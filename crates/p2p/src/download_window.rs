@@ -2922,6 +2922,125 @@ mod tests {
         stager.retire_applied(hash);
     }
 
+    /// A stager whose budget mirrors `window`'s, so window-side backpressure
+    /// reads see the same bytes/counts a real sync pair would.
+    fn test_stager(window: &DownloadWindow) -> BlockStager {
+        BlockStager::new(window.budget)
+    }
+
+    /// A 256-header regtest chain: the height-`n` header hashes to `hash(n)`.
+    static TEST_CHAIN: std::sync::LazyLock<Vec<bitcoin_rs_primitives::Header>> =
+        std::sync::LazyLock::new(|| {
+            let genesis = Network::Regtest.genesis_block().header;
+            std::iter::successors(Some(genesis), |prev| {
+                let height = prev.time.saturating_sub(genesis.time).saturating_add(1);
+                let mut merkle = [0_u8; 32];
+                merkle[..4].copy_from_slice(&height.to_le_bytes());
+                Some(bitcoin_rs_primitives::Header {
+                    prev_blockhash: prev.compute_hash(),
+                    merkle_root: Hash256::from_le_bytes(&merkle),
+                    time: prev.time.saturating_add(1),
+                    ..*prev
+                })
+            })
+            .take(256)
+            .collect()
+        });
+
+    /// The [`TEST_CHAIN`] tree: every test hash resolves to the height its
+    /// byte names.
+    fn test_tree() -> bitcoin_rs_chain::BlockTree {
+        let mut tree = bitcoin_rs_chain::BlockTree::new();
+        let mut parent = None;
+        for header in TEST_CHAIN.iter() {
+            let inserted =
+                tree.insert_node(parent, *header, bitcoin_rs_chain::NodeStatus::HeaderValid);
+            parent = Some(inserted.unwrap_or_else(|error| panic!("test chain header: {error}")));
+        }
+        tree
+    }
+
+    /// The serialized size of the smallest padded test block: an empty
+    /// coinbase script.
+    const SMALL_BODY: usize = 141;
+
+    /// A one-coinbase block whose serialized size is exactly `total_bytes`.
+    /// The script-length prefix grows by 2 bytes at 253 and again at 65536,
+    /// so sizes 253, 254, 65538, and 65539 above the empty-script size do
+    /// not exist.
+    fn padded_regtest_block(total_bytes: usize) -> Block {
+        let wanted = total_bytes.saturating_sub(padded_regtest_block_with_script(0).total_size());
+        let script_len = match wanted {
+            0..=252 => wanted,
+            255..=65_537 => wanted - 2,
+            _ => wanted.saturating_sub(4),
+        };
+        let block = padded_regtest_block_with_script(script_len);
+        assert_eq!(block.total_size(), total_bytes);
+        block
+    }
+
+    fn padded_regtest_block_with_script(script_len: usize) -> Block {
+        Block {
+            header: Network::Regtest.genesis_block().header,
+            txs: vec![Tx {
+                version: 2,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::default(),
+                    script_sig: vec![0_u8; script_len].into(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                outputs: vec![TxOut {
+                    value: Amount::from_sat(0),
+                    script_pubkey: Script::new(),
+                }],
+                lock_time: LockTime::ZERO,
+            }],
+        }
+    }
+
+    /// Stages one `total_bytes`-long body into `stager`.
+    fn stage_body(
+        stager: &mut BlockStager,
+        hash: Hash256,
+        total_bytes: usize,
+        source: Option<PeerSource>,
+        now: Instant,
+    ) {
+        let block = padded_regtest_block(total_bytes);
+        let serialized = bytes::Bytes::from(consensus_bytes(&block));
+        match stager.insert(hash, None, block, serialized, source, now) {
+            crate::StagedBlock::Memory { .. } => {}
+            other => panic!("stage_body refused: {other:?}"),
+        }
+    }
+
+    /// Test replacement for the deleted `mark_received` shorthand: stages the
+    /// body (the wire path's only staged store) and records the delivery,
+    /// attributed to the pending owner when one exists. Returns whether the
+    /// hash was not pending, as the deleted shorthand did.
+    fn receive_staged(
+        window: &mut DownloadWindow,
+        stager: &mut BlockStager,
+        hash: Hash256,
+        total_bytes: usize,
+        now: Instant,
+    ) -> bool {
+        let source = window.pending_owner(&hash);
+        stage_body(stager, hash, total_bytes, source, now);
+        window
+            .mark_received_from(hash, total_bytes, source, now)
+            .is_none()
+    }
+
+    /// Retires one staged body the way an applied commit does. The window
+    /// holds nothing for an applied body: its pending was released at
+    /// delivery, so only the stager entry is removed.
+    fn apply_staged(stager: &mut BlockStager, hash: &Hash256) {
+        stager.retire_applied(hash);
+    }
+
     fn test_source(addr: std::net::SocketAddr) -> PeerSource {
         PeerSource::for_test(addr)
     }
