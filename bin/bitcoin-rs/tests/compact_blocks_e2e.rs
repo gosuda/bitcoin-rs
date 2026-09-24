@@ -21,8 +21,6 @@
 
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
-mod support;
-
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -42,9 +40,10 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_e2e::node::workspace;
+use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 use serde_json::json;
-use support::process_node::{HarnessError, NodeBinary, ProcessNode, workspace};
-use support::process_peer::connect_loopback;
 
 /// Frames are read with the protocol payload bound, not the harness's 4 MiB
 /// cap: a full `block` reply for a heavier block is legal and must not be
@@ -75,11 +74,7 @@ impl CompactPeer {
     /// Handshakes at v70016 and, when `cmpct_version` is given, negotiates
     /// BIP152 with that recorded version so the node will serve compact
     /// requests at it.
-    fn connect(
-        node: &ProcessNode,
-        name: &str,
-        cmpct_version: Option<u64>,
-    ) -> Result<Self, HarnessError> {
+    fn connect(node: &ProcessNode, name: &str, cmpct_version: Option<u64>) -> Result<Self, Error> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let stream = connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
@@ -99,16 +94,16 @@ impl CompactPeer {
             i64::try_from(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
-                    .map_err(|error| HarnessError::Protocol(error.to_string()))?
+                    .map_err(|error| Error::Protocol(error.to_string()))?
                     .as_secs(),
             )
-            .map_err(|error| HarnessError::Protocol(error.to_string()))?,
+            .map_err(|error| Error::Protocol(error.to_string()))?,
             Address::new(&node.p2p_addr, ServiceFlags::NONE),
             Address::new(
                 &peer
                     .stream
                     .local_addr()
-                    .map_err(|error| HarnessError::Protocol(error.to_string()))?,
+                    .map_err(|error| Error::Protocol(error.to_string()))?,
                 services,
             ),
             0,
@@ -143,9 +138,7 @@ impl CompactPeer {
                 _ => {}
             }
         }
-        Err(HarnessError::Protocol(
-            "P2P handshake message limit".to_owned(),
-        ))
+        Err(Error::Protocol("P2P handshake message limit".to_owned()))
     }
 
     fn log(&mut self, direction: &str, detail: &str) {
@@ -158,18 +151,18 @@ impl CompactPeer {
         eprintln!("[E2E {at_ms:>6}ms {direction}] {detail}");
     }
 
-    fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), HarnessError> {
+    fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), Error> {
         let cmd = message.cmd().to_owned();
         let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
         self.stream
             .set_write_timeout(remaining(deadline, "write deadline reached")?)
-            .map_err(HarnessError::Io)?;
-        self.stream.write_all(&frame).map_err(HarnessError::Io)?;
+            .map_err(Error::Io)?;
+        self.stream.write_all(&frame).map_err(Error::Io)?;
         self.log("send", &cmd);
         Ok(())
     }
 
-    fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage, HarnessError> {
+    fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage, Error> {
         match read_frame(&mut self.stream, deadline) {
             Ok(frame) => {
                 let message = decode_frame(&frame)?;
@@ -194,7 +187,7 @@ impl CompactPeer {
     }
 
     /// Serves one block-typed inventory item from the offered chain.
-    fn serve_item(&mut self, item: &Inventory, deadline: Instant) -> Result<(), HarnessError> {
+    fn serve_item(&mut self, item: &Inventory, deadline: Instant) -> Result<(), Error> {
         let hash = match item {
             Inventory::WitnessBlock(hash)
             | Inventory::CompactBlock(hash)
@@ -280,25 +273,25 @@ fn block_at_depth(chain: &[Block], tip_height: u32, depth: u32) -> &Block {
     &chain[index]
 }
 
-fn remaining(deadline: Instant, message: &'static str) -> Result<Option<Duration>, HarnessError> {
+fn remaining(deadline: Instant, message: &'static str) -> Result<Option<Duration>, Error> {
     deadline
         .checked_duration_since(Instant::now())
         .filter(|time| *time >= Duration::from_micros(1))
         .map(Some)
-        .ok_or_else(|| HarnessError::Protocol(message.to_owned()))
+        .ok_or_else(|| Error::Protocol(message.to_owned()))
 }
 
-fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, HarnessError> {
+fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Error> {
     fn read_exact(
         stream: &mut TcpStream,
         mut bytes: &mut [u8],
         deadline: Instant,
-    ) -> Result<(), HarnessError> {
+    ) -> Result<(), Error> {
         while !bytes.is_empty() {
             stream.set_read_timeout(remaining(deadline, "read deadline reached")?)?;
             let count = stream.read(bytes)?;
             if count == 0 {
-                return Err(HarnessError::Protocol("truncated P2P frame".to_owned()));
+                return Err(Error::Protocol("truncated P2P frame".to_owned()));
             }
             bytes = &mut bytes[count..];
         }
@@ -309,11 +302,11 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Harn
     let raw = u32::from_le_bytes(
         header[16..20]
             .try_into()
-            .map_err(|_| HarnessError::Protocol("truncated P2P header".to_owned()))?,
+            .map_err(|_| Error::Protocol("truncated P2P header".to_owned()))?,
     );
-    let length = usize::try_from(raw).map_err(|error| HarnessError::Protocol(error.to_string()))?;
+    let length = usize::try_from(raw).map_err(|error| Error::Protocol(error.to_string()))?;
     if length > MAX_PAYLOAD_BYTES {
-        return Err(HarnessError::Protocol("P2P payload byte limit".to_owned()));
+        return Err(Error::Protocol("P2P payload byte limit".to_owned()));
     }
     let mut frame = header.to_vec();
     frame.resize(HEADER_BYTES + length, 0);
@@ -321,29 +314,29 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Harn
     Ok(frame)
 }
 
-fn decode_frame(frame: &[u8]) -> Result<NetworkMessage, HarnessError> {
+fn decode_frame(frame: &[u8]) -> Result<NetworkMessage, Error> {
     let envelope: RawNetworkMessage = bitcoin::consensus::deserialize(frame)
-        .map_err(|error| HarnessError::Protocol(format!("invalid P2P envelope: {error}")))?;
+        .map_err(|error| Error::Protocol(format!("invalid P2P envelope: {error}")))?;
     if *envelope.magic() != Magic::REGTEST {
-        return Err(HarnessError::Protocol("P2P network mismatch".to_owned()));
+        return Err(Error::Protocol("P2P network mismatch".to_owned()));
     }
     Ok(envelope.into_payload())
 }
 
-fn is_soft_recv_error(error: &HarnessError) -> bool {
+fn is_soft_recv_error(error: &Error) -> bool {
     match error {
-        HarnessError::Io(io) => matches!(
+        Error::Io(io) => matches!(
             io.kind(),
             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
         ),
-        HarnessError::Protocol(detail) => detail.contains("deadline"),
+        Error::Protocol(detail) => detail.contains("deadline"),
         _ => false,
     }
 }
 
 /// Applies a fresh regtest chain and connects one compact-aware peer.
-fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), HarnessError> {
-    let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
+fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Error> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = CompactPeer::connect(&node, name, Some(2))?;
     if !wait_for(Duration::from_secs(10), &mut || {
         node.rpc("getconnectioncount", &json!([]))
@@ -352,7 +345,7 @@ fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Har
             .and_then(ok_count)
             .is_some_and(|count| count == 1)
     }) {
-        return Err(HarnessError::Protocol(
+        return Err(Error::Protocol(
             "node never reported the inbound peer".to_owned(),
         ));
     }
@@ -377,7 +370,7 @@ fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Har
         }
         peer.pump_serving(Duration::from_millis(400));
     }
-    Err(HarnessError::Protocol(format!(
+    Err(Error::Protocol(format!(
         "applied tip never reached h{CHAIN_LEN}; count={}",
         block_count(&mut node)?
     )))
@@ -394,14 +387,14 @@ fn ok_count(value: &serde_json::Value) -> Option<u64> {
     value.as_u64()
 }
 
-fn block_count(node: &mut ProcessNode) -> Result<u64, HarnessError> {
+fn block_count(node: &mut ProcessNode) -> Result<u64, Error> {
     Ok(node
         .rpc("getblockcount", &json!([]))?
         .as_u64()
         .unwrap_or(u64::MAX))
 }
 
-fn best_hash(node: &mut ProcessNode) -> Result<String, HarnessError> {
+fn best_hash(node: &mut ProcessNode) -> Result<String, Error> {
     Ok(node
         .rpc("getbestblockhash", &json!([]))?
         .as_str()
@@ -502,7 +495,7 @@ fn build_chain(parent: &Block, count: u32, tag: u8, start_height: u32) -> Vec<Bl
 /// compact reply a peer cannot fill from its own mempool.
 /// Core 31.1 `net_processing.cpp:2705-2721`.
 #[test]
-fn serves_compact_by_depth_on_the_wire() -> Result<(), HarnessError> {
+fn serves_compact_by_depth_on_the_wire() -> Result<(), Error> {
     let (mut node, mut peer, chain) = synced_peer("depth")?;
     let tip_height = u32::try_from(block_count(&mut node)?).expect("tip height");
     let at_bound = block_at_depth(&chain, tip_height, 5);
@@ -520,26 +513,24 @@ fn serves_compact_by_depth_on_the_wire() -> Result<(), HarnessError> {
                 NetworkMessage::CmpctBlock(_) | NetworkMessage::Block(_)
             )
         })
-        .ok_or_else(|| HarnessError::Protocol("no compact-bound reply".to_owned()))?;
+        .ok_or_else(|| Error::Protocol("no compact-bound reply".to_owned()))?;
     let NetworkMessage::CmpctBlock(cmpct) = reply else {
-        return Err(HarnessError::Protocol(format!(
+        return Err(Error::Protocol(format!(
             "a block at the compact bound must be served as cmpctblock, got {}",
             reply.cmd()
         )));
     };
     let compact = &cmpct.compact_block;
     if compact.header.block_hash() != at_bound.block_hash() {
-        return Err(HarnessError::Protocol(
-            "cmpctblock header mismatch".to_owned(),
-        ));
+        return Err(Error::Protocol("cmpctblock header mismatch".to_owned()));
     }
     if compact.prefilled_txs.len() != 1 || u64::from(compact.prefilled_txs[0].idx) != 0 {
-        return Err(HarnessError::Protocol(
+        return Err(Error::Protocol(
             "the coinbase must be prefilled at index zero".to_owned(),
         ));
     }
     if serialize(&compact.prefilled_txs[0].tx) != serialize(&at_bound.txdata[0]) {
-        return Err(HarnessError::Protocol(
+        return Err(Error::Protocol(
             "the prefilled body must be the block's coinbase".to_owned(),
         ));
     }
@@ -558,11 +549,11 @@ fn serves_compact_by_depth_on_the_wire() -> Result<(), HarnessError> {
                     | NetworkMessage::NotFound(_)
             )
         })
-        .ok_or_else(|| HarnessError::Protocol("no deep-compact reply".to_owned()))?;
+        .ok_or_else(|| Error::Protocol("no deep-compact reply".to_owned()))?;
     match reply {
         NetworkMessage::Block(block) if block.block_hash() == one_deeper.block_hash() => {}
         other => {
-            return Err(HarnessError::Protocol(format!(
+            return Err(Error::Protocol(format!(
                 "a block deeper than the compact bound must be served whole, got {}",
                 other.cmd()
             )));
@@ -576,7 +567,7 @@ fn serves_compact_by_depth_on_the_wire() -> Result<(), HarnessError> {
 /// one block deeper is answered with the whole witness-bearing `block`
 /// (Core 31.1 `net_processing.cpp:4590-4624`).
 #[test]
-fn serves_blocktxn_by_depth_on_the_wire() -> Result<(), HarnessError> {
+fn serves_blocktxn_by_depth_on_the_wire() -> Result<(), Error> {
     let (mut node, mut peer, chain) = synced_peer("blocktxn")?;
     let tip_height = u32::try_from(block_count(&mut node)?).expect("tip height");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -599,14 +590,14 @@ fn serves_blocktxn_by_depth_on_the_wire() -> Result<(), HarnessError> {
                         | NetworkMessage::NotFound(_)
                 )
             })
-            .ok_or_else(|| HarnessError::Protocol(format!("no reply at depth {offset}")))?;
+            .ok_or_else(|| Error::Protocol(format!("no reply at depth {offset}")))?;
         let served_whole = matches!(
             &reply,
             NetworkMessage::Block(served) if served.block_hash() == block.block_hash()
         );
         if want_blocktxn {
             if !matches!(reply, NetworkMessage::BlockTxn(_)) {
-                return Err(HarnessError::Protocol(format!(
+                return Err(Error::Protocol(format!(
                     "depth {offset} must be answered with blocktxn, got {}",
                     reply.cmd()
                 )));
@@ -615,12 +606,12 @@ fn serves_blocktxn_by_depth_on_the_wire() -> Result<(), HarnessError> {
                 unreachable!("checked above");
             };
             if transactions.transactions != block.txdata {
-                return Err(HarnessError::Protocol(
+                return Err(Error::Protocol(
                     "blocktxn must carry the requested body".to_owned(),
                 ));
             }
         } else if !served_whole {
-            return Err(HarnessError::Protocol(format!(
+            return Err(Error::Protocol(format!(
                 "depth {offset} must be answered with the whole block, got {}",
                 reply.cmd()
             )));
@@ -635,7 +626,7 @@ fn serves_blocktxn_by_depth_on_the_wire() -> Result<(), HarnessError> {
 /// the socket was alive immediately before the request, so the drop is
 /// attributed to the malformed message and not to an idle timeout.
 #[test]
-fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), HarnessError> {
+fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), Error> {
     let (mut node, mut peer, _chain) = synced_peer("empty-txn")?;
     let deadline = Instant::now() + Duration::from_secs(10);
 
@@ -644,7 +635,7 @@ fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), HarnessError> {
         matches!(message, NetworkMessage::Pong(_))
     });
     if pong.is_none() {
-        return Err(HarnessError::Protocol(
+        return Err(Error::Protocol(
             "the connection was already dead before the probe".to_owned(),
         ));
     }
@@ -659,7 +650,7 @@ fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), HarnessError> {
         deadline,
     )?;
     if !peer.observe_disconnect(Duration::from_secs(10)) {
-        return Err(HarnessError::Protocol(
+        return Err(Error::Protocol(
             "an empty getblocktxn must drop the peer".to_owned(),
         ));
     }
@@ -670,7 +661,7 @@ fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), HarnessError> {
             .and_then(ok_count)
             .is_some_and(|count| count == 0)
     }) {
-        return Err(HarnessError::Protocol(
+        return Err(Error::Protocol(
             "the node kept the connection after the malformed request".to_owned(),
         ));
     }
@@ -683,7 +674,7 @@ fn empty_getblocktxn_disconnects_on_the_wire() -> Result<(), HarnessError> {
 /// witness body and applies the block only once the real body arrives
 /// (Core 31.1 `blockencodings.cpp:207-219`, `net_processing.cpp:3734-3754`).
 #[test]
-fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), HarnessError> {
+fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), Error> {
     let (mut node, mut peer, chain) = synced_peer("wrong-root")?;
     let tip_height = u32::try_from(block_count(&mut node)?).expect("tip height");
     let parent = chain.last().expect("chain has a tip");
@@ -710,19 +701,19 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), HarnessError
         .await_reply(Duration::from_secs(10), &|message| {
             matches!(message, NetworkMessage::GetData(_))
         })
-        .ok_or_else(|| HarnessError::Protocol("no fallback request seen".to_owned()))?;
+        .ok_or_else(|| Error::Protocol("no fallback request seen".to_owned()))?;
     let NetworkMessage::GetData(items) = asked else {
         unreachable!("checked above");
     };
     if items.as_slice() != [Inventory::WitnessBlock(hash)] {
-        return Err(HarnessError::Protocol(format!(
+        return Err(Error::Protocol(format!(
             "a failed reconstruction must fetch the full witness body from this peer, got {items:?}"
         )));
     }
     if block_count(&mut node)? != u64::from(tip_height)
         || best_hash(&mut node)? != parent.block_hash().to_string()
     {
-        return Err(HarnessError::Protocol(
+        return Err(Error::Protocol(
             "the node applied a block it could not verify".to_owned(),
         ));
     }
@@ -741,7 +732,7 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), HarnessError
         }
         peer.pump_serving(Duration::from_millis(400));
     }
-    Err(HarnessError::Protocol(format!(
+    Err(Error::Protocol(format!(
         "the real body never applied: tip is {}",
         block_count(&mut node)?
     )))

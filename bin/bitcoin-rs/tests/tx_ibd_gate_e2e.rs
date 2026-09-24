@@ -15,8 +15,6 @@
 
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
-mod support;
-
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -34,9 +32,10 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_e2e::node::workspace;
+use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 use serde_json::{Value, json};
-use support::process_node::{HarnessError, NodeBinary, ProcessNode, workspace};
-use support::process_peer::connect_loopback;
 
 const REGTEST_BITS: u32 = 0x207f_ffff;
 const HEADER_BYTES: usize = 24;
@@ -63,7 +62,7 @@ struct GatePeer {
 }
 
 impl GatePeer {
-    fn connect(node: &ProcessNode, name: &str) -> Result<Self, HarnessError> {
+    fn connect(node: &ProcessNode, name: &str) -> Result<Self, Error> {
         let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         let stream = connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
@@ -80,11 +79,11 @@ impl GatePeer {
         let now = i64::try_from(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .map_err(|error| HarnessError::Protocol(error.to_string()))?
+                .map_err(|error| Error::Protocol(error.to_string()))?
                 .as_secs(),
         )
-        .map_err(|error| HarnessError::Protocol(error.to_string()))?;
-        let local = peer.stream.local_addr().map_err(HarnessError::Io)?;
+        .map_err(|error| Error::Protocol(error.to_string()))?;
+        let local = peer.stream.local_addr().map_err(Error::Io)?;
         let mut version = VersionMessage::new(
             services,
             now,
@@ -106,9 +105,7 @@ impl GatePeer {
                 }
                 NetworkMessage::Verack if received_version => return Ok(peer),
                 NetworkMessage::Verack | NetworkMessage::Version(_) => {
-                    return Err(HarnessError::Protocol(
-                        "out-of-order P2P handshake".to_owned(),
-                    ));
+                    return Err(Error::Protocol("out-of-order P2P handshake".to_owned()));
                 }
                 NetworkMessage::Ping(nonce) => {
                     peer.send(NetworkMessage::Pong(nonce), deadline)?;
@@ -116,12 +113,10 @@ impl GatePeer {
                 _ => {}
             }
         }
-        Err(HarnessError::Protocol(
-            "P2P handshake message limit".to_owned(),
-        ))
+        Err(Error::Protocol("P2P handshake message limit".to_owned()))
     }
 
-    fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), HarnessError> {
+    fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), Error> {
         let cmd = message.cmd().to_owned();
         let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
         self.stream
@@ -130,13 +125,13 @@ impl GatePeer {
                     .checked_duration_since(Instant::now())
                     .unwrap_or(Duration::from_secs(1)),
             ))
-            .map_err(HarnessError::Io)?;
-        self.stream.write_all(&frame).map_err(HarnessError::Io)?;
+            .map_err(Error::Io)?;
+        self.stream.write_all(&frame).map_err(Error::Io)?;
         self.log("send", &cmd);
         Ok(())
     }
 
-    fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage, HarnessError> {
+    fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage, Error> {
         match read_frame(&mut self.stream, deadline) {
             Ok(frame) => {
                 let message = decode_frame(&frame)?;
@@ -163,11 +158,7 @@ impl GatePeer {
     /// returns, recording every getdata frame seen on the way. The node
     /// processes wire messages in order, so the pong proves the `inv` was
     /// fully handled.
-    fn announce_with_barrier(
-        &mut self,
-        items: Vec<Inventory>,
-        nonce: u64,
-    ) -> Result<(), HarnessError> {
+    fn announce_with_barrier(&mut self, items: Vec<Inventory>, nonce: u64) -> Result<(), Error> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         self.send(NetworkMessage::Inv(items), deadline)?;
         self.send(NetworkMessage::Ping(nonce), deadline)?;
@@ -175,16 +166,16 @@ impl GatePeer {
     }
 
     /// Ping barrier without an announcement.
-    fn bar(&mut self, nonce: u64) -> Result<(), HarnessError> {
+    fn bar(&mut self, nonce: u64) -> Result<(), Error> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         self.send(NetworkMessage::Ping(nonce), deadline)?;
         self.pump_until_pong(nonce, deadline)
     }
 
-    fn pump_until_pong(&mut self, nonce: u64, deadline: Instant) -> Result<(), HarnessError> {
+    fn pump_until_pong(&mut self, nonce: u64, deadline: Instant) -> Result<(), Error> {
         while !self.dropped {
             if Instant::now() >= deadline {
-                return Err(HarnessError::Protocol("pong barrier deadline".to_owned()));
+                return Err(Error::Protocol("pong barrier deadline".to_owned()));
             }
             match self.recv(deadline) {
                 Ok(NetworkMessage::Pong(reply)) if reply == nonce => return Ok(()),
@@ -202,9 +193,7 @@ impl GatePeer {
                 Err(error) => return Err(error),
             }
         }
-        Err(HarnessError::Protocol(
-            "peer dropped during barrier".to_owned(),
-        ))
+        Err(Error::Protocol("peer dropped during barrier".to_owned()))
     }
 
     /// Pumps for `dur`: answers pings and getheaders, records getdata and
@@ -270,23 +259,23 @@ impl GatePeer {
     }
 }
 
-fn is_soft_recv_error(error: &HarnessError) -> bool {
+fn is_soft_recv_error(error: &Error) -> bool {
     match error {
-        HarnessError::Io(io) => matches!(
+        Error::Io(io) => matches!(
             io.kind(),
             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
         ),
-        HarnessError::Protocol(detail) => detail.contains("deadline"),
+        Error::Protocol(detail) => detail.contains("deadline"),
         _ => false,
     }
 }
 
-fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, HarnessError> {
+fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Error> {
     fn read_exact(
         stream: &mut TcpStream,
         mut bytes: &mut [u8],
         deadline: Instant,
-    ) -> Result<(), HarnessError> {
+    ) -> Result<(), Error> {
         while !bytes.is_empty() {
             stream.set_read_timeout(Some(
                 deadline
@@ -295,7 +284,7 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Harn
             ))?;
             let count = stream.read(bytes)?;
             if count == 0 {
-                return Err(HarnessError::Protocol("truncated P2P frame".to_owned()));
+                return Err(Error::Protocol("truncated P2P frame".to_owned()));
             }
             bytes = &mut bytes[count..];
         }
@@ -303,13 +292,14 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Harn
     }
     let mut header = [0; HEADER_BYTES];
     read_exact(stream, &mut header, deadline)?;
-    let length =
-        usize::try_from(u32::from_le_bytes(header[16..20].try_into().map_err(
-            |_| HarnessError::Protocol("truncated P2P header".to_owned()),
-        )?))
-        .map_err(|error| HarnessError::Protocol(error.to_string()))?;
+    let length = usize::try_from(u32::from_le_bytes(
+        header[16..20]
+            .try_into()
+            .map_err(|_| Error::Protocol("truncated P2P header".to_owned()))?,
+    ))
+    .map_err(|error| Error::Protocol(error.to_string()))?;
     if length > MAX_PAYLOAD_BYTES {
-        return Err(HarnessError::Protocol("P2P payload byte limit".to_owned()));
+        return Err(Error::Protocol("P2P payload byte limit".to_owned()));
     }
     let mut frame = header.to_vec();
     frame.resize(HEADER_BYTES + length, 0);
@@ -317,11 +307,11 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Harn
     Ok(frame)
 }
 
-fn decode_frame(frame: &[u8]) -> Result<NetworkMessage, HarnessError> {
+fn decode_frame(frame: &[u8]) -> Result<NetworkMessage, Error> {
     let envelope: RawNetworkMessage = bitcoin::consensus::deserialize(frame)
-        .map_err(|error| HarnessError::Protocol(format!("invalid P2P envelope: {error}")))?;
+        .map_err(|error| Error::Protocol(format!("invalid P2P envelope: {error}")))?;
     if *envelope.magic() != Magic::REGTEST {
-        return Err(HarnessError::Protocol("P2P network mismatch".to_owned()));
+        return Err(Error::Protocol("P2P network mismatch".to_owned()));
     }
     Ok(envelope.into_payload())
 }
@@ -488,7 +478,7 @@ fn hex_body(block: &Block) -> String {
 // RPC helpers
 // ---------------------------------------------------------------------------
 
-fn rpc(node: &mut ProcessNode, method: &str) -> Result<Value, HarnessError> {
+fn rpc(node: &mut ProcessNode, method: &str) -> Result<Value, Error> {
     node.rpc(method, &json!([]))
 }
 
@@ -532,8 +522,8 @@ fn wait_with_pump(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), HarnessError> {
-    let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
+fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = GatePeer::connect(&node, "gate")?;
     let mut bystander = GatePeer::connect(&node, "bystander")?;
 
