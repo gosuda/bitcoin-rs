@@ -447,7 +447,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "smallvec",
- "tempfile",
  "thiserror",
  "tracing",
 ]

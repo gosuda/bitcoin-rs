@@ -124,7 +124,7 @@ witness variant. The cache and retry lifecycle are governed by
 | `verack` before `version`; duplicate `version`; feature message while disconnected | disconnect | misbehavior |
 | Idle connection | disconnect after 60 s | disconnect after 20 min |
 
-**Automatic misbehavior scoring and bans are not implemented.** Every row above that Core answers with a misbehavior score is answered here with a plain disconnect; banning exists only as the manual subnet mechanism (`setban`-style `NetworkControls`, persisted ban list). Repeated protocol abuse must be handled by the operator until automatic scoring lands (it is not scheduled; do not claim it in docs).
+**Automatic misbehavior scoring and bans are not implemented.** Every row above that Core answers with a misbehavior score is answered here with a plain disconnect; banning exists only as the manual subnet mechanism (setban-style), held in memory. Repeated protocol abuse must be handled by the operator until automatic scoring lands (it is not scheduled; do not claim it in docs).
 
 Structural invariants, verified by the deterministic fixtures (`crates/p2p/tests/core_compat.rs`):
 

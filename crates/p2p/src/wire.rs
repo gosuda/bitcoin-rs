@@ -285,9 +285,6 @@ pub enum PeerError {
     /// Attempted destination is currently banned.
     #[error("banned destination {0}")]
     BannedDestination(std::net::IpAddr),
-    /// Ban-list persistence data was malformed.
-    #[error("invalid ban-list entry: {0}")]
-    InvalidBanEntry(String),
 }
 
 /// Writes every byte in `slices` with `write_vectored`, advancing through

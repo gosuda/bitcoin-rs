@@ -40,7 +40,6 @@ sha2.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true
 proptest.workspace = true
-tempfile = ">=3.20.0, <4"
 serde_json.workspace = true
 bitcoin-rs-consensus.workspace = true
 
