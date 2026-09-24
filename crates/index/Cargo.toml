@@ -50,6 +50,7 @@ tracing.workspace = true
 parking_lot.workspace = true
 
 [dev-dependencies]
+bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
 serde_json.workspace = true
 criterion.workspace = true

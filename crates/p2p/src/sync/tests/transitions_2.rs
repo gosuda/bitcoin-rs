@@ -31,10 +31,18 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
     let genesis_tip = snapshot(&tree, genesis_id)?;
 
-    let losing_body1 =
-        mined_block_with_prev_hash(genesis.compute_hash(), 1, vec![coinbase_transaction(1)]);
-    let losing_body2 =
-        mined_block_with_prev_hash(losing_body1.block_hash(), 2, vec![coinbase_transaction(2)]);
+    let losing_body1 = regtest_fixture::mined_block_with_prev_hash(
+        genesis.compute_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let losing_body2 = regtest_fixture::mined_block_with_prev_hash(
+        losing_body1.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let losing1_id = tree.insert_node(
         Some(genesis_id),
         losing_body1.header,
@@ -49,11 +57,14 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
     let losing_hashes = vec![losing_body1.block_hash(), losing_body2.block_hash()];
     let losing_bodies = vec![losing_body1, losing_body2];
 
-    let winning1 = test_header(genesis.compute_hash(), 101);
+    let winning1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let winning1_id = tree.insert_node(Some(genesis_id), winning1, NodeStatus::HeaderValid)?;
-    let winning2 = test_header(winning1.compute_hash(), 102);
+    let winning2 = regtest_fixture::mined_regtest_header(winning1.compute_hash(), 102)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let winning2_id = tree.insert_node(Some(winning1_id), winning2, NodeStatus::HeaderValid)?;
-    let winning3 = test_header(winning2.compute_hash(), 103);
+    let winning3 = regtest_fixture::mined_regtest_header(winning2.compute_hash(), 103)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let winning3_id = tree.insert_node(Some(winning2_id), winning3, NodeStatus::HeaderValid)?;
     let winning_tip = snapshot(&tree, winning3_id)?;
     let winning_hashes = vec![
@@ -196,9 +207,11 @@ fn outweighed_branch_target_accepts_shorter_higher_work_branch()
     let genesis = genesis_header();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-    let main1 = test_header(genesis.compute_hash(), 1);
+    let main1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let main1_id = tree.insert_node(Some(genesis_id), main1, NodeStatus::HeaderValid)?;
-    let main2 = test_header(main1.compute_hash(), 2);
+    let main2 = regtest_fixture::mined_regtest_header(main1.compute_hash(), 2)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let main2_id = tree.insert_node(Some(main1_id), main2, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(main2_id)?;
@@ -211,15 +224,12 @@ fn outweighed_branch_target_accepts_shorter_higher_work_branch()
         }
     };
 
-    let mut high_work = test_header(genesis.compute_hash(), 101);
+    let mut high_work = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     high_work.bits = CompactTarget::from_consensus(0x2000_ffff);
     high_work.nonce = 0;
-    while !pow_met(
-        high_work.bits.to_consensus(),
-        Hash256::from(high_work.compute_hash()),
-    ) {
-        high_work.nonce = high_work.nonce.wrapping_add(1);
-    }
+    regtest_fixture::mine_header_to_declared_target(&mut high_work)
+        .unwrap_or_else(|error| panic!("regtest fixture grind: {error}"));
     let high_work_id = tree.insert_node(Some(genesis_id), high_work, NodeStatus::HeaderValid)?;
     let winning = tree
         .tip()

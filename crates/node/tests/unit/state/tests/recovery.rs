@@ -28,7 +28,11 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
-    let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+    let block_one = regtest_fixture::mined_regtest_child_at_time(
+        genesis.block_hash(),
+        genesis.header.time + 1,
+        1,
+    )?;
     state.apply_block(&block_one)?;
     state.publish_checkpoint()?;
 
@@ -38,7 +42,11 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     .get("generation")
     .and_then(serde_json::Value::as_u64)
     .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
-    let block_two = mined_regtest_child_at(block_one.block_hash(), genesis.header.time + 2, 2)?;
+    let block_two = regtest_fixture::mined_regtest_child_at_time(
+        block_one.block_hash(),
+        genesis.header.time + 2,
+        2,
+    )?;
     state.apply_block(&block_two)?;
 
     crate::reorg::invalidate_block(
@@ -66,9 +74,17 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::R
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
-    let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+    let block_one = regtest_fixture::mined_regtest_child_at_time(
+        genesis.block_hash(),
+        genesis.header.time + 1,
+        1,
+    )?;
     state.apply_block(&block_one)?;
-    let block_two = mined_regtest_child_at(block_one.block_hash(), genesis.header.time + 2, 2)?;
+    let block_two = regtest_fixture::mined_regtest_child_at_time(
+        block_one.block_hash(),
+        genesis.header.time + 2,
+        2,
+    )?;
     state.apply_block(&block_two)?;
     let before = state
         .chainstate()
@@ -76,7 +92,11 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::R
         .load_full()
         .ok_or_else(|| anyhow::anyhow!("active tip missing"))?;
 
-    let replacement = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 20, 1)?;
+    let replacement = regtest_fixture::mined_regtest_child_at_time(
+        genesis.block_hash(),
+        genesis.header.time + 20,
+        1,
+    )?;
     let genesis_id = state
         .chainstate()
         .block_tree()
@@ -125,7 +145,11 @@ fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
-    let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+    let block_one = regtest_fixture::mined_regtest_child_at_time(
+        genesis.block_hash(),
+        genesis.header.time + 1,
+        1,
+    )?;
     state.apply_block(&block_one)?;
     state.publish_checkpoint()?;
 
@@ -146,8 +170,11 @@ fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
     let mut previous_hash = genesis.block_hash();
     let mut fork_bodies = HashMap::new();
     for height in 1..=2 {
-        let block =
-            mined_regtest_child_at(previous_hash, genesis.header.time + 10 + height, height)?;
+        let block = regtest_fixture::mined_regtest_child_at_time(
+            previous_hash,
+            genesis.header.time + 10 + height,
+            height,
+        )?;
         let node_id = state.chainstate().block_tree().write().insert_node(
             Some(parent),
             block.header,
@@ -289,7 +316,11 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
     let state = NodeState::open(config, None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
-    let block_one = mined_regtest_child_at(genesis.block_hash(), genesis.header.time + 1, 1)?;
+    let block_one = regtest_fixture::mined_regtest_child_at_time(
+        genesis.block_hash(),
+        genesis.header.time + 1,
+        1,
+    )?;
     state.apply_block(&block_one)?;
     state.publish_checkpoint()?;
 
@@ -303,8 +334,11 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
     let mut previous_hash = genesis.block_hash();
     let mut fork_bodies = HashMap::new();
     for height in 1..=2 {
-        let block =
-            mined_regtest_child_at(previous_hash, genesis.header.time + 10 + height, height)?;
+        let block = regtest_fixture::mined_regtest_child_at_time(
+            previous_hash,
+            genesis.header.time + 10 + height,
+            height,
+        )?;
         let node_id = state.chainstate().block_tree().write().insert_node(
             Some(parent),
             block.header,
@@ -397,7 +431,7 @@ fn applied_regtest_chain(
     let mut time = genesis.header.time;
     for height in 1..=heights {
         time += 1;
-        let block = mined_regtest_child_at(previous, time, height)?;
+        let block = regtest_fixture::mined_regtest_child_at_time(previous, time, height)?;
         state.apply_block(&block)?;
         previous = block.block_hash();
         if height == checkpoint_height {
@@ -495,7 +529,11 @@ fn plan_fork(
     let mut bodies = HashMap::new();
     let mut ordered = Vec::new();
     for height in fork_height + 1..=fork_height + depth {
-        let block = mined_regtest_child_at(previous, time_base.wrapping_add(height), height)?;
+        let block = regtest_fixture::mined_regtest_child_at_time(
+            previous,
+            time_base.wrapping_add(height),
+            height,
+        )?;
         let hash = Hash256::from(block.block_hash());
         let node_id = state.chainstate().block_tree().write().insert_node(
             Some(parent),

@@ -58,7 +58,8 @@ use bitcoin::{
     Txid as OracleTxid, Witness as OracleWitness, absolute, opcodes,
     script::Builder as OracleBuilder, transaction,
 };
-use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
+use bitcoin_rs_consensus::compute_merkle_root;
 use bitcoin_rs_index::BlockSource;
 pub mod evidence;
 
@@ -1299,13 +1300,14 @@ fn child_coinbase_block(parent: &Block, height: u32) -> Block {
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
             nonce: 0,
         },
         txs: vec![coinbase_transaction(height)],
     };
-    block.header.merkle_root = block_merkle_root(&block);
-    mine_block_to_declared_target(&mut block);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    regtest_fixture::mine_block_to_declared_target(&mut block)
+        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
     block
 }
 
@@ -1316,13 +1318,14 @@ fn child_fanout_coinbase_block(parent: &Block, height: u32) -> Block {
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
             nonce: 0,
         },
         txs: vec![fanout_coinbase_transaction(height)],
     };
-    block.header.merkle_root = block_merkle_root(&block);
-    mine_block_to_declared_target(&mut block);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    regtest_fixture::mine_block_to_declared_target(&mut block)
+        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
     block
 }
 
@@ -1346,13 +1349,14 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
             nonce: 0,
         },
         txs,
     };
-    block.header.merkle_root = block_merkle_root(&block);
-    mine_block_to_declared_target(&mut block);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    regtest_fixture::mine_block_to_declared_target(&mut block)
+        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
     block
 }
 
@@ -1362,7 +1366,7 @@ fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
         prev_blockhash,
         merkle_root: Hash256::default(),
         time,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
+        bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
         nonce: 0,
     }
 }
@@ -1426,76 +1430,6 @@ fn coinbase_script_sig(height: u32) -> Vec<u8> {
     script.push(4);
     script.extend_from_slice(&height.to_le_bytes());
     script
-}
-
-fn mine_block_to_declared_target(block: &mut Block) {
-    while !pow_met(block.header.bits, &block.block_hash()) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .unwrap_or_else(|| panic!("exhausted nonce while mining proxy block"));
-    }
-}
-
-/// Consensus merkle root over the block's txids: pairwise double-SHA256 with
-/// the last leaf duplicated on odd levels.
-fn block_merkle_root(block: &Block) -> Hash256 {
-    let mut leaves: Vec<[u8; 32]> = block.txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair).to_le_bytes());
-        }
-        leaves = next;
-    }
-    Hash256::from_le_bytes(&leaves[0])
-}
-
-/// Decodes a 256-bit compact target into little-endian bytes. Negative,
-/// overflowed, and zero-mantissa encodings decode to an unreachable zero.
-fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
-    let bits = bits.to_consensus();
-    let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
-    let mantissa = u64::from(bits & 0x007f_ffff);
-    let mut target = [0_u8; 32];
-    if mantissa == 0 || bits & 0x0080_0000 != 0 || exponent > 34 {
-        return target;
-    }
-    let mantissa_bytes = mantissa.to_le_bytes();
-    if exponent >= 3 {
-        let offset = exponent - 3;
-        for (index, byte) in mantissa_bytes.iter().enumerate().take(3) {
-            if let Some(slot) = target.get_mut(offset + index) {
-                *slot = *byte;
-            }
-        }
-    } else {
-        let shifted = mantissa >> (8 * (3 - exponent));
-        target[..8].copy_from_slice(&shifted.to_le_bytes());
-    }
-    target
-}
-
-/// Returns true when `hash` is at or below the compact target, comparing the
-/// little-endian byte arrays from the most significant end.
-fn pow_met(bits: CompactTarget, hash: &BlockHash) -> bool {
-    let target = compact_to_target(bits);
-    let hash_le = hash.as_bytes();
-    for index in (0..32).rev() {
-        match hash_le[index].cmp(&target[index]) {
-            std::cmp::Ordering::Less => return true,
-            std::cmp::Ordering::Greater => return false,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1597,13 +1531,14 @@ fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &Signin
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
             nonce: 0,
         },
         txs: vec![coinbase],
     };
-    block.header.merkle_root = block_merkle_root(&block);
-    mine_block_to_declared_target(&mut block);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    regtest_fixture::mine_block_to_declared_target(&mut block)
+        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
     block
 }
 
@@ -1723,12 +1658,12 @@ fn child_signed_spend_fanout_block(
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
             nonce: 0,
         },
         txs,
     };
-    block.header.merkle_root = block_merkle_root(&block);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     // Recompute the coinbase witness commitment now that the full tx set is known.
     let commitment = block_witness_commitment(&block.txs);
     let coinbase = &mut block.txs[0];
@@ -1739,8 +1674,9 @@ fn child_signed_spend_fanout_block(
         .unwrap_or_else(|| panic!("coinbase missing commitment output"));
     last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
     // Recompute merkle root after updating the commitment.
-    block.header.merkle_root = block_merkle_root(&block);
-    mine_block_to_declared_target(&mut block);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    regtest_fixture::mine_block_to_declared_target(&mut block)
+        .unwrap_or_else(|error| panic!("mining proxy block failed: {error}"));
     block
 }
 
@@ -1758,32 +1694,11 @@ fn block_witness_commitment(txs: &[Tx]) -> Hash256 {
             }
         })
         .collect();
-    let root = merkle_root_bytes(&mut leaves);
+    let root = compute_merkle_root(&mut leaves).unwrap_or([0u8; 32]);
     let mut buffer = [0u8; 64];
     buffer[..32].copy_from_slice(&root);
     buffer[32..].copy_from_slice(&WITNESS_RESERVED_VALUE);
     double_sha256(&buffer)
-}
-
-/// Pairwise double-SHA256 merkle root with last-leaf duplication on odd levels.
-fn merkle_root_bytes(leaves: &mut Vec<[u8; 32]>) -> [u8; 32] {
-    if leaves.is_empty() {
-        return [0u8; 32];
-    }
-    while leaves.len() > 1 {
-        let len = leaves.len();
-        let mut next = Vec::with_capacity(len.div_ceil(2));
-        for pos in 0..len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(len - 1)];
-            let mut pair = [0u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair).to_le_bytes());
-        }
-        *leaves = next;
-    }
-    leaves[0]
 }
 
 /// Builds and signs a single spend transaction for output `vout` of

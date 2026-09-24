@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
-use bitcoin_rs_primitives::encode::double_sha256;
+use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, compact_is_met_by, regtest_fixture};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
@@ -34,22 +33,6 @@ fn apply_handles(
 
 const GENESIS_TIME: u32 = 1_296_688_602;
 
-fn pow_met(bits: u32, hash: Hash256) -> bool {
-    let exponent = bits >> 24;
-    let mantissa = bits & 0x007f_ffff;
-    if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {
-        return false;
-    }
-    let bytes = hash.as_byte_array();
-    let lo = usize::try_from(exponent).unwrap_or(32) - 3;
-    let window =
-        u32::from(bytes[lo]) | u32::from(bytes[lo + 1]) << 8 | u32::from(bytes[lo + 2]) << 16;
-    window <= mantissa
-        && bytes[usize::try_from(exponent).unwrap_or(32)..]
-            .iter()
-            .all(|&byte| byte == 0)
-}
-
 fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Vec<Tx>) -> Block {
     use bitcoin_rs_primitives::CompactTarget;
     let mut block = Block {
@@ -58,65 +41,16 @@ fn mined_block_with_prev_hash(prev_blockhash: BlockHash, height: u32, txdata: Ve
             prev_blockhash,
             merkle_root: Hash256::default(),
             time: GENESIS_TIME.saturating_add(height),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
             nonce: 0,
         },
         txs: txdata,
     };
-    block.header.merkle_root = merkle_root(&block.txs);
-    while !pow_met(
-        block.header.bits.to_consensus(),
-        Hash256::from(block.block_hash()),
-    ) {
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
+    while !compact_is_met_by(block.header.bits, block.block_hash().into()) {
         block.header.nonce = block.header.nonce.saturating_add(1);
     }
     block
-}
-
-#[allow(clippy::expect_used)]
-fn merkle_root(txs: &[Tx]) -> Hash256 {
-    let mut hashes: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    if hashes.is_empty() {
-        return Hash256::default();
-    }
-    while hashes.len() > 1 {
-        if hashes.len() % 2 == 1 {
-            let last = hashes.last().expect("odd merkle level has a last leaf");
-            hashes.push(*last);
-        }
-        hashes = hashes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| {
-                let mut buffer = [0_u8; 64];
-                buffer[..32].copy_from_slice(&pair[0]);
-                buffer[32..].copy_from_slice(&pair[1]);
-                double_sha256(&buffer).to_le_bytes()
-            })
-            .collect();
-    }
-    Hash256::from_le_bytes(hashes.first().expect("merkle fold reduces to one root"))
-}
-
-fn coinbase_transaction(height: u32) -> Tx {
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
-    let mut script_sig = push_int(i64::from(height));
-    script_sig.extend_from_slice(&push_int(1));
-    Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: Script::from_bytes(script_sig),
-            sequence: Sequence::from_consensus(0xffff_ffff),
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
-        }],
-        lock_time: LockTime::from_consensus(0),
-    }
 }
 
 type MaturedChain = (
@@ -134,7 +68,7 @@ fn matured_chain(depth: u32) -> Result<MaturedChain, Box<dyn std::error::Error>>
     let mut prev_hash = genesis.block_hash();
     let mut blocks: Vec<Block> = Vec::new();
     for height in 1..=depth {
-        let mut coinbase = coinbase_transaction(height);
+        let mut coinbase = regtest_fixture::coinbase(height);
         if height == 1 {
             coinbase.outputs[0].value = Amount::from_sat(subsidy);
         }

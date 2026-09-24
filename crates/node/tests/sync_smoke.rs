@@ -3,12 +3,11 @@ use hashbrown::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, TipSnapshot, regtest_fixture};
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_node::Network;
 use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, encode::double_sha256,
+    Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
@@ -311,9 +310,9 @@ fn child_coinbase_block_with_script(
     block.txs.truncate(1);
     block.txs[0].inputs[0].script_sig = vec![1, height].into();
     block.txs[0].outputs[0].script_pubkey = script_pubkey;
-    block.header.merkle_root = compute_merkle_root(&block)
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| std::io::Error::other("child block should have merkle root"))?;
-    mine_block_to_declared_target(&mut block)?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
 }
 
@@ -324,9 +323,9 @@ fn child_block_with_transactions(
 ) -> Result<Block, Box<dyn std::error::Error>> {
     let mut block = child_coinbase_block(parent, height)?;
     block.txs.extend(transactions);
-    block.header.merkle_root = compute_merkle_root(&block)
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| std::io::Error::other("child block should have merkle root"))?;
-    mine_block_to_declared_target(&mut block)?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
 }
 
@@ -367,86 +366,6 @@ fn is_coinbase(tx: &Tx) -> bool {
     tx.inputs.len() == 1
         && tx.inputs[0].previous_output.txid == Txid::default()
         && tx.inputs[0].previous_output.vout == u32::MAX
-}
-
-fn compute_merkle_root(block: &Block) -> Option<Hash256> {
-    let mut leaves: Vec<[u8; 32]> = block.txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    if leaves.is_empty() {
-        return None;
-    }
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair).to_le_bytes());
-        }
-        leaves = next;
-    }
-    Some(Hash256::from_le_bytes(&leaves[0]))
-}
-
-fn mine_block_to_declared_target(block: &mut Block) -> Result<(), Box<dyn std::error::Error>> {
-    while !pow_met(block.header.bits, block.block_hash().0) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("exhausted nonce while mining test block"))?;
-    }
-    Ok(())
-}
-
-fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
-    let target = uint_be(&compact_to_target(bits));
-    if target == [0_u8; 32] {
-        return false;
-    }
-    uint_be(&hash.to_le_bytes()) <= target
-}
-
-fn compact_to_target(bits: CompactTarget) -> [u8; 32] {
-    let bits = bits.to_consensus();
-    let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
-    let mantissa = u64::from(bits & 0x007f_ffff);
-    let mut target = [0_u8; 32];
-    if exponent <= 3 {
-        let val = mantissa >> (8 * (3 - exponent));
-        target[..8].copy_from_slice(&val.to_le_bytes());
-    } else {
-        let shift = 8 * (exponent - 3);
-        if shift < 256 {
-            let byte_shift = shift / 8;
-            for (offset, &byte) in mantissa.to_le_bytes().iter().enumerate() {
-                let position = byte_shift + offset;
-                if position < 32 {
-                    target[position] = byte;
-                }
-            }
-        }
-    }
-    if mantissa != 0 && bits & 0x0080_0000 != 0 {
-        return [0_u8; 32];
-    }
-    if mantissa != 0
-        && (exponent > 34
-            || (mantissa > 0xff && exponent > 33)
-            || (mantissa > 0xffff && exponent > 32))
-    {
-        return [0_u8; 32];
-    }
-    target
-}
-
-fn uint_be(bytes: &[u8; 32]) -> [u8; 32] {
-    let mut arr = [0_u8; 32];
-    arr.copy_from_slice(bytes);
-    arr.reverse();
-    arr
 }
 
 fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

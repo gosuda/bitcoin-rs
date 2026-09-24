@@ -327,12 +327,14 @@ impl MiningControl for CompatMiningControl {
         Ok(MiningInfo {
             blocks: 0,
             last_candidate: None,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(bitcoin_rs_chain::regtest_fixture::REGTEST_BITS),
             difficulty: 1.0,
             network_hashes_per_second: 0.0,
             pooled_transactions: 0,
             network: Network::Regtest,
-            next_bits: CompactTarget::from_consensus(0x207f_ffff),
+            next_bits: CompactTarget::from_consensus(
+                bitcoin_rs_chain::regtest_fixture::REGTEST_BITS,
+            ),
             next_difficulty: 1.0,
             minimum_fee_rate: 1_000,
             signet: None,

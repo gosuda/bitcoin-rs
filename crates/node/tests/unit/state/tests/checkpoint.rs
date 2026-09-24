@@ -126,7 +126,7 @@ fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
     assert!(resumed.transactions().read().is_empty());
     assert!(resumed.mempool().read().is_empty());
 
-    let next = mined_regtest_child(genesis.block_hash())?;
+    let next = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     let next_tip = resumed.apply_block(&next)?;
     assert_eq!(next_tip.height, 1);
     assert_eq!(
@@ -194,7 +194,10 @@ fn clean_checkpoint_lifecycle_is_backend_neutral() -> anyhow::Result<()> {
 
         let resumed = NodeState::open(config, None)?;
         assert_eq!(resumed.resume_source(), ResumeSource::Checkpoint);
-        resumed.apply_block(&mined_regtest_child(genesis.block_hash())?)?;
+        resumed.apply_block(&regtest_fixture::mined_regtest_child_at(
+            genesis.block_hash(),
+            1,
+        )?)?;
     }
     Ok(())
 }
@@ -218,7 +221,10 @@ fn rolling_coinstats_resume_continues_through_next_block() -> anyhow::Result<()>
     reopen_config.p2p.listen.clear();
     let resumed = NodeState::open(reopen_config, None)?;
     assert_eq!(resumed.chainstate().coin_stats_handle().snapshot(), before);
-    resumed.apply_block(&mined_regtest_child(genesis.block_hash())?)?;
+    resumed.apply_block(&regtest_fixture::mined_regtest_child_at(
+        genesis.block_hash(),
+        1,
+    )?)?;
     let rolling = resumed.chainstate().coin_stats_handle().snapshot();
     let mut scanned = resumed
         .chainstate()
@@ -262,7 +268,7 @@ fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
     // initializes one whose authenticated base is the published checkpoint.
     let base = NodeState::open(config.clone(), None)?;
     assert_eq!(base.resume_source(), ResumeSource::Checkpoint);
-    let child = mined_regtest_child(genesis.block_hash())?;
+    let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     let expected_tip = base.apply_block(&child)?;
     let expected_utxo = base
         .chainstate()

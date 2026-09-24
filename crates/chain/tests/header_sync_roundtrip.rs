@@ -3,7 +3,10 @@ use bitcoin_rs_chain::header_sync::{next_work_required, validate_header_nbits};
 use bitcoin_rs_chain::{
     BlockHeader, BlockTree, ChainError, Network, NodeStatus, accept_headers, current_unix_seconds,
 };
+
+mod pow_oracle;
 use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
+use pow_oracle::pow_is_met;
 
 #[test]
 fn accepts_valid_headers_across_batches_and_rejects_bad_bits()
@@ -424,16 +427,6 @@ fn mine_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {
         GENESIS_TIME.saturating_add(height),
         0x207f_ffff,
     )
-}
-
-/// Differential proof-of-work oracle: checks that the header hash satisfies
-/// the compact target, using bitcoin's compact-target decode and comparison.
-fn pow_is_met(bits: CompactTarget, hash: &BlockHash) -> bool {
-    use bitcoin::hashes::Hash as _;
-    let target = bitcoin::pow::Target::from_compact(bitcoin::pow::CompactTarget::from_consensus(
-        bits.to_consensus(),
-    ));
-    target.is_met_by(bitcoin::BlockHash::from_byte_array(*hash.as_bytes()))
 }
 
 fn mine_header_with(

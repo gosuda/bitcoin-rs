@@ -2,14 +2,10 @@
 
 use anyhow::{Context as _, Result, bail};
 
+use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
-};
-
-use sha2::{Digest, Sha256};
+use bitcoin_rs_primitives::{BlockHash, Hash256};
 
 use parking_lot::Mutex;
 
@@ -62,7 +58,7 @@ fn torn_disconnect_replays_parent_tip() -> Result<()> {
 fn torn_disconnect_cold_replays_head() -> Result<()> {
     let (_temp, _config, state) = run_marker_scenario("inflight-cold")?;
     let genesis = Network::Regtest.genesis_block();
-    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let block1 = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     assert_eq!(
         state
             .chainstate()
@@ -171,7 +167,7 @@ fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
     state.publish_checkpoint()?;
     let mut parent = genesis.block_hash();
     for height in 1..=GAP_BLOCKS {
-        let block = mined_regtest_child_at(parent, height)?;
+        let block = regtest_fixture::mined_regtest_child_at(parent, height)?;
         parent = block.block_hash();
         state.apply_block(&block)?;
     }
@@ -239,7 +235,7 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     drop(version_fallback);
 
     let generation_change = NodeState::open(old_config, None)?;
-    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let block1 = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     let block1_tip = generation_change.apply_block(&block1)?;
     generation_change.publish_checkpoint()?;
     drop(generation_change);
@@ -260,7 +256,7 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
     let config = crash_config(&scenario, data_dir.clone());
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config, None)?;
-    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let block1 = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
 
     match scenario.as_str() {
         "journal" => {
@@ -268,7 +264,7 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
         }
         "reorg" => {
             let tip1 = state.apply_block(&block1)?;
-            let block2 = mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
+            let block2 = regtest_fixture::mined_regtest_child_at(BlockHash(tip1.hash), 2)?;
             state.apply_block(&block2)?;
             state.chainstate().disconnect_block(&block2)?;
         }
@@ -363,7 +359,7 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
 
     let resumed = NodeState::open(config, None)
         .with_context(|| format!("restart after SIGKILL in {scenario}"))?;
-    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    let block1 = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
     let expected_hash = block1.block_hash().0;
     let tip = resumed
         .chainstate()
@@ -501,81 +497,4 @@ fn assert_tip(state: &NodeState, expected: &bitcoin_rs_chain::TipSnapshot) -> Re
         .ok_or_else(|| std::io::Error::other("recovered node has no applied tip"))?;
     assert_eq!(tip.as_ref(), expected);
     Ok(())
-}
-
-fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
-    let coinbase = Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(0),
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: Script::from_bytes(vec![1, u8::try_from(height)?]),
-            sequence: Sequence::from_consensus(u32::MAX),
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
-        }],
-    };
-    let mut block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash,
-            merkle_root: Hash256::default(),
-            time: Network::Regtest.genesis_block().header.time + height,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txs: vec![coinbase],
-    };
-    block.header.merkle_root = merkle_root(&block.txs)
-        .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
-    while !pow_met(block.header.bits.to_consensus(), block.block_hash().0) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("test nonce exhausted"))?;
-    }
-    Ok(block)
-}
-
-fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
-    let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    if leaves.is_empty() {
-        return None;
-    }
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair));
-        }
-        leaves = next;
-    }
-    Some(Hash256::from_le_bytes(&leaves[0]))
-}
-
-fn double_sha256(bytes: &[u8]) -> [u8; 32] {
-    let first = Sha256::digest(bytes);
-    Sha256::digest(first).into()
-}
-
-fn pow_met(bits: u32, hash: Hash256) -> bool {
-    let exponent = u8::try_from(bits >> 24).unwrap_or(0);
-    let mantissa = bits & 0x007f_ffff;
-    if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {
-        return false;
-    }
-    let bytes = hash.as_byte_array();
-    let low = usize::from(exponent - 3);
-    let window =
-        u32::from(bytes[low]) | u32::from(bytes[low + 1]) << 8 | u32::from(bytes[low + 2]) << 16;
-    window <= mantissa && bytes[usize::from(exponent)..].iter().all(|&byte| byte == 0)
 }

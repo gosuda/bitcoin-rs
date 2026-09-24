@@ -21,12 +21,10 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
+use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
-};
+use bitcoin_rs_primitives::{BlockHash, Hash256};
 
 use bitcoin_rs_storage::block_body::{BlockBodyStore, IndexedBlockBodyStore};
 use bitcoin_rs_storage::durable_head::{DURABLE_HEAD_FORMAT_VERSION, DURABLE_HEAD_KEY};
@@ -36,7 +34,6 @@ use bitcoin_rs_storage::{
     ColumnFamily, CommitRecords, DurableHead, DurableHeadStore, FlatFileBlockStore,
     KvDurableHeadStore, KvStore, KvUndoStore, PersistFault,
 };
-use sha2::{Digest, Sha256};
 
 const ALL_FAULTS: &[PersistFault] = &[
     PersistFault::FailApply,
@@ -286,7 +283,7 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
     let mut tip = state.apply_block(&genesis)?;
     let mut blocks = Vec::new();
     for height in 1..=3_u32 {
-        let block = mined_regtest_child_at(BlockHash(tip.hash), height)?;
+        let block = regtest_fixture::mined_regtest_child_at(BlockHash(tip.hash), height)?;
         tip = state.apply_block(&block)?;
         blocks.push(block);
     }
@@ -333,7 +330,7 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
         .load_full()
         .ok_or_else(|| anyhow::anyhow!("restart must restore an applied tip"))?;
     assert_eq!(restored.hash, tip.hash);
-    let block4 = mined_regtest_child_at(BlockHash(restored.hash), 4)?;
+    let block4 = regtest_fixture::mined_regtest_child_at(BlockHash(restored.hash), 4)?;
     let new_tip = resumed.apply_block(&block4)?;
     assert_eq!(new_tip.height, 4);
     drop(resumed);
@@ -395,80 +392,3 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Regtest miner, mirroring the crash-recovery fixtures.
 // ---------------------------------------------------------------------------
-
-fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
-    let coinbase = Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(0),
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: Script::from_bytes(vec![1, u8::try_from(height)?]),
-            sequence: Sequence::from_consensus(u32::MAX),
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
-        }],
-    };
-    let mut block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash,
-            merkle_root: Hash256::default(),
-            time: Network::Regtest.genesis_block().header.time + height,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txs: vec![coinbase],
-    };
-    block.header.merkle_root = merkle_root(&block.txs)
-        .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
-    while !pow_met(block.header.bits.to_consensus(), block.block_hash().into()) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("test nonce exhausted"))?;
-    }
-    Ok(block)
-}
-
-fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
-    let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    if leaves.is_empty() {
-        return None;
-    }
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair));
-        }
-        leaves = next;
-    }
-    Some(Hash256::from_le_bytes(&leaves[0]))
-}
-
-fn double_sha256(bytes: &[u8]) -> [u8; 32] {
-    let first = Sha256::digest(bytes);
-    Sha256::digest(first).into()
-}
-
-fn pow_met(bits: u32, hash: Hash256) -> bool {
-    let exponent = u8::try_from(bits >> 24).unwrap_or(0);
-    let mantissa = bits & 0x007f_ffff;
-    if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {
-        return false;
-    }
-    let bytes = hash.as_byte_array();
-    let low = usize::from(exponent - 3);
-    let window =
-        u32::from(bytes[low]) | u32::from(bytes[low + 1]) << 8 | u32::from(bytes[low + 2]) << 16;
-    window <= mantissa && bytes[usize::from(exponent)..].iter().all(|&byte| byte == 0)
-}

@@ -5,10 +5,10 @@ use crate::block_log::BlockRecord;
 use crate::types::{TxPosition, TxPositionValue, TxidRow};
 use crate::{HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, SpendingPrefixRow};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::NodeStatus;
+use bitcoin_rs_chain::{NodeStatus, regtest_fixture};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, encode::double_sha256,
+    Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 use bitcoin_rs_utxo::UtxoSet;
@@ -398,28 +398,6 @@ fn scan_response(
     }
 }
 
-/// Native BIP141-style txid merkle fold with the odd-leaf duplication rule.
-fn compute_merkle_root(block: &Block) -> Option<Hash256> {
-    let txs = &block.txs;
-    if txs.is_empty() {
-        return None;
-    }
-    let mut level: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pos in 0..level.len().div_ceil(2) {
-            let left = level[2 * pos];
-            let right = level[(2 * pos + 1).min(level.len() - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(*double_sha256(&pair).as_byte_array());
-        }
-        level = next;
-    }
-    Some(Hash256::from_le_bytes(&level[0]))
-}
-
 fn position_of_transaction(block: &Block, index: usize) -> Result<TxPosition, std::io::Error> {
     let body = consensus_bytes(block);
     let transaction = consensus_bytes(&block.txs[index]);
@@ -458,7 +436,7 @@ fn block_with_spending_transaction() -> Result<(Block, OutPoint, ScriptHash, Txi
             script_pubkey: Script::new(),
         }],
     });
-    block.header.merkle_root = compute_merkle_root(&block)
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| std::io::Error::other("block has transactions"))?;
     let spend_txid = block.txs[1].txid();
     Ok((block, outpoint, ScriptHash::new(&script), spend_txid))

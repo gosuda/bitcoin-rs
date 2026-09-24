@@ -17,7 +17,7 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     let mut fork_prev = fork_root_hash;
     let mut fork_blocks = Vec::new();
     for height in 51..=52_u32 {
-        let mut coinbase = coinbase_transaction(height);
+        let mut coinbase = regtest_fixture::coinbase(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
         fork_parent = tree.insert_node(Some(fork_parent), block.header, NodeStatus::HeaderValid)?;
@@ -189,7 +189,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     let subsidy = 5_000_000_000_u64;
     let mut parent_tx: Option<Tx> = None;
     for height in 1..=101_u32 {
-        let mut coinbase = coinbase_transaction(height);
+        let mut coinbase = regtest_fixture::coinbase(height);
         if height == 1 {
             coinbase.outputs[0].value = Amount::from_sat(subsidy);
         }

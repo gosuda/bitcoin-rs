@@ -107,7 +107,7 @@ fn child_headers(parent: &Header, count: usize) -> Vec<Header> {
             prev_blockhash: current.compute_hash(),
             merkle_root: Hash256::default(),
             time: current.time + 1,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(bitcoin_rs_chain::regtest_fixture::REGTEST_BITS),
             nonce: 0,
         };
         headers.push(next);

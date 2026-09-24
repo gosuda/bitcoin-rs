@@ -1767,7 +1767,7 @@ mod tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&[0; 32]),
             time: nonce,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(bitcoin_rs_chain::regtest_fixture::REGTEST_BITS),
             nonce,
         }
     }

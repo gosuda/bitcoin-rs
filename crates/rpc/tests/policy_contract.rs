@@ -18,7 +18,7 @@ use bitcoin_rs_mempool::{
     eviction::mempool_min_fee_sat_per_kvb,
 };
 
-use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
+use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot, regtest_fixture};
 
 use bitcoin_rs_node::{
     Network, NodeConfig,
@@ -28,7 +28,7 @@ use bitcoin_rs_node::{
 
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, encode::double_sha256,
+    Txid, Witness, consensus_bytes,
 };
 
 use bitcoin_rs_rpc::{
@@ -1417,7 +1417,6 @@ fn decode_failures_reject_with_deserialization_error() -> Result<(), Box<dyn Err
 const REORG_SEED_BLOCKS: u32 = 100;
 const REORG_SEED_BASE_TIME: u32 = 1_296_688_603;
 const REORG_SEED_BLOCK_INTERVAL: u32 = 600;
-const REORG_REGTEST_BITS: u32 = 0x207f_ffff;
 const REORG_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 const REORG_SPEND_FEE_SATS: u64 = 10_000;
 
@@ -1527,74 +1526,6 @@ fn reorg_seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
     }
 }
 
-fn reorg_grind_pow(block: &mut Block) -> Result<(), Box<dyn Error>> {
-    loop {
-        if pow_is_met(
-            block.header.bits.to_consensus(),
-            &block.header.compute_hash().into(),
-        ) {
-            return Ok(());
-        }
-        let Some(next) = block.header.nonce.checked_add(1) else {
-            return Err("nonce exhausted while grinding block".into());
-        };
-        block.header.nonce = next;
-    }
-}
-
-/// Returns true when the header hash, read as a little-endian integer, meets
-/// the compact bits target (Core `CheckProofOfWork` shape).
-fn pow_is_met(bits: u32, hash: &Hash256) -> bool {
-    let exponent = usize::try_from(bits >> 24).unwrap_or(usize::MAX);
-    let mantissa = bits & 0x00ff_ffff;
-    if mantissa == 0 || mantissa & 0x0080_0000 != 0 || exponent > 32 {
-        return false;
-    }
-    let shift = exponent.saturating_sub(3);
-    // Little-endian target bytes: mantissa placed `shift` bytes from the
-    // least-significant end (mantissa is masked below 2^24, so three bytes).
-    let mantissa_le = mantissa.to_le_bytes();
-    let mut target = [0_u8; 32];
-    for (offset, byte) in mantissa_le.iter().take(3).enumerate() {
-        let position = shift + offset;
-        if position < 32 {
-            target[position] = *byte;
-        }
-    }
-    // Both sides are little-endian 32-byte integers: compare from the most
-    // significant byte downward (Core `CheckProofOfWork`).
-    let hash_le = hash.to_le_bytes();
-    for index in (0..32).rev() {
-        match hash_le[index].cmp(&target[index]) {
-            std::cmp::Ordering::Less => return true,
-            std::cmp::Ordering::Greater => return false,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-    true
-}
-
-/// Native BIP141-style txid merkle fold with the odd-leaf duplication rule.
-fn compute_merkle_root(txs: &[Tx]) -> Option<Hash256> {
-    if txs.is_empty() {
-        return None;
-    }
-    let mut level: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pos in 0..level.len().div_ceil(2) {
-            let left = level[2 * pos];
-            let right = level[(2 * pos + 1).min(level.len() - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(*double_sha256(&pair).as_byte_array());
-        }
-        level = next;
-    }
-    Some(Hash256::from_le_bytes(&level[0]))
-}
-
 /// Mines and applies the regtest block at `height` over `prev`: the seed
 /// coinbase plus `txs`, through ordinary validation.
 fn reorg_mine_and_apply(
@@ -1610,7 +1541,7 @@ fn reorg_mine_and_apply(
             merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
             time: REORG_SEED_BASE_TIME
                 .saturating_add(REORG_SEED_BLOCK_INTERVAL.saturating_mul(height)),
-            bits: CompactTarget::from_consensus(REORG_REGTEST_BITS),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
             nonce: 0,
         },
         txs: std::iter::once(reorg_seed_coinbase(height))
@@ -1618,8 +1549,8 @@ fn reorg_mine_and_apply(
             .collect(),
     };
     block.header.merkle_root =
-        compute_merkle_root(&block.txs).ok_or("mined block must have a merkle root")?;
-    reorg_grind_pow(&mut block)?;
+        regtest_fixture::merkle_root(&block.txs).ok_or("mined block must have a merkle root")?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     state.apply_block(&block)?;
     Ok(block)
 }

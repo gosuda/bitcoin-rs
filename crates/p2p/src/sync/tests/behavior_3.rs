@@ -261,10 +261,30 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
 fn applied_ancestry_lookup_uses_active_index_only_for_applied_prefix()
 -> Result<(), Box<dyn std::error::Error>> {
     let genesis = Network::Regtest.genesis_block();
-    let main1 = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
-    let main2 = mined_block_with_prev_hash(main1.block_hash(), 2, vec![coinbase_transaction(2)]);
-    let main3 = mined_block_with_prev_hash(main2.block_hash(), 3, vec![coinbase_transaction(3)]);
-    let main4 = mined_block_with_prev_hash(main3.block_hash(), 4, vec![coinbase_transaction(4)]);
+    let main1 = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let main2 = regtest_fixture::mined_block_with_prev_hash(
+        main1.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let main3 = regtest_fixture::mined_block_with_prev_hash(
+        main2.block_hash(),
+        3,
+        vec![regtest_fixture::coinbase(3)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let main4 = regtest_fixture::mined_block_with_prev_hash(
+        main3.block_hash(),
+        4,
+        vec![regtest_fixture::coinbase(4)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let main1_id = tree.insert_node(Some(genesis_id), main1.header, NodeStatus::HeaderValid)?;
@@ -287,11 +307,12 @@ fn applied_ancestry_lookup_uses_active_index_only_for_applied_prefix()
     let mut fork_parent = genesis_id;
     let mut fork_prev = genesis.block_hash();
     for height in 1_u32..=5 {
-        let fork = mined_block_with_prev_hash(
+        let fork = regtest_fixture::mined_block_with_prev_hash(
             fork_prev,
             height.saturating_add(100),
-            vec![coinbase_transaction(height.saturating_add(100))],
-        );
+            vec![regtest_fixture::coinbase(height.saturating_add(100))],
+        )
+        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
         fork_prev = fork.block_hash();
         fork_parent = tree.insert_node(Some(fork_parent), fork.header, NodeStatus::HeaderValid)?;
     }
@@ -650,11 +671,12 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
 /// padding the coinbase-style transaction's output script. The script
 /// length prefix grows by 2 bytes at 253 and again at 65536.
 fn padded_block_exact(size: usize, seed: u8) -> Block {
-    let mut block = super::mined_block_with_prev_hash(
+    let mut block = regtest_fixture::mined_block_with_prev_hash(
         BlockHash(Hash256::from_le_bytes(&[seed; 32])),
         1,
         vec![super::transaction(seed)],
-    );
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     block.txs[0].outputs[0].script_pubkey = Vec::new().into();
     let prefix_growth = |len: usize| match len {
         0..=252 => 0,

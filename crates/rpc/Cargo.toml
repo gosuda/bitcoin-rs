@@ -46,6 +46,7 @@ zmq = { workspace = true, optional = true }
 toml.workspace = true
 bitcoin-rs-chainstate.workspace = true
 bitcoin-rs-node = { workspace = true, default-features = false, features = ["fjall"] }
+bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 tempfile = ">=3.20.0, <4"
 rustix.workspace = true
