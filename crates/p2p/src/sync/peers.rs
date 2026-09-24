@@ -14,8 +14,6 @@ use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_primitives::Hash256;
-use smallvec::SmallVec;
-use std::net::SocketAddr;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec::Vec;
@@ -99,66 +97,40 @@ pub(super) fn active_demonstrated_height(
 }
 
 impl BlockSync {
-    /// Clears leftover address-scoped scheduler state for a newly ready
-    /// connection. Stale sources are ignored per P2P-02.
+    /// Sweeps scheduler state owned by dead connections when `source`
+    /// becomes ready. Stale sources are ignored per P2P-02.
     pub fn on_peer_ready(&self, source: crate::PeerSource) {
-        // Table before scheduler, as in request publication. Validating again
-        // under the scheduler can deadlock behind a queued table writer while
-        // an existing table reader waits for this scheduler.
-        self.peer_table.with_current(source, || {
-            let mut scheduler = self.scheduler.lock();
-            scheduler.window.forget_peer(source.addr);
-            if scheduler
-                .header_request
-                .is_some_and(|request| request.source.addr == source.addr)
-            {
-                scheduler.header_request = None;
-            }
-        });
+        // Identity gate first, outside the scheduler lock: validating under
+        // the scheduler can deadlock behind a queued table writer while an
+        // existing table reader waits for this scheduler.
+        if !self.peer_table.is_current(source) {
+            return;
+        }
+        self.release_unowned_sessions();
     }
 
     /// Reconciles the scheduler with the peer table: cancelled leases leave
-    /// the table, same-address replacements drop the predecessor's state,
-    /// and work owned by dead connections is released back to unowned.
+    /// the table, then one sweep releases every fact owned by a connection
+    /// outside the live session set.
     pub(super) fn reconcile_peer_sessions(&self) {
         // Backstop: a session whose connection already cancelled its lease
         // leaves the table within one tick, whatever path cancelled it, so
         // zombie entries are never candidates for fetch work.
         self.peer_table
             .disconnect_matching(|_, lease| lease.is_cancelled());
-        let live: Vec<_> = self
-            .peer_table
-            .live_sessions()
-            .into_iter()
-            .map(|source| (source.addr, source.connection_id()))
-            .collect();
-        let mut scheduler = self.scheduler.lock();
-        let mut replaced = SmallVec::<[SocketAddr; 8]>::new();
-        for (addr, id) in &live {
-            if scheduler
-                .known_sessions
-                .insert(*addr, *id)
-                .is_some_and(|prev| prev != *id)
-            {
-                replaced.push(*addr);
-            }
-        }
-        scheduler
-            .known_sessions
-            .retain(|addr, _| live.iter().any(|(a, _)| a == addr));
-        for addr in replaced {
-            scheduler.window.forget_peer(addr);
-        }
-        // A header request survives only while its exact connection is live:
-        // a vanished or replaced owner leaves no deadline gate behind.
-        if scheduler.header_request.is_some_and(|request| {
-            !live.iter().any(|(addr, id)| {
-                *addr == request.source.addr && *id == request.source.connection_id()
-            })
-        }) {
-            scheduler.header_request = None;
-        }
-        scheduler.window.release_disconnected_peers(&live);
+        self.release_unowned_sessions();
+    }
+
+    /// Releases every scheduler ownership fact whose connection left the
+    /// live session set: one sweep keyed on connection identity.
+    ///
+    /// PRE: the caller holds no scheduler lock.
+    /// POST: every scheduler ownership fact names a live connection.
+    /// INVARIANT: lock order is peer table, then scheduler; the snapshot and
+    ///   the release see the same live set.
+    fn release_unowned_sessions(&self) {
+        self.peer_table
+            .with_live_sessions(|live| self.scheduler.lock().release_unowned(live));
     }
 
     /// Advances the window's recovery state machines against the canonical
@@ -227,13 +199,6 @@ impl BlockSync {
         };
         if let Some(owner) = staller {
             if self.peer_table.disconnect_source(owner) {
-                let mut scheduler = self.scheduler.lock();
-                if scheduler
-                    .header_request
-                    .is_some_and(|request| request.source == owner)
-                {
-                    scheduler.header_request = None;
-                }
                 metrics::counter!("node.sync.staller_disconnects").increment(1);
                 tracing::warn!(
                     peer_addr = %owner.addr,
@@ -244,13 +209,6 @@ impl BlockSync {
         }
         if let Some(owner) = timed_out {
             if self.peer_table.disconnect_source(owner) {
-                let mut scheduler = self.scheduler.lock();
-                if scheduler
-                    .header_request
-                    .is_some_and(|request| request.source == owner)
-                {
-                    scheduler.header_request = None;
-                }
                 metrics::counter!("node.sync.pending_timeout_disconnects").increment(1);
                 tracing::warn!(
                     peer_addr = %owner.addr,

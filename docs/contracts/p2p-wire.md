@@ -34,6 +34,11 @@ This page assigns ownership and cites proof under the
 - Parent requests validate the delivering connection and enqueue under the
   same peer-table authority that serializes replacement. Requests from an
   already cancelled lease enqueue nothing.
+- Scheduler ownership is keyed on connection identity. Each tick and each
+  ready event runs one sweep over the peer table's live session set that
+  releases every window assignment, election, probe racer, header request
+  and deferred body fetch owned by a connection outside that set, so a
+  same-address replacement never inherits or loses its predecessor's work.
 
 ### `P2P-03`: Demonstrated best-known-height credit and request eligibility
 
@@ -211,10 +216,11 @@ branch-plan, attribution, timeout and bounded-staging suites remain required.
   disconnect hands it back to scheduling — a silently dropped compact
   fetch re-requests instead of wedging the tip.
 - Every peer-removal path releases a `getheaders` gate the peer owned —
-  wire-response consumption, send failure, session reconciliation, and
-  peer-fault disconnects in both the headers drain and the staged-header
-  retry (`clear_header_request_for`, identity-exact) — so a same-address
-  reconnect cannot inherit a dead request deadline.
+  wire-response consumption, send failure, and peer-fault disconnects in
+  both the headers drain and the staged-header retry
+  (`clear_header_request_for`, identity-exact), and otherwise the live-set
+  sweep (P2P-02) — so a same-address reconnect cannot inherit a dead
+  request deadline.
 
 Proof: `crates/p2p/src/sync/tests/head_sync.rs` covers body-carried header
 admission and apply, gap-fill requests for staged bodies ahead of their

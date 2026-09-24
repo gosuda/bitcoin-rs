@@ -16,7 +16,7 @@ use smallvec::SmallVec;
 
 use crate::BlockStager;
 use crate::PeerInfo;
-use crate::connection::{ConnectionId, PeerSource};
+use crate::connection::PeerSource;
 
 // ---------------------------------------------------------------------------
 // Download-policy constants
@@ -1037,7 +1037,7 @@ impl DownloadWindow {
     ///
     /// Returns `Some(peer)` exactly when the stall threshold fires: the
     /// caller must disconnect that peer (its pendings then re-queue through
-    /// `release_disconnected_peers`). On fire the adaptive threshold doubles
+    /// [`Self::retain_owned_by`]). On fire the adaptive threshold doubles
     /// (capped at `stall_timeout_max`) and the peer enters the staller
     /// cooldown. When any predicate term stops holding — including any
     /// delivery from the blamed peer ([`Self::record_delivery_progress`]) —
@@ -1525,72 +1525,48 @@ impl DownloadWindow {
             .min();
     }
 
-    /// Releases all state for connections that are no longer live, re-queuing
-    /// their pending and in-flight blocks for retry. Liveness is identity
-    /// checked: a pending request owned by `(addr, connection_id)` is live
-    /// only while that exact connection is, so a same-address replacement
-    /// never inherits its predecessor's outstanding work.
-    pub fn release_disconnected_peers(&mut self, live: &[(SocketAddr, ConnectionId)]) {
-        let live_source = |source: &PeerSource| {
-            live.iter()
-                .any(|(a, id)| *a == source.addr && *id == source.connection_id())
-        };
-        let cold_front_live = match self.cold_front {
-            Some(ColdFrontState::Waiting { owner, .. }) => live_source(&owner),
+    /// Retains only ownership facts whose connection `owns` still names.
+    ///
+    /// PRE: `owns` is false for every connection absent from the peer
+    ///   table's live set.
+    /// POST: `pending` holds only entries whose owner satisfies `owns`, with
+    ///   `pending_bytes`, `next_request_height`, and `next_pending_deadline`
+    ///   kept in step; `cold_front` survives only while its waiting owner or
+    ///   both racing participants do; `preferred_peer` and
+    ///   `prefix_probe_attempted_owner` clear when their owner fails `owns`;
+    ///   probe racers failing `owns` leave the race, and a race left with
+    ///   fewer than two racers is cancelled.
+    /// INVARIANT: no fact here is compared by address alone.
+    ///   `recent_stallers` is the one address-keyed fact and stays exempt;
+    ///   `stall` is untouched because the conviction paths own its release.
+    pub fn retain_owned_by(&mut self, owns: impl Fn(&PeerSource) -> bool) {
+        let cold_front_owned = match self.cold_front {
+            Some(ColdFrontState::Waiting { owner, .. }) => owns(&owner),
             Some(ColdFrontState::Racing {
                 owner, alternate, ..
-            }) => live_source(&owner) && live_source(&alternate),
+            }) => owns(&owner) && owns(&alternate),
             None => true,
         };
-        if !cold_front_live {
+        if !cold_front_owned {
             self.cold_front = None;
         }
-        if self.preferred_peer.is_some_and(|peer| !live_source(&peer)) {
-            self.preferred_peer = None;
-        }
-        let cancel_probe = if let Some(probe) = self.prefix_probe.as_mut() {
-            probe.racers.retain(|peer, _| live_source(peer));
-            probe.racers.len() < 2
-        } else {
-            false
-        };
-        if cancel_probe {
-            self.prefix_probe = None;
-        }
-        self.retain_peer_assignments(|owner| live_source(owner));
-    }
-
-    /// Drops every assignment and attribution fact owned by a replaced
-    /// connection before a new connection may reuse its socket address.
-    pub fn forget_peer(&mut self, peer_addr: SocketAddr) {
-        self.retain_peer_assignments(|owner| owner.addr != peer_addr);
-        if self
-            .preferred_peer
-            .is_some_and(|peer| peer.addr == peer_addr)
-        {
+        if self.preferred_peer.is_some_and(|peer| !owns(&peer)) {
             self.preferred_peer = None;
         }
         if self
             .prefix_probe_attempted_owner
-            .is_some_and(|owner| owner.addr == peer_addr)
+            .is_some_and(|owner| !owns(&owner))
         {
             self.prefix_probe_attempted_owner = None;
         }
-        if self.cold_front.is_some_and(|state| match state {
-            ColdFrontState::Waiting { owner, .. } => owner.addr == peer_addr,
-            ColdFrontState::Racing {
-                owner, alternate, ..
-            } => owner.addr == peer_addr || alternate.addr == peer_addr,
-        }) {
-            self.cold_front = None;
-        }
-        if self
-            .prefix_probe
-            .as_ref()
-            .is_some_and(|probe| probe.racers.keys().any(|racer| racer.addr == peer_addr))
-        {
+        let cancel_probe = self.prefix_probe.as_mut().is_some_and(|probe| {
+            probe.racers.retain(|peer, _| owns(peer));
+            probe.racers.len() < 2
+        });
+        if cancel_probe {
             self.prefix_probe = None;
         }
+        self.retain_peer_assignments(owns);
     }
 
     fn retain_peer_assignments(&mut self, retain_owner: impl Fn(&PeerSource) -> bool) {
@@ -2457,7 +2433,7 @@ mod tests {
         BlockStager, DownloadWindow, FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT,
         FAST_OUTBOUND_PEER_TARGET, PENDING_BUDGET, SyncBudget, fast_sync_budget,
     };
-    use crate::connection::{ConnectionId, PeerSource};
+    use crate::connection::PeerSource;
 
     /// A stager whose budget mirrors `window`'s, so window-side backpressure
     /// reads see the same bytes/counts a real sync pair would.
@@ -2580,21 +2556,6 @@ mod tests {
 
     fn test_source(addr: std::net::SocketAddr) -> PeerSource {
         PeerSource::for_test(addr)
-    }
-
-    /// Releases every assignment owned by connections at addresses `keep`
-    /// rejects, mirroring `reconcile_peer_sessions`' live set for the
-    /// seeded window.
-    fn release_addrs(window: &mut DownloadWindow, keep: impl Fn(std::net::SocketAddr) -> bool) {
-        let mut live: Vec<(std::net::SocketAddr, ConnectionId)> = window
-            .pending
-            .values()
-            .filter(|pending| keep(pending.owner.addr))
-            .map(|pending| (pending.owner.addr, pending.owner.connection_id()))
-            .collect();
-        live.sort_by_key(|(addr, _)| *addr);
-        live.dedup();
-        window.release_disconnected_peers(&live);
     }
 
     fn stall_owner(
@@ -2784,7 +2745,7 @@ mod tests {
     }
 
     #[test]
-    fn release_disconnected_peers_refreshes_pending_deadline() {
+    fn releasing_a_dead_owner_refreshes_pending_deadline() {
         let mut window = DownloadWindow::new(SyncBudget {
             pending_timeout: Duration::from_secs(10),
             ..test_budget()
@@ -2813,7 +2774,7 @@ mod tests {
             window.record_pending_deadline(requested_at);
         }
 
-        release_addrs(&mut window, |a| a == live_peer);
+        window.retain_owned_by(|p| p.addr == live_peer);
 
         assert_eq!(window.pending_len(), 1);
         assert_eq!(window.pending_bytes(), estimated_bytes);
@@ -4354,7 +4315,7 @@ mod tests {
         // Rotation: the sync layer drops the staller and re-queues the front
         // to the healthy peer, which delivers it. The 2s wedge gap is a real
         // sample: EWMA 100 -> 100 + (2000-100)/4 = 575ms, floor still 2s.
-        release_addrs(&mut window, |a| a != staller_addr());
+        window.retain_owned_by(|p| p.addr != staller_addr());
         insert_pending(
             &mut window,
             test_source(healthy_addr()),
@@ -4575,7 +4536,7 @@ mod tests {
             Some(staller_addr())
         );
         assert_eq!(window.stall_timeout(), Duration::from_secs(8));
-        release_addrs(&mut window, |a| a != staller_addr());
+        window.retain_owned_by(|p| p.addr != staller_addr());
 
         // Healthy peer resumes; four 3s cycles walk the EWMA back with the
         // decay clamped at the adaptive floor — the limit cycle never re-fires.
@@ -4777,7 +4738,7 @@ mod tests {
         let alternate = test_source(healthy_addr());
         window.confirm_cold_front_hedge(owner, alternate, hash(0x01));
 
-        release_addrs(&mut window, |a| a != healthy_addr());
+        window.retain_owned_by(|p| p.addr != healthy_addr());
         let retry_started = t0 + Duration::from_secs(3);
         assert_eq!(cold_front_owner(&mut window, 1, false, retry_started), None);
         assert_eq!(
@@ -4997,7 +4958,7 @@ mod tests {
         // The alternate disconnects before the deadline, dropping racers
         // below two and cancelling the probe — without electing a winner or
         // setting a preferred peer.
-        release_addrs(&mut window, |a| a != alternate.addr);
+        window.retain_owned_by(|p| p.addr != alternate.addr);
         assert!(window.prefix_probe.is_none(), "the probe must be cancelled");
         assert!(
             window.preferred_peer().is_none(),
@@ -5030,7 +4991,7 @@ mod tests {
             .prefix_probe_plan()
             .ok_or_else(|| std::io::Error::other("missing probe plan"))?;
         window.confirm_prefix_probe(planned_owner, hashes, &[disconnected, live_alternate], now);
-        release_addrs(&mut window, |a| a != disconnected.addr);
+        window.retain_owned_by(|p| p.addr != disconnected.addr);
 
         for byte in 1..=4_u8 {
             window.mark_received_from(hash(byte), 80, Some(disconnected), now);
@@ -5061,7 +5022,7 @@ mod tests {
         assert_eq!(window.preferred_peer(), Some(winner));
         window.mark_received_from(hash(5), 80, Some(owner), now);
         assert_eq!(window.preferred_peer(), Some(winner));
-        release_addrs(&mut window, |a| a != winner.addr);
+        window.retain_owned_by(|p| p.addr != winner.addr);
         assert_eq!(window.preferred_peer(), None);
         assert!(!window.peer_in_staller_cooldown(loser.addr, now));
         Ok(())
@@ -5136,7 +5097,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_cold_hedge_confirmation_after_forget_does_not_blame_replacement() {
+    fn stale_cold_hedge_confirmation_after_release_does_not_blame_replacement() {
         let now = Instant::now();
         let owner = test_source(staller_addr());
         let alternate = test_source(healthy_addr());
@@ -5145,7 +5106,7 @@ mod tests {
         insert_pending(&mut window, owner, front, 1, now);
         assert_eq!(cold_front_owner(&mut window, 1, false, now), None);
 
-        window.forget_peer(owner.addr);
+        window.retain_owned_by(|p| *p != owner);
         window.confirm_cold_front_hedge(owner, alternate, front);
         window.mark_received_from(front, 80, Some(alternate), now);
 
@@ -5156,7 +5117,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_prefix_confirmation_after_forget_does_not_install_probe_or_gate()
+    fn stale_prefix_confirmation_after_release_does_not_install_probe_or_gate()
     -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         let owner = test_source(staller_addr());
@@ -5168,7 +5129,7 @@ mod tests {
         let (planned_owner, hashes, _) = window.prefix_probe_plan().ok_or_else(|| {
             std::io::Error::other("contiguous owner should produce a prefix plan")
         })?;
-        window.forget_peer(owner.addr);
+        window.retain_owned_by(|p| *p != owner);
         window.confirm_prefix_probe(planned_owner, hashes, &[test_source(healthy_addr())], now);
 
         assert!(window.prefix_probe.is_none());
@@ -5177,7 +5138,7 @@ mod tests {
     }
 
     #[test]
-    fn forget_peer_clears_connection_state_but_preserves_staller_cooldown() {
+    fn release_of_a_dead_connection_clears_state_but_preserves_cooldown() {
         let mut window = DownloadWindow::new(test_budget());
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         let now = Instant::now();
@@ -5186,7 +5147,7 @@ mod tests {
         window.preferred_peer = Some(source);
         window.mark_peer_unresponsive(peer_addr, now);
 
-        window.forget_peer(peer_addr);
+        window.retain_owned_by(|p| *p != source);
 
         assert_eq!(window.pending_count_for(source), 0);
         assert!(window.preferred_peer.is_none());
