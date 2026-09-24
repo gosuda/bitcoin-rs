@@ -43,7 +43,7 @@ The `version` message pins:
 | :--- | :--- | :--- |
 | `version` | `70016` | matches Core's latest protocol version |
 | `services` | `NETWORK \| WITNESS` | Core default nodes also advertise `NETWORK_LIMITED` (and `COMPACT_FILTERS`/`BLOOM` when the corresponding index/flag is on); we never prune, so the honest set is exactly these two bits |
-| `relay` | `true` | matches a default full-relay node |
+| `relay` | `true` on a full-relay connection, `false` on a block-relay-only dial | matches Core's per-connection preference (`PushNodeVersion`, `net_processing.cpp:1651-1689`) |
 | `user_agent` | `/bitcoin-rs:<version>/` | distinct subver string; Core records it in `getpeerinfo.subver` |
 | `timestamp` | `0` | deviation: we do not send a real clock; Core 31 does not misbehave-score time offsets (live interop evidence), but this remains a recorded deviation |
 | `start_height` | current applied tip height | matches Core semantics |
@@ -123,6 +123,8 @@ witness variant. The cache and retry lifecycle are governed by
 | `headers` > 2 000 entries | disconnect | misbehavior |
 | `verack` before `version`; duplicate `version`; feature message while disconnected | disconnect | misbehavior |
 | Idle connection | one `ping` per 2 min; disconnect once a direction is silent past 20 min | same (`PING_INTERVAL`, `net_processing.cpp:125`; `TIMEOUT_INTERVAL`, `net.h:59`; `InactivityCheck`, `net.cpp:2043-2090`) |
+| `tx` or a transaction `inv` on a block-relay-only connection | disconnect (protocol violation) | disconnect (`RejectIncomingTxs`, `net_processing.cpp:4706-4711`; the `inv` branch at `net_processing.cpp:4385-4390`) |
+| `addr` or `addrv2` on a block-relay-only connection | ignored | ignored (address relay declined, `SetupAddressRelay`, `net_processing.cpp:5952-5970`) |
 
 **Automatic misbehavior scoring and bans are not implemented.** Every row above that Core answers with a misbehavior score is answered here with a plain disconnect; banning exists only as the manual subnet mechanism (setban-style), held in memory. Repeated protocol abuse must be handled by the operator until automatic scoring lands (it is not scheduled; do not claim it in docs).
 
@@ -142,10 +144,12 @@ Known deltas from Core 31.1:
 5. **Service bits**: we advertise exactly `NETWORK | WITNESS`. No `NODE_BLOOM`, `NODE_COMPACT_FILTERS`, or `NODE_NETWORK_LIMITED` — honest, since none of those services exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Automatic misbehavior bans** (§6) absent; manual bans only.
+8. **Chain-sync timeout scope**: a full-relay outbound connection that stops bringing a better chain is timed out as Core does (`ConsiderEviction`, `net_processing.cpp:5498-5550`), with one `getheaders` probe at 20 minutes and the first four outbound connections to reach the tip protected (`MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT`, `net_processing.cpp:3203-3210`). Block-relay-only connections are exempt here; Core times out both outbound classes. A connection dialed for blocks alone is therefore never replaced by this timer.
+9. **Download budgets**: bitcoin-rs bounds one sync at `PENDING_BUDGET = 256` in-flight bodies and `RECEIVED_BLOCK_BUDGET = 256` staged bodies (`crates/p2p/src/download_window.rs:39,43`), and stripes at `MAX_BLOCKS_IN_TRANSIT_PER_PEER = 16` once `MIN_PEERS_FOR_FANOUT = 8` eligible peers exist (`:92,101`), where Core runs one `BLOCK_DOWNLOAD_WINDOW = 1024` ahead of the last common block with the same 16 per peer (`net_processing.cpp:151,133`). The 256 depth is measured, not assumed: a bounded 0–150,000 daemon single-peer IBD run at this window was 1.52× the 128-block control (`crates/p2p/src/download_window.rs:35-36`). The shallower window is a bounded divergence kept by operator decision: it caps buffered bodies and re-request work per connection instead of matching Core's depth.
 
 ## 8. Verification
 
-- **Deterministic fixtures**: `crates/p2p/tests/core_compat.rs` pins the command inventory against this table and against rust-bitcoin's v1 envelope (`RawNetworkMessage`), the handshake fields and service bits, per-network magic/ports and framing, getheaders/headers semantics and bounds, inv/getdata relay round-trips with `notfound`, the reject-or-ignore matrix of §6, and the peer-visible behavior across a chain switch (reorg) and a restart at the `ChainQuery` seam: a rebuilt query serves byte-identical answers, a switched active branch serves the new branch from the fork point and `notfound`s stale bodies. Run with `cargo test -p bitcoin-rs-p2p --test core_compat`.
+- **Deterministic fixtures**: `crates/p2p/tests/core_compat.rs` pins the command inventory against this table and against rust-bitcoin's v1 envelope (`RawNetworkMessage`), the handshake fields and service bits, the per-role `relay` advertisement and the block-relay-only prohibition on transaction traffic, per-network magic/ports and framing, getheaders/headers semantics and bounds, inv/getdata relay round-trips with `notfound`, the reject-or-ignore matrix of §6, and the peer-visible behavior across a chain switch (reorg) and a restart at the `ChainQuery` seam: a rebuilt query serves byte-identical answers, a switched active branch serves the new branch from the fork point and `notfound`s stale bodies. Run with `cargo test -p bitcoin-rs-p2p --test core_compat`.
 - **Transaction consumers**: `crates/p2p/src/dispatch.rs` test
   `gateway_inventory_filters_and_serves_txid_and_wtxid` exercises lookup,
   requested serialization, and retained-body immutability over the gateway.
