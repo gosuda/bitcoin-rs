@@ -80,6 +80,9 @@ pub(crate) struct UsablePeer {
     pub active_height: Option<u32>,
     /// What this connection relays, fixed when it was created.
     pub role: crate::peer_info::PeerRole,
+    /// Whether the operator pinned this dial by name (`--connect` or
+    /// `addnode`). Core: `ConnectionType::MANUAL`.
+    pub manual: bool,
     /// Monotonic instant this connection was created.
     pub connected_at: Instant,
 }

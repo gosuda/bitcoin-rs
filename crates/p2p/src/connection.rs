@@ -240,6 +240,9 @@ pub struct PeerLease {
     unsolicited_forwards: Arc<AtomicUsize>,
     inbound: bool,
     role: crate::peer_info::PeerRole,
+    /// Whether the operator pinned this dial by hand (`--connect` or
+    /// `addnode`). Core: `ConnectionType::MANUAL`.
+    manual: bool,
     /// Monotonic instant the connection was created.
     connected: Instant,
 }
@@ -248,7 +251,12 @@ impl PeerLease {
     /// Creates an outbound full-relay lease with a fresh process-unique identity.
     #[must_use]
     pub fn new(outbound: Sender<crate::Message>) -> Self {
-        Self::with_direction(outbound, false, crate::peer_info::PeerRole::FullRelay)
+        Self::with_direction(
+            outbound,
+            false,
+            crate::peer_info::PeerRole::FullRelay,
+            false,
+        )
     }
 
     /// Creates an outbound block-relay-only lease.
@@ -260,7 +268,26 @@ impl PeerLease {
     /// INVARIANT: the role is fixed for the life of the lease.
     #[must_use]
     pub fn new_block_relay(outbound: Sender<crate::Message>) -> Self {
-        Self::with_direction(outbound, false, crate::peer_info::PeerRole::BlockRelayOnly)
+        Self::with_direction(
+            outbound,
+            false,
+            crate::peer_info::PeerRole::BlockRelayOnly,
+            false,
+        )
+    }
+
+    /// Creates an outbound lease the operator asked for by name.
+    ///
+    /// PRE: none.
+    /// POST: the lease is outbound, carries `role`, and is manual.
+    /// INVARIANT: Core's `ConnectionType::MANUAL` is exempt from the
+    ///   chain-sync timeout and the extra-peer retirement
+    ///   (`net_processing.cpp:5502`, `net_processing.cpp:5558-5604`):
+    ///   replacing a hand-pinned connection would undo an explicit
+    ///   instruction, so the flag must outlive every policy check.
+    #[must_use]
+    pub fn new_manual(outbound: Sender<crate::Message>, role: crate::peer_info::PeerRole) -> Self {
+        Self::with_direction(outbound, false, role, true)
     }
 
     /// Creates an inbound lease with a fresh process-unique identity.
@@ -269,18 +296,20 @@ impl PeerLease {
     /// about whom we dial.
     #[must_use]
     pub fn new_inbound(outbound: Sender<crate::Message>) -> Self {
-        Self::with_direction(outbound, true, crate::peer_info::PeerRole::FullRelay)
+        Self::with_direction(outbound, true, crate::peer_info::PeerRole::FullRelay, false)
     }
 
     fn with_direction(
         outbound: Sender<crate::Message>,
         inbound: bool,
         role: crate::peer_info::PeerRole,
+        manual: bool,
     ) -> Self {
         Self::with_budget(
             outbound,
             inbound,
             role,
+            manual,
             OutboundBudget::new(OUTBOUND_QUEUE_MAX_MESSAGES, OUTBOUND_QUEUE_MAX_BYTES),
         )
     }
@@ -289,6 +318,7 @@ impl PeerLease {
         outbound: Sender<crate::Message>,
         inbound: bool,
         role: crate::peer_info::PeerRole,
+        manual: bool,
         budget: OutboundBudget,
     ) -> Self {
         let (close_tx, close_rx) = crossbeam_channel::bounded(1);
@@ -302,6 +332,7 @@ impl PeerLease {
             unsolicited_forwards: Arc::new(AtomicUsize::new(0)),
             inbound,
             role,
+            manual,
             connected: Instant::now(),
         }
     }
@@ -316,6 +347,7 @@ impl PeerLease {
             outbound,
             inbound,
             crate::peer_info::PeerRole::FullRelay,
+            false,
             budget,
         )
     }
@@ -347,6 +379,19 @@ impl PeerLease {
     #[must_use]
     pub const fn role(&self) -> crate::peer_info::PeerRole {
         self.role
+    }
+
+    /// Whether the operator pinned this connection by hand.
+    ///
+    /// PRE: none.
+    /// POST: true exactly for a dial asked for by `--connect` or `addnode`.
+    /// INVARIANT: never changes, like the role: the exemption the flag
+    ///   carries is Core's `ConnectionType::MANUAL`
+    ///   (`net_processing.cpp:5502`), and a connection that could lose it
+    ///   mid-life could be evicted by a rule that never applied to it.
+    #[must_use]
+    pub const fn is_manual(&self) -> bool {
+        self.manual
     }
 
     /// When this connection was created, on the monotonic clock.
