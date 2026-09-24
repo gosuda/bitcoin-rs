@@ -26,10 +26,15 @@
 
 use std::ops::Range;
 
+use sha2::{Digest, Sha256};
+
 use crate::{
     Amount, Block, DecodeError, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
     TxOut, Txid, Witness,
-    encode::{ConsensusDecode, read_array, read_i32_le, read_u32_le, read_u64_le},
+    encode::{
+        ConsensusDecode, double_sha256, finalize_double_sha256, read_array, read_i32_le,
+        read_u32_le, read_u64_le,
+    },
     varint,
 };
 
@@ -579,6 +584,59 @@ impl<'a> ParsedTransaction<'a> {
         let start = widen(span.start());
         let end = usize::try_from(span.end()).ok()?;
         self.bytes.get(start..end)
+    }
+
+    /// Computes the transaction id from checked borrowed spans.
+    ///
+    /// PRE: This value was produced by a successful parse.
+    /// POST: The result equals the txid of `materialize()`.
+    /// INVARIANT: Witness marker, flag, and witness data do not contribute.
+    #[must_use]
+    pub fn txid(&self) -> Txid {
+        if !self.segwit {
+            return Txid(double_sha256(slice_at(self.bytes, self.span)));
+        }
+        let mut engine = Sha256::new();
+        engine.update(slice_at(self.bytes, self.version_span));
+        engine.update(self.segwit_base_body());
+        engine.update(slice_at(self.bytes, self.lock_time_span));
+        Txid(finalize_double_sha256(engine))
+    }
+
+    /// Returns the serialized transaction size without witness data.
+    ///
+    /// PRE: This value was produced by a successful parse.
+    /// POST: The result equals the base size of `materialize()`.
+    /// INVARIANT: The result is derived from checked spans and does not allocate.
+    #[must_use]
+    pub fn base_size(&self) -> usize {
+        if !self.segwit {
+            return widen(self.span.len());
+        }
+        slice_at(self.bytes, self.version_span).len()
+            + self.segwit_base_body().len()
+            + slice_at(self.bytes, self.lock_time_span).len()
+    }
+
+    /// The input and output byte range of a `SegWit` transaction's base
+    /// serialization, between the marker/flag and the witness section.
+    fn segwit_base_body(&self) -> &'a [u8] {
+        // An empty final script still ends after its CompactSize prefix. With
+        // no outputs, the output-count prefix itself is the end of the base
+        // body.
+        let body_end = self.outputs.last().map_or_else(
+            || self.output_count_span.end(),
+            |output| output.script_pubkey().end(),
+        );
+        // Layout offsets are image-relative, not transaction-relative.
+        // Subtract the transaction origin before indexing the borrowed slice.
+        let bytes = slice_at(self.bytes, self.span);
+        let origin = u64::from(self.span.start());
+        let start = usize::try_from(u64::from(self.input_count_span.start()) - origin)
+            .unwrap_or_else(|_| unreachable!("body start is inside the transaction"));
+        let end = usize::try_from(body_end - origin)
+            .unwrap_or_else(|_| unreachable!("body end is inside the transaction"));
+        &bytes[start..end]
     }
 
     /// Materializes the owned transaction from the validated spans.
