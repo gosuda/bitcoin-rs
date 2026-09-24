@@ -170,14 +170,19 @@ pub(super) fn chain_sync_subject(peer: &UsablePeer, now: Instant) -> bool {
 ///   connections already hold protection.
 /// POST: return `Some(Probe)` once a connection has sat below `tip_height` for
 ///   `CHAIN_SYNC_TIMEOUT`, `Some(Evict)` when `HEADERS_RESPONSE_TIME` passes
-///   after that probe, and `None` otherwise. A connection at or above the tip
-///   has its timeout cleared and, while fewer than
-///   `MAX_OUTBOUND_PEERS_TO_PROTECT` hold it, takes protection, which it keeps
-///   for the life of the connection.
+///   after that probe, and `None` otherwise. A connection that DEMONSTRATED a
+///   tip at or above `tip_height` has its timeout cleared and, while fewer
+///   than `MAX_OUTBOUND_PEERS_TO_PROTECT` hold it, takes protection, which it
+///   keeps for the life of the connection. A connection that only CLAIMED a
+///   height in its handshake is armed like any other: the claim is the
+///   remote's word, not evidence.
 /// INVARIANT: this is Core's `ConsiderEviction`
 ///   (`net_processing.cpp:5498-5550`) with the chainwork comparison replaced
 ///   by the demonstrated height the scheduler already carries, because that
-///   height is the fact this node requests bodies on.
+///   height is the fact this node requests bodies on. Protection and the
+///   catch-up clear read `demonstrated_height`, never the handshake claim,
+///   as Core reads `pindexBestKnownBlock` and not `nStartingHeight`
+///   (`net_processing.cpp:3203-3210`).
 pub(super) fn consider_eviction(
     peer: &UsablePeer,
     state: &mut ChainSyncState,
@@ -185,7 +190,10 @@ pub(super) fn consider_eviction(
     now: Instant,
     protected_count: &mut usize,
 ) -> Option<ChainSyncAction> {
-    if peer.capability().is_some_and(|height| height >= tip_height) {
+    if peer
+        .demonstrated_height()
+        .is_some_and(|height| height >= tip_height)
+    {
         if !state.protected && *protected_count < MAX_OUTBOUND_PEERS_TO_PROTECT {
             state.protected = true;
             *protected_count += 1;
