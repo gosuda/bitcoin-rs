@@ -640,7 +640,7 @@ fn unsolicited_stale_block_retries_from_resolved_header_height()
     }
 
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
 
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
 
@@ -1195,7 +1195,7 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
     // stalled peer will never send) and exactly exhausts the staging byte
     // budget, closing the request gate.
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2))?;
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
     assert!(!{
         let scheduler = sync.scheduler.lock();
         scheduler.window.has_request_capacity(&scheduler.stager)

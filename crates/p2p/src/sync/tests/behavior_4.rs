@@ -152,7 +152,7 @@ fn oversized_received_block_releases_pending_budget_for_retry()
     assert_eq!(sync.scheduler.lock().window.pending_len(), 1);
 
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block))?;
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
 
     {
         let scheduler = sync.scheduler.lock();
@@ -221,7 +221,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
     // Deliver only the successor: it stages (waiting on block1) and
     // exactly exhausts the staging byte budget.
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block2.clone()))?;
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
     assert_eq!(
         sync.scheduler.lock().stager.received_bytes(),
         consensus_bytes(&block2).len()
@@ -368,7 +368,7 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
         for block in blocks[1..].iter().rev() {
             inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block.clone()))?;
         }
-        sync.drain_inbound_blocks();
+        sync.drain_inbound_blocks(Instant::now());
         let (received_count, peak_staged_bytes) = {
             let scheduler = sync.scheduler.lock();
             let stager = &scheduler.stager;
@@ -381,7 +381,7 @@ fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
 
         inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
         let apply_started = Instant::now();
-        sync.drain_inbound_blocks();
+        sync.drain_inbound_blocks(Instant::now());
         let apply_elapsed = apply_started.elapsed();
         let applied_height = applied_tip
             .load_full()

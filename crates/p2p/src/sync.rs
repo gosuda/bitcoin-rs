@@ -493,7 +493,7 @@ impl BlockSync {
         self.chain.bootstrap_genesis();
         // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
-        self.drain_inbound_blocks();
+        self.drain_inbound_blocks(now);
 
         // One frontier observation feeds recovery, selection, and planning;
         // the observation reads tips once and resolves the canonical

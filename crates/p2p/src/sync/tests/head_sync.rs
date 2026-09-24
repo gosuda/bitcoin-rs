@@ -89,8 +89,8 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap()
     // `getheaders` on this connection (a `tick` tail could also queue one
     // via `request_headers_from_best_peer` and mask a regression).
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block3.clone()))?;
-    sync.drain_inbound_blocks();
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
+    sync.drain_inbound_blocks(Instant::now());
     next_getheaders(&rx)?;
 
     // The ancestry fill lands: the gap headers admit, both bodies stage,
@@ -468,7 +468,7 @@ fn unrequested_body_at_the_count_budget_is_refused() -> Result<(), Box<dyn std::
     // on every clause except the free slot it does not have.
     let refused_hash = Hash256::from(blocks[2].block_hash());
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[2].clone()))?;
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
 
     let scheduler = sync.scheduler.lock();
     assert_eq!(
@@ -562,7 +562,7 @@ fn binding_failure_does_not_burn_the_last_staging_slot() -> Result<(), Box<dyn s
     let good_hash = Hash256::from(blocks[1].block_hash());
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(bad))?;
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
 
     let scheduler = sync.scheduler.lock();
     assert_eq!(
