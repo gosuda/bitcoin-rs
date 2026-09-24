@@ -21,12 +21,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Bounded so the listener recovers quickly once the pressure clears.
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
-/// How often an otherwise quiet connection is probed with one `ping`:
-/// Core's `PING_INTERVAL` (`net_processing.cpp:125`).
+/// How often an otherwise quiet connection is probed with one `ping`: Core's
+/// `PING_INTERVAL` is 2 * 60 seconds (`net_processing.cpp:125`).
 const PING_INTERVAL: Duration = Duration::from_mins(2);
 
 /// How long send or receive silence may last before the connection ends:
-/// Core's `TIMEOUT_INTERVAL` (`net.h:59`), enforced by its
+/// Core's `TIMEOUT_INTERVAL` is 20 * 60 seconds (`net.h:59`), enforced by its
 /// `InactivityCheck` (`net.cpp:2043-2090`).
 const TIMEOUT_INTERVAL: Duration = Duration::from_mins(20);
 
