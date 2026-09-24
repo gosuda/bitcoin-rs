@@ -6,7 +6,6 @@ use bitcoin::absolute::LockTime;
 use bitcoin::block::{Header, Version as BlockVersion};
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin::hashes::Hash as _;
-use bitcoin::opcodes::OP_TRUE;
 use bitcoin::script::{Builder, PushBytesBuf, Script};
 use bitcoin::secp256k1::{Message, Secp256k1};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
@@ -230,10 +229,10 @@ pub fn tx_hex(tx: &Transaction) -> String {
 /// Assemble a full [`Block`] from a `getblocktemplate` reply and grind its
 /// `PoW`.
 ///
-/// The coinbase pays `OP_TRUE` so the reward stays trivially spendable; the
-/// default witness commitment output is included when the template provides
-/// one.
-pub fn assemble_block_from_template(template: &Value) -> Result<Block> {
+/// The coinbase pays `coinbase_script`, so the reward is spendable exactly
+/// as the caller intends; the default witness commitment output is included
+/// when the template provides one.
+pub fn assemble_block_from_template(template: &Value, coinbase_script: &Script) -> Result<Block> {
     let prev_hex = template
         .get("previousblockhash")
         .and_then(Value::as_str)
@@ -287,7 +286,7 @@ pub fn assemble_block_from_template(template: &Value) -> Result<Block> {
 
     let mut outputs = vec![TxOut {
         value: Amount::from_sat(coinbase_value),
-        script_pubkey: Builder::new().push_opcode(OP_TRUE).into_script(),
+        script_pubkey: coinbase_script.to_owned(),
     }];
     if let Some(commitment_hex) = template
         .get("default_witness_commitment")
