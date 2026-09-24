@@ -21,8 +21,8 @@ budget's pre-load production headroom gate and reads the active chain through th
 `ChainQuery` trait. Served block bodies are the stored consensus bytes
 (`Message::BlockPayload`); they are not decoded and re-encoded. `inbound` hands over
 `InboundBlock` and `InboundHeaders` with their wire bytes preserved. Misbehaving peers accumulate score on the file-persisted
-`BanList`; whole subnets are excluded as a `BannedSubnet` built from an `IpSubnet`,
-and BIP155 addrv2 and BIP339 wtxid-relay state live in `addrv2` and `wtxid`.
+`BanList`; whole subnets are excluded as a `BannedSubnet` built from an `IpSubnet`.
+`wire` decodes BIP155 `addrv2` messages, and BIP339 wtxid-relay state lives in `wtxid`.
 
 `PeerTable` is the single authoritative owner of live peer sessions (`PeerSession`),
 connection control leases (`PeerLease`), and post-handshake metadata (`PeerInfo`).
@@ -70,8 +70,8 @@ dropped before ingress (Core 31.1 `net_processing.cpp:4401-4404`,
 `:4713-4716`); `inbound` hands over `InboundBlock`,
 `InboundHeaders`, and `InboundTx` with their delivering peer stamped. Misbehaving peers
 are tracked via the file-persisted `BanList` of the `banlist` module, whole subnets are
-excluded as a `BannedSubnet` built from an `IpSubnet`, and BIP155 addrv2 and BIP339
-wtxid-relay state live in `addrv2` and `wtxid`.
+excluded as a `BannedSubnet` built from an `IpSubnet`. `wire` decodes BIP155 `addrv2`
+messages, and BIP339 wtxid-relay state lives in `wtxid`.
 
 ## Ban-list persistence contract
 
