@@ -201,7 +201,7 @@ macro_rules! emit_user_config {
             $(
                 $(#[$fdoc:meta])*
                 $fid:ident : $fty:ty {
-                    $( cli[ $clong:literal $(, $cattr:meta)* ] )?
+                    cli[ $($fcli:tt)* ]
                     $( env[ $ekey:literal, $egram:expr ] )?
                     $( toml $tmode:ident ( $tkey:literal $(, $tgram:expr )? ) )?
                     $( conf[ $ckey:literal ] )?
@@ -216,7 +216,7 @@ macro_rules! emit_user_config {
                     $(
                         $(#[$rdoc:meta])*
                         $rfield:ident as $rid:ident : $rty:ty {
-                            $( cli[ $gclong:literal $(, $gcattr:meta)* ] )?
+                            cli[ $($gcli:tt)* ]
                             $( env[ $gekey:literal, $gegram:expr ] )?
                             $( toml $gtmode:ident ( $gtkey:literal $(, $gtgram:expr )? ) )?
                             $( conf[ $gckey:literal ] )?
@@ -404,8 +404,8 @@ macro_rules! emit_user_config {
 /// fields {
 ///     /// help text
 ///     id: Type {
-///         cli["long-flag", clap-attrs]         env["BITCOIN_RS_ID", grammar]
-///         toml native("key")                   conf["core-key"]
+///         cli[#[arg(long = "flag", …)]]  env["BITCOIN_RS_ID", grammar]
+///         toml native("key")             conf["core-key"]
 ///     }
 /// }
 /// groups {
@@ -427,218 +427,220 @@ macro_rules! emit_user_config {
 macro_rules! option_rows {
     ($m:ident) => {
         $m! {
-        fields {
-            /// Network profile.
-            network: Option<NetworkSelection> {
-                cli["network", value_parser = parse_network]
-                env["BITCOIN_RS_NETWORK", parse_network]
-                toml native("network")
-            }
-            /// Node data directory.
-            data_dir: Option<PathBuf> {
-                cli["data-dir"]
-                env["BITCOIN_RS_DATA_DIR", parse_path]
-                toml native("data_dir")
-            }
-            /// External notification adapters. `None` means this layer does not
-            /// speak to them.
-            notifications: Option<NotificationConfig> {
-                toml native("notifications")
-            }
-        }
-        groups {
-            /// User-supplied storage overrides.
-            group storage: StorageOverrides {
-                /// Selected storage backend.
-                backend as storage_backend: Option<StorageBackend> {
-                    cli["storage-backend", value_parser = parse_storage_backend]
-                    env["BITCOIN_RS_STORAGE_BACKEND", parse_storage_backend]
-                    toml text("storage_backend", parse_storage_backend)
+            fields {
+                /// Network profile.
+                network: Option<NetworkSelection> {
+                    cli[#[arg(long = "network", value_parser = parse_network)]]
+                    env["BITCOIN_RS_NETWORK", parse_network]
+                    toml native("network")
                 }
-                /// Database cache budget in MiB.
-                dbcache_mb as dbcache_mb: Option<u64> {
-                    cli["dbcache-mb"]
-                    env["BITCOIN_RS_DBCACHE_MB", str::parse]
-                    toml native("dbcache_mb")
-                    conf["dbcache"]
+                /// Node data directory.
+                data_dir: Option<PathBuf> {
+                    cli[#[arg(long = "data-dir")]]
+                    env["BITCOIN_RS_DATA_DIR", parse_path]
+                    toml native("data_dir")
                 }
-                /// Pruning target in MiB.
-                prune_target_mb as prune_target_mb: Option<u64> {
-                    cli["prune-target-mb"]
-                    env["BITCOIN_RS_PRUNE_TARGET_MB", str::parse]
-                    toml native("prune_target_mb")
-                    conf["prune"]
+                /// External notification adapters. `None` means this layer does not
+                /// speak to them.
+                notifications: Option<NotificationConfig> {
+                    cli[#[arg(skip)]]
+                    toml native("notifications")
                 }
             }
-            /// User-supplied P2P overrides.
-            group p2p: P2pOverrides {
-                /// P2P message-start bytes.
-                magic as p2p_magic: Option<[u8; 4]> {
-                    cli["p2p-magic", value_parser = parse_p2p_magic]
-                    env["BITCOIN_RS_P2P_MAGIC", parse_p2p_magic]
-                    toml text("p2p_magic", parse_p2p_magic)
+            groups {
+                /// User-supplied storage overrides.
+                group storage: StorageOverrides {
+                    /// Selected storage backend.
+                    backend as storage_backend: Option<StorageBackend> {
+                        cli[#[arg(long = "storage-backend", value_parser = parse_storage_backend)]]
+                        env["BITCOIN_RS_STORAGE_BACKEND", parse_storage_backend]
+                        toml text("storage_backend", parse_storage_backend)
+                    }
+                    /// Database cache budget in MiB.
+                    dbcache_mb as dbcache_mb: Option<u64> {
+                        cli[#[arg(long = "dbcache-mb")]]
+                        env["BITCOIN_RS_DBCACHE_MB", str::parse]
+                        toml native("dbcache_mb")
+                        conf["dbcache"]
+                    }
+                    /// Pruning target in MiB.
+                    prune_target_mb as prune_target_mb: Option<u64> {
+                        cli[#[arg(long = "prune-target-mb")]]
+                        env["BITCOIN_RS_PRUNE_TARGET_MB", str::parse]
+                        toml native("prune_target_mb")
+                        conf["prune"]
+                    }
                 }
-                /// P2P listener bind addresses.
-                listen as p2p_listen: Option<Vec<SocketAddr>> {
-                    cli["p2p-listen", value_delimiter = ',']
-                    env["BITCOIN_RS_P2P_LISTEN", parse_socket_list]
-                    toml native("p2p_listen")
+                /// User-supplied P2P overrides.
+                group p2p: P2pOverrides {
+                    /// P2P message-start bytes.
+                    magic as p2p_magic: Option<[u8; 4]> {
+                        cli[#[arg(long = "p2p-magic", value_parser = parse_p2p_magic)]]
+                        env["BITCOIN_RS_P2P_MAGIC", parse_p2p_magic]
+                        toml text("p2p_magic", parse_p2p_magic)
+                    }
+                    /// P2P listener bind addresses.
+                    listen as p2p_listen: Option<Vec<SocketAddr>> {
+                        cli[#[arg(long = "p2p-listen", value_delimiter = ',')]]
+                        env["BITCOIN_RS_P2P_LISTEN", parse_socket_list]
+                        toml native("p2p_listen")
+                    }
+                    /// Whether DNS seeds are enabled.
+                    dns_seeds as dns_seeds_enabled: Option<bool> {
+                        cli[#[arg(long = "dns-seeds-enabled")]]
+                        env["BITCOIN_RS_DNS_SEEDS_ENABLED", parse_bool]
+                        toml native("dns_seeds_enabled")
+                    }
+                    /// Fixed outbound peer endpoints.
+                    connect as connect: Option<Vec<String>> {
+                        cli[#[arg(long = "connect", value_delimiter = ',', value_parser = parse_connect_endpoint)]]
+                        env["BITCOIN_RS_CONNECT", parse_connect_list]
+                        toml each("connect", parse_connect_endpoint)
+                    }
+                    /// Whether fast sync (shallow, early fan-out over a larger
+                    /// outbound set) is enabled.
+                    fast_sync as fast_sync: Option<bool> {
+                        cli[#[arg(long = "fast-sync", num_args = 0..=1, default_missing_value = "true")]]
+                        env["BITCOIN_RS_FAST_SYNC", parse_bool]
+                        toml native("fast_sync")
+                    }
                 }
-                /// Whether DNS seeds are enabled.
-                dns_seeds as dns_seeds_enabled: Option<bool> {
-                    cli["dns-seeds-enabled"]
-                    env["BITCOIN_RS_DNS_SEEDS_ENABLED", parse_bool]
-                    toml native("dns_seeds_enabled")
+                /// User-supplied RPC overrides.
+                group rpc: RpcOverrides {
+                    /// JSON-RPC bind address.
+                    bind as rpc_bind: Option<SocketAddr> {
+                        cli[#[arg(long = "rpc-bind")]]
+                        env["BITCOIN_RS_RPC_BIND", str::parse]
+                        toml native("rpc_bind")
+                    }
+                    /// Whether the REST gateway is enabled.
+                    rest as rest: Option<bool> {
+                        cli[#[arg(long = "rest")]]
+                        env["BITCOIN_RS_REST", parse_bool]
+                        toml native("rest")
+                        conf["rest"]
+                    }
+                    /// Basic-auth username.
+                    user as rpc_user: Option<String> {
+                        cli[#[arg(long = "rpc-user")]]
+                        env["BITCOIN_RS_RPC_USER", parse_text]
+                        toml native("rpc_user")
+                        conf["rpcuser"]
+                    }
+                    /// Basic-auth password.
+                    password as rpc_password: Option<String> {
+                        cli[#[arg(long = "rpc-password")]]
+                        env["BITCOIN_RS_RPC_PASSWORD", parse_text]
+                        toml native("rpc_password")
+                        conf["rpcpassword"]
+                    }
+                    /// Cookie-auth path.
+                    cookie as rpc_cookie: Option<PathBuf> {
+                        cli[#[arg(long = "rpc-cookie")]]
+                        env["BITCOIN_RS_RPC_COOKIE", parse_path]
+                        toml native("rpc_cookie")
+                        conf["rpccookiefile"]
+                    }
                 }
-                /// Fixed outbound peer endpoints.
-                connect as connect: Option<Vec<String>> {
-                    cli["connect", value_delimiter = ',', value_parser = parse_connect_endpoint]
-                    env["BITCOIN_RS_CONNECT", parse_connect_list]
-                    toml each("connect", parse_connect_endpoint)
+                /// User-supplied index overrides.
+                group indexes: IndexOverrides {
+                    /// Whether the transaction index is enabled.
+                    txindex as txindex: Option<bool> {
+                        cli[#[arg(long = "txindex")]]
+                        env["BITCOIN_RS_TXINDEX", parse_bool]
+                        toml native("txindex")
+                        conf["txindex"]
+                    }
+                    /// Script index mode.
+                    script_index as script_index: Option<ScriptIndexMode> {
+                        cli[#[arg(long = "scriptindex", visible_alias = "script-index", num_args = 0..=1, default_missing_value = "true", value_parser = parse_script_index)]]
+                        env["BITCOIN_RS_SCRIPTINDEX", parse_script_index]
+                        toml text("script_index", parse_script_index)
+                    }
                 }
-                /// Whether fast sync (shallow, early fan-out over a larger
-                /// outbound set) is enabled.
-                fast_sync as fast_sync: Option<bool> {
-                    cli["fast-sync", num_args = 0..=1, default_missing_value = "true"]
-                    env["BITCOIN_RS_FAST_SYNC", parse_bool]
-                    toml native("fast_sync")
+                /// User-supplied observability overrides.
+                group observability: ObservabilityOverrides {
+                    /// Tracing filter level.
+                    log_level as log_level: Option<String> {
+                        cli[#[arg(long = "log-level")]]
+                        env["BITCOIN_RS_LOG_LEVEL", parse_text]
+                        toml native("log_level")
+                    }
+                    /// Optional Prometheus metrics bind address.
+                    metrics_bind as metrics_bind: Option<SocketAddr> {
+                        cli[#[arg(long = "metrics-bind")]]
+                        env["BITCOIN_RS_METRICS_BIND", str::parse]
+                        toml native("metrics_bind")
+                    }
+                }
+                /// User-supplied validation overrides.
+                group validation: ValidationOverrides {
+                    /// Height through which script verification may be skipped.
+                    assume_valid_height as assume_valid_height: Option<u32> {
+                        cli[#[arg(long = "assume-valid-height")]]
+                        env["BITCOIN_RS_ASSUME_VALID_HEIGHT", str::parse]
+                        toml native("assume_valid_height")
+                    }
+                    /// Which script verification the apply path may skip.
+                    mode as validation_mode: Option<ValidationMode> {
+                        cli[#[arg(long = "validation-mode", value_parser = parse_validation_mode)]]
+                        env["BITCOIN_RS_VALIDATION_MODE", parse_validation_mode]
+                        toml text("validation_mode", parse_validation_mode)
+                    }
+                }
+                /// User-supplied mining overrides.
+                group mining: MiningOverrides {
+                    /// Watch-only coinbase payout address. Decoded after every config
+                    /// layer has been applied, against the resolved consensus network.
+                    payout_address as mining_payout_address: Option<String> {
+                        cli[#[arg(long = "mining-payout-address")]]
+                        env["BITCOIN_RS_MINING_PAYOUT_ADDRESS", parse_text]
+                        toml native("mining_payout_address")
+                    }
+                }
+                /// User-supplied chainstate journal overrides.
+                group chainstate_journal: ChainstateJournalOverrides
+                table("chainstate_journal")
+                #[derive(serde::Deserialize)]
+                #[serde(default, deny_unknown_fields)]
+                {
+                    /// Whether the journal is active.
+                    enabled as enabled: Option<bool> {
+                        cli[#[arg(skip)]]
+                        env["BITCOIN_RS_CHAINSTATE_JOURNAL", parse_bool]
+                    }
+                    /// Durability batch size, in blocks.
+                    blocks as blocks: Option<u32> {
+                        cli[#[arg(skip)]]
+                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", str::parse]
+                    }
+                    /// Durability batch period, in seconds.
+                    seconds as seconds: Option<u64> {
+                        cli[#[arg(skip)]]
+                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_SECONDS", str::parse]
+                    }
+                    /// Active-segment rotation threshold, in MiB.
+                    rotate_mib as rotate_mib: Option<u64> {
+                        cli[#[arg(skip)]]
+                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_ROTATE_MIB", str::parse]
+                    }
+                    /// Total-journal retention bound, in MiB.
+                    max_journal_mib as max_journal_mib: Option<u64> {
+                        cli[#[arg(skip)]]
+                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_JOURNAL_MIB", str::parse]
+                    }
+                    /// Backpressure threshold, in blocks.
+                    max_lag_blocks as max_lag_blocks: Option<u32> {
+                        cli[#[arg(skip)]]
+                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_BLOCKS", str::parse]
+                    }
+                    /// Backpressure threshold, in seconds.
+                    max_lag_seconds as max_lag_seconds: Option<u64> {
+                        cli[#[arg(skip)]]
+                        env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_SECONDS", str::parse]
+                    }
                 }
             }
-            /// User-supplied RPC overrides.
-            group rpc: RpcOverrides {
-                /// JSON-RPC bind address.
-                bind as rpc_bind: Option<SocketAddr> {
-                    cli["rpc-bind"]
-                    env["BITCOIN_RS_RPC_BIND", str::parse]
-                    toml native("rpc_bind")
-                }
-                /// Whether the REST gateway is enabled.
-                rest as rest: Option<bool> {
-                    cli["rest"]
-                    env["BITCOIN_RS_REST", parse_bool]
-                    toml native("rest")
-                    conf["rest"]
-                }
-                /// Basic-auth username.
-                user as rpc_user: Option<String> {
-                    cli["rpc-user"]
-                    env["BITCOIN_RS_RPC_USER", parse_text]
-                    toml native("rpc_user")
-                    conf["rpcuser"]
-                }
-                /// Basic-auth password.
-                password as rpc_password: Option<String> {
-                    cli["rpc-password"]
-                    env["BITCOIN_RS_RPC_PASSWORD", parse_text]
-                    toml native("rpc_password")
-                    conf["rpcpassword"]
-                }
-                /// Cookie-auth path.
-                cookie as rpc_cookie: Option<PathBuf> {
-                    cli["rpc-cookie"]
-                    env["BITCOIN_RS_RPC_COOKIE", parse_path]
-                    toml native("rpc_cookie")
-                    conf["rpccookiefile"]
-                }
-            }
-            /// User-supplied index overrides.
-            group indexes: IndexOverrides {
-                /// Whether the transaction index is enabled.
-                txindex as txindex: Option<bool> {
-                    cli["txindex"]
-                    env["BITCOIN_RS_TXINDEX", parse_bool]
-                    toml native("txindex")
-                    conf["txindex"]
-                }
-                /// Script index mode.
-                script_index as script_index: Option<ScriptIndexMode> {
-                    cli[
-                        "scriptindex",
-                        visible_alias = "script-index",
-                        num_args = 0..=1,
-                        default_missing_value = "true",
-                        value_parser = parse_script_index
-                    ]
-                    env["BITCOIN_RS_SCRIPTINDEX", parse_script_index]
-                    toml text("script_index", parse_script_index)
-                }
-            }
-            /// User-supplied observability overrides.
-            group observability: ObservabilityOverrides {
-                /// Tracing filter level.
-                log_level as log_level: Option<String> {
-                    cli["log-level"]
-                    env["BITCOIN_RS_LOG_LEVEL", parse_text]
-                    toml native("log_level")
-                }
-                /// Optional Prometheus metrics bind address.
-                metrics_bind as metrics_bind: Option<SocketAddr> {
-                    cli["metrics-bind"]
-                    env["BITCOIN_RS_METRICS_BIND", str::parse]
-                    toml native("metrics_bind")
-                }
-            }
-            /// User-supplied validation overrides.
-            group validation: ValidationOverrides {
-                /// Height through which script verification may be skipped.
-                assume_valid_height as assume_valid_height: Option<u32> {
-                    cli["assume-valid-height"]
-                    env["BITCOIN_RS_ASSUME_VALID_HEIGHT", str::parse]
-                    toml native("assume_valid_height")
-                }
-                /// Which script verification the apply path may skip.
-                mode as validation_mode: Option<ValidationMode> {
-                    cli["validation-mode", value_parser = parse_validation_mode]
-                    env["BITCOIN_RS_VALIDATION_MODE", parse_validation_mode]
-                    toml text("validation_mode", parse_validation_mode)
-                }
-            }
-            /// User-supplied mining overrides.
-            group mining: MiningOverrides {
-                /// Watch-only coinbase payout address. Decoded after every config
-                /// layer has been applied, against the resolved consensus network.
-                payout_address as mining_payout_address: Option<String> {
-                    cli["mining-payout-address"]
-                    env["BITCOIN_RS_MINING_PAYOUT_ADDRESS", parse_text]
-                    toml native("mining_payout_address")
-                }
-            }
-            /// User-supplied chainstate journal overrides.
-            group chainstate_journal: ChainstateJournalOverrides
-            table("chainstate_journal")
-            #[derive(serde::Deserialize)]
-            #[serde(default, deny_unknown_fields)]
-            {
-                /// Whether the journal is active.
-                enabled as enabled: Option<bool> {
-                    env["BITCOIN_RS_CHAINSTATE_JOURNAL", parse_bool]
-                }
-                /// Durability batch size, in blocks.
-                blocks as blocks: Option<u32> {
-                    env["BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", str::parse]
-                }
-                /// Durability batch period, in seconds.
-                seconds as seconds: Option<u64> {
-                    env["BITCOIN_RS_CHAINSTATE_JOURNAL_SECONDS", str::parse]
-                }
-                /// Active-segment rotation threshold, in MiB.
-                rotate_mib as rotate_mib: Option<u64> {
-                    env["BITCOIN_RS_CHAINSTATE_JOURNAL_ROTATE_MIB", str::parse]
-                }
-                /// Total-journal retention bound, in MiB.
-                max_journal_mib as max_journal_mib: Option<u64> {
-                    env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_JOURNAL_MIB", str::parse]
-                }
-                /// Backpressure threshold, in blocks.
-                max_lag_blocks as max_lag_blocks: Option<u32> {
-                    env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_BLOCKS", str::parse]
-                }
-                /// Backpressure threshold, in seconds.
-                max_lag_seconds as max_lag_seconds: Option<u64> {
-                    env["BITCOIN_RS_CHAINSTATE_JOURNAL_MAX_LAG_SECONDS", str::parse]
-                }
-            }
-        }
         }
     };
 }
