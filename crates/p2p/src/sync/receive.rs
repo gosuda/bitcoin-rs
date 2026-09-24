@@ -292,7 +292,7 @@ impl BlockSync {
             self.refresh_active_peer_credit();
         }
         if missing_parent {
-            self.request_headers_from_eligible();
+            self.request_headers_from_eligible(Instant::now());
         }
     }
 

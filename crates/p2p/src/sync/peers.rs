@@ -655,7 +655,7 @@ impl BlockSync {
         for (source, prior, action) in outcomes {
             match action {
                 Some(ChainSyncAction::Probe) => {
-                    if !self.probe_chain_sync(source, frontier) {
+                    if !self.probe_chain_sync(source, frontier, now) {
                         self.scheduler.lock().restore_chain_sync(source, prior);
                     }
                 }
@@ -690,8 +690,8 @@ impl BlockSync {
     ///   this locator, false when nothing could be sent.
     /// INVARIANT: a suppressed probe still counts, because the pending request
     ///   it suppressed is the very question the response window waits on.
-    fn probe_chain_sync(&self, source: PeerSource, frontier: &SyncFrontier) -> bool {
-        let outcome = self.probe_frontier_peer(frontier, source);
+    fn probe_chain_sync(&self, source: PeerSource, frontier: &SyncFrontier, now: Instant) -> bool {
+        let outcome = self.probe_frontier_peer(frontier, source, now);
         if outcome == GetheadersOutcome::Failed {
             return false;
         }
