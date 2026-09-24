@@ -103,7 +103,10 @@ impl UsablePeer {
     /// that entered the block tree. `None` while it has announced nothing we
     /// accepted, whatever its handshake claimed: Core's eviction rule reads
     /// `pindexBestKnownBlock`, a tip the peer actually sent, and never the
-    /// version height (`net_processing.cpp:3203-3210`).
+    /// version height (`net_processing.cpp:3203-3210`). Where `capability`
+    /// falls back to the claimed height to choose whom to ask for a body,
+    /// this one has no fallback, because the rule that reads it decides
+    /// whether to keep the connection.
     pub(crate) fn demonstrated_height(&self) -> Option<u32> {
         if self.demonstrated_tips.is_empty() {
             return None;
