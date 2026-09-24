@@ -113,9 +113,9 @@ A peer holding up the apply frontier by failing to deliver a frontier block it w
 
 ### Peer lifecycle ownership
 `P2pService` owns P2P control state and workers. Live sessions live in one
-`PeerTable`; `PeerLifecycle` wraps that table for service send and disconnect
-helpers. Ready snapshots carry `PeerSource`, and identity-checked table
-methods are what authorize a mutation. Address equality alone never does.
+`PeerTable`, which `P2pService` holds directly and uses for its send and
+disconnect helpers. Ready snapshots carry `PeerSource`, and identity-checked
+table methods are what authorize a mutation. Address equality alone never does.
 `BlockSync` drives the P2P-owned [`DownloadWindow`] and [`BlockStager`] and may
 call identity-checked [`PeerTable`] methods directly. `P2pService` does not
 hold a second window. See `P2P-02` in `docs/contracts/p2p-wire.md`.

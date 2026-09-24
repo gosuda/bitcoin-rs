@@ -1,8 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// BIP155 addrv2 address helpers.
-pub mod addrv2;
 /// Peer banning and persistence.
 pub mod banlist;
 /// Out-of-order inbound block staging bounded by the download window budget.
@@ -55,7 +53,7 @@ pub mod wtxid;
 pub use chain_query::ActiveChainQuery;
 pub use compact_blocks::{CompactBlockHints, Reconstruction};
 pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, Command, CommandStatus, PINNED_CORE_VERSION};
-pub use connection::{ConnectionId, PeerLease, PeerLifecycle, PeerSource, ReadyPeer};
+pub use connection::{ConnectionId, PeerLease, PeerSource, ReadyPeer};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
