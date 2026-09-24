@@ -252,7 +252,7 @@ impl ConnectionShared {
     ) {
         let source = lease.source(peer_addr);
         // Every body carries its own header; route it through the headers
-        // sink too so tips learned only by body delivery (`inv` getdata,
+        // sink too so tips learned only by body delivery (`inv`-served,
         // compact reconstruction, or an unsolicited push) reach header
         // admission. Without a tree node the body can never become the
         // apply frontier's expected block, and no announced-tip credit
