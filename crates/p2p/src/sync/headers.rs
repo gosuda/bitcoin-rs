@@ -1,6 +1,5 @@
 //! Header request ownership, locator construction, and inbound header admission.
 
-use super::requests::COMPACT_RELAY_NEAR_TIP_BLOCKS;
 use super::GetdataRequestOutcome;
 use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
@@ -15,6 +14,7 @@ use super::peers::is_peer_fault;
 use super::peers::outranks;
 use super::peers::shared_active_height;
 use super::peers::sync_peer_candidate;
+use super::requests::COMPACT_RELAY_NEAR_TIP_BLOCKS;
 use super::{BlockSync, SchedulerState};
 use crate::InboundHeaders;
 use crate::Message;
@@ -217,7 +217,8 @@ impl BlockSync {
                 self.request_headers_from(Some(source));
                 continue;
             }
-            self.peer_table.note_announced_tip(source, hash, active_height);
+            self.peer_table
+                .note_announced_tip(source, hash, active_height);
             credit_refresh_needed = true;
         }
         if credit_refresh_needed {
@@ -251,8 +252,7 @@ impl BlockSync {
         if chain.apply_halted {
             return GetdataRequestOutcome::default();
         }
-        let Some(height) = self.tip_height_on_active_branch(chain_tip.tip_id, announced_tip)
-        else {
+        let Some(height) = self.tip_height_on_active_branch(chain_tip.tip_id, announced_tip) else {
             return GetdataRequestOutcome::default();
         };
         // "Close to synced", in height terms: the block the apply frontier

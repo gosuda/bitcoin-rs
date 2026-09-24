@@ -512,4 +512,4 @@ impl std::fmt::Display for NoProgressReason {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -8,7 +8,9 @@ use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
 use crate::handshake::feature_messages;
-use crate::inv::{inventory_block_hash, inventory_tx_hash, is_within_inventory_bound, request_witness};
+use crate::inv::{
+    inventory_block_hash, inventory_tx_hash, is_within_inventory_bound, request_witness,
+};
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
 
@@ -154,7 +156,16 @@ pub fn dispatch_inbound_with_chain<S>(
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
 ) -> Result<(), PeerError> {
-    dispatch_inbound_full(peer, message, chain, None, &|| true, headroom, send, &mut |_| {})
+    dispatch_inbound_full(
+        peer,
+        message,
+        chain,
+        None,
+        &|| true,
+        headroom,
+        send,
+        &mut |_| {},
+    )
 }
 
 /// Dispatch with an active-chain view and a transaction-inventory filter.
