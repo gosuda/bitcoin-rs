@@ -1,8 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// Cumulative chain transaction count arithmetic.
-mod count;
 /// BIP9 deployment-state memoization cache.
 mod bip9_cache;
 /// Neutral block-body read seam.
