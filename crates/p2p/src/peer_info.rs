@@ -7,6 +7,39 @@ use bitcoin::p2p::message_network::VersionMessage;
 
 use crate::counters::PeerCounters;
 
+/// What one connection relays.
+///
+/// PRE: assigned once, by the code that creates the connection.
+/// POST: `FullRelay` carries transactions, addresses, blocks, and
+///   announcements; `BlockRelayOnly` carries blocks and headers alone.
+/// INVARIANT: a connection's role never changes after assignment; a
+///   same-address replacement is a new connection and gets a fresh role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerRole {
+    /// Full relay: transactions, addresses, blocks, and announcements.
+    ///
+    /// Core: an inbound or `OUTBOUND_FULL_RELAY` connection.
+    FullRelay,
+    /// Block relay only: blocks and headers, never a transaction or address
+    /// message in either direction.
+    ///
+    /// Core: a `BLOCK_RELAY` connection
+    /// (`MAX_BLOCK_RELAY_ONLY_CONNECTIONS`, `net.h:73`).
+    BlockRelayOnly,
+}
+
+impl PeerRole {
+    /// Whether this role may carry transaction and address relay.
+    ///
+    /// PRE: none.
+    /// POST: `true` only for `FullRelay`.
+    /// INVARIANT: block and header relay is never restricted by role.
+    #[must_use]
+    pub const fn relays_transactions(&self) -> bool {
+        matches!(self, Self::FullRelay)
+    }
+}
+
 /// Information collected during a successful Bitcoin v1 handshake.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerInfo {
