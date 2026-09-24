@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{Read, Write as _};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::error::{Error, Result};
+use crate::rpc::Connection;
 
 /// Cold storage initialization needs more time than a single loopback request.
 pub const START_TIMEOUT: Duration = Duration::from_mins(1);
@@ -22,8 +23,6 @@ pub const START_TIMEOUT: Duration = Duration::from_mins(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Single request deadline.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-/// Bound on an HTTP body the harness reads or writes.
-const MAX_BODY: usize = 64 * 1024 * 1024;
 /// Bound on retained child output.
 const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
 /// Fixed test credentials; both node kinds share them.
@@ -50,6 +49,16 @@ pub enum Kind {
     BitcoinRs,
     /// The pinned Bitcoin Core reference node.
     Core,
+}
+
+/// The clock a spawned node's blocks are stamped with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClockControl {
+    /// Core runs under `-mocktime` pinned to this epoch second.
+    Mock(u64),
+    /// The daemon clocks blocks from the host wall clock; its CLI exposes
+    /// no mock-time input.
+    None,
 }
 
 /// Options applied on top of the default launch profile.
@@ -112,11 +121,14 @@ pub struct ProcessNode {
     pub rpc_addr: SocketAddr,
     /// P2P loopback address the child is bound to.
     pub p2p_addr: SocketAddr,
+    /// The clock this node's blocks are stamped with.
+    pub clock: ClockControl,
     /// Directory that receives launch.json, stdout.log, stderr.log, transcript.
     pub evidence: PathBuf,
     journal: File,
     started: Instant,
     output: Vec<JoinHandle<()>>,
+    conn: Connection,
 }
 
 /// Workspace root, derived from this crate's manifest location.
@@ -235,7 +247,7 @@ fn launch_command(
     rpc_addr: SocketAddr,
     p2p_addr: SocketAddr,
     options: &SpawnOptions<'_>,
-) -> Result<Command> {
+) -> Result<(Command, ClockControl)> {
     let mut command = match kind {
         Kind::BitcoinRs => Command::new(bitcoin_rs_binary()?),
         Kind::Core => Command::new(verified_core_binary()?),
@@ -246,8 +258,9 @@ fn launch_command(
             command.env_remove(key);
         }
     }
-    match kind {
+    let clock = match kind {
         Kind::Core => {
+            let mock = mock_time();
             command
                 .args([
                     "-regtest",
@@ -263,7 +276,8 @@ fn launch_command(
                 .arg(format!("-datadir={}", datadir.display()))
                 .arg(format!("-bind={p2p_addr}"))
                 .arg(format!("-rpcport={}", rpc_addr.port()))
-                .arg(format!("-mocktime={}", mock_time()));
+                .arg(format!("-mocktime={mock}"));
+            ClockControl::Mock(mock)
         }
         Kind::BitcoinRs => {
             let config_path = datadir.join("node.toml");
@@ -293,13 +307,14 @@ fn launch_command(
                 .arg(datadir.join("node"))
                 .arg("--rpc-bind")
                 .arg(rpc_addr.to_string());
+            ClockControl::None
         }
-    }
+    };
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    Ok(command)
+    Ok((command, clock))
 }
 
 impl ProcessNode {
@@ -355,7 +370,7 @@ impl ProcessNode {
         let (rpc_addr, p2p_addr, rpc_listener, p2p_listener) = loopback_addresses()?;
         let rpc_addr = options.rpc_bind.unwrap_or(rpc_addr);
         let journal = File::create(evidence.join("transcript.jsonl"))?;
-        let mut command = launch_command(kind, datadir.path(), rpc_addr, p2p_addr, options)?;
+        let (mut command, clock) = launch_command(kind, datadir.path(), rpc_addr, p2p_addr, options)?;
         command.args(options.extra_args);
         fs::write(
             evidence.join("launch.json"),
@@ -376,10 +391,12 @@ impl ProcessNode {
             datadir: None,
             rpc_addr,
             p2p_addr,
+            clock,
             evidence,
             journal,
             started: Instant::now(),
             output: Vec::new(),
+            conn: Connection::new(rpc_addr),
         };
         let stdout = node
             .child
@@ -428,11 +445,13 @@ impl ProcessNode {
                     evidence: self.evidence.clone(),
                 });
             }
-            match self.rpc("getblockchaininfo", &json!([])) {
+            match self.rpc_until("getblockchaininfo", &json!([]), deadline) {
                 Ok(_) => return Ok(()),
                 Err(error) if Instant::now() >= deadline => {
                     return Err(Error::Timeout {
+                        pid: self.pid(),
                         operation: "readiness",
+                        evidence: self.evidence.clone(),
                         detail: error.to_string(),
                     });
                 }
@@ -444,14 +463,43 @@ impl ProcessNode {
     /// JSON-RPC call; the reply's `result` is returned, an `error` becomes
     /// [`Error::Rpc`].
     pub fn rpc(&mut self, method: &str, params: &Value) -> Result<Value> {
+        self.rpc_until(method, params, Instant::now() + REQUEST_TIMEOUT)
+    }
+
+    /// JSON-RPC call bounded by `deadline`: the transport obeys the same
+    /// deadline as the polling loop, so a startup wait cannot be renewed
+    /// by a per-request budget.
+    pub fn rpc_until(
+        &mut self,
+        method: &str,
+        params: &Value,
+        deadline: Instant,
+    ) -> Result<Value> {
         let request = json!({"jsonrpc": "1.0", "id": "e2e", "method": method, "params": params});
         self.record(&request)?;
-        let reply = rpc_call(self.rpc_addr, &request, REQUEST_TIMEOUT);
-        self.record(&match &reply {
+        let response = self.conn.rpc(&request, (AUTH_USER, AUTH_PASSWORD), deadline);
+        self.record(&match &response {
             Ok(value) => value.clone(),
             Err(error) => json!({"transport_error": error.to_string()}),
         })?;
+        let reply = response?;
+        if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
+            return Err(Error::Rpc {
+                method: method.to_owned(),
+                code: error.get("code").and_then(Value::as_i64).ok_or_else(|| {
+                    Error::Protocol("RPC error lacks a numeric code".into())
+                })?,
+                message: error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::Protocol("RPC error lacks a message".into()))?
+                    .to_owned(),
+            });
+        }
         reply
+            .get("result")
+            .cloned()
+            .ok_or_else(|| Error::Protocol("missing RPC result".into()))
     }
 
     /// Low-level JSON-RPC call returning the full parsed envelope (or the
@@ -501,7 +549,8 @@ impl ProcessNode {
                 "auth_user": auth.map(|(user, _)| user),
             }
         }))?;
-        let response = http_exchange(self.rpc_addr, method, path, body, auth, REQUEST_TIMEOUT)?;
+        let response =
+            self.conn.http(method, path, body, auth, Instant::now() + REQUEST_TIMEOUT)?;
         self.record(&json!({
             "http_response": {
                 "status": response.status,
@@ -518,6 +567,29 @@ impl ProcessNode {
     /// GET helper for REST/Esplora surfaces.
     pub fn http_get(&mut self, path: &str) -> Result<HttpResponse> {
         self.http("GET", path, &[], false)
+    }
+
+    /// GET one `/api/` explorer path and return its parsed JSON body.
+    ///
+    /// PRE: `path` names a resource under the `/api/` namespace.
+    /// POST: the reply carried status 200 and a JSON body.
+    pub fn http_get_json(&mut self, path: &str) -> Result<Value> {
+        if !path.starts_with("/api/") || path.bytes().any(|byte| byte <= b' ' || byte == 127) {
+            return Err(Error::Protocol("invalid explorer HTTP path".into()));
+        }
+        let response = self.http_get(path)?;
+        if response.status != 200 {
+            return Err(Error::Protocol(
+                "explorer HTTP response was not 200".into(),
+            ));
+        }
+        response.json()
+    }
+
+    /// Common monotonic clock for RPC and P2P evidence.
+    #[must_use]
+    pub const fn evidence_clock(&self) -> Instant {
+        self.started
     }
 
     fn record(&mut self, entry: &Value) -> Result<()> {
@@ -547,7 +619,12 @@ impl ProcessNode {
                 Err(error) => detail = error.to_string(),
             }
             if Instant::now() >= deadline {
-                return Err(Error::Timeout { operation, detail });
+                return Err(Error::Timeout {
+                    pid: self.pid(),
+                    operation,
+                    evidence: self.evidence.clone(),
+                    detail,
+                });
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -661,148 +738,4 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
         let _ = file.write_all(tail.make_contiguous());
         let _ = file.flush();
     })
-}
-
-fn rpc_call(addr: SocketAddr, request: &Value, timeout: Duration) -> Result<Value> {
-    let body = serde_json::to_vec(request)?;
-    let response = http_exchange(
-        addr,
-        "POST",
-        "/",
-        &body,
-        Some((AUTH_USER, AUTH_PASSWORD)),
-        timeout,
-    )?;
-    let reply = response.json()?;
-    if let Some(error) = reply.get("error").filter(|e| !e.is_null()) {
-        let code = error
-            .get("code")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| Error::Assertion("rpc error lacks numeric code".into()))?;
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        let method = request
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or("?")
-            .to_owned();
-        return Err(Error::Rpc {
-            method,
-            code,
-            message,
-        });
-    }
-    reply
-        .get("result")
-        .cloned()
-        .ok_or_else(|| Error::Assertion(format!("missing rpc result in {reply}")))
-}
-
-fn http_exchange(
-    addr: SocketAddr,
-    method: &str,
-    path: &str,
-    body: &[u8],
-    auth: Option<(&str, &str)>,
-    timeout: Duration,
-) -> Result<HttpResponse> {
-    let mut wire = Vec::new();
-    write!(wire, "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n")?;
-    if let Some((user, password)) = auth {
-        let token = base64(&format!("{user}:{password}").into_bytes());
-        write!(wire, "Authorization: Basic {token}\r\n")?;
-    }
-    if !body.is_empty() {
-        write!(wire, "Content-Type: application/json\r\n")?;
-    }
-    write!(
-        wire,
-        "Content-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )?;
-    wire.extend_from_slice(body);
-    if wire.len() > MAX_BODY {
-        return Err(Error::Assertion("request exceeds body bound".into()));
-    }
-    let mut stream = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(2)))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    stream.write_all(&wire)?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let count = stream.read(&mut chunk)?;
-        if count == 0 {
-            break;
-        }
-        if bytes.len().saturating_add(count) > MAX_BODY {
-            return Err(Error::Assertion("response exceeds body bound".into()));
-        }
-        bytes.extend_from_slice(&chunk[..count]);
-    }
-    parse_http_reply(&bytes)
-}
-
-fn parse_http_reply(bytes: &[u8]) -> Result<HttpResponse> {
-    let split = bytes
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| Error::Assertion("missing HTTP header terminator".into()))?;
-    let head = std::str::from_utf8(&bytes[..split])
-        .map_err(|e| Error::Assertion(format!("invalid HTTP head: {e}")))?;
-    let mut lines = head.split("\r\n");
-    let status_line = lines.next().unwrap_or_default();
-    let mut parts = status_line.split_whitespace();
-    let _version = parts.next();
-    let status = parts
-        .next()
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| Error::Assertion(format!("invalid status line: {status_line}")))?;
-    let mut headers = Vec::new();
-    let mut content_length = None;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let name = name.trim().to_lowercase();
-        let value = value.trim().to_owned();
-        if name == "content-length" {
-            content_length = value.parse::<usize>().ok();
-        }
-        headers.push((name, value));
-    }
-    let body = bytes[split + 4..].to_vec();
-    if let Some(length) = content_length {
-        if length != body.len() {
-            return Err(Error::Assertion(format!(
-                "content-length {length} != body {}",
-                body.len()
-            )));
-        }
-    }
-    Ok(HttpResponse {
-        status,
-        headers,
-        body,
-    })
-}
-
-fn base64(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in input.chunks(3) {
-        let b0 = u32::from(chunk[0]);
-        let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
-        let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        let pick = |bits: u32| char::from(TABLE[usize::try_from(bits & 63).unwrap_or(0)]);
-        out.push(pick(n >> 18));
-        out.push(pick(n >> 12));
-        out.push(if chunk.len() > 1 { pick(n >> 6) } else { '=' });
-        out.push(if chunk.len() > 2 { pick(n) } else { '=' });
-    }
-    out
 }
