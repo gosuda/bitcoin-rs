@@ -513,14 +513,14 @@ pub(super) fn apply_block_admitted<'b>(
                 .into_iter()
                 .collect();
             let durable_commit_started = quanta::Instant::now();
-            let commit_id = commit_connect_head(
+            let receipt = commit_connect_head(
                 handles,
                 &ConnectCommitFacts {
                     prev_hash,
                     tip: block_hash,
                     height,
-                    // The applied tip publishes with this count, so the
-                    // durable head names the node's own cumulative total.
+                    // The node's own cumulative total is what the batch
+                    // names, and publication may carry nothing else.
                     chain_tx_count_after: outcome.tip.chain_tx_count.to_wire(),
                     undo_extent: Some((height, block_hash)),
                 },
@@ -531,13 +531,14 @@ pub(super) fn apply_block_admitted<'b>(
             )?;
             metrics::histogram!("node.apply_block.durable_commit_seconds")
                 .record(durable_commit_started.elapsed().as_secs_f64());
-            commit_id
+            outcome.tip = receipt.certify(outcome.tip);
+            receipt.commit_id
         }
         // The gap block's durable batch committed before the crash: the
         // stored head receipt covers its body, undo, and locator rows.
         // Replay redoes only what publication owed — the journal tail
         // and the coherent tip — and carries the receipt's commit id.
-        PublishMode::Replay { commit_id } => commit_id,
+        PublishMode::Replay { receipt } => receipt.commit_id,
         PublishMode::Grouped(group) => {
             // The window buffers the durable work: facts ride in the group
             // until its boundary, where one sync and one head batch commit
