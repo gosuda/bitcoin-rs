@@ -56,7 +56,7 @@ pub(super) fn apply_committed_block_admitted<'b>(
         ApplyIntent::Commit,
         publication,
     )? {
-        ApplyFinish::Committed(outcome) => Ok(outcome),
+        ApplyFinish::Committed(outcome) => Ok(*outcome),
         ApplyFinish::Proposed => unreachable!("commit intent returns a committed tip"),
     }
 }
@@ -567,7 +567,7 @@ pub(super) fn apply_block_admitted<'b>(
                 prev_hash,
                 journal_record,
             });
-            return Ok(ApplyFinish::Committed(outcome));
+            return Ok(ApplyFinish::Committed(Box::new(outcome)));
         }
     };
     // The journal may lag the durable head, never lead it. Fresh commits and
@@ -587,7 +587,7 @@ pub(super) fn apply_block_admitted<'b>(
     );
     publish_applied(handles, &outcome.tip, crate::events::HintKind::Connected);
     outcome.commit_id = commit_id;
-    Ok(ApplyFinish::Committed(outcome))
+    Ok(ApplyFinish::Committed(Box::new(outcome)))
 }
 
 /// Accumulates Core's `validation:block_connected` payload facts and fires
