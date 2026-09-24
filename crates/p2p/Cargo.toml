@@ -50,3 +50,7 @@ serde_json.workspace = true
 [[bench]]
 name = "write_message"
 harness = false
+
+[[bench]]
+name = "headers_presync"
+harness = false
