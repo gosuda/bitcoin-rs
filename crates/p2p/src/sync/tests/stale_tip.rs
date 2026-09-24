@@ -137,6 +137,10 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
 /// opens one more full-relay peer while `GetTryNewOutboundPeer()` is set
 /// (`net.cpp:2786-2806`), on top of the full and block-relay populations.
 #[test]
+#[expect(
+    clippy::expect_used,
+    reason = "a test that cannot wire its fake peers has nothing to report"
+)]
 fn the_stale_tip_allowance_dials_past_the_slot_cap() {
     // A scheduler whose tip has stood still for three target spacings.
     let t0 = Instant::now();
@@ -230,7 +234,11 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
             }
         }
     }
-    assert_eq!(held.len(), 3, "all three dials arrived and hold their slots");
+    assert_eq!(
+        held.len(),
+        3,
+        "all three dials arrived and hold their slots"
+    );
 
     // Closing the sockets lets each connection thread see EOF and exit, so
     // the drain worker's final join cannot hang.
