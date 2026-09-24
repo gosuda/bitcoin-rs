@@ -629,6 +629,7 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> Result<(), Box<dyn
         block,
         serialized,
         source: Some(source),
+        forward_credit: None,
     })?;
     sync.tick();
 
@@ -683,6 +684,7 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> Result<(), Box<dyn std::er
             block,
             serialized,
             source: Some(source),
+        forward_credit: None,
         })?;
     }
     // Whichever order the pass tries the carried headers, the second drain
@@ -738,6 +740,7 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dy
         block: block2.clone(),
         serialized,
         source: Some(source),
+        forward_credit: None,
     })?;
     sync.tick();
     let Message::GetHeaders(_) = rx.try_recv()? else {
@@ -784,6 +787,7 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dy
         block: block1,
         serialized,
         source: Some(source),
+        forward_credit: None,
     })?;
     sync.tick();
     sync.tick();

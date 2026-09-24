@@ -206,26 +206,66 @@ impl ConnectionShared {
         }
     }
 
+    /// Forwards one inbound full block into the node's ingress.
+    ///
+    /// PRE: `lease` belongs to the connection that delivered `block`.
+    /// POST: the block's header always reaches the headers sink; the body
+    ///   reaches the shared inbound block channel when
+    ///   [`crate::PeerLease::admit_block_forward`] admits it, and is dropped
+    ///   with a log record otherwise.
+    /// INVARIANT: one connection holds at most
+    ///   [`crate::MAX_UNSOLICITED_BLOCK_FORWARDS`] unsolicited bodies in the
+    ///   shared channel at once, and a body the download window owns is never
+    ///   dropped for that bound, so requested sync traffic always arrives.
     fn send_block(
         &self,
-        source: crate::PeerSource,
+        lease: &crate::PeerLease,
+        peer_addr: SocketAddr,
         block: bitcoin_rs_primitives::Block,
         serialized: bytes::Bytes,
     ) {
+        let source = lease.source(peer_addr);
         // Every body carries its own header; route it through the headers
-        // sink too so tips learned only by body delivery (`inv` getdata,
+        // sink too so tips learned only by body delivery (`inv`-served,
         // compact reconstruction, or an unsolicited push) reach header
-        // admission. Without a tree node the body can never become the
-        // apply frontier's expected block, and no announced-tip credit
-        // reaches the delivering peer. The headers drain runs before the
-        // blocks drain each tick, so the body lands already expected. The
-        // forward is not a `headers` response: it must not consume an
-        // outstanding `getheaders` request's pending state.
+        // admission. Without a tree node the body can never become the apply
+        // frontier's expected block, and no announced-tip credit reaches the
+        // delivering peer. The headers drain runs before the blocks drain
+        // each tick, so the body lands already expected. The forward is not a
+        // `headers` response: it must not consume an outstanding `getheaders`
+        // request's pending state.
         self.send_headers(source, vec![block.header], false, false);
+        let hash = bitcoin_rs_primitives::Hash256::from(block.header.compute_hash());
+        let requested = self
+            .block_sync
+            .as_ref()
+            .is_some_and(|sync| sync.owns_body_fetch(source, hash));
+        let Some(credit) = lease.admit_block_forward(source, hash, requested) else {
+            metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
+            return;
+        };
+        self.forward_block(block, serialized, source, Some(credit));
+    }
+
+    /// Queues an admitted body on the shared inbound block channel.
+    ///
+    /// PRE: `forward_credit` admits this body into the ingress path.
+    /// POST: the body is queued, or dropped because the session was cancelled
+    ///   or the channel disconnected.
+    /// INVARIANT: backpressure waits here, never in the admission step, and
+    ///   the credit is released when sync drops the body it holds.
+    fn forward_block(
+        &self,
+        block: bitcoin_rs_primitives::Block,
+        serialized: bytes::Bytes,
+        source: crate::PeerSource,
+        forward_credit: Option<crate::connection::BlockForwardCredit>,
+    ) {
         let mut inbound = crate::InboundBlock {
             block,
             serialized,
             source: Some(source),
+            forward_credit,
         };
         loop {
             if self.is_session_cancelled() {
@@ -804,7 +844,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         shared.send_headers(lease.source(peer_addr), headers, true, false);
                     }
                     crate::Message::Block(block) => {
-                        shared.send_block(lease.source(peer_addr), block, raw);
+                        shared.send_block(lease, peer_addr, block, raw);
                     }
                     crate::Message::Tx(tx) => forward_tx_if_relay_open(
                         shared,
@@ -936,7 +976,7 @@ fn handle_compact_outcome(
         crate::compact_blocks::Outcome::Complete(block) => {
             let serialized = bitcoin_rs_primitives::consensus_bytes(&block);
             tracing::info!(peer_addr = %peer_addr, hash = %block.block_hash(), "p2p compact block reconstructed");
-            shared.send_block(lease.source(peer_addr), block, serialized.into());
+            shared.send_block(lease, peer_addr, block, serialized.into());
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {
             tracing::info!(peer_addr = %peer_addr, "p2p compact reconstruction missing");
@@ -1496,7 +1536,7 @@ mod writer_shutdown_tests {
         let source = lease.source(addr);
 
         shared.send_headers(source, Vec::new(), true, false);
-        shared.send_block(source, block, serialized.clone());
+        shared.send_block(&lease, addr, block, serialized.clone());
 
         assert_eq!(headers_rx.try_recv()?.source, Some(source));
         let received = blocks_rx.try_recv()?;
@@ -1509,7 +1549,7 @@ mod writer_shutdown_tests {
     fn send_block_forwards_the_blocks_header() -> Result<(), Box<dyn std::error::Error>> {
         // Every inbound body carries its own header; `send_block` must also
         // emit it through the headers sink so body-only announcements
-        // (`inv` getdata, compact reconstruction, pushes) reach admission.
+        // (`inv`-served, compact reconstruction, pushes) reach admission.
         let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
@@ -1523,7 +1563,7 @@ mod writer_shutdown_tests {
         let header = block.header;
         let source = lease.source(addr);
 
-        shared.send_block(source, block, bytes::Bytes::from(block_bytes));
+        shared.send_block(&lease, addr, block, bytes::Bytes::from(block_bytes));
 
         let forwarded = headers_rx.try_recv()?;
         assert_eq!(forwarded.source, Some(source));
@@ -1551,11 +1591,10 @@ mod writer_shutdown_tests {
         let second_bytes = first_bytes.clone();
         let second = bitcoin_rs_primitives::Block::consensus_decode(&second_bytes)
             .map_err(|_| std::io::Error::other("genesis block must decode"))?;
-        let source = lease.source(addr);
-        shared.send_block(source, first, bytes::Bytes::from(first_bytes));
+        shared.send_block(&lease, addr, first, bytes::Bytes::from(first_bytes));
 
         let blocked = std::thread::spawn(move || {
-            shared.send_block(source, second, bytes::Bytes::from(second_bytes));
+            shared.send_block(&lease, addr, second, bytes::Bytes::from(second_bytes));
         });
         let started = std::time::Instant::now();
         while !blocked.is_finished() && started.elapsed() < Duration::from_millis(250) {

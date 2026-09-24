@@ -13,6 +13,11 @@ pub struct InboundBlock {
     pub serialized: bytes::Bytes,
     /// Delivering connection, or `None` for local injection.
     pub source: Option<crate::PeerSource>,
+    /// Releases the delivering connection's unsolicited forwarding slot when
+    /// this body leaves the ingress path — drained by sync, discarded by the
+    /// stager, or rejected. `None` for a locally injected body and for one
+    /// the download window already owned.
+    pub(crate) forward_credit: Option<crate::connection::BlockForwardCredit>,
 }
 /// A `headers` message batch and the peer that delivered it.
 pub struct InboundHeaders {
@@ -66,6 +71,7 @@ impl InboundBlock {
             block,
             serialized,
             source: None,
+            forward_credit: None,
         }
     }
 }

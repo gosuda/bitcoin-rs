@@ -87,6 +87,33 @@ pub const BLOCK_PRODUCTION_RESERVE_BYTES: usize = crate::wire::HEADER_LEN + BLOC
 
 const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES > 15 * BLOCK_PRODUCTION_RESERVE_BYTES);
 
+/// Maximum unsolicited block bodies one connection may hold in the shared
+/// inbound block channel at once.
+///
+/// The channel itself is bounded globally, so without this per-connection
+/// bound one flooding peer can occupy every slot and starve the rest of the
+/// swarm of block ingress. Sixteen is the per-peer in-flight budget: a
+/// connection may always keep the bodies it was asked for in play, and no
+/// more unsolicited ones.
+pub(crate) const MAX_UNSOLICITED_BLOCK_FORWARDS: usize = 16;
+
+/// One admitted unsolicited block forward.
+///
+/// Holding it is the credit; dropping it — once the forwarded body is drained
+/// by sync, discarded by the stager, or rejected — releases the connection's
+/// slot. A credit for a body the download window already owns releases
+/// nothing, because nothing was counted.
+#[derive(Debug)]
+pub(crate) struct BlockForwardCredit(Option<Arc<AtomicUsize>>);
+
+impl Drop for BlockForwardCredit {
+    fn drop(&mut self) {
+        if let Some(counter) = &self.0 {
+            counter.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 /// Shared item and full-framed-wire-byte accounting for one outbound queue.
 ///
 /// A message is admitted when both counters were below their high-water marks
@@ -208,6 +235,8 @@ pub struct PeerLease {
     close_tx: Sender<()>,
     close_rx: Receiver<()>,
     budget: Arc<OutboundBudget>,
+    /// Live unsolicited block forwards admitted by this connection.
+    unsolicited_forwards: Arc<AtomicUsize>,
     inbound: bool,
 }
 
@@ -245,6 +274,7 @@ impl PeerLease {
             close_tx,
             close_rx,
             budget: Arc::new(budget),
+            unsolicited_forwards: Arc::new(AtomicUsize::new(0)),
             inbound,
         }
     }
@@ -286,6 +316,42 @@ impl PeerLease {
     /// Shared handle to this connection's outbound admission budget.
     pub(crate) fn budget_handle(&self) -> Arc<OutboundBudget> {
         Arc::clone(&self.budget)
+    }
+
+    /// Admits one inbound block body into the shared inbound channel.
+    ///
+    /// PRE: `source` was stamped by this lease and `requested` reports whether
+    ///   the download window already owns `hash` for this connection.
+    /// POST: a requested body is always admitted; an unsolicited one is
+    ///   admitted only while this connection holds fewer than
+    ///   [`MAX_UNSOLICITED_BLOCK_FORWARDS`] credits, and `Some` carries the
+    ///   credit that releases the slot when the forwarded body is dropped.
+    /// INVARIANT: no admission here waits on the channel, disconnects the
+    ///   connection, or lets one source exceed its own bound. Ownership is
+    ///   the connection's, so a same-address replacement starts fresh.
+    pub(crate) fn admit_block_forward(
+        &self,
+        source: PeerSource,
+        hash: bitcoin_rs_primitives::Hash256,
+        requested: bool,
+    ) -> Option<BlockForwardCredit> {
+        if requested {
+            return Some(BlockForwardCredit(None));
+        }
+        let counter = Arc::clone(&self.unsolicited_forwards);
+        // Increment-then-compare: a credit released on the sync thread
+        // concurrently can never let two admissions cross the bound.
+        if counter.fetch_add(1, Ordering::AcqRel) >= MAX_UNSOLICITED_BLOCK_FORWARDS {
+            counter.fetch_sub(1, Ordering::AcqRel);
+            tracing::debug!(
+                peer_addr = %source.addr,
+                %hash,
+                limit = MAX_UNSOLICITED_BLOCK_FORWARDS,
+                "p2p dropping unsolicited block: per-connection forward bound reached"
+            );
+            return None;
+        }
+        Some(BlockForwardCredit(Some(counter)))
     }
 
     /// Stamps an inbound event with this connection's identity and address.
