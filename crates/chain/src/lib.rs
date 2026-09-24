@@ -35,7 +35,7 @@ pub use deployment::{
 };
 pub use header_sync::{
     accept_headers, compact_is_met_by, current_unix_seconds, validate_contextual_header,
-    validate_header_timestamp, validate_pow,
+    validate_pow,
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
