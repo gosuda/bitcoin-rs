@@ -184,7 +184,7 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         preloaded_rx.recv().map_err(|_| {
             std::io::Error::other("branch switch did not pause after preloading began")
         })?;
-        handles.apply_block(&racing)?;
+        handles.apply_block(&racing, None)?;
         continue_tx
             .send(())
             .map_err(|_| std::io::Error::other("branch switch stopped before replanning"))?;

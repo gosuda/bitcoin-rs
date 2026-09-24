@@ -38,24 +38,6 @@ use bitcoin_rs_utxo::contract::is_coinbase_tx;
 use hashbrown::HashMap;
 use std::sync::Arc;
 
-/// Applies one serialized block while the caller holds admission and `chain_transition`.
-///
-/// The caller MUST hold both guards in admission-then-transition order.
-pub(super) fn apply_block_with_serialized_admitted(
-    handles: &Chainstate,
-    block: &Block,
-    serialized: bytes::Bytes,
-) -> core::result::Result<ConnectOutcome, ApplyError> {
-    apply_committed_block_admitted(
-        handles,
-        block,
-        Some(serialized),
-        None,
-        BlockProvenance::Network,
-        PublishMode::Now,
-    )
-}
-
 /// Commit path. Callers reach this only through an admitted chain transition.
 pub(super) fn apply_committed_block_admitted<'b>(
     handles: &Chainstate,

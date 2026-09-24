@@ -1659,6 +1659,7 @@ fn unrequested_body_gate_rejects_below_floor_and_below_applied_work()
             tip_id: node_id,
             height: node.height,
             chainwork: node.chainwork,
+            chain_tx_count: node.chain_tx_count,
             hash: node.hash,
         })
     }

@@ -274,9 +274,9 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             capture_block_bytes: true,
             executed_frontier: bitcoin_rs_storage::pruning::ExecutedFrontier::NONE,
         });
-    handles.apply_block(&genesis)?;
+    handles.apply_block(&genesis, None)?;
     for block in &blocks {
-        handles.apply_block(block)?;
+        handles.apply_block(block, None)?;
     }
 
     let parent = parent_tx.ok_or_else(|| std::io::Error::other("package not built"))?;

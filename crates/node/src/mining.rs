@@ -186,11 +186,7 @@ impl MiningCoordinator {
             Err(error) => return map_apply_error(error),
         };
         let transition = lock.into_transition();
-        let connect = match serialized {
-            Some(raw) => transition.connect_serialized(block, raw),
-            None => transition.connect(block),
-        };
-        match connect {
+        match transition.connect(block, serialized) {
             Ok(outcome) => {
                 self.followers.committed_connect(block, &outcome);
                 let tip = outcome.tip;
