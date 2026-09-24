@@ -268,6 +268,89 @@ pub fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> {
     replay_committed_gap(handles, head, restored.as_deref())
 }
 
+/// Reconciles disconnect evidence before the node accepts work.
+///
+/// With no marker this is ordinary durable-head reconciliation
+/// ([`reconcile_at_boot`]) unchanged. A marker is recovery evidence, not a
+/// permanent operator refusal. Every checkpoint is written atomically and
+/// the publisher refuses a tip the head has not certified, so the restored
+/// state is self-consistent but possibly stale: it sits on the certified
+/// chain below the durable head — the same publication lag any crash
+/// leaves — or already at it. What the marker records is a branch decision
+/// whose consequences may exist only in memory. Recovery therefore replays
+/// the certified head chain onto the restored state, warns with the marker
+/// identity, publishes a clean checkpoint, and retires the marker only
+/// after that publication is durable.
+///
+/// PRE: the chainstate is restored; no network or worker can observe it
+/// yet.
+///
+/// POST: success has a coherent applied tip at the durable head, has
+/// warned for marker recovery, and has retired the marker after durable
+/// publication.
+///
+/// INVARIANT: marker presence never authorizes a partially reconstructed
+/// state. An unreadable marker or head, or a restored state that does not
+/// sit below an authenticated head, fails closed with the existing
+/// recovery error and retains the marker.
+pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError> {
+    let marker = handles
+        .undo_store
+        .load_disconnect_marker()
+        .map_err(ApplyError::UndoPersistence)?;
+    let Some(marker) = marker else {
+        return reconcile_at_boot(handles);
+    };
+    let fail_closed = |head_tip: Hash256, head_height: u32, reason: &'static str| {
+        ApplyError::DurableHeadGapUnrecoverable {
+            head_tip,
+            head_height,
+            restored_tip: handles.applied_tip.load_full().map(|tip| tip.hash),
+            restored_height: handles.applied_tip.load_full().map(|tip| tip.height),
+            reason,
+        }
+    };
+    let Some(head) = handles
+        .durable_head
+        .load()
+        .map_err(ApplyError::DurableHeadCommit)?
+    else {
+        return Err(fail_closed(
+            marker.hash,
+            marker.height,
+            "a disconnect marker exists with no durable head to reconcile it against",
+        ));
+    };
+    // The same walk that closes an ordinary publication lag: it replays the
+    // certified head chain onto the restored state or fails closed when the
+    // restored state does not sit below that head — divergence, not lag.
+    reconcile_at_boot(handles)?;
+    tracing::warn!(
+        height = marker.height,
+        hash = %marker.hash,
+        head = %head.tip,
+        head_height = head.height,
+        head_still_certifies_tip = head.tip == marker.hash,
+        "automatic disconnect recovery replayed the certified head chain"
+    );
+    // Publication is the durability fence: the marker retires only after the
+    // repaired state lands in a clean checkpoint. A failure retains it.
+    if let Err(error) = handles.publish_recovery_checkpoint() {
+        return Err(ApplyError::RecoveryPublication(Box::new(error)));
+    }
+    handles
+        .undo_store
+        .retire_disconnect_marker()
+        .map_err(|error| {
+            tracing::error!(%error, "disconnect marker retirement failed after publication");
+            fail_closed(
+                head.tip,
+                head.height,
+                "the disconnect marker did not retire after recovery publication",
+            )
+        })
+}
+
 /// Replays the committed-but-unpublished gap onto the restored chainstate.
 ///
 /// Replays every authenticated durable-head body above `restored`, or the

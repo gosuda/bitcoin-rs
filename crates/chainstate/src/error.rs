@@ -171,9 +171,9 @@ pub enum ApplyError {
     /// A serviceable gap is an ancestor prefix: the head chain descends
     /// block by block from the stored tip down to the restored tip, and
     /// every body is still stored. Anything else — the head at or below the
-    /// restored tip, a gap wider than one commit group, a missing body, or
-    /// a side chain that does not root at the restored tip — is not a
-    /// publication lag, and replaying it would fabricate history. Recovery
+    /// restored tip on a divergent chain, a missing body, or a side chain
+    /// that does not root at the restored tip — is not a publication lag,
+    /// and replaying it would fabricate history. Recovery
     /// is a rebuild from retained canonical data (`RCV-07`); no partial
     /// success publishes.
     #[error(
@@ -193,6 +193,11 @@ pub enum ApplyError {
         /// Why the gap is not a replayable publication lag.
         reason: &'static str,
     },
+    /// Disconnect-marker recovery reconstructed the state but could not
+    /// publish its clean checkpoint, so the marker stays armed and startup
+    /// fails closed. The underlying publication failure rides as source.
+    #[error("disconnect recovery checkpoint publication failed: {0}")]
+    RecoveryPublication(#[source] Box<crate::checkpoint::CheckpointError>),
     /// Rewinding the block-level coinstats failed.
     ///
     /// The per-coin fields ride the UTXO change listener and are already
@@ -240,10 +245,10 @@ pub enum DisconnectError {
     /// Rolled back cleanly, but the in-flight marker could not be cleared.
     ///
     /// The chain is consistent and no data is lost. What is broken is the
-    /// interlock: the marker still says a disconnect was in flight, so the next
-    /// start refuses until it is cleared. Reported rather than folded into
-    /// success because a caller that heard "done" would restart into a refusal
-    /// it had no warning of.
+    /// interlock: the marker still says a disconnect was in flight, so the
+    /// next start runs automatic disconnect recovery before serving. Reported
+    /// rather than folded into success because a caller that heard "done"
+    /// would restart into a recovery it had no warning of.
     #[error(
         "disconnect of block {hash} at height {height} completed but the in-flight marker remains set: {source}"
     )]

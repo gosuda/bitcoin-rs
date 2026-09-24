@@ -51,6 +51,10 @@ impl UndoStore for RejectingUndoStore {
         self.inner.disarm_disconnect()
     }
 
+    fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
+        self.inner.retire_disconnect_marker()
+    }
+
     fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
         self.inner.load_disconnect_marker()
     }

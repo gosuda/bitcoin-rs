@@ -420,7 +420,10 @@ fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::e
         .applied_tip
         .load_full()
         .ok_or("wide replay did not publish an applied tip")?;
-    assert_eq!((landed.height, landed.hash, landed.chain_tx_count.to_wire()), certified);
+    assert_eq!(
+        (landed.height, landed.hash, landed.chain_tx_count.to_wire()),
+        certified
+    );
     assert_eq!(
         handles.durable_head.load()?.map(|head| head.commit_id),
         Some(5),

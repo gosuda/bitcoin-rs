@@ -28,6 +28,100 @@ fn sigkill_restarts_at_valid_journal_frontier() -> Result<()> {
     }
     Ok(())
 }
+/// A rolled-back disconnect marker that survives the kill no longer
+/// refuses startup: reopening reconciles the durable head — the disconnect
+/// parent — onto the restored state, publishes a clean checkpoint, and
+/// retires the marker only after that publication.
+#[test]
+fn torn_disconnect_replays_parent_tip() -> Result<()> {
+    let (_temp, state) = run_marker_scenario("disconnect-rolledback")?;
+    let genesis = Network::Regtest.genesis_block();
+    assert_eq!(
+        state
+            .chainstate()
+            .applied_tip_handle()
+            .load_full()
+            .map(|tip| (tip.hash, tip.height)),
+        Some((Hash256::from(genesis.block_hash()), 0)),
+        "recovery must land on the disconnect parent the durable head certifies"
+    );
+    assert!(
+        state.undo_store().load_disconnect_marker()?.is_none(),
+        "the marker retires once the repaired state is durable"
+    );
+    Ok(())
+}
+
+/// A durable head that still names the disconnected block — the kill beat
+/// the rollback — is certified by the head: recovery replays the restored
+/// (possibly stale) state up to it and retires the marker.
+#[test]
+fn torn_disconnect_cold_replays_head() -> Result<()> {
+    let (_temp, state) = run_marker_scenario("inflight-cold")?;
+    let genesis = Network::Regtest.genesis_block();
+    let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
+    assert_eq!(
+        state
+            .chainstate()
+            .applied_tip_handle()
+            .load_full()
+            .map(|tip| (tip.hash, tip.height)),
+        Some((Hash256::from(block1.block_hash()), 1)),
+        "cold replay must reconstruct the chain the durable head certifies"
+    );
+    assert!(
+        state.undo_store().load_disconnect_marker()?.is_none(),
+        "the marker retires once the repaired state is durable"
+    );
+    Ok(())
+}
+
+/// A checkpoint far below the durable head is a replay base, not a
+/// refusal: reopening replays a whole authenticated gap one block wider
+/// than a commit group, lands on the durable head, and leaves the head
+/// untouched.
+#[test]
+fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
+    // The durable head commits one group of 64 blocks; this gap exceeds
+    // one group by one.
+    const GAP_BLOCKS: u32 = 65;
+    let temp = tempfile::tempdir()?;
+    let mut config = test_config(temp.path().join("node"));
+    config.chainstate_journal.enabled = false;
+    let genesis = Network::Regtest.genesis_block();
+    let state = NodeState::open(config.clone(), None)?;
+    state.apply_block(&genesis)?;
+    state.publish_checkpoint()?;
+    let mut parent = genesis.block_hash();
+    for height in 1..=GAP_BLOCKS {
+        let block = mined_regtest_child_at(parent, height)?;
+        parent = block.block_hash();
+        state.apply_block(&block)?;
+    }
+    let before = state
+        .durable_head()
+        .load()?
+        .context("durable head must be committed")?;
+    drop(state);
+
+    let state = NodeState::open(config, None)?;
+    let landed = state
+        .chainstate()
+        .applied_tip_handle()
+        .load_full()
+        .context("recovery must publish a tip")?;
+    assert_eq!(landed.hash, Hash256::from(parent));
+    assert_eq!(landed.height, GAP_BLOCKS);
+    let after = state
+        .durable_head()
+        .load()?
+        .context("durable head must survive")?;
+    assert_eq!(
+        after.commit_id, before.commit_id,
+        "recovery replays the committed gap; it must not re-commit the head"
+    );
+    Ok(())
+}
 
 /// The executed prune frontier is a durable fact, not process state: after a
 /// SIGKILL the restarted node still refuses a lease over the rows the killed
@@ -149,7 +243,7 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
     let config = if scenario == "prune" {
         prune_test_config(data_dir.clone())
     } else {
-        test_config(data_dir.clone())
+        crash_config(&scenario, data_dir.clone())
     };
     let state = NodeState::open(config, None)?;
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
@@ -188,6 +282,20 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
                 .prune_to_height(12)
                 .map_err(|error| anyhow::anyhow!("prune failed: {error}"))?;
         }
+        "disconnect-rolledback" => {
+            state.apply_block(&block1)?;
+            // The rollback completes; the kill arrives before any
+            // publication clears the marker.
+            state.chainstate().disconnect_block(&block1)?;
+        }
+        "inflight-cold" => {
+            state.apply_block(&block1)?;
+            // The durable head still names this block: recovery replays
+            // the certified chain onto the restored state and retires it.
+            state
+                .undo_store()
+                .arm_disconnect(1, Hash256::from(block1.block_hash()))?;
+        }
         other => bail!("unknown crash scenario {other}"),
     }
 
@@ -200,7 +308,7 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
 fn run_sigkill_scenario(scenario: &str) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let data_dir = temp.path().join(format!("{scenario}-node"));
-    let config = test_config(data_dir.clone());
+    let config = crash_config(scenario, data_dir.clone());
     let genesis = Network::Regtest.genesis_block();
     if scenario != "publication" {
         let base = NodeState::open(config.clone(), None)?;
@@ -272,6 +380,73 @@ fn crash_child(scenario: &str, data_dir: &Path, budget: Duration) -> Result<()> 
         bail!("crash worker for {scenario} exited successfully instead of being killed");
     }
     Ok(())
+}
+/// The scenario's node config. A marker that survives the kill must not be
+/// disarmed by journal rewind on the way down, so the marker scenarios run
+/// without the journal.
+fn crash_config(scenario: &str, data_dir: PathBuf) -> NodeConfig {
+    let mut config = test_config(data_dir);
+    if matches!(scenario, "disconnect-rolledback" | "inflight-cold") {
+        config.chainstate_journal.enabled = false;
+    }
+    config
+}
+
+/// Build the checkpointed base, let a parked child drive the node to the
+/// marker state and die to `SIGKILL`, then reopen in this process.
+fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeState)> {
+    let temp = tempfile::tempdir()?;
+    let data_dir = temp.path().join(format!("{scenario}-node"));
+    let config = crash_config(scenario, data_dir.clone());
+    let genesis = Network::Regtest.genesis_block();
+    let base = NodeState::open(config.clone(), None)?;
+    base.apply_block(&genesis)?;
+    base.publish_checkpoint()?;
+    drop(base);
+
+    let executable = std::env::current_exe()?;
+    let mut child = Command::new(executable)
+        .args([
+            "--ignored",
+            "--exact",
+            "crash_recovery_subprocess_worker",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .env(DATA_DIR_ENV, &data_dir)
+        .env(SCENARIO_ENV, scenario)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn crash worker for {scenario}"))?;
+    let ready = data_dir.join("crash-test-ready");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready.exists() {
+        if let Some(status) = child.try_wait()? {
+            let stderr = child
+                .stderr
+                .take()
+                .map(read_stderr)
+                .transpose()?
+                .unwrap_or_default();
+            bail!("crash worker {scenario} died before ready: {status}: {stderr}");
+        }
+        if Instant::now() > deadline {
+            child.kill()?;
+            bail!("crash worker {scenario} never became ready");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child.kill()?;
+    let status = child.wait()?;
+    if status.success() {
+        bail!("crash worker for {scenario} exited successfully instead of being killed");
+    }
+
+    let resumed = NodeState::open(config, None)
+        .with_context(|| format!("reopening {scenario} after SIGKILL must complete recovery"))?;
+    Ok((temp, resumed))
 }
 
 fn test_config(data_dir: PathBuf) -> NodeConfig {
