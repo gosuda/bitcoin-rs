@@ -1295,7 +1295,7 @@ fn spend_heavy_proxy_blocks() -> Vec<Block> {
 fn child_coinbase_block(parent: &Block, height: u32) -> Block {
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
@@ -1312,7 +1312,7 @@ fn child_coinbase_block(parent: &Block, height: u32) -> Block {
 fn child_fanout_coinbase_block(parent: &Block, height: u32) -> Block {
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
@@ -1342,7 +1342,7 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
     }
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
@@ -1358,7 +1358,7 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
 
 fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
     Header {
-        version: 1,
+        version: 4,
         prev_blockhash,
         merkle_root: Hash256::default(),
         time,
@@ -1593,7 +1593,7 @@ fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &Signin
     let coinbase = signed_fanout_coinbase_transaction(height, keys);
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
@@ -1719,7 +1719,7 @@ fn child_signed_spend_fanout_block(
     }
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),

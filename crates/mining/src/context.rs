@@ -8,7 +8,7 @@
 use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
 };
-use bitcoin_rs_consensus::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
+use bitcoin_rs_consensus::{MAX_TIMEWARP, MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 /// Contextual facts for the block that would extend `previous_tip_id`.
@@ -23,7 +23,9 @@ pub struct MiningChainContext {
     pub version: i32,
     /// Compact target the candidate's nBits must equal.
     pub bits: CompactTarget,
-    /// Earliest timestamp the candidate may carry: previous-tip MTP + 1.
+    /// Earliest timestamp the candidate may carry: previous-tip MTP + 1, or,
+    /// at a BIP94 adjustment boundary, the higher of that and the parent's
+    /// timestamp minus [`MAX_TIMEWARP`].
     pub min_time: u32,
     /// Median time past of the previous tip over the BIP113 window.
     pub prev_median_time_past: u32,
@@ -63,12 +65,24 @@ impl MiningChainContext {
             .ok_or(ChainError::UnknownNode {
                 id: previous_tip_id,
             })?;
+        let mut min_time = prev_median_time_past.saturating_add(1);
+        let retarget_interval = network.retarget_interval();
+        if network.enforce_bip94()
+            && retarget_interval != 0
+            && height.is_multiple_of(retarget_interval)
+        {
+            // Core's `GetMinimumTime` (`src/node/miner.cpp:42-49`) also
+            // refuses a boundary candidate more than `MAX_TIMEWARP` below its
+            // parent, so a locally built template must not start under the
+            // floor that admission would reject.
+            min_time = min_time.max(parent.header.time.saturating_sub(MAX_TIMEWARP));
+        }
         Ok(Self {
             previous_block_hash: parent.hash,
             height,
             version: candidate_version(tree, network, previous_tip_id, height),
             bits: header_sync::next_work_required(tree, previous_tip_id, candidate_time, network)?,
-            min_time: prev_median_time_past.saturating_add(1),
+            min_time,
             prev_median_time_past,
             csv_active: softfork.csv_active,
             segwit_active: softfork.segwit_active,
@@ -172,6 +186,42 @@ mod tests {
             active.locktime_cutoff(u32::MAX),
             active.prev_median_time_past
         );
+        Ok(())
+    }
+
+    #[test]
+    fn testnet4_bip94_min_time_uses_previous_time_floor() -> Result<(), Box<dyn std::error::Error>>
+    {
+        // Heights 0..=2014 advance ten minutes each; height 2015 jumps far
+        // ahead, so its time minus the timewarp allowance exceeds the
+        // median time past of the last eleven blocks.
+        let start = 1_600_000_000_u32;
+        let jump = 100_000_u32;
+        let mut tree = BlockTree::new();
+        let before_tip = append_chain_with_bits(&mut tree, 2015, start, |_| 4, 0x1d00_ffff)?;
+        let before_tip_hash = tree.node(before_tip)?.hash;
+        let mut last = synthetic_header_with_version(
+            BlockHash::from(before_tip_hash),
+            start + 2015 * 600 + jump,
+            4,
+        );
+        last.bits = CompactTarget::from_consensus(0x1d00_ffff);
+        let tip = tree.insert_header(last, NodeStatus::HeaderValid)?;
+
+        // Height 2016 is a Testnet4 adjustment boundary: the floor is the
+        // previous block time minus 600 seconds.
+        let boundary = MiningChainContext::resolve(&tree, Network::Testnet4, tip, last.time)?;
+        assert_eq!(boundary.height, 2016);
+        assert!(last.time - 600 > boundary.prev_median_time_past + 1);
+        assert_eq!(boundary.min_time, last.time - 600);
+
+        // Height 2015 is not a boundary: the median-time-past floor stays.
+        let inner = MiningChainContext::resolve(&tree, Network::Testnet4, before_tip, last.time)?;
+        assert_eq!(inner.min_time, inner.prev_median_time_past + 1);
+
+        // Regtest never enforces BIP94, so its boundary keeps the old floor.
+        let regtest = MiningChainContext::resolve(&tree, Network::Regtest, tip, last.time)?;
+        assert_eq!(regtest.min_time, regtest.prev_median_time_past + 1);
         Ok(())
     }
 
