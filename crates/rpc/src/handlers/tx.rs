@@ -861,7 +861,6 @@ mod tests {
     };
     use bitcoin_rs_primitives::{
         Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-        encode::double_sha256,
     };
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -906,32 +905,9 @@ mod tests {
             },
             txs: vec![coinbase],
         };
-        block.header.merkle_root = merkle_root_for(&block.txs);
+        block.header.merkle_root =
+            bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
         block
-    }
-
-    /// Test-local merkle root over fixture txids: a single tx contributes its
-    /// txid, pairs fold with `double_sha256` over the concatenated 64 bytes,
-    /// duplicating the last hash for odd counts, matching consensus.
-    fn merkle_root_for(txs: &[Tx]) -> Hash256 {
-        let mut layer: Vec<Hash256> = txs.iter().map(|tx| tx.txid().0).collect();
-        while layer.len() > 1 {
-            if layer.len() % 2 == 1
-                && let Some(last) = layer.last().copied()
-            {
-                layer.push(last);
-            }
-            layer = layer
-                .chunks(2)
-                .map(|pair| {
-                    let mut concat = [0_u8; 64];
-                    concat[..32].copy_from_slice(pair[0].as_byte_array());
-                    concat[32..].copy_from_slice(pair[1].as_byte_array());
-                    double_sha256(&concat)
-                })
-                .collect();
-        }
-        layer.first().copied().unwrap_or_default()
     }
 
     #[test]
@@ -1308,7 +1284,8 @@ mod tests {
         if let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) {
             input.script_sig = Script::from_bytes(vec![marker; 4]);
         }
-        block.header.merkle_root = merkle_root_for(&block.txs);
+        block.header.merkle_root =
+            bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
         block
     }
 
@@ -1334,7 +1311,8 @@ mod tests {
             }],
         };
         block.txs.push(extra);
-        block.header.merkle_root = merkle_root_for(&block.txs);
+        block.header.merkle_root =
+            bitcoin_rs_chain::regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
         block
     }
 
@@ -2488,7 +2466,9 @@ mod acceptance_tests {
                     prev_blockhash: BlockHash::from(prev_hash),
                     merkle_root: Hash256::default(),
                     time: BASE + STEP * height,
-                    bits: CompactTarget::from_consensus(0x207f_ffff),
+                    bits: CompactTarget::from_consensus(
+                        bitcoin_rs_chain::regtest_fixture::REGTEST_BITS,
+                    ),
                     nonce: 0,
                 };
                 let id = tree

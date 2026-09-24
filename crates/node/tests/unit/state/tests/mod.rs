@@ -7,9 +7,9 @@ mod recovery;
 
 use anyhow::Result;
 
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{TipSnapshot, regtest_fixture};
 
-use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN};
+use bitcoin_rs_primitives::{Hash256, chain_constants::CORE_REORG_SAFETY_MARGIN};
 
 use bitcoin_rs_rpc::context::PruneServiceError;
 
@@ -25,24 +25,13 @@ use std::{
 };
 
 use super::*;
-use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_primitives::LockTime;
 
 use bitcoin_rs_index::IndexCapabilities;
 
 use bitcoin_rs_primitives::BlockHash;
 
-use bitcoin_rs_primitives::Header;
-
-use bitcoin_rs_primitives::OutPoint;
-
-use bitcoin_rs_primitives::TxIn;
-
-use bitcoin_rs_primitives::TxOut;
-
 use bitcoin_rs_primitives::consensus_bytes;
-
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_script::push_int;
 
 use bitcoin_rs_index::block_log::BlockRecord;
 
@@ -166,92 +155,4 @@ fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
         "the persisted file must name the highest allocated epoch"
     );
     Ok(())
-}
-
-fn mined_regtest_child(prev_blockhash: BlockHash) -> anyhow::Result<Block> {
-    mined_regtest_child_at(prev_blockhash, 1_296_688_603, 1)
-}
-
-fn mined_regtest_child_at(
-    prev_blockhash: BlockHash,
-    time: u32,
-    height: u32,
-) -> anyhow::Result<Block> {
-    let mut script_sig = push_int(i64::from(height));
-    script_sig.extend_from_slice(&time.to_le_bytes());
-    let coinbase = Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(0),
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: Script::from_bytes(script_sig),
-            sequence: Sequence::from_consensus(u32::MAX),
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
-        }],
-    };
-    let mut block = Block {
-        header: Header {
-            version: 4,
-            prev_blockhash,
-            merkle_root: Hash256::default(),
-            time,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txs: vec![coinbase],
-    };
-    block.header.merkle_root = merkle_root(&block.txs)
-        .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
-    while !pow_met(block.header.bits.to_consensus(), block.block_hash().0) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("test nonce exhausted"))?;
-    }
-    Ok(block)
-}
-
-/// Pairwise double-SHA256 fold over little-endian txid bytes, duplicating
-/// the last leaf on odd levels (the native stand-in for
-/// `compute_merkle_root`).
-fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
-    let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    if leaves.is_empty() {
-        return None;
-    }
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair).to_le_bytes());
-        }
-        leaves = next;
-    }
-    Some(Hash256::from_le_bytes(&leaves[0]))
-}
-
-/// Regtest-easy compact-target `PoW` check over the hash as a 256-bit
-/// little-endian integer (mirrors `chain::pow::compact_is_met_by` for the
-/// >3-exponent, 3-byte-mantissa forms these fixtures mine).
-fn pow_met(bits: u32, hash: Hash256) -> bool {
-    let exponent = u8::try_from(bits >> 24).unwrap_or(0);
-    let mantissa = bits & 0x007f_ffff;
-    if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {
-        return false;
-    }
-    let bytes = hash.as_byte_array();
-    let low = usize::from(exponent - 3);
-    let window =
-        u32::from(bytes[low]) | u32::from(bytes[low + 1]) << 8 | u32::from(bytes[low + 2]) << 16;
-    window <= mantissa && bytes[usize::from(exponent)..].iter().all(|&byte| byte == 0)
 }

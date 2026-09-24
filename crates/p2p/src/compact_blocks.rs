@@ -488,7 +488,9 @@ mod tests {
                 prev_blockhash: BlockHash::from(Hash256::from_le_bytes(&[0xab; 32])),
                 merkle_root: Hash256::default(),
                 time: 7,
-                bits: bitcoin_rs_primitives::CompactTarget::from_consensus(0x207f_ffff),
+                bits: bitcoin_rs_primitives::CompactTarget::from_consensus(
+                    bitcoin_rs_chain::regtest_fixture::REGTEST_BITS,
+                ),
                 nonce: 9,
             },
             txs,

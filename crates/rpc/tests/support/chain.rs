@@ -8,8 +8,8 @@
 //! chain-bound keys to.
 
 use super::{GateResult, fail};
+use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
     Witness,
@@ -21,7 +21,6 @@ pub(crate) const SEED_BASE_TIME: u32 = 1_296_688_603;
 /// Seconds between seed blocks; Core's regtest spacing.
 pub(crate) const SEED_BLOCK_INTERVAL: u32 = 600;
 /// The never-retargeting regtest minimum target.
-pub(crate) const REGTEST_BITS: u32 = 0x207f_ffff;
 /// Immature coinbase subsidy on regtest.
 pub(crate) const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
 
@@ -76,14 +75,14 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
                 prev_blockhash: bitcoin_rs_primitives::BlockHash::from(tip.hash),
                 merkle_root: Hash256::from_le_bytes(&[0_u8; 32]),
                 time: SEED_BASE_TIME.saturating_add(SEED_BLOCK_INTERVAL.saturating_mul(height)),
-                bits: CompactTarget::from_consensus(REGTEST_BITS),
+                bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
                 nonce: 0,
             },
             txs: vec![coinbase],
         };
-        block.header.merkle_root = compute_merkle_root(&block.txs)
+        block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| fail("seed block must have a merkle root"))?;
-        grind_pow(&mut block)?;
+        regtest_fixture::mine_block_to_declared_target(&mut block).map_err(fail)?;
         state.apply_block(&block).map_err(fail)?;
         tip = current_tip(state)?;
         if tip.height != height {
@@ -119,51 +118,6 @@ pub(crate) fn regtest_config(dir: &std::path::Path) -> NodeConfig {
     config
 }
 
-fn grind_pow(block: &mut Block) -> GateResult<()> {
-    loop {
-        if pow_is_met(block.header.bits, &block.header.compute_hash().into()) {
-            return Ok(());
-        }
-        let Some(next) = block.header.nonce.checked_add(1) else {
-            return Err(fail("nonce exhausted while grinding block"));
-        };
-        block.header.nonce = next;
-    }
-}
-
-/// Returns true when the header hash, read as a little-endian integer, meets
-/// the compact bits target (Core `CheckProofOfWork` shape).
-fn pow_is_met(bits: CompactTarget, hash: &Hash256) -> bool {
-    let bits = bits.to_consensus();
-    let exponent = usize::try_from(bits >> 24).unwrap_or(usize::MAX);
-    let mantissa = bits & 0x00ff_ffff;
-    if mantissa == 0 || mantissa & 0x0080_0000 != 0 || exponent > 32 {
-        return false;
-    }
-    let shift = exponent.saturating_sub(3);
-    // Little-endian target bytes: mantissa placed `shift` bytes from the
-    // least-significant end (mantissa is masked below 2^24, so three bytes).
-    let mantissa_le = mantissa.to_le_bytes();
-    let mut target = [0_u8; 32];
-    for (offset, byte) in mantissa_le.iter().take(3).enumerate() {
-        let position = shift + offset;
-        if position < 32 {
-            target[position] = *byte;
-        }
-    }
-    // Both sides are little-endian 32-byte integers: compare from the most
-    // significant byte downward (Core `CheckProofOfWork`).
-    let hash_le = hash.to_le_bytes();
-    for index in (0..32).rev() {
-        match hash_le[index].cmp(&target[index]) {
-            std::cmp::Ordering::Less => return true,
-            std::cmp::Ordering::Greater => return false,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-    true
-}
-
 /// The one-input null-prevout coinbase outpoint (Core `COINBASE_OUTPOINT`).
 fn null_prevout() -> OutPoint {
     OutPoint::new(Txid::default(), u32::MAX)
@@ -192,25 +146,4 @@ fn script_push_int(value: i64) -> Vec<u8> {
             out
         }
     }
-}
-
-/// Native BIP141-style txid merkle fold with the odd-leaf duplication rule.
-fn compute_merkle_root(txs: &[Tx]) -> Option<Hash256> {
-    if txs.is_empty() {
-        return None;
-    }
-    let mut level: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    while level.len() > 1 {
-        let mut next = Vec::with_capacity(level.len().div_ceil(2));
-        for pos in 0..level.len().div_ceil(2) {
-            let left = level[2 * pos];
-            let right = level[(2 * pos + 1).min(level.len() - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(*double_sha256(&pair).as_byte_array());
-        }
-        level = next;
-    }
-    Some(Hash256::from_le_bytes(&level[0]))
 }

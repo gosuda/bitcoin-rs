@@ -5,14 +5,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use bitcoin_rs_consensus::block_subsidy;
+use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
-};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 const RECORDS: u32 = 10_000;
 const MAX_REPLAY: Duration = Duration::from_mins(1);
@@ -52,7 +47,7 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
 
     let mut previous = genesis.block_hash();
     for height in 1..=RECORDS {
-        let block = mined_regtest_child_at(previous, height)?;
+        let block = regtest_fixture::mined_regtest_child_at(previous, height)?;
         previous = block.block_hash();
         state.apply_block(&block)?;
     }
@@ -135,103 +130,4 @@ fn test_config(data_dir: PathBuf) -> NodeConfig {
     config.chainstate_journal.blocks = 100;
     config.chainstate_journal.max_lag_blocks = 200;
     config
-}
-
-fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
-    let coinbase = Tx {
-        version: 2,
-        lock_time: LockTime::ZERO,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: bip34_height_script(height).into(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(block_subsidy(
-                height,
-                Network::Regtest.subsidy_halving_interval(),
-            )),
-            script_pubkey: Script::new(),
-        }],
-    };
-    let mut block = Block {
-        header: Header {
-            // Version 4 keeps the block legal once regtest BIP65 activates
-            // (version < 4 is rejected at height 1351).
-            version: 4,
-            prev_blockhash,
-            merkle_root: Hash256::default(),
-            time: Network::Regtest.genesis_block().header.time + height,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txs: vec![coinbase],
-    };
-    block.header.merkle_root = merkle_root(&block.txs)
-        .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
-    while !pow_met(block.header.bits, block.block_hash().0) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("test nonce exhausted"))?;
-    }
-    Ok(block)
-}
-
-fn bip34_height_script(height: u32) -> Vec<u8> {
-    let mut value = height;
-    let mut encoded = Vec::new();
-    while value != 0 {
-        encoded.push(value.to_le_bytes()[0]);
-        value >>= 8;
-    }
-    if encoded.last().is_some_and(|byte| byte & 0x80 != 0) {
-        encoded.push(0);
-    }
-    let mut script = Vec::with_capacity(encoded.len() + 1);
-    script.push(u8::try_from(encoded.len()).unwrap_or(u8::MAX));
-    script.extend(encoded);
-    script
-}
-
-fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
-    let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    if leaves.is_empty() {
-        return None;
-    }
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair));
-        }
-        leaves = next;
-    }
-    Some(Hash256::from_le_bytes(&leaves[0]))
-}
-
-fn double_sha256(bytes: &[u8]) -> [u8; 32] {
-    let first = Sha256::digest(bytes);
-    Sha256::digest(first).into()
-}
-
-fn pow_met(bits: CompactTarget, hash: Hash256) -> bool {
-    let bits = bits.to_consensus();
-    let exponent = u8::try_from(bits >> 24).unwrap_or(0);
-    let mantissa = bits & 0x007f_ffff;
-    if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {
-        return false;
-    }
-    let bytes = hash.as_byte_array();
-    let low = usize::from(exponent - 3);
-    let window =
-        u32::from(bytes[low]) | u32::from(bytes[low + 1]) << 8 | u32::from(bytes[low + 2]) << 16;
-    window <= mantissa && bytes[usize::from(exponent)..].iter().all(|&byte| byte == 0)
 }

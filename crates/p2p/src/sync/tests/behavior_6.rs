@@ -107,12 +107,22 @@ fn mutated_forward_body_preserves_descendant_for_retry() -> Result<(), Box<dyn s
     assert_eq!(sync.apply_buffered_blocks(None), (1, 0));
 
     let main_hash = main[0].block_hash();
-    let bad = mined_block_with_prev_hash(main_hash, 2, vec![coinbase_transaction(2)]);
+    let bad = regtest_fixture::mined_block_with_prev_hash(
+        main_hash,
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     // The value change alters the txid, so the staged body contradicts the
     // header's merkle root: a mutated body, not an invalid header.
     let mut bad_body = bad.clone();
     bad_body.txs[0].outputs[0].value = Amount::from_sat(2);
-    let descendant = mined_block_with_prev_hash(bad.block_hash(), 3, vec![coinbase_transaction(3)]);
+    let descendant = regtest_fixture::mined_block_with_prev_hash(
+        bad.block_hash(),
+        3,
+        vec![regtest_fixture::coinbase(3)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     {
         let mut tree = sync.chain.block_tree().write();
         let main_id = tree

@@ -2931,9 +2931,9 @@ mod block_forward_tests {
     use crate::sync::BlockSync;
     use crate::sync::chain::SyncChain;
     use crate::sync::tests::{
-        TestChain, coinbase_transaction, connect_peer, current_source, mined_block_with_prev_hash,
-        mined_chain, synthetic_peer, test_addr,
+        TestChain, connect_peer, current_source, mined_chain, synthetic_peer, test_addr,
     };
+    use bitcoin_rs_chain::regtest_fixture;
 
     fn genesis_body() -> bitcoin_rs_primitives::Block {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
@@ -2977,8 +2977,12 @@ mod block_forward_tests {
         let _rx: crossbeam_channel::Receiver<crate::Message> =
             connect_peer(&peers, synthetic_peer(flooded, 3));
         let source = current_source(&peers, flooded);
-        let block2 =
-            mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
+        let block2 = regtest_fixture::mined_block_with_prev_hash(
+            blocks[0].block_hash(),
+            2,
+            vec![regtest_fixture::coinbase(2)],
+        )
+        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
         sync_headers_tx.send(crate::InboundHeaders {
             headers: vec![block2.header],
             source: Some(source),

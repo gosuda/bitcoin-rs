@@ -18,7 +18,7 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
     let mut fork_prev = fork_root_hash;
     let mut fork = Vec::new();
     for height in 101..=102_u32 {
-        let mut coinbase = coinbase_transaction(height);
+        let mut coinbase = regtest_fixture::coinbase(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let mut block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
         fork_parent = handles.block_tree().write().insert_node(
@@ -111,8 +111,11 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
         invalid.header,
         NodeStatus::HeaderValid,
     )?;
-    let descendant =
-        mined_block_with_prev_hash(invalid.block_hash(), 102, vec![coinbase_transaction(102)]);
+    let descendant = mined_block_with_prev_hash(
+        invalid.block_hash(),
+        102,
+        vec![regtest_fixture::coinbase(102)],
+    );
     let descendant_id = handles.block_tree().write().insert_node(
         Some(invalid_id),
         descendant.header,
@@ -183,7 +186,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
-    let mut target_coinbase = coinbase_transaction(101);
+    let mut target_coinbase = regtest_fixture::coinbase(101);
     target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
     let target = mined_block_with_prev_hash(fork_root_hash, 101, vec![target_coinbase]);
     let target_id = handles.block_tree().write().insert_node(
@@ -192,7 +195,7 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
         NodeStatus::HeaderValid,
     )?;
     let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
-    let mut wrong_coinbase = coinbase_transaction(101);
+    let mut wrong_coinbase = regtest_fixture::coinbase(101);
     wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
     let wrong_bytes = bytes::Bytes::from(consensus_bytes(&wrong));
@@ -245,7 +248,7 @@ fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
         .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
-    let mut target_coinbase = coinbase_transaction(101);
+    let mut target_coinbase = regtest_fixture::coinbase(101);
     target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
     let target = mined_block_with_prev_hash(fork_root_hash, 101, vec![target_coinbase]);
     let target_id = handles.block_tree().write().insert_node(
@@ -254,7 +257,7 @@ fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
         NodeStatus::HeaderValid,
     )?;
     let target_hash = Hash256::from_le_bytes(target.block_hash().as_bytes());
-    let mut wrong_coinbase = coinbase_transaction(101);
+    let mut wrong_coinbase = regtest_fixture::coinbase(101);
     wrong_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let wrong = mined_block_with_prev_hash(fork_root_hash, 101, vec![wrong_coinbase]);
     // The staged block names the planned hash but its preserved bytes
