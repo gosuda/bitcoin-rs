@@ -247,7 +247,7 @@ impl BlockSync {
         // a deferred owned fetch was waiting on — resolve it now.
         self.resolve_owned_body_fetches();
         if missing_parent {
-            self.request_headers_from_eligible();
+            self.request_headers_from_eligible(Instant::now());
         }
     }
 
