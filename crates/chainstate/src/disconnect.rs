@@ -5,9 +5,8 @@ use super::Chainstate;
 use super::DisconnectOutcome;
 use super::DisconnectPlan;
 use super::durable::commit_disconnect_head;
-use super::publication::begin_applied_publication;
-use super::publication::rewind_chain_tx_count;
-use super::publication::rewound_chain_tx_count;
+use super::publication::certified_rewind;
+use super::publication::publish_disconnect;
 use super::publication::tx_count_delta_for;
 use crate::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
@@ -16,7 +15,6 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::Txid;
 use bitcoin_rs_utxo::{BlockRollback, RollbackError, load_block_undo, rollback_block};
-use std::sync::Arc;
 
 pub(super) fn plan_disconnect(
     handles: &Chainstate,
@@ -161,7 +159,7 @@ pub(super) fn disconnect_block_admitted(
             parent_tip.height,
             parent_tip.hash.to_le_bytes(),
             parent_prev_hash.to_le_bytes(),
-            parent_chain_tx_count,
+            parent_chain_tx_count.to_wire(),
         );
         rewound
             .map_err(|error| {
@@ -175,26 +173,13 @@ pub(super) fn disconnect_block_admitted(
             })
             .is_ok()
     });
-    commit_disconnect_head(
-        handles,
-        &parent_tip,
-        block_hash,
-        rewound_chain_tx_count(handles, tx_count_delta),
-    )
-    .map_err(fatal)?;
-
-    {
-        let _publication = begin_applied_publication(handles);
-        handles
-            .applied_tip
-            .store(Some(Arc::new(parent_tip.clone())));
-        handles.chain_events.record(
-            crate::events::HintKind::Disconnected,
-            parent_tip.height,
-            parent_tip.hash,
-        );
-        rewind_chain_tx_count(handles, tx_count_delta);
-    }
+    // Durable before published: the head batch names the rewound count one
+    // step ahead of the tip that carries it, and both stores land the value
+    // the commit certified.
+    let rewound = certified_rewind(handles.applied_chain_tx_count(), tx_count_delta);
+    commit_disconnect_head(handles, &parent_tip, block_hash, rewound.to_wire())
+        .map_err(fatal)?;
+    publish_disconnect(handles, &parent_tip, rewound);
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
             poison(crate::DisconnectError::MarkerStuck {
