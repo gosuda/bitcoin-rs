@@ -6,10 +6,11 @@
 //! matching inbound staging set. The node sync coordinator drives these
 //! types; it does not own the policy.
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, InitialBlockDownload, TipSnapshot};
 use bitcoin_rs_primitives::{Hash256, Network};
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
@@ -30,6 +31,12 @@ const BLOCK_DOWNLOAD_TIMEOUT_BASE: u32 = 2;
 /// Core's `BLOCK_DOWNLOAD_TIMEOUT_PER_PEER` in half-target-spacing units:
 /// each additional active downloader adds half a spacing to the budget.
 const BLOCK_DOWNLOAD_TIMEOUT_PER_PEER: u32 = 1;
+/// How far below a pruned peer's own tip this node may still ask it for
+/// blocks: Core's `NODE_NETWORK_LIMITED_MIN_BLOCKS`
+/// (`net_processing.cpp:159`), the 288 blocks a `NODE_NETWORK_LIMITED` peer
+/// keeps past its pruning horizon. Core holds a two-block race buffer at
+/// `:1637`; this node keeps the plain 288.
+const NODE_NETWORK_LIMITED_MIN_BLOCKS: u32 = 288;
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 ///
 /// 256 is the measured single-peer IBD depth: a bounded 0–150,000 daemon
@@ -200,37 +207,80 @@ pub struct SyncPeerSelection {
     pub probe_peers: Vec<SyncPeer>,
 }
 
-/// A height-eligible sync candidate annotated with its fan-out eligibility
-/// and soft-block status.
+/// A height-eligible sync candidate annotated with its block-service
+/// eligibility and soft-block status.
 ///
-/// The fan-out eligibility is the KTD6 predicate, finalized across
-/// `statically_fanout_eligible` and the window's soft-demotion check; the
-/// soft-block flag indicates whether the window currently soft-blocks the
-/// candidate for block requests (expired pendings or staller cooldown).
+/// The two clauses stay separate because the selection paths combine them
+/// differently: fan-out and probes require both, a single deep peer still
+/// serves while soft-blocked when nothing better exists.
 #[derive(Clone, Copy, Debug)]
 pub struct FanoutCandidate {
     /// The peer this candidate refers to.
     pub peer: SyncPeer,
-    /// Whether the peer satisfies the KTD6 fan-out eligibility predicate.
+    /// Whether [`statically_fanout_eligible`] accepted this peer.
     pub fanout_eligible: bool,
     /// Whether the window currently soft-blocks this peer for requests.
     pub soft_blocked: bool,
 }
 
-/// Connection-level clauses of the fan-out eligibility predicate (KTD6).
+/// The chain facts one block-body peer choice reads.
 ///
-/// Outbound and witness-serving (`NODE_WITNESS`), per Bitcoin Core's
-/// block-download peer criteria in `net_processing.cpp` (Core requests blocks
-/// only from witness peers post-segwit, and inbound peers are
-/// attacker-chosen — counting them toward fan-out is the recorded under-fill
-/// regression). The height clause lives in the candidate filter and the
-/// soft-demotion clause in [`DownloadWindow::peer_has_expired_pending`].
-pub fn statically_fanout_eligible(peer: &PeerInfo) -> bool {
+/// PRE: `requested_height` is the height of the block the selection fills,
+///   taken from the same frontier snapshot as the candidates; `ibd` is the
+///   node's one latch.
+/// POST: [`statically_fanout_eligible`] answers for that height.
+/// INVARIANT: one shared latch decides initial block download for every
+///   selection path; no path caches or re-derives the answer.
+pub struct BlockDownloadPolicy {
+    /// The node's chain-owned initial-block-download latch.
+    pub ibd: Arc<InitialBlockDownload>,
+    /// The height of the block body this selection fills.
+    pub requested_height: u32,
+}
+
+/// Whether a connection may serve block bodies, before the window's dynamic
+/// clauses (KTD6).
+///
+/// PRE: `policy` names the requested height and the node's sync phase.
+/// POST: true only for an outbound witness peer whose advertised services can
+///   serve that height. Inbound peers never qualify: they are attacker-chosen,
+///   and counting them toward fan-out is the recorded under-fill regression.
+///   During initial block download the peer must advertise `NODE_NETWORK`, so
+///   a pruned peer is never asked for old blocks (Core
+///   `net_processing.cpp:6521`). Afterwards a peer without `NODE_NETWORK`
+///   serves only the last [`NODE_NETWORK_LIMITED_MIN_BLOCKS`] blocks of its own
+///   demonstrated chain (`net_processing.cpp:1637`); one below the requested
+///   height is ineligible.
+/// INVARIANT: this is the only block-body service clause. The request, fan-out,
+///   probe, and hedge paths all read it, and none re-derives a witness-only
+///   rule.
+pub fn statically_fanout_eligible(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
+    let network = ServiceFlags::NETWORK.to_u64();
     let witness = ServiceFlags::WITNESS.to_u64();
-    !peer.inbound && peer.services & witness != 0
+    if peer.inbound || peer.services & witness == 0 {
+        return false;
+    }
+    if peer.services & network != 0 {
+        return true;
+    }
+    if policy.ibd.is_active(crate::counters::now_seconds()) {
+        return false;
+    }
+    u32::try_from(peer.best_known_height).is_ok_and(|demonstrated| {
+        demonstrated
+            .checked_sub(policy.requested_height)
+            .is_some_and(|left_tip| left_tip < NODE_NETWORK_LIMITED_MIN_BLOCKS)
+    })
 }
 
 /// Set the fan-out/request mode on the window from the current candidate set.
+///
+/// PRE: each candidate carries the service clause and the window clause
+///   separately.
+/// POST: the counted fan-out set and the returned cold-front peer satisfy both
+///   clauses.
+/// INVARIANT: a candidate soft-blocked by the window never counts toward
+///   fan-out.
 pub fn configure_request_mode(
     window: &mut DownloadWindow,
     candidates: &[FanoutCandidate],
@@ -238,7 +288,7 @@ pub fn configure_request_mode(
 ) -> Option<SyncPeer> {
     let eligible = candidates
         .iter()
-        .filter(|candidate| candidate.fanout_eligible)
+        .filter(|candidate| candidate.fanout_eligible && !candidate.soft_blocked)
         .count();
     let preferred_source = window.preferred_peer();
     let preferred_candidate = preferred_source.and_then(|source| {
@@ -247,7 +297,7 @@ pub fn configure_request_mode(
             .find(|candidate| candidate.peer.source == source)
     });
     let preferred = preferred_candidate
-        .filter(|candidate| !candidate.soft_blocked)
+        .filter(|candidate| candidate.fanout_eligible && !candidate.soft_blocked)
         .map(|candidate| candidate.peer);
     if eligible < window.min_peers_for_fanout() && preferred_candidate.is_some() {
         window.set_fanout_eligible_peers(0, now);

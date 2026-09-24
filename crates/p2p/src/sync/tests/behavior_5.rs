@@ -355,8 +355,10 @@ fn tick_uses_highest_peer_for_headers_when_request_capacity_is_zero()
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    let low_rx = connect_peer(&peers, synthetic_peer(test_addr(9502, 0)?, 5));
-    let high_rx = connect_peer(&peers, synthetic_peer(test_addr(9502, 1)?, 9));
+    // Peers that may not serve block bodies: the tick's only job here is the
+    // header request, and it must still go to the highest peer.
+    let low_rx = connect_peer(&peers, ineligible_peer(test_addr(9502, 0)?, 5));
+    let high_rx = connect_peer(&peers, ineligible_peer(test_addr(9502, 1)?, 9));
 
     sync.tick();
 

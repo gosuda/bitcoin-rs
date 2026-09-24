@@ -41,6 +41,7 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
         Arc::new(PeerTable::new()),
         Arc::new(Mutex::new(headers_rx)),
         Arc::new(Mutex::new(blocks_rx)),
+        crate::sync::syncing_ibd_latch(),
     ));
     {
         let mut scheduler = sync.scheduler.lock();

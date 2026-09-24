@@ -30,7 +30,7 @@ fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error
         }
     }
     let addr = test_addr(9270, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(addr, 200));
+    let rx = connect_peer(&peers, synthetic_peer(addr, 200));
 
     sync.tick();
 
@@ -120,7 +120,7 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
         let addr = test_addr(9320, idx)?;
         rxs.push(connect_peer(
             &peers,
-            eligible_peer(addr, 200 - i32::try_from(idx)?),
+            synthetic_peer(addr, 200 - i32::try_from(idx)?),
         ));
     }
     let owner = test_addr(9320, 0)?;
@@ -212,8 +212,8 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
     );
     let owner = test_addr(9322, 0)?;
     let alternate = test_addr(9322, 1)?;
-    let owner_rx = connect_peer(&peers, eligible_peer(owner, 200));
-    let alternate_rx = connect_peer(&peers, eligible_peer(alternate, 100));
+    let owner_rx = connect_peer(&peers, synthetic_peer(owner, 200));
+    let alternate_rx = connect_peer(&peers, synthetic_peer(alternate, 100));
 
     sync.tick();
     let _ = next_getdata(&owner_rx)?;
@@ -234,7 +234,7 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
     for idx in 2..=8 {
         recovered_rxs.push(connect_peer(
             &peers,
-            eligible_peer(test_addr(9322, idx)?, 100),
+            synthetic_peer(test_addr(9322, idx)?, 100),
         ));
     }
     for block in &blocks[4..8] {
@@ -581,7 +581,7 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
         let addr = test_addr(9340, idx)?;
         rxs.push(connect_peer(
             &peers,
-            eligible_peer(addr, 200 - i32::try_from(idx)?),
+            synthetic_peer(addr, 200 - i32::try_from(idx)?),
         ));
     }
 

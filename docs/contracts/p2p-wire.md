@@ -88,6 +88,10 @@ This page assigns ownership and cites proof under the
   execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided
   `SyncChain` seam. Node retains applied-chain mutation; `P2pService` no longer
   holds a shadow download window.
+- **Inbound eviction scoring**: Core makes room at the inbound cap by scoring
+  and disconnecting a peer (`AttemptToEvictConnection`,
+  `bitcoin-core/src/net.cpp:1695-1735`). This node refuses the new socket
+  instead; see `docs/policies/p2p-compatibility.md` section 7 item 12.
 
 ## Proven by
 
@@ -97,6 +101,13 @@ This page assigns ownership and cites proof under the
   `with_current_rejects_stale_source_and_holds_live_identity` protect
   cancellation and identity-checked enqueue (P2P-02).
 - `crates/p2p/tests/core_compat.rs`:
+  - `desirable_service_policy_matches_core`,
+    `outbound_peer_without_network_flag_disconnected`,
+    `outbound_peer_with_network_and_witness_is_accepted`, and
+    `outbound_near_tip_limited_peer_is_accepted` pin the outbound service gate
+    and its near-tip `NETWORK_LIMITED` exception;
+    `pruned_version_message_advertises_network_limited_only` and
+    `unpruned_version_message_advertises_network` pin the advertised set;
   - `cargo test -p bitcoin-rs-p2p --test core_compat` pins the command
     inventory against the policy table, rust-bitcoin v1 envelopes, handshake
     fields, per-network framing, relay round-trips, the reject-or-ignore
@@ -228,7 +239,19 @@ header chain, announcer-directed `getheaders` on unattached batches,
 non-response forwards preserving pending-request state, staged-retry
 credit, shared-ancestor capability, bounded fork evidence, credit for
 already-known tips, the compact-owned pending mark, and the retained
-mark resolving once its tip header attaches. Capacity and frontier gates
+mark resolving once its tip header attaches.
+`crates/p2p/src/sync/tests/limited_peers.rs` pins the block-body service clause
+on both paths: the `statically_fanout_eligible` rows for the
+initial-block-download exclusion, the 287/288-block retained-window boundary,
+and the below-requested-height case, plus the tick rows that show a pruned peer
+receiving `getheaders` and no `getdata` while the node syncs, receiving the deep
+batch inside its window after it, and staying out of the fan-out set during
+initial block download. `crates/p2p/src/listener.rs` test
+`inbound_admission_over_cap_drops_stream` and the `crates/p2p/src/peer_table.rs`
+reservation cases pin the admission boundary: cap-minus-one accepted, cap
+refused with no lease registered, inbound-only counting, a removal that frees
+the slot, and a same-address replacement that keeps its own identity.
+Capacity and frontier gates
 on the owned-fetch mark are covered in
 `crates/p2p/src/download_window.rs` tests; fault-path gate cleanup is
 covered in `crates/p2p/src/sync/tests/transitions_4.rs`.
@@ -295,3 +318,54 @@ test `announced_near_tip_is_direct_fetched_before_tick`;
 `unsolicited_block_flood_is_bounded_per_source`; `crates/p2p/src/sync/tests.rs`
 tests `permanent_consensus_body_disconnects_delivering_source` and
 `binding_and_operational_failures_do_not_disconnect`.
+
+### `P2P-08`: Inbound admission and the outbound service gate
+
+- **Owner**: `PeerTable::try_register_inbound` (`crates/p2p/src/peer_table.rs`)
+  owns the capacity decision, and the accept loop in `serve`
+  (`crates/p2p/src/listener.rs`) is its only inbound caller.
+  `has_all_desirable_service_flags` (`crates/p2p/src/listener.rs`) is the only
+  outbound service predicate.
+- The accept loop reserves the connection's inbound lease before it spawns the
+  handshake thread, and the reservation and the live inbound count are one
+  table write operation. A socket that arrives at `max_inbound =
+  max_peer_connections - outbound_full_relay_slots - outbound_block_relay_slots`
+  is closed with no lease and no thread (Core derives the same remainder at
+  `bitcoin-core/src/net.h:1124-1127` and applies it at `net.cpp:1838-1845`). A
+  replacement at an address already in the table is admitted: it takes the slot
+  its predecessor held. The live count is always derived from the live entry
+  set, so no independent counter can drift from it. Ban, inactive-network,
+  session-cancellation, and accept-backoff behaviour are unchanged, and a
+  failed spawn releases the reservation it took.
+- `run_outbound_handshake` ends the connection when the remote `version` does
+  not offer the desirable set (`net_processing.cpp:1857-1872`, read for
+  an outbound connection at `:3864-3871`): `NETWORK | WITNESS`, or
+  `NETWORK_LIMITED | WITNESS` while the local tip is younger than 144 blocks.
+  The check runs before the peer is published as usable, so a dial that cannot
+  serve blocks never occupies a selection slot that maintenance cannot replace.
+  Inbound handshakes are not service-gated, as in Core.
+- The advertised set follows the prune setting (`init.cpp:2022-2026`):
+  `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when
+  `storage.prune_target_mb > 0`, and both handshake paths use the same set from
+  `P2pServiceConfig::local_services`.
+
+### `P2P-09`: Block-body service eligibility
+
+- **Owner**: `statically_fanout_eligible` (`crates/p2p/src/download_window.rs`)
+  is the only predicate that decides whether a connection may serve block
+  bodies. The request, fan-out, prefix-probe, and cold-front-hedge paths all
+  read it, and none re-derives a witness-only rule.
+- It consumes a `BlockDownloadPolicy` carrying the node's one
+  `InitialBlockDownload` latch and the height being requested. During initial
+  block download only a `NODE_NETWORK` peer qualifies
+  (`net_processing.cpp:6521`). Afterwards a peer without it qualifies only
+  inside the last 288 blocks of its own demonstrated chain
+  (`NODE_NETWORK_LIMITED_MIN_BLOCKS` at `net_processing.cpp:159`, applied at
+  `:1637`), and a peer below the requested height never qualifies. Inbound
+  peers stay outside the set: they are attacker-chosen, and counting them is the
+  recorded under-fill regression.
+- The service clause and the window's soft-block clause stay separate on
+  `FanoutCandidate`, so each path combines them as it always did: fan-out, the
+  probe set, and the counted threshold require both, and a soft-blocked peer
+  still serves as the single-deep-peer last resort. Header requests stay open
+  to every peer above the applied height regardless of services.

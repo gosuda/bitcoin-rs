@@ -14,12 +14,13 @@ use crate::download_window::MINIMUM_CONNECT_TIME;
 use crate::download_window::SyncPeer;
 use crate::download_window::SyncPeerSelection;
 use crate::download_window::configure_request_mode;
-use crate::download_window::statically_fanout_eligible;
+use crate::download_window::{BlockDownloadPolicy, statically_fanout_eligible};
 use crate::peer_info::PeerRole;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_primitives::Hash256;
+use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use std::vec::Vec;
@@ -505,6 +506,10 @@ impl BlockSync {
             },
             |body| body.height,
         );
+        let policy = BlockDownloadPolicy {
+            ibd: Arc::clone(&self.ibd),
+            requested_height: required_height,
+        };
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
         for peer in &frontier.usable_peers {
             let Some(active_height) = peer.capability() else {
@@ -518,7 +523,7 @@ impl BlockSync {
                     source: peer.source,
                     best_known_height: i32::try_from(active_height).unwrap_or(i32::MAX),
                 },
-                fanout_eligible: statically_fanout_eligible(&peer.info),
+                fanout_eligible: statically_fanout_eligible(&peer.info, &policy),
                 soft_blocked: false,
             });
         }
@@ -529,7 +534,6 @@ impl BlockSync {
                 candidate.soft_blocked = window
                     .peer_has_expired_pending(candidate.peer.source, now)
                     || window.peer_in_staller_cooldown(candidate.peer.source.addr, now);
-                candidate.fanout_eligible = candidate.fanout_eligible && !candidate.soft_blocked;
             }
             let cold_preferred = configure_request_mode(window, &candidates, now);
             (
@@ -540,7 +544,7 @@ impl BlockSync {
         };
         let probe_peers = candidates
             .iter()
-            .filter(|candidate| candidate.fanout_eligible)
+            .filter(|candidate| candidate.fanout_eligible && !candidate.soft_blocked)
             .map(|candidate| candidate.peer)
             .collect();
         let mut request_peers: Vec<SyncPeer> = if let Some(preferred) = cold_preferred {
@@ -548,23 +552,31 @@ impl BlockSync {
         } else if fanout_active {
             candidates
                 .iter()
-                .filter(|candidate| candidate.fanout_eligible)
+                .filter(|candidate| candidate.fanout_eligible && !candidate.soft_blocked)
                 .map(|candidate| candidate.peer)
                 .collect()
         } else if request_peer_limit > 1 {
-            candidates.iter().map(|candidate| candidate.peer).collect()
+            candidates
+                .iter()
+                .filter(|candidate| candidate.fanout_eligible)
+                .map(|candidate| candidate.peer)
+                .collect()
         } else {
-            // Fallback, single deep peer: the highest peer that the window
-            // does not currently soft-block (expired pendings / staller
-            // cooldown) fills the window; a soft-blocked peer serves only as
-            // the last resort when no alternative exists. Without the
-            // preference, a disconnected staller that reconnects with an
-            // inflated demonstrated best-known height would out-sort every
-            // honest peer and re-acquire the window front (RE-ADV-2 /
-            // first-audit ADV-2).
+            // Fallback, single deep peer: the highest peer that may serve
+            // block bodies and that the window does not currently soft-block
+            // (expired pendings / staller cooldown) fills the window; a
+            // soft-blocked peer serves only as the last resort when no
+            // alternative exists. Without the preference, a disconnected
+            // staller that reconnects with an inflated demonstrated
+            // best-known height would out-sort every honest peer and
+            // re-acquire the window front (RE-ADV-2 / first-audit ADV-2).
             let mut preferred: Option<SyncPeer> = None;
-            let allow_soft = candidates.iter().all(|candidate| candidate.soft_blocked);
-            for candidate in candidates
+            let servers: Vec<&FanoutCandidate> = candidates
+                .iter()
+                .filter(|candidate| candidate.fanout_eligible)
+                .collect();
+            let allow_soft = servers.iter().all(|candidate| candidate.soft_blocked);
+            for candidate in servers
                 .iter()
                 .filter(|candidate| allow_soft || !candidate.soft_blocked)
             {
