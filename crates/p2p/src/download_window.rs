@@ -407,11 +407,6 @@ struct PendingTimeoutObservation {
     hash: Hash256,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct PeerInflight {
-    blocks: usize,
-}
-
 /// A running window-blocked stall observation: the window front (`front_hash`)
 /// has been in flight to `peer_addr` with the apply frontier idle and no other
 /// download progress possible since `since`. The analog of Bitcoin Core's
@@ -509,7 +504,6 @@ fn count_stall_episode_cleared(reason: &'static str) {
 pub struct DownloadWindow {
     budget: SyncBudget,
     pending: HashMap<Hash256, PendingBlock>,
-    peer_inflight: HashMap<SocketAddr, PeerInflight>,
     pending_bytes: usize,
     /// Highest `pending` population observed; feeds the high-water gauge.
     pending_blocks_high_water: usize,
@@ -602,9 +596,6 @@ impl DownloadWindow {
         Self {
             budget,
             pending: HashMap::with_capacity(budget.max_pending_blocks),
-            peer_inflight: HashMap::with_capacity(
-                budget.max_pending_blocks.min(budget.max_peer_inflight),
-            ),
             pending_bytes: 0,
             pending_blocks_high_water: 0,
             pending_bytes_high_water: 0,
@@ -870,7 +861,7 @@ impl DownloadWindow {
         }
         request_blocks
             .div_ceil(per_peer)
-            .saturating_add(self.peer_inflight.len())
+            .saturating_add(self.owner_address_count())
     }
 
     fn expired_pending_capacity(&self, now: Instant) -> (usize, usize) {
@@ -1630,14 +1621,6 @@ impl DownloadWindow {
             }
             false
         });
-        // Rebuild per-peer in-flight counts from the retained owners so a
-        // released connection's share cannot transfer to a same-address
-        // replacement.
-        self.peer_inflight.clear();
-        for pending in self.pending.values() {
-            let inflight = self.peer_inflight.entry(pending.owner.addr).or_default();
-            inflight.blocks = inflight.blocks.saturating_add(1);
-        }
         if removed_earliest_deadline {
             self.refresh_next_pending_deadline();
         }
@@ -1677,11 +1660,8 @@ impl DownloadWindow {
         let mut expired = self.expire_pending(now);
         expired.sort_by_key(|entry| entry.height);
 
-        let peer_inflight = self
-            .peer_inflight
-            .get(&peer_addr)
-            .map_or(0, |inflight| inflight.blocks);
-        let peer_capacity = self.effective_peer_inflight().saturating_sub(peer_inflight);
+        let owned = self.pending_count_for_addr(peer_addr);
+        let peer_capacity = self.effective_peer_inflight().saturating_sub(owned);
         // Expiry already ran above, so the count headroom needs no expired
         // credit here: `pending` reflects only live in-flight requests.
         let block_capacity = self
@@ -2024,7 +2004,6 @@ impl DownloadWindow {
             self.prefix_probe_attempted_owner = None;
         }
         let estimated_bytes = self.ewma_block_bytes;
-        let inflight = self.peer_inflight.entry(owner.addr).or_default();
         for entry in &request.entries {
             debug_assert!(!self.pending.contains_key(&entry.hash));
             debug_assert!(!stager.contains(&entry.hash));
@@ -2039,7 +2018,6 @@ impl DownloadWindow {
             );
             debug_assert!(previous.is_none());
             self.pending_bytes = self.pending_bytes.saturating_add(estimated_bytes);
-            inflight.blocks = inflight.blocks.saturating_add(1);
         }
         self.pending_blocks_high_water = self.pending_blocks_high_water.max(self.pending.len());
         self.pending_bytes_high_water = self.pending_bytes_high_water.max(self.pending_bytes);
@@ -2302,14 +2280,12 @@ impl DownloadWindow {
         let pending_timeout = self.budget.pending_timeout;
         let mut entries = Vec::new();
         {
-            let peer_inflight = &mut self.peer_inflight;
             let pending_bytes = &mut self.pending_bytes;
             let next_request_height = &mut self.next_request_height;
             for (hash, pending) in self.pending.extract_if(|_hash, pending| {
                 now.duration_since(pending.requested_at) >= pending_timeout
             }) {
                 *pending_bytes = pending_bytes.saturating_sub(pending.estimated_bytes);
-                release_peer_block(peer_inflight, pending.owner.addr);
                 *next_request_height = (*next_request_height).min(pending.height);
                 entries.push(PeerRequestEntry {
                     hash,
@@ -2350,10 +2326,7 @@ impl DownloadWindow {
         }
         if height < self.next_request_height
             || !self.has_request_capacity(stager)
-            || self
-                .peer_inflight
-                .get(&owner.addr)
-                .is_some_and(|inflight| inflight.blocks >= self.effective_peer_inflight())
+            || self.pending_count_for_addr(owner.addr) >= self.effective_peer_inflight()
         {
             return;
         }
@@ -2374,15 +2347,42 @@ impl DownloadWindow {
     fn remove_pending(&mut self, hash: &Hash256) -> Option<PendingBlock> {
         let pending = self.pending.remove(hash)?;
         self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-        self.release_peer_block(pending.owner.addr);
         if Some(self.pending_deadline(pending.requested_at)) == self.next_pending_deadline {
             self.refresh_next_pending_deadline();
         }
         Some(pending)
     }
 
-    fn release_peer_block(&mut self, peer_addr: SocketAddr) {
-        release_peer_block(&mut self.peer_inflight, peer_addr);
+    /// Live requests whose owner sits at `peer_addr`. Derived from
+    /// `pending`; the window keeps no shadow count.
+    ///
+    /// PRE: expiry has run this tick, so `pending` holds only live in-flight
+    ///   requests.
+    /// POST: returns the number of `pending` values whose
+    ///   `owner.addr == peer_addr`.
+    /// INVARIANT: the count equals the number of `getdata` entries this
+    ///   address owns; each pending entry counts once.
+    fn pending_count_for_addr(&self, peer_addr: SocketAddr) -> usize {
+        self.pending
+            .values()
+            .filter(|pending| pending.owner.addr == peer_addr)
+            .count()
+    }
+
+    /// Distinct owner addresses holding live requests: how many peers the
+    /// tick's request scan must reach in addition to fresh capacity.
+    ///
+    /// PRE: expiry has run this tick.
+    /// POST: returns the number of distinct `pending.owner.addr` values.
+    /// INVARIANT: each address counts once, however many requests it owns.
+    fn owner_address_count(&self) -> usize {
+        let mut owners: SmallVec<[SocketAddr; 16]> = SmallVec::new();
+        for pending in self.pending.values() {
+            if !owners.contains(&pending.owner.addr) {
+                owners.push(pending.owner.addr);
+            }
+        }
+        owners.len()
     }
 }
 
@@ -2403,19 +2403,6 @@ pub enum RejectDelivery {
     /// (or no pending existed). The body is discarded; any existing pending
     /// request is preserved.
     DiscardedUnsolicited,
-}
-
-fn release_peer_block(
-    peer_inflight: &mut HashMap<SocketAddr, PeerInflight>,
-    peer_addr: SocketAddr,
-) {
-    let Some(inflight) = peer_inflight.get_mut(&peer_addr) else {
-        return;
-    };
-    inflight.blocks = inflight.blocks.saturating_sub(1);
-    if inflight.blocks == 0 {
-        peer_inflight.remove(&peer_addr);
-    }
 }
 
 fn non_empty_request(
@@ -2657,13 +2644,13 @@ mod tests {
             ..test_budget()
         });
         let stager = test_stager(&window);
+        let now = Instant::now();
+        let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        insert_pending(&mut window, owner, hash(1), 1, now);
+        insert_pending(&mut window, owner, hash(2), 2, now);
         window.pending_bytes = 256 * 1024;
-        window.peer_inflight.insert(
-            std::net::SocketAddr::from(([127, 0, 0, 1], 8333)),
-            super::PeerInflight { blocks: 2 },
-        );
 
-        assert_eq!(window.request_peer_scan_limit(&stager, Instant::now()), 3);
+        assert_eq!(window.request_peer_scan_limit(&stager, now), 3);
     }
 
     #[test]
@@ -2692,9 +2679,6 @@ mod tests {
             window.pending_bytes = window.pending_bytes.saturating_add(256 * 1024);
         }
         window.next_pending_deadline = Some(now);
-        window
-            .peer_inflight
-            .insert(peer_addr, super::PeerInflight { blocks: 2 });
 
         assert_eq!(window.request_peer_scan_limit(&stager, now), 2);
     }
@@ -2874,9 +2858,6 @@ mod tests {
             window.pending_bytes = window.pending_bytes.saturating_add(estimated_bytes);
             window.record_pending_deadline(requested_at);
         }
-        window
-            .peer_inflight
-            .insert(peer_addr, super::PeerInflight { blocks: 2 });
 
         let unsolicited = receive_staged(&mut window, &mut stager, earliest, SMALL_BODY, now);
 
@@ -3095,9 +3076,6 @@ mod tests {
             window.pending_bytes = window.pending_bytes.saturating_add(256 * 1024);
             window.record_pending_deadline(now);
         }
-        window
-            .peer_inflight
-            .insert(peer_addr, super::PeerInflight { blocks: 2 });
         for byte in [0xe3, 0xe4] {
             receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
@@ -3173,8 +3151,6 @@ mod tests {
         );
         window.pending_bytes = window.pending_bytes.saturating_add(80);
         window.record_pending_deadline(now);
-        let inflight = window.peer_inflight.entry(owner.addr).or_default();
-        inflight.blocks = inflight.blocks.saturating_add(1);
         owner
     }
 
@@ -5117,10 +5093,10 @@ mod tests {
 
         assert_eq!(window.preferred_peer(), Some(owner.addr));
         assert!(window.contains_pending(&hash(9)));
-        assert!(window.peer_inflight.contains_key(&owner.addr));
-        assert!(window.peer_inflight.contains_key(&unrelated.addr));
+        assert!(window.pending_count_for_addr(owner.addr) > 0);
+        assert!(window.pending_count_for_addr(unrelated.addr) > 0);
         assert!(!window.contains_pending(&hash(10)));
-        assert!(!window.peer_inflight.contains_key(&loser.addr));
+        assert_eq!(window.pending_count_for_addr(loser.addr), 0);
         assert!(!window.peer_in_staller_cooldown(owner.addr, now));
         Ok(())
     }
@@ -5153,9 +5129,9 @@ mod tests {
         }
         assert!(window.contains_pending(&hash(9)));
         assert!(!window.contains_pending(&hash(10)));
-        assert!(!window.peer_inflight.contains_key(&owner.addr));
-        assert!(!window.peer_inflight.contains_key(&loser.addr));
-        assert!(window.peer_inflight.contains_key(&unrelated.addr));
+        assert_eq!(window.pending_count_for_addr(owner.addr), 0);
+        assert_eq!(window.pending_count_for_addr(loser.addr), 0);
+        assert!(window.pending_count_for_addr(unrelated.addr) > 0);
         assert_eq!(window.next_request_height, 1);
         assert!(window.next_pending_deadline.is_some());
         assert!(window.peer_in_staller_cooldown(owner.addr, now));
@@ -5208,15 +5184,13 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         let now = Instant::now();
-        window
-            .peer_inflight
-            .insert(peer_addr, super::PeerInflight::default());
+        insert_pending(&mut window, test_source(peer_addr), hash(1), 1, now);
         window.preferred_peer = Some(peer_addr);
         window.mark_peer_unresponsive(peer_addr, now);
 
         window.forget_peer(peer_addr);
 
-        assert!(!window.peer_inflight.contains_key(&peer_addr));
+        assert_eq!(window.pending_count_for_addr(peer_addr), 0);
         assert!(window.preferred_peer.is_none());
         assert!(window.peer_in_staller_cooldown(peer_addr, now));
     }
