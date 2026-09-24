@@ -92,8 +92,11 @@ pub enum RollbackError {
 /// The marker is read before arming because arming overwrites an earlier
 /// disconnect's `RolledBack` debt, which a refusal would otherwise clear. On
 /// success it stays `RolledBack` until the caller durably publishes the
-/// rolled-back state. Per-coin coinstats follow [`UtxoSet::undo_block`]
-/// through the listener; only height and transaction count are rewound here.
+/// rolled-back state. A marker that survives to the next startup no longer
+/// refuses it: startup recovers automatically from the durable certified
+/// head before anything serves (`docs/contracts/recovery.md`). Per-coin
+/// coinstats follow [`UtxoSet::undo_block`] through the listener; only
+/// height and transaction count are rewound here.
 ///
 /// # Errors
 ///
@@ -296,6 +299,9 @@ mod tests {
         }
         fn disarm_disconnect(&self) -> Result<(), StorageError> {
             self.inner.disarm_disconnect()
+        }
+        fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
+            self.inner.retire_disconnect_marker()
         }
         fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
             self.inner.load_disconnect_marker()

@@ -57,6 +57,18 @@ fn retire_full_revalidation_marker(data_dir: &std::path::Path) -> Result<(), Che
     )
 }
 
+/// How a checkpoint publication treats the disconnect marker.
+#[derive(Clone, Copy)]
+pub(crate) enum DisconnectRetirement {
+    /// Ordinary publication: an `InFlight` marker refuses, and only a
+    /// completed rollback's `RolledBack` marker is disarmed after `CURRENT`.
+    Ordinary,
+    /// The disconnect-recovery transaction: reconstruction already made the
+    /// state coherent, so neither phase refuses publication, and the marker
+    /// retires unconditionally after the checkpoint lands.
+    Recovered,
+}
+
 /// All the shared handles needed to publish a checkpoint from a background
 /// thread without retaining the full [`crate::Chainstate`].
 ///
@@ -89,6 +101,30 @@ impl CheckpointPublisher {
     /// Both clean and periodic callers use this exact freeze → publish →
     /// compact → resume sequence.
     pub(crate) fn publish(&self) -> core::result::Result<CheckpointWrite, CheckpointError> {
+        self.publish_transaction(DisconnectRetirement::Ordinary)
+    }
+
+    /// Publishes the recovery checkpoint of the disconnect-marker recovery
+    /// transaction.
+    ///
+    /// PRE: recovery has reconstructed a coherent applied tip at the durable
+    /// head, so the state the checkpoint captures is repaired, not damaged.
+    ///
+    /// POST: success has written the clean checkpoint and retired the
+    /// disconnect marker; failure leaves the marker armed.
+    ///
+    /// INVARIANT: only the recovery transaction may publish over an
+    /// `InFlight` marker, and only after reconstruction succeeded.
+    pub(crate) fn publish_recovered(
+        &self,
+    ) -> core::result::Result<CheckpointWrite, CheckpointError> {
+        self.publish_transaction(DisconnectRetirement::Recovered)
+    }
+
+    fn publish_transaction(
+        &self,
+        retirement: DisconnectRetirement,
+    ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         let _exclusive_apply = self.admission.pause();
         let mut journal = self.journal.as_ref().map(|journal| journal.lock());
         if let Some(writer) = journal.as_mut() {
@@ -104,7 +140,7 @@ impl CheckpointPublisher {
         let chain_tx_count = applied_tip
             .as_ref()
             .map_or(0, |tip| tip.chain_tx_count.to_wire());
-        let mut result = self.publish_frozen(applied_tip.as_deref());
+        let mut result = self.publish_frozen(applied_tip.as_deref(), retirement);
 
         if let (Ok(CheckpointWrite::Published { generation }), Some(tip), Some(writer)) =
             (&result, applied_tip.as_ref(), journal.as_mut())
@@ -183,9 +219,11 @@ impl CheckpointPublisher {
     fn publish_frozen(
         &self,
         applied_tip: Option<&TipSnapshot>,
+        retirement: DisconnectRetirement,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         if let Some(marker) = self.undo_store.load_disconnect_marker()?
             && marker.phase == crate::DisconnectPhase::InFlight
+            && matches!(retirement, DisconnectRetirement::Ordinary)
         {
             return Err(CheckpointError::DisconnectInFlight {
                 hash: marker.hash,
@@ -258,11 +296,14 @@ impl CheckpointPublisher {
                 ))
             })?;
         }
-        // Remove the disconnect marker only after this checkpoint publishes the
-        // matching UTXO set and applied tip.
-        self.undo_store
-            .disarm_disconnect()
-            .map_err(CheckpointError::from)?;
+        // Remove the disconnect marker only after this checkpoint publishes
+        // the matching UTXO set and applied tip. Recovery retires
+        // unconditionally: reconstruction already made the state coherent.
+        match retirement {
+            DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
+            DisconnectRetirement::Recovered => self.undo_store.retire_disconnect_marker(),
+        }
+        .map_err(CheckpointError::from)?;
         // Marker retirement is a second durability step after `CURRENT`.
         // Propagate failure so the worker retries next tick; the published
         // checkpoint stays, and the marker stays until unlink+dirsync commits.

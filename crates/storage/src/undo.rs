@@ -42,11 +42,12 @@ pub trait UndoStore: Send + Sync {
 
     /// Records that the rollback finished, in memory, and is owed a checkpoint.
     ///
-    /// Distinct from clearing. Both phases refuse a startup, because both mean
-    /// the durable state is torn. What the phase decides is whether a
-    /// checkpoint may clear the marker: only a rollback that ran to completion
-    /// may, and a checkpoint taken over a half-finished or failed one would be
-    /// a checkpoint of the damage.
+    /// Distinct from clearing. The phase decides what recovery may do with the
+    /// marker, not whether startup proceeds: startup recovers automatically
+    /// from either phase by reconstructing the durable certified chainstate
+    /// (see `docs/contracts/recovery.md`), and only a checkpoint may clear a
+    /// `RolledBack` marker — a checkpoint taken over a half-finished rollback
+    /// would be a checkpoint of the damage.
     fn complete_disconnect(&self, height: u32, hash: Hash256) -> Result<(), StorageError>;
 
     /// Clears the marker once a disconnect has finished cleanly.
@@ -56,16 +57,27 @@ pub trait UndoStore: Send + Sync {
     /// watermark after restart.
     fn disarm_disconnect(&self) -> Result<(), StorageError>;
 
+    /// Clears the marker unconditionally after disconnect recovery.
+    ///
+    /// The recovery transaction has reconstructed a coherent chainstate to the
+    /// durable head and published the clean checkpoint that makes it durable,
+    /// so the marker's evidence is spent even when its phase is `InFlight`.
+    /// Ordinary callers — the checkpoint settling a completed rollback — keep
+    /// using [`UndoStore::disarm_disconnect`], which refuses `InFlight`.
+    fn retire_disconnect_marker(&self) -> Result<(), StorageError>;
+
     /// Reads the marker left by a disconnect that never finished.
     fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError>;
 }
 
-/// A disconnect that started and never reported finishing.
+/// A disconnect that started and never reported finishing through a clean
+/// checkpoint.
 ///
 /// Its presence at startup means one of two things, and the node cannot tell
-/// them apart: the disconnect returned `Fatal`, or the process died between the
-/// first mutation and the last. Both leave authoritative UTXO and tip state
-/// potentially inconsistent.
+/// them apart: the disconnect returned `Fatal`, or the process died between
+/// the first mutation and the last. Both leave authoritative UTXO and tip
+/// state potentially inconsistent, so startup runs automatic recovery: it
+/// reconstructs the chainstate to the durable head before anything serves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DisconnectMarker {
     /// Block being disconnected.
@@ -78,8 +90,8 @@ pub struct DisconnectMarker {
 
 /// How far a disconnect got before the marker was last written.
 ///
-/// Both phases refuse a startup. The phase decides only whether a checkpoint
-/// may clear the marker.
+/// Startup recovers automatically from either phase. The phase decides only
+/// whether an ordinary checkpoint may clear the marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisconnectPhase {
     /// Mutation started and was never reported finished: the rollback is
@@ -194,6 +206,11 @@ impl UndoStore for InMemoryUndoStore {
         Ok(())
     }
 
+    fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
+        *self.marker.write() = None;
+        Ok(())
+    }
+
     fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
         Ok(self.marker.read().clone())
     }
@@ -291,6 +308,13 @@ impl<S: KvStore> UndoStore for KvUndoStore<S> {
                 "cannot disarm an in-flight disconnect",
             ));
         }
+        let mut batch = self.store.new_batch();
+        batch.delete(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY);
+        self.store.write(batch)?;
+        self.store.flush()
+    }
+
+    fn retire_disconnect_marker(&self) -> Result<(), StorageError> {
         let mut batch = self.store.new_batch();
         batch.delete(ColumnFamily::UtxoMeta, DISCONNECT_MARKER_KEY);
         self.store.write(batch)?;

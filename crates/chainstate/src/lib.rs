@@ -33,6 +33,7 @@ use connect::apply_block_admitted;
 use connect::apply_committed_block_admitted;
 use disconnect::disconnect_block_admitted;
 pub use durable::reconcile_at_boot;
+pub use durable::recover_disconnect_marker;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use parking_lot::MutexGuard;
@@ -1043,6 +1044,37 @@ impl Chainstate {
         match publisher.publish()? {
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => Ok(None),
             crate::checkpoint::CheckpointWrite::Published { generation } => Ok(Some(generation)),
+        }
+    }
+
+    /// Publishes the recovery checkpoint of the disconnect-marker recovery
+    /// transaction.
+    ///
+    /// PRE: recovery has reconstructed a coherent applied tip at the durable
+    /// head.
+    ///
+    /// POST: success has published the clean checkpoint and retired the
+    /// disconnect marker.
+    ///
+    /// INVARIANT: a missing publisher or a skipped tip is a recovery failure,
+    /// never a silent skip: the marker must not survive without the
+    /// checkpoint that makes the repaired state durable.
+    pub fn publish_recovery_checkpoint(&self) -> core::result::Result<(), CheckpointError> {
+        let invalid = |reason: &str| {
+            CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
+                reason.to_owned(),
+            ))
+        };
+        let Some(publisher) = &self.checkpoint_publisher else {
+            return Err(invalid(
+                "disconnect recovery requires a configured checkpoint publisher",
+            ));
+        };
+        match publisher.publish_recovered()? {
+            crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
+                Err(invalid("recovery found no applied tip to checkpoint"))
+            }
+            crate::checkpoint::CheckpointWrite::Published { .. } => Ok(()),
         }
     }
 
