@@ -64,6 +64,8 @@ fn usable(port: u16, best_known: i32, active_height: Option<u32>) -> UsablePeer 
         info: eligible_peer(addr_of(port), best_known),
         demonstrated_tips: Vec::new(),
         active_height,
+        role: crate::peer_info::PeerRole::FullRelay,
+        connected_at: Instant::now(),
     }
 }
 

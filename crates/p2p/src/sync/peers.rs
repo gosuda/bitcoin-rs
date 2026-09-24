@@ -1,18 +1,21 @@
 //! Session reconciliation, useful-peer selection, and stalled-peer retirement.
 
 use super::BlockSync;
+use super::GetheadersOutcome;
 use super::SchedulerState;
-use super::frontier::{ChainFrontier, SyncFrontier};
+use super::frontier::{ChainFrontier, SyncFrontier, UsablePeer};
 use crate::PeerInfo;
 use crate::connection::PeerSource;
 use crate::download_window::BlameReason;
 use crate::download_window::BlockedContext;
 use crate::download_window::BlockedDecision;
 use crate::download_window::FanoutCandidate;
+use crate::download_window::MINIMUM_CONNECT_TIME;
 use crate::download_window::SyncPeer;
 use crate::download_window::SyncPeerSelection;
 use crate::download_window::configure_request_mode;
 use crate::download_window::statically_fanout_eligible;
+use crate::peer_info::PeerRole;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
@@ -97,6 +100,117 @@ pub(super) fn active_demonstrated_height(
         .iter()
         .filter_map(|hash| shared_active_height(tree, active_tip, *hash))
         .max()
+}
+
+/// How long a full-relay outbound connection may sit below our tip before it
+/// is probed, and then retired: `CHAIN_SYNC_TIMEOUT` is 20 * 60 seconds, as
+/// Core sets it (`net_processing.cpp:109`).
+const CHAIN_SYNC_TIMEOUT: Duration = Duration::from_mins(20);
+
+/// How long the answer to that probe is awaited: `HEADERS_RESPONSE_TIME` is
+/// 2 * 60 seconds, as Core sets it (`net_processing.cpp:103`).
+const HEADERS_RESPONSE_TIME: Duration = Duration::from_mins(2);
+
+/// How many tip-reaching outbound connections are never retired. Core's
+/// `MAX_OUTBOUND_PEERS_TO_PROTECT_FROM_DISCONNECT` (`net_processing.cpp:107`).
+const MAX_OUTBOUND_PEERS_TO_PROTECT: usize = 4;
+
+/// What the chain-sync rule owes one connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChainSyncAction {
+    /// Send this connection exactly one `getheaders` from our locator.
+    Probe,
+    /// Retire it: it had the timeout to show a better chain and the response
+    /// window to answer the probe.
+    Evict,
+}
+
+/// The chain-sync record of one connection.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ChainSyncState {
+    /// When this connection became worth timing out, `None` while it is
+    /// keeping up, protected, or never yet observed behind the tip.
+    timeout_start: Option<Instant>,
+    /// Whether a probe was sent since `timeout_start` was set.
+    probe_sent: bool,
+    /// Whether this connection is one of the first
+    /// `MAX_OUTBOUND_PEERS_TO_PROTECT` to reach the tip.
+    protected: bool,
+}
+
+impl ChainSyncState {
+    /// Whether this connection holds protection from the timer.
+    #[must_use]
+    pub(super) const fn is_protected(&self) -> bool {
+        self.protected
+    }
+}
+
+/// Whether the chain-sync rule applies to `peer`.
+///
+/// PRE: `now` is this tick's monotonic stamp.
+/// POST: return true exactly for an outbound full-relay connection older than
+///   `MINIMUM_CONNECT_TIME`.
+/// INVARIANT: an inbound connection is never timed out, because we did not
+///   choose it, and neither is a block-relay-only one, which is never asked to
+///   bring us a chain. Core times out both outbound classes
+///   (`ConsiderEviction`, `net_processing.cpp:5498-5550`); keeping the
+///   block-relay population out of the rule is a documented divergence, so a
+///   connection we dialed for blocks alone is never replaced by this timer.
+pub(super) fn chain_sync_subject(peer: &UsablePeer, now: Instant) -> bool {
+    !peer.info.inbound
+        && peer.role == PeerRole::FullRelay
+        && now.saturating_duration_since(peer.connected_at) >= MINIMUM_CONNECT_TIME
+}
+
+/// Advances one connection's chain-sync record and names the action owed.
+///
+/// PRE: `peer` is a subject connection (`chain_sync_subject`), `tip_height` is
+///   our heaviest header height, and `protected_count` is how many
+///   connections already hold protection.
+/// POST: return `Some(Probe)` once a connection has sat below `tip_height` for
+///   `CHAIN_SYNC_TIMEOUT`, `Some(Evict)` when `HEADERS_RESPONSE_TIME` passes
+///   after that probe, and `None` otherwise. A connection at or above the tip
+///   has its timeout cleared and, while fewer than
+///   `MAX_OUTBOUND_PEERS_TO_PROTECT` hold it, takes protection, which it keeps
+///   for the life of the connection.
+/// INVARIANT: this is Core's `ConsiderEviction`
+///   (`net_processing.cpp:5498-5550`) with the chainwork comparison replaced
+///   by the demonstrated height the scheduler already carries, because that
+///   height is the fact this node requests bodies on.
+pub(super) fn consider_eviction(
+    peer: &UsablePeer,
+    state: &mut ChainSyncState,
+    tip_height: u32,
+    now: Instant,
+    protected_count: &mut usize,
+) -> Option<ChainSyncAction> {
+    if peer.capability().is_some_and(|height| height >= tip_height) {
+        if !state.protected && *protected_count < MAX_OUTBOUND_PEERS_TO_PROTECT {
+            state.protected = true;
+            *protected_count += 1;
+        }
+        state.timeout_start = None;
+        state.probe_sent = false;
+        return None;
+    }
+    if state.protected {
+        return None;
+    }
+    let Some(start) = state.timeout_start else {
+        state.timeout_start = Some(now);
+        return None;
+    };
+    if !state.probe_sent {
+        if now.saturating_duration_since(start) < CHAIN_SYNC_TIMEOUT {
+            return None;
+        }
+        state.probe_sent = true;
+        state.timeout_start = Some(now);
+        return Some(ChainSyncAction::Probe);
+    }
+    (now.saturating_duration_since(start) >= HEADERS_RESPONSE_TIME)
+        .then_some(ChainSyncAction::Evict)
 }
 
 impl BlockSync {
@@ -434,5 +548,94 @@ impl BlockSync {
             request_peers,
             probe_peers,
         }
+    }
+
+    /// Runs the chain-sync rule over this tick's connections and performs the
+    /// actions it names.
+    ///
+    /// PRE: `frontier` is the observation made at `now`.
+    /// POST: every subject connection is armed, probed, or retired, and a
+    ///   retired connection keeps no record.
+    /// INVARIANT: the probe send and the disconnect happen outside the
+    ///   scheduler lock, and a probe that never left the node restores the
+    ///   record it was about to change, so the rule retries instead of
+    ///   condemning a connection it never asked.
+    pub(super) fn sweep_chain_sync(&self, frontier: &SyncFrontier, now: Instant) {
+        let Some(tip_height) = frontier.chain.chain_tip.as_ref().map(|tip| tip.height) else {
+            return;
+        };
+        let outcomes = {
+            let mut scheduler = self.scheduler.lock();
+            let mut protected = scheduler
+                .chain_sync
+                .values()
+                .filter(|state| state.is_protected())
+                .count();
+            let mut outcomes = Vec::new();
+            for peer in &frontier.usable_peers {
+                if !chain_sync_subject(peer, now) {
+                    continue;
+                }
+                let prior = scheduler.chain_sync.get(&peer.source).copied();
+                let mut next = prior.unwrap_or_default();
+                let action = consider_eviction(peer, &mut next, tip_height, now, &mut protected);
+                match action {
+                    Some(ChainSyncAction::Evict) => {
+                        scheduler.chain_sync.remove(&peer.source);
+                    }
+                    _ => {
+                        scheduler.chain_sync.insert(peer.source, next);
+                    }
+                }
+                outcomes.push((peer.source, prior, action));
+            }
+            outcomes
+        };
+
+        for (source, prior, action) in outcomes {
+            match action {
+                Some(ChainSyncAction::Probe) => {
+                    if !self.probe_chain_sync(source, frontier) {
+                        self.scheduler.lock().restore_chain_sync(source, prior);
+                    }
+                }
+                Some(ChainSyncAction::Evict) => self.retire_chain_sync_peer(source),
+                None => {}
+            }
+        }
+    }
+
+    /// Retires a connection the chain-sync rule condemned.
+    ///
+    /// PRE: `source` names the connection the rule chose to retire.
+    /// POST: the connection is gone, and the retirement is counted only when
+    ///   it was still live.
+    /// INVARIANT: `node.sync.chain_sync_disconnects` is the operator-visible
+    ///   name for this reason and never changes once published.
+    fn retire_chain_sync_peer(&self, source: PeerSource) {
+        if self.peer_table.disconnect_source(source) {
+            metrics::counter!("node.sync.chain_sync_disconnects").increment(1);
+            tracing::warn!(
+                peer_addr = %source.addr,
+                "block sync: peer brought no better chain within the sync timeout; disconnecting"
+            );
+        }
+    }
+
+    /// Asks one connection for headers once and reports whether the request
+    /// is now outstanding.
+    ///
+    /// PRE: `source` names a live subject connection.
+    /// POST: return true when a `getheaders` was sent or already pending for
+    ///   this locator, false when nothing could be sent.
+    /// INVARIANT: a suppressed probe still counts, because the pending request
+    ///   it suppressed is the very question the response window waits on.
+    fn probe_chain_sync(&self, source: PeerSource, frontier: &SyncFrontier) -> bool {
+        let outcome = self.probe_frontier_peer(frontier, source);
+        if outcome == GetheadersOutcome::Failed {
+            return false;
+        }
+        metrics::counter!("node.sync.chain_sync_probes").increment(1);
+        true
     }
 }
