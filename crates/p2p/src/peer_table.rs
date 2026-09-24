@@ -17,7 +17,7 @@ use parking_lot::RwLock;
 
 use crate::connection::{ConnectionId, PeerLease, PeerSource};
 use crate::counters::PeerCounters;
-use crate::peer_info::PeerInfo;
+use crate::peer_info::{PeerInfo, PeerRole};
 
 /// One live connection joined with its handshake metadata.
 #[derive(Clone, Debug)]
@@ -515,6 +515,29 @@ impl PeerTable {
         sessions
     }
 
+    /// Counts live outbound connections by relay role, including those still
+    /// handshaking.
+    ///
+    /// PRE: none.
+    /// POST: `(full_relay, block_relay)` counts of outbound connections;
+    ///   inbound connections are never counted.
+    /// INVARIANT: a cancelled lease holds no slot, so a dying connection
+    ///   cannot keep its role occupied past its own teardown.
+    #[must_use]
+    pub fn outbound_role_counts(&self) -> (usize, usize) {
+        let mut counts = (0_usize, 0_usize);
+        for entry in self.entries.read().values() {
+            if entry.lease.is_inbound() || entry.lease.is_cancelled() {
+                continue;
+            }
+            match entry.lease.role() {
+                PeerRole::FullRelay => counts.0 += 1,
+                PeerRole::BlockRelayOnly => counts.1 += 1,
+            }
+        }
+        counts
+    }
+
     /// Returns the current connection source only when `addr` is published as
     /// ready and its lease is not cancelled. Registration clears predecessor
     /// metadata, so a handshaking replacement cannot inherit an old scheduler
@@ -986,5 +1009,30 @@ mod tests {
         assert!(table.disconnect(addr(3)));
         assert!(table.entries.read().retired.is_empty());
         assert_eq!(table.traffic_totals(), (0, 42));
+    }
+
+    /// Slot arithmetic counts outbound connections by relay role. Inbound
+    /// connections and cancelled leases hold no outbound slot.
+    #[test]
+    fn outbound_role_counts_split_by_relay_role() {
+        let table = PeerTable::new();
+        let (full_tx, _full_rx) = crossbeam_channel::unbounded();
+        table.register(addr(1), PeerLease::new(full_tx));
+        let (second_full_tx, _second_full_rx) = crossbeam_channel::unbounded();
+        table.register(addr(2), PeerLease::new(second_full_tx));
+        let (block_tx, _block_rx) = crossbeam_channel::unbounded();
+        table.register(addr(3), PeerLease::new_block_relay(block_tx));
+        let (inbound_tx, _inbound_rx) = crossbeam_channel::unbounded();
+        table.register(addr(4), PeerLease::new_inbound(inbound_tx));
+        let (dead_tx, _dead_rx) = crossbeam_channel::unbounded();
+        let cancelled = PeerLease::new(dead_tx);
+        cancelled.cancel();
+        table.register(addr(5), cancelled);
+
+        assert_eq!(
+            table.outbound_role_counts(),
+            (2, 1),
+            "two full-relay and one block-relay outbound connection"
+        );
     }
 }
