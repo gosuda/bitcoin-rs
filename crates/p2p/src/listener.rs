@@ -446,24 +446,28 @@ fn accept_connections(
     }
 }
 
-/// Spawn one outbound connection.
+/// Spawn one outbound connection of a given relay role.
 ///
-/// The thread connects to `addr`, performs the outbound P2P handshake, and
-/// enters the same message loop the inbound path uses. Errors during connect
-/// or handshake bubble up via the `JoinHandle`'s `Result`; a failed thread
-/// spawn yields a handle that reports the spawn I/O error.
+/// The thread connects to `addr`, performs the outbound P2P handshake with
+/// `role`, and enters the same message loop the inbound path uses. Errors
+/// during connect or handshake bubble up via the `JoinHandle`'s `Result`; a
+/// failed thread spawn yields a handle that reports the spawn I/O error.
 ///
-/// PRE: Wiring is complete for this start epoch.
+/// PRE: Wiring is complete for this start epoch, and `role` is the role the
+///   dialer chose for this connection.
 /// POST: The handle reports connection completion or its error.
-/// INVARIANT: Preserve registration, cancellation, and teardown order.
+/// INVARIANT: Preserve registration, cancellation, and teardown order. The
+///   role is fixed at spawn: the handshake advertises it and every relay
+///   decision on the connection reads it back from the lease.
 pub fn spawn_outbound_connection(
     addr: SocketAddr,
     shared: ConnectionShared,
+    role: crate::peer_info::PeerRole,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
-        .spawn(move || run_outbound_connection(addr, &shared));
+        .spawn(move || run_outbound_connection(addr, &shared, role));
 
     match result {
         Ok(handle) => handle,
@@ -481,6 +485,7 @@ pub fn spawn_outbound_connection(
 fn run_outbound_connection(
     addr: SocketAddr,
     shared: &ConnectionShared,
+    role: crate::peer_info::PeerRole,
 ) -> Result<(), crate::wire::PeerError> {
     if crate::subnet::is_banned(&shared.banned.read(), addr.ip(), SystemTime::now()) {
         return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
@@ -509,7 +514,12 @@ fn run_outbound_connection(
     // Register the connection before the handshake so live-connection
     // accounting covers handshaking peers exactly like Core's connman.
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
-    let lease = crate::PeerLease::new(outbound_tx);
+    let lease = match role {
+        crate::peer_info::PeerRole::FullRelay => crate::PeerLease::new(outbound_tx),
+        crate::peer_info::PeerRole::BlockRelayOnly => {
+            crate::PeerLease::new_block_relay(outbound_tx)
+        }
+    };
     shared.peer_table.register(addr, lease.clone());
     if shared.is_session_cancelled() {
         shared.peer_table.remove_current(addr, &lease);
@@ -571,7 +581,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     lease: &crate::PeerLease,
     deadline: Instant,
 ) -> Result<(), crate::wire::PeerError> {
-    let outbound_messages = crate::handshake::start(peer, nonce, start_height);
+    let outbound_messages = crate::handshake::start(peer, nonce, start_height, lease.role());
     for message in outbound_messages {
         peer.send(&message)?;
     }
@@ -763,6 +773,52 @@ fn run_connected_session(
     loop_result
 }
 
+/// Applies a connection's relay role to one inbound message.
+///
+/// PRE: `role` is the connection's role and `message` arrived on it.
+/// POST: return the message for dispatch, `None` to drop it unheard, or the
+///   protocol error that ends the connection.
+/// INVARIANT: a block-relay-only connection carries blocks and headers and
+///   nothing else. A `tx` message or a transaction `inv` is a protocol
+///   violation and ends the connection, as Core's `RejectIncomingTxs`
+///   requires (`net_processing.cpp:4706-4711`, and the `inv` branch at
+///   `net_processing.cpp:4385-4390`). `addr` and `addrv2` are dropped
+///   without punishment, because Core declines address relay for such a
+///   peer rather than faulting it (`SetupAddressRelay`,
+///   `net_processing.cpp:5952-5970`). A full-relay connection is never
+///   restricted.
+fn enforce_relay_role(
+    role: crate::peer_info::PeerRole,
+    message: crate::Message,
+) -> Result<Option<crate::Message>, crate::wire::PeerError> {
+    use bitcoin::p2p::message_blockdata::Inventory;
+    if role.relays_transactions() {
+        return Ok(Some(message));
+    }
+    if matches!(message, crate::Message::Tx(_)) {
+        return Err(crate::wire::PeerError::Protocol(
+            "transaction sent in violation of protocol",
+        ));
+    }
+    if let crate::Message::Inv(items) = &message
+        && items.iter().any(|item| {
+            matches!(
+                item,
+                Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
+            )
+        })
+    {
+        return Err(crate::wire::PeerError::Protocol(
+            "transaction inv sent in violation of protocol",
+        ));
+    }
+    if matches!(message, crate::Message::Addr(_) | crate::Message::AddrV2(_)) {
+        tracing::trace!("p2p dropping address message from block-relay-only peer");
+        return Ok(None);
+    }
+    Ok(Some(message))
+}
+
 /// Dispatches one Ready connection's inbound messages until it ends.
 ///
 /// PRE: `lease` is the registered lease of the connection `peer` wraps, and
@@ -820,6 +876,9 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         match read_result {
             Ok((message, raw)) => {
                 last_inbound = Instant::now();
+                let Some(message) = enforce_relay_role(lease.role(), message)? else {
+                    continue;
+                };
                 tracing::trace!(
                     peer_addr = %peer_addr,
                     command = ?std::mem::discriminant(&message),
@@ -1233,6 +1292,7 @@ mod outbound_tests {
 
     use super::{spawn_outbound_connection, test_shared};
     use crate::PeerTable;
+    use crate::peer_info::PeerRole;
 
     #[test]
     fn spawn_outbound_connection_to_closed_port_fails_quickly()
@@ -1245,7 +1305,7 @@ mod outbound_tests {
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(PeerTable::new()), headers_tx, blocks_tx);
 
-        let handle = spawn_outbound_connection(addr, shared);
+        let handle = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
         let inner = match handle.join() {
             Ok(inner) => inner,
             Err(error) => std::panic::resume_unwind(error),
@@ -1257,6 +1317,54 @@ mod outbound_tests {
         );
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod relay_role_tests {
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::p2p::message_blockdata::Inventory;
+
+    use super::enforce_relay_role;
+    use crate::peer_info::PeerRole;
+    use crate::wire::{Message, PeerError};
+
+    fn tx_inv() -> Message {
+        Message::Inv(vec![Inventory::Transaction(
+            bitcoin::Txid::from_byte_array([7; 32]),
+        )])
+    }
+
+    /// The role gate disconnects a transaction announcement, keeps block
+    /// traffic, ignores address gossip, and never restricts a full-relay
+    /// connection.
+    #[test]
+    fn relay_role_gate_splits_transaction_and_block_traffic() {
+        let error = enforce_relay_role(PeerRole::BlockRelayOnly, tx_inv())
+            .expect_err("a transaction announcement is a protocol violation");
+        assert!(matches!(
+            error,
+            PeerError::Protocol("transaction inv sent in violation of protocol")
+        ));
+
+        let block_inv = Message::Inv(vec![Inventory::Block(bitcoin::BlockHash::from_byte_array(
+            [8; 32],
+        ))]);
+        let kept = enforce_relay_role(PeerRole::BlockRelayOnly, block_inv)
+            .expect("a block announcement is not a fault");
+        assert!(kept.is_some(), "block traffic reaches the scheduler");
+
+        let kept = enforce_relay_role(PeerRole::FullRelay, tx_inv())
+            .expect("a full-relay connection is unrestricted");
+        assert!(kept.is_some(), "transaction traffic is dispatched");
+
+        let dropped = enforce_relay_role(PeerRole::BlockRelayOnly, Message::Addr(Vec::new()))
+            .expect("address gossip is not a fault");
+        assert!(
+            dropped.is_none(),
+            "address gossip is dropped unheard on a block-relay connection"
+        );
     }
 }
 

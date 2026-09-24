@@ -1212,7 +1212,8 @@ mod tests {
         for witness in [false, true] {
             for filtered in [false, true] {
                 let mut peer = ready_peer();
-                let mut version = crate::handshake::version_message(1, 0);
+                let mut version =
+                    crate::handshake::version_message(1, 0, crate::peer_info::PeerRole::FullRelay);
                 version.services = if witness {
                     bitcoin::p2p::ServiceFlags::WITNESS
                 } else {
@@ -1325,7 +1326,8 @@ mod tests {
         for relay_open in [false, true] {
             for witness in [false, true] {
                 let mut peer = ready_peer();
-                let mut version = crate::handshake::version_message(1, 0);
+                let mut version =
+                    crate::handshake::version_message(1, 0, crate::peer_info::PeerRole::FullRelay);
                 version.services = if witness {
                     bitcoin::p2p::ServiceFlags::WITNESS
                 } else {

@@ -220,7 +220,10 @@ pub trait RelaySink: Send + Sync {
 /// Borrows the shared table, so the relay worker sees peer
 /// connect/disconnect/reconnect and their published BIP339 preference. A
 /// handshaking lease receives no inventory: choosing before negotiation could
-/// queue `MSG_TX` for a connection that later requests `MSG_WTX`.
+/// queue `MSG_TX` for a connection that later requests `MSG_WTX`. A
+/// block-relay-only lease receives none either: transaction relay is
+/// prohibited on such a connection, as Core restricts `RelayTransaction` to
+/// full-relay peers (`net_processing.cpp:5186-5260`).
 pub struct PeerRelaySink {
     peers: Arc<crate::PeerTable>,
 }
@@ -239,6 +242,9 @@ impl RelaySink for PeerRelaySink {
 
         let mut outcome = RelayOutcome::default();
         self.peers.for_each_ready_lease(|addr, lease, info| {
+            if !lease.role().relays_transactions() {
+                return;
+            }
             outcome.attempted += 1;
             if exclude.is_some_and(|id| lease.node_id() == id) {
                 outcome.excluded += 1;
@@ -382,7 +388,7 @@ mod tests {
         let mut info = crate::PeerInfo::inbound_from_version(
             addr,
             addr,
-            &crate::handshake::version_message(1, 0),
+            &crate::handshake::version_message(1, 0, crate::peer_info::PeerRole::FullRelay),
             0,
             0,
             Arc::new(crate::PeerCounters::default()),
@@ -609,6 +615,40 @@ mod tests {
             }
             other => panic!("expected Inv, got {other:?}"),
         }
+    }
+
+    /// A block-relay-only connection is never told about a transaction, so it
+    /// is not even counted as a target of the announcement.
+    #[test]
+    fn peer_relay_sink_skips_block_relay_connections() {
+        let addr_full: SocketAddr = "127.0.0.1:3".parse().expect("valid addr");
+        let addr_block: SocketAddr = "127.0.0.1:4".parse().expect("valid addr");
+        let (tx_full, rx_full) = bounded::<Message>(8);
+        let (tx_block, rx_block) = bounded::<Message>(8);
+        let lease_full = PeerLease::new(tx_full);
+        let lease_block = PeerLease::new_block_relay(tx_block);
+
+        let peers = Arc::new(crate::PeerTable::new());
+        peers.register(addr_full, lease_full.clone());
+        peers.register(addr_block, lease_block.clone());
+        publish_peer(&peers, addr_full, &lease_full, false);
+        publish_peer(&peers, addr_block, &lease_block, false);
+
+        let outcome =
+            PeerRelaySink::new(peers).announce_inv(dummy_txid(0xF7), dummy_wtxid(0xF0), None);
+
+        assert_eq!(
+            outcome.attempted, 1,
+            "only the full-relay connection is a target"
+        );
+        assert!(
+            rx_full.try_recv().is_ok(),
+            "the full-relay connection is announced to"
+        );
+        assert!(
+            rx_block.try_recv().is_err(),
+            "a block-relay-only connection receives no transaction inv"
+        );
     }
 
     #[test]

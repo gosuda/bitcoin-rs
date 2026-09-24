@@ -324,6 +324,8 @@ impl P2pService {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let peer_table = Arc::clone(&self.peer_table);
         let shutdown = Arc::clone(&self.worker_shutdown);
+        let full_relay_slots = self.config.outbound_full_relay_slots;
+        let block_relay_slots = self.config.outbound_block_relay_slots;
         let active_limit = self.config.total_outbound_active_limit();
         thread::Builder::new()
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
@@ -355,7 +357,9 @@ impl P2pService {
                         );
                         continue;
                     }
-                    let handle = crate::listener::spawn_outbound_connection(addr, shared.clone());
+                    let role = next_outbound_role(&peer_table, full_relay_slots, block_relay_slots);
+                    let handle =
+                        crate::listener::spawn_outbound_connection(addr, shared.clone(), role);
                     active.insert(addr);
                     handles.push((addr, handle));
                 }
@@ -736,6 +740,30 @@ fn live_outbound_count(peer_table: &crate::PeerTable) -> usize {
         .count()
 }
 
+/// Chooses the relay role of the next outbound connection.
+///
+/// PRE: `peer_table` holds the live connections of the current epoch.
+/// POST: return `BlockRelayOnly` only while the block-relay population is
+///   below its slots, which happens once the full-relay slots are filled.
+/// INVARIANT: full-relay slots fill first, then block-relay slots, as Core
+///   orders its dial priorities (`net.cpp:2780-2799`). When both are
+///   satisfied the request is served as full relay, which is what an
+///   operator's explicit `addnode` asks for.
+fn next_outbound_role(
+    peer_table: &crate::PeerTable,
+    full_relay_slots: usize,
+    block_relay_slots: usize,
+) -> crate::peer_info::PeerRole {
+    let (full_relay, block_relay) = peer_table.outbound_role_counts();
+    if full_relay < full_relay_slots {
+        crate::peer_info::PeerRole::FullRelay
+    } else if block_relay < block_relay_slots {
+        crate::peer_info::PeerRole::BlockRelayOnly
+    } else {
+        crate::peer_info::PeerRole::FullRelay
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn run_dns_peer_maintenance(
     shutdown: Arc<AtomicBool>,
@@ -971,5 +999,46 @@ mod tests {
             ..P2pServiceConfig::default()
         };
         assert_eq!(narrowed.total_outbound_active_limit(), 1);
+    }
+
+    /// The dialer fills full-relay slots before block-relay slots, and serves
+    /// an explicit request as full relay once both classes are full.
+    #[test]
+    fn next_outbound_role_fills_full_relay_slots_first() {
+        use crate::connection::PeerLease;
+        let table = crate::PeerTable::new();
+        assert!(
+            matches!(
+                next_outbound_role(&table, 1, 1),
+                crate::peer_info::PeerRole::FullRelay
+            ),
+            "an empty table takes the full-relay slot first"
+        );
+
+        let (full_tx, _full_rx) = crossbeam_channel::unbounded();
+        table.register(
+            SocketAddr::from(([127, 0, 0, 1], 1)),
+            PeerLease::new(full_tx),
+        );
+        assert!(
+            matches!(
+                next_outbound_role(&table, 1, 1),
+                crate::peer_info::PeerRole::BlockRelayOnly
+            ),
+            "the full-relay slot is held, so the next dial is block-relay"
+        );
+
+        let (block_tx, _block_rx) = crossbeam_channel::unbounded();
+        table.register(
+            SocketAddr::from(([127, 0, 0, 1], 2)),
+            PeerLease::new_block_relay(block_tx),
+        );
+        assert!(
+            matches!(
+                next_outbound_role(&table, 1, 1),
+                crate::peer_info::PeerRole::FullRelay
+            ),
+            "with both classes full, a requested dial stays full relay"
+        );
     }
 }

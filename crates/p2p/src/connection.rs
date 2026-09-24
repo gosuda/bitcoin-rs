@@ -238,25 +238,46 @@ pub struct PeerLease {
     /// Live unsolicited block forwards admitted by this connection.
     unsolicited_forwards: Arc<AtomicUsize>,
     inbound: bool,
+    role: crate::peer_info::PeerRole,
 }
 
 impl PeerLease {
-    /// Creates an outbound-direction lease with a fresh process-unique identity.
+    /// Creates an outbound full-relay lease with a fresh process-unique identity.
     #[must_use]
     pub fn new(outbound: Sender<crate::Message>) -> Self {
-        Self::with_direction(outbound, false)
+        Self::with_direction(outbound, false, crate::peer_info::PeerRole::FullRelay)
     }
 
-    /// Creates an inbound-direction lease with a fresh process-unique identity.
+    /// Creates an outbound block-relay-only lease.
+    ///
+    /// PRE: none.
+    /// POST: the lease is outbound and its role is
+    ///   [`crate::peer_info::PeerRole::BlockRelayOnly`], so the connection
+    ///   carries blocks and headers only, in either direction.
+    /// INVARIANT: the role is fixed for the life of the lease.
+    #[must_use]
+    pub fn new_block_relay(outbound: Sender<crate::Message>) -> Self {
+        Self::with_direction(outbound, false, crate::peer_info::PeerRole::BlockRelayOnly)
+    }
+
+    /// Creates an inbound lease with a fresh process-unique identity.
+    ///
+    /// Inbound connections always relay fully: the role split is a choice
+    /// about whom we dial.
     #[must_use]
     pub fn new_inbound(outbound: Sender<crate::Message>) -> Self {
-        Self::with_direction(outbound, true)
+        Self::with_direction(outbound, true, crate::peer_info::PeerRole::FullRelay)
     }
 
-    fn with_direction(outbound: Sender<crate::Message>, inbound: bool) -> Self {
+    fn with_direction(
+        outbound: Sender<crate::Message>,
+        inbound: bool,
+        role: crate::peer_info::PeerRole,
+    ) -> Self {
         Self::with_budget(
             outbound,
             inbound,
+            role,
             OutboundBudget::new(OUTBOUND_QUEUE_MAX_MESSAGES, OUTBOUND_QUEUE_MAX_BYTES),
         )
     }
@@ -264,6 +285,7 @@ impl PeerLease {
     fn with_budget(
         outbound: Sender<crate::Message>,
         inbound: bool,
+        role: crate::peer_info::PeerRole,
         budget: OutboundBudget,
     ) -> Self {
         let (close_tx, close_rx) = crossbeam_channel::bounded(1);
@@ -276,6 +298,7 @@ impl PeerLease {
             budget: Arc::new(budget),
             unsolicited_forwards: Arc::new(AtomicUsize::new(0)),
             inbound,
+            role,
         }
     }
 
@@ -285,7 +308,12 @@ impl PeerLease {
         inbound: bool,
         budget: OutboundBudget,
     ) -> Self {
-        Self::with_budget(outbound, inbound, budget)
+        Self::with_budget(
+            outbound,
+            inbound,
+            crate::peer_info::PeerRole::FullRelay,
+            budget,
+        )
     }
 
     /// Stable process-unique node id for this connection (Core `nodeid`).
@@ -304,6 +332,17 @@ impl PeerLease {
     #[must_use]
     pub const fn is_inbound(&self) -> bool {
         self.inbound
+    }
+
+    /// What this connection relays. See [`crate::peer_info::PeerRole`].
+    ///
+    /// PRE: none.
+    /// POST: the role assigned when the lease was created.
+    /// INVARIANT: never changes; a replacement connection gets its own lease
+    ///   and therefore its own role.
+    #[must_use]
+    pub const fn role(&self) -> crate::peer_info::PeerRole {
+        self.role
     }
 
     /// Receiver half of the close signal raised by [`PeerLease::cancel`].
