@@ -201,6 +201,16 @@ mod tests {
         }
     }
 
+    /// A `version` message whose remote peer advertises `services`. The
+    /// advertised set is resolved once by the node's service policy, so no
+    /// test restates a local advertisement inline.
+    fn version_with_services(services: ServiceFlags) -> VersionMessage {
+        VersionMessage {
+            services,
+            ..fake_version()
+        }
+    }
+
     fn counters() -> Arc<PeerCounters> {
         Arc::new(PeerCounters::default())
     }
@@ -273,8 +283,7 @@ mod tests {
 
     #[test]
     fn services_names_decodes_inbound_peer_with_network_witness() {
-        let mut version = fake_version();
-        version.services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+        let version = version_with_services(ServiceFlags::NETWORK | ServiceFlags::WITNESS);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
         let info = PeerInfo::inbound_from_version(addr, addr, &version, 0, 0, counters());
         assert_eq!(info.services_names(), vec!["NETWORK", "WITNESS"]);
@@ -282,8 +291,7 @@ mod tests {
 
     #[test]
     fn services_names_empty_for_no_flags() {
-        let mut version = fake_version();
-        version.services = ServiceFlags::NONE;
+        let version = version_with_services(ServiceFlags::NONE);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
         let info = PeerInfo::inbound_from_version(addr, addr, &version, 0, 0, counters());
         assert!(info.services_names().is_empty());
