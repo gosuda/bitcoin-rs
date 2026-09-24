@@ -1,9 +1,10 @@
 use alloc::sync::Arc;
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockBodySource, BlockTreeReader, TipReader, TipSnapshot, softfork_state};
+use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_mempool::{
-    AdmissionChain, ChainAdmissionSnapshot, Mempool, MempoolGateway, MempoolLimits,
-    MempoolObserver, MutationResult, PrevoutMeta,
+    AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolGateway,
+    MempoolLimits, MempoolObserver, MutationResult, PrevoutMeta, SubmitError, SubmitOutcome,
 };
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
@@ -17,7 +18,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::compat::convert::hex_encode;
 
@@ -811,9 +812,79 @@ impl Context {
         tx: Tx,
         max_feerate_sat_per_kvb: Option<u64>,
     ) -> Result<MutationResult, String> {
-        crate::handlers::tx::admit_transaction(self, &tx, max_feerate_sat_per_kvb)
-            .map_err(crate::handlers::tx::AdmissionFailure::into_string)
+        admit_transaction(&self.mempool, &self.chain, &tx, max_feerate_sat_per_kvb)
+            .map_err(AdmissionFailure::into_string)
     }
+}
+
+/// Failure from the one shared admission operation.
+///
+/// `sendrawtransaction` and [`Context::admit_transaction`] map this into
+/// their respective envelopes.
+pub(crate) enum AdmissionFailure {
+    /// Mempool or standardness policy refused the transaction.
+    Policy(AcceptanceRejectReason),
+    /// Consensus verification failed.
+    Consensus,
+    /// Generation or mempool tokens kept changing across the retry budget.
+    RetryExhausted,
+}
+
+impl AdmissionFailure {
+    pub(crate) const RETRY_EXHAUSTED: &'static str =
+        "admission retry exhausted: chain or mempool changed during submission";
+
+    /// Maps this failure to the string envelope used by
+    /// [`Context::admit_transaction`].
+    pub(crate) fn into_string(self) -> String {
+        match self {
+            Self::Policy(reason) => reason.to_string(),
+            Self::Consensus => "consensus-verification-failed".to_owned(),
+            Self::RetryExhausted => Self::RETRY_EXHAUSTED.to_owned(),
+        }
+    }
+}
+
+/// The node's one shared transaction-admission operation.
+///
+/// PRE: the gateway owns preparation, bounded retry, policy evaluation, and
+/// the authoritative commit; `chain` is the node's admission capability.
+/// POST: the same committed or already-known result, or the same refusal, as
+/// the gateway's submission call returns.
+/// INVARIANT: the gateway is the sole submission authority; this adds no
+/// retry loop, UTXO mutation path, or handler dependency.
+pub(crate) fn admit_transaction(
+    mempool: &MempoolGateway,
+    chain: &ChainHandles,
+    tx: &Tx,
+    max_feerate_sat_per_kvb: Option<u64>,
+) -> Result<MutationResult, AdmissionFailure> {
+    match mempool.submit_transaction(
+        Arc::new(tx.clone()),
+        AdmissionOrigin::Rpc,
+        max_feerate_sat_per_kvb,
+        unix_time_secs(),
+        &chain.admission_chain(),
+    ) {
+        Ok(SubmitOutcome::Committed(result)) => Ok(result),
+        Ok(SubmitOutcome::AlreadyKnown) => Ok(MutationResult::empty()),
+        Ok(SubmitOutcome::AlreadyConfirmed | SubmitOutcome::Held { .. }) => {
+            // RPC never holds orphans or treats the transaction lookup cache
+            // as a successful submission. Preserve its missing-input refusal.
+            Err(AdmissionFailure::Policy(
+                AcceptanceRejectReason::MissingInputs,
+            ))
+        }
+        Err(SubmitError::Policy(reason)) => Err(AdmissionFailure::Policy(reason)),
+        Err(SubmitError::Consensus) => Err(AdmissionFailure::Consensus),
+        Err(SubmitError::RetryExhausted) => Err(AdmissionFailure::RetryExhausted),
+    }
+}
+
+fn unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 impl ChainHandles {
@@ -2314,6 +2385,98 @@ mod admission_chain_tests {
         )?;
         assert!(matches!(result, SubmitOutcome::Committed(_)));
         assert!(ctx.mempool.read().contains_txid(&txid));
+        Ok(())
+    }
+
+    /// The embedded call and the RPC handler reach the gateway through the
+    /// one shared admission operation. The same accepted transaction commits
+    /// on both surfaces, the same policy refusal is reported by both, and
+    /// neither surface inserts a refused transaction.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn admission_envelopes_share_gateway_outcomes() -> anyhow::Result<()> {
+        use sonic_rs::{JsonValueTrait as _, Value, json};
+
+        use crate::error::RpcError;
+        use crate::handlers::tx;
+
+        let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[21; 32])), 0);
+        let spend = spending(outpoint);
+        let raw = hex_encode(&consensus_bytes(&spend));
+        let mut changes = BlockChanges::default();
+        changes.add(UtxoAdd::new(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: Script::from_bytes(spendable_script()),
+            },
+            false,
+            0,
+        ));
+
+        // Accepted: the embedded call and the RPC handler commit the same
+        // funded transaction through the one operation.
+        let embedded_ctx = Context::new();
+                    bitcoin_rs_utxo::contract::commit_block_changes(
+                &embedded_ctx.chain.utxo,
+                &changes,
+                &Hash256::default(),
+            )?;
+        let embedded = embedded_ctx
+            .admit_transaction(spend.clone(), None)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(embedded.changes.len(), 1);
+        assert!(embedded_ctx.mempool.read().contains_txid(&spend.txid()));
+        let rpc_ctx = Arc::new(Context::new());
+                    bitcoin_rs_utxo::contract::commit_block_changes(
+                &rpc_ctx.chain.utxo,
+                &changes,
+                &Hash256::default(),
+            )?;
+        let accepted = tx::sendrawtransaction(&rpc_ctx, &json!([raw]))?;
+        assert_eq!(accepted.as_str(), Some(spend.txid().to_string()).as_deref());
+        assert!(rpc_ctx.mempool.read().contains_txid(&spend.txid()));
+
+        // Refused: an unknown prevout is refused on both surfaces and
+        // inserted on neither.
+        let orphan = spending(OutPoint::new(
+            Txid::from(Hash256::from_le_bytes(&[22; 32])),
+            0,
+        ));
+        let refusal = embedded_ctx
+            .admit_transaction(orphan.clone(), None)
+            .expect_err("an unknown prevout must be refused");
+        assert_eq!(
+            refusal,
+            bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs.to_string(),
+            "the embedded envelope maps the shared policy failure verbatim"
+        );
+        let orphan_raw = hex_encode(&consensus_bytes(&orphan));
+        let refused = tx::sendrawtransaction(&rpc_ctx, &json!([orphan_raw]))
+            .expect_err("the RPC surface refuses the same transaction");
+        assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
+        assert!(!embedded_ctx.mempool.read().contains_txid(&orphan.txid()));
+        assert!(!rpc_ctx.mempool.read().contains_txid(&orphan.txid()));
+
+        // Preview: testmempoolaccept answers for the funded transaction
+        // without inserting it.
+        let preview_ctx = Arc::new(Context::new());
+                    bitcoin_rs_utxo::contract::commit_block_changes(
+                &preview_ctx.chain.utxo,
+                &changes,
+                &Hash256::default(),
+            )?;
+        let rows = tx::testmempoolaccept(&preview_ctx, &json!([[raw]]))?;
+        assert_eq!(
+            rows.get(0)
+                .and_then(|row| row.get("allowed"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(
+            !preview_ctx.mempool.read().contains_txid(&spend.txid()),
+            "the accepted preview must not insert"
+        );
         Ok(())
     }
 
