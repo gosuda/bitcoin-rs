@@ -656,6 +656,7 @@ impl BlockSync {
                     demonstrated_tips,
                     active_height,
                     role: session.lease.role(),
+                    manual: session.lease.is_manual(),
                     connected_at: session.lease.connected_at(),
                 });
             }

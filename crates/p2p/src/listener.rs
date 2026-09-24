@@ -495,7 +495,7 @@ fn accept_connections(
     }
 }
 
-/// Spawn one outbound connection of a given relay role.
+/// Spawn one automatic outbound connection dial of `role`.
 ///
 /// The thread connects to `addr`, performs the outbound P2P handshake with
 /// `role`, and enters the same message loop the inbound path uses. Errors
@@ -507,16 +507,44 @@ fn accept_connections(
 /// POST: The handle reports connection completion or its error.
 /// INVARIANT: Preserve registration, cancellation, and teardown order. The
 ///   role is fixed at spawn: the handshake advertises it and every relay
-///   decision on the connection reads it back from the lease.
+///   decision reads it back from the lease.
+#[must_use]
 pub fn spawn_outbound_connection(
     addr: SocketAddr,
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    spawn_dial(addr, shared, role, false)
+}
+
+/// Spawn one operator-pinned outbound connection dial of `role`: an address
+/// the operator named, which Core marks `MANUAL` and spares from its
+/// chain-sync and excess-slot eviction rules.
+///
+/// PRE: Wiring is complete for this start epoch, and `role` is the role the
+///   dialer chose for this connection.
+/// POST: The handle reports connection completion or its error.
+/// INVARIANT: The lease records the pinned origin at spawn, and the eviction
+///   rules read it back from there.
+#[must_use]
+pub fn spawn_pinned_outbound_connection(
+    addr: SocketAddr,
+    shared: ConnectionShared,
+    role: crate::peer_info::PeerRole,
+) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    spawn_dial(addr, shared, role, true)
+}
+
+fn spawn_dial(
+    addr: SocketAddr,
+    shared: ConnectionShared,
+    role: crate::peer_info::PeerRole,
+    pinned: bool,
+) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
-        .spawn(move || run_outbound_connection(addr, &shared, role));
+        .spawn(move || run_outbound_connection(addr, &shared, role, pinned));
 
     match result {
         Ok(handle) => handle,
@@ -535,6 +563,7 @@ fn run_outbound_connection(
     addr: SocketAddr,
     shared: &ConnectionShared,
     role: crate::peer_info::PeerRole,
+    manual: bool,
 ) -> Result<(), crate::wire::PeerError> {
     if crate::subnet::is_banned(&shared.banned.read(), addr.ip(), SystemTime::now()) {
         return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
@@ -563,11 +592,12 @@ fn run_outbound_connection(
     // Register the connection before the handshake so live-connection
     // accounting covers handshaking peers exactly like Core's connman.
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
-    let lease = match role {
-        crate::peer_info::PeerRole::FullRelay => crate::PeerLease::new(outbound_tx),
-        crate::peer_info::PeerRole::BlockRelayOnly => {
+    let lease = match (role, manual) {
+        (crate::peer_info::PeerRole::FullRelay, false) => crate::PeerLease::new(outbound_tx),
+        (crate::peer_info::PeerRole::BlockRelayOnly, false) => {
             crate::PeerLease::new_block_relay(outbound_tx)
         }
+        (_, true) => crate::PeerLease::new_manual(outbound_tx, role),
     };
     shared.peer_table.register(addr, lease.clone());
     if shared.is_session_cancelled() {
@@ -1544,7 +1574,7 @@ mod outbound_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::sync::Arc;
 
-    use super::{spawn_outbound_connection, test_shared};
+    use super::{spawn_outbound_connection, spawn_pinned_outbound_connection, test_shared};
     use crate::PeerTable;
     use crate::peer_info::PeerRole;
 
@@ -1571,6 +1601,71 @@ mod outbound_tests {
         );
 
         Ok(())
+    }
+
+    /// An outbound dial entry point: either origin the service can choose.
+    type Dial = fn(
+        SocketAddr,
+        crate::listener::ConnectionShared,
+        PeerRole,
+    ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>>;
+
+    /// Register one outbound dial against a listener that accepts and then
+    /// hangs up, so the handshake stalls exactly where the lease is already
+    /// published, and return that session.
+    #[expect(
+        clippy::expect_used,
+        reason = "a helper that cannot build its fixture has nothing to report"
+    )]
+    fn registered_session(dial: Dial) -> crate::PeerSession {
+        use std::time::{Duration, Instant};
+
+        let listener =
+            TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let addr = listener.local_addr().expect("listener address");
+
+        let table = Arc::new(PeerTable::new());
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        let handle = dial(addr, shared, PeerRole::FullRelay);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut accepted = None;
+        let session = loop {
+            accepted = accepted.or_else(|| listener.accept().ok().map(|(stream, _)| stream));
+            if let Some(session) = table.sessions().into_iter().find(|s| s.addr == addr) {
+                break session;
+            }
+            assert!(Instant::now() < deadline, "the dial never registered");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        drop(accepted.take());
+        let _ = handle.join();
+        session
+    }
+
+    /// The eviction rules read the dial origin off the lease, so it must
+    /// survive from the entry point that chose it: a pinned dial carries
+    /// Core's `ConnectionType::MANUAL`, an automatic dial does not.
+    #[test]
+    fn the_dial_origin_survives_to_the_lease() {
+        let pinned = registered_session(spawn_pinned_outbound_connection);
+        assert!(
+            pinned.lease.is_manual(),
+            "a dial the operator named must be marked manual"
+        );
+        assert_eq!(pinned.lease.role(), PeerRole::FullRelay);
+
+        let automatic = registered_session(spawn_outbound_connection);
+        assert!(
+            !automatic.lease.is_manual(),
+            "a dial the seed list produced is not the operator's"
+        );
+        assert_eq!(automatic.lease.role(), PeerRole::FullRelay);
     }
 }
 
