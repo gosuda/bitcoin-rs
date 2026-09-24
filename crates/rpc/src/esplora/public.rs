@@ -1,6 +1,7 @@
 //! Wallet-facing electrs/Esplora routes.
 
 use core::str::FromStr as _;
+use std::sync::Arc;
 
 // WHY rust-bitcoin: `/tx/:id/merkleblock-proof` returns the serialized
 // rust-bitcoin `MerkleBlock`; no native merkle-proof builder exists in-tree
@@ -472,12 +473,25 @@ fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
     }
     json_response(values)
 }
+/// PRE: The gateway supplies one readable pool view.
+/// POST: Capture aggregate values and `(fee_rate, vsize)` from that view.
+/// POST: Release the read guard before fee binning and JSON encoding.
+/// INVARIANT: Count, vsize, total fee and histogram come from one view.
 fn mempool(ctx: &Context) -> Response {
-    let pool = ctx.mempool.gateway.read();
-    let stats = pool.stats();
+    let (stats, entries) = {
+        let pool = ctx.mempool.gateway.read();
+        let stats = pool.stats();
+        let mut entries = Vec::with_capacity(usize::try_from(stats.txs).unwrap_or(0));
+        for entry in pool.iter_entries() {
+            entries.push((entry.fee_rate, entry.vsize));
+        }
+        (stats, entries)
+    };
+    #[cfg(test)]
+    crate::esplora::tests::gate_mempool_binning_for_tests();
     let mut bins = std::collections::BTreeMap::new();
-    for entry in pool.iter_entries() {
-        *bins.entry(entry.fee_rate).or_insert(0_u64) += u64::from(entry.vsize);
+    for (fee_rate, vsize) in entries {
+        *bins.entry(fee_rate).or_insert(0_u64) += u64::from(vsize);
     }
     json_response(MempoolSummary {
         count: stats.txs,
@@ -490,24 +504,44 @@ fn mempool(ctx: &Context) -> Response {
             .collect(),
     })
 }
+/// PRE: The gateway supplies one readable pool view.
+/// POST: Capture the ten latest transactions by `(time, txid)`.
+/// POST: Release the read guard before summing outputs and encoding JSON.
+/// INVARIANT: Equal times use descending txid order; sums saturate.
 fn mempool_recent(ctx: &Context) -> Response {
-    let pool = ctx.mempool.gateway.read();
-    let mut entries = pool.iter_entries().collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        right
-            .time
-            .cmp(&left.time)
-            .then_with(|| right.txid.cmp(&left.txid))
-    });
+    const RECENT: usize = 10;
+    let latest = {
+        let pool = ctx.mempool.gateway.read();
+        // Bounded top-ten selection: only a retained candidate pays for an
+        // `Arc` clone, never every scanned entry.
+        let mut latest: Vec<(u64, Txid, u64, u32, Arc<Tx>)> = Vec::with_capacity(RECENT);
+        for entry in pool.iter_entries() {
+            let candidate = (
+                entry.time,
+                entry.txid,
+                entry.fee,
+                entry.vsize,
+                Arc::clone(&entry.tx),
+            );
+            let rank = (candidate.0, candidate.1);
+            let position = match latest.iter().position(|kept| rank > (kept.0, kept.1)) {
+                Some(position) => position,
+                None if latest.len() < RECENT => latest.len(),
+                None => continue,
+            };
+            latest.insert(position, candidate);
+            latest.truncate(RECENT);
+        }
+        latest
+    };
     json_response(
-        entries
+        latest
             .into_iter()
-            .take(10)
-            .map(|entry| RecentTransaction {
-                txid: entry.txid.to_string(),
-                fee: entry.fee,
-                vsize: entry.vsize,
-                value: entry.tx.outputs.iter().fold(0_u64, |sum, output| {
+            .map(|(_, txid, fee, vsize, transaction)| RecentTransaction {
+                txid: txid.to_string(),
+                fee,
+                vsize,
+                value: transaction.outputs.iter().fold(0_u64, |sum, output| {
                     sum.saturating_add(output.value.to_sat())
                 }),
             })
