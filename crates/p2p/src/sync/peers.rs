@@ -135,6 +135,10 @@ pub(super) struct ChainSyncState {
     /// When this connection became worth timing out, `None` while it is
     /// keeping up, protected, or never yet observed behind the tip.
     timeout_start: Option<Instant>,
+    /// The tip height recorded when the running window was armed: a
+    /// connection that reaches it gets a fresh window even while our tip has
+    /// moved on. Core's `m_work_header` (`net_processing.cpp:5519-5527`).
+    benchmark: Option<u32>,
     /// Whether a probe was sent since `timeout_start` was set.
     probe_sent: bool,
     /// Whether this connection is one of the first
@@ -147,6 +151,15 @@ impl ChainSyncState {
     #[must_use]
     pub(super) const fn is_protected(&self) -> bool {
         self.protected
+    }
+
+    /// Starts a fresh window against the current tip, as Core's
+    /// `m_work_header = tip` arm does
+    /// (`net_processing.cpp:5519-5527`).
+    fn arm(&mut self, tip_height: u32, now: Instant) {
+        self.timeout_start = Some(now);
+        self.benchmark = Some(tip_height);
+        self.probe_sent = false;
     }
 }
 
@@ -175,11 +188,12 @@ pub(super) fn chain_sync_subject(peer: &UsablePeer, now: Instant) -> bool {
 /// POST: return `Some(Probe)` once a connection has sat below `tip_height` for
 ///   `CHAIN_SYNC_TIMEOUT`, `Some(Evict)` when `HEADERS_RESPONSE_TIME` passes
 ///   after that probe, and `None` otherwise. A connection that DEMONSTRATED a
-///   tip at or above `tip_height` has its timeout cleared and, while fewer
+///   tip at or above `tip_height` has its window cleared and, while fewer
 ///   than `MAX_OUTBOUND_PEERS_TO_PROTECT` hold it, takes protection, which it
 ///   keeps for the life of the connection. A connection that only CLAIMED a
 ///   height in its handshake is armed like any other: the claim is the
-///   remote's word, not evidence.
+///   remote's word, not evidence. Reaching the benchmark recorded at the last
+///   arm restarts the window against the current tip.
 /// INVARIANT: this is Core's `ConsiderEviction`
 ///   (`net_processing.cpp:5498-5550`) with the chainwork comparison replaced
 ///   by the demonstrated height the scheduler already carries, because that
@@ -194,15 +208,14 @@ pub(super) fn consider_eviction(
     now: Instant,
     protected_count: &mut usize,
 ) -> Option<ChainSyncAction> {
-    if peer
-        .demonstrated_height()
-        .is_some_and(|height| height >= tip_height)
-    {
+    let demonstrated = peer.demonstrated_height();
+    if demonstrated.is_some_and(|height| height >= tip_height) {
         if !state.protected && *protected_count < MAX_OUTBOUND_PEERS_TO_PROTECT {
             state.protected = true;
             *protected_count += 1;
         }
         state.timeout_start = None;
+        state.benchmark = None;
         state.probe_sent = false;
         return None;
     }
@@ -210,9 +223,19 @@ pub(super) fn consider_eviction(
         return None;
     }
     let Some(start) = state.timeout_start else {
-        state.timeout_start = Some(now);
+        state.arm(tip_height, now);
         return None;
     };
+    // Progress to the tip we held when the window started buys a fresh
+    // window, even while our own tip has moved past it.
+    let reached_benchmark = matches!(
+        (state.benchmark, demonstrated),
+        (Some(benchmark), Some(height)) if height >= benchmark
+    );
+    if reached_benchmark {
+        state.arm(tip_height, now);
+        return None;
+    }
     if !state.probe_sent {
         if now.saturating_duration_since(start) < CHAIN_SYNC_TIMEOUT {
             return None;
