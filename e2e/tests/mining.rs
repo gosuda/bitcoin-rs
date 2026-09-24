@@ -7,7 +7,7 @@
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
 use bitcoin_rs_e2e::helpers::{
     COINBASE_MATURITY, assemble_block_from_template, coinbase_at, funding_address, funding_output,
-    genesis_block, mine_bare_blocks, spend_anyone, submit_genesis, tx_hex,
+    genesis_block, mine_bare_blocks, op_true_script, spend_anyone, submit_genesis, tx_hex,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
 use serde_json::{Value, json};
@@ -61,7 +61,7 @@ fn template_assembly_and_submit() -> Result<()> {
     let _ = mine_bare_blocks(&mut node, 2)?;
 
     let template = node.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
-    let block = assemble_block_from_template(&template)?;
+    let block = assemble_block_from_template(&template, &op_true_script())?;
     let result = node.rpc("submitblock", &json!([serialize_hex(&block)]))?;
     assert!(result.is_null(), "submitblock: {result}");
 
@@ -108,7 +108,7 @@ fn submitheader_then_block() -> Result<()> {
     let _ = mine_bare_blocks(&mut node, 2)?;
 
     let template = node.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
-    let block = assemble_block_from_template(&template)?;
+    let block = assemble_block_from_template(&template, &op_true_script())?;
     let header_hex = serialize_hex(&block.header);
 
     let result = node.rpc("submitheader", &json!([header_hex]))?;
