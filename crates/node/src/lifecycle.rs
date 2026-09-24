@@ -68,23 +68,25 @@ fn bind_rpc(
     let rpc_auth = Arc::new(state.config().rpc.auth.to_rpc_auth()?);
     let chainstate = state.chainstate();
     let mut context = Context::from_handles(ContextHandles {
-        chain: ChainHandles {
-            chain_tip: chainstate.chain_tip_handle(),
-            applied_tip: chainstate.applied_tip_handle(),
-            ibd: Arc::clone(ibd),
-            blocks: state.blocks(),
-            transactions: state.transactions(),
-            utxo: chainstate.utxo_handle(),
-            coin_stats: chainstate.coin_stats_handle(),
-            block_tree: chainstate.block_tree_handle(),
-            chain_network: state.config().network,
-        },
+        chain: ChainHandles::new(
+            chainstate.chain_tip_handle(),
+            chainstate.applied_tip_handle(),
+            state.blocks(),
+            state.transactions(),
+            chainstate.utxo_handle(),
+            chainstate.coin_stats_handle(),
+            chainstate.block_tree_handle(),
+            state.config().network,
+            Arc::clone(ibd),
+        ),
         mempool: MempoolHandles {
             mempool: state.mempool_gateway(),
         },
         indexes: IndexHandles {
             derived_index: state.derived_index_query(),
+            esplora_tx_index: None,
             script_index: state.script_index_query(),
+            derived_index_status: Some(state.derived_index_status()),
         },
         network: NetworkHandles {
             network: state.network(),
@@ -97,7 +99,6 @@ fn bind_rpc(
         mining: MiningHandles {
             mining_control: Some(Arc::clone(mining_control)),
         },
-        derived_index_status: Some(state.derived_index_status()),
     })
     .with_esplora_derived_index(state.esplora_derived_index_query())
     .with_block_body_source(block_body_source)

@@ -137,11 +137,11 @@ fn network_name(ip: IpAddr) -> &'static str {
 
 pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let peers = ctx.peer_table.infos();
+    let peers = ctx.network.peer_table.infos();
     let total = peers.len();
     let inbound = peers.iter().filter(|p| p.inbound).count();
     let outbound = total.saturating_sub(inbound);
-    let network_active = ctx.network_active.load(Ordering::SeqCst);
+    let network_active = ctx.network.network_active.load(Ordering::SeqCst);
     let networks = [
         ("ipv4", false, true),
         ("ipv6", false, true),
@@ -227,7 +227,7 @@ fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
 
 pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let peers = ctx.peer_table.infos();
+    let peers = ctx.network.peer_table.infos();
     let rows = peers
         .iter()
         .enumerate()
@@ -297,7 +297,7 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 
 pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let _ = params_array(params)?;
-    let added = ctx.added_nodes.read();
+    let added = ctx.network.added_nodes.read();
     let entries = added
         .iter()
         .map(|addr| v31::AddedNode {
@@ -311,7 +311,7 @@ pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Val
 
 pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let banned = ctx.banned.read();
+    let banned = ctx.network.banned.read();
     let now = epoch_seconds(SystemTime::now());
     let entries = banned
         .iter()
@@ -341,7 +341,7 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
             let bantime = optional_u64(params, 2, 0)?;
             let absolute = optional_bool(params, 3, false)?;
             let banned_until = ban_until(now, bantime, absolute)?;
-            let mut banned = ctx.banned.write();
+            let mut banned = ctx.network.banned.write();
             banned.retain(|entry| entry.subnet != subnet);
             banned.push(BannedSubnet {
                 subnet,
@@ -351,7 +351,10 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
             });
         }
         "remove" => {
-            ctx.banned.write().retain(|entry| entry.subnet != subnet);
+            ctx.network
+                .banned
+                .write()
+                .retain(|entry| entry.subnet != subnet);
         }
         _ => return Err(RpcError::InvalidParams("command must be 'add' or 'remove'")),
     }
@@ -360,7 +363,7 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
 
 pub(crate) fn clearbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    ctx.banned.write().clear();
+    ctx.network.banned.write().clear();
     Ok(Value::new_null())
 }
 
@@ -370,7 +373,11 @@ pub(crate) fn setnetworkactive(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .first()
         .and_then(JsonValueTrait::as_bool)
         .ok_or(RpcError::InvalidParams("state must be a boolean"))?;
-    bitcoin_rs_p2p::apply_network_active(&ctx.network_active, &ctx.peer_table, state);
+    bitcoin_rs_p2p::apply_network_active(
+        &ctx.network.network_active,
+        &ctx.network.peer_table,
+        state,
+    );
     typed_to_sonic(&v31::SetNetworkActive(state))
 }
 pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -389,7 +396,7 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
     match command {
         "add" | "onetry" => {
             let now = SystemTime::now();
-            let banned = ctx.banned.read();
+            let banned = ctx.network.banned.read();
             if bitcoin_rs_p2p::subnet::is_banned(banned.as_slice(), addr.ip(), now) {
                 return Err(RpcError::InvalidParams("node is banned"));
             }
@@ -397,14 +404,14 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
 
             let persist = command == "add";
             if persist {
-                let mut list = ctx.added_nodes.write();
+                let mut list = ctx.network.added_nodes.write();
                 if !list.contains(&addr) {
                     list.push(addr);
                 }
             }
 
-            if ctx.network_active.load(Ordering::Acquire)
-                && let Some(sender) = &ctx.p2p_outbound_sender
+            if ctx.network.network_active.load(Ordering::Acquire)
+                && let Some(sender) = &ctx.network.p2p_outbound_sender
             {
                 match sender.try_send(bitcoin_rs_p2p::OutboundDial::pinned(addr)) {
                     Ok(()) => {}
@@ -419,7 +426,7 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
             }
         }
         "remove" => {
-            let mut list = ctx.added_nodes.write();
+            let mut list = ctx.network.added_nodes.write();
             list.retain(|a| *a != addr);
         }
         _ => {
@@ -447,7 +454,7 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
 
     // Verify the peer is currently connected before mutating anything.
     let found = {
-        let peers = ctx.peer_table.infos();
+        let peers = ctx.network.peer_table.infos();
         match nodeid {
             Some(id) => id < peers.len() && peers[id].addr == addr,
             None => peers.iter().any(|p| p.addr == addr),
@@ -457,14 +464,14 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
         return Err(RpcError::NotFound("Node not found in connected nodes"));
     }
 
-    ctx.peer_table.disconnect(addr);
+    ctx.network.peer_table.disconnect(addr);
 
     Ok(Value::new_null())
 }
 
 pub(crate) fn getconnectioncount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let count = u64::try_from(ctx.peer_table.len()).unwrap_or(u64::MAX);
+    let count = u64::try_from(ctx.network.peer_table.len()).unwrap_or(u64::MAX);
     typed_to_sonic(&v31::GetConnectionCount(count))
 }
 
@@ -473,7 +480,7 @@ pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     // `PeerTable` is the single owner of traffic accounting: it measures each
     // live connection and folds in the counters of every connection it drops,
     // so the totals — like Core's — never decrease across disconnects.
-    let (total_bytes_received, total_bytes_sent) = ctx.peer_table.traffic_totals();
+    let (total_bytes_received, total_bytes_sent) = ctx.network.peer_table.traffic_totals();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
@@ -506,7 +513,7 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let mut entries: Vec<v31::NodeAddress> = Vec::new();
 
     // Live peers carry real service flags and handshake times.
-    for peer in ctx.peer_table.infos() {
+    for peer in ctx.network.peer_table.infos() {
         if !seen.insert(peer.addr) {
             continue;
         }
@@ -520,7 +527,7 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
     }
 
     // Persisted added nodes have no known services; advertise NODE_NETWORK.
-    for &addr in ctx.added_nodes.read().iter() {
+    for &addr in ctx.network.added_nodes.read().iter() {
         if !seen.insert(addr) {
             continue;
         }
@@ -706,17 +713,17 @@ mod addnode_validation_tests {
     fn addnode_skips_queueing_while_network_is_inactive() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
-        ctx.network_active.store(false, Ordering::Release);
+        ctx.network.p2p_outbound_sender = Some(tx);
+        ctx.network.network_active.store(false, Ordering::Release);
         let ctx = Arc::new(ctx);
 
         let persisted = SocketAddr::from(([127, 0, 0, 1], 8333));
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]));
         assert!(result.is_ok());
-        assert_eq!(ctx.added_nodes.read().as_slice(), &[persisted]);
+        assert_eq!(ctx.network.added_nodes.read().as_slice(), &[persisted]);
         assert!(rx.try_recv().is_err());
 
-        ctx.network_active.store(true, Ordering::Release);
+        ctx.network.network_active.store(true, Ordering::Release);
         assert!(rx.try_recv().is_err());
         let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
         assert!(result.is_ok());
@@ -728,7 +735,7 @@ mod addnode_validation_tests {
     fn addnode_add_sends_outbound_request() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
+        ctx.network.p2p_outbound_sender = Some(tx);
         let ctx = Arc::new(ctx);
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
@@ -754,7 +761,7 @@ mod addnode_validation_tests {
         tx.try_send(queued)
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
         let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
+        ctx.network.p2p_outbound_sender = Some(tx);
         let ctx = Arc::new(ctx);
 
         let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
@@ -776,14 +783,14 @@ mod addnode_validation_tests {
         tx.try_send(queued)
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
         let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
+        ctx.network.p2p_outbound_sender = Some(tx);
         let ctx = Arc::new(ctx);
 
         let result = addnode(&ctx, &json!(["127.0.0.2:8333", "add"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
 
         assert!(result.is_null());
-        let added = ctx.added_nodes.read();
+        let added = ctx.network.added_nodes.read();
         assert_eq!(
             added.as_slice(),
             [std::net::SocketAddr::from(([127, 0, 0, 2], 8333))]
@@ -794,7 +801,7 @@ mod addnode_validation_tests {
     fn addnode_rejects_manually_banned_subnet() {
         let (tx, rx) = crossbeam_channel::unbounded();
         let mut ctx = Context::new();
-        ctx.p2p_outbound_sender = Some(tx);
+        ctx.network.p2p_outbound_sender = Some(tx);
         let ctx = Arc::new(ctx);
         if let Err(err) = setban(&ctx, &json!(["127.0.0.0/24", "add"])) {
             panic!("setban failed: {err}");
@@ -806,7 +813,7 @@ mod addnode_validation_tests {
             result,
             Err(RpcError::InvalidParams("node is banned"))
         ));
-        assert!(ctx.added_nodes.read().is_empty());
+        assert!(ctx.network.added_nodes.read().is_empty());
         assert!(rx.try_recv().is_err());
     }
 
@@ -848,16 +855,16 @@ mod addnode_validation_tests {
         };
         let (tx, _rx) = unbounded();
         let lease = PeerLease::new(tx);
-        ctx.peer_table.register(addr, lease.clone());
-        ctx.peer_table.publish_info(addr, &lease, info);
+        ctx.network.peer_table.register(addr, lease.clone());
+        ctx.network.peer_table.publish_info(addr, &lease, info);
         let ctx = Arc::new(ctx);
 
         let result = disconnectnode(&ctx, &json!([addr.to_string().as_str()]))
             .unwrap_or_else(|err| panic!("disconnectnode failed: {err}"));
         assert!(result.is_null());
         assert!(lease.is_cancelled());
-        assert!(ctx.peer_table.is_empty());
-        assert!(ctx.peer_table.infos().is_empty());
+        assert!(ctx.network.peer_table.is_empty());
+        assert!(ctx.network.peer_table.infos().is_empty());
     }
 }
 
@@ -896,7 +903,11 @@ mod admin_rpc_tests {
         let result = setnetworkactive(&ctx, &json!([false]))
             .unwrap_or_else(|err| panic!("setnetworkactive failed: {err}"));
         assert_eq!(result.as_bool(), Some(false));
-        assert!(!ctx.network_active.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            !ctx.network
+                .network_active
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
     }
 
     #[test]
@@ -911,21 +922,22 @@ mod admin_rpc_tests {
         let (tx_b, _rx_b) = unbounded();
         let lease_a = PeerLease::new(tx_a);
         let lease_b = PeerLease::new(tx_b);
-        ctx.peer_table.register(addr_a, lease_a.clone());
-        ctx.peer_table.register(addr_b, lease_b.clone());
+        ctx.network.peer_table.register(addr_a, lease_a.clone());
+        ctx.network.peer_table.register(addr_b, lease_b.clone());
         let ctx = Arc::new(ctx);
 
         let _ = setnetworkactive(&ctx, &json!([false]))
             .unwrap_or_else(|err| panic!("setnetworkactive failed: {err}"));
         assert!(lease_a.is_cancelled());
         assert!(lease_b.is_cancelled());
-        assert_eq!(ctx.peer_table.len(), 2);
+        assert_eq!(ctx.network.peer_table.len(), 2);
     }
 
     #[test]
     fn getnetworkinfo_reports_network_active_state() {
         let ctx = Arc::new(Context::new());
-        ctx.network_active
+        ctx.network
+            .network_active
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let result = getnetworkinfo(&ctx, &json!(null))
             .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
@@ -955,7 +967,7 @@ mod admin_rpc_tests {
             Some("10.0.0.1/32")
         );
         assert!(setban(&ctx, &json!(["10.0.0.1:8333", "remove"])).is_ok());
-        assert!(ctx.banned.read().is_empty());
+        assert!(ctx.network.banned.read().is_empty());
     }
 
     #[test]
@@ -1022,7 +1034,7 @@ mod ban_state_tests {
     fn setban_add_persists_in_context() {
         let ctx = Arc::new(Context::new());
         setban_ok(&ctx, "127.0.0.1:8333", "add");
-        let banned = ctx.banned.read();
+        let banned = ctx.network.banned.read();
         assert_eq!(banned.len(), 1);
     }
 
@@ -1118,7 +1130,7 @@ mod ban_state_tests {
         let ctx = Arc::new(Context::new());
         setban_ok(&ctx, "192.168.1.1", "add");
         clearbanned_ok(&ctx);
-        assert!(ctx.banned.read().is_empty());
+        assert!(ctx.network.banned.read().is_empty());
     }
 
     #[test]
@@ -1126,7 +1138,7 @@ mod ban_state_tests {
         let ctx = Arc::new(Context::new());
         let _ = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
-        let added = ctx.added_nodes.read();
+        let added = ctx.network.added_nodes.read();
         assert_eq!(added.len(), 1);
     }
 
@@ -1219,7 +1231,7 @@ mod peer_counter_tests {
             peer_table.publish_info(info.addr, &lease, info);
         }
         let mut ctx = Context::new();
-        ctx.peer_table = Arc::new(peer_table);
+        ctx.network.peer_table = Arc::new(peer_table);
         Arc::new(ctx)
     }
 
@@ -1571,8 +1583,8 @@ mod getnodeaddresses_tests {
     fn add_peer(ctx: &Context, info: PeerInfo) {
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = PeerLease::new(tx);
-        ctx.peer_table.register(info.addr, lease.clone());
-        ctx.peer_table.publish_info(info.addr, &lease, info);
+        ctx.network.peer_table.register(info.addr, lease.clone());
+        ctx.network.peer_table.publish_info(info.addr, &lease, info);
     }
 
     #[test]
@@ -1620,7 +1632,8 @@ mod getnodeaddresses_tests {
     fn deduplicates_peer_and_added_node() {
         let ctx = Context::new();
         add_peer(&ctx, peer("127.0.0.1:8333", 9));
-        ctx.added_nodes
+        ctx.network
+            .added_nodes
             .write()
             .push("127.0.0.1:8333".parse().expect("addr"));
         let ctx = Arc::new(ctx);
@@ -1664,7 +1677,8 @@ mod getnodeaddresses_tests {
     #[test]
     fn added_nodes_appear_when_no_live_peer() {
         let ctx = Context::new();
-        ctx.added_nodes
+        ctx.network
+            .added_nodes
             .write()
             .push("10.0.0.1:8333".parse().expect("addr"));
         let ctx = Arc::new(ctx);

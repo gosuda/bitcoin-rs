@@ -209,9 +209,9 @@ pub use bitcoin_rs_index::{
 /// node capability: chain, mempool, indexes, network, and mining.
 ///
 /// A struct-of-structs grouping, not a trait layer. `Context::from_handles`
-/// consumes one `ContextHandles` value and the handler surface reads only
-/// these capability groups — RPC consumes node capabilities and never names a
-/// storage backend or backend engine type.
+/// consumes one `ContextHandles` value and moves each group into the context
+/// unchanged — RPC consumes node capabilities and never names a storage
+/// backend or backend engine type.
 #[derive(Clone)]
 pub struct ContextHandles {
     /// Chain capability: tips, block log, UTXO set, and block tree.
@@ -224,17 +224,21 @@ pub struct ContextHandles {
     pub network: NetworkHandles,
     /// Mining capability: the template coordinator, when one is attached.
     pub mining: MiningHandles,
-    /// Live txindex status for the `getcapabilities` projection.
-    pub derived_index_status: Option<Arc<dyn crate::capabilities::DerivedIndexCapabilitySource>>,
 }
 
 /// Chain capability handles.
+///
+/// The group owns the node's applied-chain authorities: the two published
+/// tips, the transition barrier that brackets them, the shared
+/// initial-block-download latch, and the readable stores behind them.
 #[derive(Clone)]
 pub struct ChainHandles {
     /// Best header-chain tip.
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best fully-applied block tip.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    /// Serializes whole-chainstate RPC reads with node-owned connect/disconnect transitions.
+    chain_transition: Arc<Mutex<()>>,
     /// Process-wide initial-block-download latch over the applied chain,
     /// shared with P2P so both surfaces answer identically.
     pub ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
@@ -246,10 +250,62 @@ pub struct ChainHandles {
     pub utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
     /// Incremental UTXO statistics.
     pub coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
-    /// Shared block tree.
-    pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
+    /// Optional storage pruning mutator.
+    pub prune_service: Option<Arc<dyn PruneService>>,
+    /// Optional node-owned chain mutation service.
+    pub chain_control: Option<Arc<dyn ChainControl>>,
     /// Consensus network.
     pub chain_network: Network,
+    /// Shared block tree.
+    pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
+    /// Optional durable block body reader for metadata-only block records.
+    pub block_body_source: Option<Arc<dyn BlockBodySource>>,
+    /// Rollback-evidence warning source for `getblockchaininfo`.
+    ///
+    /// `None` in test contexts; populated by `NodeState` with the process-wide
+    /// `WarningStore`. Each request loads one immutable snapshot.
+    pub rollback_warnings: Option<Arc<dyn RollbackWarningSource>>,
+}
+
+impl ChainHandles {
+    /// Builds the chain capability group over handles owned elsewhere.
+    ///
+    /// PRE: the supplied handles belong to the same node; `ibd` is that node's
+    ///   shared initial-block-download decision.
+    /// POST: the group owns these exact handles, the optional adapters are
+    ///   `None`, and the unattached transition barrier is the empty-context
+    ///   default.
+    /// INVARIANT: construction copies no subsystem state and creates no second
+    ///   initial-block-download latch or transaction-count authority.
+    #[must_use]
+    pub fn new(
+        chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+        blocks: Arc<RwLock<BlockLog>>,
+        transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
+        utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
+        coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
+        block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
+        chain_network: Network,
+        ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    ) -> Self {
+        Self {
+            chain_tip,
+            applied_tip,
+            chain_transition: Arc::new(Mutex::new(())),
+            ibd,
+            blocks,
+            transactions,
+            utxo,
+            coin_stats,
+            prune_service: None,
+            chain_control: None,
+            chain_network,
+            block_tree,
+            block_body_source: None,
+            rollback_warnings: None,
+        }
+    }
 }
 
 /// Borrowed provisional chain facts used by both RPC and P2P admission.
@@ -353,12 +409,21 @@ pub struct MempoolHandles {
 }
 
 /// Index capability handles.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct IndexHandles {
     /// Complete transaction-index query adapter.
+    ///
+    /// `None` when transaction indexing is disabled.
     pub derived_index: Option<Arc<dyn DerivedIndexQuery>>,
+    /// Complete transaction lookup used internally by Esplora projections.
+    ///
+    /// This may be available with `--scriptindex` even when `derived_index` is
+    /// absent, because it does not advertise the Core `--txindex` contract.
+    pub esplora_tx_index: Option<Arc<dyn DerivedIndexQuery>>,
     /// Generic script-index query adapter.
     pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
+    /// Live txindex status for the `getcapabilities` projection.
+    pub derived_index_status: Option<Arc<dyn crate::capabilities::DerivedIndexCapabilitySource>>,
 }
 
 /// Network capability handles.
@@ -387,65 +452,24 @@ pub struct MiningHandles {
 }
 
 /// Shared state consumed by JSON-RPC handlers.
+///
+/// The context holds one capability group per node subsystem plus the fields
+/// that belong to no subsystem. It stores no subsystem state of its own: a new
+/// capability extends its own group instead of widening this declaration.
 pub struct Context {
-    /// Best-chain tip snapshot published by chain validation.
-    pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Best-applied-block tip snapshot published after block application.
-    pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Serializes whole-chainstate RPC reads with node-owned connect/disconnect transitions.
-    chain_transition: Arc<Mutex<()>>,
-    /// Process-wide initial-block-download latch over the applied chain,
-    /// shared with P2P so RPC and P2P answer identically.
-    pub ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    /// Chain capabilities: published tips, block log, UTXO set, block tree,
+    /// and the shared initial-block-download latch.
+    pub chain: ChainHandles,
     /// Mempool mutation gateway: the only production route that takes the
     /// pool write lock, publishing ordered mutation events to observers.
     pub mempool: Arc<MempoolGateway>,
-    /// Block records already available without blocking storage readers.
-    pub blocks: Arc<RwLock<BlockLog>>,
-    /// Raw transactions indexed by txid for Core transaction RPCs.
-    pub transactions: Arc<RwLock<HashMap<Txid, Tx>>>,
-    /// UTXO set snapshot handle used by chain metadata RPCs.
-    pub utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
-    /// Incremental UTXO-set statistics.
-    pub coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
-    /// Optional storage pruning mutator.
-    pub prune_service: Option<Arc<dyn PruneService>>,
-    /// Optional node-owned chain mutation service.
-    pub chain_control: Option<Arc<dyn ChainControl>>,
+    /// Index capabilities: transaction and script index query adapters.
+    pub indexes: IndexHandles,
+    /// Network capabilities: peer sessions, counters, and connection control.
+    pub network: NetworkHandles,
     /// Optional node-owned mining coordinator.
     pub mining_control: Option<Arc<dyn MiningControl>>,
-    /// Optional node-owned complete transaction-index query adapter.
-    /// `None` when transaction indexing is disabled.
-    pub derived_index: Option<Arc<dyn DerivedIndexQuery>>,
-    /// Complete transaction lookup used internally by Esplora projections.
-    ///
-    /// This may be available with `--scriptindex` even when `derived_index` is
-    /// absent, because it does not advertise the Core `--txindex` contract.
-    pub esplora_tx_index: Option<Arc<dyn DerivedIndexQuery>>,
-    /// Optional node-owned generic script-index query adapter.
-    pub script_index: Option<Arc<dyn ScriptIndexQuery>>,
-    /// Live txindex status for the `getcapabilities` projection.
-    pub derived_index_status: Option<Arc<dyn crate::capabilities::DerivedIndexCapabilitySource>>,
-    /// Network counters and peers.
-    pub network: Arc<RwLock<NetworkState>>,
-    /// Network selector used by handlers needing consensus parameters (e.g.
-    /// difficulty calculation).
-    pub chain_network: Network,
-    /// Authoritative live peer sessions.
-    pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
-    /// Whether outbound and inbound network activity is enabled through RPC.
-    pub network_active: Arc<core::sync::atomic::AtomicBool>,
-    /// Shared in-memory block tree.
-    pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
-    /// Optional durable block body reader for metadata-only block records.
-    pub block_body_source: Option<Arc<dyn BlockBodySource>>,
-    /// Optional outbound channel for `addnode` to request new P2P connections.
-    /// `None` for embedded/test callers without a live P2P listener.
-    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>>,
-    /// Manual IP/CIDR bans shared with P2P enforcement.
-    pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
-    /// Persisted `addnode add` entries.
-    pub added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
+
     /// Instant this context's RPC listener bound, set by `RpcServer::bind`
     /// and read by `uptime`. Kept per context rather than process-global so
     /// two servers in one process report their own epochs; `None` (never
@@ -457,11 +481,6 @@ pub struct Context {
     pub debug_log_path: Option<PathBuf>,
     /// Limits concurrent full-block REST response materializations.
     rest_render_budget: Arc<RestRenderBudget>,
-    /// Rollback-evidence warning source for `getblockchaininfo`.
-    ///
-    /// `None` in test contexts; populated by `NodeState` with the process-wide
-    /// `WarningStore`. Each request loads one immutable snapshot.
-    pub rollback_warnings: Option<Arc<dyn RollbackWarningSource>>,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
 // handle behind it uses atomics, channels, or locks for interior mutation.
@@ -489,56 +508,8 @@ impl Default for Context {
 impl Context {
     /// Builds an empty context suitable for tests and early startup.
     #[must_use]
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Self {
-        let coin_stats_listener = bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::default(),
-        );
-        let mut utxo = bitcoin_rs_utxo::UtxoSet::new();
-        utxo.set_listener(Box::new(coin_stats_listener.clone()));
-        let coin_stats = Arc::new(coin_stats_listener);
-        let mempool = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
-            MempoolLimits::default(),
-        ))));
-        let applied_tip = Arc::new(ArcSwapOption::empty());
-        let block_tree = Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new()));
-        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-            Arc::clone(&applied_tip),
-            Arc::clone(&block_tree),
-            Network::Mainnet,
-        ));
-        Self {
-            chain_tip: Arc::new(ArcSwapOption::empty()),
-            applied_tip,
-            chain_transition: Arc::new(Mutex::new(())),
-            ibd,
-            mempool,
-            blocks: Arc::new(RwLock::new(BlockLog::new())),
-            transactions: Arc::new(RwLock::new(HashMap::new())),
-            utxo: Arc::new(utxo),
-            coin_stats,
-            derived_index: None,
-            esplora_tx_index: None,
-            script_index: None,
-            derived_index_status: None,
-            prune_service: None,
-            chain_control: None,
-            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
-            network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
-            mining_control: None,
-            network: Arc::new(RwLock::new(NetworkState::default())),
-            chain_network: Network::Mainnet,
-            block_tree,
-            block_body_source: None,
-            p2p_outbound_sender: None,
-            banned: Arc::new(RwLock::new(Vec::new())),
-            added_nodes: Arc::new(RwLock::new(Vec::new())),
-            server_bound_at: Mutex::new(None),
-            zmq_publisher: Arc::new(crate::zmq::NoOpZmqPublisher),
-            debug_log_path: None,
-            rest_render_budget: Arc::new(RestRenderBudget::new()),
-            rollback_warnings: None,
-        }
+        Self::build_fixture(None)
     }
 
     /// Builds an empty context whose mempool gateway carries `observer`.
@@ -547,123 +518,98 @@ impl Context {
     /// observer instead of `None`. Test-only: production wiring constructs
     /// the gateway through `NodeState::open`.
     #[must_use]
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_with_mempool_observer(observer: Arc<dyn MempoolObserver>) -> Self {
+        Self::build_fixture(Some(observer))
+    }
+
+    /// Assembles one internally consistent fixture set.
+    ///
+    /// PRE: `observer` is this fixture's mempool observer, or `None`.
+    /// POST: every capability group owns fresh, unattached handles on
+    ///   `Network::Mainnet`, and the mempool gateway carries `observer`.
+    /// INVARIANT: the shared initial-block-download latch reads the same
+    ///   applied-tip cell and block tree the chain group owns, so publishing a
+    ///   tip through the group moves both readers.
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn build_fixture(observer: Option<Arc<dyn MempoolObserver>>) -> Self {
         let coin_stats_listener = bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::default(),
         );
         let mut utxo = bitcoin_rs_utxo::UtxoSet::new();
         utxo.set_listener(Box::new(coin_stats_listener.clone()));
         let coin_stats = Arc::new(coin_stats_listener);
-        let mempool = MempoolGateway::shared_with(
-            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            observer,
-        );
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        let mempool = match observer {
+            Some(observer) => MempoolGateway::shared_with(pool, observer),
+            None => MempoolGateway::shared(pool),
+        };
+        let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
+        let blocks = Arc::new(RwLock::new(BlockLog::new()));
+        let transactions = Arc::new(RwLock::new(HashMap::new()));
         let block_tree = Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new()));
         let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
             Network::Mainnet,
         ));
-        Self {
-            chain_tip: Arc::new(ArcSwapOption::empty()),
+        let chain = ChainHandles::new(
+            chain_tip,
             applied_tip,
-            chain_transition: Arc::new(Mutex::new(())),
-            ibd,
-            mempool,
-            blocks: Arc::new(RwLock::new(BlockLog::new())),
-            transactions: Arc::new(RwLock::new(HashMap::new())),
-            utxo: Arc::new(utxo),
+            blocks,
+            transactions,
+            Arc::new(utxo),
             coin_stats,
-            derived_index: None,
-            esplora_tx_index: None,
-            script_index: None,
-            derived_index_status: None,
-            prune_service: None,
-            chain_control: None,
-            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
-            network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
-            mining_control: None,
-            network: Arc::new(RwLock::new(NetworkState::default())),
-            chain_network: Network::Mainnet,
             block_tree,
-            block_body_source: None,
-            p2p_outbound_sender: None,
-            banned: Arc::new(RwLock::new(Vec::new())),
-            added_nodes: Arc::new(RwLock::new(Vec::new())),
+            Network::Mainnet,
+            ibd,
+        );
+        Self {
+            chain,
+            mempool,
+            indexes: IndexHandles::default(),
+            network: NetworkHandles {
+                network: Arc::new(RwLock::new(NetworkState::default())),
+                network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
+                peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
+                p2p_outbound_sender: None,
+                banned: Arc::new(RwLock::new(Vec::new())),
+                added_nodes: Arc::new(RwLock::new(Vec::new())),
+            },
+            mining_control: None,
             server_bound_at: Mutex::new(None),
             zmq_publisher: Arc::new(crate::zmq::NoOpZmqPublisher),
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
-            rollback_warnings: None,
         }
     }
+
     /// Builds a context that shares pre-existing handles owned elsewhere.
+    ///
+    /// PRE: `handles` groups the node's live capability objects.
+    /// POST: the context owns those exact groups and unwraps the two
+    ///   single-handle input groups; the RPC-local fields are fresh.
+    /// INVARIANT: no group is flattened or rebuilt, so a publication through
+    ///   the node's own handle is visible to every RPC worker.
     #[must_use]
     pub fn from_handles(handles: ContextHandles) -> Self {
         let ContextHandles {
-            chain:
-                ChainHandles {
-                    chain_tip,
-                    applied_tip,
-                    ibd,
-                    blocks,
-                    transactions,
-                    utxo,
-                    coin_stats,
-                    block_tree,
-                    chain_network,
-                },
+            chain,
             mempool: MempoolHandles { mempool },
-            indexes:
-                IndexHandles {
-                    derived_index,
-                    script_index,
-                },
-            network:
-                NetworkHandles {
-                    network,
-                    network_active,
-                    peer_table,
-                    p2p_outbound_sender,
-                    banned,
-                    added_nodes,
-                },
+            indexes,
+            network,
             mining: MiningHandles { mining_control },
-            derived_index_status,
         } = handles;
         Self {
-            chain_tip,
-            applied_tip,
-            chain_transition: Arc::new(Mutex::new(())),
-            ibd,
+            chain,
             mempool,
-            blocks,
-            transactions,
-            utxo,
-            coin_stats,
-            derived_index,
-            esplora_tx_index: None,
-            script_index,
-            derived_index_status,
+            indexes,
             network,
-            chain_network,
-            peer_table,
-            network_active,
-            block_tree,
-            block_body_source: None,
-            p2p_outbound_sender,
-            banned,
-            added_nodes,
-            prune_service: None,
-            chain_control: None,
             mining_control,
             server_bound_at: Mutex::new(None),
             zmq_publisher: Arc::new(crate::zmq::NoOpZmqPublisher),
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
-            rollback_warnings: None,
         }
     }
 
@@ -686,28 +632,28 @@ impl Context {
         mut self,
         derived_index: Option<Arc<dyn DerivedIndexQuery>>,
     ) -> Self {
-        self.esplora_tx_index = derived_index;
+        self.indexes.esplora_tx_index = derived_index;
         self
     }
 
     /// Returns `self` with a durable block body source.
     #[must_use]
     pub fn with_block_body_source(mut self, source: Arc<dyn BlockBodySource>) -> Self {
-        self.block_body_source = Some(source);
+        self.chain.block_body_source = Some(source);
         self
     }
 
     /// Attaches the rollback-evidence warning source for `getblockchaininfo`.
     #[must_use]
     pub fn with_rollback_warnings(mut self, source: Arc<dyn RollbackWarningSource>) -> Self {
-        self.rollback_warnings = Some(source);
+        self.chain.rollback_warnings = Some(source);
         self
     }
 
     /// Attaches the node-owned pruning mutator used by `pruneblockchain`.
     #[must_use]
     pub fn with_prune_service(mut self, prune_service: Arc<dyn PruneService>) -> Self {
-        self.prune_service = Some(prune_service);
+        self.chain.prune_service = Some(prune_service);
         self
     }
 
@@ -723,25 +669,15 @@ impl Context {
     /// Attaches the node-owned chain mutation service.
     #[must_use]
     pub fn with_chain_control(mut self, chain_control: Arc<dyn ChainControl>) -> Self {
-        self.chain_control = Some(chain_control);
+        self.chain.chain_control = Some(chain_control);
         self
     }
 
     /// Shares the node's authoritative connect/disconnect lock with RPC readers.
     #[must_use]
     pub fn with_chain_transition(mut self, chain_transition: Arc<Mutex<()>>) -> Self {
-        self.chain_transition = chain_transition;
+        self.chain.chain_transition = chain_transition;
         self
-    }
-
-    /// Runs a read while authoritative UTXO and applied-tip transitions are excluded.
-    pub fn with_stable_chainstate<R>(&self, read: impl FnOnce() -> R) -> R {
-        let _transition = self.chain_transition.lock();
-        read()
-    }
-
-    fn applied_progress_snapshot(&self) -> (Option<Arc<TipSnapshot>>, Option<u64>) {
-        self.with_stable_chainstate(|| (self.applied_tip.load_full(), self.chain_tx_count()))
     }
 
     /// Attaches the live ZMQ publisher used by `getzmqnotifications`.
@@ -768,6 +704,52 @@ impl Context {
     #[must_use]
     pub(crate) fn zmq_notifications(&self) -> Vec<crate::zmq::ZmqNotifier> {
         self.zmq_publisher.active_notifiers()
+    }
+
+    /// Admits one transaction through the full policy stack, then mutates
+    /// the mempool only through the node's one [`MempoolGateway`].
+    ///
+    /// `sendrawtransaction` and embedded `Node::broadcast` both use the
+    /// gateway's [`MempoolGateway::submit_transaction`] preparation and retry
+    /// boundary. [`MempoolGateway::admit_transaction`] evaluates policy under
+    /// a pool read and verifies scripts over copied inputs outside pool locks.
+    /// Its writer rechecks chain generation, pool sequence and enforced policy
+    /// before committing through the gateway's ordered publication seam.
+    ///
+    /// Membership follows `POL-01` Duplicate submission in
+    /// `docs/policies/mempool-policy.md`. The pool read is a best-effort
+    /// pre-check; the locked evaluation is authoritative. The RPC lookup
+    /// cache is not membership.
+    ///
+    /// `max_feerate_sat_per_kvb` of `None` disables the max-fee cap,
+    /// matching `sendrawtransaction`'s `maxfeerate=0` behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns the policy rejection verbatim (Core rejection strings) or
+    /// the failure verbatim; nothing is inserted when this fails.
+    // Owned `Tx` is the public call form (`admit_transaction(tx, None)`).
+    // Admission only borrows; the value parameter is the compatibility contract.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn admit_transaction(
+        &self,
+        tx: Tx,
+        max_feerate_sat_per_kvb: Option<u64>,
+    ) -> Result<MutationResult, String> {
+        crate::handlers::tx::admit_transaction(self, &tx, max_feerate_sat_per_kvb)
+            .map_err(crate::handlers::tx::AdmissionFailure::into_string)
+    }
+}
+
+impl ChainHandles {
+    /// Runs a read while authoritative UTXO and applied-tip transitions are excluded.
+    pub fn with_stable_chainstate<R>(&self, read: impl FnOnce() -> R) -> R {
+        let _transition = self.chain_transition.lock();
+        read()
+    }
+
+    fn applied_progress_snapshot(&self) -> (Option<Arc<TipSnapshot>>, Option<u64>) {
+        self.with_stable_chainstate(|| (self.applied_tip.load_full(), self.chain_tx_count()))
     }
 
     /// Returns the pruning state reported by `getblockchaininfo`.
@@ -896,40 +878,6 @@ impl Context {
             &self.block_tree,
             self.chain_network,
         )
-    }
-
-    /// Admits one transaction through the full policy stack, then mutates
-    /// the mempool only through the node's one [`MempoolGateway`].
-    ///
-    /// `sendrawtransaction` and embedded `Node::broadcast` both use the
-    /// gateway's [`MempoolGateway::submit_transaction`] preparation and retry
-    /// boundary. [`MempoolGateway::admit_transaction`] evaluates policy under
-    /// a pool read and verifies scripts over copied inputs outside pool locks.
-    /// Its writer rechecks chain generation, pool sequence and enforced policy
-    /// before committing through the gateway's ordered publication seam.
-    ///
-    /// Membership follows `POL-01` Duplicate submission in
-    /// `docs/policies/mempool-policy.md`. The pool read is a best-effort
-    /// pre-check; the locked evaluation is authoritative. The RPC lookup
-    /// cache is not membership.
-    ///
-    /// `max_feerate_sat_per_kvb` of `None` disables the max-fee cap,
-    /// matching `sendrawtransaction`'s `maxfeerate=0` behavior.
-    ///
-    /// # Errors
-    ///
-    /// Returns the policy rejection verbatim (Core rejection strings) or
-    /// the failure verbatim; nothing is inserted when this fails.
-    // Owned `Tx` is the public call form (`admit_transaction(tx, None)`).
-    // Admission only borrows; the value parameter is the compatibility contract.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn admit_transaction(
-        &self,
-        tx: Tx,
-        max_feerate_sat_per_kvb: Option<u64>,
-    ) -> Result<MutationResult, String> {
-        crate::handlers::tx::admit_transaction(self, &tx, max_feerate_sat_per_kvb)
-            .map_err(crate::handlers::tx::AdmissionFailure::into_string)
     }
 
     /// Returns the current tip height, or zero before initial sync publishes one.
@@ -1177,6 +1125,19 @@ impl Context {
 mod tests {
     use super::*;
 
+    /// A txindex status source stand-in, so the identity test can prove the
+    /// capability travels to `indexes` without a live index runtime.
+    struct ReadySource;
+
+    impl crate::capabilities::DerivedIndexCapabilitySource for ReadySource {
+        fn capability(&self) -> crate::capabilities::CapabilityStatus {
+            crate::capabilities::derived_index_status(
+                true,
+                crate::capabilities::CapabilityState::Ready,
+            )
+        }
+    }
+
     /// A log whose heights are non-decreasing but not a clean `0..n`.
     ///
     /// Height 3 is recorded three times, as two reorgs leave it; the log starts
@@ -1241,7 +1202,7 @@ mod tests {
     fn block_by_height_without_an_applied_tip_reads_the_log() {
         let ctx = Context::new();
         for record in shaped_records() {
-            ctx.add_block(record);
+            ctx.chain.add_block(record);
         }
 
         for height in 0_u32..12 {
@@ -1250,7 +1211,7 @@ mod tests {
                 .find(|candidate| candidate.height == height)
                 .map(|record| record.hash);
             assert_eq!(
-                ctx.block_by_height(height).map(|record| record.hash),
+                ctx.chain.block_by_height(height).map(|record| record.hash),
                 expected,
                 "block_by_height disagrees with the log at height {height}"
             );
@@ -1350,18 +1311,20 @@ mod tests {
         let banned = Arc::new(RwLock::new(Vec::<bitcoin_rs_p2p::BannedSubnet>::new()));
         let added_nodes = Arc::new(RwLock::new(Vec::new()));
         let network_active = Arc::new(core::sync::atomic::AtomicBool::new(true));
+        let status: Arc<dyn crate::capabilities::DerivedIndexCapabilitySource> =
+            Arc::new(ReadySource);
         let ctx = Context::from_handles(ContextHandles {
-            chain: ChainHandles {
-                chain_tip: Arc::clone(&chain_tip),
-                applied_tip: Arc::clone(&applied_tip),
-                ibd: Arc::clone(&ibd),
-                blocks: Arc::new(RwLock::new(BlockLog::new())),
-                transactions: Arc::new(RwLock::new(HashMap::new())),
-                utxo: Arc::clone(&utxo),
-                coin_stats: Arc::clone(&coin_stats),
-                block_tree: Arc::clone(&block_tree),
-                chain_network: Network::Mainnet,
-            },
+            chain: ChainHandles::new(
+                Arc::clone(&chain_tip),
+                Arc::clone(&applied_tip),
+                Arc::new(RwLock::new(BlockLog::new())),
+                Arc::new(RwLock::new(HashMap::new())),
+                Arc::clone(&utxo),
+                Arc::clone(&coin_stats),
+                Arc::clone(&block_tree),
+                Network::Mainnet,
+                Arc::clone(&ibd),
+            ),
             mempool: MempoolHandles {
                 mempool: MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
                     MempoolLimits::default(),
@@ -1369,7 +1332,9 @@ mod tests {
             },
             indexes: IndexHandles {
                 derived_index: None,
+                esplora_tx_index: None,
                 script_index: None,
+                derived_index_status: Some(Arc::clone(&status)),
             },
             network: NetworkHandles {
                 network: Arc::new(RwLock::new(NetworkState::default())),
@@ -1382,14 +1347,13 @@ mod tests {
             mining: MiningHandles {
                 mining_control: None,
             },
-            derived_index_status: None,
         });
         assert!(
-            Arc::ptr_eq(&ctx.chain_tip, &chain_tip),
+            Arc::ptr_eq(&ctx.chain.chain_tip, &chain_tip),
             "chain_tip must be shared with caller"
         );
         assert!(
-            Arc::ptr_eq(&ctx.applied_tip, &applied_tip),
+            Arc::ptr_eq(&ctx.chain.applied_tip, &applied_tip),
             "applied_tip must be shared with caller"
         );
         // The count travels inside the applied tip: one publication replaces
@@ -1404,36 +1368,46 @@ mod tests {
             })
         };
         applied_tip.store(Some(counted(1)));
-        assert_eq!(ctx.chain_tx_count(), Some(1));
+        assert_eq!(ctx.chain.chain_tx_count(), Some(1));
         applied_tip.store(Some(counted(42)));
-        assert_eq!(ctx.chain_tx_count(), Some(42));
+        assert_eq!(ctx.chain.chain_tx_count(), Some(42));
         assert!(
-            Arc::ptr_eq(&ctx.ibd, &ibd),
+            Arc::ptr_eq(&ctx.chain.ibd, &ibd),
             "ibd must be shared with caller"
         );
         assert!(
-            Arc::ptr_eq(&ctx.utxo, &utxo),
+            Arc::ptr_eq(&ctx.chain.utxo, &utxo),
             "utxo must be shared with caller"
         );
         assert!(
-            Arc::ptr_eq(&ctx.coin_stats, &coin_stats),
+            Arc::ptr_eq(&ctx.chain.coin_stats, &coin_stats),
             "coin_stats must be shared with caller"
         );
         assert!(
-            Arc::ptr_eq(&ctx.block_tree, &block_tree),
+            Arc::ptr_eq(&ctx.chain.block_tree, &block_tree),
             "block_tree must be shared with caller"
         );
         assert!(
-            Arc::ptr_eq(&ctx.network_active, &network_active),
+            Arc::ptr_eq(&ctx.network.network_active, &network_active),
             "network activity must be shared with caller"
         );
         assert!(
-            Arc::ptr_eq(&ctx.banned, &banned),
+            Arc::ptr_eq(&ctx.network.banned, &banned),
             "banned must be shared with caller"
         );
         assert!(
-            Arc::ptr_eq(&ctx.added_nodes, &added_nodes),
+            Arc::ptr_eq(&ctx.network.added_nodes, &added_nodes),
             "added_nodes must be shared with caller"
+        );
+        assert!(
+            Arc::ptr_eq(
+                ctx.indexes
+                    .derived_index_status
+                    .as_ref()
+                    .expect("index status keeps its own slot"),
+                &status
+            ),
+            "the txindex status source must be shared with caller"
         );
     }
 
@@ -1446,7 +1420,7 @@ mod tests {
         let ctx = Arc::new(Context::new().with_chain_transition(Arc::clone(&barrier)));
         let genesis = Network::Regtest.genesis_block();
         let tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let tip_id = tree.insert_node(
                 None,
                 genesis.header,
@@ -1467,11 +1441,11 @@ mod tests {
             ..tip
         };
         let transition = barrier.lock();
-        ctx.applied_tip.store(Some(Arc::new(tip.clone())));
+        ctx.chain.applied_tip.store(Some(Arc::new(tip.clone())));
         let worker = Arc::clone(&ctx);
         let (tx, rx) = mpsc::channel();
         let join = std::thread::spawn(move || {
-            let _ = tx.send(worker.applied_progress_snapshot());
+            let _ = tx.send(worker.chain.applied_progress_snapshot());
         });
         assert!(
             rx.recv_timeout(Duration::from_millis(20)).is_err(),
@@ -1512,11 +1486,12 @@ mod tests {
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(outpoint, txout, true, 7));
 
-        ctx.utxo
+        ctx.chain
+            .utxo
             .commit_block(&changes, &Hash256::default())
             .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
 
-        let snapshot = ctx.coin_stats.snapshot();
+        let snapshot = ctx.chain.coin_stats.snapshot();
         assert_eq!(snapshot.utxo_count, 1);
         assert_eq!(snapshot.total_amount, 125_000);
     }
@@ -1557,16 +1532,16 @@ mod tests {
             body: body.clone(),
         });
         let ctx = Context::new().with_block_body_source(source);
-        ctx.add_block(record.clone());
+        ctx.chain.add_block(record.clone());
 
         assert_eq!(record.body_size, consensus_bytes(&block).len());
         assert_eq!(
-            ctx.block_body_bytes(&record).as_deref(),
+            ctx.chain.block_body_bytes(&record).as_deref(),
             Some(body.as_slice())
         );
         let expected_hex = hex_encode(&body);
         assert_eq!(
-            ctx.block_body_hex(&record).as_deref(),
+            ctx.chain.block_body_hex(&record).as_deref(),
             Some(expected_hex.as_str())
         );
     }
@@ -1583,11 +1558,11 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let ctx = Arc::new(Context::new());
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let _ = tree.insert_node(None, block.header, bitcoin_rs_chain::NodeStatus::Active);
         }
         let hash = Hash256::from(block.block_hash());
-        let Some(record) = ctx.record_for_hash(hash) else {
+        let Some(record) = ctx.chain.record_for_hash(hash) else {
             panic!("the tree knows this hash");
         };
 
@@ -1610,7 +1585,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let ctx = Arc::new(Context::new());
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let _ = tree.insert_node(None, block.header, bitcoin_rs_chain::NodeStatus::Active);
         }
         let cached = BlockRecord::from_block(0, &block);
@@ -1618,9 +1593,9 @@ mod tests {
         let expected_body_size = cached.body_size;
         let expected_tx_count = cached.tx_count;
         assert!(cached.header_bytes().is_none(), "the log stores no header");
-        ctx.add_block(cached);
+        ctx.chain.add_block(cached);
 
-        let Some(record) = ctx.record_for_hash(hash) else {
+        let Some(record) = ctx.chain.record_for_hash(hash) else {
             panic!("the tree knows this hash");
         };
         assert_eq!(
@@ -1646,10 +1621,11 @@ mod tests {
     fn block_by_hash_ignores_log_records_the_tree_does_not_know() {
         let ctx = Context::new();
         let hash = Hash256::from_le_bytes(&[3_u8; 32]);
-        ctx.add_block(BlockRecord::synthetic(3, BlockHash::from(hash)));
+        ctx.chain
+            .add_block(BlockRecord::synthetic(3, BlockHash::from(hash)));
 
-        assert!(ctx.record_for_hash(hash).is_none());
-        assert!(ctx.block_by_hash(hash).is_none());
+        assert!(ctx.chain.record_for_hash(hash).is_none());
+        assert!(ctx.chain.block_by_hash(hash).is_none());
     }
 
     /// A record with no header must render as the empty string, the way an empty
@@ -1685,7 +1661,7 @@ mod tests {
             nonce: 7,
         };
         let hash = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let id = tree
                 .insert_node(None, header, NodeStatus::Active)
                 .expect("genesis inserts");
@@ -1694,7 +1670,10 @@ mod tests {
 
         // Nothing was pushed into `blocks`, so the record can only come from the
         // tree.
-        let record = ctx.record_for_hash(hash).expect("tree resolves the hash");
+        let record = ctx
+            .chain
+            .record_for_hash(hash)
+            .expect("tree resolves the hash");
 
         assert_eq!(
             record.header_bytes().map(|bytes| &bytes[..]),
@@ -1709,7 +1688,7 @@ mod tests {
         let ctx = Context::new();
         let unknown = bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xff_u8; 32]);
 
-        assert!(ctx.height_for_hash(unknown).is_none());
+        assert!(ctx.chain.height_for_hash(unknown).is_none());
     }
     #[test]
     fn block_by_height_prefers_tree_identity_over_stale_cache()
@@ -1719,7 +1698,7 @@ mod tests {
 
         let ctx = Context::new();
         let (child_hash, stale_hash) = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = Header {
                 version: 1,
                 prev_blockhash: BlockHash::default(),
@@ -1743,16 +1722,18 @@ mod tests {
             let applied_tip = tree
                 .tip()
                 .ok_or_else(|| std::io::Error::other("missing child tip"))?;
-            ctx.set_applied_tip((*applied_tip).clone());
+            ctx.chain.set_applied_tip((*applied_tip).clone());
             // Stale cache entry at the SAME height as the tree child but with a
             // different hash. The active-tree identity must win over this cache.
             let stale_hash = Hash256::from_le_bytes(&[0xa5_u8; 32]);
-            ctx.add_block(BlockRecord::synthetic(1, BlockHash::from(stale_hash)));
+            ctx.chain
+                .add_block(BlockRecord::synthetic(1, BlockHash::from(stale_hash)));
             (child_hash, stale_hash)
         };
 
         assert_ne!(child_hash, stale_hash, "test fixture hashes must differ");
         let found = ctx
+            .chain
             .block_by_height(1)
             .ok_or_else(|| std::io::Error::other("tree child missing at height 1"))?;
         assert_eq!(
@@ -1772,7 +1753,7 @@ mod tests {
 
         let ctx = Context::new();
         let (applied_tip, header_tip) = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = Header {
                 version: 1,
                 prev_blockhash: BlockHash::default(),
@@ -1822,23 +1803,25 @@ mod tests {
             (applied_tip, header_tip)
         };
 
-        ctx.set_applied_tip((*applied_tip).clone());
-        ctx.set_chain_tip((*header_tip).clone());
-        ctx.add_block(BlockRecord::synthetic(2, BlockHash::from(header_tip.hash)));
+        ctx.chain.set_applied_tip((*applied_tip).clone());
+        ctx.chain.set_chain_tip((*header_tip).clone());
+        ctx.chain
+            .add_block(BlockRecord::synthetic(2, BlockHash::from(header_tip.hash)));
 
         assert_eq!(
-            ctx.active_hash_at_height(1),
+            ctx.chain.active_hash_at_height(1),
             Some(applied_tip.hash),
             "height lookup must stay on the applied branch"
         );
-        assert_eq!(ctx.block_hash_at_height(1), Some(applied_tip.hash));
+        assert_eq!(ctx.chain.block_hash_at_height(1), Some(applied_tip.hash));
         assert_eq!(
-            ctx.block_by_height(1)
+            ctx.chain
+                .block_by_height(1)
                 .map(|record| Hash256::from(record.hash)),
             Some(applied_tip.hash)
         );
-        assert!(ctx.block_hash_at_height(2).is_none());
-        assert!(ctx.block_by_height(2).is_none());
+        assert!(ctx.chain.block_hash_at_height(2).is_none());
+        assert!(ctx.chain.block_by_height(2).is_none());
         Ok(())
     }
 }
@@ -1877,8 +1860,8 @@ mod admission_chain_tests {
     }
 
     fn publish_tip(ctx: &Context, time: u32) -> anyhow::Result<()> {
-        let mut tree = ctx.block_tree.write();
-        let parent = ctx.applied_tip.load_full().map(|tip| tip.tip_id);
+        let mut tree = ctx.chain.block_tree.write();
+        let parent = ctx.chain.applied_tip.load_full().map(|tip| tip.tip_id);
         let previous_hash = match parent {
             Some(id) => BlockHash::from(tree.node(id)?.hash),
             None => BlockHash::default(),
@@ -1898,7 +1881,7 @@ mod admission_chain_tests {
             )
             .context("insert tip node")?;
         let node = tree.node(id)?;
-        ctx.applied_tip.store(Some(Arc::new(TipSnapshot {
+        ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
             tip_id: id,
             height: node.height,
             chainwork: node.chainwork,
@@ -1924,13 +1907,14 @@ mod admission_chain_tests {
             false,
             0,
         ));
-        ctx.utxo.commit_block(&changes, &Hash256::default())?;
+        ctx.chain.utxo.commit_block(&changes, &Hash256::default())?;
 
         // Stable whole-chain readers hold this mutex without changing the
         // generation. Admission must succeed through its real RPC path while
         // such a reader is active, rather than spending its retry budget on
         // contention that says nothing about stale chain facts.
         let result = ctx
+            .chain
             .with_stable_chainstate(|| ctx.admit_transaction(tx, None))
             .map_err(anyhow::Error::msg)?;
         assert_eq!(result.changes.len(), 1);
@@ -1955,10 +1939,11 @@ mod admission_chain_tests {
             false,
             0,
         ));
-        ctx.utxo.commit_block(&changes, &Hash256::default())?;
-        ctx.add_transaction(tx.clone());
+        ctx.chain.utxo.commit_block(&changes, &Hash256::default())?;
+        ctx.chain.add_transaction(tx.clone());
         assert!(
-            !ctx.admission_chain()
+            !ctx.chain
+                .admission_chain()
                 .snapshot(&tx)
                 .context("snapshot")?
                 .confirmed
@@ -1971,7 +1956,7 @@ mod admission_chain_tests {
             }),
             None,
             0,
-            &ctx.admission_chain(),
+            &ctx.chain.admission_chain(),
         )?;
         assert!(matches!(result, SubmitOutcome::Committed(_)));
         assert!(ctx.mempool.read().contains_txid(&txid));
@@ -1988,10 +1973,11 @@ mod admission_chain_tests {
         let output = OutPoint::new(tx.txid(), 0);
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(output, tx.outputs[0].clone(), false, 0));
-        ctx.utxo.commit_block(&changes, &Hash256::default())?;
-        assert!(ctx.transactions.read().is_empty());
+        ctx.chain.utxo.commit_block(&changes, &Hash256::default())?;
+        assert!(ctx.chain.transactions.read().is_empty());
         assert!(
-            ctx.admission_chain()
+            ctx.chain
+                .admission_chain()
                 .snapshot(&tx)
                 .context("snapshot")?
                 .confirmed
@@ -2005,7 +1991,8 @@ mod admission_chain_tests {
         let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[7; 32])), 0);
         let tx = spending(outpoint);
         assert!(
-            ctx.admission_chain()
+            ctx.chain
+                .admission_chain()
                 .snapshot(&tx)
                 .context("empty snapshot")?
                 .prevouts
@@ -2014,7 +2001,7 @@ mod admission_chain_tests {
 
         // A borrowed capability observes current handles even in isolated
         // contexts that replace test state after construction.
-        ctx.utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
+        ctx.chain.utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(
             outpoint,
@@ -2025,14 +2012,19 @@ mod admission_chain_tests {
             false,
             0,
         ));
-        ctx.utxo
+        ctx.chain
+            .utxo
             .commit_block(&changes, &Hash256::default())
             .context("fund input")?;
         publish_tip(&ctx, 100)?;
         publish_tip(&ctx, 200)?;
-        ctx.transactions.write().insert(tx.txid(), tx.clone());
+        ctx.chain.transactions.write().insert(tx.txid(), tx.clone());
 
-        let snapshot = ctx.admission_chain().snapshot(&tx).context("snapshot")?;
+        let snapshot = ctx
+            .chain
+            .admission_chain()
+            .snapshot(&tx)
+            .context("snapshot")?;
         assert_eq!(snapshot.height, 1);
         assert_eq!(snapshot.locktime_cutoff, 200);
         assert_eq!(snapshot.prevouts.len(), 1);

@@ -251,7 +251,7 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 
 - **Owner**: `ensure_template_ready` in `crates/rpc/src/handlers/mining.rs`.
 - Template mode on mainnet requires at least one live peer (`PeerTable`) and
-  that the node has left IBD (served only once `Context::ibd.is_active`,
+  that the node has left IBD (served only once `ctx.chain.ibd.is_active`,
   the chain-crate latch in `crates/chain/src/ibd.rs`, returns `false`).
   Failures are Core `-9` (`bitcoin-rs is not connected!`) and `-10`
   (`bitcoin-rs is in initial sync and waiting for blocks...`).

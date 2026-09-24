@@ -225,7 +225,7 @@ fn internal_outspend(
 }
 
 fn block_template(handler: &Handler) -> Response {
-    let rules = required_gbt_rules(handler.context().chain_network);
+    let rules = required_gbt_rules(handler.context().chain.chain_network);
     let request = sonic_json!([{"rules": rules}]);
     handler
         .dispatch("getblocktemplate", &request)
