@@ -30,8 +30,12 @@ pub enum Error {
     },
     /// A deadline expired while waiting for a condition.
     Timeout {
+        /// Process id of the node whose wait expired.
+        pid: u32,
         /// What was being awaited.
         operation: &'static str,
+        /// Directory holding captured output.
+        evidence: PathBuf,
         /// Last observed state, for debugging.
         detail: String,
     },
@@ -69,7 +73,11 @@ impl fmt::Display for Error {
                 "child {pid} exited early ({status}); evidence {}",
                 evidence.display()
             ),
-            Self::Timeout { operation, detail } => {
+            Self::Timeout {
+                operation,
+                detail,
+                ..
+            } => {
                 write!(f, "timeout waiting for {operation}: {detail}")
             }
             Self::Protocol(detail) => write!(f, "protocol: {detail}"),
