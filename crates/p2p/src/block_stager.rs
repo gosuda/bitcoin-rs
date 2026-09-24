@@ -62,6 +62,15 @@ pub struct DrainedBlock {
     source: Option<PeerSource>,
 }
 
+impl DrainedBlock {
+    /// The connection that delivered this body, or `None` for a locally
+    /// injected one.
+    #[must_use]
+    pub(crate) const fn source(&self) -> Option<PeerSource> {
+        self.source
+    }
+}
+
 /// A staged body dropped for retry or eviction.
 #[derive(Clone, Debug)]
 pub struct DroppedBlock {
