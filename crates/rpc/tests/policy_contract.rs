@@ -105,7 +105,8 @@ fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    ctx.utxo
+    ctx.chain
+        .utxo
         .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
         .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
     OutPoint {
@@ -1640,23 +1641,25 @@ fn invalidation_handler(state: &NodeState) -> Handler {
     ));
     Handler::new(Arc::new(
         Context::from_handles(ContextHandles {
-            chain: ChainHandles {
-                chain_tip: chainstate.chain_tip_handle(),
-                applied_tip: chainstate.applied_tip_handle(),
+            chain: ChainHandles::new(
+                chainstate.chain_tip_handle(),
+                chainstate.applied_tip_handle(),
+                state.blocks(),
+                state.transactions(),
+                chainstate.utxo_handle(),
+                chainstate.coin_stats_handle(),
+                chainstate.block_tree_handle(),
+                Network::Regtest,
                 ibd,
-                blocks: state.blocks(),
-                transactions: state.transactions(),
-                utxo: chainstate.utxo_handle(),
-                coin_stats: chainstate.coin_stats_handle(),
-                block_tree: chainstate.block_tree_handle(),
-                chain_network: Network::Regtest,
-            },
+            ),
             mempool: MempoolHandles {
                 mempool: MempoolGateway::shared(state.mempool()),
             },
             indexes: IndexHandles {
                 derived_index: None,
+                esplora_tx_index: None,
                 script_index: None,
+                derived_index_status: None,
             },
             network: NetworkHandles {
                 network: state.network(),
@@ -1669,7 +1672,6 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             mining: MiningHandles {
                 mining_control: None,
             },
-            derived_index_status: None,
         })
         .with_chain_control(Arc::new(NodeInvalidator {
             handles: chainstate,
@@ -1779,7 +1781,8 @@ fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutP
         true,
         height,
     ));
-    ctx.utxo
+    ctx.chain
+        .utxo
         .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
         .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
     OutPoint {
@@ -1832,7 +1835,7 @@ fn immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity() -> Resul
     );
 
     // At depth 100 the same spend admits through the same outlet.
-    ctx.set_applied_tip(TipSnapshot {
+    ctx.chain.set_applied_tip(TipSnapshot {
         tip_id: NodeId::new(0),
         height: 119,
         chainwork: ChainWork::ZERO,

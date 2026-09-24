@@ -207,7 +207,7 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     use core::str::FromStr as _;
 
     let address_str = required_str(params, 0, "address is required")?;
-    let network = convert::bitcoin_network(ctx.chain_network);
+    let network = convert::bitcoin_network(ctx.chain.chain_network);
     let Some(address) = bitcoin::Address::from_str(address_str)
         .ok()
         .and_then(|address| address.require_network(network).ok())
@@ -245,8 +245,8 @@ pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     // checked.
     let (payload, checksum) = checked_checksum(descriptor, ChecksumRequirement::Optional)?;
 
-    let info =
-        analyse(payload, convert::bitcoin_network(ctx.chain_network)).map_err(descriptor_error)?;
+    let info = analyse(payload, convert::bitcoin_network(ctx.chain.chain_network))
+        .map_err(descriptor_error)?;
 
     typed_to_sonic_omitting_nulls(&v31::GetDescriptorInfo {
         // The canonical form comes from the parse, so a descriptor handed to this
@@ -290,9 +290,12 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         .map(parse_derivation_range)
         .transpose()?;
 
-    let expansions =
-        derive_descriptor_addresses(payload, convert::bitcoin_network(ctx.chain_network), range)
-            .map_err(descriptor_error)?;
+    let expansions = derive_descriptor_addresses(
+        payload,
+        convert::bitcoin_network(ctx.chain.chain_network),
+        range,
+    )
+    .map_err(descriptor_error)?;
 
     // Core returns a flat array for a single-path descriptor and an array per
     // expansion for a multipath one.
@@ -2069,7 +2072,7 @@ mod deriveaddresses_tests {
     #[test]
     fn combo_derives_core_regtest_addresses() {
         let mut ctx = Context::new();
-        ctx.chain_network = bitcoin_rs_primitives::Network::Regtest;
+        ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
         let ctx = Arc::new(ctx);
         // Bitcoin Core `rpc_deriveaddresses.py`.
         let tprv = "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK";

@@ -66,7 +66,7 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let request = parse_block_template_request(params)?;
     if matches!(request.mode, BlockTemplateMode::Template) {
         ensure_template_ready(ctx)?;
-        ensure_client_rules_for_template(ctx.chain_network, &request.rules)?;
+        ensure_client_rules_for_template(ctx.chain.chain_network, &request.rules)?;
     }
     let client_rules = request.rules.clone();
     match control.get_block_template(request) {
@@ -199,7 +199,7 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
         }
     }
     // See the authoritative API-24 contract for this network-dependent rule.
-    let prioritised = if ctx.chain_network == Network::Regtest {
+    let prioritised = if ctx.chain.chain_network == Network::Regtest {
         ctx.mempool.prioritise(txid, fee_delta).map(|()| true)
     } else {
         let dust_relay_fee = ctx
@@ -232,7 +232,7 @@ pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Va
     // CONTRACT: docs/contracts/external-api.md#API-29
     let payout = payout_script_from_address(
         address,
-        convert::bitcoin_network(ctx.chain_network),
+        convert::bitcoin_network(ctx.chain.chain_network),
         GENERATE_INVALID_ADDRESS,
     )?;
     let generated = control
@@ -258,7 +258,8 @@ pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         .as_ref()
         .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
     let output = required_str(params, 0, "output is required")?;
-    let payout = generateblock_payout_script(output, convert::bitcoin_network(ctx.chain_network))?;
+    let payout =
+        generateblock_payout_script(output, convert::bitcoin_network(ctx.chain.chain_network))?;
     let transactions = parse_generateblock_transactions(ctx, params)?;
     let submit = optional_bool(params, 2, true)?;
     let generated = control
@@ -596,10 +597,10 @@ fn rule_is_mandatory(rule: &str) -> bool {
 
 /// See the API-08 contract for the template-readiness requirements.
 fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
-    if ctx.chain_network != Network::Mainnet {
+    if ctx.chain.chain_network != Network::Mainnet {
         return Ok(());
     }
-    if ctx.peer_table.is_empty() {
+    if ctx.network.peer_table.is_empty() {
         return Err(RpcError::ClientNotConnected(
             "bitcoin-rs is not connected!".to_owned(),
         ));
@@ -607,7 +608,7 @@ fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    if ctx.ibd.is_active(now) {
+    if ctx.chain.ibd.is_active(now) {
         return Err(RpcError::ClientInInitialDownload(
             "bitcoin-rs is in initial sync and waiting for blocks...".to_owned(),
         ));
@@ -985,7 +986,7 @@ mod tests {
 
     fn ctx_with_control(control: Arc<dyn MiningControl>) -> Arc<Context> {
         let mut ctx = Context::new();
-        ctx.chain_network = Network::Regtest;
+        ctx.chain.chain_network = Network::Regtest;
         Arc::new(ctx.with_mining_control(control))
     }
 
@@ -994,7 +995,7 @@ mod tests {
         network: Network,
     ) -> Arc<Context> {
         let mut ctx = Context::new().with_mining_control(control);
-        ctx.chain_network = network;
+        ctx.chain.chain_network = network;
         Arc::new(ctx)
     }
 
@@ -1040,7 +1041,7 @@ mod tests {
 
     fn register_dummy_peer(ctx: &Context) {
         let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::Message>(1);
-        ctx.peer_table.register(
+        ctx.network.peer_table.register(
             "127.0.0.1:8333"
                 .parse()
                 .unwrap_or_else(|error| panic!("dummy peer addr: {error}")),
@@ -1053,7 +1054,7 @@ mod tests {
     fn getblocktemplate_rejects_mainnet_without_peers() {
         let control = FakeMiningControl::with_template(sample_template());
         let ctx = Arc::new(Context::new().with_mining_control(control));
-        assert_eq!(ctx.chain_network, Network::Mainnet);
+        assert_eq!(ctx.chain.chain_network, Network::Mainnet);
         let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
             .expect_err("mainnet without peers must fail");
         assert!(matches!(error, RpcError::ClientNotConnected(_)));
@@ -1633,7 +1634,7 @@ mod tests {
         use bitcoin_rs_mempool::MempoolEntry;
 
         let ctx = Arc::new(Context::new());
-        assert_eq!(ctx.chain_network, Network::Mainnet);
+        assert_eq!(ctx.chain.chain_network, Network::Mainnet);
         let tx = dust_priority_tx();
         let txid = tx.txid();
         {
@@ -1655,7 +1656,7 @@ mod tests {
         use bitcoin_rs_mempool::MempoolEntry;
 
         let mut ctx = Context::new();
-        ctx.chain_network = Network::Regtest;
+        ctx.chain.chain_network = Network::Regtest;
         let ctx = Arc::new(ctx);
         let tx = dust_priority_tx();
         let txid = tx.txid();
