@@ -11,8 +11,8 @@ use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
-use bitcoin_rs_chain::{BlockBodySource, BlockTree};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
+use bitcoin_rs_chain::{BlockBodySource, BlockTree, ChainWork};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Network};
 use parking_lot::RwLock;
 
 use crate::dispatch::{ChainQuery, InventoryServing};
@@ -34,15 +34,23 @@ const MAX_BLOCKTXN_DEPTH: u32 = 10;
 pub struct ActiveChainQuery {
     block_tree: Arc<RwLock<BlockTree>>,
     block_body_source: Option<Arc<dyn BlockBodySource>>,
+    network: Network,
 }
 
 impl ActiveChainQuery {
-    /// Builds a P2P chain query view over shared active-chain state.
+    /// Builds a P2P chain query view over shared active-chain state of one
+    /// network.
+    ///
+    /// PRE: `block_tree` holds only headers of `network`.
+    /// POST: returns the view; serving queries refuse below the network's
+    ///   minimum chain work.
+    /// INVARIANT: the view's network never changes after construction.
     #[must_use]
-    pub const fn new(block_tree: Arc<RwLock<BlockTree>>) -> Self {
+    pub const fn new(block_tree: Arc<RwLock<BlockTree>>, network: Network) -> Self {
         Self {
             block_tree,
             block_body_source: None,
+            network,
         }
     }
 
@@ -115,6 +123,14 @@ impl ChainQuery for ActiveChainQuery {
         let Some(tip) = tree.tip() else {
             return Vec::new();
         };
+        // A node whose active chain has not reached the network's minimum
+        // work is still syncing: it answers `getheaders` with the empty
+        // response rather than feeding a peer its low-work branch, exactly
+        // as Core refuses to serve headers below the assumed-valid floor
+        // (`net_processing.cpp:3010-3018,4648-4657`).
+        if tip.chainwork < ChainWork::from_be_bytes(self.network.minimum_chain_work()) {
+            return Vec::new();
+        }
         if limit == 0 {
             return Vec::new();
         }
@@ -473,7 +489,7 @@ mod tests {
         let active1_id = tree.insert_node(Some(genesis_id), active1, NodeStatus::Active)?;
         tree.insert_node(Some(active1_id), active2, NodeStatus::Active)?;
         tree.insert_node(Some(genesis_id), fork1, NodeStatus::Stale)?;
-        let query = ActiveChainQuery::new(Arc::new(RwLock::new(tree)));
+        let query = ActiveChainQuery::new(Arc::new(RwLock::new(tree)), Network::Regtest);
 
         let response = query.headers_after(&[fork1.compute_hash()], BlockHash::default(), 10);
 
@@ -485,6 +501,53 @@ mod tests {
             query
                 .headers_after(&[], fork1.compute_hash(), 10)
                 .is_empty()
+        );
+        Ok(())
+    }
+
+    /// A node whose active chain sits below its network's assumed-work
+    /// floor is still syncing: it must answer `getheaders` with the empty
+    /// response rather than serve its low-work branch to the rest of the
+    /// network (`net_processing.cpp:3010-3018,4648-4657`).
+    #[test]
+    fn low_work_chain_serves_no_headers() -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = test_header(BlockHash::default(), 0);
+        let first = test_header(genesis.compute_hash(), 1);
+        let second = test_header(first.compute_hash(), 2);
+        let low_work_tree = || -> Result<BlockTree, bitcoin_rs_chain::ChainError> {
+            let mut tree = BlockTree::new();
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+            let first_id = tree.insert_node(Some(genesis_id), first, NodeStatus::Active)?;
+            tree.insert_node(Some(first_id), second, NodeStatus::Active)?;
+            Ok(tree)
+        };
+        // Mainnet's floor is far above three regtest-easy headers: the
+        // serving path must go quiet below it.
+        let mainnet =
+            ActiveChainQuery::new(Arc::new(RwLock::new(low_work_tree()?)), Network::Mainnet);
+        assert!(
+            mainnet
+                .headers_after(&[genesis.compute_hash()], BlockHash::default(), 10)
+                .is_empty(),
+            "a below-floor node must answer getheaders with nothing"
+        );
+        assert!(
+            mainnet
+                .headers_after(&[], BlockHash::default(), 10)
+                .is_empty(),
+            "the stop-hash-only path must refuse too"
+        );
+
+        let regtest =
+            ActiveChainQuery::new(Arc::new(RwLock::new(low_work_tree()?)), Network::Regtest);
+        assert_eq!(
+            header_hashes(&regtest.headers_after(
+                &[genesis.compute_hash()],
+                BlockHash::default(),
+                10
+            )),
+            vec![first.compute_hash(), second.compute_hash()],
+            "a network with a zero floor must keep serving its chain"
         );
         Ok(())
     }
@@ -942,7 +1005,10 @@ mod tests {
         for header in headers {
             parent = Some(tree.insert_node(parent, header, NodeStatus::Active)?);
         }
-        Ok(ActiveChainQuery::new(Arc::new(RwLock::new(tree))))
+        Ok(ActiveChainQuery::new(
+            Arc::new(RwLock::new(tree)),
+            Network::Regtest,
+        ))
     }
 
     fn seed_headers(count: u32) -> Vec<Header> {
