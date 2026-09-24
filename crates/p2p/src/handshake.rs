@@ -21,8 +21,8 @@ use bitcoin::p2p::message_compact_blocks::SendCmpct;
 /// POST: the message advertises transaction relay only for a full-relay
 ///   connection; a block-relay-only connection advertises `relay = false`,
 ///   as Core's `PushNodeVersion` does (`net_processing.cpp:1651-1689`).
-///   Prune mode never advertises NODE_NETWORK; non-prune mode advertises
-///   NODE_NETWORK; WITNESS remains advertised in both modes (Core
+///   Prune mode never advertises `NODE_NETWORK`; non-prune mode advertises
+///   `NODE_NETWORK`; `WITNESS` remains advertised in both modes (Core
 ///   `init.cpp:2022-2026`).
 /// INVARIANT: services, height, and nonce do not vary with the role; both
 ///   inbound and outbound handshakes use the same service set.
