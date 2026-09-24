@@ -148,15 +148,36 @@ impl BlockSync {
                     // (`TimestampTooFarAhead`, `DuplicateHeader`) get no
                     // re-request — the announcer would only replay the same
                     // batch into the same rejection, which paces no one.
-                    // The connection answered, so its deadline moves to this
-                    // answer: the gate stays and paces the retry, and expiry
-                    // cannot later blame a peer that did respond.
-                    self.rearm_header_request(source, now);
                     if matches!(
                         error,
                         ChainError::MissingParent { .. } | ChainError::NoCommonAncestor { .. }
                     ) {
+                        if wire_response {
+                            // The connection answered this request with a
+                            // batch that will not attach. The gate stays and
+                            // paces the retry; its deadline moves to this
+                            // answer, so expiry cannot blame a peer that did
+                            // respond.
+                            self.rearm_header_request(source, now);
+                        } else {
+                            // A header carried by a delivered body is not a
+                            // response to the pending request, and the
+                            // delivery itself is the new evidence that this
+                            // connection holds the missing ancestry: retire
+                            // the stale gate so the recovery ask reaches the
+                            // wire with this delivery instead of waiting for
+                            // the deadline to clear first.
+                            if let Some(source) = source {
+                                self.clear_header_request_for(source);
+                            }
+                        }
                         self.request_headers_from(source, now);
+                    } else {
+                        // The connection answered, so its deadline moves to
+                        // this answer: the gate stays and paces the retry,
+                        // and expiry cannot later blame a peer that did
+                        // respond.
+                        self.rearm_header_request(source, now);
                     }
                     tracing::warn!(
                         received = batch_len,
