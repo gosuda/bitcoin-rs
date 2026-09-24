@@ -26,7 +26,7 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::node::NodeId;
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
-use bitcoin_rs_consensus::rust_path::UtxoView;
+use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Txid;

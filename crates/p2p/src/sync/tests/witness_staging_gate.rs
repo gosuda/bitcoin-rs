@@ -24,8 +24,8 @@ const ZERO_RESERVED_COMMITMENT: [u8; 32] = [
 /// share the same txid — witness data is not committed to in the txid — so
 /// they produce the same merkle root and block hash.
 fn segwit_coinbase(height: u32, witness: bool) -> Tx {
-    let mut script_sig = push_int(i64::from(height));
-    script_sig.extend_from_slice(&push_int(1));
+    let mut script_sig = regtest_fixture::script_num_push(i64::from(height));
+    script_sig.extend_from_slice(&regtest_fixture::script_num_push(1));
     let mut commitment_script = WITNESS_PREFIX.to_vec();
     commitment_script.extend_from_slice(&ZERO_RESERVED_COMMITMENT);
     Tx {
@@ -56,11 +56,12 @@ fn segwit_coinbase(height: u32, witness: bool) -> Tx {
 
 /// Mines a PoW-valid regtest block with a segwit commitment coinbase.
 fn segwit_block(prev_blockhash: BlockHash, height: u32, witness: bool) -> Block {
-    mined_block_with_prev_hash(
+    regtest_fixture::mined_block_with_prev_hash(
         prev_blockhash,
         height,
         vec![segwit_coinbase(height, witness)],
     )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"))
 }
 
 /// Sets up a `BlockSync` with genesis applied, a single segwit block header in

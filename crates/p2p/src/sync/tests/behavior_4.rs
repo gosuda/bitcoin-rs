@@ -78,7 +78,8 @@ fn tick_applies_contiguous_blocks_before_requesting_more() -> Result<(), Box<dyn
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
-    let child = test_header(genesis.block_hash(), 1);
+    let child = regtest_fixture::mined_regtest_header(genesis.block_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::HeaderValid)?;
     let expected = BlockHash::from(tree.node(child_id)?.hash);
 
@@ -108,11 +109,12 @@ fn tick_applies_contiguous_blocks_before_requesting_more() -> Result<(), Box<dyn
 fn oversized_received_block_releases_pending_budget_for_retry()
 -> Result<(), Box<dyn std::error::Error>> {
     let genesis = Network::Regtest.genesis_block();
-    let block = mined_block_with_prev_hash(
+    let block = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
         1,
-        vec![coinbase_transaction(1), transaction(0x41)],
-    );
+        vec![regtest_fixture::coinbase(1), transaction(0x41)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let block_id = tree.insert_node(Some(genesis_id), block.header, NodeStatus::HeaderValid)?;
@@ -174,9 +176,24 @@ fn oversized_received_block_releases_pending_budget_for_retry()
 fn staging_byte_exhaustion_backpressures_requests_then_recovers()
 -> Result<(), Box<dyn std::error::Error>> {
     let genesis = Network::Regtest.genesis_block();
-    let block1 = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
-    let block2 = mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
-    let block3 = mined_block_with_prev_hash(block2.block_hash(), 3, vec![coinbase_transaction(3)]);
+    let block1 = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let block2 = regtest_fixture::mined_block_with_prev_hash(
+        block1.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let block3 = regtest_fixture::mined_block_with_prev_hash(
+        block2.block_hash(),
+        3,
+        vec![regtest_fixture::coinbase(3)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let block1_hash = block1.block_hash();
     let block2_hash = block2.block_hash();
     let block3_hash = block3.block_hash();

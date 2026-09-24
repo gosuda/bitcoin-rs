@@ -88,7 +88,7 @@ fn window_failure_applies_prefix_and_restores_suffix() -> Result<(), Box<dyn std
     // apply rejects it on the merkle root. A body that changed its own hash
     // would never be drained and the window would never see it.
     let mut corrupted = fixture.blocks[1].clone();
-    corrupted.txs.push(coinbase_transaction(99));
+    corrupted.txs.push(regtest_fixture::coinbase(99));
     assert_eq!(
         corrupted.block_hash(),
         fixture.blocks[1].block_hash(),

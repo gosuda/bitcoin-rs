@@ -16,7 +16,8 @@ fn tick_sends_getdata_from_next_applied_height_when_gap_exceeds_batch()
 
     for height in 1_u32..=batch_size + 4 {
         let parent_hash = BlockHash::from(tree.node(tip_id)?.hash);
-        let header = test_header(parent_hash, height);
+        let header = regtest_fixture::mined_regtest_header(parent_hash, height)
+            .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
         tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
         if height <= batch_size {
             expected.push(BlockHash::from(tree.node(tip_id)?.hash));
@@ -72,7 +73,8 @@ fn second_tick_does_not_re_request_already_pending_blocks() -> Result<(), Box<dy
 
     for height in 1_u32..=3 {
         let parent_hash = BlockHash::from(tree.node(tip_id)?.hash);
-        let header = test_header(parent_hash, height);
+        let header = regtest_fixture::mined_regtest_header(parent_hash, height)
+            .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
         tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
     }
 

@@ -1,6 +1,9 @@
 //! Deep reorganization planner integration tests.
 use bitcoin_rs_chain::{BlockHeader, BlockTree, NodeId, NodeStatus, plan_reorg};
+
+mod pow_oracle;
 use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
+use pow_oracle::pow_is_met;
 
 #[test]
 fn plans_deep_reorg_to_common_fork() -> Result<(), Box<dyn std::error::Error>> {
@@ -49,16 +52,6 @@ fn mine_child(
         &tree.node(parent)?.hash.to_le_bytes(),
     ));
     Ok(mine_header(parent_hash, height, branch))
-}
-
-/// Differential proof-of-work oracle: checks that the header hash satisfies
-/// the compact target, using bitcoin's compact-target decode and comparison.
-fn pow_is_met(bits: CompactTarget, hash: &BlockHash) -> bool {
-    use bitcoin::hashes::Hash as _;
-    let target = bitcoin::pow::Target::from_compact(bitcoin::pow::CompactTarget::from_consensus(
-        bits.to_consensus(),
-    ));
-    target.is_met_by(bitcoin::BlockHash::from_byte_array(*hash.as_bytes()))
 }
 
 fn mine_header(prev_blockhash: BlockHash, height: u32, branch: u8) -> BlockHeader {
