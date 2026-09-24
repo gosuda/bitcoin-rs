@@ -571,13 +571,13 @@ fn release_sweep_is_connection_exact_at_the_same_address() -> Result<(), Box<dyn
     sync.scheduler
         .lock()
         .window
-        .release_disconnected_peers(&[(addr, owner.connection_id())]);
+        .retain_owned_by(|source| *source == owner);
     assert_eq!(
         sync.scheduler.lock().window.pending_owner(&front),
         Some(owner),
         "the live connection's pending must survive a release sweep"
     );
-    sync.scheduler.lock().window.release_disconnected_peers(&[]);
+    sync.scheduler.lock().window.retain_owned_by(|_| false);
     assert_eq!(
         sync.scheduler.lock().window.pending_owner(&front),
         None,

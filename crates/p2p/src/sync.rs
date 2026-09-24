@@ -31,10 +31,8 @@ use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::plan_reorg;
 use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::Receiver;
-use hashbrown::HashMap;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -127,15 +125,32 @@ struct SchedulerState {
     /// The one outstanding header request, owned by the exact connection it
     /// was sent to. Same-address replacement never inherits it.
     header_request: Option<PendingHeaderRequest>,
-    /// The connection identity last reconciled per address: a changed id at
-    /// a known address means the predecessor's scheduler state must be
-    /// dropped before the new connection can inherit it.
-    known_sessions: HashMap<SocketAddr, crate::ConnectionId>,
     /// Deferred body-fetch ownership: a compact `getblocktxn` or fallback
     /// `getdata` was issued for a tip hash whose header has not attached yet.
     /// Marks resolve against the tree each drain once ancestry admits the
     /// tip (P2P-06); bounded so announcements cannot grow it.
     owned_body_fetches: Vec<(PeerSource, Hash256)>,
+}
+
+impl SchedulerState {
+    /// Releases every scheduling fact owned by a connection not in `live`.
+    ///
+    /// PRE: `live` is the peer table's live-session snapshot.
+    /// POST: the window, the header request, and the deferred body fetches
+    ///   hold only facts owned by a connection in `live`.
+    /// INVARIANT: ownership is compared by connection identity, never by
+    ///   address alone.
+    fn release_unowned(&mut self, live: &[PeerSource]) {
+        let owns = |source: &PeerSource| live.contains(source);
+        self.window.retain_owned_by(owns);
+        if self
+            .header_request
+            .is_some_and(|request| !owns(&request.source))
+        {
+            self.header_request = None;
+        }
+        self.owned_body_fetches.retain(|(source, _)| owns(source));
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -208,7 +223,6 @@ impl BlockSync {
                 window: DownloadWindow::new(default_sync_budget()),
                 stager: BlockStager::new(default_sync_budget()),
                 header_request: None,
-                known_sessions: HashMap::new(),
                 owned_body_fetches: Vec::new(),
             }),
             refused_rerequest_at: Mutex::new(None),
@@ -225,7 +239,6 @@ impl BlockSync {
             window: DownloadWindow::new(budget),
             stager: BlockStager::new(budget),
             header_request: None,
-            known_sessions: HashMap::new(),
             owned_body_fetches: Vec::new(),
         };
     }

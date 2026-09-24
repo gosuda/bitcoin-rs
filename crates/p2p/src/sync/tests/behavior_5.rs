@@ -188,8 +188,8 @@ fn apply_cache_horizon_capped_by_pending_budget() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn on_peer_ready_clears_same_address_header_state_for_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn on_peer_ready_sweeps_dead_predecessor_header_request() -> Result<(), Box<dyn std::error::Error>>
+{
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
@@ -203,29 +203,35 @@ fn on_peer_ready_clears_same_address_header_state_for_replacement()
     sync.on_peer_ready(source);
     assert!(
         sync.scheduler.lock().header_request.is_none(),
-        "replacement readiness must drop address-scoped header state"
+        "replacement readiness must release the dead predecessor's request"
     );
     Ok(())
 }
 
 #[test]
-fn on_peer_ready_ignores_stale_predecessor_source() -> Result<(), Box<dyn std::error::Error>> {
+fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> Result<(), Box<dyn std::error::Error>>
+{
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
     let (stale_tx, _stale_rx) = unbounded::<Message>();
     let stale = PeerLease::new(stale_tx);
     sync.peer_table.register(peer_addr, stale.clone());
     register_info(&sync.peer_table, synthetic_peer(peer_addr, 2));
+    let replacement = current_source(&sync.peer_table, peer_addr);
     sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
-        source: crate::PeerSource::for_test(peer_addr),
+        source: replacement,
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),
     });
     sync.on_peer_ready(stale.source(peer_addr));
+    sync.on_peer_ready(replacement);
     assert!(
-        sync.scheduler.lock().header_request.is_some(),
-        "stale predecessor must not clear the replacement's header state"
+        sync.scheduler
+            .lock()
+            .header_request
+            .is_some_and(|request| request.source == replacement),
+        "neither a stale callback nor the sweep may release the live connection's request"
     );
     Ok(())
 }
