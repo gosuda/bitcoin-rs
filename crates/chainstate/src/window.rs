@@ -400,8 +400,9 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
             | ConsensusError::WitnessNonceSize
             | ConsensusError::WitnessCommitment
             | ConsensusError::UnexpectedWitness => BodyMutated,
-            ConsensusError::PrevoutMatrixSize { .. } | ConsensusError::Kernel(_) => Operational,
-            ConsensusError::Script {
+            ConsensusError::PrevoutMatrixSize { .. }
+            | ConsensusError::Kernel(_)
+            | ConsensusError::Script {
                 engine: ScriptEngine::Kernel,
                 ..
             } => Operational,

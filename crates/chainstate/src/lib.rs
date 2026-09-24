@@ -406,6 +406,7 @@ enum ApplyIntent {
 }
 
 /// Outcome of [`apply_block_admitted`] once intent is known.
+#[allow(clippy::large_enum_variant)]
 enum ApplyFinish {
     /// Commit path: the new applied tip, already published.
     Committed(ConnectOutcome),
