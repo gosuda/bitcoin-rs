@@ -208,16 +208,24 @@ pub struct SyncPeerSelection {
 }
 
 /// A height-eligible sync candidate annotated with its block-service
-/// eligibility and soft-block status.
+/// eligibility, fan-out eligibility, and soft-block status.
 ///
-/// The two clauses stay separate because the selection paths combine them
-/// differently: fan-out and probes require both, a single deep peer still
-/// serves while soft-blocked when nothing better exists.
+/// The clauses stay separate because the selection paths combine them
+/// differently: fan-out, probes, and hedges require an eligible outbound
+/// peer, while the deep request set and the single-peer fallback ask any
+/// peer whose advertised services can serve the range — an inbound-only
+/// node must still sync. A soft-blocked peer still serves as the last
+/// resort when nothing better exists.
 #[derive(Clone, Copy, Debug)]
 pub struct FanoutCandidate {
     /// The peer this candidate refers to.
     pub peer: SyncPeer,
-    /// Whether [`statically_fanout_eligible`] accepted this peer.
+    /// Whether [`serves_requested_height`] accepted this peer: the one
+    /// block-body service clause every body-selection path reads.
+    pub serves_bodies: bool,
+    /// Whether [`statically_fanout_eligible`] accepted this peer: the body
+    /// service clause plus the outbound requirement, for the paths that
+    /// stripe or hedge across self-chosen connections.
     pub fanout_eligible: bool,
     /// Whether the window currently soft-blocks this peer for requests.
     pub soft_blocked: bool,
@@ -228,7 +236,7 @@ pub struct FanoutCandidate {
 /// PRE: `requested_height` is the height of the block the selection fills,
 ///   taken from the same frontier snapshot as the candidates; `ibd` is the
 ///   node's one latch.
-/// POST: [`statically_fanout_eligible`] answers for that height.
+/// POST: [`serves_requested_height`] answers for that height.
 /// INVARIANT: one shared latch decides initial block download for every
 ///   selection path; no path caches or re-derives the answer.
 pub struct BlockDownloadPolicy {
@@ -236,34 +244,40 @@ pub struct BlockDownloadPolicy {
     pub ibd: Arc<InitialBlockDownload>,
     /// The height of the block body this selection fills.
     pub requested_height: u32,
+    /// The node's live configured network: the latch judges minimum chain
+    /// work and tip age against it at each query.
+    pub network: Network,
 }
 
-/// Whether a connection may serve block bodies, before the window's dynamic
-/// clauses (KTD6).
+/// Whether a peer's advertised services can serve the policy's height.
+///
+/// This is the one block-body service clause: the request, fan-out, probe,
+/// and hedge paths all read it, and none re-derives a witness-only rule. It
+/// runs before the window's dynamic clauses (KTD6).
 ///
 /// PRE: `policy` names the requested height and the node's sync phase.
-/// POST: true only for an outbound witness peer whose advertised services can
-///   serve that height. Inbound peers never qualify: they are attacker-chosen,
-///   and counting them toward fan-out is the recorded under-fill regression.
-///   During initial block download the peer must advertise `NODE_NETWORK`, so
-///   a pruned peer is never asked for old blocks (Core
+/// POST: true only for a witness peer whose advertised services cover that
+///   height. During initial block download the peer must advertise
+///   `NODE_NETWORK`, so a pruned peer is never asked for old blocks (Core
 ///   `net_processing.cpp:6521`). Afterwards a peer without `NODE_NETWORK`
-///   serves only the last [`NODE_NETWORK_LIMITED_MIN_BLOCKS`] blocks of its own
-///   demonstrated chain (`net_processing.cpp:1637`); one below the requested
-///   height is ineligible.
-/// INVARIANT: this is the only block-body service clause. The request, fan-out,
-///   probe, and hedge paths all read it, and none re-derives a witness-only
-///   rule.
-pub fn statically_fanout_eligible(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
+///   serves only the last [`NODE_NETWORK_LIMITED_MIN_BLOCKS`] blocks of its
+///   own demonstrated chain (`net_processing.cpp:1637`); one below the
+///   requested height is ineligible.
+/// INVARIANT: every body-selection path applies this clause; a peer that
+///   cannot serve the range is never asked for it.
+pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
     let network = ServiceFlags::NETWORK.to_u64();
     let witness = ServiceFlags::WITNESS.to_u64();
-    if peer.inbound || peer.services & witness == 0 {
+    if peer.services & witness == 0 {
         return false;
     }
     if peer.services & network != 0 {
         return true;
     }
-    if policy.ibd.is_active(crate::counters::now_seconds()) {
+    if policy
+        .ibd
+        .is_active(crate::counters::now_seconds(), policy.network)
+    {
         return false;
     }
     u32::try_from(peer.best_known_height).is_ok_and(|demonstrated| {
@@ -271,6 +285,21 @@ pub fn statically_fanout_eligible(peer: &PeerInfo, policy: &BlockDownloadPolicy)
             .checked_sub(policy.requested_height)
             .is_some_and(|left_tip| left_tip < NODE_NETWORK_LIMITED_MIN_BLOCKS)
     })
+}
+
+/// Whether a connection may take part in fan-out striping, prefix probes,
+/// and cold-front hedges: the [`serves_requested_height`] clause plus the
+/// pre-existing outbound requirement.
+///
+/// PRE: `policy` names the requested height and the node's sync phase.
+/// POST: true only for an outbound peer that may serve that height. Inbound
+///   peers never qualify here: they are attacker-chosen, and counting them
+///   toward fan-out is the recorded under-fill regression. The deep request
+///   set and the single-peer fallback are not fan-out paths and read the
+///   service clause alone, so an inbound-only node still syncs.
+/// INVARIANT: this is the only fan-out service clause.
+pub fn statically_fanout_eligible(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
+    !peer.inbound && serves_requested_height(peer, policy)
 }
 
 /// Set the fan-out/request mode on the window from the current candidate set.
