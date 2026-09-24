@@ -1,35 +1,52 @@
 use super::*;
 
-#[test]
-fn retargeting_pending_requests_drops_losing_branch_hashes()
--> Result<(), Box<dyn std::error::Error>> {
+/// A two-branch retarget fixture: the header tip starts on a two-block
+/// losing branch, and one peer has been sent getdata for both of its
+/// blocks. Storing `winning_tip` into `chain_tip` retargets the request
+/// branch to a three-block winning branch at the next request.
+struct TwoBranches {
+    sync: BlockSync,
+    rx: crossbeam_channel::Receiver<Message>,
+    source: PeerSource,
+    chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    losing_hashes: Vec<BlockHash>,
+    losing_bodies: Vec<Block>,
+    winning_tip: TipSnapshot,
+    winning_hashes: Vec<BlockHash>,
+}
+
+fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
+    let snapshot = |tree: &BlockTree, tip_id| -> Result<TipSnapshot, Box<dyn std::error::Error>> {
+        let node = tree.node(tip_id)?;
+        Ok(TipSnapshot {
+            tip_id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        })
+    };
     let genesis = genesis_header();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-    let genesis_tip = {
-        let node = tree.node(genesis_id)?;
-        TipSnapshot {
-            tip_id: genesis_id,
-            height: node.height,
-            chainwork: node.chainwork,
-            hash: node.hash,
-        }
-    };
+    let genesis_tip = snapshot(&tree, genesis_id)?;
 
-    let losing1 = test_header(genesis.compute_hash(), 1);
-    let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
-    let losing2 = test_header(losing1.compute_hash(), 2);
-    let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
-    let losing_tip = {
-        let node = tree.node(losing2_id)?;
-        TipSnapshot {
-            tip_id: losing2_id,
-            height: node.height,
-            chainwork: node.chainwork,
-            hash: node.hash,
-        }
-    };
-    let losing_hashes = vec![losing1.compute_hash(), losing2.compute_hash()];
+    let losing_body1 =
+        mined_block_with_prev_hash(genesis.compute_hash(), 1, vec![coinbase_transaction(1)]);
+    let losing_body2 =
+        mined_block_with_prev_hash(losing_body1.block_hash(), 2, vec![coinbase_transaction(2)]);
+    let losing1_id = tree.insert_node(
+        Some(genesis_id),
+        losing_body1.header,
+        NodeStatus::HeaderValid,
+    )?;
+    let losing2_id = tree.insert_node(
+        Some(losing1_id),
+        losing_body2.header,
+        NodeStatus::HeaderValid,
+    )?;
+    let losing_tip = snapshot(&tree, losing2_id)?;
+    let losing_hashes = vec![losing_body1.block_hash(), losing_body2.block_hash()];
+    let losing_bodies = vec![losing_body1, losing_body2];
 
     let winning1 = test_header(genesis.compute_hash(), 101);
     let winning1_id = tree.insert_node(Some(genesis_id), winning1, NodeStatus::HeaderValid)?;
@@ -37,15 +54,7 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
     let winning2_id = tree.insert_node(Some(winning1_id), winning2, NodeStatus::HeaderValid)?;
     let winning3 = test_header(winning2.compute_hash(), 103);
     let winning3_id = tree.insert_node(Some(winning2_id), winning3, NodeStatus::HeaderValid)?;
-    let winning_tip = {
-        let node = tree.node(winning3_id)?;
-        TipSnapshot {
-            tip_id: winning3_id,
-            height: node.height,
-            chainwork: node.chainwork,
-            hash: node.hash,
-        }
-    };
+    let winning_tip = snapshot(&tree, winning3_id)?;
     let winning_hashes = vec![
         winning1.compute_hash(),
         winning2.compute_hash(),
@@ -82,6 +91,31 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
             .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, losing_hashes);
+    Ok(TwoBranches {
+        sync,
+        rx,
+        source,
+        chain_tip,
+        losing_hashes,
+        losing_bodies,
+        winning_tip,
+        winning_hashes,
+    })
+}
+
+#[test]
+fn retargeting_pending_requests_drops_losing_branch_hashes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let TwoBranches {
+        sync,
+        rx,
+        source,
+        chain_tip,
+        losing_hashes,
+        winning_tip,
+        winning_hashes,
+        ..
+    } = two_branches()?;
 
     chain_tip.store(Some(Arc::new(winning_tip)));
     assert!(
@@ -98,6 +132,57 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
         sync.scheduler.lock().window.pending_len(),
         winning_hashes.len(),
         "retargeting must release losing-branch pending capacity"
+    );
+    Ok(())
+}
+
+/// BLK-08: a retarget releases losing-branch bodies from the stager as well
+/// as the window, so the freed capacity is real, and a late losing-branch
+/// delivery cannot re-acquire purged state.
+#[test]
+fn retarget_purges_staged_off_branch_bodies() -> Result<(), Box<dyn std::error::Error>> {
+    let TwoBranches {
+        sync,
+        rx,
+        source,
+        chain_tip,
+        losing_hashes,
+        losing_bodies,
+        winning_tip,
+        winning_hashes,
+    } = two_branches()?;
+    let [losing1, losing2]: [Block; 2] = losing_bodies
+        .try_into()
+        .map_err(|_| "the fixture has two losing bodies")?;
+    let mut delivery = vec![crate::InboundBlock::from_decoded(losing1)];
+    assert_eq!(sync.buffer_received_block_chunk(&mut delivery, None), 1);
+    assert_eq!(sync.scheduler.lock().stager.received_len(), 1);
+
+    chain_tip.store(Some(Arc::new(winning_tip)));
+    assert!(
+        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
+            .sent
+    );
+    assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, winning_hashes);
+    assert_eq!(
+        sync.scheduler.lock().stager.received_len(),
+        0,
+        "the retarget must purge the staged losing-branch body"
+    );
+
+    let mut late = vec![crate::InboundBlock::from_decoded(losing2)];
+    sync.buffer_received_block_chunk(&mut late, None);
+    let scheduler = sync.scheduler.lock();
+    assert_eq!(
+        scheduler.stager.received_len(),
+        0,
+        "a late losing-branch delivery must not stage"
+    );
+    assert!(
+        losing_hashes
+            .iter()
+            .all(|hash| !scheduler.window.contains_pending(&Hash256::from(*hash))),
+        "no losing-branch hash may be pending after the retarget"
     );
     Ok(())
 }

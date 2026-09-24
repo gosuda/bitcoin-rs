@@ -1257,6 +1257,66 @@ fn apply_fixture_block(sync: &BlockSync, block: Block) -> Result<(), Box<dyn std
     Ok(())
 }
 
+/// BLK-06/07: an unrequested body stages only when Core's `AcceptBlock`
+/// would process it with `fRequested == false` (validation.cpp:4327-4353):
+/// on the active branch, with at least the applied tip's work, and at most
+/// 288 blocks above the applied tip. Requested bodies are not gated.
+#[test]
+fn unrequested_body_admission_matches_core_acceptance() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut tree, blocks) = mined_chain(300, 0)?;
+    let fork_parent = tree
+        .lookup(Hash256::from(blocks[4].block_hash()))
+        .ok_or("missing height 5")?;
+    let fork_body =
+        mined_block_with_prev_hash(blocks[4].block_hash(), 606, vec![coinbase_transaction(606)]);
+    tree.insert_node(Some(fork_parent), fork_body.header, NodeStatus::HeaderValid)?;
+    let applied = {
+        let node = tree.node(fork_parent)?;
+        TipSnapshot {
+            tip_id: fork_parent,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+        }
+    };
+    let SyncHarness {
+        sync,
+        applied_tip,
+        inbound_headers_tx: _inbound_headers_tx,
+        inbound_blocks_tx: _inbound_blocks_tx,
+        ..
+    } = SyncHarness::new(tree);
+    applied_tip.store(Some(Arc::new(applied)));
+    let mut blocks = blocks.into_iter();
+    let successor = blocks.nth(5).ok_or("missing height 6")?;
+    let far_body = blocks.nth(288).ok_or("missing height 295")?;
+    let successor_hash = Hash256::from(successor.block_hash());
+    let far_hash = Hash256::from(far_body.block_hash());
+    let fork_hash = Hash256::from(fork_body.block_hash());
+    let mut delivery = vec![
+        crate::InboundBlock::from_decoded(successor),
+        crate::InboundBlock::from_decoded(far_body),
+        crate::InboundBlock::from_decoded(fork_body),
+    ];
+    sync.buffer_received_block_chunk(&mut delivery, None);
+
+    let scheduler = sync.scheduler.lock();
+    assert!(
+        scheduler.stager.contains(&successor_hash),
+        "an active-branch successor passes every clause"
+    );
+    assert!(
+        !scheduler.stager.contains(&far_hash),
+        "a body more than 288 blocks above the applied tip is too far ahead"
+    );
+    assert!(
+        !scheduler.stager.contains(&fork_hash),
+        "a body off the active branch is discarded"
+    );
+    assert_eq!(scheduler.stager.received_len(), 1);
+    Ok(())
+}
+
 /// Shared executor wiring; callers keep or drop each sender explicitly.
 struct SyncHarness {
     sync: BlockSync,

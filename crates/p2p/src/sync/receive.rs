@@ -15,6 +15,7 @@ use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
+use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use smallvec::SmallVec;
 use std::time::Instant;
 use std::vec::Vec;
@@ -291,13 +292,44 @@ impl BlockSync {
         // Already-staged precheck: skip the expensive body-binding hashes for
         // blocks whose hash is already in the stager. A correct body already
         // staged must not be displaced by a late malformed duplicate (P2-3).
+        //
+        // The same pass gates unrequested bodies: a body that no connection
+        // has in flight (Core's `fRequested` is false) stages only when
+        // Core's `AcceptBlock` would process it. A discarded body leaves no
+        // staged state and queues no retry. Lock order: tree, then scheduler.
         let already_staged: Vec<bool> = {
+            let chain_tip = self.chain.chain_tip().load_full();
+            let applied_tip = self.chain.applied_tip().load_full();
+            let minimum_chain_work = self.chain.network().minimum_chain_work();
+            let tree = self.chain.block_tree().read();
             let scheduler = self.scheduler.lock();
-            let stager = &scheduler.stager;
-            blocks
-                .iter()
-                .map(|inbound| stager.contains(&Hash256::from(inbound.block.block_hash())))
-                .collect()
+            let offered = blocks.len();
+            let mut already_staged = Vec::with_capacity(offered);
+            blocks.retain(|inbound| {
+                let hash = Hash256::from(inbound.block.block_hash());
+                let staged = scheduler.stager.contains(&hash);
+                let admitted = staged
+                    || scheduler.window.contains_pending(&hash)
+                    || unrequested_body_admissible(
+                        &tree,
+                        hash,
+                        chain_tip.as_deref(),
+                        applied_tip.as_deref(),
+                        minimum_chain_work,
+                    );
+                if admitted {
+                    already_staged.push(staged);
+                }
+                admitted
+            });
+            let discarded = offered.saturating_sub(blocks.len());
+            if discarded > 0 {
+                tracing::debug!(
+                    discarded,
+                    "block sync: discarded unrequested bodies Core would not process"
+                );
+            }
+            already_staged
         };
 
         // For non-staged blocks, the chain side derives segwit_active from
@@ -509,4 +541,55 @@ impl BlockSync {
         }
         staged_count
     }
+}
+
+/// Whether a body that no connection has in flight may stage: Core's
+/// `AcceptBlock` acceptance for `fRequested == false`
+/// (validation.cpp:4327-4353), plus an active-branch clause.
+///
+/// PRE: `hash` names a body that is neither staged nor pending.
+/// POST: `true` when the tree cannot resolve `hash` (the missing-header
+/// path: the body applies once its ancestry lands); otherwise `true` only
+/// when all four admission clauses below hold.
+/// INVARIANT: reads only the tree and the two tip snapshots.
+///
+/// The admission clauses:
+/// 1. The node lies on the header tip's branch.
+/// 2. The node's chainwork is at least the applied tip's
+///    (`fHasMoreOrSameWork`).
+/// 3. The header tip's chainwork meets the network's minimum chain work.
+/// 4. The node is at most `CORE_REORG_SAFETY_MARGIN` blocks above the
+///    applied tip (`fTooFarAhead`).
+///
+/// Core checks the minimum-work floor on the body itself. Here the header
+/// tip carries it: this window releases an expired request without
+/// disconnecting its peer, so a late delivery during initial block
+/// download must not be discarded only because its block predates the
+/// floor. Clause 1 keeps a low-work side chain out on its own.
+fn unrequested_body_admissible(
+    tree: &BlockTree,
+    hash: Hash256,
+    chain_tip: Option<&TipSnapshot>,
+    applied_tip: Option<&TipSnapshot>,
+    minimum_chain_work: [u8; 32],
+) -> bool {
+    let Some(node_id) = tree.lookup(hash) else {
+        return true;
+    };
+    let Ok(node) = tree.node(node_id) else {
+        return true;
+    };
+    let Some(chain_tip) = chain_tip else {
+        return false;
+    };
+    // Core's `ActiveHeight()` is -1 on an empty chain.
+    let max_height = applied_tip.map_or(CORE_REORG_SAFETY_MARGIN - 1, |tip| {
+        tip.height.saturating_add(CORE_REORG_SAFETY_MARGIN)
+    });
+    // Big-endian, fixed width: byte order is numeric order.
+    let tip_work: [u8; 32] = chain_tip.chainwork.to_be_bytes();
+    tree.node_at_height_from(chain_tip.tip_id, node.height) == Some(node_id)
+        && applied_tip.is_none_or(|tip| node.chainwork >= tip.chainwork)
+        && tip_work >= minimum_chain_work
+        && node.height <= max_height
 }
