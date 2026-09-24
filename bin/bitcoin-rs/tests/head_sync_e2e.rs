@@ -23,9 +23,9 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
-use serde_json::{Value, json};
 use bitcoin_rs_e2e::live_peer::LivePeer;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
+use serde_json::{Value, json};
 
 /// Builds a BIP141 segwit coinbase-only block on `parent`: the coinbase
 /// carries the 32-byte reserved nonce in its input witness and an `OP_RETURN`

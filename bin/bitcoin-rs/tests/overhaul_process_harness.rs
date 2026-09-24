@@ -23,7 +23,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
-use serde_json::{Value, json};
 use bitcoin_rs_e2e::differential::{
     compare_reply, compare_rpc, mine_common_chain, verify_reference_binary,
 };
@@ -31,6 +30,7 @@ use bitcoin_rs_e2e::node::START_TIMEOUT;
 use bitcoin_rs_e2e::process_peer::connect_loopback;
 use bitcoin_rs_e2e::rpc::exchange;
 use bitcoin_rs_e2e::{ClockControl, Error, Kind, ProcessNode, SpawnOptions};
+use serde_json::{Value, json};
 use support::reference_set::reference_set;
 
 // A height-1 coinbase is mature for admission after 101 common blocks.
@@ -60,11 +60,8 @@ fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
                 let node = start(binary);
                 let pid = node.pid();
                 assert!(node.p2p_addr.ip().is_loopback());
-                let peer = connect_loopback(
-                    node.p2p_addr,
-                    Instant::now() + Duration::from_secs(1),
-                )
-                .expect("normal startup must expose its configured P2P listener");
+                let peer = connect_loopback(node.p2p_addr, Instant::now() + Duration::from_secs(1))
+                    .expect("normal startup must expose its configured P2P listener");
                 drop(peer);
                 node.stop().expect("stop after public P2P connection");
                 assert_reaped(pid);
@@ -633,10 +630,7 @@ fn malformed_http_and_json_replies_are_transport_failures() {
             Instant::now() + Duration::from_secs(1),
         );
         server.join().expect("responder exits");
-        assert!(matches!(
-            result,
-            Err(Error::Protocol(_) | Error::Json(_))
-        ));
+        assert!(matches!(result, Err(Error::Protocol(_) | Error::Json(_))));
     }
 }
 
@@ -821,10 +815,7 @@ fn readiness_outcome(row: &Value) -> String {
 
 /// Polls until the txindex row reports Ready, returning the distinct
 /// outcomes observed on the way.
-fn wait_until_ready(
-    node: &mut ProcessNode,
-    deadline: Instant,
-) -> Result<Vec<String>, Error> {
+fn wait_until_ready(node: &mut ProcessNode, deadline: Instant) -> Result<Vec<String>, Error> {
     let mut observed = Vec::new();
     loop {
         let row = node.rpc("getcapabilities", &json!([]))?;
@@ -880,9 +871,7 @@ fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Erro
     let mined = loop {
         match node.rpc("generatetoaddress", &json!([blocks, MINING_ADDRESS])) {
             Ok(mined) => break mined,
-            Err(Error::Rpc { message, .. })
-                if message.contains("applied tip is not available") =>
-            {
+            Err(Error::Rpc { message, .. }) if message.contains("applied tip is not available") => {
                 assert!(
                     Instant::now() < deadline,
                     "the applied tip never became available"
