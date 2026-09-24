@@ -17,7 +17,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     // handler holds no policy literals of its own, so the response cannot
     // disagree with the pool even when its limits are reconfigured at
     // runtime.
-    let pool = ctx.mempool.gateway.read();
+    let pool = ctx.mempool.read();
     let policy = pool.policy_snapshot();
     let stats = pool.stats();
     let maxmempool = pool.limits.max_total_bytes;
@@ -53,7 +53,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
 
 pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
-    let pool = ctx.mempool.gateway.read();
+    let pool = ctx.mempool.read();
     let entry = pool
         .entry_by_txid(&txid)
         .ok_or(RpcError::NotFound("transaction not in mempool"))?;
@@ -70,7 +70,7 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
             "Verbose results cannot contain mempool sequence values.",
         ));
     }
-    let pool = ctx.mempool.gateway.read();
+    let pool = ctx.mempool.read();
     if verbose {
         let mut map = BTreeMap::new();
         for txid in pool.iter_txids() {
@@ -98,7 +98,7 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let verbose = optional_bool(params, 1, false)?;
-    let pool = ctx.mempool.gateway.read();
+    let pool = ctx.mempool.read();
     let Some(id) = pool.entry_id_by_txid(&txid) else {
         return Err(RpcError::NotFound("transaction not in mempool"));
     };
@@ -109,7 +109,7 @@ pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<
 pub(crate) fn getmempooldescendants(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
     let verbose = optional_bool(params, 1, false)?;
-    let pool = ctx.mempool.gateway.read();
+    let pool = ctx.mempool.read();
     let Some(id) = pool.entry_id_by_txid(&txid) else {
         return Err(RpcError::NotFound("transaction not in mempool"));
     };
@@ -291,7 +291,7 @@ mod tests {
     fn getmempoolinfo_cluster_limits_follow_the_pool_rather_than_a_constant() {
         let ctx = Arc::new(Context::new());
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             *pool = bitcoin_rs_mempool::Mempool::new(bitcoin_rs_mempool::MempoolLimits {
                 cluster_count: 7,
                 cluster_size_vbytes: 4_242,
@@ -352,7 +352,7 @@ mod tests {
     fn getmempoolinfo_minrelaytxfee_reflects_custom_mempool_floor() {
         let ctx = Arc::new(Context::new());
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             *pool = bitcoin_rs_mempool::Mempool::new(bitcoin_rs_mempool::MempoolLimits {
                 min_relay_fee_sat_per_kvb: 5_000,
                 ..bitcoin_rs_mempool::MempoolLimits::default()
@@ -384,7 +384,7 @@ mod tests {
     #[test]
     fn getmempoolinfo_maxmempool_reflects_custom_limit() {
         let ctx = Context::new();
-        *ctx.mempool.gateway.pool().write() =
+        *ctx.mempool.pool().write() =
             bitcoin_rs_mempool::Mempool::new(bitcoin_rs_mempool::MempoolLimits {
                 max_total_bytes: 50_000_000,
                 ..bitcoin_rs_mempool::MempoolLimits::default()
@@ -476,9 +476,8 @@ mod tests {
         // `policy_contract.rs` reconfigures floors mid-test: the per-guard
         // derivation must quote them on the next call, never a stale
         // composition-time copy.
-        ctx.mempool.gateway.pool().write().limits.cluster_count = 7;
+        ctx.mempool.pool().write().limits.cluster_count = 7;
         ctx.mempool
-            .gateway
             .pool()
             .write()
             .limits
@@ -561,7 +560,7 @@ mod tests {
         let child = tx(2, vec![OutPoint::new(parent_txid, 0)]);
         let child_txid = child.txid().to_string();
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0))?;
             pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0))?;
         }
@@ -588,7 +587,7 @@ mod tests {
         let child = tx(4, vec![OutPoint::new(parent_txid, 0)]);
         let child_txid = child.txid();
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0))?;
             pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0))?;
         }
@@ -636,7 +635,7 @@ mod tests {
         };
         let child_txid = child.txid();
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             let parent_entry =
                 bitcoin_rs_mempool::MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7);
             let Ok(_) = pool.insert_entry(parent_entry) else {
@@ -679,7 +678,7 @@ mod tests {
         };
         let rbf_txid = rbf_tx.txid();
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             let Ok(_) = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7))
             else {
                 panic!("mempool insert failed");
@@ -734,7 +733,7 @@ mod usage_wiring_tests {
     fn getmempoolinfo_usage_is_the_pools_memory_not_its_vsize_sum() {
         let ctx = Arc::new(Context::new());
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             for tag in 0_u8..4 {
                 let tx = Tx {
                     version: 2,
@@ -863,7 +862,7 @@ mod spentby_tests {
 
         let ctx = Arc::new(Context::new());
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             for tx in [root, first_spender, second_spender, child_c, loner] {
                 let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
                 let Ok(_id) = pool.insert_entry(entry) else {

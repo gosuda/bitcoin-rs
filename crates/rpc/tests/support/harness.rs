@@ -107,26 +107,24 @@ impl ServerHarness {
         let chainstate = state.chainstate();
         let ibd = chainstate.ibd_latch();
         let ctx = Context::from_handles(ContextHandles {
-            chain: ChainHandles {
-                chain_tip: chainstate.chain_tip_handle(),
-                applied_tip: chainstate.applied_tip_handle(),
+            chain: ChainHandles::new(
+                chainstate.chain_tip_handle(),
+                chainstate.applied_tip_handle(),
+                state.blocks(),
+                state.transactions(),
+                chainstate.utxo_handle(),
+                chainstate.coin_stats_handle(),
+                chainstate.block_tree_handle(),
+                state.config().network,
                 ibd,
-                blocks: state.blocks(),
-                transactions: state.transactions(),
-                utxo: chainstate.utxo_handle(),
-                coin_stats: chainstate.coin_stats_handle(),
-                block_tree: chainstate.block_tree_handle(),
-                chain_network: state.config().network,
-                chain_transition: chainstate.read_fence(),
-                ..ChainHandles::default()
-            },
+            ),
             mempool: MempoolHandles {
-                gateway: MempoolGateway::shared(state.mempool()),
+                mempool: MempoolGateway::shared(state.mempool()),
             },
             indexes: IndexHandles {
                 derived_index: state.derived_index_query(),
-                script_index: state.script_index_query(),
                 esplora_tx_index: None,
+                script_index: state.script_index_query(),
                 derived_index_status: Some(state.derived_index_status()),
             },
             network: NetworkHandles {

@@ -64,7 +64,7 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
         (txid.to_string() == text).then_some(txid)
     });
     let transactions = {
-        let pool = ctx.mempool.gateway.read();
+        let pool = ctx.mempool.read();
         // Cursor lookup, selection, and Arc capture share one read guard.
         // Only the selected page escapes the guard; no second lookup can
         // observe a removal or replacement between selection and capture.
@@ -151,7 +151,6 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
         .filter_map(|id| {
             let transaction = if mempool_only {
                 ctx.mempool
-                    .gateway
                     .read()
                     .transaction_by_txid(&id)
                     .map(|transaction| ((*transaction).clone(), None))
@@ -267,7 +266,6 @@ mod pagination_tests {
             let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, time, 0);
             expected.push((time, entry.txid));
             ctx.mempool
-                .gateway
                 .pool()
                 .write()
                 .insert_entry(entry)
@@ -395,7 +393,6 @@ mod pagination_tests {
         let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 0);
         let cursor = entry.txid.to_string();
         ctx.mempool
-            .gateway
             .pool()
             .write()
             .insert_entry(entry)

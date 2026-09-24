@@ -265,7 +265,7 @@ mod tests {
                 script_pubkey: spendable.clone().into(),
             },
         );
-        let txid = ctx.add_transaction(funding);
+        let txid = ctx.chain.add_transaction(funding);
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(
             OutPoint::new(txid, 0),
@@ -547,7 +547,7 @@ mod tests {
             hash: record.hash,
             body: consensus_bytes(&block),
         }));
-        context.add_block(record);
+        context.chain.add_block(record);
         let tip = {
             let mut tree = context.chain.block_tree.write();
             tree.insert_node(None, block.header, NodeStatus::Active)?;
@@ -556,7 +556,7 @@ mod tests {
                 .as_ref()
                 .clone()
         };
-        context.set_applied_tip(tip);
+        context.chain.set_applied_tip(tip);
         context.indexes.esplora_tx_index =
             Some(Arc::new(FixtureTxIndex(vec![(transaction.clone(), 0)])));
         let funding = vec![ScriptIndexRecord {
@@ -1004,9 +1004,11 @@ mod tests {
     fn composed_response_retries_when_the_applied_tip_identity_changes() {
         let block = fixture_genesis();
         let mut context = Context::new();
-        context.add_block(bitcoin_rs_index::block_log::BlockRecord::from_block(
-            0, &block,
-        ));
+        context
+            .chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::from_block(
+                0, &block,
+            ));
         let tip = {
             let mut tree = context.chain.block_tree.write();
             tree.insert_node(None, block.header, NodeStatus::Active)
@@ -1039,7 +1041,6 @@ mod tests {
         let txid = transaction.txid();
         let ctx = Arc::new(Context::new());
         ctx.mempool
-            .gateway
             .pool()
             .write()
             .insert_entry(MempoolEntry::new(Arc::new(transaction), 100, 1_000, 0, 0))
@@ -1131,10 +1132,11 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
         for record in &records {
-            ctx.add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
-                record.height,
-                BlockHash::default(),
-            ));
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    record.height,
+                    BlockHash::default(),
+                ));
         }
         ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: records,
@@ -1189,10 +1191,11 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
         for record in &history {
-            ctx.add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
-                record.height,
-                BlockHash::default(),
-            ));
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    record.height,
+                    BlockHash::default(),
+                ));
         }
         ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history,
@@ -1250,7 +1253,6 @@ mod tests {
             unspent: vec![confirmed],
         }));
         ctx.mempool
-            .gateway
             .pool()
             .write()
             .insert_entry(MempoolEntry::new(
@@ -1388,7 +1390,7 @@ mod tests {
             hash: stale_record.hash,
             body: consensus_bytes(&stale_block),
         }));
-        ctx.add_block(stale_record.clone());
+        ctx.chain.add_block(stale_record.clone());
         {
             let mut tree = ctx.chain.block_tree.write();
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -1413,7 +1415,7 @@ mod tests {
             let tip = tree
                 .tip()
                 .ok_or_else(|| std::io::Error::other("missing active tip"))?;
-            ctx.set_applied_tip((*tip).clone());
+            ctx.chain.set_applied_tip((*tip).clone());
         }
         ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(transaction)));
 
@@ -1519,7 +1521,6 @@ mod tests {
     fn seed_mempool(ctx: Context, seeds: &[Seed]) -> Arc<Context> {
         for seed in seeds {
             ctx.mempool
-                .gateway
                 .pool()
                 .write()
                 .insert_entry(MempoolEntry::new(
@@ -1579,7 +1580,7 @@ mod tests {
         });
 
         let reached_binning = entered_recv.recv_timeout(GATE_TIMEOUT).is_ok();
-        let writer_progress = ctx.mempool.gateway.pool().try_write().is_some();
+        let writer_progress = ctx.mempool.pool().try_write().is_some();
         let _ = release_send.send(());
         let response = request.join().expect("gated request completes");
 

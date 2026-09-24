@@ -89,7 +89,7 @@ impl Node {
     /// Returns typed synchronization progress without touching RPC JSON.
     #[must_use]
     pub fn sync_progress(&self) -> SyncProgress {
-        self.context.sync_progress()
+        self.context.chain.sync_progress()
     }
 
     /// Returns a decoded block, distinguishing unknown from unavailable data.
@@ -101,10 +101,10 @@ impl Node {
     )]
     pub async fn block_by_hash(&self, hash: BlockHash) -> Result<Option<Block>, NodeError> {
         let hash = Hash256::from(hash);
-        let Some(record) = self.context.block_by_hash(hash) else {
+        let Some(record) = self.context.chain.block_by_hash(hash) else {
             return Ok(None);
         };
-        let Some(bytes) = self.context.block_body_bytes(&record) else {
+        let Some(bytes) = self.context.chain.block_body_bytes(&record) else {
             return Err(NodeError::Unavailable(format!(
                 "block body pruned for {hash}"
             )));

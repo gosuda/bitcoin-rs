@@ -169,7 +169,7 @@ fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
-    let Some(record) = ctx.record_for_hash(hash) else {
+    let Some(record) = ctx.chain.record_for_hash(hash) else {
         return not_found_owned(format!("{hash_text} not found"));
     };
     let Some(_render) = ctx.try_acquire_rest_render() else {
@@ -214,7 +214,7 @@ fn route_block_part(ctx: &Arc<Context>, suffix: &str) -> Response {
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
-    let Some(record) = ctx.record_for_hash(hash) else {
+    let Some(record) = ctx.chain.record_for_hash(hash) else {
         return not_found_owned(format!("{hash_text} not found"));
     };
     let Some(_render) = ctx.try_acquire_rest_render() else {
@@ -240,7 +240,7 @@ fn bounded_block_body(ctx: &Context, record: &BlockRecord) -> Result<Vec<u8>, Re
             "stored block exceeds the REST response limit",
         ));
     }
-    let Some(body) = ctx.block_body_bytes(record) else {
+    let Some(body) = ctx.chain.block_body_bytes(record) else {
         return Err(not_found_owned(format!(
             "{} not available (pruned data)",
             record.hash
@@ -362,13 +362,13 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
         return format_not_found(available_formats());
     };
 
-    let active_height = ctx.applied_height();
-    let active_hash = ctx.applied_hash();
+    let active_height = ctx.chain.applied_height();
+    let active_hash = ctx.chain.applied_hash();
 
     let mut bitmap = vec![0_u8; outpoints.len().div_ceil(8)];
     let mut outs = Vec::with_capacity(outpoints.len());
     let mut hits = Vec::with_capacity(outpoints.len());
-    let pool = ctx.mempool.gateway.read();
+    let pool = ctx.mempool.read();
     for (txid, vout) in &outpoints {
         let outpoint = bitcoin_rs_primitives::OutPoint::new(*txid, *vout);
         let mempool_spent = check_mempool && pool.is_outpoint_spent(&outpoint);
@@ -449,8 +449,8 @@ fn route_deploymentinfo(ctx: &Arc<Context>, suffix: &str) -> Response {
     }
     let object = if hash_text.is_empty() {
         json!({
-            "hash": ctx.applied_hash().to_string_be(),
-            "height": ctx.applied_height(),
+            "hash": ctx.chain.applied_hash().to_string_be(),
+            "height": ctx.chain.applied_height(),
             "deployments": {}
         })
     } else {
@@ -458,7 +458,7 @@ fn route_deploymentinfo(ctx: &Arc<Context>, suffix: &str) -> Response {
         let Ok(hash) = Hash256::from_str(hash_text) else {
             return bad_request_owned(format!("Invalid hash: {hash_text}"));
         };
-        let Some(record) = ctx.record_for_hash(hash) else {
+        let Some(record) = ctx.chain.record_for_hash(hash) else {
             return bad_request_owned("Block not found".to_owned());
         };
         json!({
@@ -479,7 +479,7 @@ fn route_blockhash_by_height(ctx: &Arc<Context>, suffix: &str) -> Response {
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
-    let Some(hash) = ctx.block_hash_at_height(height) else {
+    let Some(hash) = ctx.chain.block_hash_at_height(height) else {
         return not_found_owned("Block height out of range".to_owned());
     };
     match format {
@@ -711,21 +711,25 @@ fn append_compact_size(body: &mut Vec<u8>, len: usize) {
 /// Builds the applied-chain facts [`crate::render`] needs to project a block or
 /// header.
 fn build_chain_context(ctx: &Context, record: &BlockRecord, header: &Header) -> BlockChainContext {
-    let applied_height = ctx.applied_height();
-    let on_active = ctx.active_hash_at_height(record.height) == Some(Hash256::from(record.hash));
+    let applied_height = ctx.chain.applied_height();
+    let on_active =
+        ctx.chain.active_hash_at_height(record.height) == Some(Hash256::from(record.hash));
     let n_tx = u32::try_from(record.tx_count).unwrap_or(u32::MAX);
     BlockChainContext {
         height: record.height,
         confirmations: crate::render::confirmations(applied_height, record.height, on_active),
         mediantime: ctx
+            .chain
             .median_time_past_for_hash(Hash256::from(record.hash))
             .unwrap_or(0),
-        difficulty: ctx.difficulty_for_bits(header.bits),
+        difficulty: ctx.chain.difficulty_for_bits(header.bits),
         chainwork_hex: ctx
+            .chain
             .chain_work_hex_for_hash(Hash256::from(record.hash))
             .unwrap_or_else(|| "00".to_owned()),
         n_tx,
         next_block_hash: ctx
+            .chain
             .next_block_hash_for_height(record.height)
             .map(BlockHash::from),
     }
@@ -735,6 +739,7 @@ fn build_chain_context(ctx: &Context, record: &BlockRecord, header: &Header) -> 
 /// transaction count) through the tree/log when available.
 fn header_chain_context(ctx: &Context, record: &HeaderRecord) -> BlockChainContext {
     let real = ctx
+        .chain
         .record_for_hash(record.hash)
         .unwrap_or_else(|| BlockRecord {
             hash: BlockHash::from(record.hash),
@@ -933,8 +938,8 @@ mod tests {
             chain_tx_count: tip_node.chain_tx_count,
         };
         drop(tree);
-        ctx.chain.applied_tip.store(Some(Arc::new(tip.clone())));
-        ctx.chain.chain_tip.store(Some(Arc::new(tip)));
+        ctx.chain.set_applied_tip(tip.clone());
+        ctx.chain.set_chain_tip(tip);
         hashes
     }
 
@@ -980,7 +985,7 @@ mod tests {
         };
         let record = BlockRecord::from_block(0, &block);
         let hash = record.hash.to_string();
-        ctx.add_block(record);
+        ctx.chain.add_block(record);
         ctx.chain.block_body_source = Some(Arc::new(PanicBlockSource));
         publish_active_chain(&ctx, &[block.header]);
         let _first = ctx.try_acquire_rest_render().expect("first permit");
@@ -1117,9 +1122,9 @@ mod tests {
             header: tip_header,
             txs: Vec::new(),
         };
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
-        ctx.add_block(BlockRecord::from_block(1, &child));
-        ctx.add_block(BlockRecord::from_block(2, &tip));
+        ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
+        ctx.chain.add_block(BlockRecord::from_block(1, &child));
+        ctx.chain.add_block(BlockRecord::from_block(2, &tip));
         publish_active_chain(&ctx, &[genesis.header, child.header, tip.header]);
 
         let path = format!("/rest/headers/{}.json", child.block_hash());
@@ -1182,7 +1187,7 @@ mod tests {
                 .expect("header tip");
             applied_tip
         };
-        ctx.chain.applied_tip.store(Some(Arc::new(applied_tip)));
+        ctx.chain.set_applied_tip(applied_tip);
         let header_tip_hash = Hash256::from(header_tip.compute_hash());
 
         let response = route(
@@ -1325,8 +1330,9 @@ mod tests {
             },
             txs: Vec::new(),
         };
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
-        ctx.add_block(BlockRecord::from_block(1, &broken_child));
+        ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
+        ctx.chain
+            .add_block(BlockRecord::from_block(1, &broken_child));
         let genesis_id = {
             let mut tree = ctx.chain.block_tree.write();
             tree.insert_node(None, genesis.header, NodeStatus::Active)
@@ -1358,8 +1364,8 @@ mod tests {
             chain_tx_count: broken_node.chain_tx_count,
         };
         drop(tree);
-        ctx.chain.applied_tip.store(Some(Arc::new(tip.clone())));
-        ctx.chain.chain_tip.store(Some(Arc::new(tip)));
+        ctx.chain.set_applied_tip(tip.clone());
+        ctx.chain.set_chain_tip(tip);
 
         let path = format!("/rest/headers/{}.json", genesis.block_hash());
         let response = route(&ctx, &path, "count=2", true);
@@ -1472,7 +1478,7 @@ mod tests {
     fn headers_serve_the_block_header_bytes_verbatim() {
         let ctx = Arc::new(Context::new());
         let genesis = regtest_genesis();
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
         let _ = publish_active_chain(&ctx, &[genesis.header]);
 
         let expected = consensus_bytes(&genesis.header);
@@ -1500,7 +1506,7 @@ mod tests {
     fn headers_for_a_record_the_tree_does_not_know_serve_nothing() {
         let ctx = Arc::new(Context::new());
         let genesis = regtest_genesis();
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
 
         for (format, expected) in [
             ("json", b"[]".as_slice()),

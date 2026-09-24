@@ -43,8 +43,8 @@ fn tipped_context() -> Arc<Context> {
         hash: Hash256::from_le_bytes(&[42_u8; 32]),
         chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
     };
-    ctx.chain.chain_tip.store(Some(Arc::new(tip.clone())));
-    ctx.chain.applied_tip.store(Some(Arc::new(tip)));
+    ctx.chain.set_chain_tip(tip.clone());
+    ctx.chain.set_applied_tip(tip);
     ctx
 }
 
@@ -371,8 +371,9 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     // This rendering proof runs off-mainnet so it reaches the template.
     let mut ctx = Context::new();
     ctx.chain.chain_network = Network::Regtest;
-    ctx.mining.mining_control = Some(Arc::new(CompatMiningControl));
-    let handler = Handler::new(Arc::new(ctx));
+    let handler = Handler::new(Arc::new(
+        ctx.with_mining_control(Arc::new(CompatMiningControl)),
+    ));
 
     let template: corepc_types::v31::GetBlockTemplate =
         typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;

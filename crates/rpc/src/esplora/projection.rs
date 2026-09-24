@@ -141,7 +141,7 @@ impl<'a> Projection<'a> {
         &self,
         txid: &Txid,
     ) -> Result<Option<(Tx, Option<Confirmation>)>, Response> {
-        if let Some(transaction) = self.ctx.mempool.gateway.read().transaction_by_txid(txid) {
+        if let Some(transaction) = self.ctx.mempool.read().transaction_by_txid(txid) {
             return Ok(Some(((*transaction).clone(), None)));
         }
         if let Some(transaction) = self.ctx.chain.transactions.read().get(txid).cloned() {
@@ -182,7 +182,6 @@ impl<'a> Projection<'a> {
         if self
             .ctx
             .mempool
-            .gateway
             .read()
             .transaction_by_txid(txid)
             .is_some()
@@ -222,7 +221,7 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) fn confirmation_at_height(&self, height: u32) -> Option<Confirmation> {
-        let record = self.ctx.block_by_height(height)?;
+        let record = self.ctx.chain.block_by_height(height)?;
         Some(Confirmation {
             height,
             hash: record.hash,
@@ -318,7 +317,6 @@ impl<'a> Projection<'a> {
         if let Some(transaction) = self
             .ctx
             .mempool
-            .gateway
             .read()
             .transaction_by_txid(&outpoint.txid)
         {
@@ -358,6 +356,7 @@ impl<'a> Projection<'a> {
             .ok_or_else(|| unavailable("block header unavailable"))?;
         let bytes = self
             .ctx
+            .chain
             .block_body_bytes(record)
             .ok_or_else(|| unavailable("block body unavailable"))?;
         let block =
@@ -375,11 +374,12 @@ impl<'a> Projection<'a> {
                 .then(|| header.prev_blockhash.to_string()),
             mediantime: self
                 .ctx
+                .chain
                 .median_time_past_for_hash(Hash256::from(record.hash))
                 .unwrap_or(header.time),
             nonce: header.nonce,
             bits: header.bits.to_consensus(),
-            difficulty: self.ctx.difficulty_for_bits(header.bits),
+            difficulty: self.ctx.chain.difficulty_for_bits(header.bits),
         })
     }
 
@@ -390,6 +390,7 @@ impl<'a> Projection<'a> {
         let record = self.required_block_record(text_hash)?;
         let bytes = self
             .ctx
+            .chain
             .block_body_bytes(&record)
             .ok_or_else(|| unavailable("block body unavailable"))?;
         let block = deserialize(&bytes).map_err(|_| internal("stored block body is corrupt"))?;
@@ -402,7 +403,7 @@ impl<'a> Projection<'a> {
     ) -> Result<bitcoin_rs_index::block_log::BlockRecord, Response> {
         let hash = bitcoin_rs_primitives::Hash256::from_str(text_hash)
             .map_err(|_| bad("block hash must be 64 hex characters"))?;
-        self.ctx.block_by_hash(hash).ok_or_else(not_found)
+        self.ctx.chain.block_by_hash(hash).ok_or_else(not_found)
     }
 
     pub(super) fn script_activity(
@@ -466,7 +467,7 @@ impl<'a> Projection<'a> {
         // the pool already spends. Script hashing, statuses, and output
         // strings are derived from those facts and run after the release.
         let funding = {
-            let pool = self.ctx.mempool.gateway.read();
+            let pool = self.ctx.mempool.read();
             confirmed
                 .retain(|record| !pool.is_outpoint_spent(&OutPoint::new(record.txid, record.vout)));
             pool.entries_funding_script(mempool_hash)
@@ -549,7 +550,7 @@ impl<'a> Projection<'a> {
         // alone: resolving a txid back to an entry afterwards costs a scan of
         // the whole pool per selected transaction.
         let (funders, spenders) = {
-            let pool = self.ctx.mempool.gateway.read();
+            let pool = self.ctx.mempool.read();
             let mut funders = Vec::new();
             let mut candidates = confirmed_unspent
                 .iter()

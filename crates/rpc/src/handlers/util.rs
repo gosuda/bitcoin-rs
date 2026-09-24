@@ -132,7 +132,7 @@ pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let conf_target = u64::try_from(conf_target)
         .map_err(|_| RpcError::InvalidParameter(ESTIMATE_SMART_FEE_TARGET_ERROR.to_owned()))?;
     let blocks = conf_target_blocks(conf_target);
-    let pool = ctx.mempool.gateway.read();
+    let pool = ctx.mempool.read();
     match pool.estimate_fee_rate(blocks) {
         Some(rate) => typed_to_sonic_omitting_nulls(&v31::EstimateSmartFee {
             fee_rate: Some(sat_to_btc(rate.as_sat_per_kvb())),
@@ -181,7 +181,7 @@ fn is_core_fee_estimate_mode(mode: &str) -> bool {
 /// and the no-estimate branch stays `{}` (see the manifest row note).
 pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
-    let pool = ctx.mempool.gateway.read();
+    let pool = ctx.mempool.read();
     let Some(rate) = pool.estimate_fee_rate(conf_target_blocks(conf_target)) else {
         return Ok(json!({}));
     };

@@ -245,8 +245,7 @@ fn invalidateblock_delegates_to_node_control_and_returns_null() -> Result<(), Rp
         called: Arc::clone(&called),
         error: None,
     };
-    let mut ctx = Context::new();
-    ctx.chain.chain_control = Some(Arc::new(control));
+    let mut ctx = Context::new().with_chain_control(Arc::new(control));
     ctx.chain.chain_network = Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
     let result = handler.dispatch(
@@ -271,8 +270,7 @@ fn invalidateblock_maps_unknown_block_to_core_not_found() {
         called: Arc::clone(&called),
         error: Some(ChainControlError::UnknownBlock),
     };
-    let mut ctx = Context::new();
-    ctx.chain.chain_control = Some(Arc::new(control));
+    let mut ctx = Context::new().with_chain_control(Arc::new(control));
     ctx.chain.chain_network = Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
     let err = handler
@@ -295,8 +293,8 @@ fn getblockchaininfo_surfaces_published_chainwork_hex() -> Result<(), Box<dyn st
         chainwork: ChainWork::from_be_bytes([0x11; 32]),
         chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
     };
-    ctx.set_chain_tip(tip.clone());
-    ctx.set_applied_tip(tip);
+    ctx.chain.set_chain_tip(tip.clone());
+    ctx.chain.set_applied_tip(tip);
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler.dispatch("getblockchaininfo", &json!([]))?;
     let chainwork = result
@@ -565,8 +563,8 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn
         chainwork: ChainWork::default(),
         chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
     };
-    ctx.set_chain_tip(headers_tip);
-    ctx.set_applied_tip(applied_tip);
+    ctx.chain.set_chain_tip(headers_tip);
+    ctx.chain.set_applied_tip(applied_tip);
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler.dispatch("getblockchaininfo", &json!([]))?;
     assert_eq!(
@@ -703,7 +701,7 @@ fn fee_stats_context(values: Option<HashMap<OutPoint, u64>>) -> (Arc<Context>, T
         hash: record.hash,
         body: consensus_bytes(&block),
     }));
-    ctx.add_block(record);
+    ctx.chain.add_block(record);
     (Arc::new(ctx), low_tx, high_tx)
 }
 
@@ -834,7 +832,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let mut ctx = Context::new();
-        ctx.mining.mining_control = Some(Arc::new(SmokeMiningControl::new()));
+        ctx.mining_control = Some(Arc::new(SmokeMiningControl::new()));
 
         ctx.chain.chain_network = Network::Regtest;
         let tx = tx(1, vec![0x51]);
@@ -860,14 +858,14 @@ impl Fixture {
             .expect("fixture tip missing")
             .as_ref()
             .clone();
-        ctx.set_chain_tip(tip.clone());
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_chain_tip(tip.clone());
+        ctx.chain.set_applied_tip(tip);
         ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
             height: 7,
             hash: block_hash,
             body: consensus_bytes(&block),
         }));
-        ctx.add_block(BlockRecord::from_block(7, &block));
+        ctx.chain.add_block(BlockRecord::from_block(7, &block));
         let mut values = HashMap::new();
         values.insert(outpoint(1), 6_000);
         ctx.indexes.derived_index = Some(Arc::new(FakeTxIndex {
@@ -879,9 +877,9 @@ impl Fixture {
             },
         }));
         let block_hex = hex_encode(&consensus_bytes(&block));
-        let txid = ctx.add_transaction(tx.clone());
+        let txid = ctx.chain.add_transaction(tx.clone());
         let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7);
-        ctx.mempool.gateway.pool().write().insert_entry(entry)?;
+        ctx.mempool.pool().write().insert_entry(entry)?;
         Ok(Self {
             ctx: Arc::new(ctx),
             tx,

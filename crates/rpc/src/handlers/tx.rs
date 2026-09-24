@@ -68,6 +68,7 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
 
     if let Some(hash) = blockhash {
         let record = ctx
+            .chain
             .block_by_hash(hash)
             .ok_or(RpcError::NotFound("block not found"))?;
         let block = load_block(ctx, &record)?;
@@ -80,7 +81,7 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
     }
 
     {
-        let pool = ctx.mempool.gateway.read();
+        let pool = ctx.mempool.read();
         if let Some(entry) = pool.entry_by_txid(&txid) {
             return render_raw_transaction(ctx, entry.tx.as_ref(), verbose, None);
         }
@@ -91,7 +92,7 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
             let record = derived_index
                 .transaction_height(&txid)
                 .map_err(RpcError::from)?
-                .and_then(|height| ctx.block_by_height(height));
+                .and_then(|height| ctx.chain.block_by_height(height));
             return render_raw_transaction(ctx, &tx, verbose, record.as_ref());
         }
     }
@@ -126,6 +127,7 @@ fn raw_transaction_verbosity(params: &Value) -> Result<bool, RpcError> {
 
 fn load_block(ctx: &Context, record: &BlockRecord) -> Result<NativeBlock, RpcError> {
     let bytes = ctx
+        .chain
         .block_body_bytes(record)
         .ok_or(RpcError::NotFound("block data pruned"))?;
     native_deserialize(&bytes)
@@ -144,7 +146,8 @@ fn render_raw_transaction(
     let chain = record.map(|record| VerboseTxChain {
         block_hash: record.hash.to_string(),
         confirmations: u64::from(
-            ctx.applied_height()
+            ctx.chain
+                .applied_height()
                 .saturating_sub(record.height)
                 .saturating_add(1),
         ),
@@ -167,7 +170,7 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     let outpoint = OutPoint::new(txid, vout_u32);
 
     if include_mempool {
-        let pool = ctx.mempool.gateway.read();
+        let pool = ctx.mempool.read();
         if pool.is_outpoint_spent(&outpoint) {
             return Ok(Value::new_null());
         }
@@ -184,6 +187,7 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         return Ok(Value::new_null());
     };
     let confirmations = ctx
+        .chain
         .applied_height()
         .saturating_sub(live.height)
         .saturating_add(1);
@@ -197,7 +201,7 @@ fn txout_typed(
     coinbase: bool,
 ) -> Result<Value, RpcError> {
     typed_to_sonic(&v31::GetTxOut {
-        best_block: ctx.best_hash().to_string(),
+        best_block: ctx.chain.best_hash().to_string(),
         confirmations,
         value: sat_to_btc(output.value.to_sat()),
         script_pubkey: convert::script_pub_key_typed(
@@ -229,7 +233,7 @@ pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     if let Some(hash_str) = array.get(1).and_then(JsonValueTrait::as_str) {
         let hash = Hash256::from_str(hash_str)
             .map_err(|_| RpcError::InvalidParams("blockhash must be 64 hex characters"))?;
-        let Some(record) = ctx.block_by_hash(hash) else {
+        let Some(record) = ctx.chain.block_by_hash(hash) else {
             return Err(RpcError::NotFound("block not found"));
         };
         return proof_from_single_record(ctx, &record, &wanted);
@@ -283,7 +287,7 @@ fn proof_via_index(ctx: &Arc<Context>, wanted: &hashbrown::HashSet<Txid>) -> Opt
                 return None;
             }
         };
-        let Some(record) = ctx.block_by_height(height) else {
+        let Some(record) = ctx.chain.block_by_height(height) else {
             continue;
         };
         if let Some(proof) = proof_from_record(ctx, &record, wanted) {
@@ -304,7 +308,7 @@ fn proof_from_single_record(
     record: &bitcoin_rs_index::block_log::BlockRecord,
     wanted: &hashbrown::HashSet<Txid>,
 ) -> Result<Value, RpcError> {
-    let Some(bytes) = ctx.block_body_bytes(record) else {
+    let Some(bytes) = ctx.chain.block_body_bytes(record) else {
         return Err(RpcError::NotFound("block data pruned"));
     };
     proof_from_body(&bytes, wanted)
@@ -334,7 +338,7 @@ fn proof_from_block_log(
         let Some(record) = ctx.chain.blocks.read().get(index).cloned() else {
             break;
         };
-        let Some(bytes) = ctx.block_body_bytes(&record) else {
+        let Some(bytes) = ctx.chain.block_body_bytes(&record) else {
             saw_pruned_block = true;
             continue;
         };
@@ -357,7 +361,7 @@ fn proof_from_record(
     record: &bitcoin_rs_index::block_log::BlockRecord,
     wanted: &hashbrown::HashSet<Txid>,
 ) -> Option<Value> {
-    let bytes = ctx.block_body_bytes(record)?;
+    let bytes = ctx.chain.block_body_bytes(record)?;
     proof_from_body(&bytes, wanted)
 }
 
@@ -450,12 +454,12 @@ pub(crate) fn admit_transaction(
     tx: &Tx,
     max_feerate_sat_per_kvb: Option<u64>,
 ) -> Result<MutationResult, AdmissionFailure> {
-    match ctx.mempool.gateway.submit_transaction(
+    match ctx.mempool.submit_transaction(
         Arc::new(tx.clone()),
         AdmissionOrigin::Rpc,
         max_feerate_sat_per_kvb,
         unix_time_secs(),
-        &ctx.admission_chain(),
+        &ctx.chain.admission_chain(),
     ) {
         Ok(SubmitOutcome::Committed(result)) => Ok(result),
         Ok(SubmitOutcome::AlreadyKnown) => Ok(MutationResult::empty()),
@@ -540,8 +544,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
 
     let facts = ctx
         .mempool
-        .gateway
-        .preview_transactions(&txs, max_feerate, &ctx.admission_chain())
+        .preview_transactions(&txs, max_feerate, &ctx.chain.admission_chain())
         .map_err(|error| match error {
             SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
             SubmitError::Consensus => {
@@ -1069,7 +1072,7 @@ mod tests {
             .clone();
         let txid = coinbase.txid();
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             let vsize = u32::try_from(coinbase.vsize())?;
             let entry =
                 MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0);
@@ -1116,7 +1119,7 @@ mod tests {
             .clone();
         let txid = coinbase.txid();
         {
-            let mut pool = ctx.mempool.gateway.pool().write();
+            let mut pool = ctx.mempool.pool().write();
             let vsize = u32::try_from(coinbase.vsize())?;
             let entry =
                 MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0);
@@ -1145,7 +1148,7 @@ mod tests {
             .write()
             .insert_node(None, genesis.header, NodeStatus::Active)
             .expect("insert genesis header");
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
         let ctx = Arc::new(ctx);
         let handler = Handler::new(Arc::clone(&ctx));
         let result = handler
@@ -1217,7 +1220,7 @@ mod tests {
             .write()
             .insert_node(None, genesis.header, NodeStatus::Active)
             .expect("insert genesis header");
-        ctx.add_block(record);
+        ctx.chain.add_block(record);
 
         let result = getrawtransaction(
             &ctx,
@@ -1310,8 +1313,8 @@ mod tests {
                 Some(consensus_bytes(&genesis)),
             ])),
         }));
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
-        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
+        ctx.chain.add_block(BlockRecord::from_block(0, &genesis));
         let ctx = Arc::new(ctx);
         let handler = Handler::new(Arc::clone(&ctx));
 
@@ -1344,8 +1347,9 @@ mod tests {
             .write()
             .insert_node(None, genesis.header, NodeStatus::Active)
             .expect("insert genesis header");
-        ctx.add_block(BlockRecord::synthetic(0, unrelated_hash));
-        ctx.add_block(record);
+        ctx.chain
+            .add_block(BlockRecord::synthetic(0, unrelated_hash));
+        ctx.chain.add_block(record);
         let ctx = Arc::new(ctx);
         let handler = Handler::new(Arc::clone(&ctx));
 
@@ -1375,7 +1379,7 @@ mod tests {
             .insert_node(None, genesis.header, NodeStatus::Active)
             .expect("insert genesis header");
         let block_hash = record.hash;
-        ctx.add_block(record);
+        ctx.chain.add_block(record);
         let handler = Handler::new(Arc::clone(&ctx));
 
         let result = handler.dispatch(
@@ -1551,7 +1555,7 @@ mod tests {
         }
         ctx.chain.block_body_source = Some(Arc::new(SeededBodySource { bodies }));
         for record in records {
-            ctx.add_block(record);
+            ctx.chain.add_block(record);
         }
     }
 
@@ -1590,15 +1594,15 @@ mod tests {
             hash: indexed.hash,
             body: consensus_bytes(&block),
         }));
-        ctx.add_block(BlockRecord::synthetic(
+        ctx.chain.add_block(BlockRecord::synthetic(
             0,
             BlockHash::from(Hash256::from_le_bytes(&[7_u8; 32])),
         ));
-        ctx.add_block(BlockRecord::synthetic(
+        ctx.chain.add_block(BlockRecord::synthetic(
             1,
             BlockHash::from(Hash256::from_le_bytes(&[8_u8; 32])),
         ));
-        ctx.add_block(indexed);
+        ctx.chain.add_block(indexed);
         let ctx = Arc::new(ctx);
 
         let result = proof_for(&ctx, &[wanted]);
@@ -1693,11 +1697,11 @@ mod tests {
             hash: indexed.hash,
             body: consensus_bytes(&block),
         }));
-        ctx.add_block(BlockRecord::synthetic(
+        ctx.chain.add_block(BlockRecord::synthetic(
             0,
             BlockHash::from(Hash256::from_le_bytes(&[5_u8; 32])),
         ));
-        ctx.add_block(indexed);
+        ctx.chain.add_block(indexed);
         let ctx = Arc::new(ctx);
 
         let result = proof_for(&ctx, &wanted);
@@ -1728,11 +1732,11 @@ mod tests {
             hash: indexed.hash,
             body: consensus_bytes(&block),
         }));
-        ctx.add_block(BlockRecord::synthetic(
+        ctx.chain.add_block(BlockRecord::synthetic(
             0,
             BlockHash::from(Hash256::from_le_bytes(&[6_u8; 32])),
         ));
-        ctx.add_block(indexed);
+        ctx.chain.add_block(indexed);
         let ctx = Arc::new(ctx);
 
         let result = proof_for(&ctx, &wanted);
@@ -1810,7 +1814,7 @@ mod tests {
             .write()
             .insert_node(None, block.header, NodeStatus::Active)
             .expect("insert block header");
-        ctx.add_block(record);
+        ctx.chain.add_block(record);
         let ctx = Arc::new(ctx);
 
         let result =
@@ -1948,7 +1952,7 @@ mod tests {
         for (height, block) in blocks.iter().enumerate() {
             let height = u32::try_from(height).unwrap_or_else(|err| panic!("height: {err}"));
             let hash = block.block_hash();
-            ctx.add_block(BlockRecord::synthetic(height, hash));
+            ctx.chain.add_block(BlockRecord::synthetic(height, hash));
         }
 
         let result = proof_for(&ctx, &[wanted]);
@@ -2049,7 +2053,7 @@ mod tests {
         // for `release`.
         let (parked_tx, parked_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let target = Arc::as_ptr(&ctx.mempool.gateway).expose_provenance();
+        let target = Arc::as_ptr(&ctx.mempool).expose_provenance();
         arm_admission_park(target, parked_tx, release_rx);
 
         let ctx_clone = Arc::clone(&ctx);
@@ -2068,7 +2072,6 @@ mod tests {
         // mempool sequence bumps and the parent's output is available.
         let guard = ctx_clone
             .mempool
-            .gateway
             .begin_chain_change()
             .expect("begin chain change on even generation");
         guard
@@ -2078,7 +2081,6 @@ mod tests {
         let parent_vsize = u32::try_from(parent.vsize()).unwrap_or(u32::MAX);
         ctx_clone
             .mempool
-            .gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
                 MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1),
@@ -2114,12 +2116,12 @@ mod tests {
 
         // The child must be in the mempool.
         assert!(
-            ctx.mempool.gateway.read().contains_txid(&child_txid),
+            ctx.mempool.read().contains_txid(&child_txid),
             "the child must be pooled after successful retry"
         );
         // The parent must still be in the mempool.
         assert!(
-            ctx.mempool.gateway.read().contains_txid(&parent_txid),
+            ctx.mempool.read().contains_txid(&parent_txid),
             "the parent must remain pooled"
         );
     }
@@ -2153,7 +2155,7 @@ mod gettxout_via_utxo_tests {
                 script_pubkey: Script::from_bytes(vec![0x51]),
             }],
         };
-        let txid = ctx.add_transaction(tx);
+        let txid = ctx.chain.add_transaction(tx);
         let params = json!([txid.to_string(), 0_u64]);
         let value = gettxout(&ctx, &params).unwrap_or_else(|err| panic!("gettxout failed: {err}"));
         assert!(
@@ -2255,8 +2257,8 @@ mod acceptance_tests {
         };
 
         assert_eq!(value.as_str(), Some(tx.txid().to_string().as_str()));
-        assert_eq!(ctx.mempool.gateway.read().len(), 1, "the pool must hold it");
-        assert!(ctx.mempool.gateway.read().contains_txid(&tx.txid()));
+        assert_eq!(ctx.mempool.read().len(), 1, "the pool must hold it");
+        assert!(ctx.mempool.read().contains_txid(&tx.txid()));
     }
 
     /// The default fee guard stops a transaction that burns its change.
@@ -2283,7 +2285,7 @@ mod acceptance_tests {
             "max-fee-exceeded is a parameter error: {error:?}"
         );
         assert_eq!(
-            ctx.mempool.gateway.read().len(),
+            ctx.mempool.read().len(),
             0,
             "and nothing was admitted"
         );
@@ -2304,7 +2306,7 @@ mod acceptance_tests {
             let tx = spending_tx(9, 1_000_000);
             let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx), 0]));
             assert_eq!(
-                ctx.mempool.gateway.read().len(),
+                ctx.mempool.read().len(),
                 1,
                 "zero sends it: {sent:?}"
             );
@@ -2319,7 +2321,7 @@ mod acceptance_tests {
             .err()
             .unwrap_or_else(|| panic!("0.99 BTC/kvB is a ceiling, not a fee allowance"));
         assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error:?}");
-        assert_eq!(ctx.mempool.gateway.read().len(), 0);
+        assert_eq!(ctx.mempool.read().len(), 0);
     }
 
     /// A ceiling the transaction stays under changes nothing.
@@ -2333,7 +2335,7 @@ mod acceptance_tests {
         let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
 
         assert!(sent.is_ok(), "an ordinary fee is not capped: {sent:?}");
-        assert_eq!(ctx.mempool.gateway.read().len(), 1);
+        assert_eq!(ctx.mempool.read().len(), 1);
     }
 
     /// Core's `ParseFeeRate` refuses ceilings at or above one whole coin per
@@ -2350,7 +2352,7 @@ mod acceptance_tests {
 
         assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error:?}");
         assert_eq!(
-            ctx.mempool.gateway.read().len(),
+            ctx.mempool.read().len(),
             0,
             "nothing admitted: {error:?}"
         );
@@ -2373,7 +2375,7 @@ mod acceptance_tests {
             "expected a verify error, got {error:?}"
         );
         assert_eq!(error.code(), RpcError::CORE_VERIFY_ERROR);
-        assert!(ctx.mempool.gateway.read().is_empty());
+        assert!(ctx.mempool.read().is_empty());
     }
 
     /// A transaction with duplicate inputs must be rejected by consensus
@@ -2415,7 +2417,7 @@ mod acceptance_tests {
             matches!(error, RpcError::TxRejected(_)),
             "expected a rejection, got {error:?}"
         );
-        assert!(ctx.mempool.gateway.read().is_empty());
+        assert!(ctx.mempool.read().is_empty());
     }
 
     /// Core rebroadcasts rather than failing, and callers retry on a dropped
@@ -2435,7 +2437,7 @@ mod acceptance_tests {
 
         assert_eq!(first.as_str(), second.as_str());
         assert_eq!(
-            ctx.mempool.gateway.read().len(),
+            ctx.mempool.read().len(),
             1,
             "it must not be inserted twice"
         );
@@ -2463,7 +2465,7 @@ mod acceptance_tests {
             panic!("the RBF-signaling original must be accepted");
         };
         assert!(
-            ctx.mempool.gateway.read().contains_txid(&original_txid),
+            ctx.mempool.read().contains_txid(&original_txid),
             "the original must enter the pool"
         );
 
@@ -2473,12 +2475,11 @@ mod acceptance_tests {
             panic!("the higher-fee replacement must be accepted");
         };
         assert!(
-            !ctx.mempool.gateway.read().contains_txid(&original_txid),
+            !ctx.mempool.read().contains_txid(&original_txid),
             "the original must be swept by the replacement"
         );
         assert!(
             ctx.mempool
-                .gateway
                 .read()
                 .contains_txid(&replacement.txid()),
             "the replacement must occupy the pool"
@@ -2490,7 +2491,7 @@ mod acceptance_tests {
             "resubmitting the evicted original must re-evaluate, not succeed as already-known: {resent:?}"
         );
         assert!(
-            !ctx.mempool.gateway.read().contains_txid(&original_txid),
+            !ctx.mempool.read().contains_txid(&original_txid),
             "the evicted original must still be absent after the failed retry"
         );
 
@@ -2550,7 +2551,7 @@ mod acceptance_tests {
             "vsize must be the transaction's, not a placeholder"
         );
         assert!(
-            ctx.mempool.gateway.read().is_empty(),
+            ctx.mempool.read().is_empty(),
             "testing acceptance must not accept"
         );
     }
@@ -2647,14 +2648,14 @@ mod acceptance_tests {
             let best_id = ids[11];
             let applied_node = tree.node(applied_id).expect("applied node exists");
             let best_node = tree.node(best_id).expect("best node exists");
-            ctx.set_applied_tip(TipSnapshot {
+            ctx.chain.set_applied_tip(TipSnapshot {
                 tip_id: applied_id,
                 height: applied_node.height,
                 chainwork: applied_node.chainwork,
                 hash: applied_node.hash,
                 chain_tx_count: applied_node.chain_tx_count,
             });
-            ctx.set_chain_tip(TipSnapshot {
+            ctx.chain.set_chain_tip(TipSnapshot {
                 tip_id: best_id,
                 height: best_node.height,
                 chainwork: best_node.chainwork,
@@ -2665,9 +2666,11 @@ mod acceptance_tests {
         };
 
         (
-            ctx.median_time_past_for_hash(applied_hash)
+            ctx.chain
+                .median_time_past_for_hash(applied_hash)
                 .expect("applied MTP exists"),
-            ctx.median_time_past_for_hash(best_hash)
+            ctx.chain
+                .median_time_past_for_hash(best_hash)
                 .expect("best MTP exists"),
         )
     }
@@ -2704,7 +2707,7 @@ mod acceptance_tests {
             "a tx final only under the header-tip MTP must be rejected; got {result:?}"
         );
         assert_eq!(
-            ctx.mempool.gateway.read().len(),
+            ctx.mempool.read().len(),
             0,
             "rejected tx must not enter the pool"
         );
