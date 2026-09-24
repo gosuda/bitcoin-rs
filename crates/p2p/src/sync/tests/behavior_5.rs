@@ -197,6 +197,7 @@ fn on_peer_ready_sweeps_dead_predecessor_header_request() -> Result<(), Box<dyn 
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),
+        answered: false,
     });
     register_info(&sync.peer_table, synthetic_peer(peer_addr, 1));
     let source = current_source(&sync.peer_table, peer_addr);
@@ -223,6 +224,7 @@ fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> Result<(), Box<dyn
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),
+        answered: false,
     });
     sync.on_peer_ready(stale.source(peer_addr));
     sync.on_peer_ready(replacement);
@@ -499,7 +501,6 @@ fn accepted_full_header_batch_continues_from_last_header() -> Result<(), Box<dyn
     let held = sync
         .chain
         .block_tree()
-        .read()
         .tip()
         .map(|tip| *tip.hash.as_byte_array());
     assert!(
@@ -721,5 +722,79 @@ fn replacement_source_does_not_inherit_header_penalty() -> Result<(), Box<dyn st
     );
     drop(scheduler);
     assert!(peers.is_connected(addr));
+    Ok(())
+}
+
+/// A connection that answered with a batch this node could not use keeps its
+/// gate only until the re-armed deadline. Ageing out then ends the pacing:
+/// it proves no silence, so the answering peer must keep its connection and
+/// its rank.
+///
+/// PRE: `a` owns the live header request and answers it with a far-future
+///   timestamp batch (`TimestampTooFarAhead`, rejected without blame); `b` is
+///   an equal peer so the rotation guard has a fallback.
+/// POST: at the re-armed deadline the gate retires with no penalty, no
+///   unresponsive mark, and no disconnect; only a fresh unanswered ask may
+///   stand in its place.
+/// INVARIANT: expiry blames silence only. A peer that answered — even
+///   unusably — never loses its connection or its rank to a timeout.
+#[test]
+fn answered_request_expires_without_blame() -> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        genesis,
+        sync,
+        inbound_headers_tx,
+        peers,
+    } = header_sync_with_genesis()?;
+    let a = test_addr(9160, 0)?;
+    let b = test_addr(9160, 1)?;
+    let a_rx = connect_peer(&peers, synthetic_peer(a, 8));
+    let _b_rx = connect_peer(&peers, synthetic_peer(b, 8));
+    let t0 = Instant::now();
+
+    sync.tick_at(t0);
+    assert!(next_locator(&a_rx).is_some(), "the first tick must ask `a`");
+
+    deliver_headers(
+        &inbound_headers_tx,
+        vec![far_future_header(genesis.compute_hash(), 1)?],
+        current_source(&peers, a),
+    )?;
+    let answered_at = t0 + Duration::from_millis(1);
+    sync.tick_at(answered_at);
+    assert!(
+        sync.scheduler.lock().header_request.is_some(),
+        "an answered request keeps its gate to pace the retry",
+    );
+
+    let expiry = answered_at + super::super::HEADER_REQUEST_TIMEOUT;
+    sync.tick_at(expiry);
+
+    let scheduler = sync.scheduler.lock();
+    let retired = scheduler
+        .header_request
+        .as_ref()
+        .is_none_or(|request| !request.answered && request.requested_at >= expiry);
+    assert!(
+        retired,
+        "the answered gate must retire; only a fresh unanswered ask may stand",
+    );
+    assert!(
+        scheduler.header_penalties.is_empty(),
+        "an answered request must never earn a timeout penalty",
+    );
+    drop(scheduler);
+    assert!(
+        peers.is_connected(a),
+        "expiry must not disconnect a peer that answered",
+    );
+    assert!(
+        !sync
+            .scheduler
+            .lock()
+            .window
+            .peer_in_staller_cooldown(a, expiry),
+        "expiry must not mark an answering peer unresponsive",
+    );
     Ok(())
 }

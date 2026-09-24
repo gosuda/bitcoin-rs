@@ -388,8 +388,9 @@ impl BlockSync {
     /// with a batch this node could not use.
     ///
     /// PRE: `source` is the connection that delivered the batch, if any.
-    /// POST: the request stays registered, so the gate keeps pacing duplicate
-    ///   `getheaders`, and its deadline no longer predates this answer.
+    /// POST: the request stays registered and is marked answered, so the gate
+    ///   keeps pacing duplicate `getheaders`, its deadline no longer predates
+    ///   this answer, and expiry retires it without blame.
     /// INVARIANT: only the exact owner's request is re-armed. A connection that
     ///   answered — even unusably — is never later blamed by expiry for a
     ///   silence it did not cause, so a wrong local clock or a paused admission
@@ -402,6 +403,7 @@ impl BlockSync {
         if let Some(request) = &mut scheduler.header_request {
             if request.source == source {
                 request.requested_at = now;
+                request.answered = true;
             }
         }
     }
@@ -588,7 +590,7 @@ impl BlockSync {
         now: Instant,
     ) -> GetheadersOutcome {
         let (locator, our_height) = {
-            let tree = self.chain.block_tree().read();
+            let tree = self.chain.block_tree();
             let Some(anchor) = tree.lookup(batch_tip) else {
                 return GetheadersOutcome::Failed;
             };
@@ -902,6 +904,15 @@ impl BlockSync {
                     && usable.iter().any(|peer| peer.source == request.source)
             })?;
             scheduler.header_request = None;
+            if request.answered {
+                // The connection answered with a batch this node could not
+                // use; age alone ends the pacing, it proves no silence.
+                tracing::debug!(
+                    peer_addr = %request.source.addr,
+                    "block sync: answered header request aged out; gate cleared without blame",
+                );
+                return None;
+            }
             *scheduler
                 .header_penalties
                 .entry(request.source)
@@ -973,6 +984,7 @@ impl BlockSync {
                     locator_tip_hash,
                     target_height,
                     requested_at: now,
+                    answered: false,
                 });
             })
             .is_err()
