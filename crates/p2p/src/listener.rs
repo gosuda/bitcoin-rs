@@ -219,8 +219,7 @@ impl ConnectionShared {
         }
     }
 
-    /// Enqueues a decoded block body into ingress, then forwards its carried
-    /// header to header admission.
+    /// Forwards one inbound full block into the node's ingress.
     ///
     /// The body is queued first so the header can never reach `headers_tx`
     /// while the body is still unsent: request scheduling runs after both
@@ -247,7 +246,7 @@ impl ConnectionShared {
     ) {
         let source = lease.source(peer_addr);
         // Every body carries its own header; route it through the headers
-        // sink too so tips learned only by body delivery (`inv` getdata,
+        // sink too so tips learned only by body delivery (`inv`-served,
         // compact reconstruction, or an unsolicited push) reach header
         // admission. Without a tree node the body can never become the
         // apply frontier's expected block, and no announced-tip credit
@@ -263,6 +262,19 @@ impl ConnectionShared {
         // same tick would schedule a duplicate fetch for it. Queueing the
         // body first means the tick that admits the header always marks the
         // body received first.
+        let hash = bitcoin_rs_primitives::Hash256::from(block.header.compute_hash());
+        let requested = self
+            .block_sync
+            .as_ref()
+            .is_some_and(|sync| sync.owns_body_fetch(source, hash));
+        let forward_credit = match lease.admit_block_forward(source, hash, requested) {
+            Some(credit) => Some(credit),
+            None => {
+                metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
+                self.send_headers(source, vec![block.header], false, false);
+                return;
+            }
+        };
         let header = block.header;
         let hash = bitcoin_rs_primitives::Hash256::from(header.compute_hash());
         let requested = self
