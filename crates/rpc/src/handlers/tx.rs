@@ -1,13 +1,12 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 use hashbrown::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::merkle_tree::MerkleBlock;
+use bitcoin_rs_mempool::SubmitError;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
-use bitcoin_rs_mempool::{AdmissionOrigin, MutationResult, SubmitError, SubmitOutcome};
 use bitcoin_rs_primitives::{
     Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, consensus_bytes, deserialize as native_deserialize,
@@ -19,7 +18,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 use crate::compat::convert::{
     self, VerboseTxChain, hex_encode, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
-use crate::context::Context;
+use crate::context::{self, AdmissionFailure, Context};
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
 use bitcoin_rs_index::block_log::BlockRecord;
@@ -419,66 +418,6 @@ pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Va
     typed_to_sonic(&v31::VerifyTxOutProof(result))
 }
 
-/// Failure from the one shared admission operation.
-///
-/// `sendrawtransaction` and [`crate::context::Context::admit_transaction`]
-/// map this into their respective envelopes.
-pub(crate) enum AdmissionFailure {
-    /// Mempool or standardness policy refused the transaction.
-    Policy(AcceptanceRejectReason),
-    /// Consensus verification failed.
-    Consensus,
-    /// Generation or mempool tokens kept changing across the retry budget.
-    RetryExhausted,
-}
-
-impl AdmissionFailure {
-    const RETRY_EXHAUSTED: &'static str =
-        "admission retry exhausted: chain or mempool changed during submission";
-
-    /// Maps this failure to the string envelope used by
-    /// [`crate::context::Context::admit_transaction`].
-    pub(crate) fn into_string(self) -> String {
-        match self {
-            Self::Policy(reason) => reason.to_string(),
-            Self::Consensus => "consensus-verification-failed".to_owned(),
-            Self::RetryExhausted => Self::RETRY_EXHAUSTED.to_owned(),
-        }
-    }
-}
-
-/// Maps the shared mempool submission verdict into the RPC/embedded envelope.
-///
-/// Preparation, bounded retry, policy evaluation, and the authoritative commit
-/// belong to the gateway. RPC only supplies its origin, fee option, current
-/// chain capability, and caller-facing error semantics.
-pub(crate) fn admit_transaction(
-    ctx: &Context,
-    tx: &Tx,
-    max_feerate_sat_per_kvb: Option<u64>,
-) -> Result<MutationResult, AdmissionFailure> {
-    match ctx.mempool.submit_transaction(
-        Arc::new(tx.clone()),
-        AdmissionOrigin::Rpc,
-        max_feerate_sat_per_kvb,
-        unix_time_secs(),
-        &ctx.chain.admission_chain(),
-    ) {
-        Ok(SubmitOutcome::Committed(result)) => Ok(result),
-        Ok(SubmitOutcome::AlreadyKnown) => Ok(MutationResult::empty()),
-        Ok(SubmitOutcome::AlreadyConfirmed | SubmitOutcome::Held { .. }) => {
-            // RPC never holds orphans or treats the transaction lookup cache
-            // as a successful submission. Preserve its missing-input refusal.
-            Err(AdmissionFailure::Policy(
-                AcceptanceRejectReason::MissingInputs,
-            ))
-        }
-        Err(SubmitError::Policy(reason)) => Err(AdmissionFailure::Policy(reason)),
-        Err(SubmitError::Consensus) => Err(AdmissionFailure::Consensus),
-        Err(SubmitError::RetryExhausted) => Err(AdmissionFailure::RetryExhausted),
-    }
-}
-
 /// Fee rate above which `sendrawtransaction` refuses by default, in sat/kvB.
 ///
 /// Bitcoin Core's `DEFAULT_MAX_RAW_TX_FEE_RATE`, `COIN / 10` — 0.1 BTC per kvB.
@@ -495,7 +434,7 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
     )?;
     let txid = tx.txid();
 
-    match admit_transaction(ctx, &tx, max_feerate) {
+    match context::admit_transaction(&ctx.mempool, &ctx.chain, &tx, max_feerate) {
         Ok(_) => typed_to_sonic(&v31::SendRawTransaction(txid.to_string())),
         Err(AdmissionFailure::Policy(reason)) => Err(reject_reason_to_rpc_error(reason)),
         Err(AdmissionFailure::Consensus) => Err(RpcError::TxRejected(
@@ -710,12 +649,6 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
 fn decode_tx(raw: &str, message: String) -> Result<Tx, RpcError> {
     let bytes = hex_decode(raw).map_err(|_| RpcError::Deserialization(message.clone()))?;
     native_deserialize(&bytes).map_err(|_| RpcError::Deserialization(message))
-}
-
-fn unix_time_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
 }
 
 /// f64 nearest to 2^64 — the value `u64::MAX` rounds to as a float, and the
