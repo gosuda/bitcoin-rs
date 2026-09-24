@@ -302,33 +302,92 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap()
     Ok(())
 }
 
+/// Mines one regtest block at `height` whose coinbase names the height, on
+/// top of the block at `prev`.
+fn mined_child(
+    prev: Hash256,
+    prev_time: u32,
+    height: u32,
+) -> Result<Block, Box<dyn std::error::Error>> {
+    let tx = Tx {
+        version: 2,
+        inputs: vec![TxIn {
+            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            script_sig: Script::from_bytes(vec![1, u8::try_from(height)?, 0]),
+            sequence: Sequence::from_consensus(u32::MAX),
+            witness: Witness::new(),
+        }],
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Script::new(),
+        }],
+        lock_time: LockTime::from_consensus(0),
+    };
+    let mut leaves = vec![*tx.txid().as_bytes()];
+    let merkle = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
+        .ok_or("coinbase merkle root missing")?;
+    let mut block = Block {
+        header: Header {
+            version: 1,
+            prev_blockhash: BlockHash(prev),
+            merkle_root: Hash256::from_le_bytes(&merkle),
+            time: prev_time.saturating_add(1),
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        },
+        txs: vec![tx],
+    };
+    while !compact_is_met_by(block.header.bits, block.header.compute_hash().0) {
+        block.header.nonce = block
+            .header
+            .nonce
+            .checked_add(1)
+            .ok_or("test nonce exhausted")?;
+    }
+    Ok(block)
+}
+
+/// A certified body chain wider than one commit group replays to the durable
+/// head: recoverability is the body-identity and ancestry walk, not the gap
+/// width. The replay lands on the stored head and preserves its `commit_id`
+/// (`P3`).
 #[test]
-fn durable_gap_wider_than_one_group_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
-    let (handles, child) = restored_chainstate()?;
-    let restored = handles
-        .applied_tip
-        .load_full()
-        .ok_or("restored tip missing")?;
-    let head_height = u32::try_from(super::REPLAY_GAP_BLOCK_LIMIT)?.saturating_add(1);
+fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut handles, first) = restored_chainstate()?;
+    let width = crate::window::DURABLE_HEAD_GROUP_BLOCKS + 1;
+    let bodies = Arc::new(MemoryBodies::default());
+    let mut tip_hash = Hash256::from(first.block_hash());
+    let mut prev_time = first.header.time;
+    bodies.persist_block_body(1, tip_hash, &consensus_bytes(&first))?;
+    for height in 2..=u32::try_from(width)? {
+        let block = mined_child(tip_hash, prev_time, height)?;
+        tip_hash = Hash256::from(block.block_hash());
+        prev_time = block.header.time;
+        bodies.persist_block_body(height, tip_hash, &consensus_bytes(&block))?;
+    }
     let head = DurableHead {
         commit_id: 5,
-        height: head_height,
-        tip: Hash256::from(child.block_hash()),
-        chain_tx_count: 2,
+        height: u32::try_from(width)?,
+        tip: tip_hash,
+        chain_tx_count: u64::try_from(width)? + 1,
         body_extent: None,
         undo_extent: None,
     };
+    let certified = (head.height, head.tip, head.chain_tx_count);
+    install_arbitrary_head(&mut handles, head, bodies)?;
 
-    let Err(error) = super::replay_committed_gap(&handles, head, Some(&restored)) else {
-        panic!("gap beyond the commit-group bound must fail");
-    };
-    assert!(matches!(
-        error,
-        ApplyError::DurableHeadGapUnrecoverable {
-            reason: "the gap is wider than one commit group",
-            ..
-        }
-    ));
+    super::reconcile_at_boot(&handles)?;
+
+    let landed = handles
+        .applied_tip
+        .load_full()
+        .ok_or("wide replay did not publish an applied tip")?;
+    assert_eq!((landed.height, landed.hash, landed.chain_tx_count.to_wire()), certified);
+    assert_eq!(
+        handles.durable_head.load()?.map(|head| head.commit_id),
+        Some(5),
+        "replay must consume the durable receipt rather than creating a new one"
+    );
     Ok(())
 }
 
