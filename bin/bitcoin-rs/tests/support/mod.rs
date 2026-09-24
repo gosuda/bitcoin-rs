@@ -9,6 +9,4 @@
     reason = "Support modules are consumed by different integration test binaries; any single binary may leave some helpers unused."
 )]
 
-pub(crate) mod process_node;
-pub(crate) mod process_peer;
 pub(crate) mod reference_set;
