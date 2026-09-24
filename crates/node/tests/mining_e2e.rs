@@ -673,7 +673,6 @@ fn mining_handler(state: &NodeState) -> Handler {
         chain: ChainHandles {
             chain_tip: state.chainstate().chain_tip_handle(),
             applied_tip: state.chainstate().applied_tip_handle(),
-            chain_tx_count: state.chainstate().chain_tx_count_handle(),
             ibd,
             blocks: state.blocks(),
             transactions: state.transactions(),

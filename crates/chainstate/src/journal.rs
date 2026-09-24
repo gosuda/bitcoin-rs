@@ -152,7 +152,7 @@ impl ReplayAccumulator {
         base_tip: bitcoin_rs_chain::TipSnapshot,
         base_chain_tx_count: u64,
     ) -> Result<Self, JournalReplayError> {
-        if base_chain_tx_count == 0 {
+        if ChainTxCount::from_wire(base_chain_tx_count).get().is_none() {
             return Err(JournalReplayError::CommittedRangeInvalid(
                 "checkpoint chain_tx_count is unknown".to_owned(),
             ));

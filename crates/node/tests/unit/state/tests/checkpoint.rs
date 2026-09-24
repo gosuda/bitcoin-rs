@@ -8,8 +8,6 @@ use super::*;
 /// disconnect its own tip.
 #[test]
 fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result<()> {
-    use std::sync::atomic::Ordering;
-
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("node");
@@ -20,9 +18,11 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
         assert_eq!(
             state
                 .chainstate()
-                .chain_tx_count_handle()
-                .load(Ordering::Relaxed),
-            0,
+                .applied_tip_handle()
+                .load_full()
+                .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| tip
+                    .chain_tx_count),
+            bitcoin_rs_chain::ChainTxCount::UNKNOWN,
             "a node that has applied nothing cannot know the count"
         );
 
@@ -31,9 +31,16 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
         let _tip = state.apply_block(&genesis)?;
         let counted = state
             .chainstate()
-            .chain_tx_count_handle()
-            .load(Ordering::Relaxed);
-        assert_eq!(counted, genesis_tx_count, "genesis establishes the count");
+            .applied_tip_handle()
+            .load_full()
+            .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| {
+                tip.chain_tx_count
+            });
+        assert_eq!(
+            counted,
+            bitcoin_rs_chain::ChainTxCount::established(genesis_tx_count),
+            "genesis establishes the count"
+        );
 
         assert!(state.write_clean_checkpoint()?.is_some());
         counted
@@ -52,8 +59,10 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
     assert_eq!(
         resumed
             .chainstate()
-            .chain_tx_count_handle()
-            .load(Ordering::Relaxed),
+            .applied_tip_handle()
+            .load_full()
+            .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| tip
+                .chain_tx_count),
         expected
     );
     Ok(())
@@ -255,10 +264,7 @@ fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
         .utxo_handle()
         .with_stable_view(stable_hash)?;
     let expected_stats = base.chainstate().coin_stats_handle().snapshot();
-    let expected_tx_count = base
-        .chainstate()
-        .chain_tx_count_handle()
-        .load(Ordering::Relaxed);
+    let expected_tx_count = expected_tip.chain_tx_count;
     drop(base);
 
     let resumed = NodeState::open(config, None)?;
@@ -279,13 +285,7 @@ fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
         resumed.chainstate().coin_stats_handle().snapshot(),
         expected_stats
     );
-    assert_eq!(
-        resumed
-            .chainstate()
-            .chain_tx_count_handle()
-            .load(Ordering::Relaxed),
-        expected_tx_count
-    );
+    assert_eq!(resumed_tip.chain_tx_count, expected_tx_count);
     Ok(())
 }
 

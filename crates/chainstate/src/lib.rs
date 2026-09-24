@@ -39,7 +39,6 @@ use scratch::ApplyScratchCapacities;
 use scratch::SameBlockSpentSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 pub use window::DURABLE_HEAD_GROUP_BLOCKS;
 pub use window::DURABLE_HEAD_GROUP_MAX_BYTES;
@@ -463,17 +462,6 @@ pub struct Chainstate {
     pub(crate) network: Network,
     pub(crate) chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     pub(crate) applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Cumulative transaction count of the applied chain, `0` when unknown.
-    ///
-    /// Bitcoin Core's `CBlockIndex::m_chain_tx_count`, including its convention
-    /// that zero means *unset* rather than *empty* (`HaveNumChainTxs()`). Only a
-    /// chain applied from genesis by a node that maintains this counter can know
-    /// it; a cold start before genesis or an arithmetic inconsistency leaves it
-    /// unknown until the chain is applied again.
-    ///
-    /// A projection of the published applied tip, stored for the readers that
-    /// have not yet loaded the tip itself.
-    pub(crate) chain_tx_count: Arc<AtomicU64>,
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
@@ -539,8 +527,6 @@ pub struct ChainstateParts {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Authoritative applied-tip publication cell.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Cumulative transaction count through the applied tip.
-    pub chain_tx_count: Arc<AtomicU64>,
     /// Shared header/block tree.
     pub block_tree: Arc<RwLock<BlockTree>>,
     /// Authoritative UTXO set.
@@ -740,7 +726,6 @@ impl Chainstate {
             network: parts.network,
             chain_tip: parts.chain_tip,
             applied_tip: parts.applied_tip,
-            chain_tx_count: parts.chain_tx_count,
             block_tree: parts.block_tree,
             utxo: parts.utxo,
             coin_stats: parts.coin_stats,
@@ -934,14 +919,7 @@ impl Chainstate {
         Arc::clone(&self.coin_stats)
     }
 
-    /// Clones the cumulative chain transaction-count handle.
-    #[must_use]
-    pub fn chain_tx_count_handle(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.chain_tx_count)
-    }
-
     /// Clones the authoritative chain-event publisher.
-    #[must_use]
     pub fn chain_events_handle(&self) -> Arc<crate::events::ChainEventPublisher> {
         Arc::clone(&self.chain_events)
     }
@@ -1135,7 +1113,6 @@ impl Chainstate {
             network,
             chain_tip,
             applied_tip,
-            chain_tx_count: Arc::new(AtomicU64::new(0)),
             block_tree,
             utxo,
             coin_stats,
@@ -1223,7 +1200,6 @@ impl Chainstate {
                 block_tree: Arc::clone(&self.block_tree),
                 utxo: Arc::clone(&self.utxo),
                 coin_stats: Arc::clone(&self.coin_stats),
-                chain_tx_count: Arc::clone(&self.chain_tx_count),
                 journal: self.journal.clone(),
                 data_dir: data_dir.to_path_buf(),
                 chain_events: Arc::clone(&self.chain_events),

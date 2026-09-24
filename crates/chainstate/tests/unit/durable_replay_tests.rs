@@ -36,10 +36,13 @@ fn restored_chainstate() -> Result<(Chainstate, Block), Box<dyn std::error::Erro
         &genesis,
         0,
     )?;
+    let genesis_tip = bitcoin_rs_chain::TipSnapshot {
+        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(1),
+        ..genesis_tip
+    };
     handles
         .applied_tip
         .store(Some(Arc::new(genesis_tip.clone())));
-    handles.chain_tx_count.store(1, Ordering::Release);
 
     let tx = Tx {
         version: 2,
@@ -128,7 +131,10 @@ fn committed_gap_replays_to_head_without_recommitting_it() -> Result<(), Box<dyn
         .load_full()
         .ok_or("replay did not publish an applied tip")?;
     assert_eq!((landed.height, landed.hash), (head.height, head.tip));
-    assert_eq!(handles.chain_tx_count.load(Ordering::Acquire), 2);
+    assert_eq!(
+        landed.chain_tx_count,
+        bitcoin_rs_chain::ChainTxCount::established(2)
+    );
     assert_eq!(handles.durable_head.load()?, Some(head));
     assert_eq!(
         handles.durable_head.load()?.map(|head| head.commit_id),
@@ -214,7 +220,6 @@ fn committed_gap_with_missing_body_fails_closed() -> Result<(), Box<dyn std::err
 fn cold_chainstate_replays_head_chain_from_genesis() -> Result<(), Box<dyn std::error::Error>> {
     let (mut handles, child) = restored_chainstate()?;
     handles.applied_tip.store(None);
-    handles.chain_tx_count.store(0, Ordering::Release);
     let genesis = Network::Regtest.genesis_block();
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
@@ -236,7 +241,10 @@ fn cold_chainstate_replays_head_chain_from_genesis() -> Result<(), Box<dyn std::
         .load_full()
         .ok_or("cold replay did not publish an applied tip")?;
     assert_eq!((landed.height, landed.hash), (1, head.tip));
-    assert_eq!(handles.chain_tx_count.load(Ordering::Acquire), 2);
+    assert_eq!(
+        landed.chain_tx_count,
+        bitcoin_rs_chain::ChainTxCount::established(2)
+    );
     assert_eq!(
         handles.durable_head.load()?,
         Some(head),
@@ -250,7 +258,6 @@ fn cold_chainstate_with_missing_genesis_body_fails_closed() -> Result<(), Box<dy
 {
     let (mut handles, child) = restored_chainstate()?;
     handles.applied_tip.store(None);
-    handles.chain_tx_count.store(0, Ordering::Release);
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
         1,

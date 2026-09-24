@@ -236,15 +236,7 @@ fn write_checkpoint(
     applied_tip: Option<&TipSnapshot>,
 ) -> Result<CheckpointWrite, CheckpointError> {
     let data_dir = open_data_dir(data_dir)?;
-    write_checkpoint_from_dir(
-        &data_dir,
-        config,
-        block_tree,
-        utxo,
-        coin_stats,
-        applied_tip,
-        0,
-    )
+    write_checkpoint_from_dir(&data_dir, config, block_tree, utxo, coin_stats, applied_tip)
 }
 
 #[cfg(test)]
@@ -296,7 +288,7 @@ fn load_payloads(
     manifest: &CheckpointManifestV1,
     mut headers: headers::RestoredHeaders,
 ) -> Result<RestoredChainstate, CheckpointError> {
-    let chain_tx_count = manifest.applied_tip.chain_tx_count;
+    let chain_tx_count = ChainTxCount::from_wire(manifest.applied_tip.chain_tx_count);
     let (utxo, coin_stats) = load_payloads_inner(generation_dir, manifest, &headers)?;
     validate_chain_tx_count(chain_tx_count, &coin_stats)?;
     // Header reconstruction initializes counts to zero. Restore the exact
@@ -311,7 +303,7 @@ fn load_payloads(
         headers.tree.restore_chain_tx_count(
             node_id,
             if node_id == headers.applied_tip_id {
-                ChainTxCount::from_wire(chain_tx_count)
+                chain_tx_count
             } else {
                 ChainTxCount::UNKNOWN
             },
@@ -335,12 +327,19 @@ fn load_payloads(
         utxo,
         coin_stats,
         applied_tip,
-        chain_tx_count,
+        chain_tx_count: chain_tx_count.to_wire(),
     })
 }
-fn validate_chain_tx_count(chain_tx_count: u64, stats: &CoinStats) -> Result<(), CheckpointError> {
-    // Zero is the existing unknown-chain-count sentinel, not a second known total.
-    if chain_tx_count != 0 && chain_tx_count != stats.tx_count {
+fn validate_chain_tx_count(
+    chain_tx_count: ChainTxCount,
+    stats: &CoinStats,
+) -> Result<(), CheckpointError> {
+    // An unknown restored count is not a second known total: only a known
+    // one has to agree with the coin statistics exported beside it.
+    if chain_tx_count
+        .get()
+        .is_some_and(|count| count != stats.tx_count)
+    {
         return Err(CheckpointError::Store(StoreError::Invalid(
             "chain transaction count does not match CoinStats".to_owned(),
         )));
@@ -500,11 +499,13 @@ pub(crate) fn write_checkpoint_from_dir(
     utxo: &UtxoSet,
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
-    chain_tx_count: u64,
 ) -> Result<CheckpointWrite, CheckpointError> {
     let Some(applied_tip) = applied_tip else {
         return Ok(CheckpointWrite::SkippedNoAppliedTip);
     };
+    // The tip carries the count it was published with: a checkpoint can
+    // never name a total its applied tip disagrees with.
+    let chain_tx_count = applied_tip.chain_tx_count;
     #[cfg(test)]
     let failpoint = NEXT_CHECKPOINT_FAILPOINT.with(std::cell::Cell::take);
     #[cfg(not(test))]
@@ -601,7 +602,7 @@ pub(crate) fn write_checkpoint_from_dir(
         network: network_name(config.network).to_owned(),
         network_magic: hex_encode(&config.network.magic()),
         genesis_hash: config.genesis.to_string_be(),
-        applied_tip: manifest_tip(headers_meta.metadata.applied, chain_tx_count),
+        applied_tip: manifest_tip(headers_meta.metadata.applied, chain_tx_count.to_wire()),
         best_header_tip: manifest_tip(headers_meta.metadata.best, 0),
         headers: HeadersArtifactV1 {
             file: HEADERS_FILE.to_owned(),

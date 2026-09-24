@@ -2785,9 +2785,7 @@ mod tests {
     fn getchaintxstats_uses_applied_atomic_when_per_node_count_is_unset() {
         use alloc::sync::Arc;
 
-        let mut ctx = Context::new();
-        ctx.chain.chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(42));
-        let ctx = Arc::new(ctx);
+        let ctx = Arc::new(Context::new());
         let genesis = fixture_genesis();
         let tip = {
             let mut tree = ctx.chain.block_tree.write();
@@ -4443,11 +4441,7 @@ mod chaintxstats_window_tests {
     /// leaves it unset cannot tell "the shortcut is restricted to the tip" from
     /// "there is no shortcut to take".
     fn chain_ctx_with_counter(times: &[u32], chain_tx_count: Option<u64>) -> Arc<Context> {
-        let mut ctx = Context::new();
-        if let Some(count) = chain_tx_count {
-            ctx.chain.chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(count));
-        }
-        let ctx = Arc::new(ctx);
+        let ctx = Arc::new(Context::new());
         let mut previous = BlockHash::default();
         let mut parent = None;
         let mut tip = None;
@@ -4953,9 +4947,10 @@ mod verification_progress_wiring_tests {
             }
             id
         };
-        if let Some(count) = chain_tx_count {
-            ctx.chain.chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(count));
-        }
+        let applied_chain_tx_count = chain_tx_count.map_or(
+            bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            bitcoin_rs_chain::ChainTxCount::established,
+        );
         let hash = header.compute_hash().0;
         ctx.set_chain_tip(TipSnapshot {
             tip_id: id,
@@ -4969,7 +4964,7 @@ mod verification_progress_wiring_tests {
             height: 50,
             chainwork: ChainWork::ZERO,
             hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: applied_chain_tx_count,
         });
         Arc::new(ctx)
     }

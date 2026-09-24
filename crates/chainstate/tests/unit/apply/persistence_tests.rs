@@ -76,8 +76,11 @@ fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyError> {
         &genesis,
         0,
     )?;
+    let tip = bitcoin_rs_chain::TipSnapshot {
+        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(1),
+        ..tip
+    };
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
-    handles.chain_tx_count.store(1, Ordering::Release);
     Ok(tip)
 }
 

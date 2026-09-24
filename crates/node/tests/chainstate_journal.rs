@@ -46,8 +46,11 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     let expected_stats = initial.chainstate().coin_stats_handle().snapshot();
     let expected_tx_count = initial
         .chainstate()
-        .chain_tx_count_handle()
-        .load(Ordering::Relaxed);
+        .applied_tip_handle()
+        .load_full()
+        .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| {
+            tip.chain_tx_count
+        });
     drop(initial);
 
     // No checkpoint was published for `child`: only the journal can recover it.
@@ -75,8 +78,10 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
     assert_eq!(
         resumed
             .chainstate()
-            .chain_tx_count_handle()
-            .load(Ordering::Relaxed),
+            .applied_tip_handle()
+            .load_full()
+            .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| tip
+                .chain_tx_count),
         expected_tx_count
     );
     Ok(())
