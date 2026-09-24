@@ -505,30 +505,6 @@ impl<'a> ParsedTransaction<'a> {
         self.bytes
     }
 
-    /// Span of the 4-byte version field.
-    #[must_use]
-    pub const fn version_span(&self) -> ByteSpan {
-        self.version_span
-    }
-
-    /// Span of the input-count compact-size encoding.
-    #[must_use]
-    pub const fn input_count_span(&self) -> ByteSpan {
-        self.input_count_span
-    }
-
-    /// Span of the output-count compact-size encoding.
-    #[must_use]
-    pub const fn output_count_span(&self) -> ByteSpan {
-        self.output_count_span
-    }
-
-    /// Span of the 4-byte lock time.
-    #[must_use]
-    pub const fn lock_time_span(&self) -> ByteSpan {
-        self.lock_time_span
-    }
-
     /// Whether the BIP144 marker/flag was present in the wire encoding. For
     /// every parseable encoding this coincides with witness data being
     /// present, because an all-empty witness section is rejected as
