@@ -564,6 +564,7 @@ pub(crate) fn start_node(
     guard.services.tx_relay = Some(bitcoin_rs_p2p::spawn_tx_relay_worker(
         bitcoin_rs_p2p::PeerRelaySink::new(state.peer_table()),
         relay_rx,
+        Arc::clone(&gateway),
         Arc::clone(&shutdown),
     )?);
     guard.services.tx_ingress = Some(crate::tx_ingress::spawn_tx_ingress_consumer(
