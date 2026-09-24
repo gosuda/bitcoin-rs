@@ -404,3 +404,322 @@ fn tick_bounded_request_peer_selection_preserves_equal_height_order()
     );
     Ok(())
 }
+
+/// Mines `count` regtest headers chained from `start_prev`, heights starting
+/// at `first_height`.
+fn chained_headers(
+    start_prev: BlockHash,
+    first_height: u32,
+    count: usize,
+) -> Result<Vec<Header>, Box<dyn std::error::Error>> {
+    let mut out = Vec::with_capacity(count);
+    let mut prev = start_prev;
+    for index in 0..count {
+        let height = first_height.saturating_add(u32::try_from(index)?);
+        let mut header = test_header(prev, height);
+        // `test_header` mines version 1, which regtest rejects from height 500
+        // (BIP 34) and again from height 1251 (BIP 66 requires version 3), so a
+        // full page has to carry a modern version throughout.
+        header.version = if height >= 1251 { 4 } else { 3 };
+        while !pow_met(
+            header.bits.to_consensus(),
+            Hash256::from(header.compute_hash()),
+        ) {
+            header.nonce = header.nonce.wrapping_add(1);
+        }
+        prev = header.compute_hash();
+        out.push(header);
+    }
+    Ok(out)
+}
+
+/// Delivers `headers` to `sync` as a wire answer from `source`.
+fn deliver_headers(
+    tx: &crossbeam_channel::Sender<InboundHeaders>,
+    headers: Vec<Header>,
+    source: PeerSource,
+) -> Result<(), Box<dyn std::error::Error>> {
+    tx.send(InboundHeaders {
+        headers,
+        source: Some(source),
+        wire_response: true,
+        body_fetch_owned: false,
+    })?;
+    Ok(())
+}
+
+/// The locator anchors a `getheaders` carries, as raw consensus bytes, or
+/// `None` for another message.
+fn locator_of(message: &Message) -> Option<Vec<[u8; 32]>> {
+    match message {
+        Message::GetHeaders(request) => Some(
+            request
+                .locator_hashes
+                .iter()
+                .map(|hash| *hash.as_byte_array())
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+/// The first `getheaders` locator on `rx`, or `None` if none is queued.
+fn next_locator(rx: &crossbeam_channel::Receiver<Message>) -> Option<Vec<[u8; 32]>> {
+    rx.try_iter().find_map(|message| locator_of(&message))
+}
+
+/// The wire encoding of a fixture block hash, for locator comparisons.
+fn wire_hash(hash: BlockHash) -> [u8; 32] {
+    *Hash256::from(hash).as_byte_array()
+}
+
+#[test]
+fn accepted_full_header_batch_continues_from_last_header() -> Result<(), Box<dyn std::error::Error>>
+{
+    let HeaderSyncFixture {
+        genesis,
+        sync,
+        inbound_headers_tx,
+        peers,
+    } = header_sync_with_genesis()?;
+    let page = super::super::MAX_HEADERS_RESULTS;
+    let addr = test_addr(9100, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, i32::try_from(page + 10)?));
+
+    sync.tick();
+    assert!(
+        next_locator(&rx).is_some(),
+        "the first tick must ask for headers"
+    );
+
+    let batch = chained_headers(genesis.compute_hash(), 1, page)?;
+    deliver_headers(&inbound_headers_tx, batch, current_source(&peers, addr))?;
+    sync.tick();
+
+    let held = sync
+        .chain
+        .block_tree()
+        .read()
+        .tip()
+        .map(|tip| *tip.hash.as_byte_array());
+    assert!(
+        held.is_some_and(|hash| hash != *Hash256::from(genesis.compute_hash()).as_byte_array()),
+        "a full page must move the header tip"
+    );
+    let locator = next_locator(&rx).ok_or("a full page must be continued")?;
+    assert_eq!(
+        locator.first().copied(),
+        held,
+        "the continuation must anchor on the deepest header the page left us with"
+    );
+    assert!(
+        next_locator(&rx).is_none(),
+        "exactly one continuation may follow a full page"
+    );
+    Ok(())
+}
+
+#[test]
+fn known_full_header_batch_continues_from_last_header() -> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        genesis,
+        sync,
+        inbound_headers_tx,
+        peers,
+    } = header_sync_with_genesis()?;
+    let page = super::super::MAX_HEADERS_RESULTS;
+    let addr = test_addr(9110, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, i32::try_from(page + 10)?));
+
+    sync.tick();
+    assert!(next_locator(&rx).is_some());
+
+    let batch = chained_headers(genesis.compute_hash(), 1, page)?;
+    let last = batch[page - 1].compute_hash();
+    let source = current_source(&peers, addr);
+    // Two deliveries admit every header of the page, so the third takes the
+    // known-batch branch, which skips the transition lock entirely.
+    for round in 0..3 {
+        deliver_headers(&inbound_headers_tx, batch.clone(), source)?;
+        sync.tick();
+        let locator = next_locator(&rx).ok_or_else(|| {
+            format!("full page round {round} must be continued, accepted or known")
+        })?;
+        assert!(!locator.is_empty(), "a continuation carries a locator");
+        if round == 2 {
+            assert_eq!(
+                locator.first().copied(),
+                Some(wire_hash(last)),
+                "the known-page continuation anchors on the page's last header"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn unconnecting_headers_leave_request_pending() -> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        sync,
+        inbound_headers_tx,
+        peers,
+        ..
+    } = header_sync_with_genesis()?;
+    let addr = test_addr(9120, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, 8));
+    let now = Instant::now();
+
+    sync.tick_at(now);
+    assert!(next_locator(&rx).is_some(), "the first tick must ask");
+    assert!(
+        sync.scheduler.lock().header_request.is_some(),
+        "the request must be registered before the answer"
+    );
+
+    // A batch whose parent the tree never saw is not an answer to anything.
+    let orphan_prev = BlockHash(Hash256::from_le_bytes(&[0x22; 32]));
+    deliver_headers(
+        &inbound_headers_tx,
+        vec![test_header(orphan_prev, 9)],
+        current_source(&peers, addr),
+    )?;
+    sync.tick_at(now);
+
+    assert!(
+        sync.scheduler
+            .lock()
+            .header_request
+            .is_some_and(|request| request.source == current_source(&peers, addr)),
+        "an unconnecting batch must not consume the request it failed to answer"
+    );
+    Ok(())
+}
+
+#[test]
+fn expired_request_marks_disconnects_and_switches_rank() -> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        sync,
+        inbound_headers_tx: _inbound_headers_tx,
+        peers,
+        ..
+    } = header_sync_with_genesis()?;
+    // Equal advertised heights, so the first-wins tie breaks toward `a` and the
+    // penalty alone can move the pick to `b`.
+    let a = test_addr(9130, 0)?;
+    let b = test_addr(9130, 1)?;
+    let a_rx = connect_peer(&peers, synthetic_peer(a, 8));
+    let b_rx = connect_peer(&peers, synthetic_peer(b, 8));
+    let t0 = Instant::now();
+    let expired_at = t0 + super::super::HEADER_REQUEST_TIMEOUT;
+
+    sync.tick_at(t0);
+    assert!(
+        next_locator(&a_rx).is_some(),
+        "the first-wins tie must pick `a`"
+    );
+    assert!(next_locator(&b_rx).is_none());
+
+    sync.tick_at(expired_at);
+
+    assert!(
+        !peers.is_connected(a),
+        "a timed-out header peer is rotated away while a fallback exists"
+    );
+    assert!(
+        sync.scheduler
+            .lock()
+            .window
+            .peer_in_staller_cooldown(a, expired_at),
+        "expiry must mark the timed-out connection unresponsive"
+    );
+    assert!(
+        sync.scheduler
+            .lock()
+            .header_request
+            .is_some_and(|request| request.source == current_source(&peers, b)),
+        "the gate must move to the fallback connection, never stay on the timed-out one"
+    );
+    assert!(
+        next_locator(&b_rx).is_some(),
+        "the fallback peer must be asked in the very tick that rotates"
+    );
+    Ok(())
+}
+
+#[test]
+fn answered_request_does_not_penalize() -> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        genesis,
+        sync,
+        inbound_headers_tx,
+        peers,
+    } = header_sync_with_genesis()?;
+    let addr = test_addr(9140, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, 8));
+    let t0 = Instant::now();
+
+    sync.tick_at(t0);
+    assert!(next_locator(&rx).is_some());
+
+    deliver_headers(
+        &inbound_headers_tx,
+        chained_headers(genesis.compute_hash(), 1, 1)?,
+        current_source(&peers, addr),
+    )?;
+    sync.tick_at(t0 + Duration::from_millis(1));
+
+    assert!(
+        sync.scheduler.lock().header_penalties.is_empty(),
+        "a real answer must not leave a timeout penalty behind"
+    );
+    assert!(
+        peers.is_connected(addr),
+        "an answered request must never rotate the peer away"
+    );
+    Ok(())
+}
+
+#[test]
+fn replacement_source_does_not_inherit_header_penalty() -> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        sync,
+        inbound_headers_tx: _inbound_headers_tx,
+        peers,
+        ..
+    } = header_sync_with_genesis()?;
+    let addr = test_addr(9150, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, 8));
+    let t0 = Instant::now();
+    let old_source = current_source(&peers, addr);
+
+    sync.tick_at(t0);
+    assert!(next_locator(&rx).is_some());
+    // One peer only, so expiry clears and penalises without disconnecting.
+    sync.tick_at(t0 + super::super::HEADER_REQUEST_TIMEOUT);
+    assert!(
+        sync.scheduler
+            .lock()
+            .header_penalties
+            .contains_key(&old_source),
+        "the timed-out connection must carry its own penalty"
+    );
+
+    // A same-address replacement is a different connection and starts clean.
+    let _replacement_rx = connect_peer(&peers, synthetic_peer(addr, 8));
+    let replacement = current_source(&peers, addr);
+    assert_ne!(old_source, replacement, "the lease identity must change");
+    sync.on_peer_ready(replacement);
+
+    let scheduler = sync.scheduler.lock();
+    assert!(
+        !scheduler.header_penalties.contains_key(&replacement),
+        "a replacement must never inherit its predecessor's penalty"
+    );
+    assert!(
+        !scheduler.header_penalties.contains_key(&old_source),
+        "the released connection keeps no penalty record"
+    );
+    drop(scheduler);
+    assert!(peers.is_connected(addr));
+    Ok(())
+}

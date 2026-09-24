@@ -301,8 +301,7 @@ fn inbound_headers_response_releases_getheaders_gate() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn unconnecting_headers_retain_gate_and_pace_retry()
--> Result<(), Box<dyn std::error::Error>> {
+fn unconnecting_headers_retain_gate_and_pace_retry() -> Result<(), Box<dyn std::error::Error>> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;

@@ -623,3 +623,62 @@ fn release_sweep_is_connection_exact_at_the_same_address() -> Result<(), Box<dyn
     );
     Ok(())
 }
+
+/// The header-request deadline is evaluated on the injected clock, never on
+/// wall time: one nanosecond short of `HEADER_REQUEST_TIMEOUT` keeps the gate
+/// live, the deadline itself retires it and penalises its owner.
+#[test]
+fn header_request_deadline_is_evaluated_on_the_injected_clock()
+-> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        sync,
+        inbound_headers_tx: _inbound_headers_tx,
+        peers,
+        ..
+    } = header_sync_with_genesis()?;
+    let addr = test_addr(9160, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, 8));
+    connect_peer(&peers, synthetic_peer(test_addr(9160, 1)?, 8));
+    let t0 = Instant::now();
+    let source = current_source(&peers, addr);
+
+    sync.tick_at(t0);
+    assert!(
+        rx.try_iter()
+            .any(|message| matches!(message, Message::GetHeaders(_))),
+        "the first tick must put the request on the wire"
+    );
+
+    // A tick well inside the deadline: nothing may be retired or penalised.
+    let well_inside = t0 + super::super::HEADER_REQUEST_TIMEOUT / 2;
+    sync.tick_at(well_inside);
+    let scheduler = sync.scheduler.lock();
+    assert!(
+        scheduler
+            .header_request
+            .is_some_and(|request| request.source == source),
+        "a request still inside its deadline must stay as the gate"
+    );
+    assert!(
+        scheduler.header_penalties.is_empty(),
+        "a request still inside its deadline must not be penalised"
+    );
+    drop(scheduler);
+
+    // The deadline itself retires the request and charges its owner.
+    let at_deadline = t0 + super::super::HEADER_REQUEST_TIMEOUT;
+    sync.tick_at(at_deadline);
+    let scheduler = sync.scheduler.lock();
+    assert!(
+        !scheduler
+            .header_request
+            .is_some_and(|request| request.source == source),
+        "the deadline retires the timed-out connection's gate"
+    );
+    assert_eq!(
+        scheduler.header_penalties.get(&source).copied(),
+        Some(1),
+        "the timed-out connection carries exactly its own strike"
+    );
+    Ok(())
+}

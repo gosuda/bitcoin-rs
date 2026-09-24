@@ -192,7 +192,8 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders()
     let genesis = Network::Regtest.genesis_block().block_hash();
     let locator = vec![Hash256::from_le_bytes(genesis.as_bytes())];
     assert!(
-        sync.send_getheaders(old_source, 0, 10, locator, std::time::Instant::now()) != super::super::GetheadersOutcome::Sent,
+        sync.send_getheaders(old_source, 0, 10, locator, std::time::Instant::now())
+            != super::super::GetheadersOutcome::Sent,
         "lease_source must reject a superseded session identity"
     );
     assert!(

@@ -77,10 +77,35 @@ pub(super) fn sync_peer_candidate(
     })
 }
 
-/// Whether `candidate` outranks `current`: strictly greater demonstrated
-/// height; first-wins on ties.
-pub(super) fn outranks(current: SyncPeer, candidate: SyncPeer) -> bool {
-    candidate.best_known_height > current.best_known_height
+/// Effective header-request rank of `peer`: its advertised height minus the
+/// number of header requests this exact connection has failed to answer.
+///
+/// PRE: none.
+/// POST: returns a signed rank that cannot underflow, so a heavily penalised
+///   peer still compares against an unpenalised one.
+/// INVARIANT: the penalty is keyed by connection identity and `peer`'s own
+///   advertised height is never rewritten by it.
+pub(super) fn header_rank(peer: &SyncPeer, penalties: &hashbrown::HashMap<PeerSource, u32>) -> i64 {
+    let timeouts = penalties.get(&peer.source).copied().unwrap_or(0);
+    i64::from(peer.best_known_height) - i64::from(timeouts)
+}
+
+/// Whether `candidate` outranks `current`: strictly greater effective rank, so
+/// a connection that timed out on its last request loses to one at the same
+/// advertised height that has not. First-wins on equal effective rank.
+///
+/// PRE: none.
+/// POST: returns the comparison only; no state is read or written beyond
+///   `penalties`.
+/// INVARIANT: this is the single ordering rule for request-bearing peer
+///   choice, so header and body selection can never disagree about who is
+///   better.
+pub(super) fn outranks(
+    current: &SyncPeer,
+    candidate: &SyncPeer,
+    penalties: &hashbrown::HashMap<PeerSource, u32>,
+) -> bool {
+    header_rank(candidate, penalties) > header_rank(current, penalties)
 }
 
 /// Height of the deepest active-chain node that is an ancestor of `hash` —
@@ -521,6 +546,7 @@ impl BlockSync {
         let policy = BlockDownloadPolicy {
             ibd: Arc::clone(&self.ibd),
             requested_height: required_height,
+            network: self.chain.network(),
         };
         let mut candidates: Vec<FanoutCandidate> = Vec::new();
         for peer in &frontier.usable_peers {
@@ -584,6 +610,7 @@ impl BlockSync {
             // best-known height would out-sort every honest peer and
             // re-acquire the window front (RE-ADV-2 / first-audit ADV-2).
             let mut preferred: Option<SyncPeer> = None;
+            let penalties = self.header_penalties();
             let servers: Vec<&FanoutCandidate> = candidates
                 .iter()
                 .filter(|candidate| candidate.serves_bodies)
@@ -593,8 +620,8 @@ impl BlockSync {
                 .iter()
                 .filter(|candidate| allow_soft || !candidate.soft_blocked)
             {
-                // First-wins on equal heights, matching the header-peer fold.
-                if preferred.is_none_or(|current| outranks(current, candidate.peer)) {
+                // First-wins on equal effective rank, matching the header-peer fold.
+                if preferred.is_none_or(|current| outranks(&current, &candidate.peer, &penalties)) {
                     preferred = Some(candidate.peer);
                 }
             }
@@ -720,9 +747,7 @@ mod tests {
                 timestamp: 1,
                 minimum: 601,
             },
-            ChainError::InvalidParent {
-                parent: NodeId::new(3),
-            },
+            ChainError::InvalidParent { prev_hash: hash },
             ChainError::TimestampTooEarly {
                 hash,
                 timestamp: 1,
