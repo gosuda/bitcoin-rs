@@ -262,3 +262,34 @@ fn genesis_txid_through_layout_matches_direct_decode() {
     let slice = parsed.span_bytes(span).expect("genesis span in bounds");
     assert_eq!(slice, consensus_bytes(through_layout).as_slice());
 }
+
+/// The borrowed identity derivation must agree with the owned transaction it
+/// materializes to, on every transaction of every golden fixture.
+#[test]
+fn parsed_transaction_txid_and_base_size_match_materialized_form() {
+    let mut compared = 0_usize;
+    let mut segwit = 0_usize;
+    for height in HEIGHTS {
+        let bytes = read_fixture(*height);
+        let parsed = ParsedBlock::parse_exact(&bytes).expect("golden block parses");
+        for (index, tx) in parsed.transactions().iter().enumerate() {
+            let materialized = tx.materialize();
+            assert_eq!(
+                tx.txid().as_bytes(),
+                materialized.txid().as_bytes(),
+                "height {height} tx {index} txid"
+            );
+            assert_eq!(
+                tx.base_size(),
+                materialized.base_size(),
+                "height {height} tx {index} base size"
+            );
+            compared += 1;
+            segwit += usize::from(tx.is_segwit());
+        }
+    }
+    assert!(
+        segwit > 0 && segwit < compared,
+        "the fixtures must exercise both encodings, got {segwit} SegWit of {compared}"
+    );
+}
