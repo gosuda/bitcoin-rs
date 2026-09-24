@@ -19,6 +19,17 @@ use parking_lot::RwLock;
 use crate::dispatch::{ChainQuery, InventoryServing};
 use crate::wire::{Message, PeerError};
 
+/// Depth from the active tip for which a `getdata` of a block is still worth
+/// answering with a `cmpctblock`. Deeper, a peer's mempool has almost
+/// certainly moved on, so the full witness-bearing body is served instead
+/// (Core 31.1 `net_processing.cpp:141-145,2705-2721,4590-4624`).
+const MAX_CMPCTBLOCK_DEPTH: u32 = 5;
+
+/// Depth from the active tip for which a `getblocktxn` is still answered
+/// with a `blocktxn`. Deeper, Core sends the whole block rather than let a
+/// peer reconstruct one it cannot have hinted.
+const MAX_BLOCKTXN_DEPTH: u32 = 10;
+
 /// Read-only active-chain view for P2P `getheaders` / `getdata`.
 #[derive(Clone)]
 pub struct ActiveChainQuery {
@@ -43,15 +54,29 @@ impl ActiveChainQuery {
         self
     }
 
-    fn load_active_block_bytes(
-        &self,
-        current_height: u32,
-        hash: BlockHash,
-    ) -> Option<bytes::Bytes> {
-        let bytes = self
-            .block_body_source
-            .as_ref()?
-            .block_body(current_height, hash)?;
+    /// The active height of one block with the tip height it was observed
+    /// under, both read in one guard so a depth is a snapshot of one tree
+    /// state. `None` when no tip exists or the hash is not on the active
+    /// chain.
+    fn active_position(&self, hash: BlockHash) -> Option<(u32, u32)> {
+        let tree = self.block_tree.read();
+        let tip = tree.tip()?;
+        let height = tree.active_height_of(tip.tip_id, hash.into())?;
+        Some((tip.height, height))
+    }
+
+    /// The validated stored body of one active block, with the tip height
+    /// re-read in the guard that proved its membership after the load.
+    ///
+    /// PRE: `height` is the block's active height as first observed.
+    /// POST: return the raw consensus payload and the observing tip height
+    /// only while the block is still active at `height`; `None` leaves the
+    /// request unanswered.
+    /// INVARIANT: no body is served for a block that left the active chain,
+    /// and the tip height comes from the same guard as that proof, so a
+    /// depth decision is never made from two different tree states.
+    fn load_active_block(&self, height: u32, hash: BlockHash) -> Option<(bytes::Bytes, u32)> {
+        let bytes = self.block_body_source.as_ref()?.block_body(height, hash)?;
         let header = bytes
             .get(..80)
             .and_then(|header| Header::consensus_decode(header).ok())?;
@@ -62,8 +87,15 @@ impl ActiveChainQuery {
         // preserves the wire-byte optimization without forwarding corruption.
         Block::consensus_decode(&bytes).ok()?;
         let tree = self.block_tree.read();
-        (tree.active_height_of(tree.tip()?.tip_id, hash.into()) == Some(current_height))
-            .then(|| bytes::Bytes::from(bytes))
+        let tip = tree.tip()?;
+        (tree.active_height_of(tip.tip_id, hash.into()) == Some(height))
+            .then(|| (bytes::Bytes::from(bytes), tip.height))
+    }
+
+    /// The stored body as a `block` payload, witnesses retained.
+    fn full_block_response(&self, height: u32, hash: BlockHash) -> Option<Message> {
+        self.load_active_block(height, hash)
+            .map(|(body, _)| Message::BlockPayload(body))
     }
 }
 
@@ -136,12 +168,7 @@ impl ChainQuery for ActiveChainQuery {
                 outcome.not_found.push(*item);
                 continue;
             };
-            let current_height = {
-                let tree = self.block_tree.read();
-                tree.tip()
-                    .and_then(|tip| tree.active_height_of(tip.tip_id, request.hash().into()))
-            };
-            let Some(current_height) = current_height else {
+            let Some((tip_height, height)) = self.active_position(request.hash()) else {
                 outcome.not_found.push(*item);
                 continue;
             };
@@ -149,14 +176,7 @@ impl ChainQuery for ActiveChainQuery {
                 outcome.halted = true;
                 return Ok(outcome);
             }
-            let response = match request {
-                BlockRequest::Full(hash) => self
-                    .load_active_block_bytes(current_height, hash)
-                    .map(Message::BlockPayload),
-                BlockRequest::Compact(hash) => {
-                    self.compact_block_for(current_height, hash, compact_version)
-                }
-            };
+            let response = self.response_for(request, tip_height, height, compact_version);
             match response {
                 Some(message) => serve(message)?,
                 None => outcome.not_found.push(*item),
@@ -165,28 +185,39 @@ impl ChainQuery for ActiveChainQuery {
         Ok(outcome)
     }
 
+    /// PRE: `request` carries decoded absolute, strictly increasing
+    /// transaction indexes for one block.
+    /// POST: return the `blocktxn` reply for a block within
+    /// [`MAX_BLOCKTXN_DEPTH`] of the active tip, the whole witness-bearing
+    /// `block` for a deeper one, and `None` for a block this node cannot
+    /// serve; `Err` reports an index past the end of the body.
+    /// INVARIANT: a deep request is never answered with a small `blocktxn`
+    /// and never left unanswered while its body is available (Core 31.1
+    /// `net_processing.cpp:4590-4624`).
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
-    ) -> Result<Option<BlockTransactions>, PeerError> {
+    ) -> Result<Option<Message>, PeerError> {
         let hash = native_block_hash(request.block_hash);
-        let current_height = {
-            let tree = self.block_tree.read();
-            tree.tip()
-                .and_then(|tip| tree.active_height_of(tip.tip_id, hash.into()))
-        };
-        let Some(current_height) = current_height else {
+        let Some((tip_height, height)) = self.active_position(hash) else {
             return Ok(None);
         };
-        let Some(payload) = self.load_active_block_bytes(current_height, hash) else {
+        let deep = beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH);
+        let Some((payload, tip_height)) = self.load_active_block(height, hash) else {
             return Ok(None);
         };
+        // The tip may have moved while the body was read; the re-observed
+        // depth decides the reply, so a moving tip cannot keep an old block
+        // eligible for a compact answer.
+        if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
+            return Ok(Some(Message::BlockPayload(payload)));
+        }
         let Ok(block) = bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref())
         else {
             return Ok(None);
         };
         BlockTransactions::from_request(request, &block)
-            .map(Some)
+            .map(|transactions| Some(Message::BlockTxn(BlockTxn { transactions })))
             .map_err(|_| PeerError::Protocol("getblocktxn index out of range"))
     }
 }
@@ -194,10 +225,10 @@ impl ChainQuery for ActiveChainQuery {
 impl ActiveChainQuery {
     /// Builds one `cmpctblock` for an active-chain body at the requesting
     /// peer's negotiated BIP152 version. `None` (no negotiation, unknown
-    /// version, undecodable body) leaves the item in `not_found`.
+    /// version, undecodable or stale body) leaves the item in `not_found`.
     fn compact_block_for(
         &self,
-        current_height: u32,
+        height: u32,
         hash: BlockHash,
         compact_version: Option<u64>,
     ) -> Option<Message> {
@@ -205,7 +236,10 @@ impl ActiveChainQuery {
         if version != 1 && version != 2 {
             return None;
         }
-        let payload = self.load_active_block_bytes(current_height, hash)?;
+        let (payload, tip_height) = self.load_active_block(height, hash)?;
+        if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) {
+            return Some(Message::BlockPayload(payload));
+        }
         let block =
             bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref()).ok()?;
         let cmpct = HeaderAndShortIds::from_block(&block, fresh_nonce(), version, &[]).ok()?;
@@ -213,6 +247,34 @@ impl ActiveChainQuery {
             compact_block: cmpct,
         }))
     }
+
+    /// The reply for one resolved block request, or `None` when its body is
+    /// unavailable and the item belongs in `not_found`.
+    fn response_for(
+        &self,
+        request: BlockRequest,
+        tip_height: u32,
+        height: u32,
+        compact_version: Option<u64>,
+    ) -> Option<Message> {
+        match request {
+            BlockRequest::Full(hash) => self.full_block_response(height, hash),
+            // A peer asking for an old block almost certainly cannot match it
+            // against a useful mempool, so the compact request is served as
+            // the whole body, whatever it negotiated.
+            BlockRequest::Compact(hash)
+                if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) =>
+            {
+                self.full_block_response(height, hash)
+            }
+            BlockRequest::Compact(hash) => self.compact_block_for(height, hash, compact_version),
+        }
+    }
+}
+
+/// Whether one block sits deeper below the active tip than `limit`.
+const fn beyond_depth(tip_height: u32, height: u32, limit: u32) -> bool {
+    tip_height.saturating_sub(height) > limit
 }
 
 /// Which active-chain body one block-typed inventory item asks for.
@@ -663,43 +725,184 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn getblocktxn_serves_active_body_and_disconnects_on_out_of_range_index()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let headers = seed_headers(2);
-        let block = Block {
-            header: headers[1],
-            txs: vec![test_tx(1), test_tx(2)],
-        };
-        let body_source = Arc::new(SingleBlockSource {
-            height: 1,
+    /// A chain view over `headers` whose body source serves `block` at
+    /// `height`.
+    fn chain_at(
+        headers: &[Header],
+        height: u32,
+        block: &Block,
+    ) -> Result<ActiveChainQuery, bitcoin_rs_chain::ChainError> {
+        let source = SingleBlockSource {
+            height,
             hash: block.block_hash(),
-            body: consensus_bytes(&block),
-        });
-        let query = query_with(headers)?.with_block_body_source(body_source);
-        let wire_hash = wire_hash(block.block_hash());
+            body: consensus_bytes(block),
+        };
+        Ok(query_with(headers.to_vec())?.with_block_body_source(Arc::new(source)))
+    }
 
+    /// The block at `height` of a `seed_headers` chain, with two transactions.
+    fn block_at(headers: &[Header], height: u32) -> Result<Block, Box<dyn std::error::Error>> {
+        let index = usize::try_from(height)?;
+        Ok(Block {
+            header: headers[index],
+            txs: vec![test_tx(1), test_tx(2)],
+        })
+    }
+
+    /// The reply to a `getblocktxn` for transaction index 1 of the block at
+    /// `height`.
+    fn blocktxn_reply(
+        headers: &[Header],
+        height: u32,
+    ) -> Result<Message, Box<dyn std::error::Error>> {
+        let block = block_at(headers, height)?;
+        let query = chain_at(headers, height, &block)?;
         let request = bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire_hash,
+            block_hash: wire_hash(block.block_hash()),
             indexes: vec![1],
         };
-        let transactions = query
+        Ok(query
             .block_transactions(&request)?
-            .unwrap_or_else(|| panic!("active body serves blocktxn"));
-        assert_eq!(transactions.block_hash, wire_hash);
-        assert_eq!(transactions.transactions.len(), 1);
+            .ok_or("an active body is always answered")?)
+    }
 
-        let out_of_range = bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire_hash,
+    /// The reply to a compact `getdata` for the block at `height`, negotiated
+    /// at v2.
+    fn compact_reply(
+        headers: &[Header],
+        height: u32,
+    ) -> Result<Message, Box<dyn std::error::Error>> {
+        let block = block_at(headers, height)?;
+        let query = chain_at(headers, height, &block)?;
+        let item = Inventory::CompactBlock(wire_hash(block.block_hash()));
+        let mut served = Vec::new();
+        query.serve_inventory_blocks(&[item], Some(2), &|| true, &mut |message| {
+            served.push(message);
+            Ok(())
+        })?;
+        Ok(served.pop().ok_or("exactly one reply")?)
+    }
+
+    /// The body a served full-block payload carries, witnesses included.
+    fn payload_body(payload: &bytes::Bytes) -> Result<RegistryBlock, Box<dyn std::error::Error>> {
+        Ok(bitcoin::consensus::encode::deserialize::<RegistryBlock>(
+            payload.as_ref(),
+        )?)
+    }
+
+    /// A shallow `getblocktxn` is answered with the requested bodies, an
+    /// index past the end of the block disconnects the peer, and a block
+    /// this node cannot serve leaves the request unanswered.
+    #[test]
+    fn getblocktxn_answers_active_body_and_disconnects_on_out_of_range_index()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(2);
+        let block = block_at(&headers, 1)?;
+        let query = chain_at(&headers, 1, &block)?;
+        let wire = wire_hash(block.block_hash());
+
+        let reply = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: wire,
+            indexes: vec![1],
+        })?;
+        let Some(Message::BlockTxn(txn)) = &reply else {
+            panic!("a shallow request is answered with blocktxn, got {reply:?}");
+        };
+        assert_eq!(txn.transactions.block_hash, wire);
+        assert_eq!(txn.transactions.transactions.len(), 1);
+
+        let out_of_range = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: wire,
             indexes: vec![7],
-        };
-        assert!(query.block_transactions(&out_of_range).is_err());
+        });
+        assert!(
+            matches!(out_of_range, Err(PeerError::Protocol(_))),
+            "an out-of-range index is a protocol disconnect"
+        );
 
-        let unknown = bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: WireBlockHash::from_byte_array([9; 32]),
+        let unknown = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: bitcoin::BlockHash::from_byte_array([9; 32]),
             indexes: vec![0],
+        })?;
+        assert!(unknown.is_none(), "an unservable block stays unanswered");
+        Ok(())
+    }
+
+    /// A block within [`MAX_BLOCKTXN_DEPTH`] of the active tip is answered
+    /// with a `blocktxn`; a deeper one gets the whole witness-bearing
+    /// `block`, never a small `blocktxn`, an inventory announcement, or
+    /// silence (Core 31.1 `net_processing.cpp:4590-4624`).
+    #[test]
+    fn getblocktxn_depth_boundary_uses_full_block_beyond_ten()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(12);
+
+        let at_the_bound = blocktxn_reply(&headers, 1)?;
+        let Message::BlockTxn(txn) = &at_the_bound else {
+            panic!("a block at the bound is answered with blocktxn, got {at_the_bound:?}");
         };
-        assert!(query.block_transactions(&unknown)?.is_none());
+        assert_eq!(txn.transactions.transactions.len(), 1);
+
+        let one_deeper = blocktxn_reply(&headers, 0)?;
+        let Message::BlockPayload(payload) = &one_deeper else {
+            panic!("a deeper block is answered with the whole block, got {one_deeper:?}");
+        };
+        assert_eq!(payload_body(payload)?.txdata.len(), 2, "witnesses retained");
+        Ok(())
+    }
+
+    /// A compact `getdata` within [`MAX_CMPCTBLOCK_DEPTH`] of the tip is
+    /// answered with a `cmpctblock`; a deeper one with the whole
+    /// witness-bearing `block` (Core 31.1 `net_processing.cpp:2705-2721`).
+    #[test]
+    fn compact_depth_boundary_uses_full_block_beyond_five() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let headers = seed_headers(12);
+
+        let at_the_bound = compact_reply(&headers, 6)?;
+        assert!(
+            matches!(at_the_bound, Message::CmpctBlock(_)),
+            "a block at the compact bound is served compact, got {at_the_bound:?}"
+        );
+
+        let one_deeper = compact_reply(&headers, 5)?;
+        let Message::BlockPayload(payload) = &one_deeper else {
+            panic!("a deeper block is served as the whole block, got {one_deeper:?}");
+        };
+        assert_eq!(payload_body(payload)?.txdata.len(), 2, "witnesses retained");
+        Ok(())
+    }
+
+    /// A served compact block always prefills transaction zero — the coinbase
+    /// — and short-ID-encodes the rest, under both identity versions
+    /// (Core 31.1 `blockencodings.cpp:20-31`).
+    #[test]
+    fn compact_prefills_coinbase_under_both_v1_v2() -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(3);
+        let block = block_at(&headers, 2)?;
+        let expected = consensus_bytes(&block.txs[0]);
+
+        for version in [1_u64, 2] {
+            let query = chain_at(&headers, 2, &block)?;
+            let item = Inventory::CompactBlock(wire_hash(block.block_hash()));
+            let mut served = Vec::new();
+            query.serve_inventory_blocks(&[item], Some(version), &|| true, &mut |message| {
+                served.push(message);
+                Ok(())
+            })?;
+            let [Message::CmpctBlock(cmpct)] = served.as_slice() else {
+                panic!("v{version} must be served as a cmpctblock, got {served:?}");
+            };
+            let prefills = &cmpct.compact_block.prefilled_txs;
+            assert_eq!(prefills.len(), 1, "v{version}: the coinbase is prefilled");
+            assert_eq!(u64::from(prefills[0].idx), 0, "v{version}: at index zero");
+            assert_eq!(
+                bitcoin::consensus::encode::serialize(&prefills[0].tx),
+                expected,
+                "v{version}: the prefilled body is the block's coinbase"
+            );
+            assert_eq!(cmpct.compact_block.short_ids.len(), 1);
+        }
         Ok(())
     }
 
