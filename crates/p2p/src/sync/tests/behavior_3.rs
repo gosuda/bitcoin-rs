@@ -107,9 +107,37 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
         stall_timeout_initial: Duration::from_millis(100),
         ..wedge_budget(super::super::PENDING_TIMEOUT)
     };
-    let (sync, peers, expected, rxs, _blocks_tx) = staged_count_wedge(budget)?;
+    // A striped window with nothing delivered: the stall predicate stays
+    // unarmed (no staged successor), so the cold-front hedge is the only
+    // actor. A shape whose predicate is armed convicts at the initial
+    // floor even with an unseeded cadence EWMA — pinned at the window
+    // level by `stall_convicts_at_initial_floor_before_ewma_is_seeded`.
+    let ((sync, peers, _block_tree, _applied_tip, expected), _blocks_tx) =
+        sync_with_header_chain_and_blocks(64)?;
+    install_budget(&sync, budget);
+    let mut rxs = Vec::new();
+    for idx in 0..budget.min_peers_for_fanout {
+        let addr = test_addr(9320, idx)?;
+        rxs.push(connect_peer(
+            &peers,
+            eligible_peer(addr, 200 - i32::try_from(idx)?),
+        ));
+    }
     let owner = test_addr(9320, 0)?;
     let alternate = test_addr(9320, 1)?;
+
+    // The first tick stripes the window and starts the cold-front timer.
+    sync.tick();
+    assert_eq!(sync.scheduler.lock().window.pending_len(), 16);
+    for (idx, rx) in rxs.iter().enumerate() {
+        let Message::GetData(inventory) = rx.try_recv()? else {
+            return Err(std::io::Error::other("expected a striped getdata per peer").into());
+        };
+        assert_eq!(
+            witness_block_inventory(inventory)?,
+            expected[idx * 2..(idx + 1) * 2]
+        );
+    }
 
     // The alternate peer connected at height zero. Its accepted header
     // announcement proves the active front, which must make it a hedge
@@ -130,10 +158,8 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
         Hash256::from_le_bytes(expected[0].as_bytes()),
         Some(1),
     ));
-
-    // The first drain builds the asymmetric wedge and starts the episode.
+    // The tick that observes the striped front arms the cold-front timer.
     sync.tick();
-    assert_eq!(sync.scheduler.lock().window.pending_len(), 2);
     std::thread::sleep(Duration::from_millis(150));
     sync.tick();
 
@@ -150,7 +176,14 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
         }
     }
     assert_eq!(hedged, expected[..1]);
-    assert_eq!(sync.scheduler.lock().window.pending_len(), 2);
+    assert_eq!(
+        sync.scheduler
+            .lock()
+            .window
+            .pending_owner(&Hash256::from_le_bytes(expected[0].as_bytes())),
+        Some(current_source(&peers, owner)),
+        "the hedge must not reassign the front's owner"
+    );
 
     // The confirmed front hash is not duplicated again on later ticks.
     std::thread::sleep(Duration::from_millis(50));

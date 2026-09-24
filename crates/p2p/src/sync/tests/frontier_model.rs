@@ -10,8 +10,36 @@ use super::super::frontier::{
     BodyState, ChainFrontier, HeaderAction, NoProgressReason, RequiredBody, SyncFrontier,
     UsablePeer,
 };
+use crate::BlockStager;
+use crate::download_window::{BlameReason, BlockedContext, BlockedDecision, DownloadWindow};
 use bitcoin_rs_chain::{ChainWork, NodeId};
 
+/// Advances the unified blockage observation one tick and returns the
+/// stall blame's owner, if this tick convicted one.
+fn stall_blame(
+    window: &mut DownloadWindow,
+    stager: &BlockStager,
+    tree: &bitcoin_rs_chain::BlockTree,
+    next_apply: u32,
+    at: Instant,
+) -> Option<PeerSource> {
+    match window.observe_blocked(
+        BlockedContext {
+            next_apply_height: Some(next_apply),
+            frontier_hash: None,
+            apply_side_busy: false,
+        },
+        stager,
+        tree,
+        at,
+    ) {
+        BlockedDecision::Blame {
+            owner,
+            reason: BlameReason::Staller,
+        } => Some(owner),
+        _ => None,
+    }
+}
 fn snap(tip_id: u32, height: u32, hash_byte: u8) -> Arc<TipSnapshot> {
     Arc::new(TipSnapshot {
         tip_id: NodeId::new(tip_id),
@@ -495,19 +523,17 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
         let mut scheduler = sync.scheduler.lock();
         let tree = sync.chain.block_tree().read();
         let state = &mut *scheduler;
-        state
-            .window
-            .observe_stall(next_apply, false, &state.stager, &tree, now);
+        stall_blame(&mut state.window, &state.stager, &tree, next_apply, now);
     }
     let owner = {
         let mut scheduler = sync.scheduler.lock();
         let tree = sync.chain.block_tree().read();
         let state = &mut *scheduler;
-        state.window.observe_stall(
-            next_apply,
-            false,
+        stall_blame(
+            &mut state.window,
             &state.stager,
             &tree,
+            next_apply,
             now + super::super::BLOCK_STALLING_TIMEOUT,
         )
     };
