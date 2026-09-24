@@ -78,6 +78,11 @@ pub(crate) use crate::download_window::MIN_PEERS_FOR_FANOUT;
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
 
+/// Headers a single `headers` message can carry. Core's
+/// `MAX_HEADERS_RESULTS` (`net_processing.h:48-57`): a batch of exactly this
+/// many is a full page, so the peer almost certainly has more.
+const MAX_HEADERS_RESULTS: usize = 2_000;
+
 /// Wire protocol version we advertise on outbound `getheaders`.
 const PROTOCOL_VERSION: u32 = 70_016;
 
@@ -231,7 +236,6 @@ impl SchedulerState {
     /// POST: the window, the header request, and the deferred body fetches
     ///   hold only facts owned by a connection in `live`.
     /// INVARIANT: ownership is compared by connection identity, never by
-    ///   address alone.
     fn release_unowned(&mut self, live: &[PeerSource]) {
         let owns = |source: &PeerSource| live.contains(source);
         self.window.retain_owned_by(owns);
@@ -404,17 +408,29 @@ impl BlockSync {
                 .any(|(owner, owned)| *owner == source && *owned == hash)
     }
 
-    /// Runs one orchestrator tick as a single canonical frontier
-    /// reconciliation: observe, recover what is unowned, then schedule or
-    /// name why progress is impossible.
+    /// Runs one orchestrator tick against the host clock.
     pub fn tick(&self) {
-        self.drain_inbound_headers();
+        self.tick_at(Instant::now());
+    }
+
+    /// Runs one orchestrator tick as a single canonical frontier
+    /// reconciliation at the injected instant `now`: observe, recover what is
+    /// unowned, then schedule or name why progress is impossible.
+    ///
+    /// PRE: `now` is the instant this tick judges every timeout against.
+    /// POST: inbound headers and blocks are drained, dead connections are
+    ///   released, the frontier is observed once, an unanswered header request
+    ///   is rotated away, and the work that frontier names is scheduled — all
+    ///   timed against `now`.
+    /// INVARIANT: no expiry, blame, or selection path inside the tick reads the
+    ///   wall clock; `now` is the tick's only time source.
+    pub fn tick_at(&self, now: Instant) {
+        self.drain_inbound_headers(now);
         self.chain.bootstrap_genesis();
         // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
         self.drain_inbound_blocks();
 
-        let now = Instant::now();
         // One frontier observation feeds recovery, selection, and planning;
         // the observation reads tips once and resolves the canonical
         // next-required body exactly once per tick.
@@ -457,17 +473,17 @@ impl BlockSync {
         }
         match plan.header_action {
             HeaderAction::Idle | HeaderAction::AwaitPending => {}
-            HeaderAction::Probe(source) => match self.probe_frontier_peer(&frontier, source) {
+            HeaderAction::Probe(source) => match self.probe_frontier_peer(&frontier, source, now) {
                 GetheadersOutcome::Failed => {
-                    self.request_headers_from_best_peer(&frontier, Some(source));
+                    self.request_headers_from_best_peer(&frontier, Some(source), now);
                 }
                 GetheadersOutcome::Suppressed => {
-                    self.request_headers_from_best_peer(&frontier, None);
+                    self.request_headers_from_best_peer(&frontier, None, now);
                 }
                 GetheadersOutcome::Sent => {}
             },
             HeaderAction::Extend => {
-                self.request_headers_from_best_peer(&frontier, None);
+                self.request_headers_from_best_peer(&frontier, None, now);
             }
         }
         if let Some(reason) = plan.no_progress {

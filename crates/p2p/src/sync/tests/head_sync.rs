@@ -140,7 +140,7 @@ fn headers_batch_missing_parent_requests_ancestry() -> Result<(), Box<dyn std::e
         body_fetch_owned: false,
     })?;
 
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     next_getheaders(&rx)?;
     Ok(())
@@ -172,7 +172,7 @@ fn known_header_batch_still_credits_the_announcer() -> Result<(), Box<dyn std::e
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert_eq!(
         peers
@@ -219,7 +219,7 @@ fn headers_batch_too_far_ahead_does_not_replay_a_request() -> Result<(), Box<dyn
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert!(
         next_getheaders(&rx).is_err(),
@@ -304,7 +304,7 @@ fn body_carried_header_does_not_consume_a_pending_getheaders()
         wire_response: false,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         sync.scheduler.lock().header_request.is_some(),
         "a body-carried header must not consume the pending request"
@@ -316,7 +316,7 @@ fn body_carried_header_does_not_consume_a_pending_getheaders()
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         sync.scheduler.lock().header_request.is_none(),
         "a wire `headers` response consumes the pending request"
@@ -395,7 +395,7 @@ fn fork_tip_attests_its_shared_active_ancestor() -> Result<(), Box<dyn std::erro
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert_eq!(
         peers
@@ -446,7 +446,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> Result<(), Box<dyn 
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert_eq!(
         peers
             .sessions()
@@ -473,7 +473,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> Result<(), Box<dyn 
             body_fetch_owned: false,
         })?;
     }
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     let retained = peers
         .sessions()
@@ -532,7 +532,7 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip()
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert_eq!(
         peers
@@ -574,7 +574,7 @@ fn compact_owned_body_fetch_marks_the_tip_pending() -> Result<(), Box<dyn std::e
         wire_response: false,
         body_fetch_owned: true,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert!(
         sync.scheduler.lock().window.contains_pending(&tip_hash),
@@ -614,7 +614,7 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches()
         wire_response: false,
         body_fetch_owned: true,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         !sync.scheduler.lock().window.contains_pending(&tip_hash),
         "an unattached tip cannot be window-pending yet"
@@ -627,7 +627,7 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches()
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         sync.scheduler.lock().window.contains_pending(&tip_hash),
         "the retained owned fetch must mark once its tip attaches"
@@ -670,7 +670,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> Result<(), Box<dyn std:
         body_fetch_owned: false,
     })?;
 
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert_eq!(
         witness_block_inventory(next_getdata(&rx)?)?,
         vec![block2.block_hash()],
@@ -694,7 +694,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> Result<(), Box<dyn std:
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         matches!(next_getdata(&rx)?.first(), Some(Inventory::CompactBlock(_))),
         "a compact-relay peer's single near-tip fetch rides the compact flavor"

@@ -270,8 +270,13 @@ fn far_future_matching_peer_retries_without_peer_blame() -> Result<(), Box<dyn s
         sync.chain.chain_tip().load_full().as_deref(),
         Some(tip_before.as_ref())
     );
-    assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
-    assert!(rx.try_recv().is_err());
+    // The batch was answered, so the gate is retained and its deadline moved:
+    // the same locator is not replayed, and expiry cannot later blame a peer
+    // that did respond.
+    assert!(
+        rx.try_recv().is_err(),
+        "an answered request must not be replayed at round-trip pace"
+    );
     assert!(
         !lease.is_cancelled(),
         "local-clock rejection must not cancel the peer lease"

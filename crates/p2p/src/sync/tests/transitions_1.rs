@@ -272,7 +272,7 @@ fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::er
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(std::time::Instant::now());
     assert_eq!(
         peers
             .infos()
@@ -291,7 +291,7 @@ fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::er
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(std::time::Instant::now());
     assert_eq!(
         peers
             .infos()
