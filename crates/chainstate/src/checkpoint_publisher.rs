@@ -75,7 +75,6 @@ pub(crate) struct CheckpointPublisher {
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<CoinStatsListener>,
-    pub(crate) chain_tx_count: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) journal: Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>,
 
     pub(crate) data_dir: PathBuf,
@@ -99,11 +98,13 @@ impl CheckpointPublisher {
                 ))
             })?;
         }
+        // One applied-tip load supplies the tip and the count it certifies,
+        // so the checkpoint and the journal compaction share one value.
         let applied_tip = self.applied_tip.load_full();
-        let chain_tx_count = self
-            .chain_tx_count
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let mut result = self.publish_frozen(applied_tip.as_deref(), chain_tx_count);
+        let chain_tx_count = applied_tip
+            .as_ref()
+            .map_or(0, |tip| tip.chain_tx_count.to_wire());
+        let mut result = self.publish_frozen(applied_tip.as_deref());
 
         if let (Ok(CheckpointWrite::Published { generation }), Some(tip), Some(writer)) =
             (&result, applied_tip.as_ref(), journal.as_mut())
@@ -182,7 +183,6 @@ impl CheckpointPublisher {
     fn publish_frozen(
         &self,
         applied_tip: Option<&TipSnapshot>,
-        chain_tx_count: u64,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         if let Some(marker) = self.undo_store.load_disconnect_marker()?
             && marker.phase == crate::DisconnectPhase::InFlight
@@ -236,7 +236,6 @@ impl CheckpointPublisher {
             &self.utxo,
             &self.coin_stats,
             applied_tip,
-            chain_tx_count,
         )?;
         // A2: Only after `CheckpointWrite::Published` and root fsync, write
         // the applied-tip witness for the same captured tip.

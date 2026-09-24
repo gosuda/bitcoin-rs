@@ -50,9 +50,7 @@ fn preserved_bytes_apply_matches_lazy_serialization() -> anyhow::Result<()> {
     config_b.p2p.listen.clear();
     config_b.storage.prune_target_mb = 0;
     let state_b = NodeState::open(config_b, None)?;
-    state_b
-        .chainstate()
-        .apply_block(&block, Some(serialized))?;
+    state_b.chainstate().apply_block(&block, Some(serialized))?;
 
     let body_a = state_a
         .chainstate()

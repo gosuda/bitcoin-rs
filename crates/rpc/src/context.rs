@@ -235,8 +235,6 @@ pub struct ChainHandles {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best fully-applied block tip.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Cumulative transaction count for the fully-applied chain.
-    pub chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
     /// Process-wide initial-block-download latch over the applied chain,
     /// shared with P2P so both surfaces answer identically.
     pub ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
@@ -396,13 +394,6 @@ pub struct Context {
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Serializes whole-chainstate RPC reads with node-owned connect/disconnect transitions.
     chain_transition: Arc<Mutex<()>>,
-    /// Cumulative transaction count of the applied chain, `0` when unknown.
-    ///
-    /// Maintained by block application and restored from the chainstate
-    /// checkpoint, so it survives a restart. Read through
-    /// [`Self::chain_tx_count`], which turns Bitcoin Core's zero-means-unset
-    /// encoding into an `Option`.
-    chain_tx_count: Arc<core::sync::atomic::AtomicU64>,
     /// Process-wide initial-block-download latch over the applied chain,
     /// shared with P2P so RPC and P2P answer identically.
     pub ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
@@ -520,7 +511,6 @@ impl Context {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
-            chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
             ibd,
             mempool,
             blocks: Arc::new(RwLock::new(BlockLog::new())),
@@ -580,7 +570,6 @@ impl Context {
             chain_tip: Arc::new(ArcSwapOption::empty()),
             applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
-            chain_tx_count: Arc::new(core::sync::atomic::AtomicU64::new(0)),
             ibd,
             mempool,
             blocks: Arc::new(RwLock::new(BlockLog::new())),
@@ -618,7 +607,6 @@ impl Context {
                 ChainHandles {
                     chain_tip,
                     applied_tip,
-                    chain_tx_count,
                     ibd,
                     blocks,
                     transactions,
@@ -649,7 +637,6 @@ impl Context {
             chain_tip,
             applied_tip,
             chain_transition: Arc::new(Mutex::new(())),
-            chain_tx_count,
             ibd,
             mempool,
             blocks,
@@ -958,19 +945,6 @@ impl Context {
         self.applied_tip.load_full().map_or(0, |tip| tip.height)
     }
 
-    /// Returns `self` sharing `handle` as the cumulative chain transaction count.
-    ///
-    /// The node owns the counter; the RPC surface only reads it.
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) fn with_chain_tx_count(
-        mut self,
-        handle: Arc<core::sync::atomic::AtomicU64>,
-    ) -> Self {
-        self.chain_tx_count = handle;
-        self
-    }
-
     /// Returns the cumulative transaction count of the applied chain, or `None`
     /// when this node cannot know it.
     ///
@@ -981,13 +955,9 @@ impl Context {
     /// two differ by an entire chain.
     #[must_use]
     pub fn chain_tx_count(&self) -> Option<u64> {
-        match self
-            .chain_tx_count
-            .load(core::sync::atomic::Ordering::Relaxed)
-        {
-            0 => None,
-            count => Some(count),
-        }
+        self.applied_tip
+            .load_full()
+            .and_then(|tip| tip.chain_tx_count.get())
     }
 
     /// Returns the current best-applied-block hash.
@@ -1367,7 +1337,6 @@ mod tests {
 
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
-        let chain_tx_count = Arc::new(core::sync::atomic::AtomicU64::new(1));
         let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
             Arc::clone(&applied_tip),
             Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new())),
@@ -1385,7 +1354,6 @@ mod tests {
             chain: ChainHandles {
                 chain_tip: Arc::clone(&chain_tip),
                 applied_tip: Arc::clone(&applied_tip),
-                chain_tx_count: Arc::clone(&chain_tx_count),
                 ibd: Arc::clone(&ibd),
                 blocks: Arc::new(RwLock::new(BlockLog::new())),
                 transactions: Arc::new(RwLock::new(HashMap::new())),
@@ -1424,8 +1392,20 @@ mod tests {
             Arc::ptr_eq(&ctx.applied_tip, &applied_tip),
             "applied_tip must be shared with caller"
         );
+        // The count travels inside the applied tip: one publication replaces
+        // tip and count together, through the cell the caller shares.
+        let counted = |count| {
+            Arc::new(TipSnapshot {
+                tip_id: bitcoin_rs_chain::NodeId::new(0),
+                height: 0,
+                chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+                hash: bitcoin_rs_primitives::Hash256::default(),
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
+            })
+        };
+        applied_tip.store(Some(counted(1)));
         assert_eq!(ctx.chain_tx_count(), Some(1));
-        chain_tx_count.store(42, core::sync::atomic::Ordering::Relaxed);
+        applied_tip.store(Some(counted(42)));
         assert_eq!(ctx.chain_tx_count(), Some(42));
         assert!(
             Arc::ptr_eq(&ctx.ibd, &ibd),
@@ -1459,17 +1439,11 @@ mod tests {
 
     #[test]
     fn progress_snapshot_waits_for_a_complete_chain_transition() -> anyhow::Result<()> {
-        use core::sync::atomic::{AtomicU64, Ordering};
         use std::sync::mpsc;
         use std::time::Duration;
 
-        let chain_tx_count = Arc::new(AtomicU64::new(1));
         let barrier = Arc::new(Mutex::new(()));
-        let ctx = Arc::new(
-            Context::new()
-                .with_chain_tx_count(Arc::clone(&chain_tx_count))
-                .with_chain_transition(Arc::clone(&barrier)),
-        );
+        let ctx = Arc::new(Context::new().with_chain_transition(Arc::clone(&barrier)));
         let genesis = Network::Regtest.genesis_block();
         let tip = {
             let mut tree = ctx.block_tree.write();
@@ -1488,6 +1462,10 @@ mod tests {
             }
         };
 
+        let tip = TipSnapshot {
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
+            ..tip
+        };
         let transition = barrier.lock();
         ctx.applied_tip.store(Some(Arc::new(tip.clone())));
         let worker = Arc::clone(&ctx);
@@ -1499,7 +1477,6 @@ mod tests {
             rx.recv_timeout(Duration::from_millis(20)).is_err(),
             "RPC progress must not observe a half-published transition"
         );
-        chain_tx_count.store(42, Ordering::Release);
         drop(transition);
 
         let (published_tip, published_count) = rx.recv_timeout(Duration::from_secs(1))?;
