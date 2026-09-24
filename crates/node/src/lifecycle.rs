@@ -521,8 +521,11 @@ pub(crate) fn start_node(
     let block_body_source = state.block_body_source()?;
     let chainstate = state.chainstate();
     let p2p_chain_query: Arc<dyn bitcoin_rs_p2p::ChainQuery> = Arc::new(
-        bitcoin_rs_p2p::ActiveChainQuery::new(chainstate.block_tree_reader())
-            .with_block_body_source(Arc::clone(&block_body_source)),
+        bitcoin_rs_p2p::ActiveChainQuery::new(
+            chainstate.block_tree_reader(),
+            state.config().network,
+        )
+        .with_block_body_source(Arc::clone(&block_body_source)),
     );
     let (sync_wake_tx, sync_wake_rx) = bounded(1);
     let sync = state.sync();
