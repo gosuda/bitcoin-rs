@@ -433,8 +433,9 @@ impl BlockSync {
     /// PRE: `now` is the instant this tick judges every timeout against.
     /// POST: inbound headers and blocks are drained, dead connections are
     ///   released, the frontier is observed once, an unanswered header request
-    ///   is rotated away, and the work that frontier names is scheduled — all
-    ///   timed against `now`.
+    ///   is rotated away, connections the rotation or the sweep retired are
+    ///   dropped from the observed snapshot before it is read, and the work
+    ///   that frontier names is scheduled — all timed against `now`.
     /// INVARIANT: no expiry, blame, or selection path inside the tick reads the
     ///   wall clock; `now` is the tick's only time source.
     pub fn tick_at(&self, now: Instant) {
@@ -452,7 +453,7 @@ impl BlockSync {
         // Convicted connections must release their work before selection so
         // the same tick can re-request it.
         self.reconcile_peer_sessions();
-        let frontier = self.observe_frontier(chain, now);
+        let mut frontier = self.observe_frontier(chain, now);
         // A `getheaders` that outlived its deadline is retired before any
         // selection this tick, so the scheduler cannot re-ask the connection
         // that ignored it.
@@ -461,6 +462,15 @@ impl BlockSync {
         // two more to answer a probe is retired before this tick plans any
         // further work with it.
         self.sweep_chain_sync(&frontier, now);
+        // Both maintenance steps above can retire a connection after the
+        // observation. Drop the retired connections from the snapshot before
+        // planning or selection reads it, so the same tick's header fallback
+        // asks a live peer instead of replaying into the socket that just
+        // closed — the same conviction-before-selection rule
+        // `reconcile_peer_sessions` enforces above.
+        frontier
+            .usable_peers
+            .retain(|peer| self.peer_table.is_current(peer.source));
         self.follow_tip_progress(&frontier, now);
         let plan = frontier.plan();
 
