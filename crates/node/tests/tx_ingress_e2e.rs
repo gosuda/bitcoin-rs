@@ -391,6 +391,9 @@ fn serve_connection(
                     &|| true,
                     &|| true,
                     &mut send,
+                    // The harness has no block sync: block inventory is
+                    // announced to nothing here.
+                    &mut |_| {},
                 );
             }
             Err(PeerError::Io(error))

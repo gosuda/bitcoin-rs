@@ -234,6 +234,7 @@ impl P2pService {
         shared.compact_hints = extras.compact_hints;
         shared.inbound_tx = extras.inbound_tx;
         shared.ibd = extras.ibd;
+        shared.block_sync = extras.block_sync;
 
         let mut listeners = Vec::with_capacity(bound_listeners.len());
         for (listener_addr, listener) in bound_listeners {
