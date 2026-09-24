@@ -364,7 +364,7 @@ impl BlockTree {
                     break;
                 }
                 target_height = target_height.saturating_sub(step);
-                if locator.len() >= 10 {
+                if locator.len() > 10 {
                     step = step.saturating_mul(2);
                 }
             }
@@ -399,7 +399,7 @@ impl BlockTree {
                 break;
             }
             current = walker;
-            if locator.len() >= 10 {
+            if locator.len() > 10 {
                 step = step.saturating_mul(2);
             }
         }
@@ -1045,11 +1045,13 @@ mod tests {
             }
         }
 
-        let expected = parent_walk_locator_schedule(&tree, main_ids[40], 32);
+        // The height index is tainted above, so this walk is the parent-walk
+        // fallback. Its schedule is the Core one, asserted by height rather
+        // than by a second copy of the production loop.
+        let expected = locator_hashes_at_heights(&tree, &main_ids, &CORE_LOCATOR_HEIGHTS_40)?;
         assert_eq!(tree.block_locator(main_ids[40], 32), expected);
         for side_hash in &side_hashes {
             assert!(!expected.contains(side_hash));
-            assert!(!tree.block_locator(main_ids[40], 32).contains(side_hash));
         }
         Ok(())
     }
@@ -1125,51 +1127,6 @@ mod tests {
             tree.node_at_height_from(active_prefix, 1),
             Some(main_ids[1])
         );
-        Ok(())
-    }
-
-    #[test]
-    fn block_locator_preserves_schedule_at_exponential_boundary()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let mut tip_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let mut hashes = vec![hash_from_header(&genesis)];
-
-        for height in 1..=40_u32 {
-            let parent_hash = BlockHash(tree.node(tip_id)?.hash);
-            let header = test_header(parent_hash, height);
-            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-            hashes.push(hash_from_header(&header));
-        }
-
-        let tip_h = 40_u32;
-        let locator = tree.block_locator(tip_id, 32);
-        let expected_heights = [
-            tip_h,
-            tip_h - 1,
-            tip_h - 2,
-            tip_h - 3,
-            tip_h - 4,
-            tip_h - 5,
-            tip_h - 6,
-            tip_h - 7,
-            tip_h - 8,
-            tip_h - 9,
-            tip_h - 10,
-            tip_h - 12,
-            tip_h - 16,
-            tip_h - 24,
-            tip_h - 40,
-        ];
-        let expected: Vec<Hash256> = expected_heights
-            .iter()
-            .map(|&h| -> Result<Hash256, Box<dyn std::error::Error>> {
-                let idx = usize::try_from(h).map_err(|_| "locator height fits usize")?;
-                Ok(hashes[idx])
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        assert_eq!(locator, expected);
         Ok(())
     }
 
@@ -1741,43 +1698,60 @@ mod tests {
         Ok(())
     }
 
-    /// Independent parent-walk locator using the production exponential schedule.
-    /// Used so expected locators are not tautological with a tainted `block_locator`.
-    fn parent_walk_locator_schedule(
-        tree: &BlockTree,
-        tip_id: NodeId,
-        max_entries: usize,
-    ) -> Vec<Hash256> {
-        let mut locator = Vec::with_capacity(max_entries.min(32));
-        let mut current = tip_id;
-        let mut step: u64 = 1;
-        while locator.len() < max_entries {
-            let Ok(node) = tree.node(current) else {
-                break;
-            };
-            locator.push(node.hash);
+    /// The Core block-locator height schedule for an active chain whose tip
+    /// sits at height 40: ten consecutive steps, then doubling. Derived from
+    /// bitcoin-core `GetLocator` (`src/chain.cpp:34-48`), which doubles only
+    /// after `have.size() > 10`.
+    const CORE_LOCATOR_HEIGHTS_40: [u32; 16] = [
+        40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 27, 23, 15, 0,
+    ];
 
-            let mut walker = current;
-            let mut walked = false;
-            for _ in 0..step {
-                let Ok(walker_node) = tree.node(walker) else {
-                    break;
-                };
-                let Some(parent) = walker_node.parent else {
-                    break;
-                };
-                walker = parent;
-                walked = true;
-            }
-            if !walked {
-                break;
-            }
-            current = walker;
-            if locator.len() >= 10 {
-                step = step.saturating_mul(2);
-            }
+    /// Maps a height schedule to the block-tree hashes at those heights.
+    /// `nodes[h]` is the node at height `h`.
+    fn locator_hashes_at_heights(
+        tree: &BlockTree,
+        nodes: &[NodeId],
+        heights: &[u32],
+    ) -> Result<Vec<Hash256>, Box<dyn std::error::Error>> {
+        let mut out = Vec::with_capacity(heights.len());
+        for &height in heights {
+            let idx = usize::try_from(height)?;
+            let id = *nodes.get(idx).ok_or("node exists at height")?;
+            out.push(tree.node(id)?.hash);
         }
-        locator
+        Ok(out)
+    }
+
+    /// PRE: an active chain of 41 blocks, tip at height 40.
+    /// POST: both the indexed walk and the forced parent-walk fallback return
+    /// the Core locator schedule, which doubles only after more than ten
+    /// entries.
+    /// INVARIANT: the two walks agree; neither may double at ten entries.
+    #[test]
+    fn locator_doubles_only_after_more_than_ten() -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::default(), 0);
+        let mut tip_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let mut main_ids = vec![tip_id];
+        for height in 1..=40_u32 {
+            let parent_hash = BlockHash(tree.node(tip_id)?.hash);
+            let header = test_header(parent_hash, height);
+            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
+            main_ids.push(tip_id);
+        }
+        assert_eq!(tree.tip_id(), Some(tip_id));
+
+        let expected = locator_hashes_at_heights(&tree, &main_ids, &CORE_LOCATOR_HEIGHTS_40)?;
+
+        // Indexed walk: the height index is trusted, so the fast path runs.
+        assert!(tree.active_by_height.is_trusted());
+        assert_eq!(tree.block_locator(tip_id, 32), expected);
+
+        // Parent-walk fallback: taint forces the second path, which must
+        // produce the same schedule.
+        tree.active_by_height.taint();
+        assert_eq!(tree.block_locator(tip_id, 32), expected);
+        Ok(())
     }
 
     fn test_header(prev_blockhash: BlockHash, height: u32) -> BlockHeader {
