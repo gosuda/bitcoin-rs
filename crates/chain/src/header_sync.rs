@@ -23,12 +23,8 @@ const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 /// correspondence between input headers and returned ids (including duplicate
 /// Genesis on a non-empty tree) without relaxing validation or error
 /// propagation for unknown headers, which continue through proof-of-work,
-/// parent resolution, and the shared contextual header validation
-/// ([`validate_contextual_header`]) before insertion.
-/// A header whose parent exists but is already marked invalid is rejected
-/// with [`ChainError::InvalidParent`]: descendants of an invalidated subtree
-/// must never enter the tree through this admission path.
-///
+/// parent resolution, the invalid-parent refusal, and the shared contextual
+/// header validation ([`validate_contextual_header`]) before insertion.
 /// `now_secs` is the reference time for the future-drift bound, supplied by
 /// the caller rather than read here.
 ///
@@ -57,20 +53,25 @@ pub fn accept_headers(
         }
         validate_pow(header, hash, network)?;
         validate_empty_tree_root(tree, header, hash, network)?;
-        validate_parent_status(tree, header)?;
         let prev_hash = prev_hash_from_header(header);
         let parent_id = match tree.lookup(prev_hash) {
             Some(parent_id) => parent_id,
             None if tree.is_empty() => {
                 // The validated genesis root: the tree is empty, so the
                 // header has no parent and no contextual rule applies.
-                let id =
-                    tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
+                let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
                 accepted.push(id);
                 continue;
             }
             None => return Err(ChainError::MissingParent { prev_hash }),
         };
+        if tree.node(parent_id)?.status == NodeStatus::Invalid {
+            // Core refuses a child of a failed block with `bad-prevblk`
+            // before any contextual rule runs
+            // (`src/validation.cpp:4228-4231`), so the header never grows
+            // the invalid subtree.
+            return Err(ChainError::InvalidParent { parent: parent_id });
+        }
         validate_contextual_header(tree, parent_id, header, network, now_secs)?;
         let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
         accepted.push(id);
@@ -185,9 +186,7 @@ pub fn validate_contextual_header(
     // candidate may not fall more than `MAX_TIMEWARP` below its parent
     // (`src/validation.cpp:4100-4110`).
     let retarget_interval = network.retarget_interval();
-    if network.enforce_bip94()
-        && retarget_interval != 0
-        && height.is_multiple_of(retarget_interval)
+    if network.enforce_bip94() && retarget_interval != 0 && height.is_multiple_of(retarget_interval)
     {
         let minimum = parent.header.time.saturating_sub(MAX_TIMEWARP);
         if header.time < minimum {
@@ -292,23 +291,6 @@ pub fn validate_header_nbits(
     let expected = next_work_required(tree, parent_id, header.time, network)?;
     compare_expected_bits(header, height, expected)
 }
-
-/// Rejects a candidate whose parent exists and is already marked invalid.
-///
-/// Insertion would silently inherit `NodeStatus::Invalid` and still report
-/// the header as accepted; the admission path refuses it up front instead.
-/// Unknown parents are left to the parent-resolution step and insertion.
-fn validate_parent_status(tree: &BlockTree, header: &BlockHeader) -> Result<(), ChainError> {
-    let prev_hash = prev_hash_from_header(header);
-    let Some(parent_id) = tree.lookup(prev_hash) else {
-        return Ok(());
-    };
-    if matches!(tree.node(parent_id)?.status, NodeStatus::Invalid) {
-        return Err(ChainError::InvalidParent { prev_hash });
-    }
-    Ok(())
-}
-
 
 /// Validates a header's proof-of-work target and hash.
 ///
@@ -845,8 +827,12 @@ mod contextual_header_tests {
                 nonce: height,
             };
             prev = header.compute_hash();
-            tree.insert_header_with_hash(header, hash_from_header(&header), NodeStatus::HeaderValid)
-                .expect("fixture header failed to insert");
+            tree.insert_header_with_hash(
+                header,
+                hash_from_header(&header),
+                NodeStatus::HeaderValid,
+            )
+            .expect("fixture header failed to insert");
             tip_time = header.time;
         }
         let parent_id = tree.lookup(prev.0).expect("fixture tip present");
@@ -876,5 +862,33 @@ mod contextual_header_tests {
         // Exactly `MAX_TIMEWARP` below the parent: still valid.
         validate_contextual_header(&tree, parent_id, &candidate(tip_time - 600), network, now)
             .expect("a timestamp exactly at the timewarp floor is legal");
+    }
+
+    #[test]
+    fn child_of_invalid_parent_is_rejected() {
+        let network = Network::Regtest;
+        let genesis = network.genesis_block();
+        let base_time = genesis.header.time;
+        let mut prev = genesis.block_hash();
+        let mut tree = BlockTree::new();
+        accept_headers(&mut tree, &[genesis.header], network, base_time)
+            .expect("the regtest genesis admits");
+        extend_regtest(&mut tree, &mut prev, 1, 4, base_time);
+        let block_one = tree.lookup(prev.0).expect("block one is in the tree");
+        tree.invalidate_subtree(block_one)
+            .expect("invalidate block one");
+
+        let now = base_time + 2 * 600;
+        let child = mine_regtest(prev, 2, now, 4);
+        assert_eq!(
+            accept_headers(&mut tree, &[child], network, now),
+            Err(ChainError::InvalidParent { parent: block_one }),
+            "a child of an invalidated header is refused, not accepted as invalid"
+        );
+        assert_eq!(
+            tree.lookup(hash_from_header(&child)),
+            None,
+            "the refused child must not extend the invalid subtree"
+        );
     }
 }
