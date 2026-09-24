@@ -23,8 +23,8 @@ const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 /// correspondence between input headers and returned ids (including duplicate
 /// Genesis on a non-empty tree) without relaxing validation or error
 /// propagation for unknown headers, which continue through proof-of-work,
-/// parent resolution, and the shared contextual header validation
-/// ([`validate_contextual_header`]) before insertion.
+/// parent resolution, the invalid-parent refusal, and the shared contextual
+/// header validation ([`validate_contextual_header`]) before insertion.
 /// A header whose parent exists but is already marked invalid is rejected
 /// with [`ChainError::InvalidParent`]: descendants of an invalidated subtree
 /// must never enter the tree through this admission path.
@@ -705,7 +705,7 @@ mod timestamp_tests {
 mod contextual_header_tests {
     use super::{
         MAX_FUTURE_TIME_SECONDS, accept_headers, compact_is_met_by, next_work_required,
-        validate_contextual_header,
+        prev_hash_from_header, validate_contextual_header,
     };
     use crate::{
         ChainError,
@@ -875,5 +875,35 @@ mod contextual_header_tests {
         // Exactly `MAX_TIMEWARP` below the parent: still valid.
         validate_contextual_header(&tree, parent_id, &candidate(tip_time - 600), network, now)
             .expect("a timestamp exactly at the timewarp floor is legal");
+    }
+
+    #[test]
+    fn child_of_invalid_parent_is_rejected() {
+        let network = Network::Regtest;
+        let genesis = network.genesis_block();
+        let base_time = genesis.header.time;
+        let mut prev = genesis.block_hash();
+        let mut tree = BlockTree::new();
+        accept_headers(&mut tree, &[genesis.header], network, base_time)
+            .expect("the regtest genesis admits");
+        extend_regtest(&mut tree, &mut prev, 1, 4, base_time);
+        let block_one = tree.lookup(prev.0).expect("block one is in the tree");
+        tree.invalidate_subtree(block_one)
+            .expect("invalidate block one");
+
+        let now = base_time + 2 * 600;
+        let child = mine_regtest(prev, 2, now, 4);
+        assert_eq!(
+            accept_headers(&mut tree, &[child], network, now),
+            Err(ChainError::InvalidParent {
+                prev_hash: prev_hash_from_header(&child),
+            }),
+            "a child of an invalidated header is refused, not accepted as invalid"
+        );
+        assert_eq!(
+            tree.lookup(hash_from_header(&child)),
+            None,
+            "the refused child must not extend the invalid subtree"
+        );
     }
 }

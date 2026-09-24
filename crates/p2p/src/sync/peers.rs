@@ -38,8 +38,10 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
         | ChainError::HeightOverflow { .. }
         // A median-time-past violation is decided entirely by the chain the peer
         // itself sent, so it is unambiguously the peer's fault. The same holds
-        // for the version floors and the BIP94 timewarp bound: both compare the
-        // candidate header against its own announced ancestors.
+        // for the version floors, the BIP94 timewarp bound, and the
+        // invalid-parent refusal: each compares the candidate against the
+        // chain the peer itself announced or a block this node already
+        // rejected, so blaming the sender cannot ban an honest peer.
         | ChainError::TimestampTooEarly { .. }
         | ChainError::BadVersion { .. }
         | ChainError::TimewarpAttack { .. }
@@ -695,5 +697,64 @@ impl BlockSync {
         }
         metrics::counter!("node.sync.chain_sync_probes").increment(1);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_peer_fault;
+    use bitcoin_rs_chain::{ChainError, NodeId};
+    use bitcoin_rs_primitives::Hash256;
+
+    #[test]
+    fn header_contextual_refusals_blame_the_sender() {
+        let hash = Hash256::default();
+        for error in [
+            ChainError::BadVersion {
+                version: 1,
+                required: 2,
+                height: 500,
+            },
+            ChainError::TimewarpAttack {
+                height: 2016,
+                timestamp: 1,
+                minimum: 601,
+            },
+            ChainError::InvalidParent {
+                parent: NodeId::new(3),
+            },
+            ChainError::TimestampTooEarly {
+                hash,
+                timestamp: 1,
+                median: 2,
+            },
+            ChainError::NbitsMismatch {
+                actual: 1,
+                expected: 2,
+                height: 3,
+            },
+        ] {
+            assert!(is_peer_fault(&error), "{error:?} must retire the peer");
+        }
+    }
+
+    #[test]
+    fn clock_and_bookkeeping_refusals_spare_the_sender() {
+        let hash = Hash256::default();
+        for error in [
+            // Future drift is judged against OUR clock, so a slow local clock
+            // must not ban every honest peer and partition the node.
+            ChainError::TimestampTooFarAhead {
+                hash,
+                timestamp: 9,
+                max_allowed: 1,
+            },
+            // A missing parent is a sync-ordering fact, not misconduct: the
+            // same headers may arrive from a peer that already has them.
+            ChainError::MissingParent { prev_hash: hash },
+            ChainError::UnknownNode { id: NodeId::new(1) },
+        ] {
+            assert!(!is_peer_fault(&error), "{error:?} must spare the peer");
+        }
     }
 }
