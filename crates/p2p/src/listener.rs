@@ -928,6 +928,11 @@ impl Keepalive {
     /// INVARIANT: Core's `InactivityCheck` (`net.cpp:2043-2090`) ends a
     ///   connection when the send timeout or the receive timeout fires, so
     ///   either direction alone expiring is enough here.
+    ///
+    /// A writer stuck on a full socket does not wait out the send silence:
+    /// [`crate::socket::HANDSHAKE_TIMEOUT`] bounds one blocking write at one
+    /// minute, so this branch only covers a peer that takes our writes and
+    /// never answers them.
     fn next_action(&mut self, now: Instant) -> KeepaliveAction {
         if now.saturating_duration_since(self.last_recv) > TIMEOUT_INTERVAL
             || now.saturating_duration_since(self.last_send) > TIMEOUT_INTERVAL
