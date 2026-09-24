@@ -4,7 +4,6 @@ use super::Chainstate;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Block;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 /// Publishes one applied tip and records the chain event that names it.
 ///
@@ -20,9 +19,6 @@ pub(super) fn publish_applied(
 ) {
     handles.applied_tip.store(Some(Arc::new(tip.clone())));
     handles.chain_events.record(kind, tip.height, tip.hash);
-    handles
-        .chain_tx_count
-        .store(tip.chain_tx_count.to_wire(), Ordering::Relaxed);
 }
 
 /// The `tx_count` delta one block contributes to coinstats.

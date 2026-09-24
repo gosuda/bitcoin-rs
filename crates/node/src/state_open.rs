@@ -36,7 +36,6 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
-use std::sync::atomic::AtomicU64;
 
 impl NodeState {
     /// Opens (or creates) the node's data directory and configured storage
@@ -131,8 +130,10 @@ impl NodeState {
             utxo: mut utxo_set,
             coin_stats: initial_coin_stats,
             tree: block_tree_value,
+            // The restored tip already carries the count its checkpoint or
+            // journal replay certified; publishing it is all the node does.
             applied_tip: restored_applied_tip,
-            chain_tx_count: restored_chain_tx_count,
+            chain_tx_count: _,
             resume_source,
             journal_bootstrap,
         } = prepare_initial_chainstate(
@@ -244,7 +245,6 @@ impl NodeState {
             applied_tip.store(Some(Arc::new(restored_applied_tip)));
         }
         let blocks = Arc::new(RwLock::new(BlockLog::new()));
-        let chain_tx_count = Arc::new(AtomicU64::new(restored_chain_tx_count));
         let transactions = Arc::new(RwLock::new(HashMap::new()));
         // Created before the txindex worker spawn: the worker mirrors this
         // publisher's snapshot into its persisted consumer cursor.
@@ -255,7 +255,6 @@ impl NodeState {
             network: config.network,
             chain_tip: Arc::clone(&chain_tip),
             applied_tip: Arc::clone(&applied_tip),
-            chain_tx_count: Arc::clone(&chain_tx_count),
             block_tree: Arc::clone(&block_tree),
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),

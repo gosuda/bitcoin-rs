@@ -100,7 +100,7 @@ pub(crate) fn unix_now() -> u64 {
 /// also quantizes the answer near 1.0, where people expect to see it settle.
 pub(crate) fn verification_progress(
     network: bitcoin_rs_primitives::Network,
-    chain_tx_count: u64,
+    verified_tx_count: u64,
     applied_height: u32,
     header_height: u32,
     tip_time: u64,
@@ -108,9 +108,6 @@ pub(crate) fn verification_progress(
 ) -> f64 {
     const RECENT_TIP_WINDOW_SECONDS: i64 = 2 * 60 * 60;
 
-    if chain_tx_count == 0 {
-        return 0.0;
-    }
     let data = network.chain_tx_data();
 
     let now_signed = i64::try_from(now).unwrap_or(i64::MAX);
@@ -125,7 +122,7 @@ pub(crate) fn verification_progress(
         tip_time_signed
     };
 
-    let total = if chain_tx_count <= data.tx_count {
+    let total = if verified_tx_count <= data.tx_count {
         // Still behind the pinned observation: extrapolate forward from it.
         let elapsed = now_signed.saturating_sub(i64::try_from(data.time).unwrap_or(i64::MAX));
         i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(data.tx_count))
@@ -133,12 +130,12 @@ pub(crate) fn verification_progress(
         // Past it, so this node's own count is the better baseline. Without
         // this the fraction would pin at 1.0 and stay there.
         let elapsed = now_signed.saturating_sub(block_time);
-        i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(chain_tx_count))
+        i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(verified_tx_count))
     };
     if total <= 0.0 {
         return 0.0;
     }
-    (u64_to_f64(chain_tx_count) / total).clamp(0.0, 1.0)
+    (u64_to_f64(verified_tx_count) / total).clamp(0.0, 1.0)
 }
 
 /// `u64` to `f64` without a silent `as` cast, which this crate forbids.
@@ -2771,12 +2768,10 @@ mod tests {
     }
 
     #[test]
-    fn getchaintxstats_uses_applied_atomic_when_per_node_count_is_unset() {
+    fn getchaintxstats_uses_the_applied_tip_count_when_per_node_count_is_unset() {
         use alloc::sync::Arc;
 
-        let ctx =
-            Context::new().with_chain_tx_count(Arc::new(core::sync::atomic::AtomicU64::new(42)));
-        let ctx = Arc::new(ctx);
+        let ctx = Arc::new(Context::new());
         let genesis = fixture_genesis();
         let tip = {
             let mut tree = ctx.block_tree.write();
@@ -2791,9 +2786,10 @@ mod tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
-                chain_tx_count: node.chain_tx_count,
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
             }
         };
+        ctx.set_applied_tip(tip.clone());
         ctx.set_applied_tip(tip);
         let result = getchaintxstats(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
@@ -4430,14 +4426,7 @@ mod chaintxstats_window_tests {
     /// leaves it unset cannot tell "the shortcut is restricted to the tip" from
     /// "there is no shortcut to take".
     fn chain_ctx_with_counter(times: &[u32], chain_tx_count: Option<u64>) -> Arc<Context> {
-        let ctx = Context::new();
-        let ctx = match chain_tx_count {
-            Some(count) => {
-                ctx.with_chain_tx_count(Arc::new(core::sync::atomic::AtomicU64::new(count)))
-            }
-            None => ctx,
-        };
-        let ctx = Arc::new(ctx);
+        let ctx = Arc::new(Context::new());
         let mut previous = BlockHash::default();
         let mut parent = None;
         let mut tip = None;
@@ -4470,7 +4459,10 @@ mod chaintxstats_window_tests {
             height,
             chainwork: bitcoin_rs_chain::ChainWork::ZERO,
             hash: hash.into(),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: chain_tx_count.map_or(
+                bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                bitcoin_rs_chain::ChainTxCount::established,
+            ),
         });
         ctx
     }
@@ -4923,7 +4915,7 @@ mod verification_progress_wiring_tests {
     use super::*;
 
     fn half_applied_ctx(chain_tx_count: Option<u64>) -> Arc<Context> {
-        let mut ctx = Context::new();
+        let ctx = Context::new();
         let header = Header {
             version: 1,
             prev_blockhash: BlockHash::default(),
@@ -4943,9 +4935,10 @@ mod verification_progress_wiring_tests {
             }
             id
         };
-        if let Some(count) = chain_tx_count {
-            ctx = ctx.with_chain_tx_count(Arc::new(core::sync::atomic::AtomicU64::new(count)));
-        }
+        let applied_chain_tx_count = chain_tx_count.map_or(
+            bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            bitcoin_rs_chain::ChainTxCount::established,
+        );
         let hash = header.compute_hash().0;
         ctx.set_chain_tip(TipSnapshot {
             tip_id: id,
@@ -4959,7 +4952,7 @@ mod verification_progress_wiring_tests {
             height: 50,
             chainwork: ChainWork::ZERO,
             hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: applied_chain_tx_count,
         });
         Arc::new(ctx)
     }

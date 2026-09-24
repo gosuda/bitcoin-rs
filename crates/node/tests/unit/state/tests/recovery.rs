@@ -652,16 +652,12 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
         .ok_or_else(|| anyhow::anyhow!("reference must publish a tip"))?;
     assert_eq!(landed.hash, reference_tip.hash);
     assert_eq!(landed.height, reference_tip.height);
-    assert_eq!(
-        state
-            .chainstate()
-            .chain_tx_count_handle()
-            .load(Ordering::Acquire),
-        reference
-            .chainstate()
-            .chain_tx_count_handle()
-            .load(Ordering::Acquire)
-    );
+    let restored = state
+        .chainstate()
+        .applied_tip_handle()
+        .load_full()
+        .ok_or_else(|| anyhow::anyhow!("restored node must publish a tip"))?;
+    assert_eq!(restored.chain_tx_count, reference_tip.chain_tx_count);
     assert_eq!(handles.retention_handle().active_leases(), 0);
     Ok(())
 }

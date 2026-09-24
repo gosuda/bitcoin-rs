@@ -7,6 +7,11 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn s
         let (tree, _, applied) = chain_with_applied_height(0, 0)?;
         let applied_tip = tip_snapshot(&tree, applied)?;
         let tree = RwLock::new(tree);
+        // The applied tip carries the count the checkpoint writes.
+        let applied_tip = bitcoin_rs_chain::TipSnapshot {
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::from_wire(chain_tx_count),
+            ..applied_tip
+        };
         let mut stats = CoinStats::new();
         stats.finish_block(0, 1);
         let data_dir = super::super::open_data_dir(dir.path())?;
@@ -17,7 +22,6 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn s
             &UtxoSet::new(),
             &CoinStatsListener::new(stats),
             Some(&applied_tip),
-            chain_tx_count,
         )?;
         let CheckpointLoad::Complete(restored) = load_checkpoint(dir.path(), config())? else {
             return Err("valid checkpoint did not load".into());
@@ -43,6 +47,10 @@ fn checkpoint_writer_refuses_inconsistent_transaction_counts()
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
+    let applied_tip = bitcoin_rs_chain::TipSnapshot {
+        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(2),
+        ..applied_tip
+    };
     let data_dir = super::super::open_data_dir(dir.path())?;
     let result = super::super::write_checkpoint_from_dir(
         &data_dir,
@@ -51,7 +59,6 @@ fn checkpoint_writer_refuses_inconsistent_transaction_counts()
         &UtxoSet::new(),
         &CoinStatsListener::new(CoinStats::new()),
         Some(&applied_tip),
-        2,
     );
     let Err(error) = result else {
         return Err("inconsistent transaction counts were published".into());
@@ -77,7 +84,6 @@ fn checkpoint_writer_reports_height_mismatch_before_count_mismatch()
         &UtxoSet::new(),
         &CoinStatsListener::new(stats),
         Some(&applied_tip),
-        2,
     );
     let Err(error) = result else {
         return Err("stale CoinStats unexpectedly published".into());
