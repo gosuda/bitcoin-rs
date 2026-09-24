@@ -259,8 +259,8 @@ fn idle_frontier_relearns_stale_peer_credit_after_rejected_body()
     let (sync, hash, correct, stripped) = segwit_sync_fixture()?;
     let bad = test_addr(9765, 0)?;
     let good = test_addr(9765, 1)?;
-    let bad_rx = connect_peer(&sync.peer_table, eligible_peer(bad, 1));
-    let good_rx = connect_peer(&sync.peer_table, eligible_peer(good, 0));
+    let bad_rx = connect_peer(&sync.peer_table, synthetic_peer(bad, 1));
+    let good_rx = connect_peer(&sync.peer_table, synthetic_peer(good, 0));
     let (headers_tx, headers_rx) = unbounded();
     *sync.inbound_headers_rx.lock() = headers_rx;
     sync.tick();

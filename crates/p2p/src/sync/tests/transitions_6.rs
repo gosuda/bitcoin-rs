@@ -146,7 +146,7 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
         addrs.push(addr);
         receivers.push(connect_peer(
             &peers,
-            eligible_peer(addr, 300 - i32::try_from(idx)?),
+            synthetic_peer(addr, 300 - i32::try_from(idx)?),
         ));
     }
     sync.tick();

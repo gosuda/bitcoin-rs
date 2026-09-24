@@ -544,9 +544,10 @@ pub(crate) fn start_node(
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
     let gateway = state.mempool_gateway();
-    // One chain-owned latch, shared by the RPC context and the P2P listener:
-    // `initialblockdownload` and the transaction-relay gate can never disagree.
-    let ibd = chainstate.ibd_latch();
+    // The node's one latch, built with the chainstate at open and already
+    // held by the block-download executor: `initialblockdownload`, the
+    // transaction-relay gate, and block-peer eligibility read one signal.
+    let ibd = state.ibd();
     let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
     let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> = gateway.clone();
     let listener_extras = bitcoin_rs_p2p::ListenerExtras {
