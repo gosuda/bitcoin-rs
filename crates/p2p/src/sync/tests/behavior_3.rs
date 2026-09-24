@@ -194,7 +194,7 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
     let _ = next_getdata(&alternate_rx)?;
     assert_eq!(
         sync.scheduler.lock().window.preferred_peer(),
-        Some(alternate)
+        Some(current_source(&peers, alternate))
     );
 
     let mut recovered_rxs = Vec::new();

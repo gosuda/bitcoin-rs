@@ -400,7 +400,7 @@ impl BlockSync {
             let SchedulerState { window, stager, .. } = &mut *scheduler;
             for candidate in &mut candidates {
                 candidate.soft_blocked = window
-                    .peer_has_expired_pending(candidate.peer.source.addr, now)
+                    .peer_has_expired_pending(candidate.peer.source, now)
                     || window.peer_in_staller_cooldown(candidate.peer.source.addr, now);
                 candidate.fanout_eligible = candidate.fanout_eligible && !candidate.soft_blocked;
             }

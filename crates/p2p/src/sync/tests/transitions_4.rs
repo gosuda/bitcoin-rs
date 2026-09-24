@@ -268,7 +268,7 @@ fn common_prefix_winner_takes_over_deep_window() -> Result<(), Box<dyn std::erro
 
     assert_eq!(
         sync.scheduler.lock().window.preferred_peer(),
-        Some(alternate)
+        Some(current_source(&peers, alternate))
     );
     assert!(
         sync.scheduler
@@ -291,7 +291,7 @@ fn common_prefix_winner_takes_over_deep_window() -> Result<(), Box<dyn std::erro
     sync.tick();
     assert_eq!(
         sync.scheduler.lock().window.preferred_peer(),
-        Some(alternate),
+        Some(current_source(&peers, alternate)),
         "a temporary soft block skips the winner without erasing its election"
     );
     Ok(())
