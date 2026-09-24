@@ -5,7 +5,7 @@ use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
 use super::SchedulerState;
-use super::frontier::SyncFrontier;
+use super::frontier::ChainFrontier;
 use super::peers::active_demonstrated_height;
 use super::telemetry::metric_count;
 use crate::Message;
@@ -25,7 +25,7 @@ use std::vec::Vec;
 /// witness flavor, where full-body availability dominates; the download
 /// window stays hash-keyed, so either answer resolves the same pending
 /// request.
-const COMPACT_RELAY_NEAR_TIP_BLOCKS: u32 = 5;
+pub(super) const COMPACT_RELAY_NEAR_TIP_BLOCKS: u32 = 5;
 
 impl BlockSync {
     /// Sends one estimated-2MiB common-prefix probe to each idle alternate.
@@ -116,12 +116,12 @@ impl BlockSync {
     /// Compact flavor is worth its reconstruction round trip only when the
     /// peer announced BIP152 relay and the whole batch sits within the
     /// near-tip window of the header tip.
-    fn compact_fetch_eligible(
+    pub(super) fn compact_fetch_eligible(
         &self,
         request: &crate::download_window::PeerRequest,
-        frontier: &SyncFrontier,
+        frontier: &ChainFrontier,
     ) -> bool {
-        let Some(chain_tip) = frontier.chain.chain_tip.as_ref() else {
+        let Some(chain_tip) = frontier.chain_tip.as_ref() else {
             return false;
         };
         let Some((first_height, _)) = request.entries().next() else {
@@ -139,13 +139,13 @@ impl BlockSync {
         source: PeerSource,
         allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
-        frontier: &SyncFrontier,
+        frontier: &ChainFrontier,
     ) -> GetdataRequestOutcome {
         let now = Instant::now();
         let (Some(chain_tip), Some(applied_tip), Some(required)) = (
-            frontier.chain.chain_tip.as_ref(),
-            frontier.chain.applied_tip.as_ref(),
-            frontier.chain.next_required,
+            frontier.chain_tip.as_ref(),
+            frontier.applied_tip.as_ref(),
+            frontier.next_required,
         ) else {
             return GetdataRequestOutcome::default();
         };
