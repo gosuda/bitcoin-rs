@@ -152,7 +152,7 @@ fn sync_phase(sync: &BlockSync, source: PeerSource) -> Option<HeadersSyncPhase> 
 /// re-derives the anchor per batch shows up here as the honest peer being
 /// re-requested from and the second batch falling into admission.
 #[test]
-fn low_work_pages_collect_without_admission_or_blame() -> Result<(), Box<dyn std::error::Error>> {
+fn low_work_headers_do_not_reach_block_tree() -> Result<(), Box<dyn std::error::Error>> {
     let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, lease, rx) = connect(&peers, 9701, 100_000);
@@ -219,7 +219,7 @@ fn low_work_pages_collect_without_admission_or_blame() -> Result<(), Box<dyn std
 /// against the salted commitments, and only then does admission run — in
 /// the order the wire delivered.
 #[test]
-fn a_committed_chain_redownloads_before_admission() -> Result<(), Box<dyn std::error::Error>> {
+fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn std::error::Error>> {
     // One full page whose last header reaches the floor exactly: the sync
     // commits at the page boundary and the replay is that same page.
     let chain = chain_on(&genesis_header(), 0, PAGE);
