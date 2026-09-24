@@ -163,9 +163,7 @@ pub fn mine_common_chain(
         }
         let accepted = node.rpc("submitblock", &json!([hex]))?;
         if !accepted.is_null() {
-            return Err(Error::Protocol(format!(
-                "submitblock rejected: {accepted}"
-            )));
+            return Err(Error::Protocol(format!("submitblock rejected: {accepted}")));
         }
         let coinbase = block
             .txdata

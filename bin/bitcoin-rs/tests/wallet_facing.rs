@@ -118,7 +118,12 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
 
     let spend_hex = spend_anyone_can_spend(&client, 1, &p2wpkh)?;
     let broadcast = client.esplora_post("/api/tx", spend_hex.as_bytes())?;
-    assert_eq!(broadcast.status, 200, "POST /api/tx: {}", broadcast.body_text());
+    assert_eq!(
+        broadcast.status,
+        200,
+        "POST /api/tx: {}",
+        broadcast.body_text()
+    );
     let txid = broadcast.body_text();
     assert_eq!(
         txid.trim().len(),
@@ -568,7 +573,9 @@ impl Client {
     fn esplora_text(&self, path: &str) -> TestResult<String> {
         let response = self.esplora_get(path)?;
         if response.status != 200 {
-            return Err(format!("GET {path} -> {} {}", response.status, response.body_text()).into());
+            return Err(
+                format!("GET {path} -> {} {}", response.status, response.body_text()).into(),
+            );
         }
         Ok(response.body_text())
     }
@@ -576,7 +583,9 @@ impl Client {
     fn esplora_json(&self, path: &str) -> TestResult<Value> {
         let response = self.esplora_get(path)?;
         if response.status != 200 {
-            return Err(format!("GET {path} -> {} {}", response.status, response.body_text()).into());
+            return Err(
+                format!("GET {path} -> {} {}", response.status, response.body_text()).into(),
+            );
         }
         Ok(response.json()?)
     }
@@ -639,7 +648,6 @@ impl Client {
         )?)
     }
 }
-
 
 fn p2wpkh_script() -> ScriptBuf {
     ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20]))

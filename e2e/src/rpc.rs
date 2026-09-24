@@ -60,12 +60,7 @@ impl Connection {
     ///
     /// PRE: `request` is a complete JSON-RPC envelope.
     /// POST: the reply parsed as a JSON value, or the call failed.
-    pub fn rpc(
-        &mut self,
-        request: &Value,
-        auth: (&str, &str),
-        deadline: Instant,
-    ) -> Result<Value> {
+    pub fn rpc(&mut self, request: &Value, auth: (&str, &str), deadline: Instant) -> Result<Value> {
         let wire = request_wire(self.addr, request, Some(auth))?;
         let response = self.round_trip(&wire, deadline)?;
         Ok(response.json()?)
@@ -200,14 +195,18 @@ impl Connection {
         }
         let (status, headers, content_length, peer_close) =
             parse_reply_head(&head).map_err(ConnFail::Error)?;
-        let content_length = content_length.ok_or_else(|| {
-            ConnFail::Error(Error::Protocol("missing HTTP content length".into()))
-        })?;
-        if content_length > MAX_BODY {
-            return Err(ConnFail::Error(Error::Protocol(
-                "RPC response bound exceeded".into(),
-            )));
-        }
+        let content_length = match content_length {
+            Some(length) => length,
+            // A 1xx, 204, or 304 reply carries no body and may omit
+            // Content-Length; any other framing-less reply is a protocol
+            // violation on a keep-alive connection.
+            None if matches!(status, 100..=199 | 204 | 304) => 0,
+            None => {
+                return Err(ConnFail::Error(Error::Protocol(
+                    "missing HTTP content length".into(),
+                )));
+            }
+        };
         let mut body = vec![0_u8; content_length];
         conn.get_ref()
             .set_read_timeout(Some(remaining().map_err(ConnFail::Error)?))
@@ -284,11 +283,7 @@ pub(crate) fn remaining_time(
 }
 
 /// Builds the wire bytes for one JSON-RPC POST to `/`.
-fn request_wire(
-    addr: SocketAddr,
-    request: &Value,
-    auth: Option<(&str, &str)>,
-) -> Result<Vec<u8>> {
+fn request_wire(addr: SocketAddr, request: &Value, auth: Option<(&str, &str)>) -> Result<Vec<u8>> {
     let body = serde_json::to_vec(request)?;
     http_wire(addr, "POST", "/", &body, auth)
 }
@@ -304,10 +299,7 @@ fn http_wire(
     auth: Option<(&str, &str)>,
 ) -> Result<Vec<u8>> {
     let mut wire = Vec::new();
-    write!(
-        wire,
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n"
-    )?;
+    write!(wire, "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n")?;
     if let Some((user, password)) = auth {
         let token = base64(format!("{user}:{password}").as_bytes());
         write!(wire, "Authorization: Basic {token}\r\n")?;
@@ -332,9 +324,7 @@ fn http_wire(
 /// INVARIANT: duplicate `Content-Length`, any `Transfer-Encoding`, a
 /// non-HTTP/1.x version, and a status code outside 100..=599 are protocol
 /// failures; header names come back lower-cased.
-fn parse_reply_head(
-    head: &[u8],
-) -> Result<(u16, Vec<(String, String)>, Option<usize>, bool)> {
+fn parse_reply_head(head: &[u8]) -> Result<(u16, Vec<(String, String)>, Option<usize>, bool)> {
     let text = std::str::from_utf8(head)
         .map_err(|error| Error::Protocol(format!("invalid HTTP headers: {error}")))?;
     let mut lines = text.split("\r\n");
@@ -356,9 +346,9 @@ fn parse_reply_head(
         if line.is_empty() {
             continue;
         }
-        let (name, value) = line.split_once(':').ok_or_else(|| {
-            Error::Protocol("invalid HTTP header".into())
-        })?;
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| Error::Protocol("invalid HTTP header".into()))?;
         let name = name.trim().to_lowercase();
         let value = value.trim().to_owned();
         if name == "content-length" {
@@ -386,7 +376,8 @@ fn parse_reply(bytes: &[u8]) -> Result<HttpResponse> {
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
         .ok_or_else(|| Error::Protocol("missing HTTP header terminator".into()))?;
-    let (status, headers, content_length, _) = parse_reply_head(bytes.get(..split).expect("position"))?;
+    let (status, headers, content_length, _) =
+        parse_reply_head(bytes.get(..split).expect("position"))?;
     let payload = bytes
         .get(split.saturating_add(4)..)
         .ok_or_else(|| Error::Protocol("missing HTTP body".into()))?;
