@@ -156,9 +156,11 @@ impl PeerTable {
     ///   automatic-connection remainder.
     /// POST: returns the registered lease only when the live inbound count
     ///   stays below `max_inbound`; otherwise returns `None` and changes no
-    ///   table state. A lease at an address that already holds an inbound
+    ///   table state. A lease at an address already holding a LIVE inbound
     ///   connection replaces and cancels it exactly as [`Self::register`]
-    ///   does, which never grows the count.
+    ///   does, which never grows the count; a replacement over an already
+    ///   cancelled predecessor does grow it, because the cancelled lease was
+    ///   never counted, so it faces the same capacity test as a new address.
     /// INVARIANT: the count test and the reservation are one `PeerTable`
     ///   write operation; every reserved lease is counted until its
     ///   identity is removed.
@@ -176,7 +178,11 @@ impl PeerTable {
                 if current.lease.same_connection(&lease) {
                     return Some(lease);
                 }
-                !current.lease.is_inbound()
+                // A live inbound predecessor is displaced by this insert, so
+                // the net count is unchanged. An outbound predecessor, or an
+                // inbound one already cancelled (and therefore outside the
+                // live count), leaves the new lease as a net addition.
+                !current.lease.is_inbound() || current.lease.is_cancelled()
             }
             None => true,
         };
@@ -839,6 +845,44 @@ mod tests {
         );
         assert!(first.is_cancelled());
         assert_eq!(table.live_inbound_count(), 1);
+    }
+
+    #[test]
+    fn inbound_replacement_over_a_cancelled_predecessor_faces_the_cap() {
+        let table = PeerTable::new();
+        let displaced = inbound_lease();
+        assert!(
+            table
+                .try_register_inbound(addr(1), displaced.clone(), 1)
+                .is_some(),
+            "capacity must admit the first inbound lease"
+        );
+        // An external conviction cancels the lease; its owning thread has
+        // not yet run the identity-checked teardown, so the entry stays in
+        // the table while sitting outside the live count.
+        displaced.cancel();
+        assert_eq!(
+            table.live_inbound_count(),
+            0,
+            "a cancelled lease stops counting the moment it is cancelled"
+        );
+        assert!(
+            table
+                .try_register_inbound(addr(2), inbound_lease(), 1)
+                .is_some(),
+            "the slot the cancellation freed goes to the next address"
+        );
+        assert!(
+            table
+                .try_register_inbound(addr(1), inbound_lease(), 1)
+                .is_none(),
+            "replacing a cancelled inbound lease adds a live entry, so it must face the cap"
+        );
+        assert_eq!(
+            table.live_inbound_count(),
+            1,
+            "the refusal must not admit a second live inbound lease"
+        );
     }
     #[test]
     fn re_registering_current_connection_is_noop_and_keeps_info() {
