@@ -21,11 +21,13 @@ use thiserror::Error;
 use crate::connection::PeerSource;
 use crate::listener::ListenerError;
 
-const DEFAULT_OUTBOUND_TARGET: usize = 8;
+/// Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
+const DEFAULT_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
 
-const DEFAULT_OUTBOUND_ACTIVE_LIMIT: usize = 8;
+/// Core's `MAX_OUTBOUND_BLOCK_RELAY_CONNECTIONS` (`net.h:73`).
+const DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
-const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = 8;
+const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = DEFAULT_OUTBOUND_FULL_RELAY_SLOTS;
 
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
 
@@ -53,10 +55,16 @@ pub struct P2pServiceConfig {
     pub dns_port: u16,
     /// Fixed connect endpoints. Non-empty disables DNS maintenance.
     pub fixed_peers: Vec<String>,
-    /// Maximum number of active outbound attempts.
-    pub outbound_active_limit: usize,
-    /// Desired number of live outbound peers in DNS mode.
-    pub outbound_peer_target: usize,
+    /// Outbound full-relay connection slots (transaction, address, block
+    /// relay, and announcements).
+    ///
+    /// Core: `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
+    pub outbound_full_relay_slots: usize,
+    /// Outbound block-relay-only connection slots (blocks only, no `tx` or
+    /// `addr`).
+    ///
+    /// Core: `MAX_BLOCK_RELAY_ONLY_CONNECTIONS` (`net.h:73`).
+    pub outbound_block_relay_slots: usize,
     /// Outbound request queue capacity.
     pub outbound_queue_limit: usize,
     /// Inbound block queue capacity.
@@ -72,11 +80,27 @@ impl Default for P2pServiceConfig {
             dns_seeds: Vec::new(),
             dns_port: 0,
             fixed_peers: Vec::new(),
-            outbound_active_limit: DEFAULT_OUTBOUND_ACTIVE_LIMIT,
-            outbound_peer_target: DEFAULT_OUTBOUND_TARGET,
+            outbound_full_relay_slots: DEFAULT_OUTBOUND_FULL_RELAY_SLOTS,
+            outbound_block_relay_slots: DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS,
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
         }
+    }
+}
+
+impl P2pServiceConfig {
+    /// Total outbound connection slots.
+    ///
+    /// PRE: none.
+    /// POST: returns the sum of the full-relay and block-relay slot counts,
+    ///   which is both the live-outbound target and the ceiling on
+    ///   simultaneous outbound attempts.
+    /// INVARIANT: no separate active limit or peer target exists; the two
+    ///   slot counts are the only outbound population knobs.
+    #[must_use]
+    pub fn total_outbound_active_limit(&self) -> usize {
+        self.outbound_full_relay_slots
+            .saturating_add(self.outbound_block_relay_slots)
     }
 }
 
@@ -300,7 +324,7 @@ impl P2pService {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let peer_table = Arc::clone(&self.peer_table);
         let shutdown = Arc::clone(&self.worker_shutdown);
-        let active_limit = self.config.outbound_active_limit;
+        let active_limit = self.config.total_outbound_active_limit();
         thread::Builder::new()
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
             .spawn(move || {
@@ -371,7 +395,7 @@ impl P2pService {
         let outbound_tx = self.outbound_tx.clone();
         let port = self.config.dns_port;
         let seeds = self.config.dns_seeds.clone();
-        let target = self.config.outbound_peer_target;
+        let target = self.config.total_outbound_active_limit();
         thread::Builder::new()
             .name("bitcoin-rs-dns-maintenance".to_owned())
             .spawn(move || {
@@ -920,5 +944,32 @@ mod tests {
         apply_network_active(&flag, &table, false);
         assert!(!flag.load(Ordering::Acquire));
         assert!(lease.is_cancelled());
+    }
+
+    /// The outbound population is the sum of two slot counts: there is no
+    /// separate active limit or peer target to keep in step.
+    #[test]
+    fn outbound_slots_split_and_derive_the_active_limit() {
+        let config = P2pServiceConfig::default();
+        assert_eq!(
+            config.outbound_full_relay_slots, 8,
+            "Core's MAX_OUTBOUND_FULL_RELAY_CONNECTIONS"
+        );
+        assert_eq!(
+            config.outbound_block_relay_slots, 2,
+            "Core's MAX_BLOCK_RELAY_ONLY_CONNECTIONS"
+        );
+        assert_eq!(config.total_outbound_active_limit(), 10);
+        assert_eq!(
+            config.outbound_queue_limit, config.outbound_full_relay_slots,
+            "the dial queue is sized to the full-relay count"
+        );
+
+        let narrowed = P2pServiceConfig {
+            outbound_full_relay_slots: 1,
+            outbound_block_relay_slots: 0,
+            ..P2pServiceConfig::default()
+        };
+        assert_eq!(narrowed.total_outbound_active_limit(), 1);
     }
 }
