@@ -30,7 +30,6 @@ use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::connect::SpentOutputLookup;
 use bitcoin_rs_utxo::is_coinbase_tx;
 use connect::apply_block_admitted;
-use connect::apply_block_with_serialized_admitted;
 use connect::apply_committed_block_admitted;
 use disconnect::disconnect_block_admitted;
 pub use durable::reconcile_at_boot;
@@ -596,31 +595,29 @@ impl<'a> ChainTransition<'a> {
 
     /// Connects `block` as the next applied tip.
     ///
-    /// Consensus refusal happens before the first write. See the type-level
-    /// persistence notes for the commit point and retry rules.
-    pub fn connect(&self, block: &Block) -> core::result::Result<ConnectOutcome, ApplyError> {
+    /// `serialized` is `Some` when the caller holds the block's wire bytes,
+    /// which skips re-serialization and validates those bytes; `None` keeps
+    /// serialization lazy. Both arms share one commit and publication order.
+    ///
+    /// PRE: the caller holds admission and the chain-transition guard, and
+    /// present bytes encode `block`.
+    ///
+    /// POST: `Ok` is a durable commit followed by publication; an error keeps
+    /// the existing refusal and recovery semantics.
+    ///
+    /// INVARIANT: `None` and `Some` commit and publish in the same order.
+    pub fn connect(
+        &self,
+        block: &Block,
+        serialized: Option<bytes::Bytes>,
+    ) -> core::result::Result<ConnectOutcome, ApplyError> {
         self.settle_apply(apply_committed_block_admitted(
             self.chainstate,
             block,
-            None,
+            serialized,
             None,
             BlockProvenance::Network,
             PublishMode::Now,
-        ))
-    }
-
-    /// Connects `block` reusing preserved wire-format bytes.
-    ///
-    /// Same commit point and retry rules as [`Self::connect`].
-    pub fn connect_serialized(
-        &self,
-        block: &Block,
-        serialized: bytes::Bytes,
-    ) -> core::result::Result<ConnectOutcome, ApplyError> {
-        self.settle_apply(apply_block_with_serialized_admitted(
-            self.chainstate,
-            block,
-            serialized,
         ))
     }
 
@@ -1074,30 +1071,25 @@ impl Chainstate {
 
     /// Admits a transition, connects `block`, then releases the transition lock.
     /// A refusal releases the same chainstate locks; retry semantics come from
-    /// [`ChainTransition::connect`].
+    /// [`ChainTransition::connect`], whose `serialized` rules this method
+    /// inherits: `Some` reuses the caller's wire bytes, `None` serializes
+    /// lazily, and both share one commit and publication order.
     ///
-    /// Persistence matches [`ChainTransition::connect`]. Derived consumers are
-    /// not invoked. Production paths with followers must dispatch while the
-    /// the chain transition is still held (`ARCH-07`). Node-owned followers
-    /// consume the returned outcome outside this crate.
-    pub fn apply_block(&self, block: &Block) -> core::result::Result<ConnectOutcome, ApplyError> {
-        let transition = self.begin_transition()?;
-        let result = transition.connect(block);
-        drop(transition);
-        result
-    }
-
-    /// Admits a transition, connects `block` from preserved bytes, then releases
-    /// the transition lock.
+    /// PRE: present bytes encode `block`.
     ///
-    /// Persistence matches [`ChainTransition::connect`].
-    pub fn apply_block_with_serialized(
+    /// POST: `Ok` is a durable commit followed by publication.
+    ///
+    /// INVARIANT: derived consumers are not invoked. Production paths with
+    /// followers must dispatch while the chain transition is still held
+    /// (`ARCH-07`); node-owned followers consume the returned outcome outside
+    /// this crate.
+    pub fn apply_block(
         &self,
         block: &Block,
-        serialized: bytes::Bytes,
+        serialized: Option<bytes::Bytes>,
     ) -> core::result::Result<ConnectOutcome, ApplyError> {
         let transition = self.begin_transition()?;
-        let result = transition.connect_serialized(block, serialized);
+        let result = transition.connect(block, serialized);
         drop(transition);
         result
     }

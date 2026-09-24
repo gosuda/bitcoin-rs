@@ -157,7 +157,7 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
     }
     // Rejecting the invalid branch must still allow the selected valid main
     // branch to reconnect through ordinary forward apply.
-    handles.apply_block(&main[100])?;
+    handles.apply_block(&main[100], None)?;
     assert_eq!(
         applied_tip.load_full().map(|tip| tip.hash),
         Some(main_tip_hash)

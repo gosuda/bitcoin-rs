@@ -31,7 +31,7 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow
 }
 
 #[test]
-fn apply_block_with_serialized_persists_same_body_as_apply_block() -> anyhow::Result<()> {
+fn preserved_bytes_apply_matches_lazy_serialization() -> anyhow::Result<()> {
     let block = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     let hash = Hash256::from_le_bytes(block.block_hash().as_bytes());
     let serialized = bytes::Bytes::from(consensus_bytes(&block));
@@ -52,7 +52,7 @@ fn apply_block_with_serialized_persists_same_body_as_apply_block() -> anyhow::Re
     let state_b = NodeState::open(config_b, None)?;
     state_b
         .chainstate()
-        .apply_block_with_serialized(&block, serialized)?;
+        .apply_block(&block, Some(serialized))?;
 
     let body_a = state_a
         .chainstate()
@@ -65,7 +65,7 @@ fn apply_block_with_serialized_persists_same_body_as_apply_block() -> anyhow::Re
         .block_body_store()
         .ok_or_else(|| anyhow::anyhow!("running node has no body store"))?
         .load_block_body(0, hash)?
-        .ok_or_else(|| anyhow::anyhow!("apply_block_with_serialized body missing"))?;
+        .ok_or_else(|| anyhow::anyhow!("preserved-byte apply body missing"))?;
     assert_eq!(body_a, body_b);
     Ok(())
 }
