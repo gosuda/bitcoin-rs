@@ -68,6 +68,15 @@ pub enum ChainError {
         /// Previous-block hash referenced by the child header.
         prev_hash: Hash256,
     },
+    /// The candidate extends a header that this node has marked invalid.
+    ///
+    /// Core refuses it with `bad-prevblk` before any contextual check runs
+    /// (`src/validation.cpp:4228-4231`), so the header never enters the tree.
+    #[error("header extends invalid parent {parent:?}")]
+    InvalidParent {
+        /// Resolved identity of the invalid parent.
+        parent: NodeId,
+    },
     /// The header version is below the floor a buried deployment requires.
     ///
     /// Core rejects with `bad-version(0x%08x)` once BIP34 (version 2),

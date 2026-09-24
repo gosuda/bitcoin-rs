@@ -272,8 +272,11 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 - The previous header must already be in the block tree. Otherwise the RPC
   returns `-25` (`Must submit previous header (HASH) first`).
 - Admission uses `accept_headers`, the same consensus gate as inbound P2P
-  headers. Duplicates succeed. Invalid headers return `-25` with Core reject
-  reasons (`high-hash`, `bad-diffbits`, `time-too-old`, `time-too-new`).
+  headers, so `submitheader` cannot admit a header the network would reject.
+  Duplicates succeed. Invalid headers return `-25` with Core reject reasons
+  (`high-hash`, `bad-diffbits`, `time-too-old`, `time-too-new`,
+  `bad-version(0x%08x)`, `time-timewarp-attack`, and `bad-prevblk` for a
+  header that extends one this node has marked invalid).
 - Success is JSON `null`. Header-only admission does not apply the block or
   publish a mining generation.
 

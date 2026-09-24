@@ -410,22 +410,6 @@ impl MiningControl for MiningCoordinator {
             MiningControlError::Unavailable(CompactString::from(error.to_string()))
         })?;
         let mut tree = self.chainstate.block_tree().write();
-        // Preserve accept_headers' idempotent duplicate path, including genesis.
-        if tree.lookup(header.compute_hash().into()).is_none() {
-            let parent = tree.lookup(header.prev_blockhash.into()).ok_or_else(|| {
-                header_reject_reason(ChainError::MissingParent {
-                    prev_hash: header.prev_blockhash.into(),
-                })
-            })?;
-            if tree
-                .node(parent)
-                .is_ok_and(|node| node.status == NodeStatus::Invalid)
-            {
-                return Err(MiningControlError::Rejected(CompactString::from(
-                    "bad-prevblk",
-                )));
-            }
-        }
         accept_headers(
             &mut tree,
             std::slice::from_ref(&header),
@@ -575,7 +559,8 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
             | ChainError::TimestampTooEarly { .. }
             | ChainError::TimestampTooFarAhead { .. }
             | ChainError::BadVersion { .. }
-            | ChainError::TimewarpAttack { .. }),
+            | ChainError::TimewarpAttack { .. }
+            | ChainError::InvalidParent { .. }),
         ) => bitcoin_rs_mining::chain_reject_reason(chain),
         ApplyError::Shutdown
         | ApplyError::JournalBackpressure(_)
