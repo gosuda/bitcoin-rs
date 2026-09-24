@@ -80,6 +80,7 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
         Arc::clone(&peers),
         inbound_headers_rx,
         inbound_blocks_rx,
+        crate::sync::syncing_ibd_latch(),
     );
     let peer = SocketAddr::from(([127, 0, 0, 1], 18_461));
     let (tx, rx) = unbounded::<Message>();

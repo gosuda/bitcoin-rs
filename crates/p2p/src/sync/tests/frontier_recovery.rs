@@ -20,7 +20,7 @@ fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, applied, blocks, incoming) = sync_with_mined_chain(3)?;
     let peer = test_addr(9760, 0)?;
-    let outbound = connect_peer(&peers, eligible_peer(peer, 3));
+    let outbound = connect_peer(&peers, synthetic_peer(peer, 3));
     sync.tick();
     let genesis = applied.load_full().ok_or("missing genesis")?;
     let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
@@ -47,9 +47,9 @@ fn cancelled_ready_event_does_not_wait_for_an_unrelated_body_writer()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let peer = test_addr(9760, 1)?;
-    let _old = connect_peer(&peers, eligible_peer(peer, 1));
+    let _old = connect_peer(&peers, synthetic_peer(peer, 1));
     let stale = current_source(&peers, peer);
-    let _replacement = connect_peer(&peers, eligible_peer(peer, 1));
+    let _replacement = connect_peer(&peers, synthetic_peer(peer, 1));
     let sync = Arc::new(sync);
     let body = sync.scheduler.lock();
     let (finished, completed) = crossbeam_channel::bounded(1);
@@ -72,8 +72,8 @@ fn empty_header_probe_is_paced_then_rotates_to_another_peer()
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let first = test_addr(9760, 2)?;
     let second = test_addr(9760, 3)?;
-    let first_rx = connect_peer(&peers, eligible_peer(first, 0));
-    let second_rx = connect_peer(&peers, eligible_peer(second, 0));
+    let first_rx = connect_peer(&peers, synthetic_peer(first, 0));
+    let second_rx = connect_peer(&peers, synthetic_peer(second, 0));
     let (headers, receiver) = unbounded();
     *sync.inbound_headers_rx.lock() = receiver;
     sync.tick();
@@ -110,7 +110,7 @@ fn staged_successors_behind_a_rejected_frontier_still_probe()
     // start_height 0: not getdata-eligible (height must exceed the floor of
     // 0) but probe-eligible (services carry NETWORK|WITNESS), so any
     // GetHeaders this peer observes can only come from the idle probe.
-    let outbound = connect_peer(&peers, eligible_peer(peer, 0));
+    let outbound = connect_peer(&peers, synthetic_peer(peer, 0));
 
     // Malformed frontier body: the header still hashes to block 1's hash, but
     // the txid Merkle root no longer binds to the header, so the body fails
@@ -156,7 +156,7 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let peer = test_addr(9762, 0)?;
-    let old_rx = connect_peer(&peers, eligible_peer(peer, 1));
+    let old_rx = connect_peer(&peers, synthetic_peer(peer, 1));
     let old_source = current_source(&peers, peer);
 
     // A handshaking replacement takes the address; it never publishes
@@ -221,9 +221,9 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick()
     // Lowest address wins the probe's min_by_key(addr) rotation, but its
     // channel is dead: dropping the receiver disconnects the crossbeam
     // sender, so the lease's try_send fails and the lease cancels itself.
-    let dead_rx = connect_peer(&peers, eligible_peer(low, 1));
+    let dead_rx = connect_peer(&peers, synthetic_peer(low, 1));
     drop(dead_rx);
-    let high_rx = connect_peer(&peers, eligible_peer(high, 5));
+    let high_rx = connect_peer(&peers, synthetic_peer(high, 5));
 
     sync.tick();
     assert!(
@@ -275,9 +275,9 @@ fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback()
     let live = test_addr(9764, 1)?;
     // The lowest address is selected for the probe and has the highest
     // advertised height, but its disconnected queue makes the send fail.
-    let dead_rx = connect_peer(&peers, eligible_peer(dead, 5));
+    let dead_rx = connect_peer(&peers, synthetic_peer(dead, 5));
     drop(dead_rx);
-    let live_rx = connect_peer(&peers, eligible_peer(live, 3));
+    let live_rx = connect_peer(&peers, synthetic_peer(live, 3));
 
     sync.tick();
 
@@ -322,9 +322,9 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
     // Lowest address wins the probe's min_by_key(addr) rotation, but its
     // channel is dead: dropping the receiver disconnects the crossbeam
     // sender, so the lease's try_send fails and the lease cancels itself.
-    let dead_rx = connect_peer(&peers, eligible_peer(dead, 5));
+    let dead_rx = connect_peer(&peers, synthetic_peer(dead, 5));
     drop(dead_rx);
-    let live_rx = connect_peer(&peers, eligible_peer(live, 3));
+    let live_rx = connect_peer(&peers, synthetic_peer(live, 3));
 
     // Tick 1: the dead peer's probe send fails and the same-tick fallback
     // hands the request to the live peer.
@@ -388,7 +388,7 @@ fn reconciler_sweeps_cancelled_lease_sessions_within_one_tick()
     let addr = test_addr(9767, 0)?;
     // A lease cancelled by any path (here: direct teardown request) while its
     // session stays table-resident must leave the table within one tick.
-    let _rx = connect_peer(&peers, eligible_peer(addr, 5));
+    let _rx = connect_peer(&peers, synthetic_peer(addr, 5));
     peers.lease(addr).ok_or("peer missing from table")?.cancel();
     assert!(peers.sessions().iter().any(|session| session.addr == addr));
     sync.tick();
@@ -463,7 +463,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
     applied_tip.store(Some(Arc::new(losing_snapshot)));
 
     let peer = test_addr(9765, 0)?;
-    let outbound = connect_peer(&peers, eligible_peer(peer, 0));
+    let outbound = connect_peer(&peers, synthetic_peer(peer, 0));
     sync.tick();
 
     let probe = next_getheaders(&outbound)?;
@@ -494,7 +494,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> Result<(), Box<dyn 
 {
     let (sync, peers, applied, blocks, incoming) = sync_with_mined_chain(4)?;
     let peer = test_addr(9766, 0)?;
-    let outbound = connect_peer(&peers, eligible_peer(peer, 4));
+    let outbound = connect_peer(&peers, synthetic_peer(peer, 4));
     sync.tick();
     let hashes: Vec<_> = blocks.iter().map(Block::block_hash).collect();
     assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);

@@ -76,7 +76,7 @@ pub use wire::{Message, PeerError};
 
 pub use block_stager::{BlockStager, DrainedBlock, DroppedBlock, StagedBlock};
 pub use download_window::{
-    BlameReason, BlockedContext, BlockedDecision, DownloadWindow, FanoutCandidate, RejectDelivery,
-    SyncBudget, SyncPeer, SyncPeerSelection, configure_request_mode, default_sync_budget,
-    statically_fanout_eligible,
+    BlameReason, BlockDownloadPolicy, BlockedContext, BlockedDecision, DownloadWindow,
+    FanoutCandidate, RejectDelivery, SyncBudget, SyncPeer, SyncPeerSelection,
+    configure_request_mode, default_sync_budget, statically_fanout_eligible,
 };

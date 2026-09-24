@@ -17,7 +17,7 @@ fn outbound(port: u16, height: u32, role: PeerRole, at: Instant) -> UsablePeer {
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     UsablePeer {
         source: PeerSource::for_test(addr),
-        info: eligible_peer(addr, i32::try_from(height).unwrap_or(i32::MAX)),
+        info: synthetic_peer(addr, i32::try_from(height).unwrap_or(i32::MAX)),
         demonstrated_tips: vec![Hash256::from_le_bytes(&[0x7c; 32])],
         active_height: Some(height),
         role,

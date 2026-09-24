@@ -32,7 +32,7 @@ fn tick_fans_out_getdata_across_eligible_peers() -> Result<(), Box<dyn std::erro
     for idx in 0..super::super::MIN_PEERS_FOR_FANOUT {
         receivers.push(connect_peer(
             &peers,
-            eligible_peer(test_addr(9505, idx)?, 300 - i32::try_from(idx)?),
+            synthetic_peer(test_addr(9505, idx)?, 300 - i32::try_from(idx)?),
         ));
     }
     sync.tick();

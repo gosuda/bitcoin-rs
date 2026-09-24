@@ -78,7 +78,7 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap()
     );
 
     let peer = test_addr(9700, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(peer, 3));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 3));
 
     let block2 =
         mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
@@ -128,7 +128,7 @@ fn headers_batch_missing_parent_requests_ancestry() -> Result<(), Box<dyn std::e
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9701, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(peer, 10));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 10));
 
     let gap_parent = test_header(genesis.compute_hash(), 1);
     let orphan_tip = test_header(gap_parent.compute_hash(), 2);
@@ -163,7 +163,7 @@ fn known_header_batch_still_credits_the_announcer() -> Result<(), Box<dyn std::e
         ..
     } = SyncHarness::new(tree);
     let peer = test_addr(9702, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip1],
@@ -205,7 +205,7 @@ fn headers_batch_too_far_ahead_does_not_replay_a_request() -> Result<(), Box<dyn
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9704, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     // The header must keep valid PoW while carrying a far-future timestamp:
     // `test_header`'s mined nonce no longer validates once `time` is
@@ -288,7 +288,7 @@ fn body_carried_header_does_not_consume_a_pending_getheaders()
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9705, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let source = current_source(&peers, peer);
     sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
         source,
@@ -342,7 +342,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> Result<(), Box<dyn s
     sync.tick();
 
     let peer = test_addr(9706, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     let unannounced =
         mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
@@ -382,7 +382,7 @@ fn fork_tip_attests_its_shared_active_ancestor() -> Result<(), Box<dyn std::erro
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9707, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     // An equal-work fork rooted at height 1 stays off the active chain
     // (first-seen wins a tie), so the batch's tip is retained as fork
@@ -427,7 +427,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> Result<(), Box<dyn 
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9708, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let source = current_source(&peers, peer);
 
     // An ancestor and its descendant on the same fork branch: the retained
@@ -516,7 +516,7 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip()
         ..
     } = SyncHarness::new(tree);
     let peer = test_addr(9703, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip1],
@@ -564,7 +564,7 @@ fn compact_owned_body_fetch_marks_the_tip_pending() -> Result<(), Box<dyn std::e
         ..
     } = SyncHarness::new(tree);
     let peer = test_addr(9706, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let tip = test_header(genesis.compute_hash(), 1);
     let tip_hash = Hash256::from(tip.compute_hash());
 
@@ -601,7 +601,7 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches()
         ..
     } = SyncHarness::new(tree);
     let peer = test_addr(9707, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let mid = test_header(genesis.compute_hash(), 1);
     let tip = test_header(mid.compute_hash(), 2);
     let tip_hash = Hash256::from(tip.compute_hash());
@@ -659,7 +659,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> Result<(), Box<dyn std:
 
     let peer = test_addr(9740, 0)?;
     // The outbound receiver stays alive: dropping it would cancel the lease.
-    let rx = connect_peer(&peers, eligible_peer(peer, 3));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 3));
     let source = current_source(&peers, peer);
     let block2 =
         mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);

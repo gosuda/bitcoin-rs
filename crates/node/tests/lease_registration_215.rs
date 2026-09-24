@@ -35,12 +35,18 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         coin_stats,
         Arc::new(bitcoin_rs_chainstate::events::ChainEventPublisher::detached(0)),
     );
+    let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+        handles.applied_tip_handle(),
+        handles.block_tree_handle(),
+        Network::Regtest,
+    ));
     bitcoin_rs_node::sync::block_sync(
         Arc::new(handles),
         bitcoin_rs_node::ChainFollowers::noop(),
         peer_table,
         Arc::new(Mutex::new(headers_rx)),
         Arc::new(Mutex::new(blocks_rx)),
+        ibd,
     )
 }
 
