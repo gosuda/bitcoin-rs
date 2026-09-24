@@ -33,7 +33,7 @@ pub use deployment::{
 };
 pub use header_sync::{
     accept_headers, compact_is_met_by, current_unix_seconds, validate_contextual_header,
-    validate_header_timestamp, validate_pow,
+    validate_pow,
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
@@ -96,7 +96,9 @@ pub enum ChainError {
     ///
     /// Core rejects with `time-timewarp-attack`
     /// (`src/validation.cpp:4100-4110`).
-    #[error("header timestamp {timestamp} at height {height} is below the timewarp floor {minimum}")]
+    #[error(
+        "header timestamp {timestamp} at height {height} is below the timewarp floor {minimum}"
+    )]
     TimewarpAttack {
         /// Candidate header height (a difficulty-adjustment boundary).
         height: u32,
