@@ -14,7 +14,9 @@ use crate::download_window::MINIMUM_CONNECT_TIME;
 use crate::download_window::SyncPeer;
 use crate::download_window::SyncPeerSelection;
 use crate::download_window::configure_request_mode;
-use crate::download_window::{BlockDownloadPolicy, statically_fanout_eligible};
+use crate::download_window::{
+    BlockDownloadPolicy, serves_requested_height, statically_fanout_eligible,
+};
 use crate::peer_info::PeerRole;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
@@ -527,6 +529,7 @@ impl BlockSync {
                     source: peer.source,
                     best_known_height: i32::try_from(active_height).unwrap_or(i32::MAX),
                 },
+                serves_bodies: serves_requested_height(&peer.info, &policy),
                 fanout_eligible: statically_fanout_eligible(&peer.info, &policy),
                 soft_blocked: false,
             });
@@ -562,7 +565,7 @@ impl BlockSync {
         } else if request_peer_limit > 1 {
             candidates
                 .iter()
-                .filter(|candidate| candidate.fanout_eligible)
+                .filter(|candidate| candidate.serves_bodies)
                 .map(|candidate| candidate.peer)
                 .collect()
         } else {
@@ -577,7 +580,7 @@ impl BlockSync {
             let mut preferred: Option<SyncPeer> = None;
             let servers: Vec<&FanoutCandidate> = candidates
                 .iter()
-                .filter(|candidate| candidate.fanout_eligible)
+                .filter(|candidate| candidate.serves_bodies)
                 .collect();
             let allow_soft = servers.iter().all(|candidate| candidate.soft_blocked);
             for candidate in servers
