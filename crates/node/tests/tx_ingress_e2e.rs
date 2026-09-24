@@ -345,7 +345,16 @@ fn serve_connection(
     }
     let mut peer = Peer::new(stream, magic);
     let deadline = Instant::now() + HANDSHAKE_DEADLINE;
-    if run_inbound_handshake(&mut peer, 1, 0, lease, deadline).is_err() {
+    if run_inbound_handshake(
+        &mut peer,
+        1,
+        0,
+        bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        lease,
+        deadline,
+    )
+    .is_err()
+    {
         return;
     }
     let Some(version) = peer.remote_version.as_ref() else {
@@ -414,7 +423,12 @@ fn dial_handshake(dialer: &TcpStream, magic: Magic, wtxid_relay: bool) -> anyhow
     write_message(
         &mut stream,
         magic,
-        &Message::Version(version_message(7, 0, PeerRole::FullRelay)),
+        &Message::Version(version_message(
+            7,
+            0,
+            PeerRole::FullRelay,
+            bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        )),
     )?;
     loop {
         let (message, _raw) = read_message(&mut stream, magic)?;

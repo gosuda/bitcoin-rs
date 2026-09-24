@@ -350,6 +350,17 @@ impl NodeState {
                 outbound_block_relay_slots: P2P_OUTBOUND_BLOCK_RELAY_SLOTS,
                 outbound_queue_limit: outbound_full_relay_slots,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
+                // A pruned node cannot serve the full block history, so it
+                // advertises `NODE_NETWORK_LIMITED` instead of
+                // `NODE_NETWORK` (Core `init.cpp:2022-2026`); witness relay
+                // is unaffected.
+                local_services: if config.storage.prune_target_mb > 0 {
+                    bitcoin::p2p::ServiceFlags::WITNESS
+                        | bitcoin::p2p::ServiceFlags::NETWORK_LIMITED
+                } else {
+                    bitcoin::p2p::ServiceFlags::WITNESS | bitcoin::p2p::ServiceFlags::NETWORK
+                },
+                ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
             Arc::clone(&shutdown),
         ));

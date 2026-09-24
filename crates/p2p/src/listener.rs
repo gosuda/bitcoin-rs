@@ -132,6 +132,10 @@ pub struct ConnectionShared {
     /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
     /// applied at `net.cpp:1838-1845` with eviction cut to refusal).
     pub max_inbound: usize,
+    /// The services this node advertises in every `version`, inbound or
+    /// outbound: `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED`
+    /// when pruned (Core `init.cpp:2022-2026`).
+    pub local_services: ServiceFlags,
 }
 
 impl ConnectionShared {
@@ -175,6 +179,7 @@ impl ConnectionShared {
             ibd: extras.ibd,
             block_sync: extras.block_sync,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
+            local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
         }
     }
 
@@ -687,6 +692,7 @@ fn run_outbound_connection(
         &lease,
         handshake_deadline,
         best_block_depth,
+        shared.local_services,
     ) {
         // `remove_current` cancels as a side effect, so revocation must be
         // read before it: a pre-cancelled lease means an external shutdown,
@@ -737,8 +743,10 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     lease: &crate::PeerLease,
     deadline: Instant,
     best_block_depth: u64,
+    local_services: ServiceFlags,
 ) -> Result<(), crate::wire::PeerError> {
-    let outbound_messages = crate::handshake::start(peer, nonce, start_height, lease.role());
+    let outbound_messages =
+        crate::handshake::start(peer, nonce, start_height, lease.role(), local_services);
     for message in outbound_messages {
         peer.send(&message)?;
     }
@@ -858,7 +866,14 @@ fn run_handshake(
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::new(stream, shared.magic);
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    if let Err(error) = run_inbound_handshake(&mut peer, nonce, 0, &lease, handshake_deadline) {
+    if let Err(error) = run_inbound_handshake(
+        &mut peer,
+        nonce,
+        0,
+        shared.local_services,
+        &lease,
+        handshake_deadline,
+    ) {
         // `remove_current` cancels as a side effect, so revocation must be
         // read before it: a pre-cancelled lease means an external shutdown,
         // while a live lease means this handshake failed on its own.
