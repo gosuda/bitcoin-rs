@@ -19,6 +19,7 @@ pub mod chain;
 mod commit;
 mod frontier;
 mod headers;
+mod headers_presync;
 mod peers;
 mod receive;
 mod requests;
@@ -63,6 +64,10 @@ use commit::restore_split;
 pub use chain::{
     BranchSwitchError, HeaderAdmission, SyncChain, SyncChainError, WindowCommitDisposition,
     WindowCommitError,
+};
+
+pub use headers_presync::{
+    HeaderAnchor, HeaderSyncError, HeaderSyncResult, HeadersSyncPhase, HeadersSyncState,
 };
 
 pub(crate) use frontier::{
@@ -229,6 +234,11 @@ struct SchedulerState {
     /// connection identity, so a same-address replacement starts clean and a
     /// timed-out peer is never blamed for its successor or the reverse.
     header_penalties: hashbrown::HashMap<PeerSource, u32>,
+    /// The download-twice header sync of every connection whose chain this
+    /// node has not yet seen reach the network's minimum work. Keyed by
+    /// exact connection identity, so a same-address replacement starts its
+    /// own sync and never inherits its predecessor's commitments.
+    headers_sync: hashbrown::HashMap<PeerSource, headers_presync::HeadersSyncState>,
     /// Whether this node's own tip is still moving, and what that buys.
     stale_tip: StaleTipState,
 }
@@ -237,9 +247,9 @@ impl SchedulerState {
     /// Releases every scheduling fact owned by a connection not in `live`.
     ///
     /// PRE: `live` is the peer table's live-session snapshot.
-    /// POST: the window, the header request, the header-timeout penalties, and
-    ///   the deferred body fetches hold only facts owned by a connection in
-    ///   `live`.
+    /// POST: the window, the header request, the header-timeout penalties,
+    ///   the header presync states, and the deferred body fetches hold only
+    ///   facts owned by a connection in `live`.
     /// INVARIANT: ownership is compared by connection identity, never by
     fn release_unowned(&mut self, live: &[PeerSource]) {
         let owns = |source: &PeerSource| live.contains(source);
@@ -253,6 +263,7 @@ impl SchedulerState {
         self.owned_body_fetches.retain(|(source, _)| owns(source));
         self.chain_sync.retain(|source, _| owns(source));
         self.header_penalties.retain(|source, _| owns(source));
+        self.headers_sync.retain(|source, _| owns(source));
     }
 
     /// Puts one connection's chain-sync record back after a probe that never
@@ -364,6 +375,7 @@ impl BlockSync {
                 owned_body_fetches: Vec::new(),
                 chain_sync: hashbrown::HashMap::new(),
                 header_penalties: hashbrown::HashMap::new(),
+                headers_sync: hashbrown::HashMap::new(),
                 stale_tip: StaleTipState::default(),
             }),
             refused_rerequest_at: Mutex::new(None),
@@ -384,6 +396,7 @@ impl BlockSync {
             owned_body_fetches: Vec::new(),
             chain_sync: hashbrown::HashMap::new(),
             header_penalties: hashbrown::HashMap::new(),
+            headers_sync: hashbrown::HashMap::new(),
             stale_tip: StaleTipState::default(),
         };
     }

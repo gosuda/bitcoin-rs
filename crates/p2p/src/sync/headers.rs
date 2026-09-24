@@ -12,6 +12,10 @@ use super::chain::SyncChainError;
 use super::frontier::ChainFrontier;
 use super::frontier::SyncFrontier;
 use super::frontier::UsablePeer;
+use super::headers_presync::HeaderAnchor;
+use super::headers_presync::HeaderSyncError;
+use super::headers_presync::HeadersSyncPhase;
+use super::headers_presync::HeadersSyncState;
 use super::peers::is_peer_fault;
 use super::peers::outranks;
 use super::peers::shared_active_height;
@@ -25,7 +29,10 @@ use crate::download_window::SyncPeer;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_chain::{ChainError, NodeId};
+use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::Header;
+use sha2::Sha256;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -38,6 +45,16 @@ const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 /// bounded so a peer cannot grow the scheduler by announcing tips that
 /// never admit. The oldest mark is evicted first.
 const MAX_DEFERRED_OWNED_FETCHES: usize = 16;
+
+/// One batch's result from a connection's download-twice sync state.
+struct PresyncOutcome {
+    failure: Option<HeaderSyncError>,
+    request_more: bool,
+    ready_headers: Vec<Header>,
+    locator: Vec<Hash256>,
+    height: u32,
+    finished: bool,
+}
 
 impl BlockSync {
     #[allow(clippy::too_many_lines)]
@@ -84,10 +101,20 @@ impl BlockSync {
                 continue;
             }
 
-            // Header admission moves the header tip, which the apply path
-            // reads under the transition; the implementation holds that lock
-            // inside `admit_headers` until commit.
-            match self.chain.admit_headers(&headers) {
+            // A batch whose fork point has not yet demonstrated the
+            // network's minimum chain work is retained by that connection's
+            // download-twice header sync; only headers the committed phase
+            // releases — and batches at or above the threshold — reach
+            // admission here.
+            let Some(admission) =
+                self.route_headers_batch(&headers, source, wire_response, batch_len, now)
+            else {
+                if body_fetch_owned {
+                    self.note_owned_body_fetch(source, headers.last());
+                }
+                continue;
+            };
+            match admission {
                 HeaderAdmission::Accepted {
                     accepted,
                     announced_tip,
@@ -1021,6 +1048,204 @@ impl BlockSync {
             && now.duration_since(pending.requested_at) < HEADER_REQUEST_TIMEOUT
     }
 
+    /// Routes one inbound batch to direct admission or to the delivering
+    /// connection's download-twice header sync.
+    ///
+    /// PRE: `headers` is the received batch, `source` its delivering
+    ///   connection when known, `wire_response` says whether the batch
+    ///   answered a `getheaders`, and `batch_len` is the received size.
+    /// POST: a batch from a connection with a live sync state always
+    ///   routes into that state — the state, not the tree, owns the
+    ///   connection's chain. Otherwise return `Some` with the admission
+    ///   outcome when the batch may be admitted directly — an empty batch,
+    ///   a source-less delivery, an unknown fork, or a fork already at the
+    ///   network minimum — or when the committed phase released headers;
+    ///   and `None` when the sync state retained the batch, in which case
+    ///   this call already sent the continuation, retired the answered
+    ///   request, or ran the fault path.
+    /// INVARIANT: a batch below the work threshold reaches
+    ///   [`SyncChain::admit_headers`] only as
+    ///   [`super::headers_presync::HeaderSyncResult::ready_headers`].
+    pub(super) fn route_headers_batch(
+        &self,
+        headers: &[Header],
+        source: Option<PeerSource>,
+        wire_response: bool,
+        batch_len: usize,
+        now: Instant,
+    ) -> Option<HeaderAdmission> {
+        let Some(source) = source.filter(|_| !headers.is_empty()) else {
+            return Some(self.chain.admit_headers(headers));
+        };
+        let outcome = if self.scheduler.lock().headers_sync.contains_key(&source) {
+            let mut scheduler = self.scheduler.lock();
+            let state = scheduler
+                .headers_sync
+                .get_mut(&source)
+                .unwrap_or_else(|| unreachable!("checked under the same lock two lines above"));
+            Self::advance_presync_state(state, headers, batch_len)
+        } else {
+            // A fresh sync anchors on the tree's fork point, read before
+            // any scheduler or transition lock is taken.
+            let Some(anchor) = self.presync_anchor(headers) else {
+                return Some(self.chain.admit_headers(headers));
+            };
+            let minimum_work = self.chain.minimum_chain_work();
+            let params = anchor.network.headers_sync_params();
+            let mut scheduler = self.scheduler.lock();
+            let state = scheduler.headers_sync.entry(source).or_insert_with(|| {
+                HeadersSyncState::new(anchor, minimum_work, params, presync_salt(source))
+            });
+            Self::advance_presync_state(state, headers, batch_len)
+        };
+        if outcome.finished {
+            self.scheduler.lock().headers_sync.remove(&source);
+        }
+        if let Some(error) = outcome.failure {
+            self.settle_presync_fault(source, error, now);
+            return None;
+        }
+        if !outcome.ready_headers.is_empty() {
+            return Some(self.chain.admit_headers(&outcome.ready_headers));
+        }
+        if outcome.request_more {
+            self.send_presync_getheaders(source, outcome.locator, outcome.height, now);
+        } else {
+            // The sync ended on a complete answer: the connection served its
+            // whole chain and the work threshold says no more of it is
+            // wanted. The request retires like any other answered one rather
+            // than expiring against a peer that did respond.
+            self.consume_header_request(Some(source), wire_response, false);
+        }
+        None
+    }
+
+    /// Feeds one batch to one connection's sync state.
+    ///
+    /// PRE: `state` belongs to the connection that delivered `headers`.
+    /// POST: return the failure, the continuation request, the committed
+    ///   headers, the sync cursor, and whether the state is spent.
+    /// INVARIANT: a spent (finished or faulted) state is retired by the
+    ///   caller, so the next batch from this connection starts a fresh
+    ///   sync with a fresh salt rather than feeding a punished one.
+    fn advance_presync_state(
+        state: &mut HeadersSyncState,
+        headers: &[Header],
+        batch_len: usize,
+    ) -> PresyncOutcome {
+        let (failure, request_more, ready_headers, finished) =
+            match state.process(headers, batch_len >= MAX_HEADERS_RESULTS) {
+                Ok(result) => (
+                    None,
+                    result.request_more,
+                    result.ready_headers,
+                    result.phase == HeadersSyncPhase::Final,
+                ),
+                Err(error) => (Some(error), false, Vec::new(), true),
+            };
+        PresyncOutcome {
+            failure,
+            request_more,
+            ready_headers,
+            locator: state.next_locator(),
+            height: state.sync_height(),
+            finished,
+        }
+    }
+
+    /// The fork point a batch builds from, when that fork is not yet worth
+    /// admitting directly.
+    ///
+    /// PRE: none.
+    /// POST: return the anchor for the batch's first header's parent when
+    ///   this node holds that parent and its cumulative chainwork is below
+    ///   the network minimum; return `None` when the parent is unknown (the
+    ///   admission path reports the missing ancestry) or already sufficient
+    ///   (Core's `TryLowWorkHeadersSync` fast path,
+    ///   `net_processing.cpp:3010-3018`).
+    /// INVARIANT: the tree read closes before any scheduler or transition
+    ///   lock is taken.
+    fn presync_anchor(&self, headers: &[Header]) -> Option<HeaderAnchor> {
+        let first = headers.first()?;
+        let network = self.chain.network();
+        let minimum_work = self.chain.minimum_chain_work();
+        let tree = self.chain.block_tree().read();
+        let fork_id = tree.lookup(Hash256::from(first.prev_blockhash))?;
+        let fork = tree.node(fork_id).ok()?;
+        if fork.chainwork >= minimum_work {
+            return None;
+        }
+        let median_time_past = tree.median_time_past_at(fork_id, MEDIAN_TIME_PAST_WINDOW)?;
+        Some(HeaderAnchor {
+            network,
+            height: fork.height,
+            hash: fork.hash,
+            header: fork.header,
+            chain_work: fork.chainwork,
+            median_time_past,
+            locator: tree.block_locator(fork_id, LOCATOR_MAX_ENTRIES),
+        })
+    }
+
+    /// Continues one download-twice sync on the connection that owns it.
+    ///
+    /// PRE: `locator` came from that connection's live sync state and
+    ///   `height` is the cursor the state has reached.
+    /// POST: the next `getheaders` is sent to that exact connection and
+    ///   registered under its ownership, or nothing is sent when an
+    ///   identical request is already pending.
+    /// INVARIANT: the continuation never re-elects a different connection:
+    ///   commitments, salt, and cursor belong to the one sync.
+    fn send_presync_getheaders(
+        &self,
+        source: PeerSource,
+        locator: Vec<Hash256>,
+        height: u32,
+        now: Instant,
+    ) -> GetheadersOutcome {
+        let target_height = self
+            .peer_table
+            .sessions()
+            .iter()
+            .find(|session| session.addr == source.addr)
+            .and_then(|session| session.info.as_ref())
+            .map_or(i32::MAX, |info| info.best_known_height);
+        self.send_getheaders(source, height, target_height, locator, now)
+    }
+
+    /// Settles a failed download-twice sync.
+    ///
+    /// PRE: `error` is why [`HeadersSyncState::process`] gave up.
+    /// POST: a peer's fault disconnects the connection and releases its
+    ///   request gate; a possibly benign break (a lost continuation) keeps
+    ///   the connection and moves the request deadline to this answer, the
+    ///   same treatment a rejected non-fault batch gets.
+    /// INVARIANT: the sync state is already gone — `process` spends it on
+    ///   every failure — so nothing is retained for a punished chain.
+    fn settle_presync_fault(&self, source: PeerSource, error: HeaderSyncError, now: Instant) {
+        if !error.is_peer_fault() {
+            self.rearm_header_request(Some(source), now);
+            tracing::debug!(
+                peer_addr = %source.addr,
+                %error,
+                "block sync: header presync gave up on a possibly reorged continuation",
+            );
+            return;
+        }
+        if self.peer_table.disconnect_source(source) {
+            self.clear_header_request_for(source);
+            self.scheduler
+                .lock()
+                .window
+                .mark_peer_unresponsive(source.addr, now);
+        }
+        tracing::warn!(
+            peer_addr = %source.addr,
+            %error,
+            "block sync: peer failed header presync validation; disconnecting",
+        );
+    }
+
     pub(super) fn build_locator(&self) -> Vec<Hash256> {
         if let Some(tip) = self.chain.chain_tip().load_full() {
             return self
@@ -1031,4 +1256,41 @@ impl BlockSync {
         }
         std::vec![self.chain.network().genesis_block_hash()]
     }
+}
+
+/// Fresh unpredictable key material for one sync's commitment hash.
+///
+/// PRE: none.
+/// POST: return a salt mixed from the clock, this process, the connection,
+///   and a monotonic counter; Core draws the same material from a fast RNG
+///   per state (`headerssync.cpp:24`).
+/// INVARIANT: one salt per sync state, and a spent state's salt is never
+///   reused: every new state draws a fresh one.
+fn presync_salt(source: PeerSource) -> [u8; 16] {
+    use sha2::Digest as _;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    // Every input is folded into the digest as entropy; SHA-256's own
+    // compression does the mixing, so no value is narrowed here.
+    let clock = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(clock.as_secs().to_le_bytes());
+    digest.update(clock.subsec_nanos().to_le_bytes());
+    digest.update(std::process::id().to_le_bytes());
+    match source.addr.ip() {
+        std::net::IpAddr::V4(v4) => digest.update(v4.octets()),
+        std::net::IpAddr::V6(v6) => digest.update(v6.octets()),
+    }
+    digest.update(source.addr.port().to_le_bytes());
+    digest.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+    let result = digest.finalize();
+    let mut salt = [0_u8; 16];
+    salt.copy_from_slice(&result[..16]);
+    salt
 }

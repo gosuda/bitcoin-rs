@@ -178,13 +178,19 @@ impl BlockSync {
                 .filter(|(hash, _, _)| tree.lookup(*hash).is_none())
                 .collect()
         };
-        // Every staged header reaches `admit_headers`, and a rejection can
-        // still commit a valid prefix.
+        // Every staged header reaches `route_headers_batch`, and a
+        // rejection can still commit a valid prefix. A batch the presync
+        // state absorbs retires here and retries once it is committed.
         let mut missing_parent = false;
         let mut credit_refresh_needed = false;
         let mut invalid: Vec<(Hash256, Option<crate::PeerSource>)> = Vec::new();
         for (hash, header, source) in unadmitted {
-            match self.chain.admit_headers(&[header]) {
+            let Some(admission) =
+                self.route_headers_batch(&[header], source, false, 1, Instant::now())
+            else {
+                continue;
+            };
+            match admission {
                 HeaderAdmission::Accepted {
                     announced_tip: Some(tip_hash),
                     active_height,

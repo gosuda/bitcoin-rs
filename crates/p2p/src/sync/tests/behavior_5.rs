@@ -440,7 +440,7 @@ fn chained_headers(
 }
 
 /// Delivers `headers` to `sync` as a wire answer from `source`.
-fn deliver_headers(
+pub(crate) fn deliver_headers(
     tx: &crossbeam_channel::Sender<InboundHeaders>,
     headers: Vec<Header>,
     source: PeerSource,
@@ -470,7 +470,7 @@ fn locator_of(message: &Message) -> Option<Vec<[u8; 32]>> {
 }
 
 /// The first `getheaders` locator on `rx`, or `None` if none is queued.
-fn next_locator(rx: &crossbeam_channel::Receiver<Message>) -> Option<Vec<[u8; 32]>> {
+pub(crate) fn next_locator(rx: &crossbeam_channel::Receiver<Message>) -> Option<Vec<[u8; 32]>> {
     rx.try_iter().find_map(|message| locator_of(&message))
 }
 
