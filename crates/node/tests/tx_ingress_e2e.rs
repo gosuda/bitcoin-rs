@@ -343,7 +343,7 @@ fn serve_connection(
     }
     let mut peer = Peer::new(stream, magic);
     let deadline = Instant::now() + HANDSHAKE_DEADLINE;
-    if run_inbound_handshake(&mut peer, 1, 0, lease, None, deadline).is_err() {
+    if run_inbound_handshake(&mut peer, 1, 0, lease, deadline).is_err() {
         return;
     }
     let Some(version) = peer.remote_version.as_ref() else {

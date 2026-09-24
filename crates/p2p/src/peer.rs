@@ -1,8 +1,7 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
@@ -238,154 +237,9 @@ impl NetworkActivity {
     }
 }
 
-/// Length of the upload-target measuring window in seconds
-/// (Core `MAX_UPLOAD_TIMEFRAME`, one day).
-pub const UPLOAD_TIMEFRAME_SECS: u64 = 86_400;
-
-/// Consensus maximum serialized block size, the per-10-minute relay buffer
-/// unit in Core's historical-block serving rule.
-pub const MAX_BLOCK_SERIALIZED_SIZE: u64 = 4_000_000;
-
-/// Same consensus limit as [`MAX_BLOCK_SERIALIZED_SIZE`] in `usize` form,
-/// for wire-buffer arithmetic. Defined beside the `u64` original so `peer`
-/// is the single authority for both forms.
+/// Consensus maximum serialized block size in bytes, in `usize` form for
+/// wire-buffer arithmetic. `peer` is the single p2p authority for this limit.
 pub const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
-
-#[allow(clippy::as_conversions, clippy::cast_possible_truncation)]
-const _: () = assert!(MAX_BLOCK_SERIALIZED_SIZE_USIZE as u64 == MAX_BLOCK_SERIALIZED_SIZE);
-
-/// Aggregate traffic totals and upload-target accounting behind `getnettotals`.
-///
-/// Byte totals accumulate since construction; the upload-target cycle mirrors
-/// Core `CConnman::RecordBytesSent`: a cycle resets when the last reset lies
-/// more than [`UPLOAD_TIMEFRAME_SECS`] in the past, and a target of `0` means
-/// unlimited (all derived fields then report Core's unlimited defaults).
-#[derive(Debug)]
-pub struct TrafficTotals {
-    bytes_recv: AtomicU64,
-    bytes_sent: AtomicU64,
-    max_upload_bytes: u64,
-    cycle_start_secs: AtomicI64,
-    sent_in_cycle: AtomicU64,
-}
-
-impl TrafficTotals {
-    /// Creates totals with an upload target in bytes; `0` means unlimited.
-    #[must_use]
-    pub const fn new(max_upload_bytes: u64) -> Self {
-        Self {
-            bytes_recv: AtomicU64::new(0),
-            bytes_sent: AtomicU64::new(0),
-            max_upload_bytes,
-            cycle_start_secs: AtomicI64::new(0),
-            sent_in_cycle: AtomicU64::new(0),
-        }
-    }
-
-    /// Accounts received bytes against the running total.
-    pub fn record_recv(&self, bytes: u64) {
-        self.bytes_recv.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Accounts sent bytes against the running total and the upload cycle.
-    pub fn record_sent(&self, bytes: u64) {
-        let now = unix_time_secs();
-        self.record_sent_at(bytes, now);
-    }
-
-    /// Time-injectable core of [`Self::record_sent`].
-    pub fn record_sent_at(&self, bytes: u64, now_secs: i64) {
-        self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
-        let cycle_start = self.cycle_start_secs.load(Ordering::Relaxed);
-        if cycle_start + i64::try_from(UPLOAD_TIMEFRAME_SECS).unwrap_or(i64::MAX) < now_secs {
-            self.cycle_start_secs.store(now_secs, Ordering::Relaxed);
-            self.sent_in_cycle.store(0, Ordering::Relaxed);
-        }
-        self.sent_in_cycle.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Total bytes received since construction.
-    #[must_use]
-    pub fn total_bytes_recv(&self) -> u64 {
-        self.bytes_recv.load(Ordering::Relaxed)
-    }
-
-    /// Total bytes sent since construction.
-    #[must_use]
-    pub fn total_bytes_sent(&self) -> u64 {
-        self.bytes_sent.load(Ordering::Relaxed)
-    }
-
-    /// Live upload-target projection at `now_secs` (Core `getnettotals`
-    /// `uploadtarget` object).
-    #[must_use]
-    pub fn upload_target(&self, now_secs: i64) -> UploadTarget {
-        let target = self.max_upload_bytes;
-        if target == 0 {
-            return UploadTarget {
-                timeframe_secs: UPLOAD_TIMEFRAME_SECS,
-                target_bytes: 0,
-                target_reached: false,
-                serve_historical_blocks: true,
-                bytes_left_in_cycle: 0,
-                time_left_in_cycle_secs: 0,
-            };
-        }
-
-        let sent = self.sent_in_cycle.load(Ordering::Relaxed);
-        let cycle_start = self.cycle_start_secs.load(Ordering::Relaxed);
-        let cycle_end = cycle_start + i64::try_from(UPLOAD_TIMEFRAME_SECS).unwrap_or(i64::MAX);
-        let time_left = if cycle_start == 0 {
-            i64::try_from(UPLOAD_TIMEFRAME_SECS).unwrap_or(i64::MAX)
-        } else {
-            (cycle_end - now_secs).max(0)
-        };
-
-        let reached = sent >= target;
-        // Core keeps a buffer large enough to relay each block once per
-        // remaining ten-minute slice of the cycle before declaring the
-        // historical-block budget reached.
-        let buffer = u64::try_from(time_left).unwrap_or(0) / 600 * MAX_BLOCK_SERIALIZED_SIZE;
-        let historical_reached = buffer >= target || sent >= target.saturating_sub(buffer);
-
-        UploadTarget {
-            timeframe_secs: UPLOAD_TIMEFRAME_SECS,
-            target_bytes: target,
-            target_reached: reached,
-            serve_historical_blocks: !historical_reached,
-            bytes_left_in_cycle: target.saturating_sub(sent),
-            time_left_in_cycle_secs: u64::try_from(time_left).unwrap_or(0),
-        }
-    }
-}
-
-/// One `getnettotals` upload-target reading.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UploadTarget {
-    /// Length of the measuring timeframe in seconds.
-    pub timeframe_secs: u64,
-    /// Upload target in bytes (`0` reports an unlimited configuration).
-    pub target_bytes: u64,
-    /// Whether the raw target has been reached.
-    pub target_reached: bool,
-    /// Whether historical blocks are still served.
-    pub serve_historical_blocks: bool,
-    /// Bytes left in the current time cycle.
-    pub bytes_left_in_cycle: u64,
-    /// Seconds left in the current time cycle.
-    pub time_left_in_cycle_secs: u64,
-}
-
-fn unix_time_secs() -> i64 {
-    unix_time_secs_at(SystemTime::now())
-}
-
-fn unix_time_secs_at(now: SystemTime) -> i64 {
-    now.duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-        })
-}
 
 #[cfg(test)]
 mod tests {
@@ -430,23 +284,5 @@ mod tests {
                 .contains(&SocketAddr::from(([127, 0, 0, 1], 8333)))
         );
         Ok(())
-    }
-
-    #[test]
-    fn upload_target_defaults_match_core_unlimited_configuration() {
-        let totals = TrafficTotals::new(0);
-        totals.record_sent_at(123_456, 1_000);
-        assert_eq!(
-            totals.upload_target(2_000),
-            UploadTarget {
-                timeframe_secs: UPLOAD_TIMEFRAME_SECS,
-                target_bytes: 0,
-                target_reached: false,
-                serve_historical_blocks: true,
-                bytes_left_in_cycle: 0,
-                time_left_in_cycle_secs: 0,
-            }
-        );
-        assert_eq!(totals.total_bytes_sent(), 123_456);
     }
 }

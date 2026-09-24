@@ -55,14 +55,12 @@ pub struct ListenerExtras {
 /// State shared by the listener and every connection thread it spawns.
 ///
 /// The peer table and ban list are the authoritative stores shared with the
-/// node; `activity` carries the network kill-switch, and `totals` holds the
-/// aggregate traffic accounting.
+/// node; `activity` carries the network kill-switch.
 #[derive(Clone)]
 struct ConnectionShared {
     peer_table: Arc<crate::PeerTable>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     activity: Option<Arc<crate::NetworkActivity>>,
-    totals: Option<Arc<crate::TrafficTotals>>,
     chain_query: ChainQueryHandle,
     tx_inventory: TxInventoryHandle,
     compact_hints: CompactHintsHandle,
@@ -81,7 +79,6 @@ impl ConnectionShared {
             peer_table,
             banned,
             activity: None,
-            totals: None,
             chain_query,
             tx_inventory: None,
             compact_hints: None,
@@ -697,14 +694,7 @@ fn run_outbound_connection(
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, magic);
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    if let Err(error) = run_outbound_handshake(
-        &mut peer,
-        nonce,
-        0,
-        &lease,
-        shared.totals.as_ref(),
-        handshake_deadline,
-    ) {
+    if let Err(error) = run_outbound_handshake(&mut peer, nonce, 0, &lease, handshake_deadline) {
         // `remove_current` cancels as a side effect, so revocation must be
         // read before it: a pre-cancelled lease means an external shutdown,
         // while a live lease means this handshake failed on its own.
@@ -725,8 +715,7 @@ fn run_outbound_connection(
             "missing remote version after outbound handshake",
         ));
     };
-    let handshake_now = SystemTime::now();
-    let conn_time = unix_secs(handshake_now);
+    let conn_time = unix_secs(SystemTime::now());
     let info = crate::PeerInfo::outbound_from_version(
         addr,
         addr_bind,
@@ -735,9 +724,6 @@ fn run_outbound_connection(
         peer.version_received_time.unwrap_or(conn_time),
         counters,
     );
-    lease
-        .stats()
-        .set_time_offset(remote_version.timestamp - unix_secs_i64(handshake_now));
 
     run_connected_session(
         &mut peer,
@@ -751,27 +737,32 @@ fn run_outbound_connection(
     )
 }
 
+/// Drives the outbound handshake until the peer is ready.
+///
+/// PRE: `peer` wraps a connected outbound stream, and `lease` belongs to it.
+/// POST: `peer` is `Ready`, and the post-verack messages are sent.
+/// INVARIANT: This function counts no bytes; the stream that `peer` wraps
+/// owns byte accounting.
 fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     nonce: u64,
     start_height: i32,
     lease: &crate::PeerLease,
-    totals: Option<&Arc<crate::TrafficTotals>>,
     deadline: Instant,
 ) -> Result<(), crate::wire::PeerError> {
     let outbound_messages = crate::handshake::start(peer, nonce, start_height);
     for message in outbound_messages {
-        crate::handshake::send_handshake_message(peer, &message, lease, totals)?;
+        peer.send(&message)?;
     }
 
     while peer.state != crate::peer::PeerState::Ready {
-        let (inbound, _) = crate::handshake::read_handshake_message(peer, lease, totals, deadline)?;
+        let (inbound, _) = crate::handshake::read_handshake_message(peer, lease, deadline)?;
         let responses = crate::dispatch::dispatch_inbound(peer, &inbound)?;
         for response in responses {
-            crate::handshake::send_handshake_message(peer, &response, lease, totals)?;
+            peer.send(&response)?;
         }
     }
-    crate::handshake::send_post_verack_messages(peer, lease, totals)?;
+    crate::handshake::send_post_verack_messages(peer)?;
     Ok(())
 }
 
@@ -843,14 +834,7 @@ fn run_handshake(
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::new(stream, magic);
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    if let Err(error) = run_inbound_handshake(
-        &mut peer,
-        nonce,
-        0,
-        &lease,
-        shared.totals.as_ref(),
-        handshake_deadline,
-    ) {
+    if let Err(error) = run_inbound_handshake(&mut peer, nonce, 0, &lease, handshake_deadline) {
         // `remove_current` cancels as a side effect, so revocation must be
         // read before it: a pre-cancelled lease means an external shutdown,
         // while a live lease means this handshake failed on its own.
@@ -871,8 +855,7 @@ fn run_handshake(
             "missing remote version after successful handshake",
         ));
     };
-    let handshake_now = SystemTime::now();
-    let conn_time = unix_secs(handshake_now);
+    let conn_time = unix_secs(SystemTime::now());
     let info = crate::PeerInfo::inbound_from_version(
         peer_addr,
         addr_bind,
@@ -881,9 +864,6 @@ fn run_handshake(
         peer.version_received_time.unwrap_or(conn_time),
         counters,
     );
-    lease
-        .stats()
-        .set_time_offset(remote_version.timestamp - unix_secs_i64(handshake_now));
 
     run_connected_session(
         &mut peer,
@@ -938,8 +918,6 @@ fn run_connected_session(
             lease.close_signal(),
             lease.budget_handle(),
             peer_addr,
-            lease.stats_handle(),
-            shared.totals.clone(),
         )
         .map_err(crate::wire::PeerError::Io)
     })();
@@ -976,7 +954,6 @@ fn run_connected_session(
         shared.tx_inventory.as_deref(),
         shared.compact_hints.as_deref(),
         shared.ibd.as_ref(),
-        shared.totals.as_ref(),
     );
 
     shared.peer_table.remove_current(peer_addr, &lease);
@@ -1011,7 +988,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     tx_inventory: Option<&dyn crate::dispatch::TxInventory>,
     compact_hints: Option<&dyn crate::compact_blocks::CompactBlockHints>,
     ibd: Option<&Arc<bitcoin_rs_chain::InitialBlockDownload>>,
-    totals: Option<&Arc<crate::TrafficTotals>>,
 ) -> Result<(), crate::wire::PeerError> {
     use crate::peer::PeerState;
     use std::time::Instant;
@@ -1050,14 +1026,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         match read_result {
             Ok((message, raw)) => {
                 last_inbound = Instant::now();
-                let wire_len = raw.len() + crate::wire::HEADER_LEN;
-                lease
-                    .stats()
-                    .record_recv(u64::try_from(wire_len).unwrap_or(u64::MAX));
-                lease.stats().record_msg_recv();
-                if let Some(totals) = totals {
-                    totals.record_recv(u64::try_from(wire_len).unwrap_or(u64::MAX));
-                }
                 tracing::trace!(
                     peer_addr = %peer_addr,
                     command = ?std::mem::discriminant(&message),
@@ -1095,9 +1063,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         peer_addr,
                         tx_relay_open(),
                     ),
-                    crate::Message::Pong(nonce) => {
-                        lease.stats().complete_ping(nonce, unix_micros());
-                    }
                     crate::Message::SendCmpct(send_cmpct) => {
                         // Any `sendcmpct` (v1 or v2) announces BIP152 relay:
                         // the peer may serve `MSG_CMPCT_BLOCK` getdata at our
@@ -1249,10 +1214,14 @@ fn process_compact_message(
 /// Spawns a per-connection writer thread that drains queued outbound messages
 /// and writes them to the peer. Decoupling writes from the blocking inbound
 /// read ensures a momentarily silent peer can never delay outbound sends (the
-/// next `getdata` during IBD). Sent bytes are accounted on the connection's
-/// telemetry and, when present, the shared aggregate totals. Exits on the
-/// lease close signal, when every sender drops, or on write failure. Every exit
-/// shuts down the socket so the reader half cannot outlive a failed writer.
+/// next `getdata` during IBD). Exits on the lease close signal, when every
+/// sender drops, or on write failure. Every exit shuts down the socket so the
+/// reader half cannot outlive a failed writer.
+///
+/// PRE: `stream` is a clone of the connection's counted stream, and
+/// `outbound_rx`, `close_rx`, and `budget` belong to the same lease.
+/// POST: Return the writer thread's handle, or the spawn error.
+/// INVARIANT: The counted stream accounts every sent byte once.
 fn spawn_connection_writer(
     mut stream: crate::CountingStream<TcpStream>,
     magic: Magic,
@@ -1260,21 +1229,11 @@ fn spawn_connection_writer(
     close_rx: crossbeam_channel::Receiver<()>,
     budget: Arc<crate::connection::OutboundBudget>,
     peer_addr: SocketAddr,
-    stats: Arc<crate::PeerStats>,
-    totals: Option<Arc<crate::TrafficTotals>>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name(format!("bitcoin-rs-p2p-writer-{peer_addr}"))
         .spawn(move || {
-            run_writer_loop(
-                &outbound_rx,
-                close_rx,
-                &budget,
-                &mut stream,
-                magic,
-                &stats,
-                totals.as_ref(),
-            );
+            run_writer_loop(&outbound_rx, close_rx, &budget, &mut stream, magic);
             let _ = stream.shutdown(std::net::Shutdown::Both);
         })
 }
@@ -1303,18 +1262,15 @@ fn collect_write_burst(
     (burst, None)
 }
 
-fn account_written(
-    sizes: &[usize],
-    stats: &Arc<crate::PeerStats>,
-    totals: Option<&Arc<crate::TrafficTotals>>,
-    budget: &Arc<crate::connection::OutboundBudget>,
-) {
+/// Releases the outbound budget for each successfully written frame.
+///
+/// PRE: `sizes` holds the full wire length of each written frame, as
+/// `write_messages` returned it.
+/// POST: The budget releases exactly those byte counts.
+/// INVARIANT: This function counts no bytes; the counted stream owns byte
+/// accounting.
+fn account_written(sizes: &[usize], budget: &Arc<crate::connection::OutboundBudget>) {
     for &bytes in sizes {
-        stats.record_sent(u64::try_from(bytes).unwrap_or(u64::MAX));
-        stats.record_msg_sent();
-        if let Some(totals) = totals {
-            totals.record_sent(u64::try_from(bytes).unwrap_or(u64::MAX));
-        }
         budget.release(bytes);
     }
 }
@@ -1322,13 +1278,16 @@ fn account_written(
 /// Writes `first` and any immediately ready follow-up control messages.
 ///
 /// Returns `false` when a write fails so the caller can exit the writer loop.
+///
+/// PRE: `budget` admitted `first` and every message queued behind it.
+/// POST: Each written frame releases its budget charge; a failed write
+/// returns `false` and releases nothing.
+/// INVARIANT: A bulk payload is never coalesced into a control burst.
 fn write_ready_burst(
     first: crate::Message,
     outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
     writer: &mut dyn std::io::Write,
     magic: Magic,
-    stats: &Arc<crate::PeerStats>,
-    totals: Option<&Arc<crate::TrafficTotals>>,
     budget: &Arc<crate::connection::OutboundBudget>,
 ) -> bool {
     let mut pending = Some(first);
@@ -1336,7 +1295,7 @@ fn write_ready_burst(
         let (burst, leftover) = collect_write_burst(head, outbound_rx);
         match crate::wire::write_messages(writer, magic, &burst) {
             Ok(sizes) => {
-                account_written(&sizes, stats, totals, budget);
+                account_written(&sizes, budget);
                 pending = leftover;
             }
             Err(error) => {
@@ -1354,28 +1313,24 @@ fn write_ready_burst(
 /// byte count after a successful burst. Exits on the close signal, sender
 /// drop, or write error — never by polling. On a write error the budget is
 /// deliberately not released (the connection is dying).
+///
+/// PRE: `outbound_rx`, `close_rx`, and `budget` belong to one lease.
+/// POST: Return after the close signal, the last sender drop, or a write
+/// error.
+/// INVARIANT: The writer counts no bytes; the stream it writes to owns byte
+/// accounting.
 fn run_writer_loop(
     outbound_rx: &crossbeam_channel::Receiver<crate::Message>,
     mut close_rx: crossbeam_channel::Receiver<()>,
     budget: &Arc<crate::connection::OutboundBudget>,
     writer: &mut dyn std::io::Write,
     magic: Magic,
-    stats: &Arc<crate::PeerStats>,
-    totals: Option<&Arc<crate::TrafficTotals>>,
 ) {
     loop {
         crossbeam_channel::select! {
             recv(outbound_rx) -> message => {
                 let Ok(first) = message else { break };
-                if !write_ready_burst(
-                    first,
-                    outbound_rx,
-                    writer,
-                    magic,
-                    stats,
-                    totals,
-                    budget,
-                ) {
+                if !write_ready_burst(first, outbound_rx, writer, magic, budget) {
                     break;
                 }
             }
@@ -1416,20 +1371,6 @@ fn forward_tx_if_relay_open(
         // them unpunished while in initial block download (:4716).
         tracing::debug!(peer_addr = %peer_addr, "tx dropped: initial block download");
     }
-}
-
-fn unix_secs_i64(now: SystemTime) -> i64 {
-    now.duration_since(UNIX_EPOCH).map_or(0, |duration| {
-        i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-    })
-}
-
-fn unix_micros() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
-        })
 }
 
 /// UNIX seconds for the chain-owned initial-block-download latch.
@@ -1936,7 +1877,6 @@ mod writer_shutdown_tests {
                 None,
                 None,
                 None,
-                None,
             )
             .is_ok()
         );
@@ -1972,7 +1912,7 @@ mod writer_shutdown_tests {
 
         assert!(
             run_message_loop(
-                &mut peer, addr, &old, &table, &sinks, None, None, None, None, None
+                &mut peer, addr, &old, &table, &sinks, None, None, None, None
             )
             .is_ok()
         );
@@ -2030,7 +1970,7 @@ mod writer_shutdown_tests {
         // Script end ends the connection; the arm already ran.
         assert!(
             run_message_loop(
-                &mut peer, addr, &lease, &table, &sinks, None, None, None, None, None
+                &mut peer, addr, &lease, &table, &sinks, None, None, None, None
             )
             .is_err()
         );
@@ -2115,7 +2055,6 @@ mod writer_shutdown_tests {
                 &lease,
                 &peer_table,
                 &sinks,
-                None,
                 None,
                 None,
                 None,
@@ -2253,8 +2192,6 @@ mod writer_shutdown_tests {
             lease.close_signal(),
             lease.budget_handle(),
             peer_addr,
-            lease.stats_handle(),
-            None,
         )
         .expect("spawn writer");
         let waiter = std::thread::spawn(move || {
@@ -2299,17 +2236,8 @@ mod writer_shutdown_tests {
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let budget = lease.budget_handle();
         let close_rx = lease.close_signal();
-        let stats = lease.stats_handle();
         let worker = std::thread::spawn(move || {
-            run_writer_loop(
-                &outbound_rx,
-                close_rx,
-                &budget,
-                &mut writer,
-                Magic::BITCOIN,
-                &stats,
-                None,
-            );
+            run_writer_loop(&outbound_rx, close_rx, &budget, &mut writer, Magic::BITCOIN);
             let _ = done_tx.send(());
         });
 
@@ -2358,7 +2286,6 @@ mod writer_shutdown_tests {
         let budget = lease.budget_handle();
         let worker_budget = Arc::clone(&budget);
         let close_rx = lease.close_signal();
-        let stats = lease.stats_handle();
         let worker = std::thread::spawn(move || {
             run_writer_loop(
                 &outbound_rx,
@@ -2366,8 +2293,6 @@ mod writer_shutdown_tests {
                 &worker_budget,
                 &mut writer,
                 Magic::BITCOIN,
-                &stats,
-                None,
             );
             let _ = done_tx.send(());
         });
@@ -2407,8 +2332,6 @@ mod writer_shutdown_tests {
             lease.close_signal(),
             lease.budget_handle(),
             peer_addr,
-            lease.stats_handle(),
-            None,
         )
         .expect("spawn writer");
 
@@ -2545,7 +2468,6 @@ mod writer_shutdown_tests {
             &lease,
             &peer_table,
             &sinks,
-            None,
             None,
             None,
             None,
