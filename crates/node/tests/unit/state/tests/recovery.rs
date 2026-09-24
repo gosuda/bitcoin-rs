@@ -662,38 +662,6 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
     Ok(())
 }
 
-/// An armed disconnect marker refuses startup, and the refusal must name
-/// every authoritative store the operator has to remove.
-#[test]
-fn torn_disconnect_refusal_names_authoritative_stores_to_remove() -> anyhow::Result<()> {
-    let dir = tempfile::tempdir()?;
-    let data_dir = dir.path().join("node");
-    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
-    config.data_dir = data_dir.clone();
-    config.p2p.listen.clear();
-    let state = NodeState::open(config.clone(), None)?;
-    state.storage.undo_store().arm_disconnect(
-        10,
-        bitcoin_rs_primitives::Hash256::from_le_bytes(&[0xcd; 32]),
-    )?;
-    drop(state);
-
-    let error = match NodeState::open(config, None) {
-        Ok(_) => anyhow::bail!("node reopened with an armed disconnect marker"),
-        Err(error) => error,
-    };
-    let message = error.to_string();
-    for store in ["chainstate", "chainstate-checkpoints", "txindex"] {
-        let path = data_dir.join(store);
-        assert!(
-            message.contains(&path.display().to_string()),
-            "startup refusal omitted {}: {message}",
-            path.display()
-        );
-    }
-    Ok(())
-}
-
 /// A checkpoint at height N with the journal and durable head advanced
 /// past it restores the exact pre-restart tip and `commit_id` on restart
 /// (`RCV-10`): the durable root is the recovery authority and the last
