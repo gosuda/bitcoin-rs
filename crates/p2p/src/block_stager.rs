@@ -471,7 +471,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let block_bytes = block_size(&block);
-        let mut stager = BlockStager::new(default_sync_budget());
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         let now = std::time::Instant::now();
         let first = Hash256::from_le_bytes(&[0x01; 32]);
         let missing = Hash256::from_le_bytes(&[0x02; 32]);
@@ -497,7 +497,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let hash = Hash256::from_le_bytes(&[0x05; 32]);
-        let mut stager = BlockStager::new(default_sync_budget());
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         stager.insert(
             hash,
             None,
@@ -522,7 +522,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let block_bytes = block_size(&block);
-        let mut stager = BlockStager::new(default_sync_budget());
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         let now = std::time::Instant::now();
         let first = Hash256::from_le_bytes(&[0x11; 32]);
         let second = Hash256::from_le_bytes(&[0x22; 32]);
@@ -550,7 +550,7 @@ mod tests {
     fn ready_received_len_requires_next_expected_hash_when_provided() {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        let mut stager = BlockStager::new(default_sync_budget());
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         let now = std::time::Instant::now();
         let staged = Hash256::from_le_bytes(&[0x31; 32]);
         let missing = Hash256::from_le_bytes(&[0x32; 32]);
@@ -568,7 +568,7 @@ mod tests {
     fn prune_expired_recomputes_deadline_after_dropping_oldest() {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        let mut budget = default_sync_budget();
+        let mut budget = default_sync_budget(Network::Regtest);
         budget.received_timeout = Duration::from_secs(10);
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
@@ -615,7 +615,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let block_bytes = block_size(&block);
-        let mut budget = default_sync_budget();
+        let mut budget = default_sync_budget(Network::Regtest);
         budget.received_timeout = Duration::from_secs(10);
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
@@ -647,7 +647,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let block_bytes = block_size(&block);
-        let mut stager = BlockStager::new(default_sync_budget());
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         let now = Instant::now();
         let protected = Hash256::from_le_bytes(&[0x51; 32]);
         let first = Hash256::from_le_bytes(&[0x52; 32]);
@@ -720,7 +720,7 @@ mod tests {
     fn insert_eviction_uses_fifo_order_for_same_instant_blocks() {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        let mut stager = BlockStager::new(default_sync_budget());
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         let now = Instant::now();
         let first = Hash256::from_le_bytes(&[0x61; 32]);
         let second = Hash256::from_le_bytes(&[0x62; 32]);
@@ -754,7 +754,7 @@ mod tests {
     fn insert_eviction_refreshes_received_deadline() {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        let mut budget = default_sync_budget();
+        let mut budget = default_sync_budget(Network::Regtest);
         budget.max_received_blocks = 1;
         budget.received_timeout = Duration::from_secs(10);
         let mut stager = BlockStager::new(budget);
@@ -786,7 +786,7 @@ mod tests {
     fn insert_eviction_skips_stale_order_entries_after_drain() {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        let mut stager = BlockStager::new(default_sync_budget());
+        let mut stager = BlockStager::new(default_sync_budget(Network::Regtest));
         let now = Instant::now();
         let first = Hash256::from_le_bytes(&[0x71; 32]);
         let second = Hash256::from_le_bytes(&[0x72; 32]);
@@ -848,7 +848,7 @@ mod tests {
 
     #[test]
     fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
-        let budget = default_sync_budget();
+        let budget = default_sync_budget(Network::Regtest);
         // Budget-pair consistency (R9): the staging byte budget admits a full
         // download window of blocks at the high-height per-slot estimate.
         assert_eq!(
@@ -888,7 +888,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let block_bytes = block_size(&block);
-        let mut budget = default_sync_budget();
+        let mut budget = default_sync_budget(Network::Regtest);
         budget.max_received_bytes = block_bytes.saturating_mul(2);
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
@@ -943,7 +943,7 @@ mod tests {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let block_bytes = block_size(&block);
-        let mut budget = default_sync_budget();
+        let mut budget = default_sync_budget(Network::Regtest);
         budget.max_received_bytes = block_bytes.saturating_mul(2);
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
@@ -991,7 +991,7 @@ mod tests {
     fn received_order_compaction_bounds_stale_applied_entries() {
         let block = Network::Regtest.genesis_block();
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
-        let mut budget = default_sync_budget();
+        let mut budget = default_sync_budget(Network::Regtest);
         budget.max_received_blocks = 1;
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();
@@ -1033,7 +1033,7 @@ mod tests {
         let mut stager = BlockStager::new(SyncBudget {
             max_received_blocks: 1,
             max_received_bytes: usize::MAX,
-            ..default_sync_budget()
+            ..default_sync_budget(Network::Regtest)
         });
         let now = Instant::now();
         let block = Network::Regtest.genesis_block();

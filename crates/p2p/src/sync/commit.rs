@@ -203,10 +203,11 @@ impl BlockSync {
                     let tree = self.chain.block_tree().read();
                     tree.height_of_hash(hash)
                 };
-                self.scheduler
-                    .lock()
-                    .window
-                    .requeue_for_retry(&hash, failed_height);
+                self.scheduler.lock().window.requeue_for_retry(
+                    &hash,
+                    failed_height,
+                    Instant::now(),
+                );
             }
             self.advance_expected_apply_cache(&applied_hashes, failed_hash.is_some());
             metrics::histogram!("node.sync.apply_buffered_blocks_seconds")

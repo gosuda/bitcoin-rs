@@ -19,7 +19,7 @@ fn slow_trickle_front_peer_observable_but_never_disconnected()
                 getdata_batch_limit: 3,
                 // Default 2s initial threshold: the 100ms trickle below
                 // stays far under it on any machine.
-                ..super::super::default_sync_budget()
+                ..super::super::default_sync_budget(Network::Regtest)
             },
         );
         let trickler = test_addr(9440, 0)?;
@@ -126,7 +126,7 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
                 min_peers_for_fanout: 8,
                 getdata_batch_limit: 24,
                 stall_timeout_initial: Duration::from_millis(100),
-                ..super::super::default_sync_budget()
+                ..super::super::default_sync_budget(Network::Regtest)
             },
         );
         let mut rxs = Vec::new();
@@ -281,7 +281,7 @@ fn tick_preserves_partial_window_order_across_pending_gap() -> Result<(), Box<dy
             max_pending_bytes: 4 * 256 * 1024,
             max_peer_inflight: 4,
             getdata_batch_limit: 4,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -299,7 +299,11 @@ fn tick_preserves_partial_window_order_across_pending_gap() -> Result<(), Box<dy
     {
         let mut scheduler = sync.scheduler.lock();
         let window = &mut scheduler.window;
-        window.requeue_for_retry(&Hash256::from_le_bytes(expected[1].as_bytes()), Some(2));
+        window.requeue_for_retry(
+            &Hash256::from_le_bytes(expected[1].as_bytes()),
+            Some(2),
+            Instant::now(),
+        );
     }
 
     sync.tick();

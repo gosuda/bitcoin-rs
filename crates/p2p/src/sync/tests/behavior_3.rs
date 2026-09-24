@@ -8,7 +8,7 @@ fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error
         &sync,
         super::super::SyncBudget {
             max_received_bytes: 3 * slot,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     // Two of three staging slots already occupied: the staged-byte gate is
@@ -55,7 +55,7 @@ fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
     // default one-minute timeouts never fire inside the test, so the only
     // thing that can stop the second wave is the count clamp itself.
     let (sync, _peers, expected, rxs, _blocks_tx) =
-        staged_count_wedge(wedge_budget(super::super::PENDING_TIMEOUT))?;
+        staged_count_wedge(wedge_budget(Duration::from_mins(1)))?;
 
     // Tick 2: the healthy deliveries stage; staged (14) + pending (2) sit
     // exactly at the count budget (16). The byte gates are unbounded here
@@ -105,7 +105,7 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
 -> Result<(), Box<dyn std::error::Error>> {
     let budget = super::super::SyncBudget {
         stall_timeout_initial: Duration::from_millis(100),
-        ..wedge_budget(super::super::PENDING_TIMEOUT)
+        ..wedge_budget(Duration::from_mins(1))
     };
     // A striped window with nothing delivered: the stall predicate stays
     // unarmed (no staged successor), so the cold-front hedge is the only
@@ -207,7 +207,7 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
             fanout_peer_inflight: 2,
             min_peers_for_fanout: super::super::MIN_PEERS_FOR_FANOUT,
             getdata_batch_limit: 16,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let owner = test_addr(9322, 0)?;
@@ -324,7 +324,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
             max_received_blocks: 2,
             max_peer_inflight: 2,
             getdata_batch_limit: 2,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let staller = test_addr(9450, 0)?;
@@ -437,7 +437,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
             max_received_blocks: 2,
             max_peer_inflight: 2,
             getdata_batch_limit: 2,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let staller = test_addr(9470, 0)?;
@@ -483,7 +483,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
         .window
         .mark_received_from(successor, 80, None, staged_at);
 
-    let bound = super::super::default_sync_budget()
+    let bound = super::super::default_sync_budget(Network::Regtest)
         .received_timeout
         .saturating_mul(2);
     let start = Instant::now();
@@ -572,8 +572,8 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
             fanout_peer_inflight: 2,
             min_peers_for_fanout: 8,
             getdata_batch_limit: 16,
-            pending_timeout: Duration::from_millis(250),
-            ..super::super::default_sync_budget()
+            pending_timeout_override: Some(Duration::from_millis(250)),
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let mut rxs = Vec::new();

@@ -10,7 +10,7 @@ fn apply_cache_invalidated_on_chain_tip_move() -> Result<(), Box<dyn std::error:
             max_pending_bytes: usize::MAX,
             max_received_blocks: 64,
             max_received_bytes: usize::MAX,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
 
@@ -138,7 +138,7 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
     const SELECTED_PEERS: usize = super::super::MIN_PEERS_FOR_FANOUT;
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain(u32::try_from(super::super::PENDING_BUDGET)?)?;
-    install_budget(&sync, super::super::default_sync_budget());
+    install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
     let mut receivers = Vec::new();
     let mut addrs = Vec::new();
     for idx in 0..PEER_COUNT {
@@ -248,7 +248,7 @@ fn reconcile_forgets_window_state_only_when_connection_identity_changes()
         &sync,
         super::super::SyncBudget {
             max_pending_blocks: 0,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = test_addr(9509, 0)?;

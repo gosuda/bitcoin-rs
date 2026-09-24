@@ -8,8 +8,8 @@ fn tick_retries_expired_pending_before_new_heights() -> Result<(), Box<dyn std::
         super::super::SyncBudget {
             max_pending_blocks: 2,
             getdata_batch_limit: 2,
-            pending_timeout: Duration::ZERO,
-            ..super::super::default_sync_budget()
+            pending_timeout_override: Some(Duration::ZERO),
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -43,8 +43,8 @@ fn tick_fills_mixed_retry_and_new_height_batch() -> Result<(), Box<dyn std::erro
             max_pending_bytes: 3 * 256 * 1024,
             max_peer_inflight: 3,
             getdata_batch_limit: 3,
-            pending_timeout: Duration::ZERO,
-            ..super::super::default_sync_budget()
+            pending_timeout_override: Some(Duration::ZERO),
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -132,7 +132,7 @@ fn oversized_received_block_releases_pending_budget_for_retry()
             max_received_bytes: 1,
             max_peer_inflight: 1,
             getdata_batch_limit: 1,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -200,7 +200,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
         super::super::SyncBudget {
             max_received_bytes: consensus_bytes(&block2).len(),
             getdata_batch_limit: 2,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);

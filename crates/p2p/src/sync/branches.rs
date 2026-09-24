@@ -6,6 +6,7 @@ use super::chain::WindowCommitDisposition;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::plan_reorg;
 use bitcoin_rs_primitives::Hash256;
+use std::time::Instant;
 
 impl BlockSync {
     /// Moves the applied chain onto the header tip's branch when it has been
@@ -80,7 +81,9 @@ impl BlockSync {
                     };
                     let mut scheduler = self.scheduler.lock();
                     scheduler.stager.retire_applied(&hash);
-                    scheduler.window.requeue_for_retry(&hash, height);
+                    scheduler
+                        .window
+                        .requeue_for_retry(&hash, height, Instant::now());
                 }
                 // Invalid descendants cannot occupy bounded download state or
                 // they can prevent the newly selected valid branch from refilling.
@@ -136,7 +139,9 @@ impl BlockSync {
         for hash in hashes {
             scheduler.stager.retire_applied(hash);
             // Invalidated hashes are never re-requested: no cursor rewind.
-            scheduler.window.requeue_for_retry(hash, None);
+            scheduler
+                .window
+                .requeue_for_retry(hash, None, Instant::now());
         }
     }
 

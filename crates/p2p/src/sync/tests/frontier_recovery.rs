@@ -213,7 +213,7 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick()
         super::super::SyncBudget {
             max_pending_bytes: 0,
             max_received_bytes: 0,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let low = test_addr(9763, 0)?;
@@ -268,7 +268,7 @@ fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback()
         super::super::SyncBudget {
             max_pending_bytes: 0,
             max_received_bytes: 0,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let dead = test_addr(9764, 0)?;
@@ -314,7 +314,7 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
         super::super::SyncBudget {
             max_pending_bytes: 0,
             max_received_bytes: 0,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let dead = test_addr(9766, 0)?;
@@ -509,7 +509,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> Result<(), Box<dyn 
     // Expire every staged body on the next drain, without a timing race.
     sync.scheduler.lock().stager = crate::BlockStager::new(super::super::SyncBudget {
         received_timeout: Duration::ZERO,
-        ..super::super::default_sync_budget()
+        ..super::super::default_sync_budget(Network::Regtest)
     });
     let orphan = mined_block_with_prev_hash(
         BlockHash::from(Hash256::from_le_bytes(&[0x5a; 32])),

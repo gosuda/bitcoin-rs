@@ -40,7 +40,7 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget()
         super::super::SyncBudget {
             max_received_blocks,
             max_received_bytes: usize::MAX,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
 
@@ -75,7 +75,7 @@ fn apply_cache_miss_populates_and_then_hits() -> Result<(), Box<dyn std::error::
             max_pending_bytes: usize::MAX,
             max_received_blocks: 64,
             max_received_bytes: usize::MAX,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     assert!(
@@ -161,7 +161,7 @@ fn apply_cache_horizon_capped_by_pending_budget() -> Result<(), Box<dyn std::err
             max_pending_bytes: usize::MAX,
             max_received_blocks: 64,
             max_received_bytes: usize::MAX,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
 
@@ -325,7 +325,7 @@ fn same_address_registration_clears_getheaders_gate_and_routes_replacement()
         &sync,
         super::super::SyncBudget {
             max_pending_blocks: 0,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let addr = test_addr(9501, 0)?;
@@ -352,7 +352,7 @@ fn tick_uses_highest_peer_for_headers_when_request_capacity_is_zero()
         &sync,
         super::super::SyncBudget {
             max_pending_blocks: 0,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let low_rx = connect_peer(&peers, synthetic_peer(test_addr(9502, 0)?, 5));
@@ -375,7 +375,7 @@ fn tick_bounded_request_peer_selection_preserves_equal_height_order()
             max_pending_blocks: 4,
             max_peer_inflight: 2,
             getdata_batch_limit: 2,
-            ..super::super::default_sync_budget()
+            ..super::super::default_sync_budget(Network::Regtest)
         },
     );
     let first_rx = connect_peer(&peers, synthetic_peer(test_addr(9503, 0)?, 100));

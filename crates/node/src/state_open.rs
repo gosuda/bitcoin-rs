@@ -419,7 +419,7 @@ impl NodeState {
             Arc::clone(&inbound_blocks_rx),
         ));
         if config.p2p.fast_sync {
-            sync.install_budget(fast_sync_budget());
+            sync.install_budget(fast_sync_budget(config.network));
         }
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.deferred.prune_service(

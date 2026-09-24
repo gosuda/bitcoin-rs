@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot};
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, Network};
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
@@ -22,8 +22,14 @@ use crate::connection::PeerSource;
 // Download-policy constants
 // ---------------------------------------------------------------------------
 
-/// Time after which a pending getdata is considered stuck and re-requestable.
-pub const PENDING_TIMEOUT: Duration = Duration::from_mins(1);
+/// Core's `BLOCK_DOWNLOAD_TIMEOUT_BASE` in half-target-spacing units
+/// (`net_processing.cpp:153-168`): an owner with no other validated-block
+/// downloaders gets one full proof-of-work target spacing of queue age
+/// before its oldest request is considered stuck.
+const BLOCK_DOWNLOAD_TIMEOUT_BASE: u32 = 2;
+/// Core's `BLOCK_DOWNLOAD_TIMEOUT_PER_PEER` in half-target-spacing units:
+/// each additional active downloader adds half a spacing to the budget.
+const BLOCK_DOWNLOAD_TIMEOUT_PER_PEER: u32 = 1;
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 ///
 /// 256 is the measured single-peer IBD depth: a bounded 0–150,000 daemon
@@ -250,7 +256,13 @@ pub fn configure_request_mode(
 }
 
 /// Returns the production [`SyncBudget`] used by the sync coordinator.
-pub const fn default_sync_budget() -> SyncBudget {
+///
+/// PRE: `network` is the chain the coordinator syncs.
+/// POST: the per-owner block-download budget derives from that network's
+///      proof-of-work target spacing; no timeout override is set.
+/// INVARIANT: production never populates `pending_timeout_override`.
+#[must_use]
+pub fn default_sync_budget(network: Network) -> SyncBudget {
     SyncBudget {
         max_pending_blocks: PENDING_BUDGET,
         max_pending_bytes: PENDING_BYTE_BUDGET,
@@ -260,7 +272,8 @@ pub const fn default_sync_budget() -> SyncBudget {
         fanout_peer_inflight: MAX_BLOCKS_IN_TRANSIT_PER_PEER,
         min_peers_for_fanout: MIN_PEERS_FOR_FANOUT,
         getdata_batch_limit: GETDATA_BATCH_SIZE,
-        pending_timeout: PENDING_TIMEOUT,
+        block_spacing: Duration::from_secs(u64::from(network.target_spacing_seconds())),
+        pending_timeout_override: None,
         received_timeout: RECEIVED_BLOCK_TIMEOUT,
         stall_timeout_initial: BLOCK_STALLING_TIMEOUT,
         stall_timeout_max: BLOCK_STALLING_TIMEOUT_MAX,
@@ -270,11 +283,11 @@ pub const fn default_sync_budget() -> SyncBudget {
 
 /// Returns the opt-in fast-sync [`SyncBudget`]: the default window striped
 /// shallower and earlier across up to [`FAST_OUTBOUND_PEER_TARGET`] peers.
-pub const fn fast_sync_budget() -> SyncBudget {
+pub fn fast_sync_budget(network: Network) -> SyncBudget {
     SyncBudget {
         fanout_peer_inflight: FAST_BLOCKS_IN_TRANSIT_PER_PEER,
         min_peers_for_fanout: FAST_MIN_PEERS_FOR_FANOUT,
-        ..default_sync_budget()
+        ..default_sync_budget(network)
     }
 }
 
@@ -293,7 +306,16 @@ pub struct SyncBudget {
     pub fanout_peer_inflight: usize,
     pub min_peers_for_fanout: usize,
     pub getdata_batch_limit: usize,
-    pub pending_timeout: Duration,
+    /// The network's proof-of-work target spacing (Core's nPowTargetSpacing):
+    /// the unit of the per-owner block-download budget,
+    /// `block_spacing / 2 * (BASE + PER_PEER * other)`, where `other`
+    /// counts the other owners with validated in-flight blocks, with the
+    /// two Core constants expressed in half-spacing units.
+    pub block_spacing: Duration,
+    /// Test-only deterministic escape hatch. Production sets `None`.
+    /// When `Some`, every owner expires at this fixed age instead of the
+    /// spacing-derived per-owner budget.
+    pub pending_timeout_override: Option<Duration>,
     pub received_timeout: Duration,
     pub stall_timeout_initial: Duration,
     pub stall_timeout_max: Duration,
@@ -471,6 +493,9 @@ pub struct BlockedContext {
     pub frontier_hash: Option<Hash256>,
     /// Whether the stager holds the next-expected body (apply lag).
     pub apply_side_busy: bool,
+    /// Distinct exact connections owning validated in-flight blocks this
+    /// tick, from [`DownloadWindow::active_downloading_peers`].
+    pub active_downloading_peers: usize,
 }
 
 /// Why the unified blockage observation convicted an owner.
@@ -587,7 +612,11 @@ pub struct DownloadWindow {
     ewma_block_bytes: usize,
     next_request_height: u32,
     request_tip: Option<(Hash256, u32)>,
-    next_pending_deadline: Option<Instant>,
+    /// Per-owner block-download queue start: the local equivalent of
+    /// Core's per-peer `m_downloading_since` (`net_processing.cpp:1323-1332,
+    /// 1363-1368`). Keyed by the exact `PeerSource`; an entry exists exactly
+    /// while that owner has validated in-flight blocks.
+    owner_downloading_since: HashMap<PeerSource, Instant>,
     /// Eligible outbound witness peers available for new block assignments.
     /// The count sizes each stripe; engagement keeps one-peer hysteresis so a
     /// transient demotion does not switch candidate classes mid-window.
@@ -673,7 +702,7 @@ impl DownloadWindow {
             ewma_block_bytes: 256 * 1024,
             next_request_height: 1,
             request_tip: None,
-            next_pending_deadline: None,
+            owner_downloading_since: HashMap::with_capacity(budget.max_pending_blocks),
             fanout_eligible_peers: 0,
             fanout_engaged: false,
             stall: None,
@@ -933,17 +962,20 @@ impl DownloadWindow {
             .saturating_add(self.owner_address_count())
     }
 
+    /// Blocks and bytes whose owner's queue has aged past its budget: the
+    /// capacity the request path credits back for re-request this tick.
+    ///
+    /// PRE: `now` is the caller's injected clock.
+    /// POST: totals over `pending` entries whose owner satisfies
+    ///      [`Self::owner_download_expired`] under this tick's owner count.
+    /// INVARIANT: the same per-owner predicate every consumer uses; no
+    ///      fixed-duration path remains.
     fn expired_pending_capacity(&self, now: Instant) -> (usize, usize) {
-        if self
-            .next_pending_deadline
-            .is_none_or(|deadline| now < deadline)
-        {
-            return (0, 0);
-        }
+        let active = self.active_downloading_peers();
         self.pending
             .values()
             .fold((0_usize, 0_usize), |(blocks, bytes), pending| {
-                if now.duration_since(pending.requested_at) < self.budget.pending_timeout {
+                if !self.owner_download_expired(pending.owner, active, now) {
                     return (blocks, bytes);
                 }
                 (
@@ -958,16 +990,7 @@ impl DownloadWindow {
     /// requests unless it is the last-resort peer, and it does not count as
     /// fan-out-eligible (KTD6's "not currently soft-demoted" clause).
     pub fn peer_has_expired_pending(&self, source: PeerSource, now: Instant) -> bool {
-        if self
-            .next_pending_deadline
-            .is_none_or(|deadline| now < deadline)
-        {
-            return false;
-        }
-        self.pending.values().any(|pending| {
-            pending.owner == source
-                && now.duration_since(pending.requested_at) >= self.budget.pending_timeout
-        })
+        self.owner_download_expired(source, self.active_downloading_peers(), now)
     }
 
     /// Advances every blockage observation once and returns at most one
@@ -1036,7 +1059,7 @@ impl DownloadWindow {
                 };
             }
         }
-        if let Some(owner) = self.advance_pending_timeout(now) {
+        if let Some(owner) = self.advance_pending_timeout(now, ctx.active_downloading_peers) {
             return BlockedDecision::Blame {
                 owner,
                 reason: BlameReason::PendingTimeout,
@@ -1059,23 +1082,21 @@ impl DownloadWindow {
     /// POST: `Some(owner)` exactly when the previous observation named
     ///      `owner`; that owner's address enters the staller cooldown.
     /// INVARIANT: the observation names the exact owning connection.
-    fn advance_pending_timeout(&mut self, now: Instant) -> Option<PeerSource> {
+    fn advance_pending_timeout(
+        &mut self,
+        now: Instant,
+        active_downloading_peers: usize,
+    ) -> Option<PeerSource> {
         if let Some(observation) = self.pending_timeout_observation {
             self.pending_timeout_observation = None;
             self.mark_peer_unresponsive(observation.owner.addr, now);
             return Some(observation.owner);
         }
-        if self
-            .next_pending_deadline
-            .is_none_or(|deadline| now < deadline)
-        {
-            return None;
-        }
         self.pending_timeout_observation = self
             .pending
             .iter()
             .filter(|(_, pending)| {
-                now.duration_since(pending.requested_at) >= self.budget.pending_timeout
+                self.owner_download_expired(pending.owner, active_downloading_peers, now)
             })
             .min_by_key(|(_, pending)| pending.height)
             .map(|(hash, pending)| PendingTimeoutObservation {
@@ -1651,28 +1672,89 @@ impl DownloadWindow {
         self.prefix_probe.as_ref().map(|probe| probe.started_at)
     }
 
-    fn pending_deadline(&self, requested_at: Instant) -> Instant {
-        requested_at
-            .checked_add(self.budget.pending_timeout)
-            .unwrap_or(requested_at)
+    /// Distinct exact connections owning validated in-flight blocks: the
+    /// per-owner block-download budget's peer count (Core's
+    /// `m_peers_downloading_from`, `net_processing.cpp:153-168`).
+    ///
+    /// POST: equals the population of `owner_downloading_since`.
+    /// INVARIANT: announced or merely-assigned peers never count; only
+    ///      ownership of at least one pending block does.
+    pub fn active_downloading_peers(&self) -> usize {
+        self.owner_downloading_since.len()
     }
 
-    fn record_pending_deadline(&mut self, requested_at: Instant) {
-        let deadline = self.pending_deadline(requested_at);
-        if self
-            .next_pending_deadline
-            .is_none_or(|current| deadline < current)
-        {
-            self.next_pending_deadline = Some(deadline);
+    /// The per-owner block-download budget for one tick.
+    ///
+    /// PRE: `active_downloading_peers` counts the owners with validated
+    ///      in-flight blocks.
+    /// POST: `SyncBudget::pending_timeout_override` when set; else
+    ///      `block_spacing * (BLOCK_DOWNLOAD_TIMEOUT_BASE
+    ///      + BLOCK_DOWNLOAD_TIMEOUT_PER_PEER * other) / 2` with `other`
+    ///      the count minus one, saturating at `Duration::MAX`.
+    /// INVARIANT: one tick applies this one budget to every owner; the
+    ///      override is a test-only escape hatch, never production.
+    fn effective_owner_timeout(&self, active_downloading_peers: usize) -> Duration {
+        if let Some(timeout) = self.budget.pending_timeout_override {
+            return timeout;
         }
+        let other = u32::try_from(active_downloading_peers.saturating_sub(1)).unwrap_or(u32::MAX);
+        let raw_factor = BLOCK_DOWNLOAD_TIMEOUT_BASE
+            .saturating_add(BLOCK_DOWNLOAD_TIMEOUT_PER_PEER.saturating_mul(other));
+        self.budget.block_spacing.saturating_mul(raw_factor) / 2
     }
 
-    fn refresh_next_pending_deadline(&mut self) {
-        self.next_pending_deadline = self
+    /// Whether `owner`'s download queue has aged past its budget.
+    ///
+    /// PRE: `active_downloading_peers` is this tick's owner count.
+    /// POST: `true` exactly while the owner has a queue start at least the
+    ///      budget old; an owner with no entry never expired.
+    /// INVARIANT: every expiry, eligibility, and blame decision shares this
+    ///      one predicate.
+    fn owner_download_expired(
+        &self,
+        owner: PeerSource,
+        active_downloading_peers: usize,
+        now: Instant,
+    ) -> bool {
+        self.owner_downloading_since
+            .get(&owner)
+            .is_some_and(|since| {
+                now.duration_since(*since) >= self.effective_owner_timeout(active_downloading_peers)
+            })
+    }
+
+    /// Re-derives one owner's queue start after a removal from `pending`.
+    ///
+    /// PRE: the entry is already out of `pending`; `removed_requested_at`
+    ///      is its request time; `now` is the caller's injected clock.
+    /// POST: the owner keeps no entry once it owns nothing; the entry moves
+    ///      to `now` exactly when the removed entry was its oldest;
+    ///      otherwise the entry is untouched.
+    /// INVARIANT: the local equivalent of Core's `m_downloading_since`
+    ///      start-and-oldest-removal reset (`net_processing.cpp:1323-1332,
+    ///      1363-1368`); `requested_at` stays the ordering and diagnostic
+    ///      record, never the sole source of the queue age.
+    fn reset_owner_queue_start(
+        &mut self,
+        owner: PeerSource,
+        removed_requested_at: Instant,
+        now: Instant,
+    ) {
+        let oldest_remaining = self
             .pending
             .values()
-            .map(|pending| self.pending_deadline(pending.requested_at))
+            .filter(|pending| pending.owner == owner)
+            .map(|pending| pending.requested_at)
             .min();
+        match oldest_remaining {
+            None => {
+                self.owner_downloading_since.remove(&owner);
+            }
+            Some(oldest) if removed_requested_at <= oldest => {
+                self.owner_downloading_since.insert(owner, now);
+            }
+            Some(_) => {}
+        }
     }
 
     /// Retains only ownership facts whose connection `owns` still names.
@@ -1680,7 +1762,7 @@ impl DownloadWindow {
     /// PRE: `owns` is false for every connection absent from the peer
     ///   table's live set.
     /// POST: `pending` holds only entries whose owner satisfies `owns`, with
-    ///   `pending_bytes`, `next_request_height`, and `next_pending_deadline`
+    ///   `pending_bytes`, `next_request_height`, and `owner_downloading_since`
     ///   kept in step; `cold_front` survives only while its waiting owner or
     ///   both racing participants do; `preferred_peer` and
     ///   `prefix_probe_attempted_owner` clear when their owner fails `owns`;
@@ -1727,27 +1809,19 @@ impl DownloadWindow {
             self.pending_timeout_observation = None;
         }
         let mut retry_height = self.next_request_height;
-        let mut removed_earliest_deadline = false;
-        let pending_timeout = self.budget.pending_timeout;
-        let next_pending_deadline = self.next_pending_deadline;
         self.pending.retain(|_hash, pending| {
             if retain_owner(&pending.owner) {
                 return true;
             }
             retry_height = retry_height.min(pending.height);
             self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-            let deadline = pending
-                .requested_at
-                .checked_add(pending_timeout)
-                .unwrap_or(pending.requested_at);
-            if Some(deadline) == next_pending_deadline {
-                removed_earliest_deadline = true;
-            }
             false
         });
-        if removed_earliest_deadline {
-            self.refresh_next_pending_deadline();
-        }
+        // A released owner loses every pending it had: its queue start
+        // goes with them, so no phantom age survives to blame a later
+        // assignment to the same connection.
+        self.owner_downloading_since
+            .retain(|owner, _| retain_owner(owner));
         self.next_request_height = retry_height;
     }
 
@@ -1771,7 +1845,7 @@ impl DownloadWindow {
         tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerRequest> {
-        self.retarget_request_branch(stager, chain_tip, request_start_height, tree);
+        self.retarget_request_branch(stager, chain_tip, request_start_height, tree, now);
         if self.staged_bytes_exhausted(stager) {
             return None;
         }
@@ -1863,6 +1937,7 @@ impl DownloadWindow {
         chain_tip: &TipSnapshot,
         request_start_height: u32,
         tree: &BlockTree,
+        now: Instant,
     ) {
         let Some((previous_hash, previous_height)) =
             self.request_tip.replace((chain_tip.hash, chain_tip.height))
@@ -1888,7 +1963,7 @@ impl DownloadWindow {
             })
             .collect();
         for hash in stale_pending {
-            self.remove_pending(&hash);
+            self.remove_pending(&hash, now);
         }
         // The stager is the single staged-body store: bodies the request
         // branch left behind are released here, so freed capacity is real
@@ -2146,7 +2221,7 @@ impl DownloadWindow {
         self.pending_blocks_high_water = self.pending_blocks_high_water.max(self.pending.len());
         self.pending_bytes_high_water = self.pending_bytes_high_water.max(self.pending_bytes);
         if !request.entries.is_empty() {
-            self.record_pending_deadline(now);
+            self.owner_downloading_since.entry(owner).or_insert(now);
         }
         self.next_request_height = self.next_request_height.max(request.next_request_height);
         self.has_request_capacity(stager)
@@ -2170,7 +2245,7 @@ impl DownloadWindow {
         source_peer: Option<PeerSource>,
         now: Instant,
     ) -> Option<u32> {
-        let pending = self.remove_pending(&hash);
+        let pending = self.remove_pending(&hash, now);
         let pending_height = pending.map(|pending| pending.height);
         if let Some(source) = source_peer {
             self.credit_delivery_from(hash, source, pending_height, now);
@@ -2190,13 +2265,14 @@ impl DownloadWindow {
     /// PRE: `height`, when known, is the tree height of `hash`.
     /// POST: a pending for `hash` is released; the request cursor is lowered
     ///   to the lower of `height` and the released pending's height, when
-    ///   either is known.
+    ///   either is known; the owner's queue start follows the removal rules
+    ///   of [`Self::reset_owner_queue_start`].
     /// INVARIANT: every rewind target is a tree height (the caller's, or the
     ///   one the pending recorded at request time); a body of unknown height
     ///   with no pending never moves the cursor, so the height-0 rewind to
     ///   genesis is unrepresentable.
-    pub fn requeue_for_retry(&mut self, hash: &Hash256, height: Option<u32>) {
-        let pending_height = self.remove_pending(hash).map(|pending| pending.height);
+    pub fn requeue_for_retry(&mut self, hash: &Hash256, height: Option<u32>, now: Instant) {
+        let pending_height = self.remove_pending(hash, now).map(|pending| pending.height);
         let target = match (height, pending_height) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (known, None) | (None, known) => known,
@@ -2350,6 +2426,7 @@ impl DownloadWindow {
         &mut self,
         hash: Hash256,
         source_peer: Option<PeerSource>,
+        now: Instant,
     ) -> RejectDelivery {
         // A malformed response is still proof that this peer answered. Do not
         // let a first-tick timeout observation disconnect it on the next tick.
@@ -2385,7 +2462,7 @@ impl DownloadWindow {
             .get(&hash)
             .is_some_and(|pending| Some(pending.owner) == source_peer);
         if is_owner {
-            if let Some(pending) = self.remove_pending(&hash) {
+            if let Some(pending) = self.remove_pending(&hash, now) {
                 self.next_request_height = self.next_request_height.min(pending.height);
             }
             RejectDelivery::ReleasedPending
@@ -2395,29 +2472,37 @@ impl DownloadWindow {
     }
 
     fn expire_pending(&mut self, now: Instant) -> Vec<PeerRequestEntry> {
-        if self
-            .next_pending_deadline
-            .is_none_or(|deadline| now < deadline)
-        {
+        let timeout = self.effective_owner_timeout(self.active_downloading_peers());
+        let expired_owners: HashSet<PeerSource> = self
+            .owner_downloading_since
+            .iter()
+            .filter(|(_, since)| now.duration_since(**since) >= timeout)
+            .map(|(owner, _)| *owner)
+            .collect();
+        if expired_owners.is_empty() {
             return Vec::new();
         }
-        let pending_timeout = self.budget.pending_timeout;
         let mut entries = Vec::new();
+        let mut removed: Vec<(PeerSource, Instant)> = Vec::new();
         {
             let pending_bytes = &mut self.pending_bytes;
             let next_request_height = &mut self.next_request_height;
-            for (hash, pending) in self.pending.extract_if(|_hash, pending| {
-                now.duration_since(pending.requested_at) >= pending_timeout
-            }) {
+            for (hash, pending) in self
+                .pending
+                .extract_if(|_hash, pending| expired_owners.contains(&pending.owner))
+            {
                 *pending_bytes = pending_bytes.saturating_sub(pending.estimated_bytes);
                 *next_request_height = (*next_request_height).min(pending.height);
                 entries.push(PeerRequestEntry {
                     hash,
                     height: pending.height,
                 });
+                removed.push((pending.owner, pending.requested_at));
             }
         }
-        self.refresh_next_pending_deadline();
+        for (owner, requested_at) in removed {
+            self.reset_owner_queue_start(owner, requested_at, now);
+        }
         entries
     }
 
@@ -2468,12 +2553,10 @@ impl DownloadWindow {
         self.prefix_probe_attempted_owner = attempted_owner;
     }
 
-    fn remove_pending(&mut self, hash: &Hash256) -> Option<PendingBlock> {
+    fn remove_pending(&mut self, hash: &Hash256, now: Instant) -> Option<PendingBlock> {
         let pending = self.pending.remove(hash)?;
         self.pending_bytes = self.pending_bytes.saturating_sub(pending.estimated_bytes);
-        if Some(self.pending_deadline(pending.requested_at)) == self.next_pending_deadline {
-            self.refresh_next_pending_deadline();
-        }
+        self.reset_owner_queue_start(pending.owner, pending.requested_at, now);
         Some(pending)
     }
 
@@ -2741,7 +2824,10 @@ mod tests {
             window.pending_timeout_observation = None;
             return None;
         }
-        window.advance_pending_timeout(now).map(|owner| owner.addr)
+        let active = window.active_downloading_peers();
+        window
+            .advance_pending_timeout(now, active)
+            .map(|owner| owner.addr)
     }
 
     fn cold_front_owner(
@@ -2802,17 +2888,18 @@ mod tests {
             max_pending_bytes: 2 * 256 * 1024,
             max_peer_inflight: 2,
             getdata_batch_limit: 2,
-            pending_timeout: Duration::ZERO,
+            pending_timeout_override: Some(Duration::ZERO),
             ..test_budget()
         });
         let stager = test_stager(&window);
         let now = Instant::now();
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+        let owner = test_source(peer_addr);
         for (byte, height) in [(1, 1_u32), (2, 2)] {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    owner: test_source(peer_addr),
+                    owner,
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
@@ -2820,7 +2907,7 @@ mod tests {
             );
             window.pending_bytes = window.pending_bytes.saturating_add(256 * 1024);
         }
-        window.next_pending_deadline = Some(now);
+        window.owner_downloading_since.insert(owner, now);
 
         assert_eq!(window.request_peer_scan_limit(&stager, now), 2);
     }
@@ -2828,7 +2915,7 @@ mod tests {
     #[test]
     fn pending_timeout_waits_for_second_delivery_drain() {
         let mut window = DownloadWindow::new(SyncBudget {
-            pending_timeout: Duration::from_secs(10),
+            pending_timeout_override: Some(Duration::from_secs(10)),
             ..test_budget()
         });
         let mut stager = test_stager(&window);
@@ -2836,16 +2923,17 @@ mod tests {
         let observed_at = requested_at + Duration::from_secs(10);
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         let block_hash = hash(0x90);
+        let owner = test_source(peer_addr);
         window.pending.insert(
             block_hash,
             super::PendingBlock {
-                owner: test_source(peer_addr),
+                owner,
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
             },
         );
-        window.next_pending_deadline = Some(observed_at);
+        window.owner_downloading_since.insert(owner, requested_at);
         assert_eq!(timeout_owner(&mut window, false, observed_at), None);
         receive_staged(
             &mut window,
@@ -2861,7 +2949,7 @@ mod tests {
     #[test]
     fn pending_timeout_apply_busy_clears_suspicion_without_blame() {
         let mut window = DownloadWindow::new(SyncBudget {
-            pending_timeout: Duration::from_secs(10),
+            pending_timeout_override: Some(Duration::from_secs(10)),
             ..test_budget()
         });
         let requested_at = Instant::now();
@@ -2885,7 +2973,7 @@ mod tests {
     #[test]
     fn retry_delivery_does_not_clear_original_peer_timeout() {
         let mut window = DownloadWindow::new(SyncBudget {
-            pending_timeout: Duration::from_secs(10),
+            pending_timeout_override: Some(Duration::from_secs(10)),
             ..test_budget()
         });
         let requested_at = Instant::now();
@@ -2893,16 +2981,19 @@ mod tests {
         let original_peer = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
         let retry_peer = std::net::SocketAddr::from(([127, 0, 0, 2], 8333));
         let block_hash = hash(0x91);
+        let original_owner = test_source(original_peer);
         window.pending.insert(
             block_hash,
             super::PendingBlock {
-                owner: test_source(original_peer),
+                owner: original_owner,
                 requested_at,
                 height: 1,
                 estimated_bytes: 80,
             },
         );
-        window.next_pending_deadline = Some(observed_at);
+        window
+            .owner_downloading_since
+            .insert(original_owner, requested_at);
 
         assert_eq!(timeout_owner(&mut window, false, observed_at), None);
         window.mark_received_from(block_hash, 80, Some(test_source(retry_peer)), observed_at);
@@ -2916,7 +3007,7 @@ mod tests {
 
     #[test]
     fn default_budget_keeps_full_request_window_for_large_blocks() {
-        let mut window = DownloadWindow::new(super::default_sync_budget());
+        let mut window = DownloadWindow::new(super::default_sync_budget(Network::Regtest));
         let stager = test_stager(&window);
         window.ewma_block_bytes = 2 * 1024 * 1024;
         window.pending_bytes = window
@@ -2929,55 +3020,60 @@ mod tests {
     }
 
     #[test]
-    fn releasing_a_dead_owner_refreshes_pending_deadline() {
+    fn releasing_a_dead_owner_drops_its_queue_start() {
         let mut window = DownloadWindow::new(SyncBudget {
-            pending_timeout: Duration::from_secs(10),
+            pending_timeout_override: Some(Duration::from_secs(10)),
             ..test_budget()
         });
         let now = Instant::now();
-        let stale_peer = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
-        let live_peer = std::net::SocketAddr::from(([127, 0, 0, 2], 8333));
+        let stale_owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        let live_owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 2], 8333)));
         let stale_requested_at = now
             .checked_sub(Duration::from_secs(9))
             .unwrap_or_else(|| panic!("test instant underflow"));
         let estimated_bytes = 256 * 1024;
-        for (peer_addr, requested_at, height, byte) in [
-            (stale_peer, stale_requested_at, 1_u32, 0x81),
-            (live_peer, now, 2_u32, 0x82),
+        for (owner, requested_at, height, byte) in [
+            (stale_owner, stale_requested_at, 1_u32, 0x81),
+            (live_owner, now, 2_u32, 0x82),
         ] {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    owner: test_source(peer_addr),
+                    owner,
                     requested_at,
                     height,
                     estimated_bytes,
                 },
             );
             window.pending_bytes = window.pending_bytes.saturating_add(estimated_bytes);
-            window.record_pending_deadline(requested_at);
+            window.owner_downloading_since.insert(owner, requested_at);
         }
 
-        window.retain_owned_by(|p| p.addr == live_peer);
+        window.retain_owned_by(|p| p.addr == live_owner.addr);
 
         assert_eq!(window.pending_len(), 1);
         assert_eq!(window.pending_bytes(), estimated_bytes);
         assert_eq!(window.next_request_height, 1);
-        assert_eq!(
-            window.next_pending_deadline,
-            Some(now + Duration::from_secs(10))
-        );
+        // The dead owner's queue start is gone with its pendings; the live
+        // owner's age bookkeeping is untouched.
+        assert_eq!(window.active_downloading_peers(), 1);
+        assert_eq!(window.owner_downloading_since.get(&live_owner), Some(&now));
+        assert!(!window.owner_download_expired(
+            live_owner,
+            window.active_downloading_peers(),
+            now + Duration::from_secs(9)
+        ));
     }
 
     #[test]
-    fn mark_received_refreshes_pending_deadline_after_earliest_pending() {
+    fn receiving_the_oldest_pending_resets_the_owner_queue_start() {
         let mut window = DownloadWindow::new(SyncBudget {
-            pending_timeout: Duration::from_secs(10),
+            pending_timeout_override: Some(Duration::from_secs(10)),
             ..test_budget()
         });
         let mut stager = test_stager(&window);
         let now = Instant::now();
-        let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+        let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
         let earliest = hash(0x91);
         let later = hash(0x92);
         let earliest_requested_at = now
@@ -2991,25 +3087,133 @@ mod tests {
             window.pending.insert(
                 hash,
                 super::PendingBlock {
-                    owner: test_source(peer_addr),
+                    owner,
                     requested_at,
                     height,
                     estimated_bytes,
                 },
             );
             window.pending_bytes = window.pending_bytes.saturating_add(estimated_bytes);
-            window.record_pending_deadline(requested_at);
         }
+        window
+            .owner_downloading_since
+            .insert(owner, earliest_requested_at);
 
         let unsolicited = receive_staged(&mut window, &mut stager, earliest, SMALL_BODY, now);
 
         assert!(!unsolicited);
         assert_eq!(window.pending_len(), 1);
         assert!(window.contains_pending(&later));
+        // The queue head left: the surviving head's clock starts at the
+        // removal instant, not at its own request time.
+        assert_eq!(window.owner_downloading_since.get(&owner), Some(&now));
         assert_eq!(
-            window.next_pending_deadline,
-            Some(now + Duration::from_secs(10))
+            timeout_owner(&mut window, false, now + Duration::from_secs(9)),
+            None
         );
+        assert!(window.pending_timeout_observation.is_none());
+        assert_eq!(
+            timeout_owner(&mut window, false, now + Duration::from_secs(10)),
+            None
+        );
+        assert!(window.pending_timeout_observation.is_some());
+    }
+
+    /// BLK-05: the block-download budget is Core's per-owner queue-age
+    /// rule — one target spacing plus half a spacing per other active
+    /// owner (`net_processing.cpp:153-168`) — not a fixed 60 seconds.
+    /// One active owner expires at exactly one spacing; three active
+    /// owners each get two spacings.
+    #[test]
+    fn slow_peer_timeout_uses_spacing_and_other_downloaders() {
+        let spacing = Duration::from_secs(10);
+        let requested_at = Instant::now();
+
+        // One active owner: the budget is exactly one spacing.
+        let mut window = DownloadWindow::new(SyncBudget {
+            block_spacing: spacing,
+            pending_timeout_override: None,
+            ..test_budget()
+        });
+        let solo = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        insert_pending(&mut window, solo, hash(0xb1), 1, requested_at);
+        assert_eq!(
+            timeout_owner(
+                &mut window,
+                false,
+                requested_at + spacing.saturating_sub(Duration::from_millis(1)),
+            ),
+            None
+        );
+        assert!(window.pending_timeout_observation.is_none());
+        assert_eq!(
+            timeout_owner(&mut window, false, requested_at + spacing),
+            None
+        );
+        assert!(window.pending_timeout_observation.is_some());
+        assert_eq!(
+            timeout_owner(&mut window, false, requested_at + spacing),
+            Some(solo.addr)
+        );
+
+        // Three active owners: every owner's `other` count is 2, so the
+        // budget is exactly two spacings and one spacing convicts nobody.
+        let mut window = DownloadWindow::new(SyncBudget {
+            block_spacing: spacing,
+            pending_timeout_override: None,
+            ..test_budget()
+        });
+        let owners: Vec<PeerSource> = (1..=3_u8)
+            .map(|byte| {
+                let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 20 + byte], 8333)));
+                insert_pending(
+                    &mut window,
+                    owner,
+                    hash(0xc0 + byte),
+                    u32::from(byte),
+                    requested_at,
+                );
+                owner
+            })
+            .collect();
+        assert_eq!(window.active_downloading_peers(), 3);
+        assert_eq!(
+            timeout_owner(&mut window, false, requested_at + spacing),
+            None
+        );
+        assert!(
+            window.pending_timeout_observation.is_none(),
+            "one spacing must not convict while three owners share the queue"
+        );
+        assert_eq!(
+            timeout_owner(&mut window, false, requested_at + 2 * spacing),
+            None
+        );
+        assert!(window.pending_timeout_observation.is_some());
+        assert_eq!(
+            timeout_owner(&mut window, false, requested_at + 2 * spacing),
+            Some(owners[0].addr),
+            "the second observation convicts the pinned owner"
+        );
+    }
+
+    /// The override is a test-only escape hatch and wins over the derived
+    /// budget, keeping deterministic tests independent of spacing math.
+    #[test]
+    fn pending_timeout_override_wins_over_spacing_policy() {
+        let mut window = DownloadWindow::new(SyncBudget {
+            block_spacing: Duration::from_secs(600),
+            pending_timeout_override: Some(Duration::from_secs(5)),
+            ..test_budget()
+        });
+        let requested_at = Instant::now();
+        let owner = test_source(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        insert_pending(&mut window, owner, hash(0xd1), 1, requested_at);
+        assert_eq!(
+            timeout_owner(&mut window, false, requested_at + Duration::from_secs(5)),
+            None
+        );
+        assert!(window.pending_timeout_observation.is_some());
     }
 
     #[test]
@@ -3097,7 +3301,7 @@ mod tests {
 
     #[test]
     fn fast_sync_budget_stripes_window_across_fast_outbound_target() {
-        let mut window = DownloadWindow::new(fast_sync_budget());
+        let mut window = DownloadWindow::new(fast_sync_budget(Network::Regtest));
         let stager = test_stager(&window);
         let now = Instant::now();
 
@@ -3199,25 +3403,26 @@ mod tests {
             max_received_blocks: 4,
             max_peer_inflight: 4,
             getdata_batch_limit: 4,
-            pending_timeout: Duration::from_secs(10),
+            pending_timeout_override: Some(Duration::from_secs(10)),
             ..test_budget()
         });
         let mut stager = test_stager(&window);
         let now = Instant::now();
         let peer_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8333));
+        let owner = test_source(peer_addr);
         for (byte, height) in [(0xe1, 1_u32), (0xe2, 2)] {
             window.pending.insert(
                 hash(byte),
                 super::PendingBlock {
-                    owner: test_source(peer_addr),
+                    owner,
                     requested_at: now,
                     height,
                     estimated_bytes: 256 * 1024,
                 },
             );
             window.pending_bytes = window.pending_bytes.saturating_add(256 * 1024);
-            window.record_pending_deadline(now);
         }
+        window.owner_downloading_since.insert(owner, now);
         for byte in [0xe3, 0xe4] {
             receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
         }
@@ -3292,16 +3497,16 @@ mod tests {
             },
         );
         window.pending_bytes = window.pending_bytes.saturating_add(80);
-        window.record_pending_deadline(now);
+        window.owner_downloading_since.entry(owner).or_insert(now);
         owner
     }
 
     /// Seeds the front-cadence EWMA through the real delivery path: heights
     /// 1 and 2 arrive from `peer` `gap` apart (must be >=
     /// `EWMA_MIN_SAMPLE_MS` or the second advance is skipped as a batch
-    /// artifact) and apply immediately. Disarms `advance_stall`'s cold-start
-    /// fire suppression and returns the instant of the second front advance
-    /// — the anchor for the next interval sample.
+    /// artifact) and apply immediately. Lifts `advance_stall`'s decay floor
+    /// to twice the demonstrated cadence and returns the instant of the
+    /// second front advance — the anchor for the next interval sample.
     fn seed_front_cadence(
         window: &mut DownloadWindow,
         peer: std::net::SocketAddr,
@@ -4006,7 +4211,7 @@ mod tests {
                 None
             );
             assert_eq!(recorder.started(), 3);
-            window.remove_pending(&hash(0x03));
+            window.remove_pending(&hash(0x03), now);
             insert_pending(&mut window, test_source(healthy_addr()), hash(0x07), 3, now);
             assert_eq!(
                 stall_owner(&mut window, &stager, &tree, 3, false, now),
@@ -4262,6 +4467,7 @@ mod tests {
             next_apply_height: Some(1),
             frontier_hash: None,
             apply_side_busy: false,
+            active_downloading_peers: window.active_downloading_peers(),
         };
         // First tick: the episode and the cold-front timer both start.
         assert_eq!(
@@ -5318,7 +5524,7 @@ mod tests {
         assert_eq!(window.pending_count_for(loser), 0);
         assert!(window.pending_count_for(unrelated) > 0);
         assert_eq!(window.next_request_height, 1);
-        assert!(window.next_pending_deadline.is_some());
+        assert!(window.owner_downloading_since.contains_key(&unrelated));
         assert!(window.peer_in_staller_cooldown(owner.addr, now));
         Ok(())
     }
@@ -5394,7 +5600,7 @@ mod tests {
         assert!(window.contains_pending(&block_hash));
         assert_eq!(window.pending_len(), 1);
 
-        let outcome = window.reject_delivery(block_hash, Some(owner));
+        let outcome = window.reject_delivery(block_hash, Some(owner), now);
 
         assert_eq!(outcome, super::RejectDelivery::ReleasedPending);
         assert!(!window.contains_pending(&block_hash));
@@ -5418,7 +5624,7 @@ mod tests {
         });
 
         assert_eq!(
-            window.reject_delivery(block_hash, Some(owner)),
+            window.reject_delivery(block_hash, Some(owner), now),
             super::RejectDelivery::ReleasedPending
         );
         assert!(window.pending_timeout_observation.is_none());
@@ -5444,7 +5650,7 @@ mod tests {
         });
 
         assert_eq!(
-            window.reject_delivery(block_hash, Some(alternate)),
+            window.reject_delivery(block_hash, Some(alternate), now),
             super::RejectDelivery::DiscardedUnsolicited
         );
         assert!(window.cold_front.is_none());
@@ -5465,7 +5671,7 @@ mod tests {
         );
 
         assert_eq!(
-            window.reject_delivery(block_hash, Some(owner)),
+            window.reject_delivery(block_hash, Some(owner), now),
             super::RejectDelivery::ReleasedPending
         );
         assert!(window.cold_front.is_none());
@@ -5494,7 +5700,7 @@ mod tests {
         });
 
         assert_eq!(
-            window.reject_delivery(block_hash, Some(unrelated)),
+            window.reject_delivery(block_hash, Some(unrelated), now),
             super::RejectDelivery::DiscardedUnsolicited
         );
         assert!(window.pending_timeout_observation.is_some());
@@ -5520,7 +5726,7 @@ mod tests {
         assert!(window.contains_pending(&block_hash));
         assert_eq!(window.pending_len(), 1);
 
-        let outcome = window.reject_delivery(block_hash, Some(other));
+        let outcome = window.reject_delivery(block_hash, Some(other), now);
 
         assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
         assert!(window.contains_pending(&block_hash));
@@ -5539,7 +5745,7 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         insert_pending(&mut window, owner, block_hash, 100, now);
 
-        let outcome = window.reject_delivery(block_hash, None);
+        let outcome = window.reject_delivery(block_hash, None, now);
 
         assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
         assert!(window.contains_pending(&block_hash));
@@ -5551,7 +5757,8 @@ mod tests {
         let mut window = DownloadWindow::new(test_budget());
         let block_hash = hash(0x99);
 
-        let outcome = window.reject_delivery(block_hash, Some(test_source(peer_addr(1))));
+        let outcome =
+            window.reject_delivery(block_hash, Some(test_source(peer_addr(1))), Instant::now());
 
         assert_eq!(outcome, super::RejectDelivery::DiscardedUnsolicited);
         assert_eq!(window.pending_len(), 0);
@@ -5828,6 +6035,7 @@ mod tests {
     fn test_budget() -> SyncBudget {
         SyncBudget {
             max_pending_blocks: 128,
+            block_spacing: Duration::from_secs(600),
             max_pending_bytes: usize::MAX,
             max_received_blocks: 128,
             max_received_bytes: usize::MAX,
@@ -5837,7 +6045,7 @@ mod tests {
             fanout_peer_inflight: 128,
             min_peers_for_fanout: usize::MAX,
             getdata_batch_limit: 16,
-            pending_timeout: Duration::from_secs(30),
+            pending_timeout_override: Some(Duration::from_secs(30)),
             received_timeout: Duration::from_secs(30),
             stall_timeout_initial: Duration::from_secs(2),
             stall_timeout_max: Duration::from_secs(64),
@@ -5866,7 +6074,7 @@ mod tests {
         assert!(window.contains_pending(&hash(0xf1)));
 
         // A real post-drain request still re-arms probe eligibility.
-        window.remove_pending(&hash(0xf1));
+        window.remove_pending(&hash(0xf1), now);
         let request = super::non_empty_request(
             compact_peer,
             vec![super::PeerRequestEntry {

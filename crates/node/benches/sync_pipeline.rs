@@ -720,7 +720,7 @@ impl SyncFixture {
         // The bench stages 128 received blocks and still needs to request a
         // full pending window, so the received-block budget must cover both
         // the staged blocks and the new requests.
-        let mut budget = default_sync_budget();
+        let mut budget = default_sync_budget(bitcoin_rs_primitives::Network::Regtest);
         budget.max_received_blocks = budget
             .max_pending_blocks
             .saturating_add(SYNC_REVERSE_SCAN_OVERFLOW_RECEIVED_BLOCKS);
