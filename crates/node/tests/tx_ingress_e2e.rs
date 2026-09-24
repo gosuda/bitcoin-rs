@@ -39,6 +39,7 @@ use bitcoin_rs_mining::{
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;
 use bitcoin_rs_node::{Network, NodeConfig};
+use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
 use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
 use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
@@ -410,7 +411,11 @@ fn dial_handshake(dialer: &TcpStream, magic: Magic, wtxid_relay: bool) -> anyhow
         .try_clone()
         .map_err(|error| anyhow!("dialer clone failed: {error}"))?;
     stream.set_read_timeout(Some(HANDSHAKE_DEADLINE))?;
-    write_message(&mut stream, magic, &Message::Version(version_message(7, 0)))?;
+    write_message(
+        &mut stream,
+        magic,
+        &Message::Version(version_message(7, 0, PeerRole::FullRelay)),
+    )?;
     loop {
         let (message, _raw) = read_message(&mut stream, magic)?;
         if matches!(message, Message::Verack) {
