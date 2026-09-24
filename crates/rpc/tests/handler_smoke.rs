@@ -661,7 +661,6 @@ impl bitcoin_rs_rpc::context::DerivedIndexQuery for FakeTxIndex {
     }
 }
 
-#[allow(clippy::arc_with_non_send_sync)]
 fn fee_stats_context(values: Option<HashMap<OutPoint, u64>>) -> (Arc<Context>, Tx, Tx) {
     let low_tx = fee_tx(21, 10_000);
     let high_tx = fee_tx(22, 20_000);
@@ -886,7 +885,6 @@ impl Fixture {
         })
     }
 }
-#[allow(clippy::arc_with_non_send_sync)]
 fn context_with_peers(peer_table: Arc<PeerTable>) -> Arc<Context> {
     let mut ctx = Context::new();
     ctx.network.peer_table = peer_table;

@@ -278,6 +278,7 @@ impl ChainHandles {
     /// INVARIANT: construction copies no subsystem state and creates no second
     ///   initial-block-download latch or transaction-count authority.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
         applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -482,16 +483,6 @@ pub struct Context {
     /// Limits concurrent full-block REST response materializations.
     rest_render_budget: Arc<RestRenderBudget>,
 }
-// SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
-// handle behind it uses atomics, channels, or locks for interior mutation.
-// `UtxoSet` is likewise internally sharded behind locks; RPC currently only
-// calls read-only aggregate counters through this handle.
-#[allow(clippy::non_send_fields_in_send_ty)]
-unsafe impl Send for Context {}
-
-// SAFETY: See the `Send` impl above. Shared access to all contained mutable
-// state is mediated by thread-safe primitives or UTXO shard locks.
-unsafe impl Sync for Context {}
 
 impl fmt::Debug for Context {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -530,7 +521,6 @@ impl Context {
     /// INVARIANT: the shared initial-block-download latch reads the same
     ///   applied-tip cell and block tree the chain group owns, so publishing a
     ///   tip through the group moves both readers.
-    #[allow(clippy::arc_with_non_send_sync)]
     fn build_fixture(observer: Option<Arc<dyn MempoolObserver>>) -> Self {
         let coin_stats_listener = bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::default(),
@@ -1138,6 +1128,23 @@ mod tests {
         }
     }
 
+    /// The context and every capability group are shareable because the
+    /// compiler derives it, not because a `SAFETY` comment claims it.
+    ///
+    /// A field that is not thread-safe fails this test at compile time and
+    /// names its type, so the fix is a real bound on the owning subsystem
+    /// rather than a new `unsafe impl`.
+    #[test]
+    fn context_and_groups_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_send_sync::<Context>();
+        assert_send_sync::<ChainHandles>();
+        assert_send_sync::<IndexHandles>();
+        assert_send_sync::<NetworkHandles>();
+        assert_send_sync::<bitcoin_rs_chain::InitialBlockDownload>();
+    }
+
     /// A log whose heights are non-decreasing but not a clean `0..n`.
     ///
     /// Height 3 is recorded three times, as two reorgs leave it; the log starts
@@ -1198,7 +1205,6 @@ mod tests {
     /// published, and nothing covered it: a mutation replacing it with "the last
     /// record in the log" stayed green.
     #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
     fn block_by_height_without_an_applied_tip_reads_the_log() {
         let ctx = Context::new();
         for record in shaped_records() {
@@ -1292,7 +1298,6 @@ mod tests {
         assert!(record_at_height(&records, 1).is_none());
     }
     #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
     fn from_handles_shares_chain_handles_with_caller() {
         use alloc::sync::Arc;
 
@@ -1356,21 +1361,6 @@ mod tests {
             Arc::ptr_eq(&ctx.chain.applied_tip, &applied_tip),
             "applied_tip must be shared with caller"
         );
-        // The count travels inside the applied tip: one publication replaces
-        // tip and count together, through the cell the caller shares.
-        let counted = |count| {
-            Arc::new(TipSnapshot {
-                tip_id: bitcoin_rs_chain::NodeId::new(0),
-                height: 0,
-                chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-                hash: bitcoin_rs_primitives::Hash256::default(),
-                chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
-            })
-        };
-        applied_tip.store(Some(counted(1)));
-        assert_eq!(ctx.chain.chain_tx_count(), Some(1));
-        applied_tip.store(Some(counted(42)));
-        assert_eq!(ctx.chain.chain_tx_count(), Some(42));
         assert!(
             Arc::ptr_eq(&ctx.chain.ibd, &ibd),
             "ibd must be shared with caller"
@@ -1409,6 +1399,27 @@ mod tests {
             ),
             "the txindex status source must be shared with caller"
         );
+    }
+
+    /// The count travels inside the applied tip: one publication replaces
+    /// tip and count together, so no reader can pair one with the other's
+    /// successor.
+    #[test]
+    fn applied_tip_publication_carries_the_transaction_count() {
+        let ctx = Context::new();
+        let counted = |count| {
+            Arc::new(TipSnapshot {
+                tip_id: bitcoin_rs_chain::NodeId::new(0),
+                height: 0,
+                chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+                hash: bitcoin_rs_primitives::Hash256::default(),
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
+            })
+        };
+        ctx.chain.applied_tip.store(Some(counted(1)));
+        assert_eq!(ctx.chain.chain_tx_count(), Some(1));
+        ctx.chain.applied_tip.store(Some(counted(42)));
+        assert_eq!(ctx.chain.chain_tx_count(), Some(42));
     }
 
     #[test]
@@ -1553,7 +1564,6 @@ mod tests {
     /// from: the tree, via `record_for_hash`. A record built straight from a
     /// block has none.
     #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
     fn header_hex_is_unchanged_by_sourcing_the_header_from_the_tree() {
         let block = Network::Regtest.genesis_block();
         let ctx = Arc::new(Context::new());
@@ -1580,7 +1590,6 @@ mod tests {
     /// it unchanged would answer with none, which is what an earlier revision of
     /// this change did until this test caught it.
     #[test]
-    #[allow(clippy::arc_with_non_send_sync)]
     fn record_for_hash_answers_with_the_tree_header_for_a_cached_record() {
         let block = Network::Regtest.genesis_block();
         let ctx = Arc::new(Context::new());
