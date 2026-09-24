@@ -303,7 +303,7 @@ fn load_payloads(
         headers.tree.restore_chain_tx_count(
             node_id,
             if node_id == headers.applied_tip_id {
-                ChainTxCount::from_wire(chain_tx_count)
+                chain_tx_count
             } else {
                 ChainTxCount::UNKNOWN
             },
