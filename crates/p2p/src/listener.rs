@@ -55,9 +55,8 @@ pub struct ListenerExtras {
 /// State shared by the listener and every connection thread it spawns.
 ///
 /// The peer table and ban list are the authoritative stores shared with the
-/// node and its network control plane; `activity` and `totals` carry the
-/// kill-switch and aggregate traffic accounting and are present only when the
-/// entry point was built from a [`crate::NetworkControls`] instance.
+/// node; `activity` carries the network kill-switch, and `totals` holds the
+/// aggregate traffic accounting.
 #[derive(Clone)]
 struct ConnectionShared {
     peer_table: Arc<crate::PeerTable>,
@@ -83,24 +82,6 @@ impl ConnectionShared {
             banned,
             activity: None,
             totals: None,
-            chain_query,
-            tx_inventory: None,
-            compact_hints: None,
-            session_cancel: None,
-            peer_ready: None,
-            ibd: None,
-        }
-    }
-
-    fn from_controls(
-        controls: &Arc<crate::NetworkControls>,
-        chain_query: ChainQueryHandle,
-    ) -> Self {
-        Self {
-            peer_table: Arc::clone(controls.peer_table()),
-            banned: Arc::clone(controls.banned()),
-            activity: Some(Arc::clone(controls.activity())),
-            totals: Some(Arc::clone(controls.totals())),
             chain_query,
             tx_inventory: None,
             compact_hints: None,
@@ -485,29 +466,6 @@ fn accept_connections(
     }
 }
 
-/// Binds `addr` and runs the accept loop driven by one
-/// [`crate::NetworkControls`] instance.
-///
-/// Unlike the part-wise entry points, the listener enforces the control
-/// plane's network-activity switch on new inbound connections and accounts
-/// aggregate traffic into its shared totals.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub fn serve_with_controls(
-    addr: SocketAddr,
-    shutdown: Arc<AtomicBool>,
-    magic: Magic,
-    controls: Arc<crate::NetworkControls>,
-    inbound_headers_tx: Sender<crate::InboundHeaders>,
-    inbound_blocks_tx: Sender<crate::InboundBlock>,
-    chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
-    sync_wake_tx: Option<Sender<()>>,
-) -> Result<(), ListenerError> {
-    let shared = ConnectionShared::from_controls(&controls, chain_query);
-    let inbound_sync_sinks =
-        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx);
-    serve_connections(addr, &shutdown, magic, &shared, &inbound_sync_sinks)
-}
-
 /// Spawns an outbound TCP connection to `addr`, performs the outbound P2P
 /// handshake, and enters the same message loop the inbound path uses.
 ///
@@ -659,30 +617,6 @@ pub fn spawn_outbound_connection_with_session_cancel(
         shared,
         InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx)
             .with_inbound_tx(extras.inbound_tx),
-    )
-}
-
-/// Spawns an outbound connection driven by one [`crate::NetworkControls`]
-/// instance.
-///
-/// The dial is refused while the control plane's network-activity switch is
-/// off, and aggregate traffic is accounted into the shared totals.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
-pub fn spawn_outbound_connection_with_controls(
-    addr: SocketAddr,
-    magic: Magic,
-    controls: Arc<crate::NetworkControls>,
-    inbound_headers_tx: Sender<crate::InboundHeaders>,
-    inbound_blocks_tx: Sender<crate::InboundBlock>,
-    chain_query: Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>,
-    sync_wake_tx: Option<Sender<()>>,
-) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
-    let shared = ConnectionShared::from_controls(&controls, chain_query);
-    spawn_outbound(
-        addr,
-        magic,
-        shared,
-        InboundSyncSinks::new(inbound_headers_tx, inbound_blocks_tx, sync_wake_tx),
     )
 }
 

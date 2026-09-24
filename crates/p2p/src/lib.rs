@@ -62,10 +62,8 @@ pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::{ListenerExtras, spawn_outbound_connection};
 pub use peer::{
-    AddNodeError, AddedNodeInfo, BanError, ConnectedPeer, ConnectionCounts, DnsResolver,
-    MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, NetworkControls,
-    NodeAddress, Peer, PeerManager, PeerState, SystemDnsResolver, TrafficTotals,
-    UPLOAD_TIMEFRAME_SECS, UploadTarget,
+    DnsResolver, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer,
+    PeerManager, PeerState, SystemDnsResolver, TrafficTotals, UPLOAD_TIMEFRAME_SECS, UploadTarget,
 };
 pub use peer_info::PeerInfo;
 pub use peer_table::{PeerSession, PeerTable};

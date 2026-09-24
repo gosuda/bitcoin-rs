@@ -154,8 +154,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
 /// Handshake writes leave the connection thread directly, before the
 /// per-connection writer exists, so this phase's telemetry owner is the
 /// connection itself: bytes land on the lease's [`crate::PeerStats`] and,
-/// when the entry point was built from a `NetworkControls` instance, on the
-/// shared aggregate totals.
+/// when present, on the shared aggregate totals.
 pub(crate) fn send_handshake_message<S: Read + Write>(
     peer: &mut Peer<S>,
     message: &Message,
