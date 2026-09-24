@@ -121,7 +121,7 @@ pub struct NodeState {
     p2p: Arc<bitcoin_rs_p2p::P2pService>,
     peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     banned: Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
-    p2p_outbound_tx: crossbeam_channel::Sender<std::net::SocketAddr>,
+    p2p_outbound_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>,
     inbound_blocks_tx: Sender<bitcoin_rs_p2p::InboundBlock>,
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
     inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
@@ -266,7 +266,7 @@ impl NodeState {
     }
     /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
     #[must_use]
-    pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<std::net::SocketAddr> {
+    pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial> {
         self.p2p_outbound_tx.clone()
     }
 

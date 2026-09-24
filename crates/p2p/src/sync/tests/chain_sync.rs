@@ -21,6 +21,7 @@ fn outbound(port: u16, height: u32, role: PeerRole, at: Instant) -> UsablePeer {
         demonstrated_tips: vec![Hash256::from_le_bytes(&[0x7c; 32])],
         active_height: Some(height),
         role,
+        manual: false,
         connected_at: at,
     }
 }
@@ -38,6 +39,14 @@ fn inbound(port: u16, height: u32, at: Instant) -> UsablePeer {
 fn claiming(port: u16, height: u32, at: Instant) -> UsablePeer {
     let mut peer = outbound(port, height, PeerRole::FullRelay, at);
     peer.demonstrated_tips.clear();
+    peer
+}
+
+/// An outbound connection to an address the operator named, which Core marks
+/// `MANUAL` (`net_processing.cpp:5502`).
+fn pinned(port: u16, height: u32, at: Instant) -> UsablePeer {
+    let mut peer = outbound(port, height, PeerRole::FullRelay, at);
+    peer.manual = true;
     peer
 }
 
@@ -244,6 +253,10 @@ fn only_aged_outbound_full_relay_connections_are_subjects() {
     assert!(
         !chain_sync_subject(&inbound(9_623, 1, t0), aged),
         "an inbound connection is never timed out"
+    );
+    assert!(
+        !chain_sync_subject(&pinned(9_624, 1, t0), aged),
+        "the operator asked for this one by name, so the timer never judges it"
     );
 }
 

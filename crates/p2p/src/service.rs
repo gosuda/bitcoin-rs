@@ -160,6 +160,41 @@ struct Workers {
     bootstrap: Option<JoinHandle<()>>,
 }
 
+/// One queued request to dial an outbound address, with the origin that
+/// asked for it.
+///
+/// PRE: none.
+/// POST: `manual` records whether the operator named this address.
+/// INVARIANT: the origin travels with the request to the lease. Core's
+///   `ConnectionType::MANUAL` is exempt from the chain-sync timeout and the
+///   extra-peer retirement (`net_processing.cpp:5502`,
+///   `net_processing.cpp:5558-5604`), and the queue is the only place that
+///   still knows which dials were asked for by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutboundDial {
+    /// The address to dial.
+    pub addr: SocketAddr,
+    /// Whether the operator asked for this address by name.
+    pub manual: bool,
+}
+
+impl OutboundDial {
+    /// A dial the seed list or the address book produced.
+    #[must_use]
+    pub const fn auto(addr: SocketAddr) -> Self {
+        Self {
+            addr,
+            manual: false,
+        }
+    }
+
+    /// A dial the operator pinned with `--connect` or `addnode`.
+    #[must_use]
+    pub const fn pinned(addr: SocketAddr) -> Self {
+        Self { addr, manual: true }
+    }
+}
+
 /// The sole runtime owner of P2P control state and workers.
 pub struct P2pService {
     config: P2pServiceConfig,
@@ -169,8 +204,8 @@ pub struct P2pService {
     peer_table: Arc<crate::PeerTable>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     added_nodes: Arc<RwLock<Vec<SocketAddr>>>,
-    outbound_tx: Sender<SocketAddr>,
-    outbound_rx: Arc<Mutex<Receiver<SocketAddr>>>,
+    outbound_tx: Sender<OutboundDial>,
+    outbound_rx: Arc<Mutex<Receiver<OutboundDial>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
     inbound_headers_rx: Arc<Mutex<Receiver<crate::InboundHeaders>>>,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
@@ -370,7 +405,7 @@ impl P2pService {
                         continue;
                     }
                     let received = outbound_rx.lock().recv_timeout(Duration::from_secs(1));
-                    let Ok(addr) = received else {
+                    let Ok(dial) = received else {
                         if matches!(
                             received,
                             Err(crossbeam_channel::RecvTimeoutError::Disconnected)
@@ -379,9 +414,9 @@ impl P2pService {
                         }
                         continue;
                     };
-                    if active.contains_key(&addr) || peer_table.is_connected(addr) {
+                    if active.contains_key(&dial.addr) || peer_table.is_connected(dial.addr) {
                         tracing::debug!(
-                            addr = %addr,
+                            addr = %dial.addr,
                             "p2p outbound request skipped: already active"
                         );
                         continue;
@@ -393,10 +428,17 @@ impl P2pService {
                         block_relay_slots,
                         extra_dial,
                     );
-                    let handle =
-                        crate::listener::spawn_outbound_connection(addr, shared.clone(), role);
-                    active.insert(addr, role);
-                    handles.push((addr, handle));
+                    let handle = if dial.manual {
+                        crate::listener::spawn_pinned_outbound_connection(
+                            dial.addr,
+                            shared.clone(),
+                            role,
+                        )
+                    } else {
+                        crate::listener::spawn_outbound_connection(dial.addr, shared.clone(), role)
+                    };
+                    active.insert(dial.addr, role);
+                    handles.push((dial.addr, handle));
                 }
                 for (_, handle) in handles {
                     let _ = handle.join();
@@ -578,15 +620,15 @@ impl P2pService {
         Arc::clone(&self.banned)
     }
 
-    /// Returns a sender for RPC addnode requests.
+    /// Returns a sender for outbound dial requests, manual or not.
     #[must_use]
-    pub fn outbound_sender(&self) -> Sender<SocketAddr> {
+    pub fn outbound_sender(&self) -> Sender<OutboundDial> {
         self.outbound_tx.clone()
     }
 
     /// Returns the service-owned outbound request receiver.
     #[must_use]
-    pub fn outbound_receiver(&self) -> Arc<Mutex<Receiver<SocketAddr>>> {
+    pub fn outbound_receiver(&self) -> Arc<Mutex<Receiver<OutboundDial>>> {
         Arc::clone(&self.outbound_rx)
     }
 
@@ -633,7 +675,7 @@ impl P2pService {
         if !self.network_active() {
             return Ok(());
         }
-        match self.outbound_tx.try_send(addr) {
+        match self.outbound_tx.try_send(OutboundDial::pinned(addr)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => Ok(()),
             Err(TrySendError::Full(_)) => Err(P2pControlError::QueueFull),
@@ -735,7 +777,7 @@ fn run_fixed_peer_bootstrap(
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
-    outbound_tx: Sender<SocketAddr>,
+    outbound_tx: Sender<OutboundDial>,
     endpoints: Vec<String>,
 ) {
     while !shutdown.load(Ordering::Acquire) {
@@ -760,7 +802,7 @@ fn run_fixed_peer_bootstrap(
                 if peer_table.is_connected(addr) || !network_active.load(Ordering::Acquire) {
                     continue;
                 }
-                if outbound_tx.try_send(addr).is_err() {
+                if outbound_tx.try_send(OutboundDial::pinned(addr)).is_err() {
                     break 'endpoints;
                 }
             }
@@ -869,10 +911,15 @@ fn retire_extra_full_relay_connection(
 ///
 /// PRE: `slots` is the configured full-relay count.
 /// POST: return `None` while the table holds no more than `slots` such
-///   connections; otherwise return the newest one old enough to be judged.
+///   connections; otherwise return the newest automatic one old enough to be
+///   judged.
 /// INVARIANT: a connection that never finished its handshake still holds a
-///   slot, so it counts; `PeerTable::sessions` is ordered by connection
-///   identity, which is dial order, so the newest is last.
+///   slot, so it counts, but a hand-pinned one is never the victim: Core's
+///   `EvictExtraOutboundPeers` looks only at `IsFullOutboundConn()` and
+///   `IsBlockOnlyConn()`, neither of which includes
+///   `ConnectionType::MANUAL` (`net_processing.cpp:5558-5604`).
+///   `PeerTable::sessions` is ordered by connection identity, which is dial
+///   order, so the newest is last.
 fn newest_excess_full_relay(
     peer_table: &crate::PeerTable,
     slots: usize,
@@ -884,6 +931,7 @@ fn newest_excess_full_relay(
         .filter(|session| {
             !session.lease.is_inbound()
                 && !session.lease.is_cancelled()
+                && !session.lease.is_manual()
                 && session.lease.role() == crate::peer_info::PeerRole::FullRelay
         })
         .collect();
@@ -905,7 +953,7 @@ fn run_dns_peer_maintenance(
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
-    outbound_tx: Sender<SocketAddr>,
+    outbound_tx: Sender<OutboundDial>,
     port: u16,
     seeds: Vec<String>,
     target: usize,
@@ -993,7 +1041,7 @@ fn drain_dns_peer_deficit<R>(
     seeds: &[&str],
     network_active: &AtomicBool,
     peer_table: &crate::PeerTable,
-    outbound_tx: &Sender<SocketAddr>,
+    outbound_tx: &Sender<OutboundDial>,
     recently_queued: &mut HashMap<SocketAddr, Instant>,
     cursor: usize,
     needed: usize,
@@ -1028,7 +1076,7 @@ where
             {
                 continue;
             }
-            match outbound_tx.try_send(addr) {
+            match outbound_tx.try_send(OutboundDial::auto(addr)) {
                 Ok(()) => {
                     recently_queued.insert(addr, now);
                     queued += 1;
@@ -1293,7 +1341,9 @@ mod tests {
         );
 
         // The newest connection overall is too young to judge; the one retired
-        // is the newest that is old enough.
+        // is the newest that is old enough. A hand-pinned connection is newer
+        // still and aged, and Core's `EvictExtraOutboundPeers` never looks at
+        // it (`net_processing.cpp:5558-5604`).
         let (young_tx, _young_rx) = crossbeam_channel::unbounded();
         let young_lease = PeerLease::new(young_tx);
         table.register(addr(5), young_lease);
@@ -1310,5 +1360,17 @@ mod tests {
             "the newest aged connection is the one"
         );
         assert_eq!(excess.lease.role(), PeerRole::FullRelay);
+
+        let (pinned_tx, _pinned_rx) = crossbeam_channel::unbounded();
+        let mut pinned_lease = PeerLease::new_manual(pinned_tx, PeerRole::FullRelay);
+        pinned_lease.backdate_for_test(aged);
+        table.register(addr(7), pinned_lease);
+        assert_eq!(
+            newest_excess_full_relay(&table, 2, now)
+                .expect("the pinned connection is not a candidate")
+                .addr,
+            excess.addr,
+            "the newest automatic connection stays the victim while a pinned one is newer"
+        );
     }
 }

@@ -406,7 +406,7 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
             if ctx.network_active.load(Ordering::Acquire)
                 && let Some(sender) = &ctx.p2p_outbound_sender
             {
-                match sender.try_send(addr) {
+                match sender.try_send(bitcoin_rs_p2p::OutboundDial::pinned(addr)) {
                     Ok(()) => {}
                     Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => {}
                     Err(TrySendError::Full(_)) => {
@@ -720,10 +720,8 @@ mod addnode_validation_tests {
         assert!(rx.try_recv().is_err());
         let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
         assert!(result.is_ok());
-        assert_eq!(
-            rx.try_recv().ok(),
-            Some(SocketAddr::from(([127, 0, 0, 2], 8333)))
-        );
+        let queued = bitcoin_rs_p2p::OutboundDial::pinned(SocketAddr::from(([127, 0, 0, 2], 8333)));
+        assert_eq!(rx.try_recv().ok(), Some(queued));
     }
 
     #[test]
@@ -739,13 +737,21 @@ mod addnode_validation_tests {
         let Ok(sent) = rx.try_recv() else {
             panic!("addnode did not send outbound request");
         };
-        assert_eq!(sent, std::net::SocketAddr::from(([127, 0, 0, 1], 8333)));
+        let queued = bitcoin_rs_p2p::OutboundDial::pinned(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            8333,
+        )));
+        assert_eq!(sent, queued);
     }
 
     #[test]
     fn addnode_returns_error_when_outbound_queue_is_full() {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        tx.try_send(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
+        let queued = bitcoin_rs_p2p::OutboundDial::pinned(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            8333,
+        )));
+        tx.try_send(queued)
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
         let mut ctx = Context::new();
         ctx.p2p_outbound_sender = Some(tx);
@@ -763,7 +769,11 @@ mod addnode_validation_tests {
     #[test]
     fn addnode_add_persists_when_outbound_queue_is_full() {
         let (tx, _rx) = crossbeam_channel::bounded(1);
-        tx.try_send(std::net::SocketAddr::from(([127, 0, 0, 1], 8333)))
+        let queued = bitcoin_rs_p2p::OutboundDial::pinned(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            8333,
+        )));
+        tx.try_send(queued)
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
         let mut ctx = Context::new();
         ctx.p2p_outbound_sender = Some(tx);
