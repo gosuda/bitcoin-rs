@@ -8,7 +8,9 @@ use std::time::Instant;
 use arc_swap::ArcSwapOption;
 // Wire seam: byte-array access on the retained bitcoin:: wire hash types.
 use bitcoin::hashes::Hash;
-use bitcoin_rs_chain::{BlockTree, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::{
+    BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
+};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
@@ -57,6 +59,7 @@ pub(crate) struct TestChain {
     block_tree: Arc<RwLock<BlockTree>>,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    minimum_chain_work: ChainWork,
     scripted_commit_failure: Mutex<Option<(Hash256, WindowCommitDisposition)>>,
     scripted_branch_switch: Mutex<Option<ScriptedBranchSwitch>>,
 }
@@ -72,6 +75,7 @@ impl TestChain {
             block_tree,
             chain_tip,
             applied_tip,
+            minimum_chain_work: ChainWork::from_be_bytes(Network::Regtest.minimum_chain_work()),
             scripted_commit_failure: Mutex::new(None),
             scripted_branch_switch: Mutex::new(None),
         }
@@ -93,6 +97,14 @@ impl TestChain {
             });
         bitcoin_rs_consensus::check_block_body_binding(block, segwit_active)
             .map_err(|error| -> SyncChainError { Box::new(error) })
+    }
+
+    /// Overrides the assumed-work floor the presync gate reads, so a test
+    /// can make a fixture chain pass or fail it at will.
+    #[must_use]
+    pub(crate) const fn with_minimum_chain_work(mut self, minimum: ChainWork) -> Self {
+        self.minimum_chain_work = minimum;
+        self
     }
 }
 
@@ -145,6 +157,10 @@ impl SyncChain for TestChain {
         if self.chain_tip.load_full().is_none() {
             self.chain_tip.store(Some(snapshot));
         }
+    }
+
+    fn minimum_chain_work(&self) -> ChainWork {
+        self.minimum_chain_work
     }
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
@@ -1705,18 +1721,32 @@ impl SyncHarness {
     }
 
     /// The same executor over a caller-chosen initial-block-download latch.
-    fn with_ibd(mut tree: BlockTree, ibd: Arc<InitialBlockDownload>) -> Self {
+    fn with_ibd(tree: BlockTree, ibd: Arc<InitialBlockDownload>) -> Self {
+        Self::with_chain_work(
+            tree,
+            ibd,
+            ChainWork::from_be_bytes(Network::Regtest.minimum_chain_work()),
+        )
+    }
+
+    /// The same executor with the network's assumed-work floor overridden,
+    /// so a fixture chain can be made to pass or fail the header-presync
+    /// gate at will.
+    fn with_chain_work(
+        mut tree: BlockTree,
+        ibd: Arc<InitialBlockDownload>,
+        minimum_chain_work: ChainWork,
+    ) -> Self {
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let peers = Arc::new(PeerTable::new());
         let (inbound_headers_tx, inbound_headers_rx) = unbounded();
         let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
-        let chain = Arc::new(TestChain::new(
-            chain_tip,
-            Arc::clone(&applied_tip),
-            Arc::clone(&block_tree),
-        ));
+        let chain = Arc::new(
+            TestChain::new(chain_tip, Arc::clone(&applied_tip), Arc::clone(&block_tree))
+                .with_minimum_chain_work(minimum_chain_work),
+        );
         let sync = BlockSync::new(
             chain,
             Arc::clone(&peers),
@@ -2549,6 +2579,9 @@ mod validation_1;
 
 #[cfg(test)]
 mod witness_staging_gate;
+
+#[cfg(test)]
+mod headers_presync;
 
 mod frontier_recovery;
 
