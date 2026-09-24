@@ -20,8 +20,8 @@ stay one frame. Inbound traffic reaches the host through
 budget's pre-load production headroom gate and reads the active chain through the
 `ChainQuery` trait. Served block bodies are the stored consensus bytes
 (`Message::BlockPayload`); they are not decoded and re-encoded. `inbound` hands over
-`InboundBlock` and `InboundHeaders` with their wire bytes preserved. Misbehaving peers accumulate score on the file-persisted
-`BanList`; whole subnets are excluded as a `BannedSubnet` built from an `IpSubnet`.
+`InboundBlock` and `InboundHeaders` with their wire bytes preserved. Manual bans exclude
+whole subnets as a `BannedSubnet` built from an `IpSubnet`, held in memory.
 `wire` decodes BIP155 `addrv2` messages, and BIP339 wtxid-relay state lives in `wtxid`.
 
 `PeerTable` is the single authoritative owner of live peer sessions (`PeerSession`),
@@ -68,21 +68,9 @@ initial-block-download latch shared with RPC: while it is active,
 transaction-typed `inv` vectors are never requested and `tx` bodies are
 dropped before ingress (Core 31.1 `net_processing.cpp:4401-4404`,
 `:4713-4716`); `inbound` hands over `InboundBlock`,
-`InboundHeaders`, and `InboundTx` with their delivering peer stamped. Misbehaving peers
-are tracked via the file-persisted `BanList` of the `banlist` module, whole subnets are
-excluded as a `BannedSubnet` built from an `IpSubnet`. `wire` decodes BIP155 `addrv2`
-messages, and BIP339 wtxid-relay state lives in `wtxid`.
-
-## Ban-list persistence contract
-
-`BanList::load` and `BanList::save` own the score-list file. Each non-empty row is
-`<ip>\t<score>\t<until-seconds>\t<reason>`; `until-seconds = 0` means no expiry,
-and non-zero values are seconds since `UNIX_EPOCH`. A missing file loads as an
-empty list. Other open or read failures are unavailable and propagate as
-`PeerError::Io`, consistent with `CONSTRAINTS.md` `CL-23` (unavailable is not
-empty). Malformed fields and expiry values that cannot be represented by
-`SystemTime` fail as `PeerError::InvalidBanEntry`. Loading does not rewrite the
-source file. This contract does not make `save` crash-atomic.
+`InboundHeaders`, and `InboundTx` with their delivering peer stamped. Manual bans
+exclude whole subnets as a `BannedSubnet` built from an `IpSubnet`, held in memory.
+`wire` decodes BIP155 `addrv2` messages, and BIP339 wtxid-relay state lives in `wtxid`.
 
 ## Features
 - `default` (enables `fjall`): build with the fjall storage backend selected.
