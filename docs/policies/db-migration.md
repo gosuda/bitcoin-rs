@@ -105,17 +105,19 @@ migration.
 
 How each input layer treats an entry it no longer knows:
 
-- TOML (`--config`): unknown keys fail startup (`deny_unknown_fields`), so a
-  removed key must be deleted from the file before the new binary starts.
+- TOML (`--config`): unknown keys fail startup (the generated reader names the
+  accepted keys, and the nested `chainstate_journal` table carries
+  `deny_unknown_fields`), so a removed key must be deleted from the file before
+  the new binary starts.
 - CLI: an unknown flag is rejected at argument parsing, before any state
   opens.
 - `BITCOIN_RS_*` environment: unknown variables are skipped, not rejected. A
   stale variable left in a service unit stays silently inert; the operator
   removes it.
-- `bitcoin.conf` (`--bitcoin-conf`): only the mapped Core keys are read
-  (`prune`, `rpcuser`, `rpcpassword`, `rpccookiefile`, `rest`, `listen`,
-  `txindex`, `dbcache`); every other line is ignored. Removed bitcoin-rs
-  settings never had Core-key spellings.
+- `bitcoin.conf` (`--bitcoin-conf`): only the Core keys the option table names
+  are read (`dbcache`, `prune`, `rest`, `txindex`, `rpcuser`, `rpcpassword`,
+  `rpccookiefile`, and the `listen` switch); every other line is ignored.
+  Removed bitcoin-rs settings never had Core-key spellings.
 
 ### Removed without an alias
 
