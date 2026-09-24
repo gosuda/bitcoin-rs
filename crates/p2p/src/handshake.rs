@@ -1,6 +1,5 @@
 use std::io::{Cursor, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::p2p::ServiceFlags;
@@ -56,13 +55,17 @@ pub const fn post_verack_messages() -> [Message; 1] {
 }
 
 /// Sends the post-verack preference messages and records what we advertised.
+///
+/// PRE: `peer` finished the `version`/`verack` exchange.
+/// POST: The messages are written and the advertised compact-block version
+/// is recorded.
+/// INVARIANT: This function counts no bytes; the stream owns byte
+/// accounting.
 pub(crate) fn send_post_verack_messages<S: Read + Write>(
     peer: &mut Peer<S>,
-    lease: &PeerLease,
-    totals: Option<&Arc<crate::TrafficTotals>>,
 ) -> Result<(), PeerError> {
     for message in post_verack_messages() {
-        send_handshake_message(peer, &message, lease, totals)?;
+        peer.send(&message)?;
     }
     peer.compact_blocks
         .record_local_advertised(COMPACT_BLOCK_VERSION);
@@ -116,70 +119,51 @@ pub fn handshake_cursors(
 /// finite-state machine rejects any inbound message, if `deadline` passes
 /// before the peer reaches the ready state, or if the connection's lease is
 /// revoked mid-handshake.
+///
+/// PRE: `peer` wraps an accepted connection, and `lease` belongs to it.
+/// POST: `peer` is `Ready`, and the post-verack messages are sent.
+/// INVARIANT: This function counts no bytes; the stream that `peer` wraps
+/// owns byte accounting.
 pub fn run_inbound_handshake<S: Read + Write>(
     peer: &mut Peer<S>,
     our_nonce: u64,
     our_start_height: i32,
     lease: &PeerLease,
-    totals: Option<&Arc<crate::TrafficTotals>>,
     deadline: Instant,
 ) -> Result<(), PeerError> {
-    let (remote_version, _) = read_handshake_message(peer, lease, totals, deadline)?;
+    let (remote_version, _) = read_handshake_message(peer, lease, deadline)?;
     let responses = dispatch_inbound(peer, &remote_version)?;
 
     peer.state = PeerState::VersionExchange;
-    send_handshake_message(
-        peer,
-        &Message::Version(version_message(our_nonce, our_start_height)),
-        lease,
-        totals,
-    )?;
+    peer.send(&Message::Version(version_message(
+        our_nonce,
+        our_start_height,
+    )))?;
     for response in responses {
-        send_handshake_message(peer, &response, lease, totals)?;
+        peer.send(&response)?;
     }
 
     while peer.state != PeerState::Ready {
-        let (inbound, _) = read_handshake_message(peer, lease, totals, deadline)?;
+        let (inbound, _) = read_handshake_message(peer, lease, deadline)?;
         let responses = dispatch_inbound(peer, &inbound)?;
         for response in responses {
-            send_handshake_message(peer, &response, lease, totals)?;
+            peer.send(&response)?;
         }
     }
-    send_post_verack_messages(peer, lease, totals)?;
-    Ok(())
-}
-
-/// Sends one handshake message, accounting its wire bytes on the connection.
-///
-/// Handshake writes leave the connection thread directly, before the
-/// per-connection writer exists, so this phase's telemetry owner is the
-/// connection itself: bytes land on the lease's [`crate::PeerStats`] and,
-/// when present, on the shared aggregate totals.
-pub(crate) fn send_handshake_message<S: Read + Write>(
-    peer: &mut Peer<S>,
-    message: &Message,
-    lease: &PeerLease,
-    totals: Option<&Arc<crate::TrafficTotals>>,
-) -> Result<(), PeerError> {
-    let written = peer.send(message)?;
-    let wire_len = u64::try_from(written).unwrap_or(u64::MAX);
-    lease.stats().record_sent(wire_len);
-    lease.stats().record_msg_sent();
-    if let Some(totals) = totals {
-        totals.record_sent(wire_len);
-    }
+    send_post_verack_messages(peer)?;
     Ok(())
 }
 
 /// Reads one handshake message, retrying transient poll timeouts.
 ///
-/// Wire bytes of every message read are accounted on the connection's
-/// telemetry and, when present, the shared aggregate totals, mirroring the
-/// message loop's reader accounting so handshake traffic is observable.
+/// PRE: `deadline` bounds the whole handshake phase.
+/// POST: Return the first complete message, or the error that ended the
+/// read: a protocol error for a revoked lease, a timeout after `deadline`.
+/// INVARIANT: This function counts no bytes; the stream the caller wraps
+/// (`CountingStream` on live connections) owns socket byte accounting.
 pub(crate) fn read_handshake_message<S: Read>(
     peer: &mut Peer<S>,
     lease: &PeerLease,
-    totals: Option<&Arc<crate::TrafficTotals>>,
     deadline: Instant,
 ) -> Result<(Message, bytes::Bytes), PeerError> {
     loop {
@@ -193,13 +177,6 @@ pub(crate) fn read_handshake_message<S: Read>(
         }
         match read_message(&mut peer.stream, peer.magic) {
             Ok((message, raw)) => {
-                let wire_len =
-                    u64::try_from(raw.len() + crate::wire::HEADER_LEN).unwrap_or(u64::MAX);
-                lease.stats().record_recv(wire_len);
-                lease.stats().record_msg_recv();
-                if let Some(totals) = totals {
-                    totals.record_recv(wire_len);
-                }
                 if matches!(message, Message::Version(_)) {
                     peer.version_received_time = Some(
                         SystemTime::now()
@@ -308,7 +285,6 @@ mod tests {
             1,
             0,
             &lease,
-            None,
             std::time::Instant::now() + std::time::Duration::from_secs(5),
         )?;
 

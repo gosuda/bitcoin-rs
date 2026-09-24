@@ -2,8 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -26,157 +25,6 @@ impl ConnectionId {
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
-    }
-}
-
-/// Live traffic and ping telemetry for one peer connection.
-///
-/// Shared between the connection's reader/writer threads and external
-/// observers (network control queries), so every counter is atomic and every
-/// timestamp is supplied by the caller for deterministic tests. Timestamps are
-/// Unix microseconds; ping durations are microseconds.
-#[derive(Debug)]
-pub struct PeerStats {
-    bytes_recv: AtomicU64,
-    bytes_sent: AtomicU64,
-    msgs_recv: AtomicU64,
-    msgs_sent: AtomicU64,
-    time_offset_secs: AtomicI64,
-    next_ping_nonce: AtomicU64,
-    ping_out_nonce: AtomicU64,
-    ping_sent_us: AtomicU64,
-    last_ping_us: AtomicU64,
-    min_ping_us: AtomicU64,
-}
-
-impl Default for PeerStats {
-    fn default() -> Self {
-        Self {
-            bytes_recv: AtomicU64::new(0),
-            bytes_sent: AtomicU64::new(0),
-            msgs_recv: AtomicU64::new(0),
-            msgs_sent: AtomicU64::new(0),
-            time_offset_secs: AtomicI64::new(TIME_OFFSET_UNSET),
-            next_ping_nonce: AtomicU64::new(0),
-            ping_out_nonce: AtomicU64::new(0),
-            ping_sent_us: AtomicU64::new(0),
-            last_ping_us: AtomicU64::new(0),
-            min_ping_us: AtomicU64::new(0),
-        }
-    }
-}
-
-/// Sentinel for "no time offset recorded yet" (`0` is a valid offset).
-const TIME_OFFSET_UNSET: i64 = i64::MIN;
-
-impl PeerStats {
-    /// Accounts `bytes` of received wire traffic.
-    pub fn record_recv(&self, bytes: u64) {
-        self.bytes_recv.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Accounts `bytes` of sent wire traffic.
-    pub fn record_sent(&self, bytes: u64) {
-        self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
-    }
-
-    /// Counts one received message.
-    pub fn record_msg_recv(&self) {
-        self.msgs_recv.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Counts one sent message.
-    pub fn record_msg_sent(&self) {
-        self.msgs_sent.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Total wire bytes received on this connection.
-    #[must_use]
-    pub fn bytes_recv(&self) -> u64 {
-        self.bytes_recv.load(Ordering::Relaxed)
-    }
-
-    /// Total wire bytes sent on this connection.
-    #[must_use]
-    pub fn bytes_sent(&self) -> u64 {
-        self.bytes_sent.load(Ordering::Relaxed)
-    }
-
-    /// Number of messages received on this connection.
-    #[must_use]
-    pub fn msgs_recv(&self) -> u64 {
-        self.msgs_recv.load(Ordering::Relaxed)
-    }
-
-    /// Number of messages sent on this connection.
-    #[must_use]
-    pub fn msgs_sent(&self) -> u64 {
-        self.msgs_sent.load(Ordering::Relaxed)
-    }
-
-    /// Records the remote clock offset in seconds observed from its `version`.
-    pub fn set_time_offset(&self, offset_secs: i64) {
-        self.time_offset_secs.store(offset_secs, Ordering::Relaxed);
-    }
-
-    /// Remote clock offset in seconds, when a `version` message was observed.
-    #[must_use]
-    pub fn time_offset(&self) -> Option<i64> {
-        let offset = self.time_offset_secs.load(Ordering::Relaxed);
-        (offset != TIME_OFFSET_UNSET).then_some(offset)
-    }
-
-    /// Registers an outgoing ping at `now_us` and returns its nonce.
-    ///
-    /// Mirrors Bitcoin Core: a new ping supersedes any outstanding one, so a
-    /// later pong carrying a stale nonce is discarded by [`Self::complete_ping`].
-    pub fn begin_ping(&self, now_us: u64) -> u64 {
-        let nonce = self.next_ping_nonce.fetch_add(1, Ordering::Relaxed) + 1;
-        self.ping_out_nonce.store(nonce, Ordering::Relaxed);
-        self.ping_sent_us.store(now_us, Ordering::Relaxed);
-        nonce
-    }
-
-    /// Completes the outstanding ping when `nonce` matches, returning its
-    /// round-trip duration; a stale or unknown nonce completes nothing.
-    pub fn complete_ping(&self, nonce: u64, now_us: u64) -> Option<u64> {
-        if self
-            .ping_out_nonce
-            .compare_exchange(nonce, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return None;
-        }
-        let elapsed = now_us.saturating_sub(self.ping_sent_us.load(Ordering::Relaxed));
-        self.last_ping_us.store(elapsed, Ordering::Relaxed);
-        let prior = self.min_ping_us.load(Ordering::Relaxed);
-        if prior == 0 || elapsed < prior {
-            self.min_ping_us.store(elapsed, Ordering::Relaxed);
-        }
-        Some(elapsed)
-    }
-
-    /// Duration of the most recently completed ping round trip.
-    #[must_use]
-    pub fn ping_time(&self) -> Option<Duration> {
-        let micros = self.last_ping_us.load(Ordering::Relaxed);
-        (micros != 0).then(|| Duration::from_micros(micros))
-    }
-
-    /// Shortest observed ping round trip on this connection.
-    #[must_use]
-    pub fn min_ping(&self) -> Option<Duration> {
-        let micros = self.min_ping_us.load(Ordering::Relaxed);
-        (micros != 0).then(|| Duration::from_micros(micros))
-    }
-
-    /// Time an outstanding ping has been unanswered at `now_us`.
-    #[must_use]
-    pub fn ping_wait(&self, now_us: u64) -> Option<Duration> {
-        let nonce = self.ping_out_nonce.load(Ordering::Relaxed);
-        (nonce != 0).then(|| {
-            Duration::from_micros(now_us.saturating_sub(self.ping_sent_us.load(Ordering::Relaxed)))
-        })
     }
 }
 
@@ -226,16 +74,14 @@ pub const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
 /// fit: after fifteen, 60,000,360 bytes remain below this 64 MiB high-water.
 pub const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-/// `usize` form of the consensus maximum serialized block size. The
-/// authoritative `u64` original and this `usize` form are both owned by
-/// `peer` ([`crate::MAX_BLOCK_SERIALIZED_SIZE`] and
-/// [`crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE`]); `connection` references
-/// them rather than carrying an independent copy.
+/// Consensus maximum serialized block size. `peer` owns the value
+/// ([`crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE`]); `connection` references it
+/// rather than carrying an independent copy.
 const BLOCK_SERIALIZED_SIZE: usize = crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
 
 /// Full framed-wire bytes reserved before loading a worst-case block body.
 ///
-/// Equals `HEADER_LEN + MAX_BLOCK_SERIALIZED_SIZE`: the full encoded wire
+/// Equals `HEADER_LEN + MAX_BLOCK_SERIALIZED_SIZE_USIZE`: the full encoded wire
 /// byte count that `wire_len` charges and `write_message` releases.
 pub const BLOCK_PRODUCTION_RESERVE_BYTES: usize = crate::wire::HEADER_LEN + BLOCK_SERIALIZED_SIZE;
 
@@ -509,7 +355,6 @@ pub struct PeerLease {
     close_tx: Sender<()>,
     close_rx: Receiver<()>,
     budget: Arc<OutboundBudget>,
-    stats: Arc<PeerStats>,
     inbound: bool,
 }
 
@@ -547,7 +392,6 @@ impl PeerLease {
             close_tx,
             close_rx,
             budget: Arc::new(budget),
-            stats: Arc::new(PeerStats::default()),
             inbound,
         }
     }
@@ -579,17 +423,6 @@ impl PeerLease {
         self.inbound
     }
 
-    /// Live traffic and ping telemetry for this connection.
-    #[must_use]
-    pub fn stats(&self) -> &PeerStats {
-        &self.stats
-    }
-
-    /// Shared handle to this connection's telemetry.
-    #[must_use]
-    pub fn stats_handle(&self) -> Arc<PeerStats> {
-        Arc::clone(&self.stats)
-    }
     /// Receiver half of the close signal raised by [`PeerLease::cancel`].
     /// The connection writer selects on it so teardown never depends on
     /// remaining sender clones. Node code never observes this channel.
@@ -828,70 +661,21 @@ mod tests {
     }
 
     #[test]
-    fn ping_round_trip_records_last_and_min_durations() {
-        let stats = super::PeerStats::default();
-
-        let first = stats.begin_ping(1_000);
-        assert_eq!(stats.complete_ping(first, 3_000), Some(2_000));
-        let second = stats.begin_ping(10_000);
-        assert_eq!(stats.complete_ping(second, 11_000), Some(1_000));
-
-        assert_eq!(stats.ping_time(), Some(std::time::Duration::from_millis(1)));
-        assert_eq!(stats.min_ping(), Some(std::time::Duration::from_millis(1)));
-        assert_eq!(stats.ping_wait(12_000), None);
-    }
-
-    #[test]
-    fn stale_ping_nonce_does_not_complete_outstanding_ping() {
-        let stats = super::PeerStats::default();
-
-        let superseded = stats.begin_ping(1_000);
-        let current = stats.begin_ping(2_000);
-
-        assert_eq!(stats.complete_ping(superseded, 9_000), None);
-        assert_eq!(
-            stats.ping_wait(3_000),
-            Some(std::time::Duration::from_millis(1))
-        );
-        assert_eq!(stats.complete_ping(current, 9_000), Some(7_000));
-    }
-
-    #[test]
-    fn traffic_and_offset_counters_accumulate() {
-        let stats = super::PeerStats::default();
-        assert_eq!(stats.time_offset(), None);
-
-        stats.record_recv(120);
-        stats.record_recv(24);
-        stats.record_sent(48);
-        stats.record_msg_recv();
-        stats.record_msg_recv();
-        stats.record_msg_sent();
-        stats.set_time_offset(-3);
-
-        assert_eq!(stats.bytes_recv(), 144);
-        assert_eq!(stats.bytes_sent(), 48);
-        assert_eq!(stats.msgs_recv(), 2);
-        assert_eq!(stats.msgs_sent(), 1);
-        assert_eq!(stats.time_offset(), Some(-3));
-    }
-
-    #[test]
     fn block_production_reserve_admits_worst_case_block() {
-        // The reserve is derived from the authoritative consensus constant
-        // `MAX_BLOCK_SERIALIZED_SIZE` (owned by `peer`). A worst-case block
-        // body of exactly that many wire bytes (header + body) must be
-        // admissible into a queue whose byte cap equals the reserve. If the
-        // reserve did not match the authoritative constant, a real 4 MB
-        // block would be silently refused or the queue would over-reserve.
-        let Ok(block_size) = usize::try_from(crate::MAX_BLOCK_SERIALIZED_SIZE) else {
+        // A worst-case block body is the consensus limit that
+        // `bitcoin_rs_consensus` owns. Its full wire message (header + body)
+        // must be admissible into a queue whose byte cap equals the reserve.
+        // A smaller reserve would refuse a real 4 MB block; a larger one
+        // would over-reserve.
+        let Ok(block_size) = usize::try_from(bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE)
+        else {
             panic!("MAX_BLOCK_SERIALIZED_SIZE exceeds usize on this platform")
         };
         let worst_case_wire = crate::wire::HEADER_LEN + block_size;
         assert_eq!(
             super::BLOCK_PRODUCTION_RESERVE_BYTES,
             worst_case_wire,
-            "reserve must equal header + authoritative max block size"
+            "reserve must equal header + consensus max block size"
         );
         let budget = super::OutboundBudget::with_block_reserve(
             1,
