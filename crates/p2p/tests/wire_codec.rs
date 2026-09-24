@@ -330,6 +330,49 @@ fn round_trips_compact_block_messages() -> Result<(), PeerError> {
     Ok(())
 }
 
+/// Hand-builds a `getblocktxn` payload from raw differential indexes, so a
+/// list the encoder would never produce still reaches the decoder.
+fn getblocktxn_frame(deltas: &[u64]) -> Result<Vec<u8>, PeerError> {
+    let mut payload = bitcoin::consensus::encode::serialize(&BlockHash::from_byte_array([3u8; 32]));
+    let count =
+        u64::try_from(deltas.len()).map_err(|_| PeerError::PayloadTooLarge(deltas.len()))?;
+    payload.extend_from_slice(&bitcoin::consensus::encode::serialize(&VarInt(count)));
+    for delta in deltas {
+        payload.extend_from_slice(&bitcoin::consensus::encode::serialize(&VarInt(*delta)));
+    }
+    message_frame(b"getblocktxn", &payload)
+}
+
+/// Decodes one hand-built `getblocktxn` frame to its absolute index list.
+fn decoded_getblocktxn(deltas: &[u64]) -> Result<Vec<u64>, PeerError> {
+    let mut cursor = Cursor::new(getblocktxn_frame(deltas)?);
+    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
+    let Message::GetBlockTxn(request) = decoded else {
+        panic!("a getblocktxn frame must decode as getblocktxn");
+    };
+    Ok(request.txs_request.indexes)
+}
+
+/// BIP152 encodes `getblocktxn` indexes differentially: the first is absolute
+/// and each later one is a delta from the previous absolute index, so a `0`
+/// delta names the next transaction rather than repeating one. The decoder
+/// yields a strictly increasing absolute list, refuses a tail that cannot be
+/// added without overflowing, and decodes an empty list as empty — which is
+/// why refusing a malformed list belongs to dispatch, not to the codec
+/// (Core 31.1 `net_processing.cpp:4560-4574`).
+#[test]
+fn getblocktxn_differential_indexes_decode_to_absolute_order() -> Result<(), PeerError> {
+    assert_eq!(decoded_getblocktxn(&[1, 0, 0])?, vec![1, 2, 3]);
+    assert!(decoded_getblocktxn(&[])?.is_empty());
+
+    let mut cursor = Cursor::new(getblocktxn_frame(&[0, u64::MAX])?);
+    assert!(
+        read_message(&mut cursor, Magic::BITCOIN).is_err(),
+        "an overflowing index delta must not decode"
+    );
+    Ok(())
+}
+
 fn inventory_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
     let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
     let mut payload = Vec::new();
