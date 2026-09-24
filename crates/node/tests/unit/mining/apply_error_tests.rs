@@ -4,6 +4,7 @@
 use super::{map_apply_error, test_block_validity_error};
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::ChainWork;
+use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_mining::BlockValidationResult;
@@ -113,6 +114,28 @@ fn apply_errors_delegate_consensus_and_chain_reasons() {
             hash: Hash256::default(),
         })),
         "duplicate-invalid"
+    );
+    assert_eq!(
+        rejected(ApplyError::Chain(ChainError::BadVersion {
+            version: 1,
+            required: 2,
+            height: 500,
+        })),
+        "bad-version(0x00000001)"
+    );
+    assert_eq!(
+        rejected(ApplyError::Chain(ChainError::TimewarpAttack {
+            height: 2016,
+            timestamp: 1,
+            minimum: 601,
+        })),
+        "time-timewarp-attack"
+    );
+    assert_eq!(
+        rejected(ApplyError::Chain(ChainError::InvalidParent {
+            parent: NodeId::new(3),
+        })),
+        "bad-prevblk"
     );
 }
 
