@@ -116,6 +116,11 @@ pub struct ConnectionShared {
     pub ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
     /// Block-download orchestrator for this start epoch.
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
+    /// Inbound connection capacity: the automatic-connection maximum minus
+    /// the outbound slot counts. The listener refuses inbound admission at
+    /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
+    /// applied at `net.cpp:1838-1845` with eviction cut to refusal).
+    pub max_inbound: usize,
 }
 
 impl ConnectionShared {
@@ -158,6 +163,7 @@ impl ConnectionShared {
             inbound_tx: extras.inbound_tx,
             ibd: extras.ibd,
             block_sync: extras.block_sync,
+            max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
         }
     }
 
@@ -483,7 +489,24 @@ fn accept_connections(
                     tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: network inactive");
                     continue;
                 }
-                spawn_handshake_thread(stream, peer_addr, shared.clone());
+                // Reserve the inbound slot atomically with the capacity
+                // test before any thread exists: a separate count followed
+                // by an unconstrained spawn races concurrent accepts.
+                // Registration stays identity-checked, so the reservation
+                // itself is the handshaking-peer accounting Core's connman
+                // performs (`net.cpp:1838-1845`, eviction cut to refusal).
+                let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
+                let lease = crate::PeerLease::new_inbound(outbound_tx);
+                let Some(lease) =
+                    shared
+                        .peer_table
+                        .try_register_inbound(peer_addr, lease, shared.max_inbound)
+                else {
+                    drop(stream);
+                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: at capacity");
+                    continue;
+                };
+                spawn_handshake_thread(stream, peer_addr, shared.clone(), lease, outbound_rx);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 std::thread::sleep(POLL_INTERVAL);
@@ -683,12 +706,20 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     Ok(())
 }
 
-fn spawn_handshake_thread(stream: TcpStream, peer_addr: SocketAddr, shared: ConnectionShared) {
+fn spawn_handshake_thread(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    shared: ConnectionShared,
+    lease: crate::PeerLease,
+    outbound_rx: crossbeam_channel::Receiver<crate::Message>,
+) {
     let thread_name = format!("bitcoin-rs-p2p-handshake-{peer_addr}");
+    let peer_table = Arc::clone(&shared.peer_table);
+    let reservation = lease.clone();
     let spawn_result = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            if let Err(error) = run_handshake(stream, peer_addr, &shared) {
+            if let Err(error) = run_handshake(stream, peer_addr, &shared, lease, outbound_rx) {
                 tracing::warn!(
                     peer_addr = %peer_addr,
                     %error,
@@ -698,6 +729,10 @@ fn spawn_handshake_thread(stream: TcpStream, peer_addr: SocketAddr, shared: Conn
         });
 
     if let Err(error) = spawn_result {
+        // The accept loop reserved this lease for the thread; with no
+        // thread running, the reservation must release its capacity.
+        peer_table.remove_current(peer_addr, &reservation);
+        reservation.cancel();
         tracing::warn!(
             peer_addr = %peer_addr,
             %error,
@@ -712,6 +747,8 @@ fn run_handshake(
     stream: TcpStream,
     peer_addr: SocketAddr,
     shared: &ConnectionShared,
+    lease: crate::PeerLease,
+    outbound_rx: crossbeam_channel::Receiver<crate::Message>,
 ) -> Result<(), crate::wire::PeerError> {
     configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io)?;
 
@@ -722,15 +759,10 @@ fn run_handshake(
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
 
-    // Register the connection before the handshake so live-connection
-    // accounting covers handshaking peers exactly like Core's connman.
-    if shared.is_session_cancelled() {
-        return Err(crate::wire::PeerError::Protocol("p2p startup cancelled"));
-    }
-
-    let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
-    let lease = crate::PeerLease::new_inbound(outbound_tx);
-    shared.peer_table.register(peer_addr, lease.clone());
+    // The accept loop already reserved this lease in the table — live
+    // connection accounting covers handshaking peers exactly like Core's
+    // connman — so the inbound path never registers an unrestricted
+    // connection here.
     if shared.is_session_cancelled() {
         shared.peer_table.remove_current(peer_addr, &lease);
         lease.cancel();
@@ -1814,6 +1846,66 @@ mod resilient_accept_tests {
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
+mod inbound_admission_tests {
+    use std::io::Read;
+    use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use super::{bind_listener, serve, test_shared};
+    use crate::PeerTable;
+
+    /// With the inbound capacity at one, the second accepted socket is
+    /// closed by the listener before any lease registers, while the first
+    /// socket's reservation stays live.
+    #[test]
+    fn inbound_admission_over_cap_drops_stream() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+        let addr = listener.local_addr()?;
+        let peer_table = Arc::new(PeerTable::new());
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&peer_table), headers_tx, blocks_tx);
+        shared.max_inbound = 1;
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let serve_shutdown = Arc::clone(&shutdown);
+        let serve_shared = shared.clone();
+        let handle = std::thread::spawn(move || serve(listener, serve_shutdown, serve_shared));
+
+        let _first = TcpStream::connect(addr)?;
+        let mut second = TcpStream::connect(addr)?;
+        let second_addr = second.local_addr()?;
+        // The refusal closes the socket as part of the same accept step that
+        // admitted the first, so the EOF is the synchronization point. The
+        // read bound only guards a hang: an admitted socket would sit in the
+        // handshake read for the full `HANDSHAKE_TIMEOUT` (10 s) first.
+        second.set_read_timeout(Some(Duration::from_secs(5)))?;
+        let mut byte = [0u8; 1];
+        let read = second.read(&mut byte)?;
+        assert_eq!(
+            read, 0,
+            "the over-capacity socket must be closed by the listener"
+        );
+        assert_eq!(
+            peer_table.live_inbound_count(),
+            1,
+            "the admitted socket keeps its reservation"
+        );
+        assert!(
+            !peer_table.is_connected(second_addr),
+            "the refused socket registered no lease"
+        );
+
+        shutdown.store(true, Ordering::Relaxed);
+        handle.join().expect("listener thread panicked")?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
 mod writer_setup_cleanup_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::sync::Arc;
@@ -1935,7 +2027,13 @@ mod writer_shutdown_tests {
         io::Write::write_all(&mut client, &frame).expect("frame write");
         drop(client);
 
-        let result = crate::listener::run_handshake(server, peer_addr, &shared);
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new_inbound(outbound_tx);
+        let lease = shared
+            .peer_table
+            .try_register_inbound(peer_addr, lease, 1)
+            .expect("the test lease reserves its inbound slot");
+        let result = crate::listener::run_handshake(server, peer_addr, &shared, lease, outbound_rx);
         let Err(error) = result else {
             panic!("handshake failure on a live lease must not be masked as revoked");
         };
