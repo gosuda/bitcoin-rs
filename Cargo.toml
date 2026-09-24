@@ -94,12 +94,6 @@ corepc-types = { version = "0.15.0", default-features = false, features = [
     "std", "serde-deny-unknown-fields",
 ] }
 
-# bitcoin_slices: zero-alloc block visitor. Default features list is empty;
-# enable bitcoin + sha2 explicitly.
-bitcoin_slices = { version = ">=0.12, <0.13", default-features = false, features = [
-    "bitcoin", "sha2",
-] }
-
 # Note: `payjoin` is intentionally NOT declared at the workspace level. Task 14
 # adds it with feature names verified against the version current at that time;
 # the 0.23 line uses `["v2"]` and the 1.0-rc line uses different feature names,
