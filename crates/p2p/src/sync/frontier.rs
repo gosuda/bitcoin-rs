@@ -78,6 +78,10 @@ pub(crate) struct UsablePeer {
     /// The peer's demonstrated height resolved on the active chain, `None`
     /// when its announced tips do not intersect it.
     pub active_height: Option<u32>,
+    /// What this connection relays, fixed when it was created.
+    pub role: crate::peer_info::PeerRole,
+    /// Monotonic instant this connection was created.
+    pub connected_at: Instant,
 }
 
 impl UsablePeer {
