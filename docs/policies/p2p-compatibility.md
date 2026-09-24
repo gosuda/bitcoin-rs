@@ -122,7 +122,7 @@ witness variant. The cache and retry lifecycle are governed by
 | Locator > 101 hashes | disconnect (checked before any state mutation) | misbehavior 255 → ban |
 | `headers` > 2 000 entries | disconnect | misbehavior |
 | `verack` before `version`; duplicate `version`; feature message while disconnected | disconnect | misbehavior |
-| Idle connection | disconnect after 60 s | disconnect after 20 min |
+| Idle connection | one `ping` per 2 min; disconnect once a direction is silent past 20 min | same (`PING_INTERVAL`, `net_processing.cpp:125`; `TIMEOUT_INTERVAL`, `net.h:59`; `InactivityCheck`, `net.cpp:2043-2090`) |
 
 **Automatic misbehavior scoring and bans are not implemented.** Every row above that Core answers with a misbehavior score is answered here with a plain disconnect; banning exists only as the manual subnet mechanism (setban-style), held in memory. Repeated protocol abuse must be handled by the operator until automatic scoring lands (it is not scheduled; do not claim it in docs).
 
@@ -141,8 +141,7 @@ Known deltas from Core 31.1:
 4. **Address management**: no `getaddr` answers, no addr gossip, no DNS-seed-free peer discovery beyond configured `--connect`/`--addnode` surfaces.
 5. **Service bits**: we advertise exactly `NETWORK | WITNESS`. No `NODE_BLOOM`, `NODE_COMPACT_FILTERS`, or `NODE_NETWORK_LIMITED` — honest, since none of those services exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
-7. **Idle timeout** 60 s vs Core's 20 minutes.
-8. **Automatic misbehavior bans** (§6) absent; manual bans only.
+7. **Automatic misbehavior bans** (§6) absent; manual bans only.
 
 ## 8. Verification
 
