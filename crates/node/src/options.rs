@@ -276,10 +276,10 @@ macro_rules! emit_user_config {
                         }
                     )*
                 )*
-                if self.rpc.cookie.is_some() {
+                if upper.rpc.cookie.is_some() {
                     self.rpc.user = None;
                     self.rpc.password = None;
-                } else if self.rpc.user.is_some() || self.rpc.password.is_some() {
+                } else if upper.rpc.user.is_some() || upper.rpc.password.is_some() {
                     self.rpc.cookie = None;
                 }
             }
