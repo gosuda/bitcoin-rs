@@ -1838,6 +1838,7 @@ fn immature_coinbase_spends_reject_on_both_rpcs_and_admit_at_maturity() -> Resul
         height: 119,
         chainwork: ChainWork::ZERO,
         hash: Hash256::from_le_bytes(&[0x71; 32]),
+        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
     });
     handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&spend)]))?;
     assert!(

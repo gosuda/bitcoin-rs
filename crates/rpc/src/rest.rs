@@ -929,6 +929,7 @@ mod tests {
             height: tip_node.height,
             chainwork: tip_node.chainwork,
             hash: tip_node.hash,
+            chain_tx_count: tip_node.chain_tx_count,
         };
         drop(tree);
         ctx.set_applied_tip(tip.clone());
@@ -1352,6 +1353,7 @@ mod tests {
             height: broken_node.height,
             chainwork: broken_node.chainwork,
             hash: broken_node.hash,
+            chain_tx_count: broken_node.chain_tx_count,
         };
         drop(tree);
         ctx.set_applied_tip(tip.clone());

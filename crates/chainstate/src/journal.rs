@@ -286,6 +286,7 @@ fn insert_replayed_header(
         height: node.height,
         chainwork: node.chainwork,
         hash: node.hash,
+        chain_tx_count: ChainTxCount::from_wire(chain_tx_count),
     })
 }
 
