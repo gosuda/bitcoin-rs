@@ -61,9 +61,14 @@ impl bitcoin_rs_index::reconcile::ChainCursorSource for IndexChainCursorSource {
     }
 }
 
-// One active generation of outbound requests is enough to keep the drain fed;
-// extra backlog is overload and must fail fast at producers.
-pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
+// Outbound full-relay slots, and the one active generation of outbound
+// requests that keeps the drain fed: extra backlog is overload and must fail
+// fast at producers. Bitcoin Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS`.
+pub(crate) const P2P_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
+
+// Outbound block-relay-only slots: connections that relay blocks and nothing
+// else. Bitcoin Core's `MAX_BLOCK_RELAY_ONLY_CONNECTIONS`.
+pub(crate) const P2P_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
 // Bounds transient inbound-block buffering between the per-peer listener
 // threads and the single-threaded `BlockSync::tick` drain. Decoded inbound
