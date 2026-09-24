@@ -15,6 +15,10 @@ pub mod header_sync;
 pub mod ibd;
 /// Block-tree node types.
 pub mod node;
+/// Regtest block and proof-of-work builders shared by cross-crate test
+/// harnesses. Compiled only under the `test-seam` feature.
+#[cfg(feature = "test-seam")]
+pub mod regtest_fixture;
 /// Reorganization planning.
 pub mod reorg;
 /// Best-tip snapshot type.
