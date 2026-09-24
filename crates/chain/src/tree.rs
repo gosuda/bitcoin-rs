@@ -108,6 +108,7 @@ impl BlockTree {
         };
         let chain_tx_count = parent_count.advance(height, block_tx_count);
         self.node_mut_without_index_invalidation(id)?.chain_tx_count = chain_tx_count;
+        self.refresh_published_tip(id);
         Ok(())
     }
 
@@ -118,7 +119,36 @@ impl BlockTree {
         chain_tx_count: ChainTxCount,
     ) -> Result<(), ChainError> {
         self.node_mut_without_index_invalidation(id)?.chain_tx_count = chain_tx_count;
+        self.refresh_published_tip(id);
         Ok(())
+    }
+
+    /// Re-publishes the header tip when `id` is the published tip.
+    ///
+    /// A tip snapshot is immutable, so a node whose count becomes known after
+    /// the tip published — the apply path records it, and an authenticated
+    /// restore replaces it — would otherwise keep being advertised with the
+    /// stale count. Only the published tip is refreshed; tip selection does
+    /// not change here.
+    fn refresh_published_tip(&mut self, id: NodeId) {
+        if !self.tip.load_full().is_some_and(|tip| tip.tip_id == id) {
+            return;
+        }
+        if let Ok(snapshot) = self.tip_snapshot(id) {
+            self.tip.store(Some(Arc::new(snapshot)));
+        }
+    }
+
+    /// The published snapshot of `id`: the node's own chain facts.
+    fn tip_snapshot(&self, id: NodeId) -> Result<TipSnapshot, ChainError> {
+        let node = self.node(id)?;
+        Ok(TipSnapshot {
+            tip_id: id,
+            height: node.height,
+            chainwork: node.chainwork,
+            hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
+        })
     }
 
     /// Returns the highest shared ancestor of `a` and `b`, walking parent pointers.
@@ -762,7 +792,6 @@ impl BlockTree {
     pub fn parent_id(&self, id: NodeId) -> Result<Option<NodeId>, ChainError> {
         Ok(self.node(id)?.parent)
     }
-
     fn publish_tip_if_best(&mut self, node_id: NodeId) -> Result<(), ChainError> {
         let node = self.node(node_id)?;
         if node.status == NodeStatus::Invalid {
@@ -783,13 +812,7 @@ impl BlockTree {
                 .status = NodeStatus::Stale;
         }
         self.node_mut_without_index_invalidation(node_id)?.status = NodeStatus::Active;
-        let node = self.node(node_id)?;
-        self.tip.store(Some(Arc::new(TipSnapshot {
-            tip_id: node_id,
-            height: node.height,
-            chainwork: node.chainwork,
-            hash: node.hash,
-        })));
+        self.tip.store(Some(Arc::new(self.tip_snapshot(node_id)?)));
         self.refresh_active_height_index(node_id);
         Ok(())
     }
@@ -1412,6 +1435,7 @@ mod tests {
             height: 7,
             chainwork: ChainWork::ZERO,
             hash: genesis_hash,
+            chain_tx_count: ChainTxCount::UNKNOWN,
         })));
         assert_eq!(tree.tip_height(), Some(7));
         Ok(())
@@ -1428,6 +1452,7 @@ mod tests {
             height: 0,
             chainwork: ChainWork::ZERO,
             hash: genesis_hash,
+            chain_tx_count: ChainTxCount::UNKNOWN,
         })));
         assert_eq!(tree.tip_hash(), Some(genesis_hash));
         Ok(())
@@ -1929,8 +1954,14 @@ mod tests {
 
         tree.record_applied_tx_count(main_id, 2)?;
         tree.record_applied_tx_count(side_id, 7)?;
-        assert_eq!(tree.node(main_id)?.chain_tx_count, ChainTxCount::established(3));
-        assert_eq!(tree.node(side_id)?.chain_tx_count, ChainTxCount::established(8));
+        assert_eq!(
+            tree.node(main_id)?.chain_tx_count,
+            ChainTxCount::established(3)
+        );
+        assert_eq!(
+            tree.node(side_id)?.chain_tx_count,
+            ChainTxCount::established(8)
+        );
         Ok(())
     }
 

@@ -450,6 +450,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
         height: losing_tip.height,
         chainwork: losing_tip.chainwork,
         hash: losing_tip.hash,
+        chain_tx_count: losing_tip.chain_tx_count,
     };
 
     let SyncHarness {

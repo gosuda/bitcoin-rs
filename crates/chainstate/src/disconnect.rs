@@ -5,8 +5,7 @@ use super::Chainstate;
 use super::DisconnectOutcome;
 use super::DisconnectPlan;
 use super::durable::commit_disconnect_head;
-use super::publication::certified_rewind;
-use super::publication::publish_disconnect;
+use super::publication::publish_applied;
 use super::publication::tx_count_delta_for;
 use crate::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
@@ -58,7 +57,7 @@ pub(super) fn plan_disconnect(
     bitcoin_rs_consensus::verify_merkle_root_with_txids(block, &txids)
         .map_err(|_| ApplyError::DisconnectBodyMismatch { hash: block_hash })?;
 
-    let (parent_tip, parent_prev_hash, parent_chain_tx_count) = {
+    let (parent_tip, parent_prev_hash) = {
         let tree = handles.block_tree.read();
         let node = tree.node(applied.tip_id)?;
         let parent_id = node.parent.ok_or(ApplyError::DisconnectNotTip {
@@ -76,9 +75,9 @@ pub(super) fn plan_disconnect(
                 height: parent.height,
                 chainwork: parent.chainwork,
                 hash: parent.hash,
+                chain_tx_count: parent.chain_tx_count,
             },
             parent_prev_hash,
-            parent.chain_tx_count,
         )
     };
 
@@ -95,7 +94,6 @@ pub(super) fn plan_disconnect(
     Ok(DisconnectPlan {
         parent_tip,
         parent_prev_hash,
-        parent_chain_tx_count,
         undo,
         height,
         tx_count_delta,
@@ -111,7 +109,6 @@ pub(super) fn disconnect_block_admitted(
     let DisconnectPlan {
         parent_tip,
         parent_prev_hash,
-        parent_chain_tx_count,
         undo,
         height,
         tx_count_delta,
@@ -157,7 +154,7 @@ pub(super) fn disconnect_block_admitted(
             parent_tip.height,
             parent_tip.hash.to_le_bytes(),
             parent_prev_hash.to_le_bytes(),
-            parent_chain_tx_count.to_wire(),
+            parent_tip.chain_tx_count.to_wire(),
         );
         rewound
             .map_err(|error| {
@@ -171,13 +168,16 @@ pub(super) fn disconnect_block_admitted(
             })
             .is_ok()
     });
-    // Durable before published: the head batch names the rewound count one
-    // step ahead of the tip that carries it, and both stores land the value
-    // the commit certified.
-    let rewound = certified_rewind(handles.applied_chain_tx_count(), tx_count_delta);
-    commit_disconnect_head(handles, &parent_tip, block_hash, rewound.to_wire())
-        .map_err(fatal)?;
-    publish_disconnect(handles, &parent_tip, rewound);
+    // Durable before published: the head batch names the parent's own
+    // cumulative count, and the tip published next carries that same value.
+    commit_disconnect_head(
+        handles,
+        &parent_tip,
+        block_hash,
+        parent_tip.chain_tx_count.to_wire(),
+    )
+    .map_err(fatal)?;
+    publish_applied(handles, &parent_tip, crate::events::HintKind::Disconnected);
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
             poison(crate::DisconnectError::MarkerStuck {

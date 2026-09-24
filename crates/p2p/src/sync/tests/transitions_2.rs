@@ -23,6 +23,7 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
         })
     };
     let genesis = genesis_header();
@@ -209,6 +210,7 @@ fn outweighed_branch_target_accepts_shorter_higher_work_branch()
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
         }
     };
 

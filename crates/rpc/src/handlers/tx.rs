@@ -2652,12 +2652,14 @@ mod acceptance_tests {
                 height: applied_node.height,
                 chainwork: applied_node.chainwork,
                 hash: applied_node.hash,
+                chain_tx_count: applied_node.chain_tx_count,
             });
             ctx.set_chain_tip(TipSnapshot {
                 tip_id: best_id,
                 height: best_node.height,
                 chainwork: best_node.chainwork,
                 hash: best_node.hash,
+                chain_tx_count: best_node.chain_tx_count,
             });
             (applied_node.hash, best_node.hash)
         };

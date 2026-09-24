@@ -61,7 +61,9 @@ impl ChainTxCount {
     #[must_use]
     pub fn advance(self, height: u32, delta: u64) -> Self {
         match self.0 {
-            Some(known) => known.checked_add(delta).map_or(Self::UNKNOWN, Self::established),
+            Some(known) => known
+                .checked_add(delta)
+                .map_or(Self::UNKNOWN, Self::established),
             // Genesis is the one block with nothing below it, so its own
             // transactions are the whole chain total at that height.
             None if height == 0 => Self::established(delta),
@@ -82,7 +84,9 @@ impl ChainTxCount {
     #[must_use]
     pub fn rewind(self, delta: u64) -> Self {
         match self.0 {
-            Some(known) => known.checked_sub(delta).map_or(Self::UNKNOWN, Self::established),
+            Some(known) => known
+                .checked_sub(delta)
+                .map_or(Self::UNKNOWN, Self::established),
             None => Self::UNKNOWN,
         }
     }

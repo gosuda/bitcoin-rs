@@ -56,6 +56,7 @@ fn base_state() -> TestResult<BaseState> {
         height: base_node.height,
         chainwork: base_node.chainwork,
         hash: base_node.hash,
+        chain_tx_count: base_node.chain_tx_count,
     };
 
     let base_coin = coin(1, 0, 50);

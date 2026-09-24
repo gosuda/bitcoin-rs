@@ -327,6 +327,7 @@ fn load_payloads(
         height: applied_node.height,
         chainwork: applied_node.chainwork,
         hash: applied_node.hash,
+        chain_tx_count: applied_node.chain_tx_count,
     };
     Ok(RestoredChainstate {
         generation: manifest.generation,

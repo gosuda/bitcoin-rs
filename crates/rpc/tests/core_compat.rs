@@ -41,6 +41,7 @@ fn tipped_context() -> Arc<Context> {
         height: 42,
         chainwork: ChainWork::ZERO,
         hash: Hash256::from_le_bytes(&[42_u8; 32]),
+        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
     };
     ctx.chain.chain_tip.store(Some(Arc::new(tip.clone())));
     ctx.chain.applied_tip.store(Some(Arc::new(tip)));
