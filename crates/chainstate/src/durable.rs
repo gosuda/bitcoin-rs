@@ -58,11 +58,9 @@ impl DurableReceipt {
     }
 
     /// The applied tip this receipt certifies: `tip` with the committed count.
-    pub(super) fn certify(self, tip: TipSnapshot) -> TipSnapshot {
-        TipSnapshot {
-            chain_tx_count: self.chain_tx_count,
-            ..tip
-        }
+    pub(super) fn certify(self, mut tip: TipSnapshot) -> TipSnapshot {
+        tip.chain_tx_count = self.chain_tx_count;
+        tip
     }
 }
 
