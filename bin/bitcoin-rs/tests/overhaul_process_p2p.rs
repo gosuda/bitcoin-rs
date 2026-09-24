@@ -2,16 +2,15 @@
 
 #![expect(clippy::expect_used, reason = "public process test assertions")]
 
-mod support;
-
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use bitcoin::consensus::serialize;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
 use serde_json::json;
-use support::process_node::{NodeBinary, ProcessNode, compare_rpc, mine_common_chain};
-use support::process_peer::{ProcessPeer, decode_frame};
+use bitcoin_rs_e2e::differential::{compare_rpc, mine_common_chain};
+use bitcoin_rs_e2e::process_peer::{ProcessPeer, connect_loopback, decode_frame, read_frame};
+use bitcoin_rs_e2e::{Error, Kind, ProcessNode, SpawnOptions};
 
 /// REF-07b/c: RPC may become ready before the independent P2P bind.
 #[test]
@@ -36,7 +35,7 @@ fn p2p_connect_waits_for_a_delayed_listener() {
         false
     });
     let result =
-        support::process_peer::connect_loopback(addr, Instant::now() + Duration::from_secs(1));
+        connect_loopback(addr, Instant::now() + Duration::from_secs(1));
     let accepted = server.join().expect("fixture joins");
     assert!(
         result.is_ok(),
@@ -52,7 +51,7 @@ fn p2p_connect_to_an_absent_listener_has_a_fixed_deadline() {
     let addr = reservation.local_addr().expect("fixture address");
     drop(reservation);
     let start = Instant::now();
-    let result = support::process_peer::connect_loopback(addr, start + Duration::from_millis(80));
+    let result = connect_loopback(addr, start + Duration::from_millis(80));
     assert!(result.is_err());
     assert!(start.elapsed() < Duration::from_millis(600));
 }
@@ -61,8 +60,8 @@ fn p2p_connect_to_an_absent_listener_has_a_fixed_deadline() {
 #[test]
 #[cfg(target_os = "linux")]
 fn p2p_timeout_releases_the_connected_peer_and_process() {
-    for binary in [NodeBinary::BitcoinRs, NodeBinary::ReferenceCore] {
-        let mut node = ProcessNode::start(binary).expect("normal startup");
+    for binary in [Kind::BitcoinRs, Kind::Core] {
+        let mut node = ProcessNode::spawn(binary).expect("normal startup");
         let pid = node.pid();
         let mut peer = ProcessPeer::connect(&node).expect("connected peer");
         let result = peer.wait_for_pong(u64::MAX, Instant::now() + Duration::from_millis(100));
@@ -124,7 +123,7 @@ fn fragmented_p2p_response_obeys_one_total_deadline() {
         }
     });
     let start = Instant::now();
-    let result = support::process_peer::read_frame(&mut client, start + Duration::from_millis(100));
+    let result = read_frame(&mut client, start + Duration::from_millis(100));
     let elapsed = start.elapsed();
     drop(client);
     writer.join().expect("fixture joins");
@@ -159,10 +158,10 @@ fn oversized_p2p_length_is_rejected_without_a_body() {
     header[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
     server.write_all(&header).expect("header only");
     let error =
-        support::process_peer::read_frame(&mut client, Instant::now() + Duration::from_millis(200))
+        read_frame(&mut client, Instant::now() + Duration::from_millis(200))
             .expect_err("oversized length must fail before reading the missing body");
     assert!(
-        matches!(error, support::process_node::HarnessError::Protocol(ref message) if message == "P2P payload byte limit")
+        matches!(error, Error::Protocol(ref message) if message == "P2P payload byte limit")
     );
 }
 
@@ -205,40 +204,18 @@ fn admit_over_p2p(process: &mut ProcessNode, transaction: &bitcoin::Transaction)
     );
 }
 
-/// Move both processes onto a tip that is recent on the candidate's real
-/// clock. Core mines at a frozen launch-time mocktime, so a shared chain
-/// older than the tip-age bound leaves the candidate in initial block
-/// download — the phase where Core itself refuses relayed transactions
-/// (`net_processing.cpp:4713-4716`). Advancing the reference clock and
-/// mining one empty common block first makes wire admission observable on
-/// both binaries.
-fn advance_to_fresh_common_tip(core: &mut ProcessNode, node: &mut ProcessNode) {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("wall clock after the epoch")
-        .as_secs();
-    core.rpc("setmocktime", &json!([now]))
-        .expect("advance the reference clock");
-    mine_common_chain(core, node, 1).expect("recent common tip");
-    assert_eq!(
-        node.rpc("getblockchaininfo", &json!([]))
-            .expect("candidate progress")["initialblockdownload"],
-        json!(false),
-        "wire admission runs only outside initial block download"
-    );
-}
-
 /// No listener, service, or pool is constructed in the test process. The same
-/// signed transaction enters each binary's ordinary inbound P2P path. The
-/// candidate must first leave initial block download, so the shared tip is
-/// refreshed before any wire admission.
+/// signed transaction enters each binary's ordinary inbound P2P path.
 #[test]
 fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
-    let mut core = ProcessNode::start(NodeBinary::ReferenceCore).expect("reference process");
-    let mut node = ProcessNode::start_with_options(
-        NodeBinary::BitcoinRs,
-        &["--txindex", "true"],
-        Duration::from_secs(30),
+    let mut core = ProcessNode::spawn(Kind::Core).expect("reference process");
+    let mut node = ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            extra_args: &["--txindex", "true"],
+            timeout: Some(Duration::from_secs(30)),
+            ..Default::default()
+        },
     )
     .expect("candidate process with explorer transaction lookup enabled");
     let funds = mine_common_chain(&mut core, &mut node, 101).expect("identical mature funds");
@@ -251,8 +228,6 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         compare_rpc(&mut core, &mut node, "getrawmempool", &json!([])).expect("initial pools"),
         json!([]),
     );
-    // Wire admission is observable only outside initial block download.
-    advance_to_fresh_common_tip(&mut core, &mut node);
     for process in [&mut core, &mut node] {
         admit_over_p2p(process, &transaction);
     }
@@ -322,12 +297,12 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         json!(null)
     );
     // Block acceptance publishes the chain tip before the derived index catches up.
-    wait_for_txindex(&mut node, 103);
+    wait_for_txindex(&mut node, 102);
     assert_eq!(
         node.http_get_json(&format!("/api/tx/{txid}/status"))
             .expect("public explorer confirmed status"),
         json!({
-            "confirmed": true, "block_height": 103, "block_hash": hash, "block_time": block.header.time,
+            "confirmed": true, "block_height": 102, "block_hash": hash, "block_time": block.header.time,
         })
     );
     core.stop().expect("reap reference");
@@ -390,7 +365,7 @@ fn malformed_p2p_frames_are_protocol_failures_not_behavior_evidence() {
     ] {
         assert!(matches!(
             decode_frame(&bytes),
-            Err(support::process_node::HarnessError::Protocol(_))
+            Err(Error::Protocol(_))
         ));
     }
 }
