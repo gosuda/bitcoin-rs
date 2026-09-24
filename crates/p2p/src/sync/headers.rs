@@ -168,11 +168,15 @@ impl BlockSync {
                             }
                         }
                         self.request_headers_from(source, now);
-                    } else {
+                    } else if wire_response {
                         // The connection answered, so its deadline moves to
                         // this answer: the gate stays and paces the retry,
                         // and expiry cannot later blame a peer that did
-                        // respond.
+                        // respond. A batch forwarded out of a delivered body
+                        // is not an answer: it re-arms nothing, so the gate
+                        // keeps its original deadline and expiry still
+                        // retires a connection that silently ignored its
+                        // `getheaders`.
                         self.rearm_header_request(source, now);
                     }
                     tracing::warn!(
@@ -186,9 +190,15 @@ impl BlockSync {
                     // The source still has the headers; a paced re-request
                     // relearns the tip once admission reopens rather than
                     // silently losing the announcement. Our own paused
-                    // admission is not the peer's silence, so the deadline
-                    // moves to this answer.
-                    self.rearm_header_request(source, now);
+                    // admission is not the peer's silence, so a wire answer's
+                    // deadline moves to this answer. A batch forwarded out of
+                    // a delivered body is not an answer: it re-arms nothing,
+                    // so the gate keeps its original deadline and expiry
+                    // still retires a connection that silently ignored its
+                    // `getheaders`.
+                    if wire_response {
+                        self.rearm_header_request(source, now);
+                    }
                     self.request_ancestry_after_refusal(source, &error, now);
                 }
             }
