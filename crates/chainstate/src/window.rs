@@ -49,16 +49,16 @@ pub const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
 /// [`PublishMode::Grouped`] buffers the commit facts in a [`WindowGroup`]:
 /// the window syncs once per group, lands one head batch per verified
 /// prefix, and publishes the prefix in order after the batch — one
-/// `commit_id` per committed prefix, never beyond it (`RCV-02`).
 pub(super) enum PublishMode<'a> {
     Now,
     Grouped(&'a mut WindowGroup),
     /// Crash-recovery replay of a block whose durable batch already
     /// committed. The stored head receipt covers it, so nothing syncs and
     /// nothing re-commits: replay rebuilds the derived state the crash
-    /// lost — coins, bookkeeping, journal tail — and publishes.
+    /// lost — coins, bookkeeping, journal tail — and publishes under the
+    /// receipt the head already issued.
     Replay {
-        commit_id: u64,
+        receipt: super::durable::DurableReceipt,
     },
 }
 
@@ -178,13 +178,19 @@ impl WindowGroup {
             undo_rows,
             body_rows,
         };
-        let commit_id = commit_connect_head(handles, &facts, &records)?;
+        let receipt = commit_connect_head(handles, &facts, &records)?;
+        debug_assert!(
+            self.pending
+                .last()
+                .is_some_and(|last| last.outcome.tip.chain_tx_count == receipt.chain_tx_count),
+            "the batch certifies the last staged prefix count"
+        );
         metrics::histogram!("node.durable_head.group_commit_seconds")
             .record(started.elapsed().as_secs_f64());
         let staged = u32::try_from(self.pending.len()).unwrap_or(u32::MAX);
         metrics::histogram!("node.durable_head.group_blocks").record(f64::from(staged));
         for pending in &mut self.pending {
-            pending.outcome.commit_id = commit_id;
+            pending.outcome.commit_id = receipt.commit_id;
         }
         // The journal follows the receipt, block by block, before the
         // prefix publishes — the same derived-after-durable order as the
