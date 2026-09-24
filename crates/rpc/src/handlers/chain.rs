@@ -401,8 +401,8 @@ fn count_through(
     is_applied_tip: bool,
 ) -> Option<u64> {
     let node = tree.node(node_id).ok()?;
-    if node.chain_tx_count > 0 {
-        return Some(node.chain_tx_count);
+    if let Some(count) = node.chain_tx_count.get() {
+        return Some(count);
     }
     if is_applied_tip && let Some(count) = ctx.chain_tx_count() {
         return Some(count);
@@ -426,8 +426,10 @@ fn window_tx_count_between(
 ) -> Option<u64> {
     let start = tree.node(start_id).ok()?;
     let end = tree.node(end_id).ok()?;
-    if end.chain_tx_count > 0 && start.chain_tx_count > 0 {
-        return Some(end.chain_tx_count.saturating_sub(start.chain_tx_count));
+    if let (Some(end_count), Some(start_count)) =
+        (end.chain_tx_count.get(), start.chain_tx_count.get())
+    {
+        return Some(end_count.saturating_sub(start_count));
     }
     let log = ctx.chain.blocks.read();
     let end_count = cumulative_tx_count_through(&log, end.height)?;
@@ -2750,7 +2752,7 @@ mod tests {
             let id = tree
                 .insert_node(None, genesis.header, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("insert genesis: {err}"));
-            tree.restore_chain_tx_count(id, 1)
+            tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(1))
                 .unwrap_or_else(|err| panic!("record genesis: {err}"));
             let node = tree
                 .node(id)
@@ -2964,7 +2966,7 @@ mod tests {
                 prev = header.compute_hash();
                 let id = tree.insert_node(parent, header, NodeStatus::Active)?;
                 cumulative = cumulative.saturating_add(u64::from(height.saturating_add(1)));
-                tree.restore_chain_tx_count(id, cumulative)?;
+                tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(cumulative))?;
                 parent = Some(id);
                 let node = tree.node(id)?;
                 tip = Some(TipSnapshot {
@@ -3078,7 +3080,7 @@ mod tests {
                 let id = tree
                     .insert_node(parent, header, NodeStatus::Active)
                     .unwrap_or_else(|err| panic!("insert {height}: {err}"));
-                tree.restore_chain_tx_count(id, u64::from(height) + 1)
+                tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(u64::from(height) + 1))
                     .unwrap_or_else(|err| panic!("count {height}: {err}"));
                 parent = Some(id);
                 let node = tree
@@ -4069,7 +4071,7 @@ mod chaintxstats_durability_tests {
             let id = tree
                 .insert_node(parent, header, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("insert {height}: {err}"));
-            tree.restore_chain_tx_count(id, count)
+            tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(count))
                 .unwrap_or_else(|err| panic!("count {height}: {err}"));
             parent = Some(id);
             let node = tree
@@ -4256,7 +4258,7 @@ mod chaintxstats_durability_tests {
         let genesis_id = tree
             .insert_node(None, genesis, NodeStatus::Active)
             .unwrap_or_else(|err| panic!("genesis: {err}"));
-        tree.restore_chain_tx_count(genesis_id, 1)
+        tree.restore_chain_tx_count(genesis_id, bitcoin_rs_chain::ChainTxCount::established(1))
             .unwrap_or_else(|err| panic!("genesis count: {err}"));
         let lost = Header {
             version: 1,
@@ -4269,7 +4271,7 @@ mod chaintxstats_durability_tests {
         let lost_id = tree
             .insert_node(Some(genesis_id), lost, NodeStatus::HeaderValid)
             .unwrap_or_else(|err| panic!("lost: {err}"));
-        tree.restore_chain_tx_count(lost_id, 3)
+        tree.restore_chain_tx_count(lost_id, bitcoin_rs_chain::ChainTxCount::established(3))
             .unwrap_or_else(|err| panic!("lost count: {err}"));
         let won = Header {
             version: 1,
@@ -4282,7 +4284,7 @@ mod chaintxstats_durability_tests {
         let won_id = tree
             .insert_node(Some(genesis_id), won, NodeStatus::Active)
             .unwrap_or_else(|err| panic!("won: {err}"));
-        tree.restore_chain_tx_count(won_id, 8)
+        tree.restore_chain_tx_count(won_id, bitcoin_rs_chain::ChainTxCount::established(8))
             .unwrap_or_else(|err| panic!("won count: {err}"));
         let child = Header {
             version: 1,
@@ -4295,7 +4297,7 @@ mod chaintxstats_durability_tests {
         let child_id = tree
             .insert_node(Some(won_id), child, NodeStatus::Active)
             .unwrap_or_else(|err| panic!("child: {err}"));
-        tree.restore_chain_tx_count(child_id, 15)
+        tree.restore_chain_tx_count(child_id, bitcoin_rs_chain::ChainTxCount::established(15))
             .unwrap_or_else(|err| panic!("child count: {err}"));
         let lost_hash = tree
             .node(lost_id)
@@ -4914,7 +4916,7 @@ mod verification_progress_wiring_tests {
                 .insert_node(None, header, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("insert: {err}"));
             if let Some(count) = chain_tx_count {
-                tree.restore_chain_tx_count(id, count)
+                tree.restore_chain_tx_count(id, bitcoin_rs_chain::ChainTxCount::established(count))
                     .unwrap_or_else(|err| panic!("restore: {err}"));
             }
             id

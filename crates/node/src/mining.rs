@@ -125,7 +125,7 @@ impl MiningCoordinator {
             .chainstate
             .applied_tip_snapshot()
             .is_some_and(|tip| tree.node_at_height_from(tip.tip_id, node.height) == Some(node_id));
-        if on_applied || node.chain_tx_count != 0 {
+        if on_applied || node.chain_tx_count.get().is_some() {
             return Some(BlockValidationResult::Duplicate);
         }
         Some(BlockValidationResult::DuplicateInconclusive)

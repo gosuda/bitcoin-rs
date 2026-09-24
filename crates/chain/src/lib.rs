@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_op_in_unsafe_fn)]
 
+/// Cumulative chain transaction count arithmetic.
+mod count;
 /// BIP9 deployment-state memoization cache.
 mod bip9_cache;
 /// Neutral block-body read seam.
@@ -29,6 +31,7 @@ pub(crate) use bip9_cache::CachedState;
 pub use bitcoin_rs_consensus::SoftforkState;
 pub use bitcoin_rs_primitives::Network;
 pub use block_body::{BlockBodyMetadata, BlockBodySource};
+pub use count::ChainTxCount;
 pub use deployment::{
     SignallingDeployment, bip30_duplicate_scan_required, candidate_version, signalling_deployments,
     softfork_state,

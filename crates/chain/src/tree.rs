@@ -8,7 +8,7 @@ use hashbrown::HashTable;
 use slab::Slab;
 
 use crate::{
-    CachedState, ChainError,
+    CachedState, ChainError, ChainTxCount,
     bip9_cache::Bip9Cache,
     node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus},
     tip::TipSnapshot,
@@ -89,10 +89,10 @@ impl BlockTree {
 
     /// Records the cumulative transaction count after applying `id`'s block.
     ///
-    /// Genesis establishes the count from its own block. Every other node derives
-    /// from its actual parent, so side branches remain independent. A parent with
-    /// an unknown count (`0`) keeps the child unknown rather than manufacturing a
-    /// partial total.
+    /// Genesis establishes the count from its own block. Every other node
+    /// derives from its actual parent, so side branches remain independent. A
+    /// parent with an unknown count keeps the child unknown rather than
+    /// manufacturing a partial total.
     pub fn record_applied_tx_count(
         &mut self,
         id: NodeId,
@@ -102,18 +102,11 @@ impl BlockTree {
             let node = self.node(id)?;
             (node.height, node.parent)
         };
-        let chain_tx_count = match parent {
-            None if height == 0 => block_tx_count,
-            Some(parent_id) => {
-                let parent_count = self.node(parent_id)?.chain_tx_count;
-                if parent_count == 0 {
-                    0
-                } else {
-                    parent_count.checked_add(block_tx_count).unwrap_or(0)
-                }
-            }
-            None => 0,
+        let parent_count = match parent {
+            Some(parent_id) => self.node(parent_id)?.chain_tx_count,
+            None => ChainTxCount::UNKNOWN,
         };
+        let chain_tx_count = parent_count.advance(height, block_tx_count);
         self.node_mut_without_index_invalidation(id)?.chain_tx_count = chain_tx_count;
         Ok(())
     }
@@ -122,7 +115,7 @@ impl BlockTree {
     pub fn restore_chain_tx_count(
         &mut self,
         id: NodeId,
-        chain_tx_count: u64,
+        chain_tx_count: ChainTxCount,
     ) -> Result<(), ChainError> {
         self.node_mut_without_index_invalidation(id)?.chain_tx_count = chain_tx_count;
         Ok(())
@@ -626,7 +619,7 @@ impl BlockTree {
             hash,
             header,
             chainwork,
-            chain_tx_count: 0,
+            chain_tx_count: ChainTxCount::UNKNOWN,
             status,
         });
         let id_u32 = u32::try_from(index).map_err(|_| ChainError::NodeIdOverflow { index })?;
@@ -886,6 +879,7 @@ mod tests {
 
     use super::{BlockTree, Hash256, hash_from_header};
     use crate::{
+        ChainTxCount,
         node::{BlockHeader, ChainWork, NodeId, NodeStatus},
         tip::TipSnapshot,
     };
@@ -1917,23 +1911,26 @@ mod tests {
         let mut tree = BlockTree::new();
         let genesis = test_header(BlockHash::default(), 0);
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        assert_eq!(tree.node(genesis_id)?.chain_tx_count, 0);
+        assert_eq!(tree.node(genesis_id)?.chain_tx_count, ChainTxCount::UNKNOWN);
 
         tree.record_applied_tx_count(genesis_id, 1)?;
-        assert_eq!(tree.node(genesis_id)?.chain_tx_count, 1);
+        assert_eq!(
+            tree.node(genesis_id)?.chain_tx_count,
+            ChainTxCount::established(1)
+        );
 
         let genesis_hash = tree.node(genesis_id)?.hash;
         let main_header = test_header(BlockHash(genesis_hash), 1);
         let main_id = tree.insert_node(Some(genesis_id), main_header, NodeStatus::HeaderValid)?;
         let side_header = test_header(BlockHash(genesis_hash), 101);
         let side_id = tree.insert_node(Some(genesis_id), side_header, NodeStatus::HeaderValid)?;
-        assert_eq!(tree.node(main_id)?.chain_tx_count, 0);
-        assert_eq!(tree.node(side_id)?.chain_tx_count, 0);
+        assert_eq!(tree.node(main_id)?.chain_tx_count, ChainTxCount::UNKNOWN);
+        assert_eq!(tree.node(side_id)?.chain_tx_count, ChainTxCount::UNKNOWN);
 
         tree.record_applied_tx_count(main_id, 2)?;
         tree.record_applied_tx_count(side_id, 7)?;
-        assert_eq!(tree.node(main_id)?.chain_tx_count, 3);
-        assert_eq!(tree.node(side_id)?.chain_tx_count, 8);
+        assert_eq!(tree.node(main_id)?.chain_tx_count, ChainTxCount::established(3));
+        assert_eq!(tree.node(side_id)?.chain_tx_count, ChainTxCount::established(8));
         Ok(())
     }
 
@@ -1947,13 +1944,33 @@ mod tests {
         let child_id = tree.insert_node(Some(genesis_id), child_header, NodeStatus::HeaderValid)?;
 
         tree.record_applied_tx_count(child_id, 3)?;
-        assert_eq!(tree.node(child_id)?.chain_tx_count, 0);
+        assert_eq!(tree.node(child_id)?.chain_tx_count, ChainTxCount::UNKNOWN);
 
-        tree.restore_chain_tx_count(genesis_id, 11)?;
+        tree.restore_chain_tx_count(genesis_id, ChainTxCount::established(11))?;
         tree.record_applied_tx_count(child_id, 3)?;
-        assert_eq!(tree.node(child_id)?.chain_tx_count, 14);
-        tree.restore_chain_tx_count(child_id, 42)?;
-        assert_eq!(tree.node(child_id)?.chain_tx_count, 42);
+        assert_eq!(
+            tree.node(child_id)?.chain_tx_count,
+            ChainTxCount::established(14)
+        );
+        tree.restore_chain_tx_count(child_id, ChainTxCount::established(42))?;
+        assert_eq!(
+            tree.node(child_id)?.chain_tx_count,
+            ChainTxCount::established(42)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_restored_wire_zero_stays_unknown_at_the_boundary() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::default(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        // The persisted encoding has no known zero: `from_wire(0)` is unknown,
+        // and an unknown count encodes back as zero.
+        tree.restore_chain_tx_count(genesis_id, ChainTxCount::from_wire(0))?;
+        assert_eq!(tree.node(genesis_id)?.chain_tx_count, ChainTxCount::UNKNOWN);
+        assert_eq!(tree.node(genesis_id)?.chain_tx_count.to_wire(), 0);
         Ok(())
     }
 }

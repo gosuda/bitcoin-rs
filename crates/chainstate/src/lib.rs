@@ -7,7 +7,7 @@
 
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, BlockTreeReader, ChainError, TipReader, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot};
 use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Network;
@@ -36,10 +36,6 @@ use parking_lot::MutexGuard;
 use parking_lot::RwLock;
 use parking_lot::RwLockReadGuard;
 use parking_lot::RwLockWriteGuard;
-#[cfg(test)]
-use publication::advance_chain_tx_count;
-#[cfg(test)]
-use publication::rewind_chain_tx_count;
 use scratch::ApplyScratchCapacities;
 use scratch::SameBlockSpentSet;
 use std::sync::Arc;
@@ -933,6 +929,12 @@ impl Chainstate {
         Arc::clone(&self.chain_tx_count)
     }
 
+    /// The cumulative count of the published applied chain.
+    #[must_use]
+    pub(crate) fn applied_chain_tx_count(&self) -> ChainTxCount {
+        ChainTxCount::from_wire(self.chain_tx_count.load(Ordering::Relaxed))
+    }
+
     /// Clones the authoritative chain-event publisher.
     #[must_use]
     pub fn chain_events_handle(&self) -> Arc<crate::events::ChainEventPublisher> {
@@ -1374,7 +1376,7 @@ impl Chainstate {
 struct DisconnectPlan {
     parent_tip: TipSnapshot,
     parent_prev_hash: Hash256,
-    parent_chain_tx_count: u64,
+    parent_chain_tx_count: ChainTxCount,
     undo: bitcoin_rs_utxo::contract::UndoBatch,
     height: u32,
     tx_count_delta: u64,

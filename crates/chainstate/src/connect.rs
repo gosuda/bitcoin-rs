@@ -17,8 +17,7 @@ use super::durable::{
 };
 use super::prepare::prepare_apply;
 use super::prepare::verify_block_transactions;
-use super::publication::advanced_chain_tx_count;
-use super::publication::advanced_chain_tx_count_from;
+use super::publication::certified_advance;
 use super::publication::publish_connect;
 use super::publication::tx_count_delta_for;
 use super::scratch::ApplyScratch;
@@ -39,7 +38,6 @@ use bitcoin_rs_utxo::contract::build_block_changes;
 use bitcoin_rs_utxo::contract::is_coinbase_tx;
 use hashbrown::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 /// Applies one serialized block while the caller holds admission and `chain_transition`.
 ///
@@ -523,7 +521,7 @@ pub(super) fn apply_block_admitted<'b>(
         block_bytes,
         raw_txs,
     };
-    let commit_id = match publication {
+    let (commit_id, chain_tx_count) = match publication {
         PublishMode::Now => {
             // RCV-02 steps 3–4: certify, then commit. `sync` makes the
             // appended body bytes, the blocks directory, and every deferred
@@ -543,13 +541,15 @@ pub(super) fn apply_block_admitted<'b>(
                 .into_iter()
                 .collect();
             let durable_commit_started = quanta::Instant::now();
+            let chain_tx_count =
+                certified_advance(handles.applied_chain_tx_count(), height, tx_count_delta);
             let commit_id = commit_connect_head(
                 handles,
                 &ConnectCommitFacts {
                     prev_hash,
                     tip: block_hash,
                     height,
-                    chain_tx_count_after: advanced_chain_tx_count(handles, height, tx_count_delta),
+                    chain_tx_count_after: chain_tx_count.to_wire(),
                     undo_extent: Some((height, block_hash)),
                 },
                 &CommitRecords {
@@ -559,22 +559,23 @@ pub(super) fn apply_block_admitted<'b>(
             )?;
             metrics::histogram!("node.apply_block.durable_commit_seconds")
                 .record(durable_commit_started.elapsed().as_secs_f64());
-            commit_id
+            (commit_id, chain_tx_count)
         }
-        PublishMode::Replay { commit_id } => {
-            // The gap block's durable batch committed before the crash: the
-            // stored head receipt covers its body, undo, and locator rows.
-            // Replay redoes only what publication owed — the journal tail
-            // and the coherent tip — and carries the receipt's commit id.
-            commit_id
-        }
+        // The gap block's durable batch committed before the crash: the
+        // stored head receipt covers its body, undo, and locator rows.
+        // Replay redoes only what publication owed — the journal tail
+        // and the coherent tip — and carries the receipt's commit id.
+        PublishMode::Replay { commit_id } => (
+            commit_id,
+            certified_advance(handles.applied_chain_tx_count(), height, tx_count_delta),
+        ),
         PublishMode::Grouped(group) => {
             // The window buffers the durable work: facts ride in the group
             // until its boundary, where one sync and one head batch commit
             // the whole verified prefix and the prefix publishes in order.
-            let known = group
+            let base = group
                 .chain_tx_count_base()
-                .unwrap_or_else(|| handles.chain_tx_count.load(Ordering::Relaxed));
+                .unwrap_or_else(|| handles.applied_chain_tx_count());
             let journal_record = build_journal_record(
                 block,
                 height,
@@ -588,7 +589,7 @@ pub(super) fn apply_block_admitted<'b>(
                 outcome: outcome.clone(),
                 undo_record,
                 tx_count_delta,
-                chain_tx_count_after: advanced_chain_tx_count_from(known, height, tx_count_delta),
+                chain_tx_count_after: certified_advance(base, height, tx_count_delta),
                 prev_hash,
                 journal_record,
             });
@@ -610,7 +611,7 @@ pub(super) fn apply_block_admitted<'b>(
         ),
         height,
     );
-    publish_connect(handles, &tip, tx_count_delta);
+    publish_connect(handles, &tip, chain_tx_count);
     outcome.commit_id = commit_id;
     Ok(ApplyFinish::Committed(outcome))
 }
