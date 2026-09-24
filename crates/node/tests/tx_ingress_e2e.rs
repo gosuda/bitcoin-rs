@@ -627,6 +627,7 @@ impl Harness {
         harness.relay = Some(spawn_tx_relay_worker(
             PeerRelaySink::new(harness.state.peer_table()),
             relay_rx,
+            Arc::clone(&harness.gateway),
             Arc::clone(&harness.shutdown),
         )?);
         harness.ingress = Some(spawn_tx_ingress_consumer(
