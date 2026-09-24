@@ -988,9 +988,7 @@ mod tests {
         for header in headers {
             parent = Some(tree.insert_node(parent, header, NodeStatus::Active)?);
         }
-        Ok(ActiveChainQuery::new(BlockTreeReader::new(Arc::new(
-            RwLock::new(tree),
-        ))))
+        Ok(ActiveChainQuery::new(BlockTreeReader::new(Arc::new(RwLock::new(tree)))))
     }
 
     fn seed_headers(count: u32) -> Vec<Header> {
