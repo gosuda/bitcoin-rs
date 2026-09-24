@@ -553,6 +553,9 @@ pub(crate) fn start_node(
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
         ibd: Some(Arc::clone(&ibd)),
+        // One orchestrator: the listener announces block inventory to the
+        // same sync loop the event loop drives.
+        block_sync: Some(Arc::clone(&peer_ready_sync)),
     };
     let (relay_queue, relay_rx) =
         bitcoin_rs_p2p::TxRelayQueue::new(bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);

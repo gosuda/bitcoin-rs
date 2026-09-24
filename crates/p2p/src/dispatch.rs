@@ -8,10 +8,7 @@ use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
 use crate::handshake::feature_messages;
-use crate::inv::{
-    inventory_tx_hash, is_within_inventory_bound, request_inventory, request_inventory_filtered,
-    request_witness,
-};
+use crate::inv::{inventory_block_hash, inventory_tx_hash, is_within_inventory_bound, request_witness};
 use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
 
@@ -129,6 +126,7 @@ impl crate::compact_blocks::CompactBlockHints for bitcoin_rs_mempool::MempoolGat
 /// With `chain: None` responses can never contain a block body, so the batch
 /// is protocol-bounded (at most [`MAX_HEADERS_RESPONSE`] headers, or one
 /// inventory-bound notfound/getdata echo) and safe to materialize whole.
+/// Block announcements go to a no-op sink.
 pub fn dispatch_inbound<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -143,9 +141,10 @@ pub fn dispatch_inbound<S>(
 
 /// Dispatch with an active-chain view but no transaction-inventory filter.
 ///
-/// Equivalent to [`dispatch_inbound_full`] with `tx_inventory: None`: every
-/// announced tx is requested, and tx-typed `getdata` items are reported
-/// missing. Production listeners pass a [`TxInventory`] through
+/// Equivalent to [`dispatch_inbound_full`] with `tx_inventory: None` and a
+/// no-op block-announcement sink: every announced tx is requested, and
+/// tx-typed `getdata` items are reported missing. Production listeners pass
+/// a [`TxInventory`] and an announcement sink through
 /// [`dispatch_inbound_full`]; this wrapper remains for call sites that only
 /// have a chain view.
 pub fn dispatch_inbound_with_chain<S>(
@@ -155,7 +154,7 @@ pub fn dispatch_inbound_with_chain<S>(
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
 ) -> Result<(), PeerError> {
-    dispatch_inbound_full(peer, message, chain, None, &|| true, headroom, send)
+    dispatch_inbound_full(peer, message, chain, None, &|| true, headroom, send, &mut |_| {})
 }
 
 /// Dispatch with an active-chain view and a transaction-inventory filter.
@@ -173,8 +172,16 @@ pub fn dispatch_inbound_with_chain<S>(
 ///
 /// `tx_relay_open` reports whether the node accepts transaction relay from
 /// peers (it is not in initial block download). While it returns `false`,
-/// the `inv` arm requests block-typed vectors only and every other arm is
-/// unchanged. The gate is evaluated lazily per `inv` message.
+/// the `inv` arm requests no transaction-typed vector and every other arm
+/// is unchanged. The gate is evaluated lazily per `inv` message.
+///
+/// `announce_block` receives the hash of every `MSG_BLOCK` and
+/// `MSG_WITNESS_BLOCK` vector of an `inv`.
+/// PRE: `announce_block` belongs to the connection that `peer` wraps.
+/// POST: block inventory reaches `announce_block` and never a `getdata`.
+/// INVARIANT: block bodies are requested only by header sync and the
+/// download window (Core 31.1 `net_processing.cpp:4370-4410`).
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_inbound_full<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -183,6 +190,7 @@ pub fn dispatch_inbound_full<S>(
     tx_relay_open: &dyn Fn() -> bool,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+    announce_block: &mut dyn FnMut(Hash256),
 ) -> Result<(), PeerError> {
     match message {
         Message::Version(_) => {
@@ -202,26 +210,27 @@ pub fn dispatch_inbound_full<S>(
             // tx-typed vector is ever requested, in either inventory branch
             // (Core 31.1 net_processing.cpp:4401-4404).
             let relay_open = tx_relay_open();
-            let response = match tx_inventory {
-                Some(inv) => request_inventory_filtered(items, &|item| {
-                    inventory_tx_hash(item).is_some_and(|hash| {
-                        !relay_open || inv.have_tx(hash, matches!(item, Inventory::WTx(_)))
-                    })
-                }),
-                None if relay_open => request_inventory(items),
-                None => {
-                    request_inventory_filtered(items, &|item| inventory_tx_hash(item).is_some())
+            let mut requested = Vec::new();
+            for item in items {
+                if let Some(hash) = inventory_block_hash(item) {
+                    announce_block(hash);
+                    continue;
                 }
-            };
-            if let Some(mut response) = response {
-                if let Message::GetData(items) = &mut response {
-                    let witness = peer.remote_version.as_ref().is_some_and(|version| {
-                        version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64()
-                            != 0
-                    });
-                    request_witness(items, witness);
+                let held = inventory_tx_hash(item).is_some_and(|hash| {
+                    !relay_open
+                        || tx_inventory
+                            .is_some_and(|inv| inv.have_tx(hash, matches!(item, Inventory::WTx(_))))
+                });
+                if !held {
+                    requested.push(*item);
                 }
-                send(response)?;
+            }
+            if !requested.is_empty() {
+                let witness = peer.remote_version.as_ref().is_some_and(|version| {
+                    version.services.to_u64() & bitcoin::p2p::ServiceFlags::WITNESS.to_u64() != 0
+                });
+                request_witness(&mut requested, witness);
+                send(Message::GetData(requested))?;
             }
         }
         Message::GetHeaders(request) => {
@@ -1107,7 +1116,8 @@ mod tests {
         }
     }
 
-    /// P2P-01 / BIP144: `NODE_WITNESS` controls getdata serialization, not hashes.
+    /// P2P-01 / BIP144: `NODE_WITNESS` controls getdata serialization, not
+    /// hashes. Block vectors are announced to header sync, never requested.
     /// <https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay>
     #[test]
     fn announced_transactions_request_witness_without_changing_hashes() {
@@ -1124,54 +1134,61 @@ mod tests {
                 peer.remote_version = Some(version);
                 let txid = bitcoin::Txid::from_byte_array([1; 32]);
                 let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
-                let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
-                let (requested, block_requested) = if witness {
-                    (
-                        Inventory::WitnessTransaction(txid),
-                        Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array([3; 32])),
-                    )
+                let block_hash = bitcoin::BlockHash::from_byte_array([3; 32]);
+                let block = Inventory::Block(block_hash);
+                let requested_tx = if witness {
+                    Inventory::WitnessTransaction(txid)
                 } else {
-                    (Inventory::Transaction(txid), block)
+                    Inventory::Transaction(txid)
                 };
                 let view: Option<&dyn TxInventory> = filtered.then_some(&inventory);
-                assert_eq!(
-                    dispatch_collect_full(
-                        &mut peer,
-                        &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
-                        None,
-                        view,
-                    ),
-                    vec![Message::GetData(vec![requested, wtxid, block_requested])],
+                let (responses, announced) = dispatch_collect_announcements(
+                    &mut peer,
+                    &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
+                    None,
+                    view,
+                    true,
                 );
+                assert_eq!(
+                    responses,
+                    vec![Message::GetData(vec![requested_tx, wtxid])],
+                    "announced transactions keep their witness serialization and \
+                     no block body is requested"
+                );
+                assert_eq!(announced, vec![announced_hash(block_hash)]);
             }
         }
     }
 
-    /// A closed transaction-relay gate suppresses every tx-typed vector in a
-    /// mixed `inv` while block vectors are still requested (unfiltered
-    /// fallback branch).
+    /// A closed transaction-relay gate suppresses every tx-typed vector while
+    /// block vectors are still announced to header sync, in both gate states.
     #[test]
     fn inv_tx_vectors_not_requested_while_tx_relay_closed() {
         let txid = bitcoin::Txid::from_byte_array([1; 32]);
         let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
-        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+        let block_hash = bitcoin::BlockHash::from_byte_array([3; 32]);
+        let block = Inventory::Block(block_hash);
 
         let mut peer = ready_peer();
-        let gated = dispatch_collect_gated(
+        let (gated, announced) = dispatch_collect_announcements(
             &mut peer,
             &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
             None,
             None,
             false,
         );
+        assert!(
+            gated.is_empty(),
+            "a closed relay gate must request no announced vector"
+        );
         assert_eq!(
-            gated,
-            vec![Message::GetData(vec![block])],
-            "a closed relay gate must request the block but no announced tx"
+            announced,
+            vec![announced_hash(block_hash)],
+            "the block is announced to header sync either way"
         );
 
         let mut peer = ready_peer();
-        let open = dispatch_collect_gated(
+        let (open, announced) = dispatch_collect_announcements(
             &mut peer,
             &Message::Inv(vec![Inventory::Transaction(txid), wtxid, block]),
             None,
@@ -1180,13 +1197,10 @@ mod tests {
         );
         assert_eq!(
             open,
-            vec![Message::GetData(vec![
-                Inventory::Transaction(txid),
-                wtxid,
-                block
-            ])],
-            "an open relay gate must request every announced vector"
+            vec![Message::GetData(vec![Inventory::Transaction(txid), wtxid])],
+            "an open relay gate must request every announced tx"
         );
+        assert_eq!(announced, vec![announced_hash(block_hash)]);
     }
 
     /// Same suppression on the filtered branch: a closed gate wins over the
@@ -1196,42 +1210,62 @@ mod tests {
         let inventory = FakeTxInventory::empty();
         let wtxid = Inventory::WTx(bitcoin::Wtxid::from_byte_array([2; 32]));
         let witness_txid = Inventory::WitnessTransaction(bitcoin::Txid::from_byte_array([1; 32]));
-        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
+        let block_hash = bitcoin::BlockHash::from_byte_array([3; 32]);
+        let block = Inventory::Block(block_hash);
 
         let mut peer = ready_peer();
-        let gated = dispatch_collect_gated(
+        let (responses, announced) = dispatch_collect_announcements(
             &mut peer,
             &Message::Inv(vec![witness_txid, wtxid, block]),
             None,
             Some(&inventory),
             false,
         );
-        assert_eq!(
-            gated,
-            vec![Message::GetData(vec![block])],
+        assert!(
+            responses.is_empty(),
             "a closed relay gate must suppress txid and wtxid vectors the node does not hold"
         );
+        assert_eq!(announced, vec![announced_hash(block_hash)]);
     }
 
-    /// Block announcements stay admissible while the relay gate is closed,
-    /// and `request_witness` still upgrades the remaining block vectors.
+    /// Block inventory is availability information, never a body request:
+    /// Core 31.1 updates the peer's best-known block and asks for headers
+    /// (`net_processing.cpp:4370-4410`). At the base of this change the same
+    /// message produced `GetData(WitnessBlock(..))` straight from dispatch.
     #[test]
-    fn inv_block_vectors_requested_while_tx_relay_closed() {
-        let block = Inventory::Block(bitcoin::BlockHash::from_byte_array([3; 32]));
-        let mut peer = ready_peer();
-        let mut version = crate::handshake::version_message(1, 0);
-        version.services = bitcoin::p2p::ServiceFlags::WITNESS;
-        peer.remote_version = Some(version);
-
-        let gated =
-            dispatch_collect_gated(&mut peer, &Message::Inv(vec![block]), None, None, false);
-        assert_eq!(
-            gated,
-            vec![Message::GetData(vec![Inventory::WitnessBlock(
-                bitcoin::BlockHash::from_byte_array([3; 32])
-            )])],
-            "a closed relay gate must not change block announcement handling"
-        );
+    fn inv_block_uses_headers_not_body_getdata() {
+        let block_hash = bitcoin::BlockHash::from_byte_array([3; 32]);
+        for relay_open in [false, true] {
+            for witness in [false, true] {
+                let mut peer = ready_peer();
+                let mut version = crate::handshake::version_message(1, 0);
+                version.services = if witness {
+                    bitcoin::p2p::ServiceFlags::WITNESS
+                } else {
+                    bitcoin::p2p::ServiceFlags::NETWORK
+                };
+                peer.remote_version = Some(version);
+                let (responses, announced) = dispatch_collect_announcements(
+                    &mut peer,
+                    &Message::Inv(vec![
+                        Inventory::Block(block_hash),
+                        Inventory::WitnessBlock(block_hash),
+                    ]),
+                    None,
+                    None,
+                    relay_open,
+                );
+                assert!(
+                    responses.is_empty(),
+                    "block inventory must not emit a body getdata"
+                );
+                assert_eq!(
+                    announced,
+                    vec![announced_hash(block_hash); 2],
+                    "both block flavors reach the announcement sink"
+                );
+            }
+        }
     }
 
     /// P2P-01 / BIP144 / BIP339: requested serialization must preserve stored witnesses.
@@ -1535,6 +1569,12 @@ mod tests {
         );
     }
 
+    /// The hash dispatch routes to header sync for one announced block vector.
+    fn announced_hash(block_hash: bitcoin::BlockHash) -> Hash256 {
+        use bitcoin::hashes::Hash as _;
+        Hash256::from_le_bytes(block_hash.as_byte_array())
+    }
+
     #[allow(clippy::expect_used)]
     fn dispatch_collect_full<S>(
         peer: &mut Peer<S>,
@@ -1554,7 +1594,21 @@ mod tests {
         tx_inventory: Option<&dyn TxInventory>,
         relay_open: bool,
     ) -> Vec<Message> {
+        dispatch_collect_announcements(peer, message, chain, tx_inventory, relay_open).0
+    }
+
+    /// Same helper, additionally returning the block-inventory hashes that
+    /// dispatch routed to header sync instead of requesting their bodies.
+    #[allow(clippy::expect_used)]
+    fn dispatch_collect_announcements<S>(
+        peer: &mut Peer<S>,
+        message: &Message,
+        chain: Option<&dyn ChainQuery>,
+        tx_inventory: Option<&dyn TxInventory>,
+        relay_open: bool,
+    ) -> (Vec<Message>, Vec<Hash256>) {
         let collected = RefCell::new(Vec::new());
+        let mut announced = Vec::new();
         dispatch_inbound_full(
             peer,
             message,
@@ -1566,9 +1620,10 @@ mod tests {
                 collected.borrow_mut().push(response);
                 Ok(())
             },
+            &mut |hash| announced.push(hash),
         )
         .expect("dispatch must succeed");
-        collected.into_inner()
+        (collected.into_inner(), announced)
     }
 
     #[derive(Debug, PartialEq, Eq)]

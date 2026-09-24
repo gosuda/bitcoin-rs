@@ -50,6 +50,11 @@ pub struct ListenerExtras {
     /// active, tx-typed `inv` vectors are not requested and `tx` bodies are
     /// dropped before ingress (Core 31.1 `net_processing.cpp:4401`, `:4716`).
     pub ibd: Option<Arc<bitcoin_rs_chain::InitialBlockDownload>>,
+    /// Block-download orchestrator, used to route block inventory
+    /// announcements and to ask whether an inbound body was requested.
+    /// `None` (tests, and a node without a sync loop) announces nothing and
+    /// treats every body as unsolicited.
+    pub block_sync: Option<Arc<crate::sync::BlockSync>>,
 }
 
 /// Share the wiring for one P2P start epoch.
@@ -94,6 +99,8 @@ pub struct ConnectionShared {
     /// Chain-owned initial-block-download latch. `None` means transaction
     /// relay is open.
     pub ibd: Option<Arc<bitcoin_rs_chain::InitialBlockDownload>>,
+    /// Block-download orchestrator for this start epoch.
+    pub block_sync: Option<Arc<crate::sync::BlockSync>>,
 }
 
 impl ConnectionShared {
@@ -128,7 +135,24 @@ impl ConnectionShared {
             compact_hints: None,
             inbound_tx: None,
             ibd: None,
+            block_sync: None,
         }
+    }
+
+    /// Routes one block-typed inventory hash into header sync.
+    ///
+    /// PRE: `source` identifies the current connection and `hash` is a block
+    /// inventory hash.
+    /// POST: the sync layer records the connection's best-known block and
+    /// schedules `getheaders`; no block body request is emitted here.
+    /// INVARIANT: block inventory never bypasses header admission and the
+    /// download-window budget.
+    fn announce_block(&self, source: crate::PeerSource, hash: bitcoin_rs_primitives::Hash256) {
+        let Some(sync) = self.block_sync.as_ref() else {
+            return;
+        };
+        sync.announce_block(source, hash);
+        wake_sync(self.wake_tx.as_ref());
     }
 
     fn notify_peer_ready(&self, source: crate::PeerSource) {
@@ -773,6 +797,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             crate::wire::PeerError::Protocol("outbound queue closed or saturated")
                         })
                     },
+                    &mut |hash| shared.announce_block(lease.source(peer_addr), hash),
                 )?;
                 match message {
                     crate::Message::Headers(headers) => {
