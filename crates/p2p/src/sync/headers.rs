@@ -11,6 +11,7 @@ use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
 use super::frontier::ChainFrontier;
 use super::frontier::SyncFrontier;
+use super::frontier::UsablePeer;
 use super::peers::is_peer_fault;
 use super::peers::outranks;
 use super::peers::shared_active_height;
@@ -75,7 +76,7 @@ impl BlockSync {
                     if wire_response && !body_fetch_owned {
                         direct_fetch.push((source, tip_hash));
                     }
-                    self.continue_full_page(Some(source), &headers, now);
+                    self.continue_full_page(Some(source), batch_len, Some(tip_hash), now);
                 }
                 if body_fetch_owned {
                     self.note_owned_body_fetch(source, headers.last());
@@ -101,7 +102,7 @@ impl BlockSync {
                     }
                     credit_refresh_needed = true;
                     self.consume_header_request(source, wire_response, headers.is_empty());
-                    self.continue_full_page(source, &headers, now);
+                    self.continue_full_page(source, batch_len, announced_tip, now);
                     tracing::debug!(
                         accepted,
                         received = batch_len,
@@ -324,15 +325,17 @@ impl BlockSync {
     }
 
     /// Consumes the pending `getheaders` when a nonempty wire `headers`
-    /// response arrives on the exact connection that owns it. An empty
+    /// response arrives on the exact connection that owns it, and clears that
+    /// connection's header-timeout penalty: an answered request is the evidence
+    /// that retires the blame a previous timeout recorded. An empty
     /// response supplies no new capability: retain its deadline so idle
     /// discovery is paced and rotates to another peer. The consumption is
     /// identity-exact: only the connection the request was sent to can
     /// answer it, so a same-address replacement's batch never frees the
-    /// predecessor's deadline. Headers forwarded out of a delivered body
-    /// (`wire_response = false`) are not a response: letting them clear the
-    /// pending slot would let every delivered block reset request pacing
-    /// and emit duplicate `getheaders`.
+    /// predecessor's deadline nor redeems its penalty. Headers forwarded out
+    /// of a delivered body (`wire_response = false`) are not a response:
+    /// letting them clear the pending slot would let every delivered block
+    /// reset request pacing and emit duplicate `getheaders`.
     fn consume_header_request(
         &self,
         source: Option<PeerSource>,
@@ -343,6 +346,7 @@ impl BlockSync {
             return;
         };
         self.clear_header_request_for(source);
+        self.scheduler.lock().header_penalties.remove(&source);
     }
 
     /// Moves the retained request's deadline to `now` after `source` answered
@@ -490,28 +494,32 @@ impl BlockSync {
 
     /// Continues a full header page on the connection that delivered it.
     ///
-    /// PRE: `source` is the connection `headers` arrived on, if any.
-    /// POST: when the batch filled the wire page and `source` is known, exactly
+    /// PRE: `source` is the connection the page arrived on, `batch_len` is the
+    ///   size of that page, and `page_tip` is the deepest header of the page
+    ///   that this node now holds.
+    /// POST: when the page filled the wire batch and `source` is known, exactly
     ///   one `getheaders` was sent to that connection; nothing is sent for a
-    ///   short batch or a source-less delivery.
+    ///   short page or a source-less delivery.
     /// INVARIANT: a full page is continued on the connection that proved it can
     ///   serve it, never by re-electing a peer, so header sync does not stall
-    ///   waiting for a later tick to rediscover the tip.
+    ///   waiting for a later tick to rediscover the tip; and the anchor is the
+    ///   header this node actually holds, because a page may be admitted only
+    ///   as far as consensus validation allows.
     fn continue_full_page(
         &self,
         source: Option<PeerSource>,
-        headers: &[bitcoin_rs_primitives::Header],
+        batch_len: usize,
+        page_tip: Option<Hash256>,
         now: Instant,
     ) {
-        if headers.len() != MAX_HEADERS_RESULTS {
+        if batch_len != MAX_HEADERS_RESULTS {
             return;
         }
-        let (Some(source), Some(last)) = (source, headers.last()) else {
+        let (Some(source), Some(page_tip)) = (source, page_tip) else {
             return;
         };
-        let batch_tip = Hash256::from(last.compute_hash());
         let target_height = self.header_continuation_target(source);
-        self.continue_headers_from(source, batch_tip, target_height, now);
+        self.continue_headers_from(source, page_tip, target_height, now);
     }
 
     /// Asks `source` for the page that follows the one it just delivered.
@@ -521,9 +529,9 @@ impl BlockSync {
     /// POST: the locator handed to `send_getheaders` has `batch_tip` as its
     ///   first entry and the request is registered under `source`; returns the
     ///   send outcome, or `Failed` when `batch_tip` is not in the tree.
-    /// INVARIANT: the anchor is the delivered batch's own last header, never a
-    ///   separately loaded chain tip, so the peer resumes exactly where this
-    ///   page stopped.
+    /// INVARIANT: the anchor is the delivered page's own deepest admitted
+    ///   header, never a separately loaded chain tip, so the peer resumes
+    ///   exactly where this page stopped.
     fn continue_headers_from(
         &self,
         source: PeerSource,
@@ -592,7 +600,13 @@ impl BlockSync {
             .find(|session| session.addr == source.addr)
             .and_then(|session| session.info.as_ref())
             .map_or(i32::MAX, |info| info.best_known_height);
-        self.send_getheaders(source, header_height, target_height, self.build_locator(), now);
+        self.send_getheaders(
+            source,
+            header_height,
+            target_height,
+            self.build_locator(),
+            now,
+        );
     }
 
     /// Asks any live full-witness peer for the header ancestry past our tip.
@@ -719,6 +733,10 @@ impl BlockSync {
             .chain_tip
             .as_ref()
             .map_or(applied_height, |tip| tip.height);
+        // Each connection's own header-timeout record lowers its effective
+        // rank, so a peer that failed to answer is not re-picked over one that
+        // has not been asked yet at the same advertised height.
+        let penalties = self.header_penalties();
         let mut header_peer: Option<(PeerSource, SyncPeer)> = None;
         for peer in &frontier.usable_peers {
             let Some(candidate) = sync_peer_candidate(peer.source, &peer.info, applied_height)
@@ -730,7 +748,7 @@ impl BlockSync {
             }
             if header_peer
                 .as_ref()
-                .is_none_or(|(_, current)| outranks(*current, candidate))
+                .is_none_or(|(_, current)| outranks(current, &candidate, &penalties))
             {
                 header_peer = Some((peer.source, candidate));
             }
@@ -802,6 +820,70 @@ impl BlockSync {
             metrics::counter!("node.sync.idle_frontier_probes").increment(1);
         }
         outcome
+    }
+
+    /// This tick's header-timeout penalties, one count per exact connection.
+    ///
+    /// PRE: none.
+    /// POST: returns a snapshot of the penalty records, empty for connections
+    ///   that have answered every request asked of them.
+    /// INVARIANT: the snapshot is taken and released in one lock acquisition,
+    ///   so no peer comparison ever runs while the scheduler is held.
+    pub(super) fn header_penalties(&self) -> hashbrown::HashMap<PeerSource, u32> {
+        self.scheduler.lock().header_penalties.clone()
+    }
+
+    /// Retires a `getheaders` that outlived its deadline and rotates away from
+    /// the connection that ignored it.
+    ///
+    /// PRE: `now` is the instant this tick was taken at and `usable` is the
+    ///   peer snapshot observed at that same instant.
+    /// POST: when the pending request is older than `HEADER_REQUEST_TIMEOUT` and
+    ///   its exact owner is still usable, the request is cleared, that owner is
+    ///   marked unresponsive at `now`, and its penalty rises by one; the owner
+    ///   is disconnected only while another usable peer remains. Returns the
+    ///   retired connection, or `None` when nothing expired.
+    /// INVARIANT: expiry reads only `now` and compares whole connection
+    ///   identity, so a same-address replacement never inherits the blame, and
+    ///   a cleared request can never gate a later selection.
+    pub(super) fn expire_header_request(
+        &self,
+        now: Instant,
+        usable: &[UsablePeer],
+    ) -> Option<PeerSource> {
+        let expired = {
+            let mut scheduler = self.scheduler.lock();
+            let request = scheduler.header_request.filter(|request| {
+                now.saturating_duration_since(request.requested_at) >= HEADER_REQUEST_TIMEOUT
+                    && usable.iter().any(|peer| peer.source == request.source)
+            })?;
+            scheduler.header_request = None;
+            *scheduler
+                .header_penalties
+                .entry(request.source)
+                .or_insert(0) += 1;
+            scheduler
+                .window
+                .mark_peer_unresponsive(request.source.addr, now);
+            request.source
+        };
+        let fallback_exists = usable.len() > 1;
+        if !fallback_exists {
+            // Nothing else to ask, so the request stays cleared rather than
+            // gating the next peer that connects.
+            tracing::warn!(
+                peer_addr = %expired.addr,
+                "block sync: peer did not answer getheaders; request cleared, no fallback peer",
+            );
+            return Some(expired);
+        }
+        if self.peer_table.disconnect_source(expired) {
+            tracing::warn!(
+                peer_addr = %expired.addr,
+                "block sync: peer did not answer getheaders; disconnecting and rotating to a fallback",
+            );
+        }
+        Some(expired)
     }
 
     /// Sends `getheaders` to the exact connection `source` identifies and

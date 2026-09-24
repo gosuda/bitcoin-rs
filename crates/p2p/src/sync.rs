@@ -225,6 +225,10 @@ struct SchedulerState {
     /// it can bring us to the tip. Keyed by exact connection identity, so a
     /// replacement at the same address is judged on its own record.
     chain_sync: hashbrown::HashMap<PeerSource, peers::ChainSyncState>,
+    /// Header requests each connection has failed to answer. Keyed by exact
+    /// connection identity, so a same-address replacement starts clean and a
+    /// timed-out peer is never blamed for its successor or the reverse.
+    header_penalties: hashbrown::HashMap<PeerSource, u32>,
     /// Whether this node's own tip is still moving, and what that buys.
     stale_tip: StaleTipState,
 }
@@ -233,8 +237,9 @@ impl SchedulerState {
     /// Releases every scheduling fact owned by a connection not in `live`.
     ///
     /// PRE: `live` is the peer table's live-session snapshot.
-    /// POST: the window, the header request, and the deferred body fetches
-    ///   hold only facts owned by a connection in `live`.
+    /// POST: the window, the header request, the header-timeout penalties, and
+    ///   the deferred body fetches hold only facts owned by a connection in
+    ///   `live`.
     /// INVARIANT: ownership is compared by connection identity, never by
     fn release_unowned(&mut self, live: &[PeerSource]) {
         let owns = |source: &PeerSource| live.contains(source);
@@ -247,6 +252,7 @@ impl SchedulerState {
         }
         self.owned_body_fetches.retain(|(source, _)| owns(source));
         self.chain_sync.retain(|source, _| owns(source));
+        self.header_penalties.retain(|source, _| owns(source));
     }
 
     /// Puts one connection's chain-sync record back after a probe that never
@@ -352,6 +358,7 @@ impl BlockSync {
                 header_request: None,
                 owned_body_fetches: Vec::new(),
                 chain_sync: hashbrown::HashMap::new(),
+                header_penalties: hashbrown::HashMap::new(),
                 stale_tip: StaleTipState::default(),
             }),
             refused_rerequest_at: Mutex::new(None),
@@ -371,6 +378,7 @@ impl BlockSync {
             header_request: None,
             owned_body_fetches: Vec::new(),
             chain_sync: hashbrown::HashMap::new(),
+            header_penalties: hashbrown::HashMap::new(),
             stale_tip: StaleTipState::default(),
         };
     }
@@ -440,6 +448,10 @@ impl BlockSync {
         // the same tick can re-request it.
         self.reconcile_peer_sessions();
         let frontier = self.observe_frontier(chain, now);
+        // A `getheaders` that outlived its deadline is retired before any
+        // selection this tick, so the scheduler cannot re-ask the connection
+        // that ignored it.
+        self.expire_header_request(now, &frontier.usable_peers);
         // A connection that has had twenty minutes to bring a better chain and
         // two more to answer a probe is retired before this tick plans any
         // further work with it.
