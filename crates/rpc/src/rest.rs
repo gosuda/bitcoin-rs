@@ -385,6 +385,13 @@ pub(crate) fn arm_capture_hook(hook: impl FnOnce() + 'static) {
 ///
 /// Only the URI-scheme input form is implemented (Core's raw-body form is not
 /// served). Responses follow Core's BIP64-ish shape.
+///
+/// PRE: parsing and format resolution have succeeded.
+/// POST: the `checkmempool` branch answers only while the gateway's chain
+/// generation is stable across the whole read; an unstable or moved
+/// generation returns the retry response instead of a body.
+/// INVARIANT: the plain branch never reads the generation and acquires no
+/// new lock.
 fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     let (path, format) = split_format(suffix);
     let (check_mempool, outpoints) = match parse_getutxos_outpoints(path) {
@@ -393,6 +400,17 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     };
     let Some(format) = format else {
         return format_not_found(available_formats());
+    };
+    // The checkmempool branch pairs UTXO facts with pool facts, so a chain
+    // transition between the reads could confirm a spend the transition
+    // already reversed. The entry check refuses while a change is active.
+    let entry_generation = if check_mempool {
+        match ctx.mempool.stable_generation() {
+            Some(generation) => Some(generation),
+            None => return service_unavailable("chain generation is odd; retry"),
+        }
+    } else {
+        None
     };
     // Height and hash describe one publication, so a response cannot pair one
     // block's height with another block's hash.
@@ -419,6 +437,12 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
         }
     }
     drop(pool);
+    // The end check compares for exact equality only; a generation that
+    // moved while the reads ran discards the assembled results and asks the
+    // client to retry.
+    if entry_generation.is_some_and(|entry| ctx.mempool.stable_generation() != Some(entry)) {
+        return service_unavailable("chain generation is odd; retry");
+    }
     // Bitmap packs the least-significant hit bit first per byte, matching Core.
     for (index, hit) in hits.iter().enumerate() {
         if *hit {
@@ -1915,6 +1939,49 @@ mod tests {
                 .map(|published| published.height),
             Some(applied_height + 40),
             "the hook must really have published mid-response"
+        );
+    }
+
+    const CHECKMEMPOOL_JSON: &str = "/rest/getutxos/checkmempool/\
+        0000000000000000000000000000000000000000000000000000000000000001-0.json";
+
+    /// The checkmempool branch mixes UTXO and mempool facts, so it refuses
+    /// while a chain change is active. The refusal is the documented retry
+    /// response: 503, `text/plain`, no trailing newline.
+    #[test]
+    fn getutxos_checkmempool_returns_503_on_unstable_generation() {
+        let ctx = Arc::new(Context::new());
+        ctx.mempool.force_chain_generation(3);
+        let response = route(&ctx, CHECKMEMPOOL_JSON, "", true);
+        assert_eq!(response.status, 503);
+        assert_eq!(response.reason, "Service Unavailable");
+        assert_eq!(response.content_type, "text/plain");
+        assert_eq!(response.body, b"chain generation is odd; retry".to_vec());
+    }
+
+    /// A generation that moves between the entry check and the end check
+    /// discards the assembled body and returns the same retry response.
+    #[test]
+    fn getutxos_checkmempool_rejects_moved_generation() {
+        let ctx = Arc::new(Context::new());
+        ctx.mempool.force_chain_generation(4);
+        let mover = Arc::clone(&ctx);
+        arm_capture_hook(move || mover.mempool.force_chain_generation(6));
+        let response = route(&ctx, CHECKMEMPOOL_JSON, "", true);
+        assert_eq!(response.status, 503);
+        assert_eq!(response.body, b"chain generation is odd; retry".to_vec());
+    }
+
+    /// The plain branch reads no mempool fact and deploymentinfo never reads
+    /// the generation, so an odd generation must not refuse either one.
+    #[test]
+    fn plain_tip_routes_ignore_mempool_generation() {
+        let ctx = Arc::new(Context::new());
+        ctx.mempool.force_chain_generation(3);
+        assert_eq!(route(&ctx, GETUTXOS_JSON, "", true).status, 200);
+        assert_eq!(
+            route(&ctx, "/rest/deploymentinfo.json", "", true).status,
+            200
         );
     }
 
