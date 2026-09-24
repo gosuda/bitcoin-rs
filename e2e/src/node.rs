@@ -197,16 +197,14 @@ fn core_binary() -> PathBuf {
     workspace().join("target/reference-core-31.1/bitcoin-31.1/bin/bitcoind")
 }
 
-/// Verify the resolved bitcoind matches the pinned digest in
-/// `docs/api/core-compat.toml`. Returns the binary path on success.
+/// Verify the resolved bitcoind matches the pinned digest in the compiled
+/// `core-compat.toml` manifest. Returns the binary path on success.
 pub fn verified_core_binary() -> Result<PathBuf> {
     if let Some(path) = VERIFIED_CORE.get() {
         return Ok(path.clone());
     }
     let path = core_binary();
-    let compat = fs::read_to_string(workspace().join("docs/api/core-compat.toml"))
-        .map_err(|e| Error::Assertion(format!("cannot read core-compat.toml: {e}")))?;
-    let table: toml::Table = compat
+    let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
         .parse()
         .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
     let expected = table
