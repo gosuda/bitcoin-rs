@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_primitives::Network;
 use crossbeam_channel::{SendTimeoutError, Sender};
 use parking_lot::RwLock;
@@ -29,6 +30,16 @@ const PING_INTERVAL: Duration = Duration::from_mins(2);
 /// Core's `TIMEOUT_INTERVAL` is 20 * 60 seconds (`net.h:59`), enforced by its
 /// `InactivityCheck` (`net.cpp:2043-2090`).
 const TIMEOUT_INTERVAL: Duration = Duration::from_mins(20);
+
+/// Blocks of tip staleness (in target-spacing units) within which Core will
+/// still connect to a `NODE_NETWORK_LIMITED` peer:
+/// `NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS` (`net_processing.cpp:161`).
+const NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS: u64 = 144;
+
+/// Proof-of-work target spacing used to express the local tip age in blocks
+/// (Core `nPowTargetSpacing`, 600 seconds on every bitcoin-rs network;
+/// `bitcoin_rs_primitives::Network::target_spacing_seconds`).
+const POW_TARGET_SPACING_SECS: u64 = 600;
 
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 
@@ -213,6 +224,31 @@ impl ConnectionShared {
 
     fn is_session_cancelled(&self) -> bool {
         self.session_cancel.load(Ordering::Acquire)
+    }
+
+    /// The local tip age in target-spacing units (Core
+    /// `ApproximateBestBlockDepth`, `net_processing.cpp:1445-1448`).
+    ///
+    /// PRE: none.
+    /// POST: returns `(now - active tip header time) / target spacing`, and
+    ///   `u64::MAX` when no chain view or no tip exists — with nothing
+    ///   applied the node is as deep as it can be, so only full-history
+    ///   peers are desirable.
+    /// INVARIANT: reads the shared chain view once; no per-handshake block
+    ///   tree walk exists.
+    #[must_use]
+    pub fn approximate_best_block_depth(&self) -> u64 {
+        let Some(tip_time) = self
+            .chain_query
+            .as_ref()
+            .and_then(|query| query.best_block_time())
+        else {
+            return u64::MAX;
+        };
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        now.saturating_sub(u64::from(tip_time)) / POW_TARGET_SPACING_SECS
     }
 
     fn send_headers(
@@ -643,7 +679,15 @@ fn run_outbound_connection(
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, shared.magic);
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-    if let Err(error) = run_outbound_handshake(&mut peer, nonce, 0, &lease, handshake_deadline) {
+    let best_block_depth = shared.approximate_best_block_depth();
+    if let Err(error) = run_outbound_handshake(
+        &mut peer,
+        nonce,
+        0,
+        &lease,
+        handshake_deadline,
+        best_block_depth,
+    ) {
         // `remove_current` cancels as a side effect, so revocation must be
         // read before it: a pre-cancelled lease means an external shutdown,
         // while a live lease means this handshake failed on its own.
@@ -679,16 +723,20 @@ fn run_outbound_connection(
 
 /// Drives the outbound handshake until the peer is ready.
 ///
-/// PRE: `peer` wraps a connected outbound stream, and `lease` belongs to it.
-/// POST: `peer` is `Ready`, and the post-verack messages are sent.
+/// PRE: `peer` wraps a connected outbound stream, `lease` belongs to it,
+///   and `best_block_depth` is the local tip age read for this dial.
+/// POST: `peer` is `Ready`, the post-verack messages are sent, and the
+///   remote offered the desirable services ([`has_all_desirable_service_flags`]).
 /// INVARIANT: This function counts no bytes; the stream that `peer` wraps
-/// owns byte accounting.
+///   owns byte accounting. The service check runs once the remote `version`
+///   is decoded and before the peer can be published as usable.
 fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     nonce: u64,
     start_height: i32,
     lease: &crate::PeerLease,
     deadline: Instant,
+    best_block_depth: u64,
 ) -> Result<(), crate::wire::PeerError> {
     let outbound_messages = crate::handshake::start(peer, nonce, start_height, lease.role());
     for message in outbound_messages {
@@ -698,12 +746,50 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     while peer.state != crate::peer::PeerState::Ready {
         let (inbound, _) = crate::handshake::read_handshake_message(peer, lease, deadline)?;
         let responses = crate::dispatch::dispatch_inbound(peer, &inbound)?;
+        // Core disconnects an outbound peer whose `version` does not offer
+        // the expected services (`net_processing.cpp:1904-1912`); an
+        // ineligible peer would otherwise hold an outbound slot that
+        // maintenance cannot replace.
+        if peer.remote_version.as_ref().is_some_and(|version| {
+            !has_all_desirable_service_flags(version.services, best_block_depth)
+        }) {
+            return Err(crate::wire::PeerError::Protocol(
+                "outbound peer lacks desirable services",
+            ));
+        }
         for response in responses {
             peer.send(&response)?;
         }
     }
     crate::handshake::send_post_verack_messages(peer)?;
     Ok(())
+}
+
+/// Returns the service flags required from an outbound peer.
+///
+/// PRE: `remote_services` is the flags received in `version`;
+///   `best_block_depth` is the local approximate tip age in target-spacing
+///   units ([`ConnectionShared::approximate_best_block_depth`]).
+/// POST: a peer with NETWORK and WITNESS is accepted; a LIMITED peer is
+///   accepted only when it also has WITNESS and `best_block_depth < 144`;
+///   every other service set is rejected.
+/// INVARIANT: this is the only outbound desirable-service predicate
+///   (Core `HasAllDesirableServiceFlags` / `GetDesirableServiceFlags`,
+///   `net_processing.cpp:1857-1872`, applied to outbound connections at
+///   `net_processing.cpp:1904-1912`); inbound peers are exempt.
+#[must_use]
+pub fn has_all_desirable_service_flags(
+    remote_services: ServiceFlags,
+    best_block_depth: u64,
+) -> bool {
+    let required = if remote_services.has(ServiceFlags::NETWORK_LIMITED)
+        && best_block_depth < NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS
+    {
+        ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS
+    } else {
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS
+    };
+    remote_services.has(required)
 }
 
 fn spawn_handshake_thread(
