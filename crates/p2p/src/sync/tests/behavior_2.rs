@@ -166,12 +166,11 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
     sync.scheduler
         .lock()
         .window
-        .mark_received(hash, bytes, Instant::now());
+        .mark_received_from(hash, bytes, None, Instant::now());
 
     sync.drain_inbound_blocks();
 
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
-    assert_eq!(sync.scheduler.lock().window.received_len(), 0);
     Ok(())
 }
 

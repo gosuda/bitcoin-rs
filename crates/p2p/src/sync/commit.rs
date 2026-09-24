@@ -178,7 +178,7 @@ impl BlockSync {
                         // valid, so they must not occupy bounded download
                         // state or the frontier would cycle on them forever.
                         // Purge every invalidated hash from the stager and
-                        // from the window's pending/received maps; the
+                        // from the window's pending map; the
                         // expected-apply cache is dropped below because the
                         // round failed.
                         self.purge_invalidated(&error.invalidated);
@@ -195,15 +195,18 @@ impl BlockSync {
             chunk_start = chunk_end;
         }
         if !applied_hashes.is_empty() || failed_hash.is_some() {
-            {
-                let mut scheduler = self.scheduler.lock();
-                let window = &mut scheduler.window;
-                for hash in &applied_hashes {
-                    window.mark_received_applied(hash);
-                }
-                if let Some(hash) = failed_hash {
-                    window.drop_received_for_retry(&hash);
-                }
+            if let Some(hash) = failed_hash {
+                // The tree owns heights: the retry cursor drops to the failed
+                // body's tree height, or stays put when the tree cannot
+                // resolve it (no rewind to genesis).
+                let failed_height = {
+                    let tree = self.chain.block_tree().read();
+                    tree.height_of_hash(hash)
+                };
+                self.scheduler
+                    .lock()
+                    .window
+                    .requeue_for_retry(&hash, failed_height);
             }
             self.advance_expected_apply_cache(&applied_hashes, failed_hash.is_some());
             metrics::histogram!("node.sync.apply_buffered_blocks_seconds")

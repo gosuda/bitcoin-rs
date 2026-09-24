@@ -1,6 +1,7 @@
 //! Session reconciliation, useful-peer selection, and stalled-peer retirement.
 
 use super::BlockSync;
+use super::SchedulerState;
 use super::frontier::{ChainFrontier, SyncFrontier};
 use crate::PeerInfo;
 use crate::connection::PeerSource;
@@ -187,10 +188,13 @@ impl BlockSync {
                 .and_then(|tip| tip.height.checked_add(1))
         });
         let (apply_side_escalation, cold_hedge, staller, timed_out) = {
+            // Lock order tree -> scheduler (as in request publication): the
+            // stall predicate resolves staged hashes against block-tree
+            // heights, so the tree guard is held across the window read.
+            let tree = self.chain.block_tree().read();
             let mut scheduler = self.scheduler.lock();
-            let apply_side_busy =
-                frontier_hash.is_some_and(|hash| scheduler.stager.contains(&hash));
-            let window = &mut scheduler.window;
+            let SchedulerState { window, stager, .. } = &mut *scheduler;
+            let apply_side_busy = frontier_hash.is_some_and(|hash| stager.contains(&hash));
             let mut apply_side_escalation = None;
             let mut cold_hedge = None;
             let staller = if let Some(next_apply_height) = next_apply_height {
@@ -201,7 +205,7 @@ impl BlockSync {
                     now,
                 );
                 cold_hedge = window.observe_cold_front(next_apply_height, apply_side_busy, now);
-                window.observe_stall(next_apply_height, apply_side_busy, now)
+                window.observe_stall(next_apply_height, apply_side_busy, stager, &tree, now)
             } else {
                 None
             };
@@ -322,12 +326,9 @@ impl BlockSync {
         };
         {
             let mut scheduler = self.scheduler.lock();
-            if let Some(height) = height {
-                scheduler
-                    .window
-                    .update_received_height(&frontier_hash, height);
-            }
-            scheduler.window.drop_received_for_retry(&frontier_hash);
+            // The tree owns the height: requeue drops the cursor to the
+            // body's tree height, or leaves it alone when unresolvable.
+            scheduler.window.requeue_for_retry(&frontier_hash, height);
         }
         metrics::counter!("node.sync.apply_side_stall_escalations").increment(1);
         tracing::warn!(
@@ -391,7 +392,7 @@ impl BlockSync {
         }
         let (request_peer_limit, fanout_active, cold_preferred) = {
             let mut scheduler = self.scheduler.lock();
-            let window = &mut scheduler.window;
+            let SchedulerState { window, stager, .. } = &mut *scheduler;
             for candidate in &mut candidates {
                 candidate.soft_blocked = window
                     .peer_has_expired_pending(candidate.peer.source.addr, now)
@@ -400,7 +401,7 @@ impl BlockSync {
             }
             let cold_preferred = configure_request_mode(window, &candidates, now);
             (
-                window.request_peer_scan_limit(now),
+                window.request_peer_scan_limit(stager, now),
                 window.fanout_active(),
                 cold_preferred,
             )

@@ -464,7 +464,21 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     let now = Instant::now();
     {
         let mut scheduler = sync.scheduler.lock();
+        let block = super::mined_block_with_prev_hash(
+            BlockHash(Hash256::from_le_bytes(expected[2].as_bytes())),
+            4,
+            vec![super::transaction(0xEE)],
+        );
+        let serialized = bytes::Bytes::from(consensus_bytes(&block));
         scheduler.window.seed_front_cadence_for_test(50, now);
+        scheduler.stager.insert(
+            tail,
+            None,
+            block,
+            serialized,
+            Some(conn1.source(staller)),
+            now,
+        );
         scheduler
             .window
             .mark_received_from(tail, 80, Some(conn1.source(staller)), now);
@@ -479,13 +493,24 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
         .height;
     {
         let mut scheduler = sync.scheduler.lock();
-        scheduler.window.observe_stall(next_apply, false, now);
+        let tree = sync.chain.block_tree().read();
+        let state = &mut *scheduler;
+        state
+            .window
+            .observe_stall(next_apply, false, &state.stager, &tree, now);
     }
-    let owner = sync.scheduler.lock().window.observe_stall(
-        next_apply,
-        false,
-        now + super::super::BLOCK_STALLING_TIMEOUT,
-    );
+    let owner = {
+        let mut scheduler = sync.scheduler.lock();
+        let tree = sync.chain.block_tree().read();
+        let state = &mut *scheduler;
+        state.window.observe_stall(
+            next_apply,
+            false,
+            &state.stager,
+            &tree,
+            now + super::super::BLOCK_STALLING_TIMEOUT,
+        )
+    };
     let (tx2, rx2) = unbounded::<Message>();
     let conn2 = PeerLease::new(tx2);
     peers.register(staller, conn2.clone());

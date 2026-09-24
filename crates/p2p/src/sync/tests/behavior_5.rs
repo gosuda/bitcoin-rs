@@ -57,10 +57,6 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget()
         "block stager must enforce received block count budget"
     );
     assert!(
-        fixture.sync.scheduler.lock().window.received_len() <= max_received_blocks,
-        "download window must mirror received block count budget"
-    );
-    assert!(
         fixture.applied_tip.load_full().is_none(),
         "missing next expected block should prevent out-of-order apply"
     );

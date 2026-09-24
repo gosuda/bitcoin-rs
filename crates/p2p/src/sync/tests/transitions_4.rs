@@ -321,11 +321,18 @@ fn stall_eviction_does_not_disconnect_replacement_connection()
         .height
         .checked_add(1)
         .ok_or_else(|| std::io::Error::other("applied height overflow"))?;
-    let selected = sync.scheduler.lock().window.observe_stall(
-        next_apply_height,
-        false,
-        Instant::now() + Duration::from_millis(150),
-    );
+    let selected = {
+        let mut scheduler = sync.scheduler.lock();
+        let tree = sync.chain.block_tree().read();
+        let state = &mut *scheduler;
+        state.window.observe_stall(
+            next_apply_height,
+            false,
+            &state.stager,
+            &tree,
+            Instant::now() + Duration::from_millis(150),
+        )
+    };
     let (replacement_tx, _replacement_rx) = unbounded::<Message>();
     let replacement = PeerLease::new(replacement_tx);
     peers.register(staller, replacement.clone());
@@ -400,9 +407,11 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
     sync.tick();
     {
         let scheduler = sync.scheduler.lock();
-        let window = &scheduler.window;
-        assert!(!window.has_request_capacity());
-        assert_eq!(window.stalling_peer().map(|(addr, _)| addr), Some(staller));
+        assert!(!scheduler.window.has_request_capacity(&scheduler.stager));
+        assert_eq!(
+            scheduler.window.stalling_peer().map(|(addr, _)| addr),
+            Some(staller)
+        );
     }
     assert!(honest_rx.try_recv().is_err());
 

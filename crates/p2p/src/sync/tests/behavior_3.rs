@@ -15,10 +15,19 @@ fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error
     // still open, but only one more estimated block fits.
     {
         let mut scheduler = sync.scheduler.lock();
-        let window = &mut scheduler.window;
         let now = Instant::now();
-        window.mark_received(Hash256::from_le_bytes(&[0xEE; 32]), slot, now);
-        window.mark_received(Hash256::from_le_bytes(&[0xEF; 32]), slot, now);
+        for seed in [0xEE, 0xEF] {
+            let block = padded_block_exact(slot, seed);
+            let serialized = bytes::Bytes::from(consensus_bytes(&block));
+            scheduler.stager.insert(
+                Hash256::from_le_bytes(&[seed; 32]),
+                None,
+                block,
+                serialized,
+                None,
+                now,
+            );
+        }
     }
     let addr = test_addr(9270, 0)?;
     let rx = connect_peer(&peers, eligible_peer(addr, 200));
@@ -26,20 +35,16 @@ fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error
     sync.tick();
 
     assert_applied_genesis(&applied_tip, &block_tree)?;
-    let Message::GetData(inventory) = rx.try_recv()? else {
-        return Err(std::io::Error::other("expected headroom-clamped getdata").into());
-    };
+    // The staged fixture bodies carry headers with unknown parents, so the
+    // tick also sends a recovery `getheaders`; only block requests count.
     // A gate-open burst must not over-request past staging headroom.
-    assert_eq!(witness_block_inventory(inventory)?, expected[..1]);
-    if !matches!(rx.try_recv()?, Message::GetHeaders(_)) {
-        return Err(std::io::Error::other("expected getheaders").into());
-    }
+    assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, expected[..1]);
 
     sync.tick();
 
     // The in-flight request consumed the last slot: no further requests
     // until staged blocks apply.
-    assert!(rx.try_recv().is_err());
+    assert_no_getdata(&rx)?;
     Ok(())
 }
 
@@ -60,12 +65,13 @@ fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
 
     {
         let scheduler = sync.scheduler.lock();
-        let window = &scheduler.window;
-        assert_eq!(window.received_len(), 14);
-        assert_eq!(window.pending_len(), 2);
+        assert_eq!(scheduler.stager.received_len(), 14);
+        assert_eq!(scheduler.window.pending_len(), 2);
         for front in &expected[..2] {
             assert!(
-                window.contains_pending(&Hash256::from_le_bytes(front.as_bytes())),
+                scheduler
+                    .window
+                    .contains_pending(&Hash256::from_le_bytes(front.as_bytes())),
                 "stalled front stripe must stay pending, not churn through retry"
             );
         }
@@ -323,7 +329,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
     sync.scheduler
         .lock()
         .window
-        .mark_received(successor, 80, Instant::now());
+        .mark_received_from(successor, 80, None, Instant::now());
 
     // Apply-side backpressure: the next expected block (the frontier) is
     // itself staged but not yet drained.
@@ -418,11 +424,10 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     assert_eq!(witness_block_inventory(inventory)?, expected[..2]);
 
     // The #1091 wedge shape: the frontier (and a successor) staged, nothing
-    // applied — apply_side_busy true and stuck. Both bodies register in the
-    // window exactly as real deliveries do (mark_received_from): the
-    // escalation requeues through drop_received_for_retry, which only acts
-    // on received entries, so an unregistered frontier would leave the
-    // refetch assertion below vacuous.
+    // applied — apply_side_busy true and stuck. Both bodies stage in the
+    // stager exactly as real deliveries do: the escalation drains the
+    // staged prefix and requeues it, so an unstaged frontier would leave
+    // the refetch assertion below vacuous.
     let frontier = Hash256::from_le_bytes(expected[0].as_bytes());
     let successor = Hash256::from_le_bytes(expected[1].as_bytes());
     for hash in [frontier, successor] {
@@ -443,7 +448,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     sync.scheduler
         .lock()
         .window
-        .mark_received(successor, 80, staged_at);
+        .mark_received_from(successor, 80, None, staged_at);
 
     let bound = super::super::default_sync_budget()
         .received_timeout
@@ -606,4 +611,26 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
     sync.tick();
     assert!(sync.scheduler.lock().window.fanout_active());
     Ok(())
+}
+
+/// Builds a regtest block whose serialized size is exactly `size` bytes by
+/// padding the coinbase-style transaction's output script. The script
+/// length prefix grows by 2 bytes at 253 and again at 65536.
+fn padded_block_exact(size: usize, seed: u8) -> Block {
+    let mut block = super::mined_block_with_prev_hash(
+        BlockHash(Hash256::from_le_bytes(&[seed; 32])),
+        1,
+        vec![super::transaction(seed)],
+    );
+    block.txs[0].outputs[0].script_pubkey = Vec::new().into();
+    let prefix_growth = |len: usize| match len {
+        0..=252 => 0,
+        253..=0xffff => 2,
+        _ => 4,
+    };
+    let wanted = size - consensus_bytes(&block).len();
+    let script_len = wanted - prefix_growth(wanted - prefix_growth(wanted));
+    block.txs[0].outputs[0].script_pubkey = vec![0_u8; script_len].into();
+    assert_eq!(consensus_bytes(&block).len(), size);
+    block
 }
