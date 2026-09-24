@@ -230,6 +230,7 @@ dependencies = [
  "anyhow",
  "bitcoin",
  "bitcoin-rs-chainstate",
+ "bitcoin-rs-e2e",
  "bitcoin-rs-node",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",

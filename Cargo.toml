@@ -51,6 +51,7 @@ bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.8.0" }
 bitcoin-rs-mining     = { path = "crates/mining",     version = "0.8.0" }
 bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.8.0" }
 bitcoin-rs-node       = { path = "crates/node",       version = "0.8.0", default-features = false }
+bitcoin-rs-e2e        = { path = "e2e",               version = "0.8.0" }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
 mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
