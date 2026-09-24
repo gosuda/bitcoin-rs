@@ -418,13 +418,13 @@ struct StallEpisode {
     since: Instant,
     /// Whether the one-shot episode-observability INFO line has been emitted
     /// for this episode (fires once when the episode survives
-    /// [`STALL_EPISODE_LOG_AGE`]; see [`DownloadWindow::observe_stall`]).
+    /// [`STALL_EPISODE_LOG_AGE`]; see [`DownloadWindow::advance_stall`]).
     info_logged: bool,
 }
 
 /// One continuous apply-side stuck episode: the apply frontier pinned at
 /// `(height, frontier_hash)` with a staged body held (`apply_side_busy`)
-/// across [`DownloadWindow::observe_apply_side_bound`] calls.
+/// across [`DownloadWindow::advance_apply_side_stuck`] calls.
 ///
 /// Keyed by height AND hash: the prune/refetch cycle briefly removes and
 /// re-delivers the stuck staged body (flipping `apply_side_busy` off and
@@ -453,6 +453,74 @@ enum ColdFrontState {
         alternate: PeerSource,
         hash: Hash256,
     },
+}
+
+/// The canonical frontier facts one blockage observation needs.
+///
+/// PRE: `next_apply_height` and `frontier_hash` describe the same
+///      `next_required` body the scheduler requested this tick;
+///      `apply_side_busy` is current for that body.
+/// POST: one tick advances every observation from this one snapshot.
+/// INVARIANT: a frontier without a next-expected block has `None` height
+///      and `None` hash; only the pending timeout still runs there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockedContext {
+    /// The next height apply expects, or `None` at the chain tip.
+    pub next_apply_height: Option<u32>,
+    /// The hash of that next-expected body, or `None` at the chain tip.
+    pub frontier_hash: Option<Hash256>,
+    /// Whether the stager holds the next-expected body (apply lag).
+    pub apply_side_busy: bool,
+}
+
+/// Why the unified blockage observation convicted an owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlameReason {
+    /// The window-blocked stall predicate fired on this owner.
+    Staller,
+    /// This owner's pending block passed its timeout twice.
+    PendingTimeout,
+}
+
+/// The single action the sync coordinator owes this tick.
+///
+/// PRE: apply-side state and exact pending owners are current; `now` is
+///      injected by the caller.
+/// POST: at most one action returns, in precedence
+///      `EvictStaged` > `Blame(Staller)` > `Blame(PendingTimeout)` >
+///      `HedgeColdFront` > `None`.
+/// INVARIANT: a same-address replacement never inherits blame, because
+///      every observation keys on the exact [`PeerSource`]; only the
+///      apply-side bound can produce [`BlockedDecision::EvictStaged`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockedDecision {
+    /// Disconnect `owner`: it is stalling the window or missed its
+    /// request timeout.
+    Blame {
+        /// The exact owning connection.
+        owner: PeerSource,
+        /// Which rule convicted it.
+        reason: BlameReason,
+    },
+    /// The apply-side no-blame suppression outlived its bound: evict the
+    /// staged body at `height`/`hash` for refetch. No peer is blamed.
+    EvictStaged {
+        /// The stuck apply-frontier height.
+        height: u32,
+        /// The stuck staged body's hash.
+        hash: Hash256,
+        /// How long the suppression had held when it fired.
+        suppressed_for: Duration,
+    },
+    /// Send a duplicate request for the cold front from another peer.
+    HedgeColdFront {
+        /// The current exact owner of the front block.
+        owner: PeerSource,
+        /// The front block's hash.
+        front_hash: Hash256,
+    },
+    /// Nothing to do this tick.
+    None,
 }
 #[derive(Debug)]
 struct PrefixProbe {
@@ -486,7 +554,7 @@ const PREFIX_PROBE_ESTIMATED_BYTES: usize = 2 * 1024 * 1024;
 /// Stall-episode clearing reasons, the counter taxonomy for
 /// `node.sync.stall_episodes_cleared{reason}`. Every path that zeroes the
 /// episode clock tags exactly one reason:
-/// - `apply_busy`: the no-blame guard held this tick ([`DownloadWindow::observe_stall`]).
+/// - `apply_busy`: the no-blame guard held this tick ([`DownloadWindow::advance_stall`]).
 /// - `predicate`: a [`DownloadWindow::window_blocked_on`] term went false
 ///   (front moved off the frontier, no staged successor, or capacity opened).
 /// - `front_moved`: the predicate still holds but for a different
@@ -526,13 +594,13 @@ pub struct DownloadWindow {
     fanout_eligible_peers: usize,
     fanout_engaged: bool,
     /// Current window-blocked stall observation, if any (R8). Re-derived from
-    /// the predicate every [`Self::observe_stall`] call; cleared whenever any
+    /// the predicate every [`Self::advance_stall`] call; cleared whenever any
     /// predicate term stops holding, so a transient stall never accumulates
     /// blame across unrelated episodes.
     stall: Option<StallEpisode>,
     /// Current apply-side stuck observation, if any (#1091 bound). Re-keyed
     /// on the apply-front `(height, hash)` every
-    /// [`Self::observe_apply_side_bound`] call; a front advance or a
+    /// [`Self::advance_apply_side_stuck`] call; a front advance or a
     /// same-height branch replacement resets it, brief unbusy seams do not,
     /// and an idle frontier starts no clock at all.
     apply_side_stuck: Option<ApplySideStuck>,
@@ -557,12 +625,13 @@ pub struct DownloadWindow {
     /// x0.85 decay re-cross g in ~4-5 front advances and fire again — a limit
     /// cycle draining one honest peer per ~5g seconds. Keying the floor to
     /// twice the demonstrated cadence kills the cycle while a true staller
-    /// (silent while others stream) still convicts at ~2g. Two guards keep
-    /// the estimate honest: same-chunk batch arrivals (samples under
+    /// (silent while others stream) still convicts at ~2g. The estimate
+    /// stays honest because same-chunk batch arrivals (samples under
     /// [`EWMA_MIN_SAMPLE_MS`]) are skipped so an in-order burst sharing one
-    /// chunk timestamp cannot deflate the floor, and while no sample exists
-    /// at all (cold start) [`Self::observe_stall`] suppresses conviction
-    /// entirely, deferring to the 60s pending-timeout fallback.
+    /// chunk timestamp cannot deflate the floor. A window with no sample at
+    /// all (cold start) convicts at the `stall_timeout_initial` floor —
+    /// [`Self::advance_stall`] never suppresses conviction for lack of a
+    /// cadence estimate.
     front_interval_ewma_ms: Option<u64>,
     /// When the window front last advanced (a front block arrived); the
     /// anchor for the next `front_interval_ewma_ms` sample.
@@ -634,7 +703,7 @@ impl DownloadWindow {
     /// resolves/cancels or the fixed `stall_timeout_initial` interval
     /// expires, existing hysteresis and immediate prefix-probe cancellation
     /// behavior resume unchanged. `now` is injected (not read here) so the
-    /// tick/selection path controls the clock; see [`Self::observe_stall`]
+    /// tick/selection path controls the clock; see [`Self::advance_stall`]
     /// for the same discipline.
     pub fn set_fanout_eligible_peers(&mut self, count: usize, now: Instant) {
         let was_engaged = self.fanout_engaged;
@@ -901,21 +970,96 @@ impl DownloadWindow {
         })
     }
 
-    /// Observes the lowest expired request and convicts only on a second idle tick.
+    /// Advances every blockage observation once and returns at most one
+    /// action for this tick.
+    ///
+    /// The order is fixed: the measurement intervals; the apply-side bound;
+    /// the no-blame guard; the cold-front timer and the stall predicate;
+    /// staller blame; the pending timeout (also at the chain tip); pending
+    /// blame; the cold-front hedge.
+    ///
+    /// PRE: `ctx` describes the canonical frontier after this tick's apply
+    ///      drain; `stager` is the coupled staging set and `tree` resolves
+    ///      staged hashes to heights; `now` is injected by the caller.
+    /// POST: the no-blame guard is evaluated once; the return value is the
+    ///      single action the caller owes: disconnect the blamed exact
+    ///      owner, evict the stuck staged body without blame, send the
+    ///      cold-front duplicate request, or nothing.
+    /// INVARIANT: a same-address replacement never inherits blame, because
+    ///      every observation keys on the exact [`PeerSource`].
+    /// INVARIANT: while `ctx.apply_side_busy` holds, no stall, timeout, or
+    ///      hedge action returns; only the apply-side bound can return
+    ///      [`BlockedDecision::EvictStaged`].
+    pub fn observe_blocked(
+        &mut self,
+        ctx: BlockedContext,
+        stager: &BlockStager,
+        tree: &BlockTree,
+        now: Instant,
+    ) -> BlockedDecision {
+        let evicted = if let Some(next_apply_height) = ctx.next_apply_height {
+            self.observe_intervals(ctx.apply_side_busy, now);
+            self.advance_apply_side_stuck(
+                next_apply_height,
+                ctx.frontier_hash,
+                ctx.apply_side_busy,
+                now,
+            )
+        } else {
+            None
+        };
+        if ctx.apply_side_busy {
+            // The no-blame guard: our own slowness is never a peer's fault.
+            if self.stall.take().is_some() {
+                count_stall_episode_cleared("apply_busy");
+            }
+            self.pending_timeout_observation = None;
+            if !matches!(self.cold_front, Some(ColdFrontState::Racing { .. })) {
+                self.cold_front = None;
+            }
+            return match (ctx.next_apply_height, evicted) {
+                (Some(height), Some((hash, suppressed_for))) => BlockedDecision::EvictStaged {
+                    height,
+                    hash,
+                    suppressed_for,
+                },
+                _ => BlockedDecision::None,
+            };
+        }
+        let mut hedge = None;
+        if let Some(next_apply_height) = ctx.next_apply_height {
+            hedge = self.advance_cold_front(next_apply_height, now);
+            if let Some(owner) = self.advance_stall(next_apply_height, stager, tree, now) {
+                return BlockedDecision::Blame {
+                    owner,
+                    reason: BlameReason::Staller,
+                };
+            }
+        }
+        if let Some(owner) = self.advance_pending_timeout(now) {
+            return BlockedDecision::Blame {
+                owner,
+                reason: BlameReason::PendingTimeout,
+            };
+        }
+        hedge.map_or(BlockedDecision::None, |(owner, front_hash)| {
+            BlockedDecision::HedgeColdFront { owner, front_hash }
+        })
+    }
+
+    /// Observes the lowest expired request and convicts only on a second
+    /// idle tick.
     ///
     /// A block may arrive while synchronous apply is running and wait in the
     /// inbound channel after its request timestamp expires. The first
     /// observation records suspicion only. Delivery from that same peer
     /// clears it; delivery of a retry from another peer does not.
-    pub fn observe_pending_timeout(
-        &mut self,
-        apply_side_busy: bool,
-        now: Instant,
-    ) -> Option<PeerSource> {
-        if apply_side_busy {
-            self.pending_timeout_observation = None;
-            return None;
-        }
+    ///
+    /// PRE: the apply side is not busy this tick.
+    /// POST: `Some(owner)` exactly when the previous observation named
+    ///      `owner`; that owner's address enters the staller cooldown.
+    /// INVARIANT: the observation names the exact owning connection.
+    fn advance_pending_timeout(&mut self, now: Instant) -> Option<PeerSource> {
         if let Some(observation) = self.pending_timeout_observation {
             self.pending_timeout_observation = None;
             self.mark_peer_unresponsive(observation.owner.addr, now);
@@ -969,18 +1113,18 @@ impl DownloadWindow {
     /// Firing re-arms the clock, so a persistently stuck frontier escalates
     /// at most once per bound.
     ///
-    /// `frontier_hash` is `None` when no next-expected block exists (the
-    /// applied tip sits at the chain tip): nothing can be stuck, and a
-    /// leftover episode is dropped.
-    ///
-    /// Returns `Some(suppressed_for)` exactly on fire.
-    pub fn observe_apply_side_bound(
+    /// PRE: `frontier_hash` is `None` when no next-expected block exists
+    ///      (the applied tip sits at the chain tip).
+    /// POST: `Some((frontier_hash, suppressed_for))` exactly on fire; a
+    ///      missing frontier drops any leftover episode.
+    /// INVARIANT: the clock runs only while `apply_side_busy` holds.
+    fn advance_apply_side_stuck(
         &mut self,
         next_apply_height: u32,
         frontier_hash: Option<Hash256>,
         apply_side_busy: bool,
         now: Instant,
-    ) -> Option<Duration> {
+    ) -> Option<(Hash256, Duration)> {
         let Some(frontier_hash) = frontier_hash else {
             // No expected frontier: nothing can be stuck.
             self.apply_side_stuck = None;
@@ -1017,46 +1161,21 @@ impl DownloadWindow {
         if let Some(stuck) = self.apply_side_stuck.as_mut() {
             stuck.since = now;
         }
-        Some(suppressed_for)
+        Some((frontier_hash, suppressed_for))
     }
 
-    /// Advances the window-blocked stall state machine one observation (R8).
+    /// Measurement only (issue #51): interval bookkeeping that never feeds
+    /// a blockage decision.
     ///
-    /// Inputs computed by the sync layer each tick, after the apply drain:
-    /// - `next_apply_height`: `applied_tip.height + 1`, the apply frontier.
-    /// - `apply_side_busy`: the no-blame guard — true while the stager holds
-    ///   the next expected block (apply lag / failed-apply restore). Our own
-    ///   slowness must never be blamed on a peer, so the stall clock does not
-    ///   run at all.
+    /// - download-blocked-by-apply: apply owns the frontier while requests
+    ///   are in flight — download progress gated by apply speed.
+    /// - apply-idle: requests in flight, nothing staged — apply starved by
+    ///   the network.
     ///
-    /// Deliberately *not* an input: a chain-tail arm ("nothing above the
-    /// window left to request"). At the tip, one >2s block from a caught-up
-    /// peer is the normal regime, not a stall — Core's stalling logic does
-    /// not engage there either, and the last <window blocks of IBD stay
-    /// covered by the pre-existing 60s pending-timeout machinery.
-    ///
-    /// Returns `Some(peer)` exactly when the stall threshold fires: the
-    /// caller must disconnect that peer (its pendings then re-queue through
-    /// [`Self::retain_owned_by`]). On fire the adaptive threshold doubles
-    /// (capped at `stall_timeout_max`) and the peer enters the staller
-    /// cooldown. When any predicate term stops holding — including any
-    /// delivery from the blamed peer ([`Self::record_delivery_progress`]) —
-    /// the episode is cleared, more forgiving than freezing the clock and
-    /// Core-shaped (`m_stalling_since` is likewise re-derived, never frozen).
-    pub fn observe_stall(
-        &mut self,
-        next_apply_height: u32,
-        apply_side_busy: bool,
-        stager: &BlockStager,
-        tree: &BlockTree,
-        now: Instant,
-    ) -> Option<PeerSource> {
-        // Measurement only (issue #51): interval bookkeeping ahead of the
-        // stall state machine, which these observations never feed.
-        // - download-blocked-by-apply: apply owns the frontier while requests
-        //   are in flight — download progress gated by apply speed.
-        // - apply-idle: requests in flight, nothing staged — apply starved
-        //   by the network.
+    /// PRE: called once per tick that has an apply frontier.
+    /// POST: at most one of the two intervals is open.
+    /// INVARIANT: a closed interval records its duration exactly once.
+    fn observe_intervals(&mut self, apply_side_busy: bool, now: Instant) {
         if apply_side_busy {
             if self.pending.is_empty() {
                 self.close_download_blocked_by_apply(now);
@@ -1072,12 +1191,40 @@ impl DownloadWindow {
                 self.apply_idle_since = Some(now);
             }
         }
-        if apply_side_busy {
-            if self.stall.take().is_some() {
-                count_stall_episode_cleared("apply_busy");
-            }
-            return None;
-        }
+    }
+
+    /// Advances the window-blocked stall state machine one observation (R8).
+    ///
+    /// `next_apply_height` is `applied_tip.height + 1`, the apply frontier.
+    ///
+    /// Deliberately *not* an input: a chain-tail arm ("nothing above the
+    /// window left to request"). At the tip, one >2s block from a caught-up
+    /// peer is the normal regime, not a stall — Core's stalling logic does
+    /// not engage there either, and the last <window blocks of IBD stay
+    /// covered by the pending-timeout machinery.
+    ///
+    /// An unseeded front-cadence EWMA (cold start) does not suppress
+    /// conviction: the threshold is then the stored adaptive value, whose
+    /// floor is `stall_timeout_initial` — Core's `BLOCK_STALLING_TIMEOUT_DEFAULT`.
+    ///
+    /// PRE: the apply side is not busy this tick.
+    /// POST: `Some(owner)` exactly when the stall threshold fires: the
+    ///      caller must disconnect that exact owner (its pendings then
+    ///      re-queue through [`Self::retain_owned_by`]). On fire the
+    ///      adaptive threshold doubles (capped at `stall_timeout_max`) and
+    ///      the owner's address enters the staller cooldown.
+    /// INVARIANT: when any predicate term stops holding — including any
+    ///      delivery from the blamed peer ([`Self::record_delivery_progress`])
+    ///      — the episode is cleared, more forgiving than freezing the clock
+    ///      and Core-shaped (`m_stalling_since` is likewise re-derived,
+    ///      never frozen).
+    fn advance_stall(
+        &mut self,
+        next_apply_height: u32,
+        stager: &BlockStager,
+        tree: &BlockTree,
+        now: Instant,
+    ) -> Option<PeerSource> {
         let Some((owner, front_hash)) = self.window_blocked_on(stager, tree, next_apply_height)
         else {
             if self.stall.take().is_some() {
@@ -1108,8 +1255,12 @@ impl DownloadWindow {
         // Phase 0 observability: one INFO line per episode, once it survives
         // STALL_EPISODE_LOG_AGE — visible below the WARN fire line so episode
         // dynamics (and the EWMA the threshold tracks, the design falsifier)
-        // appear in run logs. Emitted regardless of EWMA cold start: a
-        // suppressed-conviction episode is exactly what must be observable.
+        // appear in run logs.
+        //
+        // The fire threshold is the stored adaptive value, never below the
+        // ADV-DRIP-1 decay floor: on a network whose demonstrated front
+        // cadence exceeds `stall_timeout_initial`, an episode younger than
+        // twice that cadence is the uniform-slow steady state, not a stall.
         let effective_timeout = self.stall_timeout.max(self.stall_decay_floor());
         if !episode.info_logged && now.duration_since(episode.since) >= STALL_EPISODE_LOG_AGE {
             if let Some(stored) = self.stall.as_mut() {
@@ -1127,12 +1278,6 @@ impl DownloadWindow {
                 "block sync: stall episode running"
             );
         }
-        self.front_interval_ewma_ms?;
-        // The fire threshold (`effective_timeout` above) is the stored
-        // adaptive value, never below the ADV-DRIP-1 decay floor: on a
-        // network whose demonstrated front cadence exceeds
-        // `stall_timeout_initial`, an episode younger than twice that
-        // cadence is the uniform-slow steady state, not a stall.
         if now.duration_since(episode.since) < effective_timeout {
             return None;
         }
@@ -1191,13 +1336,13 @@ impl DownloadWindow {
     ///   cannot re-cross g — zero false fires — while a true staller
     ///   (silent while others stream) still convicts at ~6s, far inside the
     ///   60s pending-timeout fallback. That zero-false-fires guarantee
-    ///   holds only because of two qualifications: same-chunk batch
-    ///   arrivals are filtered out of the EWMA (sub-[`EWMA_MIN_SAMPLE_MS`]
-    ///   samples share one chunk timestamp and would otherwise deflate the
-    ///   floor back to the static 2s), and a cold-start window (no sample
-    ///   yet) does not trust the floor at all — [`Self::observe_stall`]
-    ///   suppresses conviction and defers to the 60s pending-timeout
-    ///   fallback until the cadence estimate has one real sample.
+    ///   holds only because same-chunk batch arrivals are filtered out of
+    ///   the EWMA (sub-[`EWMA_MIN_SAMPLE_MS`] samples share one chunk
+    ///   timestamp and would otherwise deflate the floor back to the static
+    ///   2s). A cold-start window (no sample yet) convicts at the
+    ///   `stall_timeout_initial` floor: an unproven cadence is never an
+    ///   exemption, matching Core's `BLOCK_STALLING_TIMEOUT_DEFAULT`
+    ///   behavior for a fresh connection.
     ///
     /// The 2x multiplier is deliberately hardcoded (no `SyncBudget` knob):
     /// it is the audit finding's refuted-equilibrium margin — the floor must
@@ -1243,7 +1388,7 @@ impl DownloadWindow {
     ///    shapes (staged + pending pinned at the count budget) satisfy this
     ///    term trivially, so wedge conviction is preserved. The chain tail
     ///    (nothing above the window left to request) is deliberately not an
-    ///    arm of this term — see [`Self::observe_stall`].
+    ///    arm of this term — see [`Self::advance_stall`].
     ///
     /// PRE: `stager` is the coupled staging set and `tree` resolves staged
     ///      hashes to heights.
@@ -1291,17 +1436,22 @@ impl DownloadWindow {
     /// Advances the cold-start front timer independently of the strong stall
     /// predicate. Returns a duplicate request only after the same apply-front
     /// hash remains pending to one owner for the initial stall timeout.
-    pub fn observe_cold_front(
+    ///
+    /// PRE: the apply side is not busy this tick (the no-blame guard in
+    ///      [`Self::observe_blocked`] owns the busy case).
+    /// POST: `Some((owner, hash))` names the exact owner of the waiting
+    ///      front; a seeded cadence EWMA or a spent hedge budget drops the
+    ///      timer.
+    /// INVARIANT: a running race is never restarted from here.
+    fn advance_cold_front(
         &mut self,
         next_apply_height: u32,
-        apply_side_busy: bool,
         now: Instant,
     ) -> Option<(PeerSource, Hash256)> {
         if matches!(self.cold_front, Some(ColdFrontState::Racing { .. })) {
             return None;
         }
-        if apply_side_busy
-            || self.front_interval_ewma_ms.is_some()
+        if self.front_interval_ewma_ms.is_some()
             || self.cold_hedged_fronts.len() >= MAX_COLD_FRONT_HEDGES
         {
             self.cold_front = None;
@@ -2430,8 +2580,9 @@ mod tests {
     };
 
     use super::{
-        BlockStager, DownloadWindow, FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT,
-        FAST_OUTBOUND_PEER_TARGET, PENDING_BUDGET, SyncBudget, fast_sync_budget,
+        BlameReason, BlockStager, BlockedContext, BlockedDecision, ColdFrontState, DownloadWindow,
+        FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT, FAST_OUTBOUND_PEER_TARGET,
+        PENDING_BUDGET, SyncBudget, count_stall_episode_cleared, fast_sync_budget,
     };
     use crate::connection::PeerSource;
 
@@ -2558,6 +2709,10 @@ mod tests {
         PeerSource::for_test(addr)
     }
 
+    // The per-rule wrappers drive the private advances directly, including
+    // the no-blame guard's clears, so each test observes exactly one state
+    // machine. `BlockedDecision` precedence is pinned separately through
+    // the unified `observe_blocked` entry.
     fn stall_owner(
         window: &mut DownloadWindow,
         stager: &BlockStager,
@@ -2566,8 +2721,14 @@ mod tests {
         apply_side_busy: bool,
         now: Instant,
     ) -> Option<std::net::SocketAddr> {
+        if apply_side_busy {
+            if window.stall.take().is_some() {
+                count_stall_episode_cleared("apply_busy");
+            }
+            return None;
+        }
         window
-            .observe_stall(next_apply_height, apply_side_busy, stager, tree, now)
+            .advance_stall(next_apply_height, stager, tree, now)
             .map(|owner| owner.addr)
     }
 
@@ -2576,9 +2737,11 @@ mod tests {
         apply_side_busy: bool,
         now: Instant,
     ) -> Option<std::net::SocketAddr> {
-        window
-            .observe_pending_timeout(apply_side_busy, now)
-            .map(|owner| owner.addr)
+        if apply_side_busy {
+            window.pending_timeout_observation = None;
+            return None;
+        }
+        window.advance_pending_timeout(now).map(|owner| owner.addr)
     }
 
     fn cold_front_owner(
@@ -2587,9 +2750,30 @@ mod tests {
         apply_side_busy: bool,
         now: Instant,
     ) -> Option<(std::net::SocketAddr, Hash256)> {
+        if apply_side_busy {
+            if !matches!(window.cold_front, Some(ColdFrontState::Racing { .. })) {
+                window.cold_front = None;
+            }
+            return None;
+        }
         window
-            .observe_cold_front(next_apply_height, apply_side_busy, now)
+            .advance_cold_front(next_apply_height, now)
             .map(|(owner, hash)| (owner.addr, hash))
+    }
+
+    fn apply_side_bound(
+        window: &mut DownloadWindow,
+        next_apply_height: u32,
+        frontier_hash: Option<Hash256>,
+        apply_side_busy: bool,
+        now: Instant,
+    ) -> Option<Duration> {
+        window
+            .advance_apply_side_stuck(next_apply_height, frontier_hash, apply_side_busy, now)
+            .map(|(hash, suppressed_for)| {
+                debug_assert_eq!(Some(hash), frontier_hash);
+                suppressed_for
+            })
     }
 
     #[test]
@@ -3115,7 +3299,7 @@ mod tests {
     /// Seeds the front-cadence EWMA through the real delivery path: heights
     /// 1 and 2 arrive from `peer` `gap` apart (must be >=
     /// `EWMA_MIN_SAMPLE_MS` or the second advance is skipped as a batch
-    /// artifact) and apply immediately. Disarms `observe_stall`'s cold-start
+    /// artifact) and apply immediately. Disarms `advance_stall`'s cold-start
     /// fire suppression and returns the instant of the second front advance
     /// — the anchor for the next interval sample.
     fn seed_front_cadence(
@@ -3569,9 +3753,8 @@ mod tests {
     fn successor_arrival_does_not_reset_stall_clock() {
         // Mid-window deliveries are data progress but not front progress: the
         // episode keeps running and fires on schedule. Heights 1-2 seed the
-        // cadence EWMA first (cold start would otherwise defer the fire to
-        // the pending-timeout fallback); the 100ms cadence keeps the decay
-        // floor at the static 2s.
+        // cadence EWMA; the 100ms cadence keeps the decay floor at the
+        // static 2s.
         let mut window = DownloadWindow::new(stall_budget());
         let mut stager = test_stager(&window);
         let tree = test_tree();
@@ -3879,7 +4062,7 @@ mod tests {
     }
 
     /// The stored episode's one-shot log latch, if an episode is running.
-    /// `observe_stall` emits the INFO line in exactly the branch that flips
+    /// `advance_stall` emits the INFO line in exactly the branch that flips
     /// this `false -> true`, so the latch IS the emission contract — pinned
     /// here at the state level because asserting through the global tracing
     /// pipeline is racy under parallel tests (tracing-core caches per-callsite
@@ -3996,12 +4179,13 @@ mod tests {
         assert_eq!(info_logged(&window), Some(true));
     }
 
-    /// Cold start (front-cadence EWMA unseeded): conviction is suppressed
-    /// but the episode still forms and the observability line still fires —
-    /// a suppressed-conviction episode is exactly what must be visible in
-    /// run logs (the `front_interval_ewma_ms=None` shape).
+    /// An unseeded front-cadence EWMA (cold start) is not a conviction
+    /// exemption: the fire threshold is the stored adaptive value, whose
+    /// floor is `stall_timeout_initial` — Core's
+    /// `BLOCK_STALLING_TIMEOUT_DEFAULT`. The observability line still fires
+    /// at 1s, one full second before the first possible conviction.
     #[test]
-    fn stall_episode_logs_info_during_ewma_cold_start_without_firing() {
+    fn stall_convicts_at_initial_floor_before_ewma_is_seeded() {
         let now = Instant::now();
         let mut window = DownloadWindow::new(stall_budget());
         let mut stager = test_stager(&window);
@@ -4024,7 +4208,7 @@ mod tests {
             None
         );
         assert_eq!(info_logged(&window), Some(false));
-        // The INFO latch flips at 1s, but an unseeded window never convicts.
+        // The INFO latch flips at 1s; the initial floor has not elapsed.
         assert_eq!(
             stall_owner(
                 &mut window,
@@ -4037,6 +4221,8 @@ mod tests {
             None
         );
         assert_eq!(info_logged(&window), Some(true));
+        // Past the 2s initial floor the exact owner convicts with no EWMA
+        // sample: an unproven cadence never exempts a proven-slow front.
         assert_eq!(
             stall_owner(
                 &mut window,
@@ -4044,11 +4230,54 @@ mod tests {
                 &tree,
                 1,
                 false,
-                now + Duration::from_mins(1)
+                now + Duration::from_millis(2100)
             ),
-            None
+            Some(staller_addr())
         );
-        assert_eq!(info_logged(&window), Some(true));
+    }
+
+    /// The unified entry returns at most one action per tick and blame
+    /// outranks the hedge: a tick where the cold-front timer and the stall
+    /// predicate both mature convicts the staller and sends no duplicate
+    /// request.
+    #[test]
+    fn at_most_one_action_per_tick_blame_outranks_hedge() {
+        let now = Instant::now();
+        let mut window = DownloadWindow::new(stall_budget());
+        let mut stager = test_stager(&window);
+        let tree = test_tree();
+        let staller = test_source(staller_addr());
+        insert_pending(&mut window, staller, hash(0x01), 1, now);
+        for (byte, height) in [(0x02_u8, 2_u32), (0x03, 3), (0x04, 4)] {
+            insert_pending(
+                &mut window,
+                test_source(healthy_addr()),
+                hash(byte),
+                height,
+                now,
+            );
+            receive_staged(&mut window, &mut stager, hash(byte), SMALL_BODY, now);
+        }
+        let ctx = BlockedContext {
+            next_apply_height: Some(1),
+            frontier_hash: None,
+            apply_side_busy: false,
+        };
+        // First tick: the episode and the cold-front timer both start.
+        assert_eq!(
+            window.observe_blocked(ctx, &stager, &tree, now),
+            BlockedDecision::None
+        );
+        // Both mature past the 2s floor: the blame wins alone.
+        let decision =
+            window.observe_blocked(ctx, &stager, &tree, now + Duration::from_millis(2100));
+        assert_eq!(
+            decision,
+            BlockedDecision::Blame {
+                owner: staller,
+                reason: BlameReason::Staller,
+            }
+        );
     }
 
     fn peer_addr(idx: u8) -> std::net::SocketAddr {
@@ -4084,12 +4313,12 @@ mod tests {
         // Pre-seed: the network has already demonstrated its 3s front
         // cadence — two front advances 3s apart seed the interval EWMA at
         // 3000ms and lift the decay floor to 2x3s = 6s before the saturated
-        // rounds begin. An unseeded window cannot fire at all (cold-start
-        // conviction is suppressed and deferred to the pending-timeout
-        // fallback — `cold_start_unseeded_ewma_never_fires_and_defers_to_
-        // fallback`), and in real IBD the EWMA has tracked the cadence since
-        // the first two blocks of the session anyway, long before blocks
-        // grow past one threshold of transfer time.
+        // rounds begin. An unseeded window would fire at the static 2s
+        // floor while its honest peers need 3s per round, so the adaptive
+        // floor must be demonstrated before the saturated rounds start; in
+        // real IBD the EWMA has tracked the cadence since the first two
+        // blocks of the session anyway, long before blocks grow past one
+        // threshold of transfer time.
         insert_pending(&mut window, test_source(peer_addr(0)), hash(0x01), 1, t0);
         receive_staged(&mut window, &mut stager, hash(0x01), SMALL_BODY, t0);
         apply_staged(&mut stager, &hash(0x01));
@@ -4212,9 +4441,8 @@ mod tests {
         // per-peer delivery restarts the clock instead. When the same peer
         // then stops delivering entirely, it is a true staller and still
         // fires one full threshold after its last delivery. Heights 1-2 seed
-        // the cadence EWMA first (cold start would otherwise defer the fire
-        // to the pending-timeout fallback); the 100ms cadence keeps the
-        // decay floor at the static 2s.
+        // the cadence EWMA; the 100ms cadence keeps the decay floor at the
+        // static 2s.
         let mut window = DownloadWindow::new(stall_budget());
         let mut stager = test_stager(&window);
         let tree = test_tree();
@@ -4397,11 +4625,10 @@ mod tests {
         // no re-fire ever, while a true staller still convicts at the
         // elevated ~2g threshold.
         //
-        // The session's first two blocks seed the EWMA at the 3s cadence
-        // (cold start no longer convicts at all — the fire suppression
-        // defers an unseeded window to the pending-timeout fallback, pinned
-        // by `cold_start_unseeded_ewma_never_fires_and_defers_to_fallback`),
-        // so even the FIRST conviction is judged at the 6s adaptive floor.
+        // The session's first two blocks seed the EWMA at the 3s cadence,
+        // so even the FIRST conviction is judged at the 6s adaptive floor
+        // (an unseeded window would convict at the static 2s floor, below
+        // the honest 3s cadence).
         let (mut window, stager, front, at, _silent) = limit_cycle_window_state();
         let tree = test_tree();
         assert_eq!(window.front_interval_ewma_ms(), Some(3239));
@@ -5354,11 +5581,17 @@ mod tests {
         // Stuck at the same frontier (height, hash): observations prime and
         // advance the clock, but nothing fires below the bound.
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), true, start),
+            apply_side_bound(&mut window, 7, Some(frontier), true, start),
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), true, just_below(start, bound, 1)),
+            apply_side_bound(
+                &mut window,
+                7,
+                Some(frontier),
+                true,
+                just_below(start, bound, 1)
+            ),
             None
         );
         // The no-blame suppression itself is unchanged below the bound.
@@ -5381,15 +5614,16 @@ mod tests {
         let start = Instant::now();
         let bound = test_budget().received_timeout.saturating_mul(2);
         let frontier = hash(0x07);
-        let _ = window.observe_apply_side_bound(7, Some(frontier), true, start);
+        let _ = apply_side_bound(&mut window, 7, Some(frontier), true, start);
 
-        let fired = window.observe_apply_side_bound(7, Some(frontier), true, start + bound);
+        let fired = apply_side_bound(&mut window, 7, Some(frontier), true, start + bound);
         assert_eq!(fired, Some(bound));
         // Re-armed: the next stuck observation does not immediately re-fire,
         // so a persistently stuck frontier escalates once per bound, not
         // once per tick.
         assert_eq!(
-            window.observe_apply_side_bound(
+            apply_side_bound(
+                &mut window,
                 7,
                 Some(frontier),
                 true,
@@ -5398,7 +5632,8 @@ mod tests {
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(
+            apply_side_bound(
+                &mut window,
                 7,
                 Some(frontier),
                 true,
@@ -5419,20 +5654,33 @@ mod tests {
         let start = Instant::now();
         let bound = test_budget().received_timeout.saturating_mul(2);
         let frontier = hash(0x07);
-        let _ = window.observe_apply_side_bound(7, Some(frontier), true, start);
+        let _ = apply_side_bound(&mut window, 7, Some(frontier), true, start);
 
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), true, just_below(start, bound, 10)),
+            apply_side_bound(
+                &mut window,
+                7,
+                Some(frontier),
+                true,
+                just_below(start, bound, 10)
+            ),
             None
         );
         // The prune seam: the body is briefly absent (unbusy), then the
         // refetched copy is staged again.
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), false, just_below(start, bound, 9)),
+            apply_side_bound(
+                &mut window,
+                7,
+                Some(frontier),
+                false,
+                just_below(start, bound, 9)
+            ),
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(
+            apply_side_bound(
+                &mut window,
                 7,
                 Some(frontier),
                 true,
@@ -5448,9 +5696,15 @@ mod tests {
         let start = Instant::now();
         let bound = test_budget().received_timeout.saturating_mul(2);
         let frontier = hash(0x07);
-        let _ = window.observe_apply_side_bound(7, Some(frontier), true, start);
+        let _ = apply_side_bound(&mut window, 7, Some(frontier), true, start);
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), true, just_below(start, bound, 1)),
+            apply_side_bound(
+                &mut window,
+                7,
+                Some(frontier),
+                true,
+                just_below(start, bound, 1)
+            ),
             None
         );
 
@@ -5459,15 +5713,21 @@ mod tests {
         let moved = start + bound + Duration::from_secs(1);
         let advanced = hash(0x08);
         assert_eq!(
-            window.observe_apply_side_bound(8, Some(advanced), true, moved),
+            apply_side_bound(&mut window, 8, Some(advanced), true, moved),
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(8, Some(advanced), true, just_below(moved, bound, 1)),
+            apply_side_bound(
+                &mut window,
+                8,
+                Some(advanced),
+                true,
+                just_below(moved, bound, 1)
+            ),
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(8, Some(advanced), true, moved + bound),
+            apply_side_bound(&mut window, 8, Some(advanced), true, moved + bound),
             Some(bound)
         );
     }
@@ -5485,23 +5745,24 @@ mod tests {
 
         // Idle (nothing staged) far past the bound: no episode, no clock.
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), false, start),
+            apply_side_bound(&mut window, 7, Some(frontier), false, start),
             None
         );
         let delivered = start + bound + Duration::from_secs(10);
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), false, delivered),
+            apply_side_bound(&mut window, 7, Some(frontier), false, delivered),
             None
         );
 
         // The first normal delivery arrives: the clock starts here and must
         // hold a full bound before any escalation.
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), true, delivered),
+            apply_side_bound(&mut window, 7, Some(frontier), true, delivered),
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(
+            apply_side_bound(
+                &mut window,
                 7,
                 Some(frontier),
                 true,
@@ -5510,7 +5771,7 @@ mod tests {
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(frontier), true, delivered + bound),
+            apply_side_bound(&mut window, 7, Some(frontier), true, delivered + bound),
             Some(bound)
         );
     }
@@ -5528,26 +5789,38 @@ mod tests {
 
         // Branch A nearly exhausted its bound.
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(branch_a), true, start),
+            apply_side_bound(&mut window, 7, Some(branch_a), true, start),
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(branch_a), true, just_below(start, bound, 1)),
+            apply_side_bound(
+                &mut window,
+                7,
+                Some(branch_a),
+                true,
+                just_below(start, bound, 1)
+            ),
             None
         );
 
         // Same height, different frontier body: a fresh episode.
         let moved = start + bound + Duration::from_secs(1);
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(branch_b), true, moved),
+            apply_side_bound(&mut window, 7, Some(branch_b), true, moved),
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(branch_b), true, just_below(moved, bound, 1)),
+            apply_side_bound(
+                &mut window,
+                7,
+                Some(branch_b),
+                true,
+                just_below(moved, bound, 1)
+            ),
             None
         );
         assert_eq!(
-            window.observe_apply_side_bound(7, Some(branch_b), true, moved + bound),
+            apply_side_bound(&mut window, 7, Some(branch_b), true, moved + bound),
             Some(bound)
         );
     }

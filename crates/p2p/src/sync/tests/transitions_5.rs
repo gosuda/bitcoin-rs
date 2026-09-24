@@ -130,12 +130,14 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
             },
         );
         let mut rxs = Vec::new();
+        let mut sources = Vec::new();
         for idx in 0..8_usize {
             let addr = test_addr(9470, idx)?;
             rxs.push(connect_peer(
                 &peers,
                 eligible_peer(addr, 200 - i32::try_from(idx)?),
             ));
+            sources.push(current_source(&peers, addr));
         }
 
         // Tick 1: fan-out stripes the 24-block window, 3 blocks per peer.
@@ -156,10 +158,10 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
         // so the interval EWMA takes its first sample at round 1 and the
         // adaptive floor (2x the ~150ms demonstrated cadence) covers the
         // mid-gap wakes from the round 1 -> 2 gap on. The round 0 -> 1
-        // gap has no sample yet, but an unseeded window cannot fire at
-        // all: cold-start conviction is suppressed and deferred to the
-        // 60s pending-timeout fallback (`observe_stall` in the window
-        // module), so even a wake landing there is safe.
+        // gap has no sample yet and no wake lands there: the predicate
+        // only arms at round 1's observe (the staged set crosses the
+        // half-window term then), so the unseeded 100ms floor never
+        // judges a front in that gap.
         for round in 0..3_usize {
             if round == 2 {
                 // The wake path observes at ~g/8 cadence, so episodes
@@ -185,11 +187,15 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
             } else {
                 std::thread::sleep(Duration::from_millis(150));
             }
-            for stripe in &stripes {
+            for (idx, stripe) in stripes.iter().enumerate() {
                 let block = by_hash
                     .get(&stripe[round])
                     .ok_or_else(|| std::io::Error::other("unknown getdata hash"))?;
-                blocks_tx.send(crate::InboundBlock::from_decoded(block.clone()))?;
+                let mut inbound = crate::InboundBlock::from_decoded(block.clone());
+                // Source-attributed, like the wire path: the front arrival
+                // credits the cadence EWMA and clears the owner's episode.
+                inbound.source = Some(sources[idx]);
+                blocks_tx.send(inbound)?;
             }
             sync.tick();
             assert_eq!(

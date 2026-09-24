@@ -5,6 +5,9 @@ use super::SchedulerState;
 use super::frontier::{ChainFrontier, SyncFrontier};
 use crate::PeerInfo;
 use crate::connection::PeerSource;
+use crate::download_window::BlameReason;
+use crate::download_window::BlockedContext;
+use crate::download_window::BlockedDecision;
 use crate::download_window::FanoutCandidate;
 use crate::download_window::SyncPeer;
 use crate::download_window::SyncPeerSelection;
@@ -133,14 +136,15 @@ impl BlockSync {
             .with_live_sessions(|live| self.scheduler.lock().release_unowned(live));
     }
 
-    /// Advances the window's recovery state machines against the canonical
-    /// frontier, convicting at most one staller and one timed-out owner per
-    /// tick and firing the bounded cold-front hedge.
+    /// Advances the window's blockage observations against the canonical
+    /// frontier and performs the single action the unified decision names:
+    /// convict one owner, evict one stuck staged body, or fire one bounded
+    /// cold-front hedge.
     ///
-    /// R8: window-blocked staller detection, the #1091 apply-side suppression
-    /// bound, and the 60s pending-timeout fallback all read the same
-    /// `next_required` body the scheduler requests — the frontier cannot
-    /// disagree with itself about which block is required next.
+    /// R8: window-blocked staller detection, the #1091 apply-side
+    /// suppression bound, and the pending-timeout fallback all read the
+    /// same `next_required` body the scheduler requests — the frontier
+    /// cannot disagree with itself about which block is required next.
     ///
     /// Convictions are identity-exact: `disconnect_source` removes only the
     /// connection that owns the stalled work, so a same-address replacement
@@ -164,73 +168,46 @@ impl BlockSync {
                 .as_ref()
                 .and_then(|tip| tip.height.checked_add(1))
         });
-        let (apply_side_escalation, cold_hedge, staller, timed_out) = {
+        let decision = {
             // Lock order tree -> scheduler (as in request publication): the
             // stall predicate resolves staged hashes against block-tree
             // heights, so the tree guard is held across the window read.
             let tree = self.chain.block_tree().read();
             let mut scheduler = self.scheduler.lock();
             let SchedulerState { window, stager, .. } = &mut *scheduler;
-            let apply_side_busy = frontier_hash.is_some_and(|hash| stager.contains(&hash));
-            let mut apply_side_escalation = None;
-            let mut cold_hedge = None;
-            let staller = if let Some(next_apply_height) = next_apply_height {
-                apply_side_escalation = window.observe_apply_side_bound(
-                    next_apply_height,
-                    frontier_hash,
-                    apply_side_busy,
-                    now,
-                );
-                cold_hedge = window.observe_cold_front(next_apply_height, apply_side_busy, now);
-                window.observe_stall(next_apply_height, apply_side_busy, stager, &tree, now)
-            } else {
-                None
+            let ctx = BlockedContext {
+                next_apply_height,
+                frontier_hash,
+                apply_side_busy: frontier_hash.is_some_and(|hash| stager.contains(&hash)),
             };
-            let timed_out = if staller.is_none() {
-                window.observe_pending_timeout(apply_side_busy, now)
-            } else {
-                None
-            };
+            let decision = window.observe_blocked(ctx, stager, &tree, now);
             let stall_seconds = window
                 .stalling_peer()
                 .map_or(0.0, |(_, since)| now.duration_since(since).as_secs_f64());
             metrics::gauge!("node.sync.stall_seconds").set(stall_seconds);
-            (apply_side_escalation, cold_hedge, staller, timed_out)
+            decision
         };
-        if let Some(owner) = staller {
-            if self.peer_table.disconnect_source(owner) {
-                metrics::counter!("node.sync.staller_disconnects").increment(1);
-                tracing::warn!(
-                    peer_addr = %owner.addr,
-                    next_apply_height,
-                    "block sync: peer is stalling the download window; disconnecting and re-queueing its blocks"
-                );
-            }
+        if let BlockedDecision::Blame { owner, reason } = decision {
+            self.disconnect_convicted(owner, reason, next_apply_height);
+            return;
         }
-        if let Some(owner) = timed_out {
-            if self.peer_table.disconnect_source(owner) {
-                metrics::counter!("node.sync.pending_timeout_disconnects").increment(1);
-                tracing::warn!(
-                    peer_addr = %owner.addr,
-                    "block sync: peer missed the block request timeout; disconnecting and re-queueing its blocks"
-                );
-            }
-        }
-        // `apply_side_escalation` and `cold_hedge` are `Some` only when a
-        // frontier height existed, so `next_apply_height` is `Some` here.
-        if let (Some(next_apply_height), Some(suppressed_for)) =
-            (next_apply_height, apply_side_escalation)
+        if let BlockedDecision::EvictStaged {
+            height,
+            hash,
+            suppressed_for,
+        } = decision
         {
             // The no-blame suppression outlived its bound (issue #1091):
             // evict the stuck staged body for refetch. No peer is convicted
             // here; while the body is absent the unsuppressed stall path
             // applies as usual.
-            self.escalate_stuck_staged_body(next_apply_height, frontier_hash, suppressed_for);
+            self.escalate_stuck_staged_body(height, Some(hash), suppressed_for);
             return;
         }
-        if staller.is_none()
-            && let (Some(next_apply_height), Some((owner, front_hash))) =
-                (next_apply_height, cold_hedge)
+        // The hedge only fires with a frontier height present, so
+        // `next_apply_height` is `Some` here.
+        if let BlockedDecision::HedgeColdFront { owner, front_hash } = decision
+            && let Some(next_apply_height) = next_apply_height
             && let Some(alternate) =
                 self.send_cold_front_hedge(owner, front_hash, next_apply_height, now)
         {
@@ -241,11 +218,50 @@ impl BlockSync {
         }
     }
 
-    /// Issue #1091 escalation: evict the stuck staged next-expected body for
+    /// Performs the blame action of [`BlockedDecision`]: disconnect the
+    /// convicted exact owner and report the reason on the frozen operator
+    /// counters.
+    ///
+    /// PRE: `owner` names the exact connection the window convicted.
+    /// POST: at most one connection is disconnected; a dead owner makes
+    ///      the disconnect a no-op.
+    /// INVARIANT: the counter names (`node.sync.staller_disconnects`,
+    ///      `node.sync.pending_timeout_disconnects`) are operator-visible
+    ///      and frozen.
+    fn disconnect_convicted(
+        &self,
+        owner: PeerSource,
+        reason: BlameReason,
+        next_apply_height: Option<u32>,
+    ) {
+        match reason {
+            BlameReason::Staller => {
+                if self.peer_table.disconnect_source(owner) {
+                    metrics::counter!("node.sync.staller_disconnects").increment(1);
+                    tracing::warn!(
+                        peer_addr = %owner.addr,
+                        next_apply_height,
+                        "block sync: peer is stalling the download window; disconnecting and re-queueing its blocks"
+                    );
+                }
+            }
+            BlameReason::PendingTimeout => {
+                if self.peer_table.disconnect_source(owner) {
+                    metrics::counter!("node.sync.pending_timeout_disconnects").increment(1);
+                    tracing::warn!(
+                        peer_addr = %owner.addr,
+                        "block sync: peer missed the block request timeout; disconnecting and re-queueing its blocks"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Issue #1091 escalation: evict the stuck staged body for
     /// refetch, without blaming any peer.
     ///
-    /// Fired by [`crate::DownloadWindow::observe_apply_side_bound`] after the
-    /// apply-side suppression held for two full `received_timeout` windows.
+    /// Fired on [`BlockedDecision::EvictStaged`] after the apply-side
+    /// suppression held for two full `received_timeout` windows.
     /// `frontier_hash` is the snapshot the window observation fired on; the
     /// final equality check against the live frontier ensures a same-height
     /// branch replacement between observation and eviction cannot drain a
