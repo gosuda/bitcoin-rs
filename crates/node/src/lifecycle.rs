@@ -557,6 +557,9 @@ pub(crate) fn start_node(
         // magic-derived one: a custom `--p2p-magic` can carry another
         // network's bytes.
         ibd: Some((Arc::clone(&ibd), state.config().network)),
+        // One orchestrator: the listener announces block inventory to the
+        // same sync loop the event loop drives.
+        block_sync: Some(Arc::clone(&peer_ready_sync)),
     };
     let (relay_queue, relay_rx) =
         bitcoin_rs_p2p::TxRelayQueue::new(bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY);
