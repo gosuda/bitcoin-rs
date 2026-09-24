@@ -22,13 +22,51 @@ use super::Chainstate;
 use super::ProvenApply;
 use super::PublishMode;
 use super::error::ApplyError;
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::UtxoCoin;
 use bitcoin_rs_utxo::contract::{OutputSource, UndoLoadError, load_block_undo};
+
+/// What one durable head commit certified.
+///
+/// PRE: a receipt comes only from a successful durable connect or disconnect
+/// commit, or from reconstructing the already committed head during replay.
+///
+/// POST: it names the durable commit id and the exact cumulative chain
+/// transaction count that publication may carry.
+///
+/// INVARIANT: publication cannot accept a bare commit id or count that a
+/// commit did not name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DurableReceipt {
+    /// The `DurableHead::commit_id` the batch assigned.
+    pub(super) commit_id: u64,
+    /// The cumulative chain transaction count the batch named.
+    pub(super) chain_tx_count: ChainTxCount,
+}
+
+impl DurableReceipt {
+    /// The receipt of an already committed head, as crash recovery reads it
+    /// back. Replay never mints a commit: it republishes under this receipt.
+    pub(super) fn from_head(head: &DurableHead) -> Self {
+        Self {
+            commit_id: head.commit_id,
+            chain_tx_count: ChainTxCount::from_wire(head.chain_tx_count),
+        }
+    }
+
+    /// The applied tip this receipt certifies: `tip` with the committed count.
+    pub(super) fn certify(self, tip: TipSnapshot) -> TipSnapshot {
+        TipSnapshot {
+            chain_tx_count: self.chain_tx_count,
+            ..tip
+        }
+    }
+}
+
 /// Facts of one connected block that its durable head commit names.
 pub(super) struct ConnectCommitFacts {
     /// Parent the durable head must currently name — for a group, the
@@ -66,15 +104,17 @@ pub(super) fn sync_appended_blocks(handles: &Chainstate) -> Result<(), ApplyErro
 
 /// Advances the durable head for one connected block.
 ///
-/// Returns the commit id the batch assigned. The first commit on a datadir
-/// fences on absence; every later commit fences on the encoded previous
-/// head, which makes the transition lock's single-writer guarantee checkable
-/// on disk and keeps `commit_id` strictly monotonic (`P3`).
+/// Returns the [`DurableReceipt`] the batch issued: the commit id it assigned
+/// and the count it named, which is all publication may carry. The first
+/// commit on a datadir fences on absence; every later commit fences on the
+/// encoded previous head, which makes the transition lock's single-writer
+/// guarantee checkable on disk and keeps `commit_id` strictly monotonic
+/// (`P3`).
 pub(super) fn commit_connect_head(
     handles: &Chainstate,
     facts: &ConnectCommitFacts,
     records: &CommitRecords<'_>,
-) -> Result<u64, ApplyError> {
+) -> Result<DurableReceipt, ApplyError> {
     let prior = handles
         .durable_head
         .load()
@@ -105,7 +145,7 @@ pub(super) fn commit_connect_head(
         .commit(prior.as_ref(), &next, records)
         .map_err(ApplyError::DurableHeadCommit)?;
     metrics::counter!("node.durable_head.commits").increment(1);
-    Ok(next.commit_id)
+    Ok(DurableReceipt::from_head(&next))
 }
 
 /// Resolves the stored flat-file locator of one committed block, when the
@@ -128,6 +168,7 @@ pub(super) fn stored_body_row(
 ///
 /// A disconnect commits too: the head moves to the parent tip with the next
 /// `commit_id`, so a reorg may lower `height` but never `commit_id` (`P3`).
+/// The returned receipt names that id and the parent count the batch wrote.
 /// The extents stay as the previous head certified them — a disconnect
 /// appends nothing, and the disconnected block's undo row stays durable for
 /// a possible reconnect. The stored head must name exactly the block being
@@ -138,7 +179,7 @@ pub(super) fn commit_disconnect_head(
     parent_tip: &bitcoin_rs_chain::TipSnapshot,
     disconnected_hash: Hash256,
     chain_tx_count_after: u64,
-) -> Result<u64, ApplyError> {
+) -> Result<DurableReceipt, ApplyError> {
     let prior = handles
         .durable_head
         .load()
@@ -169,7 +210,7 @@ pub(super) fn commit_disconnect_head(
         .commit(Some(head), &next, &CommitRecords::default())
         .map_err(ApplyError::DurableHeadCommit)?;
     metrics::counter!("node.durable_head.commits").increment(1);
-    Ok(next.commit_id)
+    Ok(DurableReceipt::from_head(&next))
 }
 
 /// Bound on how many blocks one crash can leave committed-but-unpublished
@@ -370,7 +411,7 @@ fn replay_gap_chain(
                 proven,
                 BlockProvenance::LocalReplay,
                 PublishMode::Replay {
-                    commit_id: head.commit_id,
+                    receipt: DurableReceipt::from_head(&head),
                 },
             )?;
             commit_id = outcome.commit_id;
@@ -378,7 +419,17 @@ fn replay_gap_chain(
         }
         let published = handles.applied_tip.load_full();
         let landed = published.as_ref().is_some_and(|tip| {
-            (tip.hash, tip.height, commit_id) == (head.tip, head.height, head.commit_id)
+            (
+                tip.hash,
+                tip.height,
+                tip.chain_tx_count.to_wire(),
+                commit_id,
+            ) == (
+                head.tip,
+                head.height,
+                head.chain_tx_count,
+                head.commit_id,
+            )
         });
         if !landed {
             return Err(unrecoverable("replay finished short of the stored head"));
