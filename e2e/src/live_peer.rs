@@ -84,11 +84,7 @@ impl LivePeer {
     ///
     /// `NODE_NETWORK|WITNESS`: the recovery getheaders path only considers
     /// fully-serving peers eligible.
-    pub fn connect_with_height(
-        node: &ProcessNode,
-        name: &str,
-        start_height: i32,
-    ) -> Result<Self> {
+    pub fn connect_with_height(node: &ProcessNode, name: &str, start_height: i32) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let stream = crate::process_peer::connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
@@ -152,9 +148,7 @@ impl LivePeer {
                 _ => {}
             }
         }
-        Err(Error::Protocol(
-            "P2P handshake message limit".to_owned(),
-        ))
+        Err(Error::Protocol("P2P handshake message limit".to_owned()))
     }
 
     /// Register servable blocks and reveal their headers: the peer answers

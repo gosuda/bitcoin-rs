@@ -221,7 +221,17 @@ fn esplora_tx_projection_with_txindex() -> Result<()> {
         std::time::Duration::from_secs(15),
     )?;
 
-    let fetched = node.http_get(&format!("/api/tx/{txid}"))?;
+    // Esplora answers 503 ("index changed during query; retry") while the
+    // transaction index crosses a snapshot boundary; retry within the same
+    // budget the mempool wait above already allowed.
+    let fetch_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let fetched = loop {
+        let response = node.http_get(&format!("/api/tx/{txid}"))?;
+        if response.status != 503 || std::time::Instant::now() >= fetch_deadline {
+            break response;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
     assert_eq!(fetched.status, 200, "tx fetch: {}", fetched.status);
     let body = fetched.json()?;
     assert_eq!(body["txid"], json!(txid));

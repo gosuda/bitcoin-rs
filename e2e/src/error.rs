@@ -83,9 +83,7 @@ impl fmt::Display for Error {
                 evidence.display()
             ),
             Self::Timeout {
-                operation,
-                detail,
-                ..
+                operation, detail, ..
             } => {
                 write!(f, "timeout waiting for {operation}: {detail}")
             }

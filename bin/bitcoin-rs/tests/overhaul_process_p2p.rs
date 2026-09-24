@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 use bitcoin::consensus::serialize;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
-use serde_json::json;
 use bitcoin_rs_e2e::differential::{compare_rpc, mine_common_chain};
 use bitcoin_rs_e2e::process_peer::{ProcessPeer, connect_loopback, decode_frame, read_frame};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, SpawnOptions};
+use serde_json::json;
 
 /// REF-07b/c: RPC may become ready before the independent P2P bind.
 #[test]
@@ -34,8 +34,7 @@ fn p2p_connect_waits_for_a_delayed_listener() {
         }
         false
     });
-    let result =
-        connect_loopback(addr, Instant::now() + Duration::from_secs(1));
+    let result = connect_loopback(addr, Instant::now() + Duration::from_secs(1));
     let accepted = server.join().expect("fixture joins");
     assert!(
         result.is_ok(),
@@ -157,12 +156,9 @@ fn oversized_p2p_length_is_rejected_without_a_body() {
     let mut header = [0_u8; 24];
     header[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
     server.write_all(&header).expect("header only");
-    let error =
-        read_frame(&mut client, Instant::now() + Duration::from_millis(200))
-            .expect_err("oversized length must fail before reading the missing body");
-    assert!(
-        matches!(error, Error::Protocol(ref message) if message == "P2P payload byte limit")
-    );
+    let error = read_frame(&mut client, Instant::now() + Duration::from_millis(200))
+        .expect_err("oversized length must fail before reading the missing body");
+    assert!(matches!(error, Error::Protocol(ref message) if message == "P2P payload byte limit"));
 }
 
 fn admit_over_p2p(process: &mut ProcessNode, transaction: &bitcoin::Transaction) {
@@ -363,9 +359,6 @@ fn malformed_p2p_frames_are_protocol_failures_not_behavior_evidence() {
         valid[..23].to_vec(),
         valid[..27].to_vec(),
     ] {
-        assert!(matches!(
-            decode_frame(&bytes),
-            Err(Error::Protocol(_))
-        ));
+        assert!(matches!(decode_frame(&bytes), Err(Error::Protocol(_))));
     }
 }

@@ -127,9 +127,7 @@ impl ProcessPeer {
                 _ => {}
             }
         }
-        self.record_result(Err(Error::Protocol(
-            "P2P pong message limit".to_owned(),
-        )))
+        self.record_result(Err(Error::Protocol("P2P pong message limit".to_owned())))
     }
 
     fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<()> {
@@ -247,11 +245,7 @@ fn remaining(deadline: Instant) -> Result<Duration> {
     remaining_time(deadline, Instant::now(), "P2P operation deadline")
 }
 
-fn read_exact(
-    stream: &mut TcpStream,
-    mut bytes: &mut [u8],
-    deadline: Instant,
-) -> Result<()> {
+fn read_exact(stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Instant) -> Result<()> {
     while !bytes.is_empty() {
         // The deadline bounds the wait for the next byte, with a floor:
         // a slice that expires between two chunks of one frame must not
