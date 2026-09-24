@@ -240,6 +240,20 @@ pub trait SyncChain: Send + Sync {
     /// happen inside, under the implementation's transition lock).
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission;
 
+    /// Cumulative chain work a peer's header chain must demonstrate before
+    /// this node stores its headers (`Network::minimum_chain_work`).
+    ///
+    /// PRE: none.
+    /// POST: return the network's anti-DoS work threshold, the value that
+    ///   decides whether an inbound batch enters the download-twice presync
+    ///   or the direct admission path.
+    /// INVARIANT: the threshold has exactly one source — the configured
+    ///   network's parameter table; implementations override only to
+    ///   substitute a fixture threshold.
+    fn minimum_chain_work(&self) -> bitcoin_rs_chain::ChainWork {
+        bitcoin_rs_chain::ChainWork::from_be_bytes(self.network().minimum_chain_work())
+    }
+
     /// Whether `block`'s body binds to its admitted header — txid merkle
     /// root plus witness commitment under the tree's segwit-active rule for
     /// the block's parent. `Ok(())` when bound or when the header is not in

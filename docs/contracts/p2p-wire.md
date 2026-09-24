@@ -398,3 +398,37 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
   probe set, and the counted threshold require both, and a soft-blocked peer
   still serves as the single-deep-peer last resort. Header requests stay open
   to every peer above the applied height regardless of services.
+
+### `P2P-10`: Header presync gates admission on committed work
+
+- **Owner**: `HeadersSyncState` (`crates/p2p/src/sync/headers_presync.rs`)
+  is the only place that decides whether a connection's header chain is
+  worth admitting; `BlockSync::route_headers_batch`
+  (`crates/p2p/src/sync/headers.rs`) is the only caller, and
+  `SyncChain::admit_headers` is reached either directly (a fork already at
+  the network's assumed work, or a released chain) or with the committed
+  headers, never with a collected-but-unverified batch. Core's
+  `HeadersSync` (`bitcoin-core/src/headerssync.h:57-149`,
+  `headerssync.cpp:72-326`, wired in `net_processing.cpp:4648-4657`) is the
+  authority.
+- A connection whose chain starts below `Network::minimum_chain_work` is
+  collected first: each header is checked for continuity, its own proof of
+  work, and a permitted difficulty transition, then reduced to one salted
+  commitment bit every `commitment_period` heights. Nothing is inserted and
+  no body is requested during this pass. When the cumulative work crosses
+  the floor the sync restarts at the fork point and re-verifies every
+  header against those commitments; only then are headers admitted, in wire
+  order. The download-twice rule is what stops one unsynced connection from
+  installing an endless minimum-difficulty chain that is cheaper to extend
+  than the honest chain.
+- The state is keyed by `PeerSource`, not address: a replacement connection
+  never inherits a predecessor's collection, and a spent or faulted state
+  is removed so the next batch starts a fresh sync with a fresh salt. A
+  lost-continuity break is treated as possibly benign (the peer keeps its
+  connection, `headerssync.cpp:155-163`); every other failure — bad proof of
+  work, an impermitted difficulty transition, a commitment divergence, or
+  the commitment and buffer bounds — disconnects the connection.
+- The serving side is the mirror rule: below the network's assumed work the
+  node answers `getheaders` with the empty response
+  (`ActiveChainQuery::headers_after`, `net_processing.cpp:3010-3018`), so a
+  syncing node does not spread its low-work branch.

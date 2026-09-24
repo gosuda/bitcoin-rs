@@ -37,7 +37,7 @@ const MAX_FUTURE_BLOCK_TIME_SECONDS: u64 = 2 * 60 * 60;
 
 /// The phase of one peer's download-twice sync.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HeadersSyncPhase {
+pub enum HeadersSyncPhase {
     /// Collecting salted commitments; nothing is releasable.
     Presync,
     /// Replaying the chain and verifying commitments; releases buffered
@@ -56,43 +56,43 @@ pub(crate) enum HeadersSyncPhase {
 ///   resolution time, so the state can issue continuation requests without
 ///   ever reading the tree.
 #[derive(Clone, Debug)]
-pub(crate) struct HeaderAnchor {
+pub struct HeaderAnchor {
     /// The network whose difficulty rules the chain is validated against.
-    pub(crate) network: Network,
+    pub network: Network,
     /// Height of the anchor.
-    pub(crate) height: u32,
+    pub height: u32,
     /// Hash of the anchor.
-    pub(crate) hash: Hash256,
+    pub hash: Hash256,
     /// The anchor header itself: redownload reads its bits as the previous
     /// difficulty when its buffer is empty.
-    pub(crate) header: Header,
+    pub header: Header,
     /// Cumulative chain work through the anchor.
-    pub(crate) chain_work: Work,
+    pub chain_work: Work,
     /// Median time past at the anchor, bounding the honest-chain length
     /// estimate behind `max_commitments`.
-    pub(crate) median_time_past: u32,
+    pub median_time_past: u32,
     /// Tree locator for the anchor, appended after the sync cursor in every
     /// continuation request.
-    pub(crate) locator: Vec<Hash256>,
+    pub locator: Vec<Hash256>,
 }
 
 /// One batch's outcome from [`HeadersSyncState::process`].
 #[derive(Clone, Debug)]
-pub(crate) struct HeaderSyncResult {
+pub struct HeaderSyncResult {
     /// Headers the caller may admit now: empty during PRESYNC, and during
     /// REDOWNLOAD only headers whose commitments are verified and whose
     /// buffer depth has been retired.
-    pub(crate) ready_headers: Vec<Header>,
+    pub ready_headers: Vec<Header>,
     /// Whether the caller should request the next batch from this peer with
     /// [`HeadersSyncState::next_locator`].
-    pub(crate) request_more: bool,
+    pub request_more: bool,
     /// The phase after this batch.
-    pub(crate) phase: HeadersSyncPhase,
+    pub phase: HeadersSyncPhase,
 }
 
 /// A typed failure that ends one peer's download-twice sync.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HeaderSyncError {
+pub enum HeaderSyncError {
     /// The batch did not connect to the sync cursor. Core treats this as
     /// benign — the peer may have reorged — and gives up on the sync
     /// (`bitcoin-core/src/headerssync.cpp:155-163`).
@@ -241,7 +241,7 @@ impl CompressedHeader {
 /// INVARIANT: no method on this type inserts into the block tree. Headers
 /// leave only through [`HeaderSyncResult::ready_headers`], and only the
 /// caller's committed-phase branch may admit them.
-pub(crate) struct HeadersSyncState {
+pub struct HeadersSyncState {
     phase: HeadersSyncPhase,
     chain_start: HeaderAnchor,
     params: HeadersSyncParams,
@@ -286,7 +286,7 @@ impl HeadersSyncState {
     ///   `salt` keys the commitment hash and `params` size the commitment
     ///   period and the redownload buffer.
     /// INVARIANT: no method on this type inserts into the block tree.
-    pub(crate) fn new(
+    pub fn new(
         chain_start: HeaderAnchor,
         minimum_work: Work,
         params: HeadersSyncParams,
@@ -345,7 +345,7 @@ impl HeadersSyncState {
     ///   and the state is spent.
     /// INVARIANT: returned headers are continuous, commitment-checked, and
     ///   may be admitted only by the caller's committed-phase branch.
-    pub(crate) fn process(
+    pub fn process(
         &mut self,
         headers: &[Header],
         full_message: bool,
@@ -579,7 +579,7 @@ impl HeadersSyncState {
     /// INVARIANT: locator progress is monotonic within a phase: the cursor is
     ///   the deepest header this sync has accepted.
     #[must_use]
-    pub(crate) fn next_locator(&self) -> Vec<Hash256> {
+    pub fn next_locator(&self) -> Vec<Hash256> {
         if self.phase == HeadersSyncPhase::Final {
             return Vec::new();
         }
@@ -622,7 +622,7 @@ impl HeadersSyncState {
     ///   dropped, and the salt is never reused: the caller must discard this
     ///   state and construct a fresh one for any later sync.
     /// INVARIANT: no temporary header remains retained after finalization.
-    pub(crate) fn finalize(&mut self) {
+    pub fn finalize(&mut self) {
         if self.phase == HeadersSyncPhase::Final {
             return;
         }
