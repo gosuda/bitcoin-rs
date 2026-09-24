@@ -135,7 +135,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     seed_genesis(&handles)?;
 
     let first = mined_child(genesis.block_hash(), 1)?;
-    handles.apply_block(&first)?;
+    handles.apply_block(&first, None)?;
     let applied_hash = Hash256::from(first.block_hash());
     let utxo_len = utxo.len();
     handles.undo_store = Arc::new(RejectingUndoStore {
@@ -144,7 +144,7 @@ fn undo_persist_failure_leaves_utxo_tip_and_tree_untouched()
     let next = mined_child(first.block_hash(), 2)?;
     let next_hash = Hash256::from(next.block_hash());
 
-    let outcome = handles.apply_block(&next);
+    let outcome = handles.apply_block(&next, None);
     assert!(matches!(outcome, Err(ApplyError::UndoPersistence(_))));
     assert_eq!(
         handles.applied_tip.load_full().map(|tip| tip.hash),
@@ -245,7 +245,7 @@ fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::e
     let shutdown = handles.shutdown_handle();
 
     let transition = handles.begin_transition()?;
-    let outcome = transition.connect(&child);
+    let outcome = transition.connect(&child, None);
 
     assert!(matches!(
         outcome,
@@ -268,9 +268,9 @@ fn disconnect_off_durable_head_refuses_without_mutation() -> Result<(), Box<dyn 
     let genesis = Network::Regtest.genesis_block();
     let utxo = Arc::new(UtxoSet::new());
     let mut handles = handles(Network::Regtest, Arc::clone(&utxo));
-    handles.apply_block(&genesis)?;
+    handles.apply_block(&genesis, None)?;
     let first = mined_child(genesis.block_hash(), 1)?;
-    handles.apply_block(&first)?;
+    handles.apply_block(&first, None)?;
     let first_outpoint = OutPoint::new(first.txs[0].txid(), 0);
     assert!(utxo.get(&first_outpoint).is_some());
 

@@ -2,7 +2,7 @@
 //!
 //! [`plan_reorg`] says which blocks to disconnect and which to connect;
 //! [`ChainTransition::disconnect`] rolls one back and
-//! [`ChainTransition::connect_serialized`] applies one. This joins them.
+//! [`ChainTransition::connect`] applies one. This joins them.
 //! Without it the node follows the chain forward and cannot leave a branch that
 //! loses, which is the difference between a chain follower and a full node.
 
@@ -958,7 +958,7 @@ fn connect_loaded_body<O>(
 where
     O: ReorgObserver + ?Sized,
 {
-    match transition.connect_serialized(&body.block, body.serialized.clone()) {
+    match transition.connect(&body.block, Some(body.serialized.clone())) {
         Ok(outcome) => {
             observer.connected(&body.block, &outcome);
             progress.connected += 1;
