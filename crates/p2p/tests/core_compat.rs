@@ -29,14 +29,14 @@ use bitcoin_rs_p2p::dispatch::{
 };
 use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
-use bitcoin_rs_p2p::listener::serve_with_shutdown;
+use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve};
 use bitcoin_rs_p2p::wire::{
     MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
     write_message,
 };
 use bitcoin_rs_p2p::{
     BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, InboundBlock, InboundHeaders, Message,
-    PINNED_CORE_VERSION, Peer, PeerState, PeerTable,
+    NetworkActivity, PINNED_CORE_VERSION, Peer, PeerState, PeerTable,
 };
 use bitcoin_rs_primitives::{
     Block, BlockHash as NativeBlockHash, CompactTarget, Hash256, Header, consensus_bytes,
@@ -1190,31 +1190,27 @@ fn handshake_completes_over_tcp_for_every_network() -> Result<(), Box<dyn Error>
 }
 
 fn serve_and_handshake_over_tcp(network: Network, magic: Magic) -> Result<(), Box<dyn Error>> {
-    let helper = std::net::TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
-    let addr = helper.local_addr()?;
-    drop(helper);
+    let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let addr = listener.local_addr()?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let listener_shutdown = Arc::clone(&shutdown);
-    let network_active = Arc::new(AtomicBool::new(true));
-    let listener_network_active = Arc::clone(&network_active);
-    let peer_table = Arc::new(PeerTable::new());
     let (headers_tx, _headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
     let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
-    let banned = Arc::new(parking_lot::RwLock::new(Vec::<BannedSubnet>::new()));
+    let shared = ConnectionShared::new(
+        Arc::new(PeerTable::new()),
+        Arc::new(parking_lot::RwLock::new(Vec::<BannedSubnet>::new())),
+        Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
+            true,
+        )))),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        magic,
+        headers_tx,
+        blocks_tx,
+    );
 
-    let handle = thread::spawn(move || {
-        serve_with_shutdown(
-            addr,
-            listener_shutdown,
-            listener_network_active,
-            magic,
-            peer_table,
-            headers_tx,
-            blocks_tx,
-            banned,
-        )
-    });
+    let handle = thread::spawn(move || serve(listener, listener_shutdown, shared));
 
     let client = match connect_with_retry(addr) {
         Ok(client) => client,

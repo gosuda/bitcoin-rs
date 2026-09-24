@@ -29,7 +29,7 @@ pub mod handshake;
 pub mod inbound;
 /// Inventory relay helpers.
 pub mod inv;
-/// TCP listener skeleton with graceful shutdown.
+/// Inbound accept loop, outbound dial, and their shared start-epoch wiring.
 pub mod listener;
 /// Peer state and peer manager types.
 pub mod peer;
@@ -60,7 +60,7 @@ pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
-pub use listener::{ListenerExtras, spawn_outbound_connection};
+pub use listener::ListenerExtras;
 pub use peer::{
     DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerManager, PeerState,
     SystemDnsResolver,
