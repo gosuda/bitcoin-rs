@@ -99,6 +99,11 @@ pub const MAX_BLOCKS_IN_TRANSIT_PER_PEER: usize = 16;
 /// with [`PENDING_BUDGET`]: `PENDING_BUDGET / 16` would be 16, and fan-out
 /// would never engage at the 8-outbound default.
 pub const MIN_PEERS_FOR_FANOUT: usize = 8;
+
+/// How young a connection may be before policy may hold its silence against
+/// it. Core's `MINIMUM_CONNECT_TIME` (`net_processing.cpp:115`).
+pub const MINIMUM_CONNECT_TIME: Duration = Duration::from_secs(30);
+
 /// Fast-sync per-peer stripe floor. Half the Core cap so the window spreads
 /// across a larger outbound set; opt-in, not measured against the default.
 pub const FAST_BLOCKS_IN_TRANSIT_PER_PEER: usize = 8;
@@ -1724,6 +1729,18 @@ impl DownloadWindow {
     ///      ownership of at least one pending block does.
     pub fn active_downloading_peers(&self) -> usize {
         self.owner_downloading_since.len()
+    }
+
+    /// Whether `owner` holds one of the per-owner download slots.
+    ///
+    /// PRE: none.
+    /// POST: true exactly while `owner` is in the population that
+    ///   `active_downloading_peers` counts.
+    /// INVARIANT: the answer is the same fact the fan-out budget reads, so a
+    ///   peer counted as downloading is never retired as idle.
+    #[must_use]
+    pub fn is_downloading(&self, owner: PeerSource) -> bool {
+        self.owner_downloading_since.contains_key(&owner)
     }
 
     /// The per-owner block-download budget for one tick.
