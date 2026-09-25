@@ -15,12 +15,12 @@ use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
 use bitcoin_rs_mining::{
-    BlockTemplate, BlockTemplateRequest, BlockTemplateResult, BlockValidationResult, Candidate,
-    MiningCapability, MiningControl, MiningControlError, MiningInfo, TemplateId, TemplateMutation,
+    BlockTemplate, Candidate, FakeMiningControl, MiningCapability, MiningInfo, TemplateId,
+    TemplateMutation,
 };
 use bitcoin_rs_primitives::{
-    Block, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Txid,
-    Witness, client_version,
+    CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Txid, Witness,
+    client_version,
 };
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
@@ -261,107 +261,76 @@ fn mining_responses_error_without_a_control() {
     assert!(handler.dispatch("getmininginfo", &json!([])).is_err());
 }
 
-/// Mirrors the `handler_smoke` mining-control fixture so the typed mining
-/// response schemas are exercised against real template facts instead of the
-/// unavailable-control error path.
-struct CompatMiningControl;
-
-impl MiningControl for CompatMiningControl {
-    fn get_block_template(
-        &self,
-        _request: BlockTemplateRequest,
-    ) -> Result<BlockTemplateResult, MiningControlError> {
-        let previous_block_hash = Hash256::default();
-        Ok(BlockTemplateResult::Template(BlockTemplate {
-            candidate: Arc::new(Candidate {
-                template_id: TemplateId::new(&previous_block_hash, 0),
-                previous_block_hash,
-                height: 0,
-                version: 0x2000_0000,
-                bits: CompactTarget::from_consensus(0x1d00_ffff),
-                min_time: 0,
-                current_time: 0,
-                csv_active: false,
-                segwit_active: false,
-                max_weight: 4_000_000,
-                max_size: 4_000_000,
-                max_sigops: 80_000,
-                mempool_sequence: 0,
-                coinbase: Tx {
-                    version: 1,
-                    lock_time: LockTime::ZERO,
-                    inputs: vec![TxIn {
-                        previous_output: OutPoint::new(Txid::default(), u32::MAX),
-                        script_sig: Script::new(),
-                        sequence: Sequence::MAX,
-                        witness: Witness::new(),
-                    }],
-                    outputs: Vec::new(),
-                },
-                coinbase_value: 0,
-                fees: 0,
-                weight: 0,
-                size: 0,
-                sigop_cost: 0,
-                transactions: Vec::new(),
-                witness_merkle_root: None,
-                witness_reserved_value: None,
-                witness_commitment: None,
-            }),
-            rules: Vec::new(),
-            version_bits_available: Vec::new(),
-            version_bits_required: 0,
-            capabilities: vec![MiningCapability::new("coinbasetxn")],
-            mutable: vec![
-                TemplateMutation::Time,
-                TemplateMutation::Transactions,
-                TemplateMutation::PreviousBlock,
-            ],
-            submit_old: None,
-            signet: None,
-            work_id: None,
-        }))
+/// Canned template for the typed mining-response schema; the pinned GBT
+/// assertions read their exact values from these literals.
+fn compat_template() -> BlockTemplate {
+    let previous_block_hash = Hash256::default();
+    BlockTemplate {
+        candidate: Arc::new(Candidate {
+            template_id: TemplateId::new(&previous_block_hash, 0),
+            previous_block_hash,
+            height: 0,
+            version: 0x2000_0000,
+            bits: CompactTarget::from_consensus(0x1d00_ffff),
+            min_time: 0,
+            current_time: 0,
+            csv_active: false,
+            segwit_active: false,
+            max_weight: 4_000_000,
+            max_size: 4_000_000,
+            max_sigops: 80_000,
+            mempool_sequence: 0,
+            coinbase: Tx {
+                version: 1,
+                lock_time: LockTime::ZERO,
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                }],
+                outputs: Vec::new(),
+            },
+            coinbase_value: 0,
+            fees: 0,
+            weight: 0,
+            size: 0,
+            sigop_cost: 0,
+            transactions: Vec::new(),
+            witness_merkle_root: None,
+            witness_reserved_value: None,
+            witness_commitment: None,
+        }),
+        rules: Vec::new(),
+        version_bits_available: Vec::new(),
+        version_bits_required: 0,
+        capabilities: vec![MiningCapability::new("coinbasetxn")],
+        mutable: vec![
+            TemplateMutation::Time,
+            TemplateMutation::Transactions,
+            TemplateMutation::PreviousBlock,
+        ],
+        submit_old: None,
+        signet: None,
+        work_id: None,
     }
+}
 
-    fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
-        Ok(MiningInfo {
-            blocks: 0,
-            last_candidate: None,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            difficulty: 1.0,
-            network_hashes_per_second: 0.0,
-            pooled_transactions: 0,
-            network: Network::Regtest,
-            next_bits: CompactTarget::from_consensus(0x207f_ffff),
-            next_difficulty: 1.0,
-            minimum_fee_rate: 1_000,
-            signet: None,
-            warnings: Vec::new(),
-        })
-    }
-
-    fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
-        Ok(BlockValidationResult::Accepted)
-    }
-
-    fn submit_header(
-        &self,
-        _header: bitcoin_rs_primitives::Header,
-    ) -> Result<(), MiningControlError> {
-        Ok(())
-    }
-
-    fn publish_generation(&self) {}
-
-    fn generate(
-        &self,
-        _request: bitcoin_rs_mining::GenerateRequest,
-    ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
-        Err(MiningControlError::Unavailable("not wired".into()))
-    }
-
-    fn network_hash_ps(&self, _lookup: i64, _height: i64) -> Result<f64, MiningControlError> {
-        Ok(self.mining_info()?.network_hashes_per_second)
+/// Canned mining info for the typed mining-response schema.
+fn compat_info() -> MiningInfo {
+    MiningInfo {
+        blocks: 0,
+        last_candidate: None,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        difficulty: 1.0,
+        network_hashes_per_second: 0.0,
+        pooled_transactions: 0,
+        network: Network::Regtest,
+        next_bits: CompactTarget::from_consensus(0x207f_ffff),
+        next_difficulty: 1.0,
+        minimum_fee_rate: 1_000,
+        signet: None,
+        warnings: Vec::new(),
     }
 }
 
@@ -371,9 +340,9 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     // This rendering proof runs off-mainnet so it reaches the template.
     let mut ctx = Context::new();
     ctx.chain.chain_network = Network::Regtest;
-    let handler = Handler::new(Arc::new(
-        ctx.with_mining_control(Arc::new(CompatMiningControl)),
-    ));
+    let handler = Handler::new(Arc::new(ctx.with_mining_control(
+        FakeMiningControl::with_template(compat_template(), compat_info()),
+    )));
 
     let template: corepc_types::v31::GetBlockTemplate =
         typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;
