@@ -155,6 +155,9 @@ fn settle_node_reorg(
             {
                 settle_failed = true;
             }
+            if reconsidered && trim_after_reorg(gateway).is_err() {
+                return true;
+            }
         }
         settle_failed
             || mempool_change
