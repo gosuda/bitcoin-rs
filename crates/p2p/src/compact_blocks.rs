@@ -10,7 +10,7 @@
 //!
 //! BIP152 identity direction: a peer serializes the compact blocks it sends
 //! us with the version we advertised in our own `sendcmpct`
-//! ([`COMPACT_BLOCK_VERSION`], v2 = wtxid identity, witness-bearing
+//! ([`crate::peer::COMPACT_BLOCK_VERSION`], v2 = wtxid identity, witness-bearing
 //! prefills). Conversely, we serve peers at the version they recorded with
 //! us (`CompactBlockNegotiation::servable_version`, used by the chain
 //! query). The two directions are independent; decoding incoming compact
@@ -28,11 +28,6 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
 use bitcoin_rs_primitives::deserialize;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
-
-/// Compact-block protocol version this node advertises: the identity
-/// profile peers use for the compact blocks they send us. Re-exported from
-/// `peer` as the authority.
-pub use crate::peer::COMPACT_BLOCK_VERSION;
 
 /// Concurrent pending reconstructions per peer connection.
 pub const MAX_PENDING_RECONSTRUCTIONS: usize = 4;
@@ -113,7 +108,7 @@ impl Reconstruction {
     /// Receive-side entry for `cmpctblock`.
     ///
     /// `identity_version` is the BIP152 version the peer used to serialize
-    /// this message — our own advertised [`COMPACT_BLOCK_VERSION`], per the
+    /// this message — our own advertised [`crate::peer::COMPACT_BLOCK_VERSION`], per the
     /// direction rule in the module docs. Prefills are placed, remaining
     /// short IDs are matched as hints against the mempool, and the outcome
     /// is [`Outcome::Complete`] (all filled), [`Outcome::RequestMissing`]
@@ -411,6 +406,8 @@ fn wire_block_hash(hash: BlockHash) -> bitcoin::BlockHash {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::peer::COMPACT_BLOCK_VERSION;
 
     use bitcoin::bip152::{BlockTransactions, PrefilledTransaction};
     use bitcoin::blockdata::block::Block as RegistryBlock;

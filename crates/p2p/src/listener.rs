@@ -1320,8 +1320,7 @@ fn process_compact_wire_message(
     peer_addr: SocketAddr,
     shared: &ConnectionShared,
 ) {
-    let identity_version =
-        local_compact_version.unwrap_or(crate::compact_blocks::COMPACT_BLOCK_VERSION);
+    let identity_version = local_compact_version.unwrap_or(crate::peer::COMPACT_BLOCK_VERSION);
     let outcome = process_compact_message(
         compact_reconstruction,
         message,
