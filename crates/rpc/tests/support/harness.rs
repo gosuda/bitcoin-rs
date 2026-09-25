@@ -88,11 +88,13 @@ impl NodeHarness {
 }
 
 /// The real `RpcServer` on `127.0.0.1:0`, driven from one worker thread and
-/// shut down by `Drop`.
+/// shut down by `Drop`. The RPC context holds the node's actual chain
+/// transition barrier, the same mutex the daemon's block transitions take.
 pub(crate) struct ServerHarness {
     address: SocketAddr,
     shutdown: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
+    transition: Arc<parking_lot::Mutex<()>>,
 }
 
 impl ServerHarness {
@@ -143,7 +145,11 @@ impl ServerHarness {
             mining: bitcoin_rs_rpc::context::MiningHandles {
                 mining_control: None,
             },
-        });
+        })
+        .with_chain_transition(chainstate.transition_barrier());
+        // The same mutex the context was just handed, so a test can hold a
+        // transition open the way the daemon does.
+        let transition = chainstate.transition_barrier();
         let handler = Arc::new(Handler::new(Arc::new(ctx)));
         let auth = Arc::new(Auth::basic(REPLAY_USER, REPLAY_PASSWORD));
         let server = RpcServer::bind(
@@ -166,6 +172,7 @@ impl ServerHarness {
             address,
             shutdown,
             join: Some(join),
+            transition,
         })
     }
 
@@ -173,6 +180,15 @@ impl ServerHarness {
     #[must_use]
     pub(crate) fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    /// The node's authoritative connect/disconnect barrier, wired into the
+    /// RPC context by `start` exactly as the daemon wires it. A test that holds
+    /// this mutex observes the server the way a status client does while a
+    /// block transition is running.
+    #[must_use]
+    pub(crate) fn chain_transition(&self) -> Arc<parking_lot::Mutex<()>> {
+        Arc::clone(&self.transition)
     }
 
     /// Base64 token of the correct `user:password` credentials.
