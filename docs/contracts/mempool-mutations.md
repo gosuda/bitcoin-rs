@@ -116,9 +116,13 @@ state (`crates/mempool/src/orphan.rs`).
   script evaluator, with the same retry bound. Each attempt captures an even
   chain generation and pool sequence before reading chain facts. Preparation
   copies the input outputs under a pool read, then executes scripts without
-  any pool or lifecycle lock. The commit writer validates the exact generation
-  and sequence, the enforced policy snapshot and all `MempoolLimits`, then the
-  resident orphan claim and duplicate identity, before using that verdict.
+  any pool or lifecycle lock. `check_admission_state` is the one writer-side
+  validator: under its own lock the writer checks the fence's generation, the
+  captured membership sequence, and, where the attempt captured one, the
+  `PolicyStamp` that carries the enforced policy snapshot, all
+  `MempoolLimits`, and the fee-delta sequence. No other function compares
+  those admission tokens. The writer then checks the resident orphan claim
+  and duplicate identity, before using that verdict.
   Policy values are compared directly because limits can change without a
   membership sequence change; there is no second policy owner or shadow counter.
   Stale approvals and stale rejections both retry with newly resolved facts.
@@ -241,7 +245,8 @@ state (`crates/mempool/src/orphan.rs`).
   `observer_panic_does_not_roll_back_the_mutation`,
   `insert_reports_accepted_then_policy_evictions`,
   `sequence_base_matches_per_change_assignment`,
-  `stable_generation_reads_even_values`.
+  `stable_generation_reads_even_values`,
+  `admit_write_gate_retries_when_the_stamp_moved_after_prepare`.
 - `crates/node/tests/unit/sync/tests/transitions_3.rs` and
   `transitions_7.rs`: permanent and mutated-body reorg outcomes preserve the
   committed-prefix and invalidation semantics while the node owns
