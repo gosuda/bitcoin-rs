@@ -104,7 +104,7 @@ impl<S: KvStore> Indexer<S> {
                 return Err(IndexError::InvalidLiveRowValue { len: value.len() });
             }
             let row = crate::types::ScriptLiveRow::from_db_row(&key)
-                .ok_or(IndexError::InvalidWatermark)?;
+                .ok_or(IndexError::InvalidPrefixRowLength { len: key.len() })?;
             outpoints.push(row.outpoint());
         }
         Ok(outpoints)
