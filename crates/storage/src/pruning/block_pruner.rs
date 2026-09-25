@@ -29,6 +29,26 @@ pub fn block_body_key(height: u32, hash: Hash256) -> [u8; KEY_LEN] {
     key
 }
 
+/// The lowest row height still stored under `prefix`, when a row survives.
+///
+/// Keys are `(prefix, big-endian height, hash)`, so a family iterates in
+/// height order and the first row that parses names the lowest surviving
+/// height. A row whose height does not parse proves nothing about where
+/// deletion stopped, so it is skipped.
+pub(crate) fn lowest_stored_height<S: KvStore>(
+    store: &S,
+    cf: ColumnFamily,
+    prefix: &[u8],
+) -> Result<Option<u32>, StorageError> {
+    for row in store.iter_prefix(cf, prefix)? {
+        let (key, _) = row?;
+        if let Some(height) = row_height(&key, prefix) {
+            return Ok(Some(height));
+        }
+    }
+    Ok(None)
+}
+
 /// Prunes persisted block-body rows according to a [`PrunePolicy`].
 pub struct BlockPruner<S: KvStore> {
     store: Arc<S>,

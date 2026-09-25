@@ -24,6 +24,14 @@
 //! selected, so a reader holding a lease keeps exactly its required
 //! history.
 //!
+//! Three prune meanings stay separate. The *requested* height is operator
+//! intent (`node:pruneheight`). The *effective* line is that intent folded
+//! with reorg safety, live retention, and the byte target. The
+//! [`ExecutedFrontier`] (`node:prune_executed`) is the durable, monotonic
+//! fact of what a committed pass deleted, written in the same batch as its
+//! deletions: it is what a restart reconstructs and what refuses a lease,
+//! and no consumer infers it from the intent line.
+//!
 //! [`crate::pruning::PrunePolicy`] carries no behaviour of its own: the node builds one from
 //! configuration and hands it in, which is the policy/mechanism split this
 //! module keeps.
@@ -55,21 +63,142 @@ use crate::{StorageError, WriteBatch as _};
 use thiserror::Error;
 
 const PRUNEHEIGHT_METADATA_KEY: &[u8] = b"node:pruneheight";
+const PRUNE_EXECUTED_METADATA_KEY: &[u8] = b"node:prune_executed";
 
-/// Loads the persisted manual-prune line.
-pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, StorageError> {
-    let Some(bytes) = store.get(crate::ColumnFamily::UtxoMeta, PRUNEHEIGHT_METADATA_KEY)? else {
+/// Reads one big-endian `u32` metadata row from the UTXO meta family.
+fn load_u32_metadata<S: crate::KvStore>(
+    store: &S,
+    key: &[u8],
+    what: &str,
+) -> Result<Option<u32>, StorageError> {
+    let Some(bytes) = store.get(crate::ColumnFamily::UtxoMeta, key)? else {
         return Ok(None);
     };
     if bytes.len() != size_of::<u32>() {
         return Err(StorageError::IncompatibleData(format!(
-            "invalid persisted pruneheight length {}",
+            "invalid persisted {what} length {}",
             bytes.len()
         )));
     }
     let mut encoded = [0_u8; size_of::<u32>()];
     encoded.copy_from_slice(&bytes);
     Ok(Some(u32::from_be_bytes(encoded)))
+}
+
+/// Loads the persisted manual-prune line.
+///
+/// This is the operator's requested height: intent, and never proof that
+/// rows were deleted. The deleted range is
+/// [`load_executed_frontier`].
+pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, StorageError> {
+    load_u32_metadata(store, PRUNEHEIGHT_METADATA_KEY, "pruneheight")
+}
+
+/// Loads the persisted executed prune frontier, when the record exists.
+pub fn load_executed_frontier<S: crate::KvStore>(
+    store: &S,
+) -> Result<Option<ExecutedFrontier>, StorageError> {
+    let height = load_u32_metadata(store, PRUNE_EXECUTED_METADATA_KEY, "prune frontier")?;
+    Ok(height.map(ExecutedFrontier::new))
+}
+
+/// The durable, monotonic executed prune frontier: one past the highest
+/// block-body or undo row a committed prune pass deleted.
+///
+/// This is the one authoritative answer to "what history is permanently
+/// gone?". Three meanings stay distinct: the *requested* prune height is
+/// operator intent (`node:pruneheight`); the *effective* prune line is that
+/// intent folded with reorg safety, active retention, and the byte target;
+/// the frontier names only deletions that committed.
+///
+/// PRE: [`Self::NONE`] is the state of a store that has deleted nothing.
+///
+/// POST: a pass writes its frontier inside the same batch as its row
+/// deletions, so the record and the deletion commit together or not at all,
+/// and a restart reconstructs exactly the committed boundary.
+///
+/// INVARIANT: the frontier never moves backwards, every height below it is
+/// gone, and no lease is granted below it, so no reader can pin rows the
+/// frontier names as deleted.
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ExecutedFrontier(u32);
+
+impl ExecutedFrontier {
+    /// The frontier of a store that has deleted nothing.
+    pub const NONE: Self = Self(0);
+
+    /// Wraps a raw frontier height.
+    #[must_use]
+    pub const fn new(height: u32) -> Self {
+        Self(height)
+    }
+
+    /// The raw height: one past the highest deleted row.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// Returns true when `height` lies below the frontier: gone.
+    #[must_use]
+    pub const fn contains(self, height: u32) -> bool {
+        height < self.0
+    }
+
+    /// The monotonic join of two frontiers.
+    #[must_use]
+    pub const fn advance(self, other: Self) -> Self {
+        if self.0 >= other.0 { self } else { other }
+    }
+
+    /// Reconstructs a store's executed frontier, migrating a datadir that
+    /// was pruned before the record existed.
+    ///
+    /// POST: the persisted record wins when it exists. Otherwise only a
+    /// datadir that ran a pass before the record existed can have deleted
+    /// history, and every such pass persisted its requested line, so:
+    ///
+    /// - no requested line at all means no pass ever ran, and the frontier
+    ///   is [`Self::NONE`];
+    /// - a family with surviving rows shows that every lower height of it is
+    ///   gone, so the frontier is the *highest* of the two families' lowest
+    ///   surviving heights: one pass prunes bodies and undo through one
+    ///   line, so a floor must be safe for both;
+    /// - an empty family proves nothing, because a node that never wrote
+    ///   undo records also has an empty undo family;
+    /// - with no rows in either family, the requested line is the only
+    ///   bound left, and taking it refuses a lease rather than grant one
+    ///   over rows that may already be gone.
+    ///
+    /// INVARIANT: the result never grants a lease over deleted rows. A raw
+    /// `node:pruneheight` is intent: a pass clamped by a lease may have
+    /// stopped below it, so while rows survive the intent line never sets
+    /// the frontier.
+    pub fn reconstruct<S: crate::KvStore>(store: &S) -> Result<Self, StorageError> {
+        if let Some(frontier) = load_executed_frontier(store)? {
+            return Ok(frontier);
+        }
+        let Some(requested) = load_pruneheight(store)? else {
+            return Ok(Self::NONE);
+        };
+        let bodies = block_pruner::lowest_stored_height(
+            store,
+            block_pruner::BLOCK_DATA_CF,
+            block_pruner::BLOCK_BODY_PREFIX_BYTES,
+        )?;
+        let undo = block_pruner::lowest_stored_height(
+            store,
+            undo_pruner::BLOCK_UNDO_CF,
+            undo_pruner::BLOCK_UNDO_PREFIX_BYTES,
+        )?;
+        let frontier = match (bodies, undo) {
+            (Some(bodies), Some(undo)) => bodies.max(undo),
+            (Some(bodies), None) => bodies,
+            (None, Some(undo)) => undo,
+            (None, None) => requested,
+        };
+        Ok(Self::new(frontier))
+    }
 }
 
 /// What one pruning pass staged for its caller's atomic batch.
@@ -93,15 +222,18 @@ pub struct StagedPrune {
     pub pruned_below: u32,
 }
 
-/// One manual prune pass: clamps the line under the Core reorg margin,
-/// reserves it, stages rows, persists the prune height in the same batch,
-/// commits, promotes the executed line, and reclaims files.
+/// One manual prune pass.
+///
+/// It clamps the line under the Core reorg margin, reserves it, stages rows,
+/// persists the requested height and the executed frontier in the same batch,
+/// commits durably, and reclaims files.
 ///
 /// PRE: the caller holds the pruning authority, so passes do not overlap.
 ///
-/// POST: on `Ok`, the batch's deletions are committed and the registry's
-/// executed prune line is at least [`StagedPrune::pruned_below`]; on `Err`,
-/// the reservation is released and the executed line is untouched.
+/// POST: on `Ok`, the deletions and the [`ExecutedFrontier`] describing them
+/// are committed through one durable batch and the registry's executed line
+/// is at least [`StagedPrune::pruned_below`]; on `Err`, the reservation is
+/// released and neither the rows nor the frontier moved.
 ///
 /// INVARIANT: no lease is granted below the line this pass deletes
 /// through, because the reservation refuses such grants from the moment it
@@ -143,11 +275,24 @@ pub fn prune_to_height<S: crate::KvStore>(
         PRUNEHEIGHT_METADATA_KEY,
         &pruneheight.to_be_bytes(),
     );
-    store.write(batch)?;
-    // The committed batch is the receipt for the line promoted here. A
-    // failed pass drops the reservation instead, releasing the claim
-    // without advancing the executed line, so the next pass grants again.
-    reservation.commit(staged.pruned_below);
+    // The frontier is the deletion's receipt. It shares this batch's atomic
+    // and durable boundary, so a restart sees the record and the deletions
+    // together and reconciles the committed batch instead of retrying a
+    // pass that may already have applied (#632). Clamping with the
+    // reconstruction keeps the record monotonic when a legacy datadir's
+    // surviving rows prove more deletion than the record did.
+    let executed =
+        ExecutedFrontier::reconstruct(store)?.advance(ExecutedFrontier::new(staged.pruned_below));
+    batch.put(
+        crate::ColumnFamily::UtxoMeta,
+        PRUNE_EXECUTED_METADATA_KEY,
+        &executed.get().to_be_bytes(),
+    );
+    store.write_durable(batch)?;
+    // The durable batch is the receipt for the line promoted here. A failed
+    // pass drops the reservation instead, releasing the claim without
+    // advancing the executed line, so the next pass grants again.
+    reservation.commit(executed.get());
     reclaim_staged_flat_block_files(store, block_files, &staged.file_numbers)?;
     Ok(staged)
 }
