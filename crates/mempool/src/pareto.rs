@@ -76,15 +76,6 @@ impl ParetoKey {
 }
 
 impl ParetoFront {
-    /// Creates an empty priority index.
-    #[must_use]
-    pub(crate) fn new() -> Self {
-        Self {
-            order: BTreeSet::new(),
-            keys: BTreeMap::new(),
-        }
-    }
-
     /// Inserts or replaces an entry in priority order.
     ///
     /// Replacement is not a special case for the caller but is one here: an
@@ -200,7 +191,7 @@ mod memory_usage_tests {
     fn the_estimate_counts_both_key_collections() {
         const COUNT: u32 = 64;
 
-        let mut front = ParetoFront::new();
+        let mut front = ParetoFront::default();
         for id in 0..COUNT {
             front.insert(id, &entry(u8::try_from(id).unwrap_or(0)));
         }
@@ -231,7 +222,7 @@ mod memory_usage_tests {
     /// pinned together so the distinction is not lost.
     #[test]
     fn the_estimate_follows_what_is_indexed() {
-        let mut front = ParetoFront::new();
+        let mut front = ParetoFront::default();
         assert_eq!(front.dynamic_memory_usage(), 0);
 
         for id in 0..16_u32 {
