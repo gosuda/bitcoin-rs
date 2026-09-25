@@ -84,11 +84,11 @@ struct TxIngressConsumer {
 }
 
 impl TxIngressConsumer {
-    fn chain_view(&self) -> ChainAdmissionView<'_> {
+    fn chain_view(&self) -> ChainAdmissionView {
         ChainAdmissionView::new(
-            &self.utxo,
-            &self.applied_tip,
-            &self.block_tree,
+            Arc::clone(&self.utxo),
+            self.applied_tip.clone(),
+            self.block_tree.clone(),
             self.network,
         )
     }

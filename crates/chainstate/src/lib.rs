@@ -816,6 +816,23 @@ impl Chainstate {
         TipReader::new(Arc::clone(&self.applied_tip))
     }
 
+    /// Clones the best-work header-tip cell for the RPC capability bundle.
+    ///
+    /// The RPC context is a sibling capability boundary (ARCH-10): it holds
+    /// the cell itself so handlers can publish and observe the tip the chain
+    /// owner already moved, without routing every read through a reader.
+    #[must_use]
+    pub fn chain_tip_handle(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
+        Arc::clone(&self.chain_tip)
+    }
+
+    /// Clones the authoritative applied-tip cell for the RPC capability
+    /// bundle.
+    #[must_use]
+    pub fn applied_tip_handle(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
+        Arc::clone(&self.applied_tip)
+    }
+
     /// Publishes the genesis connect outcome as the best-work header tip.
     ///
     /// Header admission fills the header-tip cell through the tree; a
@@ -849,6 +866,12 @@ impl Chainstate {
     #[must_use]
     pub fn block_tree_reader(&self) -> BlockTreeReader {
         BlockTreeReader::new(Arc::clone(&self.block_tree))
+    }
+
+    /// Clones the block-tree cell for the RPC capability bundle.
+    #[must_use]
+    pub fn block_tree_handle(&self) -> Arc<RwLock<BlockTree>> {
+        Arc::clone(&self.block_tree)
     }
 
     /// Returns the chainstate-owned initial-block-download latch.

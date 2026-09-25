@@ -137,10 +137,12 @@ fn spending_tx(parent: Txid, fee_sats: u64, sequence: u32) -> Tx {
 /// Admits `tx` through the node's shared gateway exactly like production RPC
 /// ingress.
 fn admit(state: &NodeState, tx: Tx, time: u64) -> Result<SubmitOutcome> {
-    let utxo = state.chainstate().utxo_handle();
-    let applied_tip = state.chainstate().applied_tip_reader();
-    let block_tree = state.chainstate().block_tree_reader();
-    let view = ChainAdmissionView::new(&utxo, &applied_tip, &block_tree, Network::Regtest);
+    let view = ChainAdmissionView::new(
+        state.chainstate().utxo_handle(),
+        state.chainstate().applied_tip_reader(),
+        state.chainstate().block_tree_reader(),
+        Network::Regtest,
+    );
     state
         .mempool_gateway()
         .submit_transaction(Arc::new(tx), AdmissionOrigin::Rpc, None, time, &view)

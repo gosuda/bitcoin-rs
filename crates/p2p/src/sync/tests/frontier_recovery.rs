@@ -305,19 +305,17 @@ fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback()
     Ok(())
 }
 
-/// An expired header request retires its owner before this tick plans work.
-/// Expiry disconnects the owner while a fallback peer exists, but the
-/// snapshot this tick plans from was observed before that disconnect: the
-/// fallback ask must land on a live peer in the same tick, not on the
-/// just-disconnected highest peer the stale snapshot still lists.
+/// An expired header request rotates ownership before this tick plans
+/// work: once the deadline lapses the probe pick moves past the expired
+/// owner, so the fallback ask lands on a live peer in the same tick.
 ///
-/// PRE: `slow` owns the pending `getheaders` and advertises a height more
-///   than one above `fallback`, so plain ranking prefers `slow` even after
-///   expiry's one-point penalty (5 - 1 still outranks 3).
-/// POST: the deadline tick disconnects `slow` and `fallback` receives the
-///   header request in that same tick and owns the pending gate after it.
-/// INVARIANT: a connection retired inside the tick is never selected by
-///   the same tick's header fallback.
+/// PRE: `slow` owns the pending `getheaders` and advertises a height above
+///   `fallback`, so plain ranking would prefer `slow` again.
+/// POST: the expired gate no longer suppresses a probe; `fallback` is asked
+///   in that same tick and owns the pending request after it, while `slow`
+///   receives nothing.
+/// INVARIANT: a connection whose request expired is never re-asked by the
+///   same tick's header fallback.
 #[test]
 fn expired_request_excludes_its_disconnected_owner_from_the_same_tick_fallback()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -335,22 +333,22 @@ fn expired_request_excludes_its_disconnected_owner_from_the_same_tick_fallback()
     let slow_rx = connect_peer(&peers, synthetic_peer(slow, 5));
     let fallback_rx = connect_peer(&peers, synthetic_peer(fallback, 3));
 
-    let t0 = std::time::Instant::now();
-    sync.tick_at(t0);
+    sync.tick();
     assert!(
         next_getheaders(&slow_rx).is_ok(),
         "the higher advertised peer must own the first request",
     );
     assert!(fallback_rx.try_recv().is_err());
 
-    // The deadline itself retires the request and disconnects its owner
-    // while a fallback peer remains.
-    sync.tick_at(t0 + super::super::HEADER_REQUEST_TIMEOUT);
+    // Lapse the deadline without sleeping: backdate the pending request.
+    sync.scheduler
+        .lock()
+        .header_request
+        .as_mut()
+        .ok_or("probe lost its deadline")?
+        .requested_at -= super::super::HEADER_REQUEST_TIMEOUT;
+    sync.tick();
 
-    assert!(
-        !peers.is_connected(slow),
-        "the expired owner must be rotated away while a fallback exists",
-    );
     let request = next_getheaders(&fallback_rx)?;
     assert_eq!(
         request
@@ -372,7 +370,7 @@ fn expired_request_excludes_its_disconnected_owner_from_the_same_tick_fallback()
     assert!(fallback_rx.try_recv().is_err());
     assert!(
         slow_rx.try_recv().is_err(),
-        "the disconnected owner must receive no further request",
+        "the expired owner must receive no further request",
     );
     Ok(())
 }

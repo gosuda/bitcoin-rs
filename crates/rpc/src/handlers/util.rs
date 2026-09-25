@@ -132,7 +132,7 @@ pub(crate) fn estimatesmartfee(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let conf_target = u64::try_from(conf_target)
         .map_err(|_| RpcError::InvalidParameter(ESTIMATE_SMART_FEE_TARGET_ERROR.to_owned()))?;
     let blocks = conf_target_blocks(conf_target);
-    let pool = ctx.mempool.read();
+    let pool = ctx.mempool.gateway.read();
     match pool.estimate_fee_rate(blocks) {
         Some(rate) => typed_to_sonic_omitting_nulls(&v31::EstimateSmartFee {
             fee_rate: Some(sat_to_btc(rate.as_sat_per_kvb())),
@@ -181,7 +181,7 @@ fn is_core_fee_estimate_mode(mode: &str) -> bool {
 /// and the no-estimate branch stays `{}` (see the manifest row note).
 pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let conf_target = required_u64(params, 0, "conf_target is required")?;
-    let pool = ctx.mempool.read();
+    let pool = ctx.mempool.gateway.read();
     let Some(rate) = pool.estimate_fee_rate(conf_target_blocks(conf_target)) else {
         return Ok(json!({}));
     };
@@ -207,7 +207,7 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     use core::str::FromStr as _;
 
     let address_str = required_str(params, 0, "address is required")?;
-    let network = convert::bitcoin_network(ctx.chain_network);
+    let network = convert::bitcoin_network(ctx.chain.chain_network);
     let Some(address) = bitcoin::Address::from_str(address_str)
         .ok()
         .and_then(|address| address.require_network(network).ok())
@@ -245,8 +245,8 @@ pub(crate) fn getdescriptorinfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     // checked.
     let (payload, checksum) = checked_checksum(descriptor, ChecksumRequirement::Optional)?;
 
-    let info =
-        analyse(payload, convert::bitcoin_network(ctx.chain_network)).map_err(descriptor_error)?;
+    let info = analyse(payload, convert::bitcoin_network(ctx.chain.chain_network))
+        .map_err(descriptor_error)?;
 
     typed_to_sonic_omitting_nulls(&v31::GetDescriptorInfo {
         // The canonical form comes from the parse, so a descriptor handed to this
@@ -290,9 +290,12 @@ pub(crate) fn deriveaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         .map(parse_derivation_range)
         .transpose()?;
 
-    let expansions =
-        derive_descriptor_addresses(payload, convert::bitcoin_network(ctx.chain_network), range)
-            .map_err(descriptor_error)?;
+    let expansions = derive_descriptor_addresses(
+        payload,
+        convert::bitcoin_network(ctx.chain.chain_network),
+        range,
+    )
+    .map_err(descriptor_error)?;
 
     // Core returns a flat array for a single-path descriptor and an array per
     // expansion for a multipath one.
@@ -1292,9 +1295,9 @@ mod tests {
 
     #[test]
     fn getrpcinfo_returns_active_commands_and_configured_log_path() {
-        let ctx = Arc::new(
-            Context::new().with_debug_log_path(std::path::PathBuf::from("/tmp/debug.log")),
-        );
+        let mut ctx = Context::new();
+        ctx.debug_log_path = Some(std::path::PathBuf::from("/tmp/debug.log"));
+        let ctx = Arc::new(ctx);
         let result =
             getrpcinfo(&ctx, &json!([])).unwrap_or_else(|err| panic!("getrpcinfo failed: {err}"));
         assert!(
@@ -1367,7 +1370,9 @@ mod tests {
             fn publish_rawblock(&self, _bytes: &[u8]) {}
             fn publish_rawtx(&self, _bytes: &[u8]) {}
         }
-        let ctx = Arc::new(Context::new().with_zmq_publisher(Arc::new(NotifierPublisher)));
+        let mut ctx = Context::new();
+        ctx.zmq_publisher = Arc::new(NotifierPublisher);
+        let ctx = Arc::new(ctx);
         let result = getzmqnotifications(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getzmqnotifications failed: {err}"));
         let Some(arr) = result.as_array() else {
@@ -2069,7 +2074,7 @@ mod deriveaddresses_tests {
     #[test]
     fn combo_derives_core_regtest_addresses() {
         let mut ctx = Context::new();
-        ctx.chain_network = bitcoin_rs_primitives::Network::Regtest;
+        ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
         let ctx = Arc::new(ctx);
         // Bitcoin Core `rpc_deriveaddresses.py`.
         let tprv = "tprv8ZgxMBicQKsPd7Uf69XL1XwhmjHopUGep8GuEiJDZmbQz6o58LninorQAfcKZWARbtRtfnLcJ5MQ2AtHcQJCCRUcMRvmDUjyEmNUWwx8UbK";
