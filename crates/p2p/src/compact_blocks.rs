@@ -29,6 +29,7 @@ use bitcoin::bip152::{BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
 use bitcoin_rs_primitives::deserialize;
+use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 /// Compact-block protocol version this node advertises: the identity
@@ -289,6 +290,64 @@ fn complete_block(
     let block = Block { header, txs };
     bitcoin_rs_consensus::verify_merkle_root_with_txids(&block, &txids).map_err(|_| ())?;
     Ok(block)
+}
+
+/// Mutation-aware transaction-ID merkle reduction over borrowed leaves:
+/// `(root, mutated)`, or `None` for an empty tree. Mirrors the consensus
+/// walker (`bitcoin_rs_consensus` `merkle_root_spine`): two equal *real*
+/// adjacent nodes at any level flag the tree as mutated, while the odd
+/// leftover paired with its duplicate-last copy never does — the property
+/// that makes `[a, b, c, c]` colliding with `[a, b, c]` a detected mutation
+/// rather than a silent pass.
+fn merkle_root_and_mutation(leaves: impl ExactSizeIterator<Item = Txid>) -> Option<(Txid, bool)> {
+    if leaves.len() == 0 {
+        return None;
+    }
+    let hash_pair = |left: Txid, right: Txid| {
+        let mut pair = [0_u8; 64];
+        pair[..32].copy_from_slice(left.as_bytes());
+        pair[32..].copy_from_slice(right.as_bytes());
+        Txid(double_sha256(&pair))
+    };
+    // One pending node per level; a block holds far fewer than 2^64 leaves.
+    let mut spine: [Option<Txid>; 64] = [None; 64];
+    let mut mutated = false;
+    for leaf in leaves {
+        let mut current = leaf;
+        let mut height = 0;
+        while let Some(left) = spine[height] {
+            spine[height] = None;
+            if left == current {
+                mutated = true;
+            }
+            current = hash_pair(left, current);
+            height += 1;
+        }
+        spine[height] = Some(current);
+    }
+    // Fold the right spine bottom-up: the carry rises to each pending height
+    // through duplicate-last self-pairs (never a mutation), then joins that
+    // pending node as its right sibling.
+    let mut carry: Option<(Txid, usize)> = None;
+    for (height, slot) in spine.iter().enumerate() {
+        let Some(node) = *slot else { continue };
+        carry = Some(match carry {
+            None => (node, height),
+            Some((accumulated, accumulated_height)) => {
+                let mut right = accumulated;
+                let mut right_height = accumulated_height;
+                while right_height < height {
+                    right = hash_pair(right, right);
+                    right_height += 1;
+                }
+                if node == right {
+                    mutated = true;
+                }
+                (hash_pair(node, right), height + 1)
+            }
+        });
+    }
+    carry.map(|(root, _height)| (root, mutated))
 }
 
 /// Matches the message's short IDs against the hint identities and fills
