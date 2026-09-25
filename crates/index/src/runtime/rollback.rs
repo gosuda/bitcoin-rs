@@ -137,11 +137,25 @@ impl Worker {
         watermark: IndexWatermark,
     ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
         let watermark_hash = Hash256::from_le_bytes(&watermark.hash);
-        let body = self.load_body(watermark.height, watermark_hash)?;
+        // One grant covers every persistence read this rollback needs: a
+        // prune pass may not delete the undo row in the gap between the
+        // body load and the live-anchor lookup.
+        let lease = match self.history.request_history(watermark.height) {
+            Ok(lease) => lease,
+            Err(HistoryUnavailable::Pruned { .. }) => {
+                return Err(DerivedIndexWorkerError::MissingBody {
+                    height: watermark.height,
+                    hash: watermark_hash,
+                });
+            }
+            Err(error) => return Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
+        };
+        let body = self.load_body(watermark.height, watermark_hash, &lease)?;
         let anchor = capabilities
             .script_live
             .then(|| self.live_anchor(watermark.height, watermark.hash))
             .transpose()?;
+        lease.release();
 
         let spent: &dyn crate::SpentCoinScripts =
             anchor.as_ref().map_or(&NoSpentScripts, |anchor| anchor);
@@ -187,15 +201,14 @@ impl Worker {
         Ok(prev)
     }
 
-    /// Loads one body through the owner's typed history boundary.
+    /// Loads one body under a live history grant.
     ///
-    /// PRE: none; the caller names the row it needs.
+    /// PRE: `lease` pins `height`, so a body that reads back absent under it
+    /// is transient absence, never lost history.
     ///
-    /// POST: `Ok` returns the body. `MissingBody` means the pruning authority
-    /// answered that the height is permanently gone — the owner's rebuild
-    /// decision, relayed rather than inferred. `HistoryUnavailable` means the
-    /// authority granted the history and the row is absent for now, or the
-    /// node is shutting down: the caller waits instead of rebuilding.
+    /// POST: `Ok` returns the body. `HistoryUnavailable::Missing` means the
+    /// authority granted the height and the row is absent for now: the
+    /// caller waits instead of rebuilding.
     ///
     /// INVARIANT: permanence comes from the grant. The worker never compares a
     /// height against a copied prune frontier to decide it.
@@ -203,21 +216,15 @@ impl Worker {
         &self,
         height: u32,
         hash: Hash256,
+        lease: &bitcoin_rs_storage::pruning::HistoryLease,
     ) -> Result<Vec<u8>, DerivedIndexWorkerError> {
+        let _ = lease;
         let Some(store) = self.body_store.as_ref() else {
             return Err(DerivedIndexWorkerError::NoBodyStore);
-        };
-        let lease = match self.history.request_history(height) {
-            Ok(lease) => lease,
-            Err(HistoryUnavailable::Pruned { .. }) => {
-                return Err(DerivedIndexWorkerError::MissingBody { height, hash });
-            }
-            Err(error) => return Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
         };
         // The grant pins this height, so an absent body under it is transient
         // absence, which the boundary types as `Missing`.
         let body = store.load_block_body(height, hash)?;
-        lease.release();
         body.ok_or(DerivedIndexWorkerError::HistoryUnavailable(
             HistoryUnavailable::Missing,
         ))

@@ -41,7 +41,7 @@ fn pruned_frontier_survives_sigkill_and_refuses_deleted_history() -> Result<()> 
     let data_dir = temp.path().join("prune-node");
     let config = prune_test_config(data_dir.clone());
 
-    crash_child("prune", &data_dir, Duration::from_secs(120))?;
+    crash_child("prune", &data_dir, Duration::from_mins(2))?;
 
     let resumed = NodeState::open(config, None).context("restart after SIGKILL in prune")?;
     let retention = resumed.chainstate().retention_handle();

@@ -230,14 +230,16 @@ impl Worker {
                     continue;
                 }
                 Err(error @ DerivedIndexWorkerError::HistoryUnavailable(_)) => {
-                    // The owner granted this history and the row is not there
-                    // yet, or the node is shutting down. Waiting is the whole
-                    // reaction: a rebuild cannot recover what already exists,
-                    // and rebuilding on a transient gap would discard rows the
-                    // consumer had already derived.
+                    // Every answer here is provisional: an outstanding
+                    // reservation can abort and release the range, the owner
+                    // granted the history and the row is not there yet, or
+                    // the node is shutting down. Waiting is the whole
+                    // reaction: a rebuild cannot recover what may already
+                    // exist, and rebuilding on a transient gap would discard
+                    // rows the consumer had already derived.
                     tracing::debug!(
                         error = %error,
-                        "index rollback waits for history the owner granted"
+                        "index rollback waits on a provisional history answer"
                     );
                     return Ok(ReconcileAction::Stalled);
                 }
