@@ -208,34 +208,10 @@ impl<'b> BlockView<'b> {
         &self.facts
     }
 
-    /// Returns decoded transactions in block order.
-    #[must_use]
-    pub const fn transactions(&self) -> &'b [Tx] {
-        self.txs
-    }
-
     /// Returns transaction IDs in block order.
     #[must_use]
     pub fn txids(&self) -> &[Txid] {
         self.facts.txids()
-    }
-
-    /// Returns BIP141 block weight.
-    #[must_use]
-    pub const fn weight(&self) -> u64 {
-        self.facts.weight()
-    }
-
-    /// Returns transaction spans from the parsed image, when available.
-    #[must_use]
-    pub fn transaction_spans(&self) -> &[ByteSpan] {
-        self.facts.transaction_spans()
-    }
-
-    /// Returns whether the transaction Merkle tree is mutated.
-    #[must_use]
-    pub const fn merkle_mutated(&self) -> bool {
-        self.facts.merkle_mutated()
     }
 
     /// Returns whether the derived Merkle root equals `merkle_root`.
