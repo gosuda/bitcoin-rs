@@ -190,19 +190,25 @@ impl ChainQuery for ActiveChainQuery {
     /// POST: return the `blocktxn` reply for a block within
     /// [`MAX_BLOCKTXN_DEPTH`] of the active tip, the whole witness-bearing
     /// `block` for a deeper one, and `None` for a block this node cannot
-    /// serve; `Err` reports an index past the end of the body.
+    /// serve or while the `headroom` gate is saturated; `Err` reports an
+    /// index past the end of the body.
     /// INVARIANT: a deep request is never answered with a small `blocktxn`
     /// and never left unanswered while its body is available (Core 31.1
-    /// `net_processing.cpp:4590-4624`).
+    /// `net_processing.cpp:4590-4624`); `headroom` is evaluated immediately
+    /// before the body load, so a saturated gate materializes no body.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
+        headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError> {
         let hash = native_block_hash(request.block_hash);
         let Some((tip_height, height)) = self.active_position(hash) else {
             return Ok(None);
         };
         let deep = beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH);
+        if !headroom() {
+            return Ok(None);
+        }
         let Some((payload, tip_height)) = self.load_active_block(height, hash) else {
             return Ok(None);
         };
@@ -683,6 +689,44 @@ mod tests {
         Ok(())
     }
 
+    /// A `getblocktxn` for a deep block — the branch that would otherwise
+    /// materialize the whole body — loads nothing and stays unanswered while
+    /// the production gate is saturated, mirroring the `getdata` gate
+    /// behaviour (`serve_inventory_blocks`).
+    #[test]
+    fn getblocktxn_halts_at_gate_without_loading() -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(12);
+        let deep_block = block_at(&headers, 0)?;
+        let body_source = Arc::new(CountingBodySource {
+            bodies: vec![(0, deep_block.block_hash(), consensus_bytes(&deep_block))],
+            loads: AtomicUsize::new(0),
+            tripwire: Some(0),
+        });
+        let query = query_with(headers)?.with_block_body_source(body_source.clone());
+        let request = bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: wire_hash(deep_block.block_hash()),
+            indexes: vec![1],
+        };
+        let headroom_calls = AtomicUsize::new(0);
+
+        let reply = query.block_transactions(&request, &|| {
+            headroom_calls.fetch_add(1, Ordering::Relaxed);
+            false
+        })?;
+
+        assert!(
+            reply.is_none(),
+            "a saturated gate leaves the request unanswered"
+        );
+        assert_eq!(
+            body_source.loads.load(Ordering::Relaxed),
+            0,
+            "a saturated gate must not load the block body"
+        );
+        assert_eq!(headroom_calls.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
+
     #[test]
     fn getdata_msg_cmpct_block_serves_negotiated_profile_and_notfound_without()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -762,7 +806,7 @@ mod tests {
             indexes: vec![1],
         };
         Ok(query
-            .block_transactions(&request)?
+            .block_transactions(&request, &|| true)?
             .ok_or("an active body is always answered")?)
     }
 
@@ -801,29 +845,38 @@ mod tests {
         let query = chain_at(&headers, 1, &block)?;
         let wire = wire_hash(block.block_hash());
 
-        let reply = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire,
-            indexes: vec![1],
-        })?;
+        let reply = query.block_transactions(
+            &bitcoin::bip152::BlockTransactionsRequest {
+                block_hash: wire,
+                indexes: vec![1],
+            },
+            &|| true,
+        )?;
         let Some(Message::BlockTxn(txn)) = &reply else {
             panic!("a shallow request is answered with blocktxn, got {reply:?}");
         };
         assert_eq!(txn.transactions.block_hash, wire);
         assert_eq!(txn.transactions.transactions.len(), 1);
 
-        let out_of_range = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire,
-            indexes: vec![7],
-        });
+        let out_of_range = query.block_transactions(
+            &bitcoin::bip152::BlockTransactionsRequest {
+                block_hash: wire,
+                indexes: vec![7],
+            },
+            &|| true,
+        );
         assert!(
             matches!(out_of_range, Err(PeerError::Protocol(_))),
             "an out-of-range index is a protocol disconnect"
         );
 
-        let unknown = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: bitcoin::BlockHash::from_byte_array([9; 32]),
-            indexes: vec![0],
-        })?;
+        let unknown = query.block_transactions(
+            &bitcoin::bip152::BlockTransactionsRequest {
+                block_hash: bitcoin::BlockHash::from_byte_array([9; 32]),
+                indexes: vec![0],
+            },
+            &|| true,
+        )?;
         assert!(unknown.is_none(), "an unservable block stays unanswered");
         Ok(())
     }

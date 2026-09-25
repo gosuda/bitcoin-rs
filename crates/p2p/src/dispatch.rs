@@ -66,12 +66,15 @@ pub trait ChainQuery: Send + Sync {
     /// enough to reconstruct, or the whole witness-bearing `block` for one
     /// too deep for a useful hint set (Core 31.1 answers both instead of
     /// leaving a peer to time out); `Ok(None)` leaves the request unanswered
-    /// (unknown, stale, pruned, or headless block). `Err` reports an
-    /// out-of-range transaction index — a protocol disconnect per BIP152
-    /// (Core scores misbehavior).
+    /// (unknown, stale, pruned, or headless block, or a saturated
+    /// `headroom` gate). `Err` reports an out-of-range transaction index —
+    /// a protocol disconnect per BIP152 (Core scores misbehavior).
+    /// INVARIANT: `headroom` is evaluated before any block body is loaded,
+    /// so a saturated outbound gate materializes no body for this request.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
+        headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError>;
 }
 
@@ -276,7 +279,7 @@ pub fn dispatch_inbound_full<S>(
         Message::GetBlockTxn(request) => {
             ensure_block_txn_indexes_valid(&request.txs_request)?;
             step(peer, message)?;
-            serve_block_txn(chain, &request.txs_request, send)?;
+            serve_block_txn(chain, &request.txs_request, headroom, send)?;
         }
         _ => step(peer, message)?,
     }
@@ -423,18 +426,21 @@ fn serve_getdata_blocks(
 /// Answers one `getblocktxn` through the chain view and sends whatever reply
 /// it produces. PRE: the request's indexes are structurally valid. POST: a
 /// servable block gets its `blocktxn`, a block too deep for a compact answer
-/// gets the whole `block`, and an unknown, stale, or headless block — or a
-/// node with no chain view — leaves the request unanswered. INVARIANT: the
-/// dispatch boundary never learns which reply shape the chain chose.
+/// gets the whole `block`, and an unknown, stale, headless, or
+/// production-gated block — or a node with no chain view — leaves the
+/// request unanswered. INVARIANT: the dispatch boundary never learns which
+/// reply shape the chain chose, and a saturated `headroom` gate loads no
+/// block body here.
 fn serve_block_txn(
     chain: Option<&dyn ChainQuery>,
     request: &BlockTransactionsRequest,
+    headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
 ) -> Result<(), PeerError> {
     let Some(chain) = chain else {
         return Ok(());
     };
-    if let Some(response) = chain.block_transactions(request)? {
+    if let Some(response) = chain.block_transactions(request, headroom)? {
         send(response)?;
     }
     Ok(())
@@ -576,6 +582,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
@@ -622,6 +629,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
@@ -806,6 +814,7 @@ mod tests {
             fn block_transactions(
                 &self,
                 request: &BlockTransactionsRequest,
+                _headroom: &dyn Fn() -> bool,
             ) -> Result<Option<Message>, PeerError> {
                 Ok(Some(Message::BlockTxn(BlockTxn {
                     transactions: BlockTransactions {
@@ -862,6 +871,95 @@ mod tests {
         assert_getblocktxn_refused(Vec::new());
         assert_getblocktxn_refused(vec![1, 1]);
         assert_getblocktxn_refused(vec![3, 2]);
+    }
+
+    /// A saturated headroom gate leaves a `getblocktxn` unanswered through
+    /// the real dispatch arm: the chain view is consulted with the dispatch
+    /// closure itself, and a chain that honours it neither loads nor
+    /// replies, exactly as `getdata` block serving behaves.
+    #[test]
+    fn getblocktxn_is_unanswered_while_the_production_gate_is_saturated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct GatedChain {
+            observed: AtomicUsize,
+            loads: AtomicUsize,
+        }
+        impl ChainQuery for GatedChain {
+            fn headers_after(
+                &self,
+                _locator_hashes: &[BlockHash],
+                _stop_hash: BlockHash,
+                _limit: usize,
+            ) -> Vec<Header> {
+                Vec::new()
+            }
+
+            fn serve_inventory_blocks(
+                &self,
+                _items: &[Inventory],
+                _compact_version: Option<u64>,
+                _headroom: &dyn Fn() -> bool,
+                _serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+            ) -> Result<InventoryServing, PeerError> {
+                Ok(InventoryServing::default())
+            }
+
+            fn block_transactions(
+                &self,
+                request: &BlockTransactionsRequest,
+                headroom: &dyn Fn() -> bool,
+            ) -> Result<Option<Message>, PeerError> {
+                self.observed.fetch_add(1, Ordering::Relaxed);
+                if !headroom() {
+                    return Ok(None);
+                }
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(Message::BlockTxn(BlockTxn {
+                    transactions: BlockTransactions {
+                        block_hash: request.block_hash,
+                        transactions: Vec::new(),
+                    },
+                })))
+            }
+        }
+
+        let chain = GatedChain {
+            observed: AtomicUsize::new(0),
+            loads: AtomicUsize::new(0),
+        };
+        let message = Message::GetBlockTxn(bitcoin::p2p::message_compact_blocks::GetBlockTxn {
+            txs_request: BlockTransactionsRequest {
+                block_hash: bitcoin::BlockHash::from_byte_array([7; 32]),
+                indexes: vec![0],
+            },
+        });
+        let mut peer = ready_peer();
+        let collected = RefCell::new(Vec::new());
+        dispatch_inbound_full(
+            &mut peer,
+            &message,
+            Some(&chain),
+            None,
+            &|| true,
+            &|| false,
+            &mut |response| {
+                collected.borrow_mut().push(response);
+                Ok(())
+            },
+            &mut |_| {},
+        )?;
+
+        assert_eq!(chain.observed.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            chain.loads.load(Ordering::Relaxed),
+            0,
+            "a saturated gate must not produce a reply body"
+        );
+        assert!(
+            collected.borrow().is_empty(),
+            "the request stays unanswered"
+        );
+        Ok(())
     }
 
     /// Streaming chain fake mirroring `ActiveChainQuery`: block-typed items
@@ -922,6 +1020,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
