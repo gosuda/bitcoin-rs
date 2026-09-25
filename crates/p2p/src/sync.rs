@@ -88,9 +88,6 @@ const LOCATOR_MAX_ENTRIES: usize = 32;
 /// many is a full page, so the peer almost certainly has more.
 const MAX_HEADERS_RESULTS: usize = 2_000;
 
-/// Wire protocol version we advertise on outbound `getheaders`.
-const PROTOCOL_VERSION: u32 = 70_016;
-
 /// Time after which an unanswered `getheaders` request may be retried.
 const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
