@@ -469,8 +469,9 @@ pub fn bip94_timewarp_floor(network: Network, height: u32, parent_time: u32) -> 
 
 /// Compact proof-of-work target decode/encode and block-work helpers.
 ///
-/// These mirror Bitcoin Core's `arith_uint256::SetCompact`/`GetCompact`
-/// exactly, including sign-bit normalization and overflow classification.
+/// These mirror Bitcoin Core's `arith_uint256::SetCompact` decode exactly —
+/// a signed encoding decodes to zero — and `GetCompact` for non-negative
+/// targets on the encode side.
 pub(crate) mod pow {
     use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
@@ -546,10 +547,13 @@ pub(crate) mod pow {
     /// Encodes a non-negative 256-bit target into compact consensus form.
     #[must_use]
     pub(crate) fn target_to_compact(target: ChainWork) -> CompactTarget {
-        CompactTarget::from_consensus(get_compact(target, false))
+        CompactTarget::from_consensus(get_compact(target))
     }
 
-    fn get_compact(target: ChainWork, negative: bool) -> u32 {
+    /// PRE: `target` is a non-negative 256-bit chain target.
+    /// POST: Return its compact consensus encoding.
+    /// INVARIANT: No signed-target bit is added.
+    fn get_compact(target: ChainWork) -> u32 {
         if target == ChainWork::ZERO {
             return 0;
         }
@@ -568,13 +572,7 @@ pub(crate) mod pow {
         debug_assert_eq!(compact & !0x007f_ffff, 0);
         debug_assert!(size < 256);
 
-        compact
-            | (u32::try_from(size).unwrap_or(0) << 24)
-            | if negative && compact & 0x007f_ffff != 0 {
-                0x0080_0000
-            } else {
-                0
-            }
+        compact | (u32::try_from(size).unwrap_or(0) << 24)
     }
 }
 
