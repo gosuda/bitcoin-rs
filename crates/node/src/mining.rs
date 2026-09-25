@@ -407,14 +407,10 @@ impl MiningControl for MiningCoordinator {
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
         match self.chainstate.admit_headers(std::slice::from_ref(&header)) {
             bitcoin_rs_chain::HeaderAdmission::Accepted { .. } => Ok(()),
-            bitcoin_rs_chain::HeaderAdmission::Rejected(error) => {
-                Err(header_reject_reason(error))
-            }
-            bitcoin_rs_chain::HeaderAdmission::Refused(error) => {
-                Err(MiningControlError::Unavailable(CompactString::from(
-                    error.to_string(),
-                )))
-            }
+            bitcoin_rs_chain::HeaderAdmission::Rejected(error) => Err(header_reject_reason(error)),
+            bitcoin_rs_chain::HeaderAdmission::Refused(error) => Err(
+                MiningControlError::Unavailable(CompactString::from(error.to_string())),
+            ),
         }
     }
 
