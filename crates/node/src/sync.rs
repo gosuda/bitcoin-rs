@@ -128,6 +128,24 @@ fn window_disposition(
     }
 }
 
+/// Test fixture: the one owner of header-tree writes node tests must
+/// synthesize directly — mid-chain forks that must not become the best tip,
+/// and subtrees admission would reject — which [`Chainstate::admit_headers`]
+/// cannot produce because admission validates and republishes the best-work
+/// tip. Production never calls this.
+///
+/// [`Chainstate::admit_headers`]: bitcoin_rs_chainstate::Chainstate::admit_headers
+#[cfg(test)]
+pub(crate) fn fixture_insert_header_node(
+    handles: &bitcoin_rs_chainstate::Chainstate,
+    parent: bitcoin_rs_chain::NodeId,
+    header: bitcoin_rs_primitives::Header,
+    status: bitcoin_rs_chain::NodeStatus,
+) -> Result<bitcoin_rs_chain::NodeId, bitcoin_rs_chain::ChainError> {
+    let mut tree = handles.block_tree().write();
+    tree.insert_node(Some(parent), header, status)
+}
+
 impl SyncChain for NodeSyncChain {
     fn network(&self) -> Network {
         self.handles.network()
@@ -151,8 +169,13 @@ impl SyncChain for NodeSyncChain {
         }
 
         let genesis = self.handles.network().genesis_block();
-        if let Err(error) = self.followers.apply_connect(&self.handles, &genesis) {
-            tracing::warn!(%error, "block sync: failed to bootstrap genesis");
+        match self.followers.apply_connect(&self.handles, &genesis) {
+            // The header-tip cell is the chainstate's to publish.
+            Ok(outcome) => self.handles.publish_genesis_tip(outcome.tip),
+            // Genesis apply failed before an applied tip could be published.
+            Err(error) => {
+                tracing::warn!(%error, "block sync: failed to bootstrap genesis");
+            }
         }
     }
 
