@@ -37,6 +37,8 @@ pub use coordinator::{
     AppliedTipSource, ChainContextSource, MempoolSequenceWake, MempoolSnapshotSource, MiningService,
 };
 pub use generation_signal::MiningGenerationSignal;
+#[cfg(any(test, feature = "test-seam"))]
+pub use control::FakeMiningControl;
 pub use network_hashps::{estimate_network_hashps, network_hash_ps};
 pub use template::{
     Candidate, CandidateContext, CandidateTransaction, TemplateId, assemble_candidate,

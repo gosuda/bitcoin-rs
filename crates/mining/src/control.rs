@@ -6,11 +6,17 @@
 //! submission stay on the node's authoritative apply path.
 
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-seam"))]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::vec::Vec;
 
 use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Header, Network, Tx, Txid};
+#[cfg(any(test, feature = "test-seam"))]
+use bitcoin_rs_primitives::{Hash256, consensus_bytes};
 use compact_str::CompactString;
+#[cfg(any(test, feature = "test-seam"))]
+use parking_lot::Mutex;
 
 use crate::Candidate;
 
@@ -322,6 +328,227 @@ pub trait MiningControl: Send + Sync {
     /// by the caller after inspecting the applied tip.
     fn generate(&self, request: GenerateRequest)
     -> Result<Vec<GeneratedBlock>, MiningControlError>;
+}
+
+/// In-memory [`MiningControl`] double for tests in any crate.
+///
+/// Compile gate: available inside this crate's unit tests and, through the
+/// `test-seam` feature, to downstream integration tests. Production code
+/// never links it.
+///
+/// PRE: construction requires no external state and does not block.
+///
+/// POST: each result-returning operation checks [`Self::fail`] first; the
+/// request captures and call counters have the semantics of the recording
+/// fakes this type replaces; publication counters record every wake.
+///
+/// INVARIANT: an armed failure short-circuits every result-returning method,
+/// including `submit_header`, before canned state is read; both wake counters
+/// remain independently observable.
+#[cfg(any(test, feature = "test-seam"))]
+pub struct FakeMiningControl {
+    /// Template returned by template-mode `get_block_template` calls.
+    pub template: Mutex<Option<BlockTemplate>>,
+    /// Proposal-mode `get_block_template` result.
+    pub proposal: Mutex<BlockValidationResult>,
+    /// `submit_block` result.
+    pub submit: Mutex<BlockValidationResult>,
+    /// `mining_info` and `network_hash_ps` state source.
+    pub info: Mutex<MiningInfo>,
+    /// Most recent template-mode or proposal request.
+    pub last_request: Mutex<Option<BlockTemplateRequest>>,
+    /// Most recent `network_hash_ps` arguments.
+    pub last_hash_ps: Mutex<Option<(i64, i64)>>,
+    /// Most recent `generate` request.
+    pub last_generate: Mutex<Option<GenerateRequest>>,
+    /// `get_block_template` call count.
+    pub template_calls: AtomicUsize,
+    /// `submit_block` call count.
+    pub submit_calls: AtomicUsize,
+    /// `mining_info` call count.
+    pub info_calls: AtomicUsize,
+    /// Armed failure returned by every result-returning operation.
+    pub fail: Mutex<Option<MiningControlError>>,
+    /// `publish_generation` wake count.
+    pub publishes: AtomicU64,
+    /// Every `publish_generation_from` sequence, in call order.
+    pub published_from: Mutex<Vec<u64>>,
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+impl FakeMiningControl {
+    /// Builds a control that fails every result-returning operation with
+    /// [`MiningControlError::Unavailable`] and counts publication wakes.
+    ///
+    /// The placeholder mining info is never returned through the control:
+    /// an armed failure short-circuits before it can be read.
+    pub fn unavailable(reason: &str) -> Arc<Self> {
+        Arc::new(Self {
+            template: Mutex::new(None),
+            proposal: Mutex::new(BlockValidationResult::Accepted),
+            submit: Mutex::new(BlockValidationResult::Accepted),
+            info: Mutex::new(placeholder_mining_info()),
+            last_request: Mutex::new(None),
+            last_hash_ps: Mutex::new(None),
+            last_generate: Mutex::new(None),
+            template_calls: AtomicUsize::new(0),
+            submit_calls: AtomicUsize::new(0),
+            info_calls: AtomicUsize::new(0),
+            fail: Mutex::new(Some(MiningControlError::Unavailable(CompactString::from(
+                reason,
+            )))),
+            publishes: AtomicU64::new(0),
+            published_from: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Builds a control that answers template requests with `template` and
+    /// mining-info reads with `info`. Submissions and proposals are accepted
+    /// by default; no failure is armed and every counter starts at zero.
+    pub fn with_template(template: BlockTemplate, info: MiningInfo) -> Arc<Self> {
+        Arc::new(Self {
+            template: Mutex::new(Some(template)),
+            proposal: Mutex::new(BlockValidationResult::Accepted),
+            submit: Mutex::new(BlockValidationResult::Accepted),
+            info: Mutex::new(info),
+            last_request: Mutex::new(None),
+            last_hash_ps: Mutex::new(None),
+            last_generate: Mutex::new(None),
+            template_calls: AtomicUsize::new(0),
+            submit_calls: AtomicUsize::new(0),
+            info_calls: AtomicUsize::new(0),
+            fail: Mutex::new(None),
+            publishes: AtomicU64::new(0),
+            published_from: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Loads the publication wake count.
+    pub fn publish_count(&self) -> u64 {
+        self.publishes.load(Ordering::Relaxed)
+    }
+
+    /// Clones the armed failure, if any, for the caller's short-circuit check.
+    fn armed_failure(&self) -> Option<MiningControlError> {
+        self.fail.lock().clone()
+    }
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+impl MiningControl for FakeMiningControl {
+    fn get_block_template(
+        &self,
+        request: BlockTemplateRequest,
+    ) -> Result<BlockTemplateResult, MiningControlError> {
+        self.template_calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(error) = self.armed_failure() {
+            return Err(error);
+        }
+        *self.last_request.lock() = Some(request.clone());
+        match request.mode {
+            BlockTemplateMode::Proposal(_) => {
+                Ok(BlockTemplateResult::Proposal(self.proposal.lock().clone()))
+            }
+            BlockTemplateMode::Template => {
+                let mut template = self
+                    .template
+                    .lock()
+                    .clone()
+                    .unwrap_or_else(|| panic!("template configured for fake control"));
+                if request.long_poll_id.is_some() {
+                    template.submit_old = Some(true);
+                }
+                Ok(BlockTemplateResult::Template(template))
+            }
+        }
+    }
+
+    fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
+        self.info_calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(error) = self.armed_failure() {
+            return Err(error);
+        }
+        Ok(self.info.lock().clone())
+    }
+
+    fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
+        if let Some(error) = self.armed_failure() {
+            return Err(error);
+        }
+        *self.last_hash_ps.lock() = Some((lookup, height));
+        Ok(self.info.lock().network_hashes_per_second)
+    }
+
+    fn submit_block(&self, _block: Block) -> Result<BlockValidationResult, MiningControlError> {
+        self.submit_calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(error) = self.armed_failure() {
+            return Err(error);
+        }
+        Ok(self.submit.lock().clone())
+    }
+
+    fn submit_block_with_bytes(
+        &self,
+        block: Block,
+        raw: Vec<u8>,
+    ) -> Result<BlockValidationResult, MiningControlError> {
+        assert_eq!(raw, consensus_bytes(&block));
+        self.submit_block(block)
+    }
+
+    fn submit_header(&self, _header: Header) -> Result<(), MiningControlError> {
+        if let Some(error) = self.armed_failure() {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn publish_generation(&self) {
+        self.publishes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn generate(
+        &self,
+        request: GenerateRequest,
+    ) -> Result<Vec<GeneratedBlock>, MiningControlError> {
+        if let Some(error) = self.armed_failure() {
+            return Err(error);
+        }
+        *self.last_generate.lock() = Some(request.clone());
+        let hash = BlockHash::from(Hash256::from_le_bytes(&[0xab; 32]));
+        Ok(vec![
+            GeneratedBlock {
+                hash,
+                hex: String::from("00"),
+            };
+            usize::try_from(request.count).unwrap_or(0)
+        ])
+    }
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+impl crate::coordinator::MempoolSequenceWake for FakeMiningControl {
+    fn publish_generation_from(&self, sequence: u64) {
+        self.published_from.lock().push(sequence);
+    }
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+fn placeholder_mining_info() -> MiningInfo {
+    MiningInfo {
+        blocks: 0,
+        last_candidate: None,
+        bits: CompactTarget::from_consensus(0x207f_ffff),
+        difficulty: 1.0,
+        network_hashes_per_second: 0.0,
+        pooled_transactions: 0,
+        network: Network::Regtest,
+        next_bits: CompactTarget::from_consensus(0x207f_ffff),
+        next_difficulty: 1.0,
+        minimum_fee_rate: 0,
+        signet: None,
+        warnings: Vec::new(),
+    }
 }
 
 /// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.
