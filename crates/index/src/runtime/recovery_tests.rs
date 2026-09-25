@@ -20,6 +20,7 @@ use bitcoin::{
 use bitcoin_rs_chain::{BlockTree, NodeId, NodeStatus, TipSnapshot};
 
 use crate::IndexCapabilities;
+use crate::IndexCapability;
 
 use bitcoin_rs_primitives::Hash256;
 
@@ -201,9 +202,11 @@ impl Harness {
         let reporter: Arc<dyn IndexAheadSink> = evidence.clone();
         let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
         let utxo = enabled
-            .script_live
+            .contains(IndexCapability::ScriptLive)
             .then(|| Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
-        let chain_transition = enabled.script_live.then(|| Arc::new(Mutex::new(())));
+        let chain_transition = enabled
+            .contains(IndexCapability::ScriptLive)
+            .then(|| Arc::new(Mutex::new(())));
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),

@@ -29,11 +29,7 @@ fn script_index_capabilities_match_the_storage_contract() {
     config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     assert_eq!(
         derived_index_capabilities(&config),
-        IndexCapabilities {
-            tx_lookup: true,
-            script_history: false,
-            script_live: true,
-        }
+        IndexCapabilities::TX_LOOKUP_SCRIPT_LIVE
     );
 }
 

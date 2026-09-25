@@ -6,6 +6,7 @@ use super::PendingForward;
 use super::Worker;
 use crate::ConsumerCursorUpdate;
 use crate::IndexCapabilities;
+use crate::IndexCapability;
 use crate::IndexError;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
@@ -38,9 +39,12 @@ impl Worker {
             height: snapshot.height,
             hash: snapshot.hash.to_le_bytes(),
         };
-        if (self.enabled.tx_lookup && watermarks.tx_lookup != Some(expected))
-            || (self.enabled.script_history && watermarks.script_history != Some(expected))
-            || (self.enabled.script_live && watermarks.script_live != Some(expected))
+        if (self.enabled.contains(IndexCapability::TxLookup)
+            && watermarks.tx_lookup != Some(expected))
+            || (self.enabled.contains(IndexCapability::ScriptHistory)
+                && watermarks.script_history != Some(expected))
+            || (self.enabled.contains(IndexCapability::ScriptLive)
+                && watermarks.script_live != Some(expected))
         {
             return Ok(CursorCommit::NotAligned);
         }
@@ -120,18 +124,21 @@ impl Worker {
         if result.height != snapshot.height || result.hash != snapshot.hash.to_le_bytes() {
             return None;
         }
-        if capabilities.tx_lookup {
+        if capabilities.contains(IndexCapability::TxLookup) {
             watermarks.tx_lookup = Some(result);
         }
-        if capabilities.script_history {
+        if capabilities.contains(IndexCapability::ScriptHistory) {
             watermarks.script_history = Some(result);
         }
-        if capabilities.script_live {
+        if capabilities.contains(IndexCapability::ScriptLive) {
             watermarks.script_live = Some(result);
         }
-        let aligned = (!self.enabled.tx_lookup || watermarks.tx_lookup == Some(result))
-            && (!self.enabled.script_history || watermarks.script_history == Some(result))
-            && (!self.enabled.script_live || watermarks.script_live == Some(result));
+        let aligned = (!self.enabled.contains(IndexCapability::TxLookup)
+            || watermarks.tx_lookup == Some(result))
+            && (!self.enabled.contains(IndexCapability::ScriptHistory)
+                || watermarks.script_history == Some(result))
+            && (!self.enabled.contains(IndexCapability::ScriptLive)
+                || watermarks.script_live == Some(result));
         aligned.then(|| snapshot.to_bytes())
     }
 

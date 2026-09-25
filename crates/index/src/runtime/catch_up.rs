@@ -12,6 +12,7 @@ use super::PendingForward;
 use super::ReconcileAction;
 use super::Worker;
 use crate::IndexCapabilities;
+use crate::IndexCapability;
 use crate::IndexError;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
@@ -192,7 +193,7 @@ impl Worker {
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
 
-        let anchors = if capabilities.script_live {
+        let anchors = if capabilities.contains(IndexCapability::ScriptLive) {
             let mut anchors = Vec::with_capacity(sub_chunk.len());
             for identity in sub_chunk {
                 match self.live_anchor(identity.height, identity.hash) {
