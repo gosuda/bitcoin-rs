@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut};
 
 use crate::block_view::BlockView;
 use crate::sigops::transaction_sigop_cost;
@@ -119,14 +119,13 @@ pub fn verify_coinbase_script_sig_size(tx: &Tx) -> Result<(), ConsensusError> {
     Ok(())
 }
 
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && is_null_outpoint(&tx.inputs[0].previous_output)
-}
-
-/// Core's `OutPoint::IsNull`: null hash plus `NULL_INDEX` (`u32::MAX`), the
-/// coinbase marker. The derived all-zero outpoint (`vout` 0) is not null.
-fn is_null_outpoint(outpoint: &OutPoint) -> bool {
-    outpoint.txid == Txid::default() && outpoint.vout == u32::MAX
+/// Returns `true` for the one-input, null-prevout coinbase shape.
+///
+/// PRE: `tx` is a decoded transaction.
+/// POST: Return true only for one input with a null previous outpoint.
+/// INVARIANT: An all-zero txid with output index zero is not coinbase.
+pub(crate) fn is_coinbase(tx: &Tx) -> bool {
+    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Checks whether a transaction may spend a coinbase output at `spend_height`.
@@ -253,7 +252,7 @@ pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError>
     }
     let mut seen = HashSet::new();
     for (input_index, input) in tx.inputs.iter().enumerate() {
-        if is_null_outpoint(&input.previous_output) {
+        if input.previous_output.is_null() {
             return Err(ConsensusError::NullPrevout { input_index });
         }
         if !seen.insert(input.previous_output) {
