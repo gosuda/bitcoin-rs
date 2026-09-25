@@ -1509,12 +1509,61 @@ fn hex_of(bytes: &[u8]) -> String {
     out
 }
 
+/// The full flag mask this crate defines: `STANDARD` plus the three bits
+/// Core vectors name that `STANDARD` omits. Bit-equal to Core's
+/// `MAX_SCRIPT_VERIFY_FLAGS` minus the bits it has not assigned.
+const FULL_FLAGS: VerifyFlags = VerifyFlags::STANDARD
+    .union(VerifyFlags::SIGPUSHONLY)
+    .union(VerifyFlags::CONST_SCRIPTCODE)
+    .union(VerifyFlags::MINIMALIF);
+
+/// Every single-bit flag const, used to rebuild a `VerifyFlags` from raw
+/// bits by union: the crate has no public bit-level constructor, and the
+/// complement below is computed over `.bits()`.
+const SINGLE_BIT_FLAGS: [VerifyFlags; 21] = [
+    VerifyFlags::P2SH,
+    VerifyFlags::STRICTENC,
+    VerifyFlags::DERSIG,
+    VerifyFlags::LOW_S,
+    VerifyFlags::NULLDUMMY,
+    VerifyFlags::SIGPUSHONLY,
+    VerifyFlags::MINIMALDATA,
+    VerifyFlags::DISCOURAGE_UPGRADABLE_NOPS,
+    VerifyFlags::CLEANSTACK,
+    VerifyFlags::CHECKLOCKTIMEVERIFY,
+    VerifyFlags::CHECKSEQUENCEVERIFY,
+    VerifyFlags::WITNESS,
+    VerifyFlags::DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM,
+    VerifyFlags::MINIMALIF,
+    VerifyFlags::NULLFAIL,
+    VerifyFlags::WITNESS_PUBKEYTYPE,
+    VerifyFlags::CONST_SCRIPTCODE,
+    VerifyFlags::TAPROOT,
+    VerifyFlags::DISCOURAGE_UPGRADABLE_TAPROOT_VERSION,
+    VerifyFlags::DISCOURAGE_OP_SUCCESS,
+    VerifyFlags::DISCOURAGE_UPGRADABLE_PUBKEYTYPE,
+];
+
+/// Unions every named flag bit contained in `bits`. The assertion is a
+/// maintenance tripwire: it fires only if a flag const is added to the
+/// crate without extending `SINGLE_BIT_FLAGS`.
+fn flags_from_bits(bits: u32) -> VerifyFlags {
+    let mut flags = VerifyFlags::NONE;
+    for flag in SINGLE_BIT_FLAGS {
+        if bits & flag.bits() != 0 {
+            flags = flags.union(flag);
+        }
+    }
+    assert_eq!(flags.bits(), bits, "flag bits outside SINGLE_BIT_FLAGS");
+    flags
+}
+
 /// `tx_valid.json` names the flags Core turns OFF: it verifies with the
 /// complement (`transaction_tests.cpp:224`). A row whose complement is not a
 /// filled combination is bad test data, which Core reports rather than runs.
 fn tx_valid_flags(names: &str) -> Result<VerifyFlags, String> {
     let parsed = VerifyFlags::from_core_names(names).map_err(|e| e.to_string())?;
-    let effective = VerifyFlags::ALL.excluding(parsed);
+    let effective = flags_from_bits(FULL_FLAGS.bits() & !parsed.bits());
     if effective != effective.filled() {
         return Err(format!(
             "bad test flags (not a filled combination): {names}"

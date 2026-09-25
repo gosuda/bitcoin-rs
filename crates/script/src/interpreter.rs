@@ -96,12 +96,6 @@ impl VerifyFlags {
             | Self::DISCOURAGE_UPGRADABLE_PUBKEYTYPE.0,
     );
 
-    /// Builds flags from raw Core-compatible bits.
-    #[must_use]
-    pub const fn from_bits(bits: u32) -> Self {
-        Self(bits)
-    }
-
     /// Returns raw Core-compatible flag bits.
     #[must_use]
     pub const fn bits(self) -> u32 {
@@ -112,17 +106,6 @@ impl VerifyFlags {
     #[must_use]
     pub const fn kernel_bits(self) -> u32 {
         self.0 & Self::MANDATORY.0
-    }
-
-    /// Every flag bit this crate defines, the mask Core calls
-    /// `MAX_SCRIPT_VERIFY_FLAGS` minus the bits it has not assigned.
-    pub const ALL: Self =
-        Self(Self::STANDARD.0 | Self::SIGPUSHONLY.0 | Self::CONST_SCRIPTCODE.0 | Self::MINIMALIF.0);
-
-    /// Returns the bits of `self` that `other` does not set.
-    #[must_use]
-    pub const fn excluding(self, other: Self) -> Self {
-        Self(self.0 & !other.0)
     }
 
     /// Applies Core's flag implications: `CLEANSTACK` implies `WITNESS`, and
@@ -402,9 +385,6 @@ pub enum ScriptError {
         /// Unknown flag name.
         name: String,
     },
-    /// The transaction could not be serialized for the delegated verifier.
-    #[error("transaction serialization failed: {0}")]
-    Serialization(String),
     /// The delegated consensus verifier rejected the script.
     #[error("script verification failed: {0}")]
     Verification(String),
