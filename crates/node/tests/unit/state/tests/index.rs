@@ -67,32 +67,16 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     let mut state = NodeState::open(config, None)?;
 
     assert!(state.chain_followers().effects().derived_index().is_some());
+    assert!(state.derived_index.lifecycle_is_opening());
     assert!(
-        state
-            .derived_index_lifecycle
-            .as_ref()
-            .is_some_and(|lifecycle| {
-                matches!(
-                    lifecycle.load().as_ref(),
-                    bitcoin_rs_index::runtime::DerivedIndexLifecycle::Opening
-                )
-            })
+        !state.derived_index.is_running(),
+        "no worker may exist before start_index_workers"
     );
-    assert!(state.derived_index_worker.is_none());
 
     state.start_index_workers()?;
-    assert!(state.derived_index_worker.is_some());
+    assert!(state.derived_index.is_running());
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while state
-        .derived_index_lifecycle
-        .as_ref()
-        .is_some_and(|lifecycle| {
-            matches!(
-                lifecycle.load().as_ref(),
-                bitcoin_rs_index::runtime::DerivedIndexLifecycle::Opening
-            )
-        })
-    {
+    while state.derived_index.lifecycle_is_opening() {
         assert!(
             std::time::Instant::now() < deadline,
             "txindex lifecycle remained Opening"
