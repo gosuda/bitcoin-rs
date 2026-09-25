@@ -67,17 +67,6 @@ impl RpcServer {
         self.listener.local_addr()
     }
 
-    /// Runs the accept loop. Each accepted connection is handled by one bounded worker thread.
-    pub fn serve(self) -> io::Result<()> {
-        let active = Arc::new(Mutex::new(0_usize));
-        for stream in self.listener.incoming() {
-            if let Err(error) = self.handle_accept(&active, stream?) {
-                debug!(%error, "rpc connection setup failed");
-            }
-        }
-        Ok(())
-    }
-
     /// Runs the accept loop until `shutdown` is set to `true`.
     ///
     /// Polls non-blocking accept on a fixed cadence so the loop can observe

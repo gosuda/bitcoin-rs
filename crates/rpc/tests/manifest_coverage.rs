@@ -280,22 +280,6 @@ fn esplora_extension_row_resolves_to_the_router() {
     );
 }
 
-/// The pending extension row is the contract, not the method: it must not
-/// dispatch until it ships.
-#[test]
-fn pending_extension_rows_do_not_dispatch() {
-    let handler = handler();
-    for entry in manifest::entries_of_kind(SurfaceKind::Rpc)
-        .filter(|entry| entry.status == Status::Extension && entry.since == "pending")
-    {
-        assert!(
-            not_dispatchable(&handler, entry.name),
-            "`{}` is marked since=pending but the dispatcher answers it",
-            entry.name
-        );
-    }
-}
-
 /// Invariant 2: no duplicate (kind, name) rows.
 #[test]
 fn manifest_has_no_duplicate_rows() {

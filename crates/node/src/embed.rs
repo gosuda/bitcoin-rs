@@ -9,7 +9,7 @@
 
 use bitcoin_rs_mempool::{FeeRate, MempoolStats, MutationResult};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Tx, Txid, deserialize};
-use bitcoin_rs_rpc::capabilities::CapabilitySnapshot;
+use bitcoin_rs_index::CapabilitySnapshot;
 pub use bitcoin_rs_rpc::context::SyncProgress;
 use std::sync::Arc;
 use thiserror::Error;
@@ -81,7 +81,7 @@ impl Node {
     /// Returns the live txindex capability report.
     #[must_use]
     pub fn capabilities(&self) -> CapabilitySnapshot {
-        bitcoin_rs_rpc::capabilities::txindex_snapshot(Some(
+        bitcoin_rs_index::txindex_snapshot(Some(
             self.state.derived_index_status().as_ref(),
         ))
     }

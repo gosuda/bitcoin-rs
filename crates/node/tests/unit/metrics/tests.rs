@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use bitcoin_rs_rpc::capabilities::{
+use bitcoin_rs_index::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
 use parking_lot::{Mutex, const_mutex};

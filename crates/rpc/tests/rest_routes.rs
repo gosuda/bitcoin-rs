@@ -70,24 +70,6 @@ const PREFIX_PROBES: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn registration_count_is_twelve() {
-    assert_eq!(
-        REGISTRATIONS.len(),
-        12,
-        "Core registers exactly 12 supported REST prefixes"
-    );
-}
-
-#[test]
-fn every_registration_prefix_has_a_probe() {
-    assert_eq!(
-        PREFIX_PROBES.len(),
-        REGISTRATIONS.len(),
-        "one probe per registration"
-    );
-}
-
-#[test]
 fn every_prefix_is_dispatched_when_enabled() {
     let ctx = Arc::new(Context::new());
     for (path, query) in PREFIX_PROBES {

@@ -52,7 +52,7 @@ pub mod tx_ingress;
 pub use bitcoin_rs_primitives::Network;
 
 pub use bitcoin_rs_rpc::zmq::{
-    NoOpZmqPublisher, SequenceEvent, TracingZmqPublisher, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
+    NoOpZmqPublisher, SequenceEvent, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
 };
 
 pub use chain_effects::ChainFollowers;
