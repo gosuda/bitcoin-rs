@@ -2755,3 +2755,36 @@ fn binding_and_operational_failures_do_not_disconnect() -> Result<(), Box<dyn st
     }
     Ok(())
 }
+
+/// Sync progress must publish the shared latch's initial-block-download
+/// answer, not a height heuristic (#1149 acceptance 1/12). The two fixtures
+/// below are the snapshots where the old `applied < header` rule disagreed
+/// with the latch: an active latch over an empty frontier, and a latched-off
+/// latch over headers ahead of an absent applied tip.
+#[test]
+fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> Result<(), Box<dyn std::error::Error>> {
+    let now = crate::counters::now_seconds();
+
+    let syncing = SyncHarness::new(BlockTree::new());
+    assert!(
+        syncing.sync.ibd.is_active(now),
+        "the fixture latch must be active for this snapshot"
+    );
+    assert!(
+        syncing.sync.in_initial_block_download(),
+        "telemetry must report initial block download while the latch is active"
+    );
+
+    let (tree, _blocks) = mined_chain(0, 3)?;
+    let synced = SyncHarness::with_ibd(tree, synced_ibd_latch());
+    assert!(
+        !synced.sync.ibd.is_active(now),
+        "the fixture latch must have left initial block download"
+    );
+    assert!(
+        !synced.sync.in_initial_block_download(),
+        "telemetry must stay out of initial block download once the latch \
+         has left it, even with headers ahead of the applied tip"
+    );
+    Ok(())
+}
