@@ -394,6 +394,41 @@ class DirectMappingTests(unittest.TestCase):
         self.assertEqual((self.output / "seed").read_bytes(), b"new")
 
 
+class FlagCommentTests(unittest.TestCase):
+    """QAC-01: imported seeds feed fuzz/fuzz_targets/script_eval.rs, whose
+    selector-indexed input framing and FLAGS order survive Rust comment
+    syntax, including comments with commas and nested block comments."""
+
+    def test_comments_with_commas_do_not_change_owned_selectors(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            output = root / "output"
+            source.mkdir()
+            script = b"Q" * 64
+            (source / "script").write_bytes(script)
+            harness = root / "script_eval.rs"
+            flag_names = ("TAPROOT", "MANDATORY", "NONE", "STANDARD")
+            harness.write_text(
+                "const FLAGS: [VerifyFlags; 4] = [\n"
+                f"    VerifyFlags::{flag_names[0]}, // taproot, selector owner\n"
+                "    /* mandatory, nested /* comment, comma */ still comment */\n"
+                f"    VerifyFlags::{flag_names[1]},\n"
+                f"    VerifyFlags::{flag_names[2]}, // none, selector owner\n"
+                f"    VerifyFlags::{flag_names[3]},\n"
+                "];\n"
+                "const ELEMENT_LEN_MAX: usize = 1_024;\n"
+            )
+            none_selector = flag_names.index("NONE")
+            taproot_selector = flag_names.index("TAPROOT")
+            mapper.map_script([source], harness, output, 65_536)
+            seeds = {path.read_bytes() for path in output.iterdir()}
+            raw = bytes([none_selector]) + b"\0\0\x40\0" + script + b"\0"
+            taproot = (bytes([taproot_selector]) + b"\0\0\x22\0\x51\x20" + script[:32]
+                       + b"\x01\x20\0" + script[32:])
+            self.assertEqual(seeds, {raw, taproot})
+
+
 class PublicationTests(unittest.TestCase):
     """Failed publication preserves old bytes and cleans temporary files."""
 
