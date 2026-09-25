@@ -152,6 +152,13 @@ pub const CORE_VERSION: &str = "31.x";
 pub(crate) const NO_WALLET: &str =
     "No wallet: this process holds no private-key material (crates/rpc/src/lib.rs).";
 
+/// The reference custody record, embedded so it cannot drift from the binary.
+///
+/// PRE: The embedded TOML contains reference custody and admission evidence.
+/// POST: The constant is the exact bytes used by the reference custody tests.
+/// INVARIANT: It contains no external-surface row arrays.
+pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
+
 /// Every external surface, declared against Core 31.x.
 ///
 /// Projection of the single [`crate::registry::REGISTRY`] table: each row's

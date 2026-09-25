@@ -29,15 +29,20 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 ### `API-01`: Single manifest owner
 
 
-- `MANIFEST` in `crates/rpc/src/manifest.rs` is the single source of truth
-  for RPC, REST, and ZMQ external interfaces. A JSON-RPC method answers
-  only when a non-`Unimplemented` row carries its name. No second route
-  inventory exists.
+- `REGISTRY` in `crates/rpc/src/registry.rs` is the single source of truth
+  for RPC, REST, and ZMQ external interfaces: each row binds one dispatch
+  arm to one compatibility claim. `MANIFEST` in
+  `crates/rpc/src/manifest.rs` projects those rows. A JSON-RPC method
+  answers only when a non-`Unimplemented` row carries its name. No second
+  route inventory exists.
 - Each `Entry` row carries `name`, `kind` (`Rpc`, `Rest`, `Zmq`),
   `status`, `feature`, `core_version`, `notes`, and `since`, extended
   with required capabilities, error behavior, consistency class, resource
-  budget, and evidence scenario. The `Status` vocabulary is unchanged:
-  `Implemented`, `Deviation`, `Extension`, `Unimplemented`.
+  budget, and evidence scenario. The `Status` vocabulary is `Supported`,
+  `Deviation`, `Implemented (unverified)`, `Extension`, `Disabled`,
+  `Unimplemented`. `[reference].differential_harness` in
+  [core-compat.toml](../api/core-compat.toml) gates `Supported`: no row
+  may claim it while that flag is false.
 - Compatibility class, runtime readiness, and observed proof stay
   separate row facts. An unverified implementation never reads as
   verified parity.
@@ -45,10 +50,10 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
   `RpcError::MethodNotFound` (code `-32601`). No wallet-only RPC is a
   disguised successful no-op.
 - [docs/rpc-reference.md](../rpc-reference.md) is generated from the
-  manifest and is never edited by hand.
+  registry and is never edited by hand.
   `crates/rpc/tests/manifest_coverage.rs` enforces set equality between
-  the manifest and the live registry in both directions and regenerates
-  the reference. Regenerate with:
+  the registry and the live dispatch table in both directions and
+  regenerates the reference. Regenerate with:
   `REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test manifest_coverage -- --ignored regenerate_reference`
 
 ### `API-02`: JSON-RPC mechanics and the wallet-free surface
