@@ -216,11 +216,12 @@ impl ReplacementInputs {
     /// The potentially expensive graph solver runs over owned facts, with
     /// no pool guard held. The returned plan can only commit at its stamp.
     ///
-    /// INVARIANT: under [`LimitEnforcement::Deferred`] the projected cluster
-    /// limits are not re-checked. Core's `bypassLimits` re-acceptance runs the
-    /// same skip: a disconnected transaction's cluster membership is the one
-    /// it already held, so re-measuring it against a pool the reorg just
-    /// changed would reject relay for a reason the transaction did not cause.
+    /// INVARIANT: under [`LimitEnforcement::Deferred`] neither the projected
+    /// cluster limits nor the per-acceptance size trim is applied. Core's
+    /// `bypassLimits` re-acceptance runs the same skip: a disconnected
+    /// transaction's cluster is the one the pool already held, and trimming
+    /// per admission would shed the very family the walk is rebuilding. The
+    /// trim runs once over the settled pool instead.
     pub(crate) fn verify(self) -> Result<PreparedPoolChange, RbfError> {
         let Some((before_graph, after_graph)) = self.graphs else {
             return Ok(PreparedPoolChange {
@@ -234,7 +235,9 @@ impl ReplacementInputs {
         if self.enforcement == LimitEnforcement::Full {
             after_graph.check_limits(self.limits)?;
         }
-        let needs_trim = self.max_vsize > 0 && self.projected_vsize > self.max_vsize;
+        let needs_trim = self.enforcement == LimitEnforcement::Full
+            && self.max_vsize > 0
+            && self.projected_vsize > self.max_vsize;
         let after_chunks = if self.direct.is_empty() && !needs_trim {
             Vec::new()
         } else {
