@@ -11,9 +11,12 @@ use bitcoin_rs_primitives::{
 
 use sha2::{Digest, Sha256};
 
+use parking_lot::Mutex;
+
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -34,7 +37,7 @@ fn sigkill_restarts_at_valid_journal_frontier() -> Result<()> {
 /// retires the marker only after that publication.
 #[test]
 fn torn_disconnect_replays_parent_tip() -> Result<()> {
-    let (_temp, state) = run_marker_scenario("disconnect-rolledback")?;
+    let (_temp, _config, state) = run_marker_scenario("disconnect-rolledback")?;
     let genesis = Network::Regtest.genesis_block();
     assert_eq!(
         state
@@ -57,7 +60,7 @@ fn torn_disconnect_replays_parent_tip() -> Result<()> {
 /// (possibly stale) state up to it and retires the marker.
 #[test]
 fn torn_disconnect_cold_replays_head() -> Result<()> {
-    let (_temp, state) = run_marker_scenario("inflight-cold")?;
+    let (_temp, _config, state) = run_marker_scenario("inflight-cold")?;
     let genesis = Network::Regtest.genesis_block();
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
     assert_eq!(
@@ -72,6 +75,80 @@ fn torn_disconnect_cold_replays_head() -> Result<()> {
     assert!(
         state.undo_store().load_disconnect_marker()?.is_none(),
         "the marker retires once the repaired state is durable"
+    );
+    Ok(())
+}
+
+/// A checkpoint published above the block the disconnect rewinds past
+/// restores at or above the rewound durable head. That is a stale
+/// checkpoint, not divergence: recovery rolls the restored coins back to
+/// the head the batch certified — the Core `ReplayBlocks`
+/// roll-back-to-fork-point shape — then warns with the recovery mode,
+/// publishes a clean checkpoint, and retires the marker.
+#[test]
+fn torn_disconnect_checkpoint_above_head_rewinds_to_head() -> Result<()> {
+    let log = SharedLog::default();
+    install_log_capture(log.clone());
+    let (_temp, config, state) = run_marker_scenario("disconnect-above-head")?;
+    let genesis = Network::Regtest.genesis_block();
+    let landed = Some((Hash256::from(genesis.block_hash()), 0));
+    assert_eq!(
+        state
+            .chainstate()
+            .applied_tip_handle()
+            .load_full()
+            .map(|tip| (tip.hash, tip.height)),
+        landed,
+        "the rewind must land on the durable head the disconnect certified"
+    );
+    assert!(
+        state.undo_store().load_disconnect_marker()?.is_none(),
+        "the marker retires once the repaired state is durable"
+    );
+    assert_eq!(
+        state.chainstate().coin_stats_handle().snapshot().height,
+        0,
+        "the coin statistics must rewind to the durable head with the applied tip"
+    );
+    let log = log.contents();
+    assert!(
+        log.contains("automatic disconnect recovery replayed the certified head chain"),
+        "the mandatory recovery warning must be observed: {log}"
+    );
+    assert!(
+        log.contains(r#"mode="checkpoint-rewind""#),
+        "the recovery warning must name the mode that ran: {log}"
+    );
+    let recovered = state
+        .durable_head()
+        .load()?
+        .context("the durable head must survive recovery")?;
+    drop(state);
+    // The refusal this defect produced repeated on every restart. A second
+    // restart must come up on the repaired checkpoint, with no marker and no
+    // new recovery work.
+    let reopened =
+        NodeState::open(config, None).context("reopening after completed recovery must succeed")?;
+    assert_eq!(
+        reopened
+            .chainstate()
+            .applied_tip_handle()
+            .load_full()
+            .map(|tip| (tip.hash, tip.height)),
+        landed,
+        "the repaired state must be what the next restart restores"
+    );
+    assert!(
+        reopened.undo_store().load_disconnect_marker()?.is_none(),
+        "the retired marker must stay retired across restarts"
+    );
+    let after = reopened
+        .durable_head()
+        .load()?
+        .context("the durable head must survive the second restart")?;
+    assert_eq!(
+        after.commit_id, recovered.commit_id,
+        "recovery rewinds the applied state; it must not re-commit the durable head"
     );
     Ok(())
 }
@@ -296,6 +373,16 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
                 .undo_store()
                 .arm_disconnect(1, Hash256::from(block1.block_hash()))?;
         }
+        "disconnect-above-head" => {
+            state.apply_block(&block1)?;
+            // The checkpoint lands above the block the disconnect then
+            // rewinds past: the restored tip sits at or above the durable
+            // head.
+            state.publish_checkpoint()?;
+            // The rollback completes; the journal is disabled, so nothing
+            // clears the marker on the way down.
+            state.chainstate().disconnect_block(&block1)?;
+        }
         other => bail!("unknown crash scenario {other}"),
     }
 
@@ -386,7 +473,10 @@ fn crash_child(scenario: &str, data_dir: &Path, budget: Duration) -> Result<()> 
 /// without the journal.
 fn crash_config(scenario: &str, data_dir: PathBuf) -> NodeConfig {
     let mut config = test_config(data_dir);
-    if matches!(scenario, "disconnect-rolledback" | "inflight-cold") {
+    if matches!(
+        scenario,
+        "disconnect-rolledback" | "inflight-cold" | "disconnect-above-head"
+    ) {
         config.chainstate_journal.enabled = false;
     }
     config
@@ -394,7 +484,7 @@ fn crash_config(scenario: &str, data_dir: PathBuf) -> NodeConfig {
 
 /// Build the checkpointed base, let a parked child drive the node to the
 /// marker state and die to `SIGKILL`, then reopen in this process.
-fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeState)> {
+fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig, NodeState)> {
     let temp = tempfile::tempdir()?;
     let data_dir = temp.path().join(format!("{scenario}-node"));
     let config = crash_config(scenario, data_dir.clone());
@@ -444,9 +534,42 @@ fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeState)>
         bail!("crash worker for {scenario} exited successfully instead of being killed");
     }
 
-    let resumed = NodeState::open(config, None)
+    let resumed = NodeState::open(config.clone(), None)
         .with_context(|| format!("reopening {scenario} after SIGKILL must complete recovery"))?;
-    Ok((temp, resumed))
+    Ok((temp, config, resumed))
+}
+
+#[derive(Clone, Default)]
+struct SharedLog(Arc<Mutex<Vec<u8>>>);
+
+impl SharedLog {
+    fn contents(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock()).into_owned()
+    }
+}
+
+impl std::io::Write for SharedLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Captures `tracing` events for one assertion. Each nextest test runs in
+/// its own process, so the global subscriber set here sees only this
+/// test's events; under plain `cargo test` an already-set subscriber wins
+/// and is ignored.
+fn install_log_capture(log: SharedLog) {
+    let _already_set = tracing::subscriber::set_global_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || log.clone())
+            .finish(),
+    );
 }
 
 fn test_config(data_dir: PathBuf) -> NodeConfig {
