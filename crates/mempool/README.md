@@ -5,7 +5,7 @@ package preview, TRUC and ephemeral dust, orphan parking, relay standardness,
 and the history-based fee-rate estimator.
 
 `Mempool` owns the entry arena plus the txid, funding (keyed by `ScriptHash`, the
-double-SHA256 of a script), spending, and fee-priority indexes; every accepted
+single-SHA256 of a script), spending, and fee-priority indexes; every accepted
 transaction becomes a `MempoolEntry` addressed by its slab-index `EntryId`.
 `insert_entry` enforces the `MempoolLimits` (including min-relay fee) and reports
 violations as `PolicyError` or `MempoolError`; `enforce_size_limit` delegates to
