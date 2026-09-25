@@ -171,7 +171,7 @@ mod memory_usage_tests {
                 script_pubkey: Script::new(),
             }],
         };
-        MempoolEntry::new(Arc::new(tx), 100, 10_000, u64::from(tag), 7)
+        MempoolEntry::new(Arc::new(tx), 100, 10_000, u64::from(tag), 7, 0)
     }
 
     /// Every entry is stored twice, and the estimate says so.

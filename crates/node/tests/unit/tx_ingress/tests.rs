@@ -252,7 +252,7 @@ fn duplicate_tx_does_not_relay_or_wake_mining() {
 
     let tx = coinbase_tx(50_000);
     let txid = tx.txid();
-    let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 0, 1, 0);
+    let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 0, 1, 0, 0);
     gateway.insert_entry(AdmissionOrigin::Rpc, entry).unwrap();
 
     let source = test_source();

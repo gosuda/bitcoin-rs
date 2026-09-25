@@ -216,9 +216,9 @@ fn replacements_accept_mixed_signaling_conflicts() -> Result<(), Box<dyn Error>>
         let second_input = outpoint(2, 0);
 
         let opt_in = tx_from_inputs(20, &[(first_input, RBF_SEQUENCE)], 1);
-        pool.insert_entry(MempoolEntry::new(Arc::new(opt_in), 100, 1_000, 1, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(opt_in), 100, 1_000, 1, 1, 0))?;
         let other = tx_from_inputs(21, &[(second_input, second_sequence)], 1);
-        pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 2, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 2, 1, 0))?;
 
         // One replacement, conflicting with both of them.
         let replacement = tx_from_inputs(
@@ -265,7 +265,7 @@ fn pool_with_conflict(
     if has_parent {
         let parent = tx_from_inputs(10, &[(outpoint(9, 0), 0xFFFF_FFFF)], 1);
         original_input = OutPoint::new(parent.txid(), 0);
-        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 500, 1, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 500, 1, 1, 0))?;
     }
 
     let original_tx = tx_from_inputs(20, &[(original_input, original.sequence)], 1);
@@ -275,7 +275,7 @@ fn pool_with_conflict(
         original.vsize,
         original.fee,
         2,
-        1,
+        1, 0
     ))?;
 
     let mut last_parent = OutPoint::new(original_txid, 0);
@@ -288,7 +288,7 @@ fn pool_with_conflict(
             50,
             100,
             u64::from(i) + 3,
-            1,
+            1, 0
         ))?;
     }
 
@@ -388,7 +388,7 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         let original = tx_from_inputs(20, &[(outpoint(1, 0), 0xFFFF_FFFD)], 1);
         // Admit under the default floor, then raise it so only the replacement
         // hits BelowMinRelayFee after BIP125 validation succeeds.
-        pool.insert_entry(MempoolEntry::new(Arc::new(original), 300, 1_000, 2, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(original), 300, 1_000, 2, 1, 0))?;
         pool.limits.min_relay_fee_sat_per_kvb = 5_000;
         let replacement = tx_from_inputs(40, &[(outpoint(1, 0), 0xFFFF_FFFD)], 1);
         let before = pool_fingerprint(&pool);
@@ -415,12 +415,12 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         let mut pool = Mempool::new(MempoolLimits::default());
         let conflict1 = tx_from_inputs(10, &[(outpoint(1, 0), 0xFFFF_FFFD)], 1);
         let conflict1_txid = conflict1.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(conflict1), 100, 500, 1, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(conflict1), 100, 500, 1, 1, 0))?;
         let parent = tx_from_inputs(11, &[(OutPoint::new(conflict1_txid, 0), 0xFFFF_FFFF)], 1);
         let parent_txid = parent.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 500, 2, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 500, 2, 1, 0))?;
         let conflict2 = tx_from_inputs(12, &[(OutPoint::new(parent_txid, 0), 0xFFFF_FFFD)], 1);
-        pool.insert_entry(MempoolEntry::new(Arc::new(conflict2), 100, 500, 3, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(conflict2), 100, 500, 3, 1, 0))?;
         // Conflicts with conflict1 on U1 and with conflict2 on P's output.
         let replacement = tx_from_inputs(
             40,
@@ -477,7 +477,7 @@ fn replace_transaction_cluster_limits_use_post_eviction_projection() -> Result<(
     });
     let parent = tx_from_inputs(10, &[(outpoint(1, 0), 0xFFFF_FFFD)], 24);
     let parent_txid = parent.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1, 0))?;
     for i in 0..23_u32 {
         let child = tx_from_inputs(
             u8::try_from(30 + i)?,
@@ -489,11 +489,11 @@ fn replace_transaction_cluster_limits_use_post_eviction_projection() -> Result<(
             50,
             100,
             u64::from(i) + 2,
-            1,
+            1, 0
         ))?;
     }
     let conflict = tx_from_inputs(60, &[(OutPoint::new(parent_txid, 23), 0xFFFF_FFFD)], 1);
-    pool.insert_entry(MempoolEntry::new(Arc::new(conflict), 50, 100, 30, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(conflict), 50, 100, 30, 1, 0))?;
     let replacement = tx_from_inputs(40, &[(OutPoint::new(parent_txid, 23), 0xFFFF_FFFD)], 1);
     let replacement_txid = replacement.txid();
     let _id = pool.replace_transaction(

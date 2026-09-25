@@ -874,7 +874,7 @@ impl Fixture {
         }));
         let block_hex = hex_encode(&consensus_bytes(&block));
         let txid = ctx.chain.add_transaction(tx.clone());
-        let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7);
+        let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7, 0);
         ctx.mempool.pool().write().insert_entry(entry)?;
         Ok(Self {
             ctx: Arc::new(ctx),

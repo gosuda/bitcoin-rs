@@ -101,7 +101,7 @@ fn txid(tx: &Tx) -> Hash256 {
 }
 
 fn entry(tx: Tx, vsize: u32, fee: u64) -> MempoolEntry {
-    MempoolEntry::new(Arc::new(tx), vsize, fee, 0, 1)
+    MempoolEntry::new(Arc::new(tx), vsize, fee, 0, 1, 0)
 }
 
 // ---------------------------------------------------------------------------

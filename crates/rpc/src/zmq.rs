@@ -1026,7 +1026,7 @@ mod manifest_tests {
     }
 
     fn sequence_entry(tx: &bitcoin_rs_primitives::Tx) -> bitcoin_rs_mempool::MempoolEntry {
-        bitcoin_rs_mempool::MempoolEntry::new(std::sync::Arc::new(tx.clone()), 100, 1_000, 1, 7)
+        bitcoin_rs_mempool::MempoolEntry::new(std::sync::Arc::new(tx.clone()), 100, 1_000, 1, 7, 0)
     }
 
     fn expected_sequence_body(txid: &Txid, label: u8, sequence: u64) -> Vec<u8> {
@@ -1134,8 +1134,8 @@ mod manifest_tests {
             }))),
             Some(observer),
         );
-        let low = MempoolEntry::new(std::sync::Arc::new(sequence_tx(5)), 100, 100, 1, 7);
-        let high = MempoolEntry::new(std::sync::Arc::new(sequence_tx(6)), 100, 900, 1, 7);
+        let low = MempoolEntry::new(std::sync::Arc::new(sequence_tx(5)), 100, 100, 1, 7, 0);
+        let high = MempoolEntry::new(std::sync::Arc::new(sequence_tx(6)), 100, 900, 1, 7, 0);
         gateway
             .insert_entry(AdmissionOrigin::Rpc, low)
             .expect("low in");

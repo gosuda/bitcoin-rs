@@ -47,7 +47,7 @@ fn pool() -> Mempool {
 
 fn entry(tx: Tx, fee: u64) -> MempoolEntry {
     let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    MempoolEntry::new(Arc::new(tx), vsize, fee, 1, 1)
+    MempoolEntry::new(Arc::new(tx), vsize, fee, 1, 1, 0)
 }
 
 fn candidate(tx: Tx, fee: u64) -> ReplacementCandidate {
@@ -61,9 +61,9 @@ fn a_higher_direct_rate_and_total_fee_can_still_worsen_the_curve()
     let mut pool = pool();
     let parent = spend(1, &[coin(100)], 1);
     let parent_id = parent.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 0, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 0, 1, 1, 0))?;
     let child = spend(2, &[OutPoint::new(parent_id, 0)], 1);
-    pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 1, 0))?;
     let replacement = spend(3, &[coin(100)], 1);
     let before = pool.mining_snapshot();
     // 1,400 pays the evicted 1,000 plus 300 relay satoshis. Its direct
@@ -88,10 +88,10 @@ fn lower_direct_rate_can_improve_the_parent_child_curve() -> Result<(), Box<dyn 
     let mut pool = pool();
     let parent = spend(1, &[coin(100)], 1);
     let parent_id = parent.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 2_250, 0, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 2_250, 0, 1, 1, 0))?;
     let child = spend(2, &[OutPoint::new(parent_id, 0)], 1);
     let child_id = child.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 4_000, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 4_000, 1, 1, 0))?;
     let replacement = spend(3, &[OutPoint::new(parent_id, 0)], 1);
     let replacement_id = replacement.txid();
     // Direct rate drops from 40 to 22.5 sat/vB, but the complete cluster

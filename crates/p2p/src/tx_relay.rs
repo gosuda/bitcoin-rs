@@ -948,7 +948,7 @@ mod tests {
             let wtxid = tx.wtxid();
             assert_ne!(txid.as_bytes(), wtxid.as_bytes());
             gateway
-                .insert_entry(origin, MempoolEntry::new(tx, 100, 10_000, 1, 0))
+                .insert_entry(origin, MempoolEntry::new(tx, 100, 10_000, 1, 0, 0))
                 .expect("insert fixture");
             if matches!(origin, AdmissionOrigin::Rpc | AdmissionOrigin::Reorg) {
                 let announced = rx.try_recv().expect("local commit announces once");
@@ -1020,7 +1020,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0),
+                MempoolEntry::new(Arc::clone(&tx), 100, 10_000, 1, 0, 0),
             )
             .expect("admit live fixture");
         tx
@@ -1082,7 +1082,7 @@ mod tests {
                 "mutate-first",
                 Arc::new(MutateBeforeLocalRelay {
                     gateway: Arc::downgrade(&gateway),
-                    next: Mutex::new(Some(MempoolEntry::new(next, 100, 10_000, 2, 0))),
+                    next: Mutex::new(Some(MempoolEntry::new(next, 100, 10_000, 2, 0, 0))),
                     clear_first,
                 }),
             )
@@ -1094,7 +1094,7 @@ mod tests {
             )
             .expect("relay observer slot");
         gateway
-            .insert_entry(origin, MempoolEntry::new(original, 100, 10_000, 1, 0))
+            .insert_entry(origin, MempoolEntry::new(original, 100, 10_000, 1, 0, 0))
             .expect("local admission");
         (gateway, rx)
     }
@@ -1171,7 +1171,7 @@ mod tests {
         gateway
             .insert_entry(
                 relay_identity_peer(),
-                MempoolEntry::new(Arc::clone(&original), 100, 10_000, 1, 0),
+                MempoolEntry::new(Arc::clone(&original), 100, 10_000, 1, 0, 0),
             )
             .expect("original peer admission");
         assert!(rx.try_recv().is_err());

@@ -557,8 +557,8 @@ mod tests {
         let child_txid = child.txid().to_string();
         {
             let mut pool = ctx.mempool.pool().write();
-            pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0))?;
-            pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0))?;
+            pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0, 0))?;
+            pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0, 0))?;
         }
 
         let result = getmempooldescendants(&ctx, &json!([parent_txid.to_string()]))?;
@@ -584,8 +584,8 @@ mod tests {
         let child_txid = child.txid();
         {
             let mut pool = ctx.mempool.pool().write();
-            pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0))?;
-            pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0))?;
+            pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0, 0))?;
+            pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0, 0))?;
         }
 
         let result = getmempoolancestors(&ctx, &json!([child_txid.to_string()]))?;
@@ -633,12 +633,12 @@ mod tests {
         {
             let mut pool = ctx.mempool.pool().write();
             let parent_entry =
-                bitcoin_rs_mempool::MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7);
+                bitcoin_rs_mempool::MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0);
             let Ok(_) = pool.insert_entry(parent_entry) else {
                 panic!("parent insert failed");
             };
             let child_entry =
-                bitcoin_rs_mempool::MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7);
+                bitcoin_rs_mempool::MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7, 0);
             let Ok(_) = pool.insert_entry(child_entry) else {
                 panic!("child insert failed");
             };
@@ -675,7 +675,7 @@ mod tests {
         let rbf_txid = rbf_tx.txid();
         {
             let mut pool = ctx.mempool.pool().write();
-            let Ok(_) = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7))
+            let Ok(_) = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7, 0))
             else {
                 panic!("mempool insert failed");
             };
@@ -748,7 +748,7 @@ mod usage_wiring_tests {
                         script_pubkey: vec![0x51; 128].into(),
                     }],
                 };
-                let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+                let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0);
                 let Ok(_id) = pool.insert_entry(entry) else {
                     panic!("fixture insert failed");
                 };
@@ -860,7 +860,7 @@ mod spentby_tests {
         {
             let mut pool = ctx.mempool.pool().write();
             for tx in [root, first_spender, second_spender, child_c, loner] {
-                let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+                let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0);
                 let Ok(_id) = pool.insert_entry(entry) else {
                     panic!("mempool insert failed while building the fixture");
                 };

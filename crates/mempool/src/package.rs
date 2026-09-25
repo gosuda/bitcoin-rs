@@ -114,8 +114,8 @@ pub(crate) fn capture_preview_checks(
                 job.fact.base_fee.unwrap_or(0),
                 request.time,
                 request.height,
+                job.fact.sigop_cost,
             )
-            .with_sigop_cost(job.fact.sigop_cost)
         })
         .collect();
     PreviewChecks {

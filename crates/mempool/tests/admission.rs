@@ -182,7 +182,7 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     );
     gateway.insert_entry(
         AdmissionOrigin::Rpc,
-        MempoolEntry::new(Arc::new(unrelated), 100, 100_000_000, 1, 1),
+        MempoolEntry::new(Arc::new(unrelated), 100, 100_000_000, 1, 1, 0),
     )?;
 
     release_tx.send(()).expect("release the parked admission");
@@ -321,7 +321,7 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     let parent_txid = parent.txid();
     gateway.insert_entry(
         AdmissionOrigin::Rpc,
-        MempoolEntry::new(Arc::new(parent), 100, 100_000_000, 1, 1),
+        MempoolEntry::new(Arc::new(parent), 100, 100_000_000, 1, 1, 0),
     )?;
 
     let redeem = vec![opcode::OP_CHECKMULTISIG; 200];

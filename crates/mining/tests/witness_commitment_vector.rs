@@ -189,7 +189,7 @@ fn snapshot_with(txs: &[Tx], fees: &[u64]) -> Result<MempoolMiningSnapshot, Box<
             u32::try_from(tx.vsize())?,
             fee,
             0,
-            0,
+            0, 0
         ))?;
     }
     Ok(pool.mining_snapshot())

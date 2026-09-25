@@ -297,8 +297,8 @@ impl Mempool {
             candidate.fee,
             time,
             height,
-        )
-        .with_sigop_cost(candidate.sigop_cost);
+            candidate.sigop_cost,
+        );
         self.capture_pool_change(
             entry,
             conflicts,

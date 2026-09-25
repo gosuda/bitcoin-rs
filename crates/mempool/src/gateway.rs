@@ -1463,7 +1463,7 @@ mod tests {
     }
 
     fn entry(tx: &Tx) -> MempoolEntry {
-        MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7)
+        MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7, 0)
     }
 
     fn hash(txid: &Txid) -> Hash256 {
@@ -1688,7 +1688,7 @@ mod tests {
 
         // Below the default min-relay floor (1_000 sat/kvB): rejected before
         // any commit.
-        let poor = MempoolEntry::new(Arc::new(tx(4)), 100, 50, 1, 7);
+        let poor = MempoolEntry::new(Arc::new(tx(4)), 100, 50, 1, 7, 0);
         assert!(gateway.insert_entry(AdmissionOrigin::Rpc, poor).is_err());
         let stranger = tx(5);
         let stranger_txid = stranger.txid();
@@ -1829,8 +1829,8 @@ mod tests {
             Some(dyn_observer(&observer)),
         );
 
-        let low = MempoolEntry::new(Arc::new(tx(13)), 100, 100, 1, 7);
-        let high = MempoolEntry::new(Arc::new(tx(14)), 100, 900, 1, 7);
+        let low = MempoolEntry::new(Arc::new(tx(13)), 100, 100, 1, 7, 0);
+        let high = MempoolEntry::new(Arc::new(tx(14)), 100, 900, 1, 7, 0);
         gateway
             .insert_entry(AdmissionOrigin::Rpc, low)
             .expect("low in");
@@ -2290,7 +2290,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(filler), 100, 9_000, 1, 7),
+                MempoolEntry::new(Arc::new(filler), 100, 9_000, 1, 7, 0),
             )
             .expect("filler in");
         observer.seen.lock().clear();
@@ -2304,7 +2304,7 @@ mod tests {
         let error = gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(shed), 100, 100, 1, 7),
+                MempoolEntry::new(Arc::new(shed), 100, 100, 1, 7, 0),
             )
             .expect_err("entry cannot survive trimming");
         assert_eq!(error, crate::MempoolError::Full);
@@ -2337,7 +2337,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7),
+                MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7, 0),
             )
             .expect("original in");
 
@@ -2346,7 +2346,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(bystander), 850, 8_500_000, 1, 7),
+                MempoolEntry::new(Arc::new(bystander), 850, 8_500_000, 1, 7, 0),
             )
             .expect("bystander in");
 

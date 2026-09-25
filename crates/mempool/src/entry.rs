@@ -3,8 +3,7 @@ use alloc::sync::Arc;
 use bitcoin_rs_primitives::{Tx, Txid, Wtxid};
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Witness};
-use bitcoin_rs_script::count_tx_legacy;
+use bitcoin_rs_primitives::{LockTime, Script, Witness};
 
 /// Slot index for a pooled transaction. Removal allows the slot to be reused.
 pub type EntryId = u32;
@@ -55,10 +54,9 @@ pub struct MempoolEntry {
     /// by shared admission preparation after resolving prevouts, and carried
     /// through the gateway. Bitcoin Core does the same, storing
     /// `sigOpCost` on `CTxMemPoolEntry` at acceptance rather than recounting
-    /// per block template.
-    ///
-    /// Raw `MempoolEntry::new` callers get the existing transaction-only
-    /// legacy count; admission replaces it with the resolved weighted cost.
+    /// per block template. The entry is complete at construction: admission
+    /// supplies the prevout-resolved cost, and a builder with no resolved
+    /// prevout context supplies `0`.
     pub sigop_cost: u32,
 }
 
@@ -67,13 +65,25 @@ impl MempoolEntry {
         crate::accounting::charged_weight(self.weight, self.vsize, self.sigop_cost)
     }
 
-    /// Builds an entry and derives all metadata available from the transaction.
+    /// Builds a complete entry from the transaction and admission facts.
     ///
-    /// The default sigop count includes legacy sigops. Admission code that has
-    /// resolved prevouts must replace it with [`Self::with_sigop_cost`] so P2SH
-    /// and witness sigops are included.
+    /// PRE: `vsize` and `fee` come from the caller's resolved policy facts;
+    /// `sigop_cost` is the caller's best value (0 when no prevout context
+    /// exists).
+    /// POST: `size`, `weight`, `bip141_vsize` derive from `tx` alone, so
+    /// `Tx::default()` yields (10, 40, 10); `wtxid` equals `txid` when the
+    /// transaction has no witness; `sigop_cost` equals the argument.
+    /// INVARIANT: the committed entry's `sigop_cost` always reflects resolved
+    /// prevouts on the admission path, never a transaction-only legacy count.
     #[must_use]
-    pub fn new(tx: Arc<Tx>, vsize: u32, fee: u64, time: u64, height: u32) -> Self {
+    pub fn new(
+        tx: Arc<Tx>,
+        vsize: u32,
+        fee: u64,
+        time: u64,
+        height: u32,
+        sigop_cost: u32,
+    ) -> Self {
         let own_size = u64::from(vsize);
         let txid = tx.txid();
         // BIP141: witness-free transactions have identical txid and wtxid.
@@ -88,7 +98,6 @@ impl MempoolEntry {
         let weight = tx.weight();
         let bip141_vsize = u32::try_from(Tx::vsize_from_weight(weight)).unwrap_or(u32::MAX);
         let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
-        let sigop_cost = count_tx_legacy(&tx);
         Self {
             tx,
             txid,
@@ -110,17 +119,6 @@ impl MempoolEntry {
             time,
             height,
         }
-    }
-
-    /// Attaches a sigop cost counted against resolved prevouts.
-    ///
-    /// Admission preparation derives this value from the transaction and
-    /// resolved coins. Raw entry builders may omit it when that input context
-    /// is unavailable.
-    #[must_use]
-    pub const fn with_sigop_cost(mut self, sigop_cost: u32) -> Self {
-        self.sigop_cost = sigop_cost;
-        self
     }
 
     /// Actual fee plus the signed mining-only adjustment.
@@ -198,7 +196,7 @@ mod is_replaceable_tests {
             }],
             outputs: vec![],
         };
-        MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7)
+        MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0)
     }
 
     #[test]
@@ -227,7 +225,7 @@ mod is_replaceable_tests {
             inputs: vec![],
             outputs: vec![],
         };
-        let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0);
         assert!(!entry.is_replaceable());
     }
 }
@@ -235,7 +233,7 @@ mod is_replaceable_tests {
 #[cfg(test)]
 mod mining_metadata_tests {
     use super::*;
-    use bitcoin_rs_primitives::{Tx, TxOut};
+    use bitcoin_rs_primitives::Tx;
     use std::sync::Arc;
 
     fn bare_entry() -> MempoolEntry {
@@ -245,30 +243,7 @@ mod mining_metadata_tests {
             inputs: vec![],
             outputs: vec![],
         };
-        MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7)
-    }
-
-    /// The default count comes from the transaction alone — legacy sigops of
-    /// its own scripts — and admission replaces it with the prevout-aware
-    /// figure once it has resolved the outputs being spent.
-    #[test]
-    fn with_sigop_cost_overrides_the_transaction_derived_default() {
-        let entry = bare_entry().with_sigop_cost(20_000);
-        assert_eq!(entry.sigop_cost, 20_000);
-
-        let mut tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![],
-            outputs: vec![],
-        };
-        tx.outputs.push(TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: alloc::vec![0xac].into(),
-        });
-        let counted = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7);
-        assert_eq!(counted.sigop_cost, count_tx_legacy(&counted.tx));
-        assert!(counted.sigop_cost > 0, "an OP_CHECKSIG output costs sigops");
+        MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0)
     }
 
     #[test]
@@ -391,7 +366,7 @@ mod wire_metadata_tests {
         ];
         for (mode, (wtxid, size, weight, vsize)) in vectors.into_iter().enumerate() {
             let tx = Arc::new(fixture(mode));
-            let entry = MempoolEntry::new(Arc::clone(&tx), 999, 7_000, 42, 100);
+            let entry = MempoolEntry::new(Arc::clone(&tx), 999, 7_000, 42, 100, 0);
             assert_eq!(entry.txid, expected_txid, "mode {mode}");
             assert_eq!(
                 entry.wtxid,
@@ -413,7 +388,7 @@ mod wire_metadata_tests {
     fn policy_size_is_not_overwritten_by_bip141_size() {
         for mode in 0..7 {
             for policy_size in [0, 1, 999, u32::MAX] {
-                let entry = MempoolEntry::new(Arc::new(fixture(mode)), policy_size, 7_000, 42, 100);
+                let entry = MempoolEntry::new(Arc::new(fixture(mode)), policy_size, 7_000, 42, 100, 0);
                 assert_eq!(entry.vsize, policy_size);
                 assert_eq!(entry.ancestor_size, u64::from(policy_size));
                 assert_eq!(entry.descendant_size, u64::from(policy_size));
@@ -432,7 +407,7 @@ mod wire_metadata_tests {
     // Contract: /CONSTRAINTS.md, "Raw zero-input mempool entry contract".
     #[test]
     fn raw_empty_entry_keeps_zero_input_behavior() {
-        let entry = MempoolEntry::new(Arc::new(Tx::default()), 0, 0, 0, 0);
+        let entry = MempoolEntry::new(Arc::new(Tx::default()), 0, 0, 0, 0, 0);
         assert_eq!(entry.wtxid, Wtxid(entry.txid.0));
         assert_eq!((entry.size, entry.weight, entry.bip141_vsize), (10, 40, 10));
         assert_eq!(entry.fee_rate, 0);

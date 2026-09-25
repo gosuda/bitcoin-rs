@@ -159,7 +159,7 @@ mod tests {
             ..MempoolLimits::default()
         });
         // 200 vbytes is exactly half of 400 — pressure threshold.
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1))
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1, 0))
             .expect("insert");
         // fee_rate = 400 * 1000 / 200 = 2_000 sat/kvB
         assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 3_000);
@@ -172,8 +172,8 @@ mod tests {
             max_total_bytes: 10_000,
             ..MempoolLimits::default()
         });
-        let high = MempoolEntry::new(Arc::new(tx(2)), 100, 10_000, 1, 1);
-        let low = MempoolEntry::new(Arc::new(tx(3)), 100, 1_000, 2, 1);
+        let high = MempoolEntry::new(Arc::new(tx(2)), 100, 10_000, 1, 1, 0);
+        let low = MempoolEntry::new(Arc::new(tx(3)), 100, 1_000, 2, 1, 0);
         pool.insert_entry(high).expect("high");
         pool.insert_entry(low).expect("low");
 
@@ -196,7 +196,7 @@ mod tests {
     -> Result<(), crate::MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
         for (tag, fee) in [(1, 3_000), (2, 1_000), (3, 2_000)] {
-            pool.insert_entry(MempoolEntry::new(Arc::new(tx(tag)), 100, fee, 1, 1))?;
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx(tag)), 100, fee, 1, 1, 0))?;
         }
         let changes = evict_lowest_fee_packages(&mut pool, 100)?;
         let ids: Vec<_> = changes.iter().map(|change| change.txid).collect();
@@ -218,7 +218,7 @@ mod tests {
             Hash256::from(child.txid()),
         ];
         for (transaction, fee) in [(parent, 100), (child, 1_900), (tx(6), 500), (tx(7), 10_000)] {
-            pool.insert_entry(MempoolEntry::new(Arc::new(transaction), 100, fee, 1, 1))?;
+            pool.insert_entry(MempoolEntry::new(Arc::new(transaction), 100, fee, 1, 1, 0))?;
         }
         let changes = evict_lowest_fee_packages(&mut pool, 100)?;
         assert_eq!(
@@ -234,10 +234,10 @@ mod tests {
     -> Result<(), crate::MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
         for (tag, fee) in [(1, 3_000), (2, 1_000), (3, 2_000)] {
-            pool.insert_entry(MempoolEntry::new(Arc::new(tx(tag)), 100, fee, 1, 1))?;
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx(tag)), 100, fee, 1, 1, 0))?;
         }
         pool.limits.max_total_bytes = 200;
-        let changes = pool.insert_entry(MempoolEntry::new(Arc::new(tx(4)), 100, 10_000, 1, 1))?;
+        let changes = pool.insert_entry(MempoolEntry::new(Arc::new(tx(4)), 100, 10_000, 1, 1, 0))?;
         assert_eq!(changes.removed_txids(), vec![tx(2).txid(), tx(3).txid()]);
         assert_eq!(pool.total_vsize(), 200);
         Ok(())
@@ -250,9 +250,9 @@ mod tests {
             max_total_bytes: 400,
             ..MempoolLimits::default()
         });
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1))
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1, 0))
             .expect("low");
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx(2)), 200, 800, 1, 1))
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx(2)), 200, 800, 1, 1, 0))
             .expect("high");
         assert_eq!(pool.lowest_fee_rate(), Some(2_000));
         assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 3_000);

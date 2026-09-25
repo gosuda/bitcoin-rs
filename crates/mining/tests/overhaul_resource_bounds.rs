@@ -69,7 +69,7 @@ fn fixture(members: u32) -> TestResult<Fixture> {
             let tx = Arc::new(transaction(input, value, &[0x51]));
             input = OutPoint::new(tx.txid(), 0);
             let vsize = u32::try_from(tx.vsize())?;
-            pool.insert_entry(MempoolEntry::new(tx, vsize, fee, 1, 1))?;
+            pool.insert_entry(MempoolEntry::new(tx, vsize, fee, 1, 1, 0))?;
         }
         tips.push((input, value));
     }

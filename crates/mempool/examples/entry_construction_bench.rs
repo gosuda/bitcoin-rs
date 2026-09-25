@@ -88,7 +88,7 @@ fn main() {
         for witness in [None, Some(72)] {
             let tx = Arc::new(fixture(inputs, 72, witness));
             let before = baseline_entry(Arc::clone(&tx), 137, 1_000, 17, 23);
-            let after = MempoolEntry::new(Arc::clone(&tx), 137, 1_000, 17, 23);
+            let after = MempoolEntry::new(Arc::clone(&tx), 137, 1_000, 17, 23, 0);
             assert_eq!(before.txid, after.txid);
             assert_eq!(before.wtxid, after.wtxid);
             assert_eq!(before.weight, after.weight);
@@ -99,7 +99,7 @@ fn main() {
             for optimized in [false, true] {
                 for _ in 0..100 {
                     let entry = if optimized {
-                        MempoolEntry::new(Arc::clone(&tx), 137, 1_000, 17, 23)
+                        MempoolEntry::new(Arc::clone(&tx), 137, 1_000, 17, 23, 0)
                     } else {
                         baseline_entry(Arc::clone(&tx), 137, 1_000, 17, 23)
                     };
@@ -112,7 +112,7 @@ fn main() {
                     for _ in 0..iterations {
                         let tx = Arc::clone(black_box(&tx));
                         let entry = if optimized {
-                            MempoolEntry::new(tx, 137, 1_000, 17, 23)
+                            MempoolEntry::new(tx, 137, 1_000, 17, 23, 0)
                         } else {
                             baseline_entry(tx, 137, 1_000, 17, 23)
                         };

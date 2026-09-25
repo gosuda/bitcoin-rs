@@ -28,7 +28,7 @@ fn selects_independent_transactions_in_modified_fee_order() -> Result<(), Box<dy
             vsize,
             fee,
             u64::from(index),
-            800_000,
+            800_000, 0
         ))?;
     }
 
@@ -61,14 +61,14 @@ fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dy
     });
     let parent = chained_tx(1, 50_000, None);
     let parent_txid = parent.txid();
-    mempool.insert_entry(MempoolEntry::new(Arc::new(parent), 200, 1_000, 1, 100))?;
+    mempool.insert_entry(MempoolEntry::new(Arc::new(parent), 200, 1_000, 1, 100, 0))?;
     // High-fee child should outrank the parent individually and pull it in.
     mempool.insert_entry(MempoolEntry::new(
         Arc::new(chained_tx(2, 40_000, Some(parent_txid))),
         200,
         10_000,
         2,
-        100,
+        100, 0
     ))?;
 
     let snapshot = mempool.mining_snapshot();
@@ -89,8 +89,8 @@ fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), Box<dyn Erro
     let low = independent_tx(1);
     let high = independent_tx(2);
     let low_txid = low.txid();
-    mempool.insert_entry(MempoolEntry::new(Arc::new(low), 200, 1_000, 1, 100))?;
-    mempool.insert_entry(MempoolEntry::new(Arc::new(high), 200, 2_000, 2, 100))?;
+    mempool.insert_entry(MempoolEntry::new(Arc::new(low), 200, 1_000, 1, 100, 0))?;
+    mempool.insert_entry(MempoolEntry::new(Arc::new(high), 200, 2_000, 2, 100, 0))?;
     mempool.prioritise(low_txid, 10_000)?;
 
     let snapshot = mempool.mining_snapshot();
