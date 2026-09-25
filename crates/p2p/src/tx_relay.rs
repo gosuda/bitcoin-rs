@@ -19,7 +19,7 @@
 //! a running node.
 //!
 //! [`spawn_tx_relay_worker`] drains the queue on a dedicated thread; tests
-//! call [`drain_relay_queue`] synchronously for deterministic fixtures. Both
+//! drain the queue's receiver directly for deterministic fixtures. Both
 //! paths re-check the shared mempool at send time and announce only
 //! transactions still resident there, so a queued request for a transaction
 //! removed by block connection, replacement, eviction, or reorg never emits
@@ -288,35 +288,6 @@ fn transaction_is_live(gateway: &MempoolGateway, txid: &Txid) -> bool {
     gateway.read().contains_txid(txid)
 }
 
-/// Synchronously drains every currently-queued relay request into `sink`,
-/// announcing only transactions still resident in `gateway`.
-///
-/// Returns the number of requests processed. Tests call it to flush the
-/// queue deterministically.
-///
-/// PRE: `gateway` is the shared gateway for the node's live mempool; `rx`
-/// is the relay queue receiver.
-/// POST: every request queued at the call is consumed and counted once. A
-/// request whose transaction is in the mempool at its send is announced
-/// through `sink`, excluding its source connection. A request whose
-/// transaction left the mempool (block connect, replacement, eviction, or
-/// reorg) produces no announcement.
-/// INVARIANT: no mempool guard is held while `sink` sends to peers.
-pub fn drain_relay_queue(
-    rx: &Receiver<RelayRequest>,
-    sink: &dyn RelaySink,
-    gateway: &MempoolGateway,
-) -> usize {
-    let mut processed = 0;
-    while let Ok(request) = rx.try_recv() {
-        if transaction_is_live(gateway, &request.txid) {
-            sink.announce_inv(request.txid, request.wtxid, request.source);
-        }
-        processed += 1;
-    }
-    processed
-}
-
 /// Spawns the single tx-relay worker thread.
 ///
 /// The thread drains [`RelayRequest`]s from `rx` and announces each through
@@ -329,7 +300,7 @@ pub fn drain_relay_queue(
 /// mempool at its send; a request for a removed transaction is consumed
 /// with no announcement. The thread ends on `shutdown` or queue close.
 /// INVARIANT: no mempool guard is held while `sink` sends to peers. The
-/// worker applies the same send-time rule as [`drain_relay_queue`].
+/// worker applies the same send-time rule for every consumed request.
 pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
     sink: S,
     rx: Receiver<RelayRequest>,
@@ -568,7 +539,13 @@ mod tests {
         // The dropped request never reaches the sink.
         let (peers, _ids) = fake_peers(1);
         let sink = FakeSink::new(peers);
-        let processed = drain_relay_queue(&rx, &sink, &gateway);
+        let mut processed = 0;
+        while let Ok(request) = rx.try_recv() {
+            processed += 1;
+            if transaction_is_live(&gateway, &request.txid) {
+                sink.announce_inv(request.txid, request.wtxid, request.source);
+            }
+        }
         assert_eq!(processed, 2);
         assert_eq!(sink.log().len(), 2);
     }
@@ -587,7 +564,13 @@ mod tests {
         queue.announce(live[1], dummy_wtxid(2), Some(ids[1]));
         queue.announce(live[2], dummy_wtxid(3), None);
 
-        let processed = drain_relay_queue(&rx, &sink, &gateway);
+        let mut processed = 0;
+        while let Ok(request) = rx.try_recv() {
+            processed += 1;
+            if transaction_is_live(&gateway, &request.txid) {
+                sink.announce_inv(request.txid, request.wtxid, request.source);
+            }
+        }
         assert_eq!(processed, 3);
 
         let log = sink.log();
@@ -613,7 +596,13 @@ mod tests {
         // replacement, or eviction) before the drain.
         gateway.clear(AdmissionOrigin::Block);
 
-        let processed = drain_relay_queue(&rx, &sink, &gateway);
+        let mut processed = 0;
+        while let Ok(request) = rx.try_recv() {
+            processed += 1;
+            if transaction_is_live(&gateway, &request.txid) {
+                sink.announce_inv(request.txid, request.wtxid, request.source);
+            }
+        }
 
         // A stale request is consumed so the queue cannot retain it, but it
         // must never produce an `inv` for a body `getdata` cannot retrieve.
