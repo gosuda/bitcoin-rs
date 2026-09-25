@@ -23,6 +23,7 @@ use crate::IndexCapabilities;
 
 use bitcoin_rs_primitives::Hash256;
 
+use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
 use bitcoin_rs_storage::{FjallStore, StorageError, block_body::BlockBodyStore};
 
 use hashbrown::HashMap;
@@ -171,6 +172,8 @@ struct Harness {
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
     evidence: Arc<RecordedIndexAhead>,
+    /// The pruning authority this worker reads through.
+    retention: Arc<RetentionRegistry>,
     worker: Worker,
 }
 
@@ -203,12 +206,14 @@ impl Harness {
             .script_live
             .then(|| Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
         let chain_transition = enabled.script_live.then(|| Arc::new(Mutex::new(())));
+        let retention = Arc::new(RetentionRegistry::new());
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),
             applied_tip: bitcoin_rs_chain::TipReader::new(Arc::clone(&applied_tip)),
             block_tree: bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&fixture.tree)),
             body_store: Some(body_store),
+            history: HistoryAccess::new(Arc::clone(&retention), RetentionBudget::Unlimited),
             batch_limits: DEFAULT_BATCH_LIMITS,
             enabled,
             chain_events: Arc::new(TestChainCursor),
@@ -226,6 +231,7 @@ impl Harness {
             applied_tip,
             runtime,
             evidence,
+            retention,
             worker,
         }
     }
@@ -347,4 +353,57 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     h.settle(&mut pending);
     h.assert_at(&b3);
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
+}
+
+/// The pruning authority, not the worker, decides whether absent history is
+/// permanent. A height the frontier names as deleted routes to a rebuild; a
+/// height the authority granted and the store cannot yet show is a wait.
+#[test]
+fn pruned_history_rebuilds_and_absent_history_waits() {
+    // Pruned below the frontier: the owner says gone, so the capabilities
+    // reset for a rebuild rather than waiting on rows that never return.
+    let f = ForkFixture::new(3);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    h.settle(&mut pending);
+    h.assert_at(&a3);
+
+    let pass = h.retention.reserve(4);
+    pass.commit(4);
+    let a1 = f.tip(f.a[0]);
+    h.set_tip(&a1);
+    let action = h.worker.reconcile_once(&mut pending).expect("reset pass");
+    assert!(!matches!(action, ReconcileAction::CaughtUp));
+    assert_eq!(
+        h.runtime.phase(),
+        ReconcilePhase::FORWARD.with_leg(IndexCapabilities::HISTORICAL, ReconcileLeg::Rebuilding),
+        "a pruned height is the owner's rebuild decision"
+    );
+
+    // Granted but absent: the owner says the history is retained, so the
+    // worker waits and keeps the rows it already derived.
+    let f = ForkFixture::new(3);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    h.settle(&mut pending);
+    f.bodies.bodies.lock().remove(&(3, f.a[2].1.to_le_bytes()));
+    let a1 = f.tip(f.a[0]);
+    h.set_tip(&a1);
+    let action = h.worker.reconcile_once(&mut pending).expect("wait pass");
+    assert!(
+        matches!(action, ReconcileAction::Stalled),
+        "transient absence under a grant must not rebuild, got {action:?}"
+    );
+    assert_eq!(
+        h.watermarks().tx_lookup,
+        Some(IndexWatermark {
+            height: 3,
+            hash: a3.hash.to_le_bytes(),
+        }),
+        "the consumer keeps its derived rows while it waits"
+    );
 }

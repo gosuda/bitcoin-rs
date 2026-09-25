@@ -41,7 +41,11 @@ use crate::query_api::{
     ScriptIndexSnapshot, SpendingRecord, TxQueryError,
 };
 
-use bitcoin_rs_storage::{PrefixScanLimit, block_body::BlockBodyStore};
+use bitcoin_rs_storage::{
+    PrefixScanLimit,
+    block_body::BlockBodyStore,
+    pruning::{HistoryAccess, HistoryUnavailable},
+};
 
 use compact_str::CompactString;
 use std::sync::atomic::AtomicU64;
@@ -549,6 +553,11 @@ struct Worker {
     applied_tip: TipReader,
     block_tree: BlockTreeReader,
     body_store: Option<Arc<dyn BlockBodyStore>>,
+    /// The pruning authority's narrow history capability, paired with the
+    /// budget the operator configured for this consumer. The worker asks it
+    /// whether history is available and reacts to the typed answer; it never
+    /// derives permanence from a prune height or from a bare `None`.
+    history: HistoryAccess,
     batch_limits: PreparedBatchLimits,
     enabled: IndexCapabilities,
     chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
@@ -655,7 +664,14 @@ pub enum DerivedIndexWorkerError {
     /// The index writer or reader reported a failure.
     #[error("txindex index error: {0}")]
     Index(#[from] IndexError),
-    /// A block body needed for indexing or rollback was absent.
+    /// A block body the pruning authority confirmed as retained was absent.
+    /// The owner decided the history is not gone, so the defined reaction is
+    /// to wait and retry, never to rebuild.
+    #[error("txindex worker: retained history unavailable: {0}")]
+    HistoryUnavailable(#[from] HistoryUnavailable),
+    /// A block body needed for indexing or rollback is permanently gone: the
+    /// pruning authority reported the height outside retained history. The
+    /// defined recovery is a rebuild from what remains.
     #[error("txindex worker: missing body at height {height}, hash {hash}")]
     MissingBody {
         /// Block height whose body is missing.

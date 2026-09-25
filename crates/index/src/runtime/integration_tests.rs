@@ -92,6 +92,10 @@ fn blocked_open_abandonment_detaches_and_poisons() {
         bitcoin_rs_chain::TipReader::new(Arc::clone(&inputs.applied_tip)),
         bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&inputs.block_tree)),
         None,
+        bitcoin_rs_storage::pruning::HistoryAccess::new(
+            Arc::new(bitcoin_rs_storage::pruning::RetentionRegistry::new()),
+            bitcoin_rs_storage::pruning::RetentionBudget::Unlimited,
+        ),
         inputs.block_source,
         None,
         Arc::clone(&inputs.chain_events),
