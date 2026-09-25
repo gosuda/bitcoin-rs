@@ -593,108 +593,58 @@ impl UtxoRecord {
             .max()
     }
 
-    /// Stages an entire coalesced add run without changing this record,
-    /// materializing the overwritten slots for listener/event consumers.
+    /// Builds one replacement for additions to an existing record or a new
+    /// txid.
     ///
-    /// `add_unique` is the strictly-increasing-vout fast path. Callers prove
-    /// that it cannot encounter an existing vout before selecting it.
-    #[cfg(test)]
-    pub(crate) fn stage_add_run(
-        &self,
-        additions: &[OwnedUtxoOut],
+    /// PRE: `existing`, when present, has `txid`; additions and `add_unique`
+    /// satisfy the checks of the current staging paths.
+    /// POST: returns the canonical replacement. If `overwritten` is Some, it
+    /// has one entry per addition in addition order; an append has a None
+    /// entry.
+    /// INVARIANT: an error leaves the source record and shard table unchanged.
+    pub(crate) fn add_run_replacement<'p>(
+        existing: Option<&UtxoRecord>,
+        txid: Hash256,
+        additions: &'p [OutputParts<'p>],
         add_unique: bool,
-    ) -> Result<(Self, Vec<Option<OwnedUtxoOut>>), UtxoError> {
-        self.add_replacement_tracked(&owned_parts(additions), add_unique)
-    }
-
-    /// Builds the replacement record for a coalesced add run, borrowing every
-    /// surviving output straight from this record's payload (no per-output
-    /// script clone) and copying each addition's script exactly once. Used by
-    /// the no-listener commit path, which never materializes overwritten
-    /// outputs.
-    pub(crate) fn add_replacement<'a>(
-        &'a self,
-        additions: &'a [OutputParts<'a>],
-        add_unique: bool,
+        mut overwritten: Option<&mut Vec<Option<OwnedUtxoOut>>>,
     ) -> Result<Self, UtxoError> {
         if add_unique {
-            if let Some(record) = self.append_unique_run(additions)? {
+            let appended = match existing {
+                Some(record) => record.append_unique_run(additions)?,
+                // Unique adds on a fresh record encode in slice order with the
+                // inline partition filled to capacity; no dedup pass is
+                // needed.
+                None => Some(Self::from_output_parts(
+                    txid,
+                    additions.len().min(INLINE_CAPACITY),
+                    additions,
+                )?),
+            };
+            if let Some(record) = appended {
+                // The unique fast path can never overwrite a live vout, so
+                // every append slot is None.
+                if let Some(sink) = overwritten {
+                    sink.resize(sink.len().saturating_add(additions.len()), None);
+                }
                 return Ok(record);
             }
+            // Appending would reorder the inline partition or widen a
+            // directory: fall through to the rebuild, where the unique scan
+            // overwrites nothing and every sink slot is None.
         }
-        let mut parts = self.output_parts();
-        let mut inline_len = self.header().inline_len;
-        apply_additions(&mut parts, &mut inline_len, additions, add_unique, None);
-        Self::from_output_parts(self.txid(), inline_len, &parts)
-    }
-
-    /// Add-run replacement that also materializes the overwritten outputs (owned,
-    /// so they outlive the record swap) for listener/event consumers.
-    pub(crate) fn add_replacement_tracked<'a>(
-        &'a self,
-        additions: &'a [OutputParts<'a>],
-        add_unique: bool,
-    ) -> Result<(Self, Vec<Option<OwnedUtxoOut>>), UtxoError> {
-        if add_unique {
-            // The unique fast path can never overwrite a live vout.
-            let record = self.add_replacement(additions, true)?;
-            return Ok((record, vec![None; additions.len()]));
-        }
-        let mut parts = self.output_parts();
-        let mut inline_len = self.header().inline_len;
-        let mut overwritten = Vec::with_capacity(additions.len());
+        let (mut parts, mut inline_len) = match existing {
+            Some(record) => (record.output_parts(), record.header().inline_len),
+            None => (Vec::with_capacity(additions.len()), 0),
+        };
         apply_additions(
             &mut parts,
             &mut inline_len,
             additions,
-            false,
-            Some(&mut overwritten),
+            add_unique,
+            overwritten.as_deref_mut(),
         );
-        let record = Self::from_output_parts(self.txid(), inline_len, &parts)?;
-        Ok((record, overwritten))
-    }
-
-    /// Builds a fresh record for a coalesced add run on a transaction that has
-    /// no live record. Only additions contribute bytes.
-    pub(crate) fn new_add_replacement(
-        txid: Hash256,
-        additions: &[OutputParts<'_>],
-        add_unique: bool,
-    ) -> Result<Self, UtxoError> {
-        if add_unique {
-            // Unique adds on an empty record encode in slice order with the
-            // inline partition filled to capacity; no dedup pass is needed.
-            let inline_len = additions.len().min(INLINE_CAPACITY);
-            return Self::from_output_parts(txid, inline_len, additions);
-        }
-        let mut parts = Vec::with_capacity(additions.len());
-        let mut inline_len = 0;
-        apply_additions(&mut parts, &mut inline_len, additions, false, None);
         Self::from_output_parts(txid, inline_len, &parts)
-    }
-
-    pub(crate) fn new_add_replacement_tracked(
-        txid: Hash256,
-        additions: &[OutputParts<'_>],
-        add_unique: bool,
-    ) -> Result<(Self, Vec<Option<OwnedUtxoOut>>), UtxoError> {
-        if add_unique {
-            let inline_len = additions.len().min(INLINE_CAPACITY);
-            let record = Self::from_output_parts(txid, inline_len, additions)?;
-            return Ok((record, vec![None; additions.len()]));
-        }
-        let mut parts = Vec::with_capacity(additions.len());
-        let mut inline_len = 0;
-        let mut overwritten = Vec::with_capacity(additions.len());
-        apply_additions(
-            &mut parts,
-            &mut inline_len,
-            additions,
-            false,
-            Some(&mut overwritten),
-        );
-        let record = Self::from_output_parts(txid, inline_len, &parts)?;
-        Ok((record, overwritten))
     }
 
     /// Increasing-unique append-copy fast path. Returns `None` when appending
@@ -789,47 +739,41 @@ impl UtxoRecord {
         Ok(Some(Self { buf }))
     }
 
-    /// Stages an entire coalesced remove run without changing this record,
-    /// materializing the removed outputs (in request order) for listener/event
-    /// consumers. Only removed outputs are cloned; survivors stay borrowed.
-    pub(crate) fn stage_remove_run(
+    /// Builds a replacement for one ordered run of removals.
+    ///
+    /// PRE: `vouts` may contain absent or repeated indexes and is in request
+    /// order.
+    /// POST: returns Unchanged, Emptied, or Replaced as today. If `removed` is
+    /// Some, it receives one slot per requested vout in request order; absent
+    /// or repeated indexes have None. Exact-cover removal builds no
+    /// replacement.
+    /// INVARIANT: each live vout is removed at most once; an error leaves
+    /// source bytes and the shard table unchanged.
+    pub(crate) fn remove_run_replacement(
         &self,
         vouts: &[u32],
-    ) -> Result<(Option<Self>, Vec<Option<OwnedUtxoOut>>), UtxoError> {
-        let mut parts = self.output_parts();
-        let mut inline_len = self.header().inline_len;
-        let mut removed = Vec::with_capacity(vouts.len());
-
-        for &vout in vouts {
-            let output = parts
-                .iter()
-                .position(|part| part.vout == vout)
-                .map(|index| remove_part_at(&mut parts, &mut inline_len, index));
-            removed.push(output.map(OutputParts::into_owned));
-        }
-
-        if removed.iter().all(Option::is_none) {
-            return Ok((None, removed));
-        }
-
-        let replacement = Self::from_output_parts(self.txid(), inline_len, &parts)?;
-        Ok((Some(replacement), removed))
-    }
-
-    /// Builds the replacement for a coalesced remove run without materializing
-    /// any removed output. A full removal returns [`RemovedRecord::Emptied`]
-    /// with no replacement allocation. Used by the no-listener commit path.
-    pub(crate) fn remove_replacement(&self, vouts: &[u32]) -> Result<RemovedRecord, UtxoError> {
+        mut removed: Option<&mut Vec<Option<OwnedUtxoOut>>>,
+    ) -> Result<RemovedRecord, UtxoError> {
         if self.is_full_removal(vouts) {
+            if let Some(sink) = removed.as_deref_mut() {
+                for &vout in vouts {
+                    let output = self.find_output(vout).ok_or(UtxoError::CorruptRecord)?;
+                    sink.push(Some(OutputParts::from_view(&output).into_owned()));
+                }
+            }
             return Ok(RemovedRecord::Emptied);
         }
         let mut parts = self.output_parts();
         let mut inline_len = self.header().inline_len;
         let mut any_removed = false;
         for &vout in vouts {
-            if let Some(index) = parts.iter().position(|part| part.vout == vout) {
-                remove_part_at(&mut parts, &mut inline_len, index);
-                any_removed = true;
+            let output = parts
+                .iter()
+                .position(|part| part.vout == vout)
+                .map(|index| remove_part_at(&mut parts, &mut inline_len, index));
+            any_removed |= output.is_some();
+            if let Some(sink) = removed.as_deref_mut() {
+                sink.push(output.map(OutputParts::into_owned));
             }
         }
         if !any_removed {
@@ -838,8 +782,11 @@ impl UtxoRecord {
         if parts.is_empty() {
             return Ok(RemovedRecord::Emptied);
         }
-        let replacement = Self::from_output_parts(self.txid(), inline_len, &parts)?;
-        Ok(RemovedRecord::Replaced(replacement))
+        Ok(RemovedRecord::Replaced(Self::from_output_parts(
+            self.txid(),
+            inline_len,
+            &parts,
+        )?))
     }
 
     /// Builds the replacement for a coalesced remove run followed by a
@@ -866,7 +813,7 @@ impl UtxoRecord {
                 return Ok(RemovedRecord::Emptied);
             }
             let add_unique = additions_are_strictly_increasing(None, additions);
-            let record = Self::new_add_replacement(self.txid(), additions, add_unique)?;
+            let record = Self::add_run_replacement(None, self.txid(), additions, add_unique, None)?;
             return Ok(RemovedRecord::Replaced(record));
         }
         let mut parts = self.output_parts();
@@ -888,20 +835,6 @@ impl UtxoRecord {
         }
         let replacement = Self::from_output_parts(self.txid(), inline_len, &parts)?;
         Ok(RemovedRecord::Replaced(replacement))
-    }
-
-    /// Returns the requested outputs in request order only when the request
-    /// spends this whole record exactly once per live vout. Materializes the
-    /// removed outputs for listener/event consumers; survivors are never built.
-    pub(crate) fn full_removals_by_vout(&self, vouts: &[u32]) -> Option<Vec<OwnedUtxoOut>> {
-        if !self.is_full_removal(vouts) {
-            return None;
-        }
-        let mut removed = Vec::with_capacity(vouts.len());
-        for &vout in vouts {
-            removed.push(OutputParts::from_view(&self.find_output(vout)?).into_owned());
-        }
-        Some(removed)
     }
 
     /// True when `vouts` removes every live output exactly once (no duplicate
@@ -1065,7 +998,8 @@ impl<'a> OutputParts<'a> {
     }
 }
 
-/// Outcome of staging a coalesced remove run without materializing removals.
+/// Outcome of a coalesced remove run. The optional sink materializes one slot
+/// per requested vout in request order; absent or repeated slots stay None.
 pub(crate) enum RemovedRecord {
     /// No requested vout was live; the record is unchanged.
     Unchanged,
@@ -1691,10 +1625,19 @@ mod tests {
         let record = UtxoRecord::from_owned_outputs(Hash256::default(), &[output(0, &[0x51], 1)])?;
         let original = record.clone();
         let too_large = OwnedUtxoOut::new(1, 2, vec![0_u8; usize::from(u16::MAX) + 1], false, 1);
-        assert!(matches!(
-            record.stage_add_run(&[too_large], true),
-            Err(UtxoError::ScriptTooLarge { .. })
-        ));
+        let additions = [OutputParts::from_owned(&too_large)];
+        for overwritten in [None, Some(Vec::new())] {
+            assert!(matches!(
+                UtxoRecord::add_run_replacement(
+                    Some(&record),
+                    record.txid(),
+                    &additions,
+                    true,
+                    overwritten.as_mut(),
+                ),
+                Err(UtxoError::ScriptTooLarge { .. })
+            ));
+        }
         assert_eq!(record, original);
         Ok(())
     }
@@ -1860,11 +1803,12 @@ mod tests {
         let decoded = UtxoRecord::from_encoded(ThinRecordBuf::from_slice(record.buf.as_bytes())?)?;
         assert_eq!(decoded, record);
         // Removing nothing from nothing is an exact cover of an empty set.
+        let mut removed = Vec::new();
         assert!(matches!(
-            record.remove_replacement(&[])?,
+            record.remove_run_replacement(&[], Some(&mut removed))?,
             RemovedRecord::Emptied
         ));
-        assert_eq!(record.full_removals_by_vout(&[]), Some(Vec::new()));
+        assert!(removed.is_empty());
         Ok(())
     }
 
@@ -1877,11 +1821,11 @@ mod tests {
             &[output(0, &[0x51], 1), output(1, &[0x52], 2)],
         )?;
         assert!(matches!(
-            record.remove_replacement(&[])?,
+            record.remove_run_replacement(&[], None)?,
             RemovedRecord::Unchanged
         ));
         assert!(matches!(
-            record.remove_replacement(&[9])?,
+            record.remove_run_replacement(&[9], None)?,
             RemovedRecord::Unchanged
         ));
         Ok(())
@@ -1889,7 +1833,7 @@ mod tests {
 
     // --- violation tests: ordering ---
 
-    /// `full_removals_by_vout` answers in request order, not record order —
+    /// Removal materialization answers in request order, not record order —
     /// listener consumers replay the request's ordering.
     #[test]
     fn full_removal_materializes_outputs_in_request_order() -> Result<(), UtxoError> {
@@ -1901,16 +1845,21 @@ mod tests {
                 output(2, &[0x12], 12),
             ],
         )?;
-        let removed = record
-            .full_removals_by_vout(&[2, 0, 1])
-            .ok_or(UtxoError::CorruptRecord)?;
+        let mut removed = Vec::new();
+        assert!(matches!(
+            record.remove_run_replacement(&[2, 0, 1], Some(&mut removed))?,
+            RemovedRecord::Emptied
+        ));
         assert_eq!(
-            removed.iter().map(|out| out.vout).collect::<Vec<_>>(),
+            removed
+                .iter()
+                .map(|out| out.unwrap().vout)
+                .collect::<Vec<_>>(),
             vec![2, 0, 1]
         );
-        assert_eq!(removed[0].value, 12);
-        assert_eq!(removed[1].value, 10);
-        assert_eq!(removed[2].value, 11);
+        assert_eq!(removed[0].unwrap().value, 12);
+        assert_eq!(removed[1].unwrap().value, 10);
+        assert_eq!(removed[2].unwrap().value, 11);
         Ok(())
     }
 
@@ -1926,14 +1875,18 @@ mod tests {
                 output(2, &[0x53], 3),
             ],
         )?;
-        match record.remove_replacement(&[0, 0, 1])? {
+        match record.remove_run_replacement(&[0, 0, 1], None)? {
             RemovedRecord::Replaced(replacement) => {
                 assert_eq!(replacement.output_count(), 1);
                 assert!(replacement.find_output(2).is_some());
             }
             _ => panic!("a duplicate request must not empty the record"),
         }
-        let (replacement, removed) = record.stage_remove_run(&[0, 0])?;
+        let mut removed = Vec::new();
+        assert!(matches!(
+            record.remove_run_replacement(&[0, 0], Some(&mut removed))?,
+            RemovedRecord::Replaced(_)
+        ));
         assert_eq!(
             removed
                 .iter()
@@ -1942,7 +1895,6 @@ mod tests {
             vec![Some(0), None],
             "the duplicate request keeps its request-order slot as None"
         );
-        assert!(replacement.is_some());
         Ok(())
     }
 
@@ -1958,23 +1910,44 @@ mod tests {
                 output(2, &[0x53], 3),
             ],
         )?;
-        for vouts in [&[0_u32, 1, 9][..], &[0, 1, 2, 9][..], &[0, 1][..]] {
-            assert_eq!(
-                record.full_removals_by_vout(vouts),
-                None,
-                "non-exact cover {vouts:?} must not materialize removals"
-            );
-        }
+        // Only an exact cover materializes every requested slot: an absent
+        // vout stays None and never fabricates a phantom removal.
+        let mut removed = Vec::new();
         assert!(matches!(
-            record.remove_replacement(&[0, 1, 9])?,
+            record.remove_run_replacement(&[0, 1, 9], Some(&mut removed))?,
+            RemovedRecord::Replaced(_)
+        ));
+        assert_eq!(
+            removed
+                .iter()
+                .map(|out| out.as_ref().map(|out| out.vout))
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1), None]
+        );
+        let mut removed = Vec::new();
+        assert!(matches!(
+            record.remove_run_replacement(&[0, 1], Some(&mut removed))?,
+            RemovedRecord::Replaced(_)
+        ));
+        assert!(removed.iter().all(Option::is_some));
+        assert!(matches!(
+            record.remove_run_replacement(&[0, 1, 9], None)?,
             RemovedRecord::Replaced(_)
         ));
         // An absent vout alongside every live one is still a full spend: the
         // absent request is a no-op and the record empties.
+        let mut removed = Vec::new();
         assert!(matches!(
-            record.remove_replacement(&[0, 1, 2, 9])?,
+            record.remove_run_replacement(&[0, 1, 2, 9], Some(&mut removed))?,
             RemovedRecord::Emptied
         ));
+        assert_eq!(
+            removed
+                .iter()
+                .map(|out| out.as_ref().map(|out| out.vout))
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(1), Some(2), None]
+        );
         Ok(())
     }
 
@@ -2060,7 +2033,10 @@ mod tests {
             RemovedRecord::Replaced(record) => record,
             _ => panic!("an add-only edit must produce a replacement"),
         };
-        assert_eq!(edited, record.add_replacement(&additions, false)?);
+        assert_eq!(
+            edited,
+            UtxoRecord::add_run_replacement(Some(&record), record.txid(), &additions, false, None)?
+        );
         Ok(())
     }
 
@@ -2073,13 +2049,19 @@ mod tests {
             .map(|vout| output(vout, &[0x51], u64::from(vout)))
             .collect();
         let record = UtxoRecord::from_owned_outputs(Hash256::default(), &nine)?;
-        let shrunk = match record.remove_replacement(&[0])? {
+        let shrunk = match record.remove_run_replacement(&[0], None)? {
             RemovedRecord::Replaced(record) => record,
             _ => panic!("a partial removal must produce a replacement"),
         };
         assert_eq!(shrunk.output_count(), 8);
         assert_eq!(shrunk.header().inline_len, 7);
-        let grown = shrunk.add_replacement(&[OutputParts::new(9, 99, &[0x59], false, 2)], true)?;
+        let grown = UtxoRecord::add_run_replacement(
+            Some(&shrunk),
+            shrunk.txid(),
+            &[OutputParts::new(9, 99, &[0x59], false, 2)],
+            true,
+            None,
+        )?;
         assert_eq!(grown.output_count(), 9);
         for vout in 1..=9 {
             assert!(grown.find_output(vout).is_some(), "vout {vout} was lost");
@@ -2135,16 +2117,23 @@ mod tests {
         Ok(())
     }
 
-    /// The staged path materializes `None` holes for absent vouts in request
-    /// order and returns `Some(empty)` — not `None` — when the run spends the
-    /// whole record, which is the delete signal the shard layer reads.
+    /// The sink path materializes `None` holes for absent vouts in request
+    /// order and reports `Emptied` — the delete signal the shard layer reads —
+    /// when the run spends the whole record.
     #[test]
     fn staged_removal_marks_absent_vouts_and_signals_delete_as_empty() -> Result<(), UtxoError> {
         let record = UtxoRecord::from_owned_outputs(
             Hash256::default(),
             &[output(0, &[0x50], 5), output(1, &[0x51], 6)],
         )?;
-        let (replacement, removed) = record.stage_remove_run(&[0, 9])?;
+        let mut removed = Vec::new();
+        match record.remove_run_replacement(&[0, 9], Some(&mut removed))? {
+            RemovedRecord::Replaced(replacement) => {
+                assert_eq!(replacement.output_count(), 1);
+                assert!(replacement.find_output(1).is_some());
+            }
+            _ => panic!("a partial removal must produce a replacement"),
+        }
         assert_eq!(
             removed
                 .iter()
@@ -2152,17 +2141,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(0), None]
         );
-        let replacement = replacement.ok_or(UtxoError::CorruptRecord)?;
-        assert_eq!(replacement.output_count(), 1);
-        assert!(replacement.find_output(1).is_some());
 
-        let (replacement, removed) = record.stage_remove_run(&[9, 8])?;
-        assert!(replacement.is_none());
+        let mut removed = Vec::new();
+        assert!(matches!(
+            record.remove_run_replacement(&[9, 8], Some(&mut removed))?,
+            RemovedRecord::Unchanged
+        ));
         assert!(removed.iter().all(Option::is_none));
 
-        let (replacement, removed) = record.stage_remove_run(&[0, 1])?;
-        let emptied = replacement.ok_or(UtxoError::CorruptRecord)?;
-        assert!(emptied.is_empty());
+        let mut removed = Vec::new();
+        assert!(matches!(
+            record.remove_run_replacement(&[0, 1], Some(&mut removed))?,
+            RemovedRecord::Emptied
+        ));
         assert!(removed.iter().all(Option::is_some));
         Ok(())
     }
