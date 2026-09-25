@@ -1509,7 +1509,7 @@ mod tests {
             if height == self.height && hash == self.hash {
                 Some(self.body.clone())
             } else {
-                panic!("index path should not load unrelated body {height}:{hash}");
+                panic!("should not load unrelated body {height}:{hash}");
             }
         }
     }
