@@ -6,6 +6,7 @@ use super::ExpectedBlockHashes;
 use super::GetdataRequestOutcome;
 use super::SchedulerState;
 use super::frontier::ChainFrontier;
+use super::frontier::body_capability;
 use super::peers::active_demonstrated_height;
 use super::telemetry::metric_count;
 use crate::Message;
@@ -255,14 +256,16 @@ impl BlockSync {
                 continue;
             };
             let source = session.lease.source(session.addr);
-            // Same capability rule as `UsablePeer::capability`: the
-            // handshake best-known while the peer has no branch evidence,
-            // else only a tip on the current active chain counts.
-            let capability = if session.demonstrated_tips.is_empty() {
+            // One capability rule for every path that asks for a body: the
+            // same `body_capability` the frontier's usable-peer view
+            // precomputes, so the hedge and the scheduler can never disagree
+            // about whom to ask.
+            let active_height = if session.demonstrated_tips.is_empty() {
                 u32::try_from(peer.best_known_height).ok()
             } else {
                 active_demonstrated_height(&tree, active_tip, &session.demonstrated_tips)
             };
+            let capability = body_capability(peer.best_known_height, active_height);
             if source == owner || !statically_fanout_eligible(&peer, &policy) {
                 continue;
             }

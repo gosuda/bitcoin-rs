@@ -87,16 +87,42 @@ pub(crate) struct UsablePeer {
     pub connected_at: Instant,
 }
 
+/// The height a connection may be asked to serve bodies up to.
+///
+/// `claimed` is the best-known height the peer advertises and this node
+/// raises as it accepts that peer's headers; `active_height` is what the
+/// peer's demonstrated tips resolve to on the active chain.
+///
+/// PRE: both heights are heights this node derived from the peer itself,
+///   never from a third party.
+/// POST: the greater of the two, `None` only when the peer offered neither:
+///   an unusable advertised height and no tip that resolves.
+/// INVARIANT: branch evidence never LOWERS the height a peer is trusted at.
+///   A tip that resolves off the active chain says the peer's best chain is
+///   elsewhere; it does not retract the height the peer claimed, and a
+///   connection that cannot serve what it claimed is judged by the request
+///   that times out — `expired_release` convicts it — not by being skipped
+///   without ever being asked. Without that floor, one fork answer pins a
+///   connection below the frontier for its whole life: its later
+///   `getheaders` replies follow the same losing branch, so the probe meant
+///   to restore capability replays headers this node already holds, and the
+///   frontier starves on peers it never asks (issue #1153).
+#[must_use]
+pub(crate) fn body_capability(claimed: i32, active_height: Option<u32>) -> Option<u32> {
+    match (u32::try_from(claimed).ok(), active_height) {
+        (Some(claimed), Some(resolved)) => Some(claimed.max(resolved)),
+        (Some(claimed), None) => Some(claimed),
+        (None, resolved) => resolved,
+    }
+}
+
 impl UsablePeer {
-    /// Demonstrated serving capability: the handshake best-known height
-    /// while the peer has no branch evidence, else only a tip on the active
-    /// chain counts (`body_capability_height` semantics, precomputed once
-    /// per observation instead of per request peer).
+    /// Demonstrated serving capability for this connection: the height it is
+    /// trusted at, precomputed once per observation instead of per request
+    /// peer. See [`body_capability`] for the rule and why branch evidence
+    /// cannot lower it.
     pub(crate) fn capability(&self) -> Option<u32> {
-        if self.demonstrated_tips.is_empty() {
-            return u32::try_from(self.info.best_known_height).ok();
-        }
-        self.active_height
+        body_capability(self.info.best_known_height, self.active_height)
     }
 
     /// The height this connection PROVED it can serve by handing us headers

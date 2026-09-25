@@ -59,11 +59,14 @@ This page assigns ownership and cites proof under the
   — `shared_active_height`: an on-active tip attests its own height, while a
   losing fork tip still attests the shared prefix it proved the peer holds.
   When a later announcement makes a previously losing retained tip active,
-  its delivering connection is re-evaluated before request selection. Until
-  a session has accepted a header tip, body and hedge selection may use its
-  handshake capability while header discovery is pending; after that point,
-  the requested height must not exceed the deepest shared ancestor across
-  its retained tips. Retained-tip evidence is compacted at each credit
+  its delivering connection is re-evaluated before request selection. Body
+  and hedge selection may ask a connection up to the greater of its
+  handshake credit and the deepest shared ancestor across its retained
+  tips: branch evidence can raise what a peer may serve, never lower it
+  below the credit the connection already carries. A peer that cannot serve
+  what it claimed is judged by the request that times out, not by being
+  skipped without ever being asked (issue #1153). Retained-tip evidence is
+  compacted at each credit
   refresh: a tip that resolves on the active chain at or below the recorded
   maximum can never raise it again, so only unresolved (fork) tips and the
   max-resolving tip are kept. Unresolved tips are deduplicated to the
