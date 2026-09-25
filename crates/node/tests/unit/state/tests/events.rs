@@ -64,7 +64,7 @@ fn active_chain_snapshot_anchors_at_restored_tip_after_restart() -> anyhow::Resu
         let state = NodeState::open(config.clone(), None)?;
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         let tip = state.apply_block(&genesis)?;
-        assert!(state.write_clean_checkpoint()?.is_some());
+        assert!(state.publish_checkpoint()?.is_some());
         (tip, state.chainstate().chain_snapshot().epoch)
     };
 

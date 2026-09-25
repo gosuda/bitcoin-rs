@@ -290,7 +290,7 @@ fn durable_head_precedes_publication_and_survives_restart() -> Result<()> {
         tip = state.apply_block(&block)?;
         blocks.push(block);
     }
-    state.publish_checkpoint()?;
+    let _ = state.publish_checkpoint()?;
     drop(state);
 
     // Durability precedes publication: by the time apply_block returned,

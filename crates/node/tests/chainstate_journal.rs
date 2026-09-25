@@ -232,7 +232,7 @@ fn idle_journal_batch_flushes_on_wall_clock_deadline() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
     state.apply_block(&genesis)?;
-    state.publish_checkpoint()?;
+    let _ = state.publish_checkpoint()?;
     let child = mined_regtest_child_at(genesis.block_hash(), 1)?;
     let expected_tip = state.apply_block(&child)?;
     let worker = state.start_chainstate_maintenance()?;
@@ -269,7 +269,7 @@ fn maintenance_worker_drains_retention_pressure_with_a_publication() -> Result<(
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
     state.apply_block(&genesis)?;
-    state.publish_checkpoint()?;
+    let _ = state.publish_checkpoint()?;
     let current = config.data_dir.join("chainstate-checkpoints/CURRENT");
     let baseline = std::fs::read_to_string(&current)?;
 
@@ -317,7 +317,7 @@ fn retention_pressure_stops_apply_before_tip_mutation() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
     let genesis_tip = state.apply_block(&genesis)?;
-    state.publish_checkpoint()?;
+    let _ = state.publish_checkpoint()?;
     let pressure = config
         .data_dir
         .join("chainstate-journal/segment-9999999999.log");
