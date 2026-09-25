@@ -4,11 +4,11 @@ use super::{
     block::NoSpentScripts, block::SpentCoinScripts, capability::IndexCapabilities,
     capability::IndexWatermark, capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
     capability::put_selected_watermarks, capability::selected_watermark, error::IndexError,
-    prepared::PreparedBatch, prepared::PreparedBatchLimits, reader::Indexer, rows::IndexRowCounts,
-    rows::PendingRows, rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY,
-    state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE,
-    state::IndexWriteFence, state::capture_write_fence, state::commit_ordinary,
-    state::ensure_fence_live, state::resume_capability_reset,
+    prepared::PreparedBatch, prepared::PreparedBatchLimits, reader::Indexer, rows::PendingRows,
+    rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY, state::ConsumerCursorUpdate,
+    state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE, state::IndexWriteFence,
+    state::capture_write_fence, state::commit_ordinary, state::ensure_fence_live,
+    state::resume_capability_reset,
 };
 use bitcoin_rs_primitives::{OutPoint, encode};
 use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
@@ -66,11 +66,6 @@ impl<S: KvStore> IndexWriter<S> {
     /// Loads the exact durable watermark.
     pub fn watermark(&self) -> Result<Option<IndexWatermark>, IndexError> {
         self.indexer.watermark()
-    }
-
-    /// Returns the row counts from the last successful prepared commit.
-    pub const fn last_counts(&self) -> IndexRowCounts {
-        self.indexer.last_counts()
     }
 
     /// Loads both independently durable capability watermarks.
@@ -353,7 +348,6 @@ impl<S: KvStore> IndexWriter<S> {
             &fence,
             store_batch,
         )?;
-        self.indexer.last_counts = merged.counts();
         Ok(final_watermark)
     }
 
@@ -497,7 +491,6 @@ impl<S: KvStore> IndexWriter<S> {
             &fence,
             store_batch,
         )?;
-        self.indexer.last_counts = prepared.rows.counts();
         Ok(())
     }
 

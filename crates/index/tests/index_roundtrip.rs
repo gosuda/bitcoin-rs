@@ -572,11 +572,6 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std
         // owner; row cardinality does not depend on the height suffix.
         writer.commit_block(0, &block)?;
         assert_eq!(
-            writer.last_counts(),
-            expected,
-            "height {height} committed counts"
-        );
-        assert_eq!(
             store.count(ColumnFamily::TxConfirmed),
             expected.txids,
             "height {height} txid rows"

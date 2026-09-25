@@ -3,7 +3,6 @@
 use super::{
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
     capability::SCRIPT_LIVE_WATERMARK_KEY, capability::watermark_key, error::IndexError,
-    rows::IndexRowCounts,
 };
 use crate::{types::ScriptHashRow, types::SpendingPrefixRow, types::TxidRow};
 use bitcoin_rs_primitives::{OutPoint, Txid};
@@ -15,26 +14,17 @@ use bitcoin_rs_storage::{ColumnFamily, KvStore};
 /// owned exclusively by [`super::write::IndexWriter`].
 pub struct Indexer<S: KvStore> {
     pub(super) store: std::sync::Arc<S>,
-    pub(super) last_counts: IndexRowCounts,
 }
 
 impl<S: KvStore> Indexer<S> {
     /// Creates an indexer over `store`.
     pub fn new(store: std::sync::Arc<S>) -> Self {
-        Self {
-            store,
-            last_counts: IndexRowCounts::default(),
-        }
+        Self { store }
     }
 
     /// Returns the underlying key-value store.
     pub const fn store(&self) -> &std::sync::Arc<S> {
         &self.store
-    }
-
-    /// Returns the row counts from the last successful prepared commit.
-    pub const fn last_counts(&self) -> IndexRowCounts {
-        self.last_counts
     }
 
     /// Loads the exact durable `TxIndex` watermark, or `None` for an empty v2 index.
@@ -158,24 +148,6 @@ impl<S: KvStore> Indexer<S> {
     ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
         let prefix = SpendingPrefixRow::scan_prefix(outpoint);
         let iter = self.store.iter_prefix(ColumnFamily::Spending, &prefix)?;
-        collect_prefix_rows(iter)
-    }
-
-    /// Iterates confirmed transaction-id rows matching `txid`.
-    ///
-    /// Returns every `HashPrefixRow` whose 8-byte prefix matches the txid's scan
-    /// prefix, decoded from `ColumnFamily::TxConfirmed`. The 8-byte prefix is
-    /// lossy; multiple txids can share a prefix.
-    ///
-    /// **Height ordering:** same as [`Self::iter_funding_rows`]: the 4-byte
-    /// height suffix is big-endian (format 5), so prefix-range scans arrive
-    /// in chronological order.
-    pub(crate) fn iter_txid_rows(
-        &self,
-        txid: &Txid,
-    ) -> Result<Vec<crate::HashPrefixRow>, IndexError> {
-        let prefix = TxidRow::scan_prefix(txid);
-        let iter = self.store.iter_prefix(ColumnFamily::TxConfirmed, &prefix)?;
         collect_prefix_rows(iter)
     }
 }

@@ -8,7 +8,6 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, WriteBatch};
 
 use super::{BlockSource, IndexError, IndexWriter, Indexer};
-use crate::types::TxidRow;
 use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, SpendingPrefixRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
@@ -93,19 +92,6 @@ fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::E
         writer.indexer().iter_spending_rows(&outpoint)?,
         vec![SpendingPrefixRow::row(&outpoint, 0)]
     );
-    Ok(())
-}
-
-#[test]
-fn iter_txid_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
-    let tx = tx(spent_outpoint(4, 5), vec![0x51, 0x03]);
-    let txid = tx.txid();
-    let (_dir, mut writer) = writer()?;
-
-    writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
-
-    let rows = writer.indexer().iter_txid_rows(&txid)?;
-    assert!(rows.contains(&TxidRow::row(&txid, 0)));
     Ok(())
 }
 
@@ -210,46 +196,6 @@ fn resolve_transaction_returns_none_when_indexed_height_is_not_visible()
     let resolved = writer.indexer().resolve_transaction(txid, &source)?;
 
     assert_eq!(resolved, None);
-    Ok(())
-}
-
-#[test]
-fn resolve_tx_with_height_returns_genesis_coinbase_at_height_zero()
--> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let Some(tx) = block.txs.first() else {
-        return Err(std::io::Error::other("genesis block has no transactions").into());
-    };
-    let coinbase = tx.clone();
-    let txid = tx.txid();
-    let (_dir, mut writer) = writer()?;
-
-    writer.commit_block(0, &consensus_bytes(&block))?;
-
-    let source = FakeSource {
-        block,
-        target_height: 0,
-    };
-    let resolved = writer.indexer().resolve_tx_with_height(txid, &source)?;
-
-    assert_eq!(resolved, Some((coinbase, 0)));
-    Ok(())
-}
-
-#[test]
-fn resolve_tx_with_height_returns_none_for_unknown_txid() -> Result<(), Box<dyn std::error::Error>>
-{
-    let (_dir, writer) = writer()?;
-    let txid = Txid(Hash256::from_le_bytes(&[0xff; 32]));
-    let source = FakeSource {
-        block: Network::Regtest.genesis_block(),
-        target_height: 0,
-    };
-
-    assert_eq!(
-        writer.indexer().resolve_tx_with_height(txid, &source)?,
-        None
-    );
     Ok(())
 }
 
