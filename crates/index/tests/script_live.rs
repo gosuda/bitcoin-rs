@@ -821,11 +821,7 @@ fn leftover_capabilities_are_persisted_families_outside_the_selection() {
     };
     assert_eq!(
         IndexCapabilities::SCRIPT_LIVE.leftover(watermarks),
-        IndexCapabilities {
-            tx_lookup: true,
-            script_history: true,
-            script_live: false,
-        }
+        IndexCapabilities::HISTORICAL
     );
     assert!(IndexCapabilities::ALL.leftover(watermarks).is_empty());
 }

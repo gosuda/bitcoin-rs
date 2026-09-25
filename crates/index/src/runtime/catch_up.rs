@@ -12,6 +12,7 @@ use super::PendingForward;
 use super::ReconcileAction;
 use super::Worker;
 use crate::IndexCapabilities;
+use crate::IndexCapability;
 use crate::IndexError;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
@@ -228,7 +229,7 @@ impl Worker {
         let loaded = bodies.len();
         let sub_chunk = &identities[..loaded];
 
-        let anchors = if capabilities.script_live {
+        let anchors = if capabilities.contains(IndexCapability::ScriptLive) {
             let mut anchors = Vec::with_capacity(sub_chunk.len());
             for identity in sub_chunk {
                 match self.live_anchor(identity.height, identity.hash) {
@@ -385,10 +386,10 @@ impl Worker {
             // rows and waits rather than churning a reset every pass.
             return Ok(ReconcileAction::Stalled);
         }
-        let anchored = IndexCapabilities {
-            script_live: false,
-            ..capabilities
-        };
+        let anchored = capabilities
+            .iter()
+            .filter(|capability| *capability != IndexCapability::ScriptLive)
+            .collect::<IndexCapabilities>();
         // Resolve the anchor identity before the durable reset: it is a pure
         // read — the block tree keeps headers for pruned heights — so a
         // missing node fails before any derived row is erased, not after.

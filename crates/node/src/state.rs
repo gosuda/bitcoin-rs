@@ -14,6 +14,7 @@ use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_chainstate::events::ChainEventPublisher;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
+use bitcoin_rs_index::IndexCapability;
 use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
@@ -451,16 +452,22 @@ impl NodeState {
 }
 
 fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
-    bitcoin_rs_index::IndexCapabilities {
-        // Full ScriptIndex-backed Esplora responses need exact historical
-        // transactions to render prevouts and calculate fees. `utxo` owns
-        // only the compact live-output view and must not pay for TxLookup.
-        // `derived_index_query` still exposes TxLookup to Core RPCs only for an
-        // explicit --txindex configuration.
-        tx_lookup: config.indexes.txindex || config.indexes.script_index.keeps_history(),
-        script_history: config.indexes.script_index.keeps_history(),
-        script_live: config.indexes.script_index.is_enabled(),
+    // Full ScriptIndex-backed Esplora responses need exact historical
+    // transactions to render prevouts and calculate fees. `utxo` owns
+    // only the compact live-output view and must not pay for TxLookup.
+    // `derived_index_query` still exposes TxLookup to Core RPCs only for an
+    // explicit --txindex configuration.
+    let mut capabilities = bitcoin_rs_index::IndexCapabilities::NONE;
+    if config.indexes.txindex || config.indexes.script_index.keeps_history() {
+        capabilities = capabilities.insert(IndexCapability::TxLookup);
     }
+    if config.indexes.script_index.keeps_history() {
+        capabilities = capabilities.insert(IndexCapability::ScriptHistory);
+    }
+    if config.indexes.script_index.is_enabled() {
+        capabilities = capabilities.insert(IndexCapability::ScriptLive);
+    }
+    capabilities
 }
 
 fn build_derived_index_open_spec(

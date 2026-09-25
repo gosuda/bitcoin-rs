@@ -271,16 +271,14 @@ impl DerivedIndexQueryEngine {
     }
 
     fn require_enabled(&self, required: IndexCapabilities) -> Result<(), TxQueryError> {
-        if required.tx_lookup && !self.enabled.tx_lookup {
-            return Err(TxQueryError::Unavailable("txindex is disabled".into()));
-        }
-        if required.script_history && !self.enabled.script_history {
-            return Err(TxQueryError::Unavailable(
-                "script history is disabled".into(),
-            ));
-        }
-        if required.script_live && !self.enabled.script_live {
-            return Err(TxQueryError::Unavailable("script live is disabled".into()));
+        // INVARIANT: the refusal text is the first unmet capability's own,
+        // scanned in IndexCapability::ALL order.
+        for capability in required.iter() {
+            if !self.enabled.contains(capability) {
+                return Err(TxQueryError::Unavailable(
+                    capability.disabled_message().into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -302,7 +300,7 @@ impl DerivedIndexQueryEngine {
         // so a before/after tip comparison cannot exclude that window. Hold
         // chain-transition across watermark check, locator scan, and UTXO
         // resolution. History and tx lookup never take it.
-        let _chain_transition = if required.script_live {
+        let _chain_transition = if required.contains(IndexCapability::ScriptLive) {
             Some(
                 self.chain_transition
                     .as_ref()
@@ -340,11 +338,7 @@ impl DerivedIndexQueryEngine {
             }
         }
 
-        for capability in [
-            IndexCapability::TxLookup,
-            IndexCapability::ScriptHistory,
-            IndexCapability::ScriptLive,
-        ] {
+        for capability in IndexCapability::ALL {
             if !required.contains(capability) {
                 continue;
             }
@@ -395,46 +389,29 @@ impl DerivedIndexQueryEngine {
         let snapshot = reader
             .snapshot()
             .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-        let tx = required
-            .tx_lookup
-            .then(|| snapshot.capability_watermark(IndexCapability::TxLookup))
-            .transpose()
-            .map_err(|e| TxQueryError::Storage(e.to_string().into()))?
-            .flatten();
-        let script_index = required
-            .script_history
-            .then(|| snapshot.capability_watermark(IndexCapability::ScriptHistory))
-            .transpose()
-            .map_err(|e| TxQueryError::Storage(e.to_string().into()))?
-            .flatten();
-        let script_live = required
-            .script_live
-            .then(|| snapshot.capability_watermark(IndexCapability::ScriptLive))
-            .transpose()
-            .map_err(|e| TxQueryError::Storage(e.to_string().into()))?
-            .flatten();
+        let mut marks = [None; 3];
+        for capability in IndexCapability::ALL {
+            if !required.contains(capability) {
+                continue;
+            }
+            marks[capability.index()] = snapshot
+                .capability_watermark(capability)
+                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+        }
         let at_tip = |watermark: Option<IndexWatermark>| {
             watermark.is_some_and(|watermark| {
                 watermark.height == tip_before.height
                     && watermark.hash == *tip_before.hash.as_byte_array()
             })
         };
-        let synced = (!required.tx_lookup || at_tip(tx))
-            && (!required.script_history || at_tip(script_index))
-            && (!required.script_live || at_tip(script_live));
-        let watermark_height =
-            |watermark: Option<IndexWatermark>| watermark.map_or(0, |watermark| watermark.height);
-        let best_block_height = [
-            required.tx_lookup.then(|| watermark_height(tx)),
-            required
-                .script_history
-                .then(|| watermark_height(script_index)),
-            required.script_live.then(|| watermark_height(script_live)),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(0);
+        let synced = required
+            .iter()
+            .all(|capability| at_tip(marks[capability.index()]));
+        let best_block_height = required
+            .iter()
+            .map(|capability| marks[capability.index()].map_or(0, |watermark| watermark.height))
+            .min()
+            .unwrap_or(0);
 
         self.query_health()?;
         let tip_after = self.applied_tip.load_full();

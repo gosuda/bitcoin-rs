@@ -1,10 +1,11 @@
 //! Coherent write fences and cooperative, versioned capability-reset recovery.
 
 use super::{
-    capability::IndexCapabilities, capability::IndexWatermark, capability::IndexWatermarks,
-    capability::SCRIPT_HISTORY_WATERMARK_KEY, capability::SCRIPT_LIVE_WATERMARK_KEY,
-    capability::TX_LOOKUP_WATERMARK_KEY, capability::WATERMARK_LEN, error::IndexError,
-    format::INDEX_FORMAT_VERSION, format::INDEX_FORMAT_VERSION_KEY,
+    capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
+    capability::IndexWatermarks, capability::SCRIPT_HISTORY_WATERMARK_KEY,
+    capability::SCRIPT_LIVE_WATERMARK_KEY, capability::TX_LOOKUP_WATERMARK_KEY,
+    capability::WATERMARK_LEN, error::IndexError, format::INDEX_FORMAT_VERSION,
+    format::INDEX_FORMAT_VERSION_KEY,
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, WriteBatch, WriteCondition};
 use tracing::debug;
@@ -562,21 +563,17 @@ fn acquire_capability_reset<S: KvStore>(
             &FORMAT_VERSION_VALUE,
         );
         let capabilities = IndexCapabilities::from_mask(mask)?;
-        if capabilities.tx_lookup {
-            batch.delete(ColumnFamily::UtxoMeta, TX_LOOKUP_WATERMARK_KEY);
-        }
-        if capabilities.script_history {
-            batch.delete(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY);
+        for capability in capabilities.iter() {
+            batch.delete(ColumnFamily::UtxoMeta, capability.watermark_key());
             // Same durable batch as FORMAT_VERSION_VALUE so a reset can never
             // publish the row-value marker without the format marker.
-            batch.put(
-                ColumnFamily::UtxoMeta,
-                INDEX_FORMAT_VERSION_KEY,
-                &INDEX_FORMAT_VERSION.to_le_bytes(),
-            );
-        }
-        if capabilities.script_live {
-            batch.delete(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY);
+            if capability == IndexCapability::ScriptHistory {
+                batch.put(
+                    ColumnFamily::UtxoMeta,
+                    INDEX_FORMAT_VERSION_KEY,
+                    &INDEX_FORMAT_VERSION.to_le_bytes(),
+                );
+            }
         }
         crate::index::capability::delete_selected_floors(&mut batch, capabilities);
         batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
@@ -601,29 +598,22 @@ pub(super) fn resume_capability_reset<S: KvStore>(
         requested_mask = 0;
 
         let capabilities = IndexCapabilities::from_mask(work.mask)?;
-        let mut column_families = Vec::with_capacity(4);
-        if capabilities.tx_lookup {
-            column_families.push(ColumnFamily::TxConfirmed);
-        }
-        if capabilities.script_history {
-            column_families.push(ColumnFamily::Funding);
-            column_families.push(ColumnFamily::Spending);
-        }
-        if capabilities.script_live {
-            column_families.push(ColumnFamily::ScriptLive);
-        }
-        let unselected_cursor_remains = (!capabilities.tx_lookup
-            && store
-                .get(ColumnFamily::UtxoMeta, TX_LOOKUP_WATERMARK_KEY)?
-                .is_some())
-            || (!capabilities.script_history
-                && store
-                    .get(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY)?
+        let mut column_families: Vec<ColumnFamily> = capabilities
+            .iter()
+            .flat_map(IndexCapability::column_families)
+            .copied()
+            .collect();
+        let unselected_cursor_remains = IndexCapability::ALL.into_iter().try_fold(
+            false,
+            |remains, capability| -> Result<bool, IndexError> {
+                if remains || capabilities.contains(capability) {
+                    return Ok(remains);
+                }
+                Ok(store
+                    .get(ColumnFamily::UtxoMeta, capability.watermark_key())?
                     .is_some())
-            || (!capabilities.script_live
-                && store
-                    .get(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY)?
-                    .is_some());
+            },
+        )?;
         if !unselected_cursor_remains {
             column_families.push(ColumnFamily::BlockHeaders);
         }
@@ -671,7 +661,7 @@ pub(super) fn resume_capability_reset<S: KvStore>(
             ORDINARY_STATE_REVISION_KEY,
             &work.next_revision,
         );
-        if capabilities.script_history {
+        if capabilities.contains(IndexCapability::ScriptHistory) {
             // Resume of a claim that predates the acquire-batch marker
             // still publishes the current row-value format.
             completion.put(

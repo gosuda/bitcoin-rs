@@ -106,12 +106,12 @@ impl ReconcilePhase {
 
     /// Returns the phase with `leg` assigned to every capability in
     /// `capabilities`.
+    ///
+    /// INVARIANT: `legs[capability.index()]` is that capability's leg.
     #[must_use]
     pub fn with_leg(mut self, capabilities: IndexCapabilities, leg: ReconcileLeg) -> Self {
-        for capability in IndexCapability::ALL {
-            if capabilities.contains(capability) {
-                self.0[capability.index()] = leg;
-            }
+        for capability in capabilities.iter() {
+            self.0[capability.index()] = leg;
         }
         self
     }
@@ -119,14 +119,10 @@ impl ReconcilePhase {
     /// Capabilities whose rows are rebuilding from genesis.
     #[must_use]
     pub fn rebuilding(self) -> IndexCapabilities {
-        let rebuilding = |capability: IndexCapability| {
-            matches!(self.0[capability.index()], ReconcileLeg::Rebuilding)
-        };
-        IndexCapabilities {
-            tx_lookup: rebuilding(IndexCapability::TxLookup),
-            script_history: rebuilding(IndexCapability::ScriptHistory),
-            script_live: rebuilding(IndexCapability::ScriptLive),
-        }
+        IndexCapability::ALL
+            .into_iter()
+            .filter(|&capability| matches!(self.0[capability.index()], ReconcileLeg::Rebuilding))
+            .collect()
     }
 
     /// Widest rollback in flight: the highest watermark being rewound and
@@ -175,14 +171,10 @@ pub(crate) fn selected_watermark(
     watermarks: IndexWatermarks,
     capabilities: IndexCapabilities,
 ) -> SelectedWatermark {
-    let selected = [
-        (capabilities.tx_lookup, watermarks.tx_lookup),
-        (capabilities.script_history, watermarks.script_history),
-        (capabilities.script_live, watermarks.script_live),
-    ];
-    let mut selected = selected
+    let mut selected = IndexCapability::ALL
         .into_iter()
-        .filter_map(|(enabled, watermark)| enabled.then_some(watermark));
+        .filter(|&capability| capabilities.contains(capability))
+        .map(|capability| watermarks.get(capability));
     let Some(first) = selected.next() else {
         return SelectedWatermark::Invalid;
     };

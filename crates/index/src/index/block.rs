@@ -1,8 +1,9 @@
 //! Parse-once block preparation and authoritative spent-script anchoring.
 
 use super::{
-    capability::IndexCapabilities, error::IndexError, prepared::PreparedBlock, rows::LiveOp,
-    rows::PendingRows, rows::PositionedRow, write::IndexWriter,
+    capability::IndexCapabilities, capability::IndexCapability, error::IndexError,
+    prepared::PreparedBlock, rows::LiveOp, rows::PendingRows, rows::PositionedRow,
+    write::IndexWriter,
 };
 use crate::{
     types::HashPrefixRow, types::HeaderRow, types::ScriptHash, types::SpendingPrefixRow,
@@ -82,7 +83,7 @@ fn pending_rows_for_block_with_header(
             Err(error) => return Err(IndexError::BlockParse(error)),
         }
     };
-    if capabilities.script_live {
+    if capabilities.contains(IndexCapability::ScriptLive) {
         push_live_ops(&mut rows, live_created, live_spent, height, spent_scripts)?;
     }
     Ok((rows, header))
@@ -239,15 +240,16 @@ impl Visitor for IndexBlockVisitor<'_> {
                 .spending_rows
                 .push(PositionedRow { row, position });
         }
-        let txid =
-            (self.capabilities.tx_lookup || !self.pending_live.is_empty()).then(|| tx.txid_sha2());
+        let txid = (self.capabilities.contains(IndexCapability::TxLookup)
+            || !self.pending_live.is_empty())
+        .then(|| tx.txid_sha2());
         if let Some(hash) = txid {
             let mut txid_bytes = [0_u8; 32];
             txid_bytes.copy_from_slice(hash.as_slice());
             for (vout, scripthash) in self.pending_live.drain(..) {
                 self.live_created.push((txid_bytes, vout, scripthash));
             }
-            if self.capabilities.tx_lookup {
+            if self.capabilities.contains(IndexCapability::TxLookup) {
                 self.push_txid_row(hash.as_slice(), position);
             }
         }
@@ -259,14 +261,14 @@ impl Visitor for IndexBlockVisitor<'_> {
         if is_null_prevout(prevout) {
             return ControlFlow::Continue(());
         }
-        if self.capabilities.script_history {
+        if self.capabilities.contains(IndexCapability::ScriptHistory) {
             self.pending_spending.push(SpendingPrefixRow::row_parts(
                 prevout.txid(),
                 prevout.vout(),
                 self.height_bytes,
             ));
         }
-        if self.capabilities.script_live {
+        if self.capabilities.contains(IndexCapability::ScriptLive) {
             let mut txid = [0_u8; 32];
             txid.copy_from_slice(prevout.txid());
             self.live_spent.push((txid, prevout.vout()));
@@ -276,7 +278,9 @@ impl Visitor for IndexBlockVisitor<'_> {
 
     fn visit_tx_out(&mut self, vout: usize, tx_out: &bsl::TxOut<'_>) -> ControlFlow<()> {
         let script = tx_out.script_pubkey();
-        if self.capabilities.script_history && !is_op_return_script(script) {
+        if self.capabilities.contains(IndexCapability::ScriptHistory)
+            && !is_op_return_script(script)
+        {
             self.pending_funding
                 .push(ScriptHash::from_script_bytes(script).prefix());
         }
@@ -286,7 +290,7 @@ impl Visitor for IndexBlockVisitor<'_> {
         // deliberately keeps oversized-script outputs (they are historical
         // activity); Live must not, or it would carry locators no
         // authoritative lookup can resolve.
-        if self.capabilities.script_live
+        if self.capabilities.contains(IndexCapability::ScriptLive)
             && self.height_bytes != [0_u8; crate::types::HEIGHT_SIZE]
             && let Ok(vout) = u32::try_from(vout)
         {
@@ -326,7 +330,7 @@ impl<S: KvStore> IndexWriter<S> {
         hash: [u8; 32],
         body: &[u8],
     ) -> Result<PreparedBlock, IndexError> {
-        if capabilities.script_live {
+        if capabilities.contains(IndexCapability::ScriptLive) {
             return Err(IndexError::MissingSpentScripts);
         }
         self.prepare_block_with_spent_scripts(capabilities, height, hash, body, &NoSpentScripts)

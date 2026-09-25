@@ -133,70 +133,69 @@ impl IndexCapability {
     }
 }
 
-/// Capabilities included in one prepared index transition.
+/// Named subset of [`IndexCapability`]: one prepared transition, an
+/// enabled configuration, or one query requirement.
+///
+/// PRE: build only from the named constants, [`Self::insert`], or
+/// `FromIterator`.
+/// POST: [`Self::contains`], [`Self::iter`], and [`Self::leftover`] answer
+/// over the selected capabilities.
+/// INVARIANT: bit `capability.index()` is set iff `capability` is selected;
+/// `to_mask` persists exactly this byte, so the on-disk reset-marker
+/// encoding is unchanged.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct IndexCapabilities {
-    /// Build transaction lookup rows.
-    pub tx_lookup: bool,
-    /// Build `ScriptIndex` funding and spending rows.
-    pub script_history: bool,
-    /// Build `ScriptIndex` live-output rows.
-    pub script_live: bool,
-}
+pub struct IndexCapabilities(u8);
 
 impl IndexCapabilities {
     /// No derived rows.
-    pub const NONE: Self = Self {
-        tx_lookup: false,
-        script_history: false,
-        script_live: false,
-    };
+    pub const NONE: Self = Self(0);
     /// Transaction lookup only.
-    pub const TX_LOOKUP: Self = Self {
-        tx_lookup: true,
-        script_history: false,
-        script_live: false,
-    };
+    pub const TX_LOOKUP: Self = Self(IndexCapability::TxLookup.bit());
     /// `ScriptIndex` history only.
-    pub const SCRIPT_HISTORY: Self = Self {
-        tx_lookup: false,
-        script_history: true,
-        script_live: false,
-    };
+    pub const SCRIPT_HISTORY: Self = Self(IndexCapability::ScriptHistory.bit());
     /// `ScriptIndex` live outputs only.
-    pub const SCRIPT_LIVE: Self = Self {
-        tx_lookup: false,
-        script_history: false,
-        script_live: true,
-    };
+    pub const SCRIPT_LIVE: Self = Self(IndexCapability::ScriptLive.bit());
+    /// Node `--txindex` plus `--scriptindex=utxo`; previously an ad-hoc
+    /// struct literal at its sole construction site.
+    pub const TX_LOOKUP_SCRIPT_LIVE: Self =
+        Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptLive.bit());
     /// Every index capability, including the compact live view.
-    pub const ALL: Self = Self {
-        tx_lookup: true,
-        script_history: true,
-        script_live: true,
-    };
+    pub const ALL: Self = Self(0b111);
     /// Every capability derivable from a block body alone.
     ///
     /// Anchorless paths use this, because `ScriptLive` cannot be prepared
     /// without a spent-coin script source.
-    pub const HISTORICAL: Self = Self {
-        tx_lookup: true,
-        script_history: true,
-        script_live: false,
-    };
+    pub const HISTORICAL: Self =
+        Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptHistory.bit());
 
-    /// Returns whether `capability` is selected.
+    /// PRE: none.
+    /// POST: whether `capability` is selected.
+    #[must_use]
     pub const fn contains(self, capability: IndexCapability) -> bool {
-        match capability {
-            IndexCapability::TxLookup => self.tx_lookup,
-            IndexCapability::ScriptHistory => self.script_history,
-            IndexCapability::ScriptLive => self.script_live,
-        }
+        self.0 & capability.bit() != 0
     }
 
-    /// Returns whether no capability is selected.
+    /// PRE: none.
+    /// POST: whether no capability is selected.
+    #[must_use]
     pub const fn is_empty(self) -> bool {
-        !self.tx_lookup && !self.script_history && !self.script_live
+        self.0 == 0
+    }
+
+    /// PRE: none.
+    /// POST: `capability` is selected in the result; every other selection
+    /// bit is unchanged.
+    #[must_use]
+    pub const fn insert(self, capability: IndexCapability) -> Self {
+        Self(self.0 | capability.bit())
+    }
+
+    /// PRE: none.
+    /// POST: the selected capabilities in [`IndexCapability::ALL`] order.
+    pub fn iter(self) -> impl Iterator<Item = IndexCapability> {
+        IndexCapability::ALL
+            .into_iter()
+            .filter(move |&capability| self.contains(capability))
     }
 
     /// Persisted cursors this selection no longer maintains.
@@ -205,31 +204,36 @@ impl IndexCapabilities {
     /// change leave durable rows behind. Those leftover families are reset
     /// and rebuilt or discarded; they are never served as if still configured.
     #[must_use]
-    pub const fn leftover(self, watermarks: IndexWatermarks) -> Self {
-        Self {
-            tx_lookup: !self.tx_lookup && watermarks.tx_lookup.is_some(),
-            script_history: !self.script_history && watermarks.script_history.is_some(),
-            script_live: !self.script_live && watermarks.script_live.is_some(),
-        }
+    pub fn leftover(self, watermarks: IndexWatermarks) -> Self {
+        IndexCapability::ALL
+            .into_iter()
+            .filter(|&capability| {
+                !self.contains(capability) && watermarks.get(capability).is_some()
+            })
+            .collect()
     }
 
-    pub(super) fn to_mask(self) -> u8 {
-        u8::from(self.tx_lookup)
-            | (u8::from(self.script_history) << 1)
-            | (u8::from(self.script_live) << 2)
+    pub(super) const fn to_mask(self) -> u8 {
+        self.0
     }
 
+    /// PRE: none.
+    /// POST: the set the mask encodes, or
+    /// [`IndexError::InvalidResetMarker`] when `mask` is 0 or any bit above
+    /// bit 2 is set.
     pub(super) fn from_mask(mask: u8) -> Result<Self, IndexError> {
         // A pre-#225 marker never carries bit 2, and reading one with the bit
         // absent is exactly right: the store had no live rows to reset.
         if mask == 0 || mask & !0b111 != 0 {
             return Err(IndexError::InvalidResetMarker);
         }
-        Ok(Self {
-            tx_lookup: mask & 0b001 != 0,
-            script_history: mask & 0b010 != 0,
-            script_live: mask & 0b100 != 0,
-        })
+        Ok(Self(mask))
+    }
+}
+
+impl FromIterator<IndexCapability> for IndexCapabilities {
+    fn from_iter<I: IntoIterator<Item = IndexCapability>>(iter: I) -> Self {
+        iter.into_iter().fold(Self::NONE, Self::insert)
     }
 }
 
@@ -288,7 +292,7 @@ impl IndexWatermark {
         snapshot: &dyn KvSnapshot,
         capability: IndexCapability,
     ) -> Result<Option<Self>, IndexError> {
-        let key = watermark_key(capability);
+        let key = capability.watermark_key();
         snapshot
             .get(ColumnFamily::UtxoMeta, key)?
             .as_deref()
@@ -355,15 +359,8 @@ pub(super) fn put_selected_watermarks<B: WriteBatch>(
     capabilities: IndexCapabilities,
     watermark: Option<IndexWatermark>,
 ) {
-    for capability in [
-        IndexCapability::TxLookup,
-        IndexCapability::ScriptHistory,
-        IndexCapability::ScriptLive,
-    ] {
-        if !capabilities.contains(capability) {
-            continue;
-        }
-        let key = watermark_key(capability);
+    for capability in capabilities.iter() {
+        let key = capability.watermark_key();
         if let Some(watermark) = watermark {
             batch.put(ColumnFamily::UtxoMeta, key, &watermark.to_bytes());
         } else {

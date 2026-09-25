@@ -5,6 +5,7 @@ use super::UndoScripts;
 use super::Worker;
 use crate::ConsumerCursorUpdate;
 use crate::IndexCapabilities;
+use crate::IndexCapability;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
 use crate::IndexWriteFence;
@@ -16,16 +17,7 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::pruning::HistoryUnavailable;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
-    let mut names = Vec::new();
-    if capabilities.tx_lookup {
-        names.push("tx_lookup");
-    }
-    if capabilities.script_history {
-        names.push("script_history");
-    }
-    if capabilities.script_live {
-        names.push("script_live");
-    }
+    let names: Vec<&str> = capabilities.iter().map(IndexCapability::name).collect();
     (!names.is_empty()).then(|| names.join(","))
 }
 
@@ -152,7 +144,7 @@ impl Worker {
         };
         let body = self.load_body(watermark.height, watermark_hash, &lease)?;
         let anchor = capabilities
-            .script_live
+            .contains(IndexCapability::ScriptLive)
             .then(|| self.live_anchor(watermark.height, watermark.hash))
             .transpose()?;
         lease.release();

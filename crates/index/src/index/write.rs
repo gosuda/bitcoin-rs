@@ -2,13 +2,14 @@
 
 use super::{
     block::NoSpentScripts, block::SpentCoinScripts, capability::IndexCapabilities,
-    capability::IndexWatermark, capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
-    capability::put_selected_watermarks, capability::selected_watermark, error::IndexError,
-    prepared::PreparedBatch, prepared::PreparedBatchLimits, reader::Indexer, rows::IndexRowCounts,
-    rows::PendingRows, rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY,
-    state::ConsumerCursorUpdate, state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE,
-    state::IndexWriteFence, state::capture_write_fence, state::commit_ordinary,
-    state::ensure_fence_live, state::resume_capability_reset,
+    capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
+    capability::SCRIPT_LIVE_WATERMARK_KEY, capability::put_selected_watermarks,
+    capability::selected_watermark, error::IndexError, prepared::PreparedBatch,
+    prepared::PreparedBatchLimits, reader::Indexer, rows::IndexRowCounts, rows::PendingRows,
+    rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY, state::ConsumerCursorUpdate,
+    state::FORMAT_VERSION_KEY, state::FORMAT_VERSION_VALUE, state::IndexWriteFence,
+    state::capture_write_fence, state::commit_ordinary, state::ensure_fence_live,
+    state::resume_capability_reset,
 };
 use bitcoin_rs_primitives::{OutPoint, encode};
 use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
@@ -248,7 +249,7 @@ impl<S: KvStore> IndexWriter<S> {
         watermark: IndexWatermark,
         floor: u32,
     ) -> Result<(), IndexError> {
-        if capabilities.is_empty() || capabilities.script_live {
+        if capabilities.is_empty() || capabilities.contains(IndexCapability::ScriptLive) {
             return Err(IndexError::AnchorUnsupportedSelection);
         }
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
@@ -406,7 +407,7 @@ impl<S: KvStore> IndexWriter<S> {
         body: &[u8],
         cursor: ConsumerCursorUpdate<'_>,
     ) -> Result<(), IndexError> {
-        if capabilities.script_live {
+        if capabilities.contains(IndexCapability::ScriptLive) {
             return Err(IndexError::MissingSpentScripts);
         }
         self.commit_rollback_one_for_with_cursor_with_spent_scripts(
@@ -499,21 +500,13 @@ impl<S: KvStore> IndexWriter<S> {
         // A disabled capability may still point above this block on the same
         // disconnected prefix. Retain every ancestor identity it may need to
         // reconcile when it is enabled again.
-        let unselected_keeps_identity = (!capabilities.tx_lookup
-            && fence
-                .watermarks
-                .tx_lookup
-                .is_some_and(|watermark| watermark.height >= current.height))
-            || (!capabilities.script_history
+        let unselected_keeps_identity = IndexCapability::ALL.into_iter().any(|capability| {
+            !capabilities.contains(capability)
                 && fence
                     .watermarks
-                    .script_history
-                    .is_some_and(|watermark| watermark.height >= current.height))
-            || (!capabilities.script_live
-                && fence
-                    .watermarks
-                    .script_live
-                    .is_some_and(|watermark| watermark.height >= current.height));
+                    .get(capability)
+                    .is_some_and(|watermark| watermark.height >= current.height)
+        });
         delete_rows(&mut store_batch, &prepared.rows, !unselected_keeps_identity);
         store_batch.put(
             ColumnFamily::UtxoMeta,
