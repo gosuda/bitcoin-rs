@@ -12,7 +12,7 @@ use bitcoin_rs_primitives::{
 use sha2::{Digest, Sha256};
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
 };
@@ -26,6 +26,63 @@ fn sigkill_restarts_at_valid_journal_frontier() -> Result<()> {
     for scenario in ["journal", "reorg", "publication"] {
         run_sigkill_scenario(scenario)?;
     }
+    Ok(())
+}
+
+/// The executed prune frontier is a durable fact, not process state: after a
+/// SIGKILL the restarted node still refuses a lease over the rows the killed
+/// process deleted, and those rows stay gone (#1151).
+#[test]
+fn pruned_frontier_survives_sigkill_and_refuses_deleted_history() -> Result<()> {
+    use bitcoin_rs_storage::pruning::RetentionError;
+
+    const FRONTIER: u32 = 12;
+    let temp = tempfile::tempdir()?;
+    let data_dir = temp.path().join("prune-node");
+    let config = prune_test_config(data_dir.clone());
+
+    crash_child("prune", &data_dir, Duration::from_secs(120))?;
+
+    let resumed = NodeState::open(config, None).context("restart after SIGKILL in prune")?;
+    let retention = resumed.chainstate().retention_handle();
+    assert_eq!(
+        retention.pruned_below(),
+        FRONTIER,
+        "the restarted authority starts from the frontier the killed process committed"
+    );
+    assert!(
+        matches!(
+            retention.acquire(FRONTIER - 1),
+            Err(RetentionError::PrunedBelow {
+                requested: 11,
+                pruned_below: 12,
+            })
+        ),
+        "deleted history is refused, not granted and discovered by a failed read"
+    );
+    retention.acquire(FRONTIER)?.release();
+
+    let tree = resumed.chainstate().block_tree_handle();
+    let hash_at = |height: u32| -> Result<Hash256> {
+        let tree = tree.read();
+        let tip = tree.tip().context("restarted node has no chain tip")?;
+        let id = tree
+            .node_at_height_from(tip.tip_id, height)
+            .context("chain is shorter than the sample height")?;
+        Ok(tree.node(id)?.hash)
+    };
+    let bodies = resumed
+        .chainstate()
+        .block_body_store_handle()
+        .context("pruned node has a body store")?;
+    assert!(
+        bodies.load_block_body(5, hash_at(5)?)?.is_none(),
+        "a body the killed pass deleted stays gone"
+    );
+    assert!(
+        bodies.load_block_body(20, hash_at(20)?)?.is_some(),
+        "history the frontier retains survives the restart"
+    );
     Ok(())
 }
 
@@ -79,15 +136,21 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
 }
 
 #[test]
-#[ignore = "spawned explicitly by sigkill_restarts_at_valid_journal_frontier"]
+#[ignore = "spawned explicitly by the SIGKILL scenario runners in this file"]
 fn crash_recovery_subprocess_worker() -> Result<()> {
     if std::env::var_os(CHILD_ENV).is_none() {
         return Ok(());
     }
     let data_dir = PathBuf::from(std::env::var(DATA_DIR_ENV)?);
     let scenario = std::env::var(SCENARIO_ENV)?;
-    let config = test_config(data_dir.clone());
     let genesis = Network::Regtest.genesis_block();
+    // The prune scenario needs the manual prune service, which exists only
+    // when a prune target is configured.
+    let config = if scenario == "prune" {
+        prune_test_config(data_dir.clone())
+    } else {
+        test_config(data_dir.clone())
+    };
     let state = NodeState::open(config, None)?;
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
 
@@ -105,6 +168,25 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
             state.apply_block(&genesis)?;
             state.publish_checkpoint()?;
             state.apply_block(&block1)?;
+        }
+        "prune" => {
+            // A chain long enough that the durable checkpoint leaves a real
+            // deletion range below the Core reorg margin, then one manual
+            // prune whose frontier must outlive the process.
+            state.apply_block(&genesis)?;
+            let mut previous = genesis.block_hash();
+            for height in 1..=300_u32 {
+                let block = mined_regtest_child_at(previous, height)?;
+                state.apply_block(&block)?;
+                previous = block.block_hash();
+            }
+            state.publish_checkpoint()?;
+            let Some(service) = state.prune_service() else {
+                bail!("prune scenario needs the prune service");
+            };
+            service
+                .prune_to_height(12)
+                .map_err(|error| anyhow::anyhow!("prune failed: {error}"))?;
         }
         other => bail!("unknown crash scenario {other}"),
     }
@@ -127,44 +209,7 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
         drop(base);
     }
 
-    let executable = std::env::current_exe()?;
-    let mut child = Command::new(executable)
-        .args([
-            "--ignored",
-            "--exact",
-            "crash_recovery_subprocess_worker",
-            "--nocapture",
-        ])
-        .env(CHILD_ENV, "1")
-        .env(DATA_DIR_ENV, &data_dir)
-        .env(SCENARIO_ENV, scenario)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawn crash worker for {scenario}"))?;
-
-    let ready = data_dir.join("crash-test-ready");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while !ready.is_file() {
-        if let Some(status) = child.try_wait()? {
-            let stderr = child.stderr.take().map_or_else(String::new, |stderr| {
-                read_stderr(stderr).unwrap_or_default()
-            });
-            bail!("crash worker for {scenario} exited early ({status}): {stderr}");
-        }
-        if Instant::now() >= deadline {
-            child.kill()?;
-            let _ = child.wait();
-            bail!("crash worker for {scenario} did not become ready");
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    child.kill()?;
-    let status = child.wait()?;
-    if status.success() {
-        bail!("crash worker for {scenario} exited successfully instead of being killed");
-    }
+    crash_child(scenario, &data_dir, Duration::from_secs(15))?;
 
     let resumed = NodeState::open(config, None)
         .with_context(|| format!("restart after SIGKILL in {scenario}"))?;
@@ -186,12 +231,62 @@ fn read_stderr(mut stderr: std::process::ChildStderr) -> std::io::Result<String>
     stderr.read_to_string(&mut output)?;
     Ok(output)
 }
+/// Spawns the ignored child worker for `scenario`, waits until it reports
+/// readiness, then kills it and proves it died by signal rather than exiting.
+fn crash_child(scenario: &str, data_dir: &Path, budget: Duration) -> Result<()> {
+    let executable = std::env::current_exe()?;
+    let mut child = Command::new(executable)
+        .args([
+            "--ignored",
+            "--exact",
+            "crash_recovery_subprocess_worker",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .env(DATA_DIR_ENV, data_dir)
+        .env(SCENARIO_ENV, scenario)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn crash worker for {scenario}"))?;
+
+    let ready = data_dir.join("crash-test-ready");
+    let deadline = Instant::now() + budget;
+    while !ready.is_file() {
+        if let Some(status) = child.try_wait()? {
+            let stderr = child.stderr.take().map_or_else(String::new, |stderr| {
+                read_stderr(stderr).unwrap_or_default()
+            });
+            bail!("crash worker for {scenario} exited early ({status}): {stderr}");
+        }
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let _ = child.wait();
+            bail!("crash worker for {scenario} did not become ready");
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child.kill()?;
+    let status = child.wait()?;
+    if status.success() {
+        bail!("crash worker for {scenario} exited successfully instead of being killed");
+    }
+    Ok(())
+}
 
 fn test_config(data_dir: PathBuf) -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.data_dir = data_dir;
     config.p2p.listen.clear();
     config.chainstate_journal.blocks = 1;
+    config
+}
+
+/// The same configuration with the manual prune service enabled.
+fn prune_test_config(data_dir: PathBuf) -> NodeConfig {
+    let mut config = test_config(data_dir);
+    config.storage.prune_target_mb = 1;
     config
 }
 
@@ -211,7 +306,7 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
         lock_time: LockTime::from_consensus(0),
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: Script::from_bytes(vec![1, u8::try_from(height)?]),
+            script_sig: Script::from_bytes(coinbase_height_push(height)?),
             sequence: Sequence::from_consensus(u32::MAX),
             witness: Witness::new(),
         }],
@@ -240,7 +335,18 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
             .checked_add(1)
             .ok_or_else(|| std::io::Error::other("test nonce exhausted"))?;
     }
+
     Ok(block)
+}
+
+/// The coinbase push that names `height`: one byte below 256, two bytes from
+/// there up, so a chain past the Core reorg margin mines without an
+/// overflowing narrowing conversion and without repeating a coinbase.
+fn coinbase_height_push(height: u32) -> Result<Vec<u8>> {
+    if height < 256 {
+        return Ok(vec![1, u8::try_from(height)?]);
+    }
+    Ok([&[2_u8][..], &u16::try_from(height)?.to_le_bytes()].concat())
 }
 
 fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
