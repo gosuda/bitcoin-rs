@@ -214,8 +214,8 @@ pub use bitcoin_rs_index::{
 /// barrier, the durable block-body reader, and the optional surfaces (prune,
 /// chain control, ZMQ publisher, debug log). The handler surface reads only
 /// these capability groups — RPC consumes node capabilities and never names a
-/// storage backend or backend engine type, and no capability is attached to a
-/// constructed `Context` afterwards.
+/// storage backend or backend engine type, and production wiring attaches
+/// nothing to a constructed `Context` afterwards.
 #[derive(Clone)]
 pub struct ContextHandles {
     /// Chain capability: tips, block log, UTXO set, block tree, transition
