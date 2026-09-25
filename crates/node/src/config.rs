@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
+use bitcoin_rs_index::IndexCapabilities;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_storage::StorageBackend;
 use core::fmt;
@@ -54,6 +55,27 @@ impl ScriptIndexMode {
     #[must_use]
     pub const fn keeps_history(self) -> bool {
         matches!(self, Self::Full)
+    }
+
+    /// Derived-index capabilities this mode and txindex jointly enable.
+    ///
+    /// PRE: none.
+    /// POST: one of `NONE`, `TX_LOOKUP`, `SCRIPT_LIVE`, `TX_LOOKUP_SCRIPT_LIVE`,
+    /// `ALL`. Full always includes `TxLookup` regardless of txindex (Esplora
+    /// prevout and fee rendering needs exact historical transactions); the
+    /// RPC-visible `derived_index_query` gate still requires an explicit
+    /// `--txindex`.
+    /// INVARIANT: the match is exhaustive over `(bool, Self)`; an
+    /// unreachable combination is not spellable from `crates/node`.
+    #[must_use]
+    pub const fn enabled_capabilities(self, txindex: bool) -> IndexCapabilities {
+        match (txindex, self) {
+            (false, Self::Disabled) => IndexCapabilities::NONE,
+            (true, Self::Disabled) => IndexCapabilities::TX_LOOKUP,
+            (false, Self::Utxo) => IndexCapabilities::SCRIPT_LIVE,
+            (true, Self::Utxo) => IndexCapabilities::TX_LOOKUP_SCRIPT_LIVE,
+            (_, Self::Full) => IndexCapabilities::ALL,
+        }
     }
 
     /// Parses a mode from a configuration value.
