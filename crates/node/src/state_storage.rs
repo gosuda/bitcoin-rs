@@ -24,6 +24,9 @@ pub(super) struct NodeStorage {
     undo_store: Arc<dyn bitcoin_rs_chainstate::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
+    /// The executed prune frontier the store reports: the deletions that
+    /// committed, whether or not the datadir predates the record.
+    executed_frontier: bitcoin_rs_storage::pruning::ExecutedFrontier,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
 }
 
@@ -43,6 +46,11 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer {
     where
         S: KvStore,
     {
+        // The frontier is read once, before the chainstate builds its
+        // retention authority, so no lease can be granted over history a
+        // previous process deleted.
+        let executed_frontier =
+            bitcoin_rs_storage::pruning::ExecutedFrontier::reconstruct(&*store)?;
         let deferred: Arc<dyn DeferredChainstateServices> = Arc::new(ChainstateStoreServices {
             store: Arc::clone(&store),
         });
@@ -56,6 +64,7 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer {
                 Arc::clone(&store),
                 self.block_files,
             )),
+            executed_frontier,
             deferred,
         })
     }
@@ -107,6 +116,11 @@ impl NodeStorage {
 
     pub(super) fn durable_head(&self) -> Arc<dyn bitcoin_rs_storage::DurableHeadStore> {
         Arc::clone(&self.durable_head)
+    }
+
+    /// The executed prune frontier loaded from the store.
+    pub(super) const fn executed_frontier(&self) -> bitcoin_rs_storage::pruning::ExecutedFrontier {
+        self.executed_frontier
     }
 }
 
