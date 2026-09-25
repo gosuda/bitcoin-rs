@@ -21,7 +21,7 @@ use support::fixture::{
     self, BodyCheck, BodyForm, Fixture, HttpTuple, PINNED_NETWORK, Relation, RequestAuth,
 };
 use support::harness::{NodeHarness, ServerHarness};
-use support::http::{Connection, RawRequest, RawResponse};
+use support::http::{Connection, HttpError, RawRequest, RawResponse};
 use support::limits::{MAX_CORPUS_BYTES, SEED_CHAIN_BLOCKS};
 use support::manifest_check::is_shipped_rpc_method;
 
@@ -236,6 +236,174 @@ fn keepalive_two_framed_responses_without_eof() -> Result<(), Box<dyn std::error
     }
     let envelope: Value = serde_json::from_slice(&second.body)?;
     decode_result_as_chaininfo(&envelope)?;
+    Ok(())
+}
+
+/// Replays one authenticated request from a worker thread while the caller
+/// holds the node's chain-transition barrier, and returns the complete framed
+/// response.
+///
+/// PRE: `server` wires the node's real transition barrier into its context,
+///   and no other lock is held by the caller.
+/// POST: the response was received before the barrier was released, or the
+///   call failed with the bound it hit.
+/// INVARIANT: the barrier is released on every outcome before the worker is
+///   joined, so a blocked handler cannot deadlock the gate.
+fn replay_during_chain_transition(
+    server: &ServerHarness,
+    body: &str,
+) -> Result<RawResponse, Box<dyn std::error::Error>> {
+    use std::net::SocketAddr;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// A status read that waits on the barrier stays blocked for the whole
+    /// window; this bounds the wait, it does not assert a latency.
+    const DEADLOCK_WATCHDOG: Duration = Duration::from_secs(30);
+
+    /// One bounded exchange on a fresh connection, off the main thread.
+    fn request(
+        address: SocketAddr,
+        authorization: String,
+        body: String,
+    ) -> Result<RawResponse, HttpError> {
+        let mut connection = Connection::connect(address)?;
+        let request = RawRequest {
+            path: "/",
+            authorization: Some(authorization),
+            body,
+            keep_alive: true,
+        };
+        let bytes = request.bytes();
+        connection.send_request_fragmented(&bytes, None)?;
+        connection.read_response()
+    }
+
+    let barrier = server.chain_transition();
+    let guard = barrier.lock();
+    let (sender, receiver) = mpsc::channel();
+    let address = server.address();
+    let authorization = ServerHarness::basic_token();
+    let owned_body = body.to_owned();
+    let worker = std::thread::spawn(move || {
+        let _ignored = sender.send(request(address, authorization, owned_body));
+    });
+    let outcome = receiver.recv_timeout(DEADLOCK_WATCHDOG);
+    drop(guard);
+    if worker.join().is_err() {
+        return Err(support::fail("the request worker panicked").into());
+    }
+    match outcome {
+        Ok(Ok(response)) => Ok(response),
+        Ok(Err(error)) => Err(support::fail(error).into()),
+        Err(_) => Err(support::fail(
+            "no complete response arrived while the chain-transition barrier was held",
+        )
+        .into()),
+    }
+}
+
+/// Reads the applied tip's published transaction count from the node state,
+/// never from an RPC answer, so the status response has an independent
+/// expectation to meet.
+fn seeded_chain_tx_count(node: &NodeHarness) -> Result<u64, Box<dyn std::error::Error>> {
+    let applied = node
+        .state
+        .chainstate()
+        .applied_tip_handle()
+        .load_full()
+        .ok_or_else(|| support::fail("the seeded node has no applied tip"))?;
+    Ok(applied
+        .chain_tx_count
+        .get()
+        .ok_or_else(|| support::fail("the applied tip publishes no transaction count"))?)
+}
+
+/// Decodes one JSON-RPC envelope answered while the barrier was held: HTTP
+/// 200, the matching id, and no error member.
+fn decoded_success(
+    response: &RawResponse,
+    method: &str,
+    id: i64,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    if response.status != 200 {
+        return Err(support::fail(format!(
+            "{method} answered HTTP {} while the barrier was held",
+            response.status
+        ))
+        .into());
+    }
+    let envelope: Value = serde_json::from_slice(&response.body)?;
+    if envelope.get("id").and_then(Value::as_i64) != Some(id) {
+        return Err(support::fail(format!("{method} answered a different id: {envelope}")).into());
+    }
+    if !matches!(envelope.get("error"), None | Some(Value::Null)) {
+        return Err(support::fail(format!("{method} returned an error: {envelope}")).into());
+    }
+    envelope
+        .get("result")
+        .cloned()
+        .ok_or_else(|| support::fail(format!("{method} answered no result")).into())
+}
+
+/// The live bug (issue #1132): an explorer's status read waited on the
+/// whole-chain transition, so requests hung while a block was applying.
+/// `getblockchaininfo` must answer from the last complete applied publication
+/// with the barrier held.
+#[test]
+fn getblockchaininfo_returns_during_chain_transition() -> Result<(), Box<dyn std::error::Error>> {
+    let (node, server) = stand_up()?;
+    let live = node.live_chain()?;
+
+    let response = replay_during_chain_transition(
+        &server,
+        r#"{"jsonrpc":"2.0","id":1,"method":"getblockchaininfo","params":[]}"#,
+    )?;
+    let result = decoded_success(&response, "getblockchaininfo", 1)?;
+    let reported = result
+        .get("bestblockhash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| support::fail("getblockchaininfo answered no bestblockhash"))?;
+    if reported != live.best_block_hash {
+        return Err(support::fail(format!(
+            "getblockchaininfo reported {reported}, not the applied tip {}",
+            live.best_block_hash
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// `getchaintxstats` must answer from the same published pair with the barrier
+/// held, reporting the applied tip's count rather than waiting for the
+/// transition to finish.
+#[test]
+fn getchaintxstats_returns_during_chain_transition() -> Result<(), Box<dyn std::error::Error>> {
+    let (node, server) = stand_up()?;
+    let seeded_count = seeded_chain_tx_count(&node)?;
+
+    let response = replay_during_chain_transition(
+        &server,
+        r#"{"jsonrpc":"2.0","id":2,"method":"getchaintxstats","params":[0]}"#,
+    )?;
+    let result = decoded_success(&response, "getchaintxstats", 2)?;
+    let reported = result
+        .get("txcount")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| support::fail("getchaintxstats answered no txcount"))?;
+    if reported != seeded_count {
+        return Err(support::fail(format!(
+            "getchaintxstats reported {reported}, not the published count {seeded_count}"
+        ))
+        .into());
+    }
+    // A zero-block window keeps its documented shape: no window fields.
+    if result.get("window_tx_count").is_some() || result.get("window_interval").is_some() {
+        return Err(support::fail(format!(
+            "a zero-block window must omit its fields: {result}"
+        ))
+        .into());
+    }
     Ok(())
 }
 
