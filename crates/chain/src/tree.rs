@@ -10,7 +10,7 @@ use slab::Slab;
 use crate::{
     CachedState, ChainError, ChainTxCount,
     bip9_cache::Bip9Cache,
-    node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus},
+    node::{BlockHeader, BlockTreeNode, NodeId, NodeStatus},
     tip::TipSnapshot,
 };
 
@@ -588,7 +588,7 @@ impl BlockTree {
             return Err(ChainError::DuplicateHeader { hash });
         }
 
-        let block_work = work_from_header(&header);
+        let block_work = crate::header_sync::pow::work_from_header(&header);
         let (height, chainwork, status) = match parent {
             Some(parent_id) => {
                 let parent_node = self.node(parent_id)?;
@@ -866,9 +866,6 @@ fn node_hash_key(nodes: &Slab<BlockTreeNode>, id: NodeId) -> u64 {
         .map_or(0, |node| hash_table_key(node.hash))
 }
 
-fn work_from_header(header: &BlockHeader) -> ChainWork {
-    crate::header_sync::pow::work_from_header(header)
-}
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{BlockHash, CompactTarget};
