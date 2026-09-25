@@ -12,3 +12,11 @@ flamegraph.svg
 docs/benchmarks/data
 data
 backups
+bitcoin-core/
+btcd/
+gocoin/
+libbitcoin/
+Floresta/
+utreexod/
+utreexo/
+rust-bitcoin/
