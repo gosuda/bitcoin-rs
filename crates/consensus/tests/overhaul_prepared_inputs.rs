@@ -4,7 +4,7 @@
 
 use bitcoin::hashes::Hash as _;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_consensus::total_sigop_cost;
+use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_primitives::tx::{Tx, TxIn, TxOut};
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Txid, Witness,
@@ -90,7 +90,7 @@ fn sigop_cost_owner_counts_from_resolved_prevouts() {
         })
         .collect();
     let flags = bitcoin_rs_script::VerifyFlags::STANDARD;
-    let first = total_sigop_cost(&tx, &prevouts, flags);
+    let first = transaction_sigop_cost(&tx, &prevouts, flags);
     // Two empty-script inputs carry no legacy sigops: the owner's count is
     // exactly zero for this fixture, not merely "bounded".
     assert_eq!(first, 0, "empty scripts count zero sigops");
@@ -99,7 +99,7 @@ fn sigop_cost_owner_counts_from_resolved_prevouts() {
     let mut reversed = prevouts;
     reversed.reverse();
     assert_eq!(
-        total_sigop_cost(&tx, &reversed, flags),
+        transaction_sigop_cost(&tx, &reversed, flags),
         first,
         "out-of-order prevouts resolve identically"
     );

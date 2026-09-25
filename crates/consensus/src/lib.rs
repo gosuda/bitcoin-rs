@@ -50,7 +50,6 @@ pub use bip9::{
 pub use bip113::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
 pub use block_view::BlockView;
 pub use sigops::transaction_sigop_cost;
-pub use sigops::transaction_sigop_cost as total_sigop_cost;
 pub use verify_block::{
     BlockRuleContext, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT, check_block_body_binding,
     compute_merkle_root, verify_block_rules, verify_block_rules_precomputed, verify_flags,
