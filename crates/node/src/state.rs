@@ -40,10 +40,10 @@ use std::time::Duration;
 use storage::NodeStorage;
 use storage::StoredBlockBodySource;
 
-#[path = "state_open.rs"]
-mod open;
 #[path = "state_index.rs"]
 mod index;
+#[path = "state_open.rs"]
+mod open;
 #[path = "state_prune.rs"]
 mod prune;
 #[path = "state_storage.rs"]
