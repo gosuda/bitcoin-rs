@@ -14,6 +14,28 @@ use crate::{
 /// current system time, per the Bitcoin consensus future-drift bound.
 const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 
+/// Outcome of admitting one inbound headers batch into the block tree.
+///
+/// The header-admission vocabulary lives beside [`accept_headers`] so the
+/// authoritative tree writer and every caller share one result type.
+pub enum HeaderAdmission {
+    /// Batch accepted into the block tree.
+    Accepted {
+        /// Headers accepted from the batch.
+        accepted: usize,
+        /// Hash of the last accepted header, when any were admitted.
+        announced_tip: Option<Hash256>,
+        /// Height of `announced_tip` on the active chain, when resolvable.
+        active_height: Option<i32>,
+    },
+    /// Header validation rejected the batch (peer-fault classification stays
+    /// with the caller).
+    Rejected(ChainError),
+    /// Admission refused before validation (chain transition lock
+    /// unavailable); batch dropped.
+    Refused(Box<dyn core::error::Error + Send + Sync>),
+}
+
 /// Accepts a contiguous batch of headers after proof-of-work validation.
 ///
 /// An already-present header is treated as an idempotent input: before any

@@ -9,9 +9,13 @@ pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::HeaderAdmission;
+use bitcoin_rs_chain::accept_headers;
+use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_primitives::Tx;
@@ -938,6 +942,63 @@ impl Chainstate {
             chainstate: self,
             guard,
         })
+    }
+
+    /// Admits one header batch into the authoritative block tree.
+    ///
+    /// PRE: the caller holds no chain lock. The operation takes
+    ///   [`Self::lock_transition`] itself — exactly as the node seam did —
+    ///   and releases it before returning.
+    /// POST: on acceptance the batch is in the tree and the assume-valid
+    ///   anchor has been re-evaluated over that same tree write; the
+    ///   result names the announced tip and its height on the active
+    ///   chain.
+    /// INVARIANT: header admission and block connection are the only
+    ///   operations that move the header tree; no caller may implement a
+    ///   second admission path. Lock order is chain transition, then the
+    ///   block-tree write guard; the download scheduler must never be
+    ///   held across this call, preserving the tree-before-scheduler
+    ///   discipline inside the executor.
+    pub fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
+        // Header admission moves the header tip, which the apply path
+        // reads under the transition; the lock keeps it fixed until commit.
+        let transition = match self.lock_transition() {
+            Ok(transition) => transition,
+            // The transition lock is unavailable, so admission is refused.
+            Err(error) => return HeaderAdmission::Refused(Box::new(error)),
+        };
+        let mut tree = self.block_tree().write();
+        let acceptance =
+            accept_headers(&mut tree, headers, self.network(), current_unix_seconds());
+        match acceptance {
+            Ok(node_ids) => {
+                let announced_tip = node_ids
+                    .last()
+                    .and_then(|id| tree.node(*id).ok())
+                    .map(|node| node.hash);
+                let active_height = tree
+                    .tip()
+                    .zip(announced_tip)
+                    .and_then(|(active_tip, hash)| {
+                        tree.active_height_of(active_tip.tip_id, hash)
+                            .and_then(|height| i32::try_from(height).ok())
+                    });
+                self.reevaluate_assume_valid_with(&tree);
+                drop(tree);
+                drop(transition);
+                HeaderAdmission::Accepted {
+                    accepted: node_ids.len(),
+                    announced_tip,
+                    active_height,
+                }
+            }
+            // Header validation rejected the batch after admission began.
+            Err(error) => {
+                drop(tree);
+                drop(transition);
+                HeaderAdmission::Rejected(error)
+            }
+        }
     }
 
     /// Begins an admitted authoritative-chain mutation.

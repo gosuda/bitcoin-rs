@@ -167,49 +167,7 @@ impl SyncChain for NodeSyncChain {
     }
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {
-        // Header admission moves the header tip, which the apply path
-        // reads under the transition; the lock keeps it fixed until commit.
-        let transition = match self.handles.lock_transition() {
-            Ok(transition) => transition,
-            // The transition lock is unavailable, so admission is refused.
-            Err(error) => return HeaderAdmission::Refused(Box::new(error)),
-        };
-        let mut tree = self.handles.block_tree().write();
-        let acceptance = bitcoin_rs_chain::accept_headers(
-            &mut tree,
-            headers,
-            self.handles.network(),
-            bitcoin_rs_chain::current_unix_seconds(),
-        );
-        match acceptance {
-            Ok(node_ids) => {
-                let announced_tip = node_ids
-                    .last()
-                    .and_then(|id| tree.node(*id).ok())
-                    .map(|node| node.hash);
-                let active_height = tree
-                    .tip()
-                    .zip(announced_tip)
-                    .and_then(|(active_tip, hash)| {
-                        tree.active_height_of(active_tip.tip_id, hash)
-                            .and_then(|height| i32::try_from(height).ok())
-                    });
-                self.handles.reevaluate_assume_valid_with(&tree);
-                drop(tree);
-                drop(transition);
-                HeaderAdmission::Accepted {
-                    accepted: node_ids.len(),
-                    announced_tip,
-                    active_height,
-                }
-            }
-            // Header validation rejected the batch after admission began.
-            Err(error) => {
-                drop(tree);
-                drop(transition);
-                HeaderAdmission::Rejected(error)
-            }
-        }
+        self.handles.admit_headers(headers)
     }
 
     fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {

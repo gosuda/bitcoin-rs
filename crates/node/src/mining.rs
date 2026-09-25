@@ -10,8 +10,6 @@ use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_chain::accept_headers;
-use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_chain::signalling_deployments;
 use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_chainstate::Chainstate;
@@ -404,20 +402,20 @@ impl MiningControl for MiningCoordinator {
         self.submit(&block, Some(serialized))
     }
 
-    /// Admits `header` through [`accept_headers`], the same gate inbound P2P uses.
+    /// Admits `header` through [`Chainstate::admit_headers`], the same gate
+    /// inbound P2P header admission runs.
     fn submit_header(&self, header: Header) -> Result<(), MiningControlError> {
-        let _transition = self.chainstate.lock_transition().map_err(|error| {
-            MiningControlError::Unavailable(CompactString::from(error.to_string()))
-        })?;
-        let mut tree = self.chainstate.block_tree().write();
-        accept_headers(
-            &mut tree,
-            std::slice::from_ref(&header),
-            self.chainstate.network(),
-            current_unix_seconds(),
-        )
-        .map(|_| ())
-        .map_err(header_reject_reason)
+        match self.chainstate.admit_headers(std::slice::from_ref(&header)) {
+            bitcoin_rs_chain::HeaderAdmission::Accepted { .. } => Ok(()),
+            bitcoin_rs_chain::HeaderAdmission::Rejected(error) => {
+                Err(header_reject_reason(error))
+            }
+            bitcoin_rs_chain::HeaderAdmission::Refused(error) => {
+                Err(MiningControlError::Unavailable(CompactString::from(
+                    error.to_string(),
+                )))
+            }
+        }
     }
 
     fn publish_generation(&self) {
