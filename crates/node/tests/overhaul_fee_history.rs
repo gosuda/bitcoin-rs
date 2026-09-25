@@ -5,7 +5,7 @@
 //! one shared [`bitcoin_rs_mempool::MempoolGateway`] exactly like RPC ingress
 //! (`crates/node/src/tx_ingress.rs`), confirmations happen when ordinary
 //! block validation connects a block containing them
-//! (`crates/node/src/apply_connect.rs` → `remove_for_block`), replacements go
+//! (`crates/node/src/chain_effects.rs` → `remove_for_block`), replacements go
 //! through gateway admission's BIP125 path, evictions through
 //! `evict_below_fee_rate`, the reorg leg through `reorg::invalidate_block`
 //! with its reconsideration walk, and restart through `NodeState::open`
