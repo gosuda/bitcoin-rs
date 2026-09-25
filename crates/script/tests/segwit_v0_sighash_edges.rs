@@ -126,12 +126,12 @@ fn verify_witness(
     witness: &[Vec<u8>],
     flags: VerifyFlags,
 ) -> Result<bool, ScriptError> {
-    Interpreter.execute(
+    Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
         &[],
         witness,
         flags,
-        prevout,
+        std::slice::from_ref(prevout),
         tx,
         INPUT,
     )

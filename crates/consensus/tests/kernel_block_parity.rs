@@ -142,12 +142,12 @@ fn interpreter_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result
     for (input_index, (input, prevout)) in tx.inputs.iter().zip(prevouts).enumerate() {
         let witness = input.witness.clone();
         Interpreter
-            .execute(
+            .execute_with_prevouts(
                 &prevout.script_pubkey,
                 &input.script_sig,
                 &witness,
                 flags,
-                prevout,
+                prevouts,
                 tx,
                 input_index,
             )

@@ -30,7 +30,7 @@ Replace `p2p_message` with any of:
 | `p2p_message`    | P2P wire message decoder (`read_message`)                               |
 | `block_validate` | rust-bitcoin block parse, then `verify_block_rules`                     |
 | `tx_validate`    | rust-bitcoin tx/witness parse, then consensus + mempool `check_acceptance` |
-| `script_eval`    | Production interpreter entry point (`Interpreter::execute` with fuzz-selected `VerifyFlags`) |
+| `script_eval`    | Production interpreter entry point (`Interpreter::execute_with_prevouts` with fuzz-selected `VerifyFlags`) |
 | `utxo_snapshot`  | UTXO snapshot deserializer (`read_snapshot_strict_v4`)                  |
 
 To limit the run to 60 seconds:

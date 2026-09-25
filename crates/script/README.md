@@ -3,7 +3,7 @@
 Native script verification for every consensus spend class, plus the sigop
 counters that surround execution.
 
-`Interpreter::execute` and `Interpreter::execute_with_prevouts` run one script
+`Interpreter::execute_with_prevouts` runs one script
 spend under a `VerifyFlags` set (parseable from Core test-vector flag strings
 via `VerifyFlags::from_core_names`). The opcode evaluator covers legacy and
 P2SH, SegWit v0 uses BIP143 sighashes, and Taproot key-path and script-path
