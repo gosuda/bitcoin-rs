@@ -11,10 +11,12 @@ mempool DAG. The `coinbase` module funds
 the coinbase (subsidy plus actual fees) and, when `SegWit` is active, attaches the
 witness commitment through consensus `compute_merkle_root` (the same AVX2/spine
 fold block rules use).
-[`Candidate::solve`](crate::Candidate::solve) turns that candidate into a header
-that meets its compact target. Failures surface as [`MiningError`](crate::MiningError).
+[`into_unsolved_block`](crate::Candidate::into_unsolved_block) turns that candidate
+into a header with a zero nonce, and [`solve_block`](crate::solve_block) searches
+nonces until the header meets its compact target. Failures surface as
+[`MiningError`](crate::MiningError).
 
-The crate owns the domain `Candidate`, [`Candidate::solve`](crate::Candidate::solve),
+The crate owns the domain `Candidate`, [`solve_block`](crate::solve_block),
 and the node-facing mining contract ([`MiningControl`](crate::MiningControl),
 [`BlockTemplate`](crate::BlockTemplate), [`MiningInfo`](crate::MiningInfo),
 [`MiningControl::generate`](crate::MiningControl::generate)).
