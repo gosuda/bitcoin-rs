@@ -48,7 +48,7 @@ pub use lease::{RetentionError, RetentionLease, RetentionRegistry};
 pub use policy::PrunePolicy;
 pub use undo_pruner::{UndoPruner, block_undo_key};
 
-use crate::{StorageError, WriteBatch as _};
+use crate::{BufferedWriteBatch, StorageError};
 use thiserror::Error;
 
 const PRUNEHEIGHT_METADATA_KEY: &[u8] = b"node:pruneheight";
@@ -160,7 +160,7 @@ pub fn prune_to_height<S: crate::KvStore>(
 /// already met, leaves nothing to record.
 pub fn stage_block_and_undo_prune<S: crate::KvStore>(
     store: &S,
-    batch: &mut S::WriteBatch,
+    batch: &mut BufferedWriteBatch,
     block_files: &crate::FlatFileBlockStore,
     current_tip_height: u32,
     durable_tip_height: u32,

@@ -144,8 +144,6 @@ impl RocksDbStore {
 }
 
 impl KvStore for RocksDbStore {
-    type WriteBatch = BufferedWriteBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.db
             .get_cf(self.cf_handle(cf)?, key)
@@ -177,7 +175,7 @@ impl KvStore for RocksDbStore {
         ))
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
+    fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
 
@@ -188,17 +186,17 @@ impl KvStore for RocksDbStore {
             .map_err(StorageError::backend)
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock();
         self.write_with_durability(batch, "default", false)
     }
 
-    fn write_deferred(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_deferred(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock();
         self.write_with_durability(batch, "deferred", false)
     }
 
-    fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock();
         self.write_with_durability(batch, "durable", true)
     }

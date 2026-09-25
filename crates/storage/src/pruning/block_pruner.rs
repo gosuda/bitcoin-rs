@@ -1,7 +1,7 @@
 use alloc::sync::Arc;
 
 use crate::{
-    BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvStore, StorageError, WriteBatch,
+    BlockFilePosition, BufferedWriteBatch, ColumnFamily, FlatFileBlockStore, KvStore, StorageError,
     decode_block_file_max_height,
 };
 use bitcoin_rs_primitives::Hash256;
@@ -90,7 +90,7 @@ pub(crate) fn prune_prefixed_rows<S: KvStore>(
 
 pub(crate) fn prune_prefixed_rows_into_batch<S: KvStore>(
     store: &S,
-    batch: &mut S::WriteBatch,
+    batch: &mut BufferedWriteBatch,
     cf: ColumnFamily,
     prefix: &[u8],
     prune_below_height: u32,
@@ -134,7 +134,7 @@ pub(crate) fn prune_prefixed_rows_into_batch<S: KvStore>(
 
 pub(crate) fn stage_flat_block_file_prune<S: KvStore>(
     store: &S,
-    batch: &mut S::WriteBatch,
+    batch: &mut BufferedWriteBatch,
     block_files: &FlatFileBlockStore,
     prune_below_height: u32,
     policy: PrunePolicy,

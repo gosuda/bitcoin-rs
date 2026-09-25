@@ -5,6 +5,8 @@ extern crate alloc;
 
 use core::{fmt, str::FromStr};
 
+pub use batch::{BatchOp, BufferedWriteBatch};
+
 pub use block_file::{
     BLOCK_FILE_DIRECTORY, BLOCK_FILE_MAGIC, BLOCK_FILE_MAX_BYTES, BlockFilePosition,
     FlatFileBlockReader, FlatFileBlockStore, block_file_max_height_key, complete_framed_stats,
@@ -25,7 +27,7 @@ pub use footprint::{
 
 pub use trait_::{
     KvIter, KvPair, KvSnapshot, KvStore, PersistBoundary, PersistFault, PersistFaultSlot,
-    PrefixScan, PrefixScanLimit, WriteBatch, WriteCondition,
+    PrefixScan, PrefixScanLimit, WriteCondition,
 };
 
 pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore};
@@ -98,6 +100,8 @@ impl fmt::Display for StorageBackend {
     }
 }
 
+/// Ordered atomic write batches shared by every backend.
+mod batch;
 /// Indexed authoritative block bodies and read sessions.
 pub mod block_body;
 /// Append-only flat files for immutable block bodies.
@@ -121,8 +125,6 @@ mod trait_;
 /// Per-block UTXO undo records and the in-flight disconnect marker.
 pub mod undo;
 
-#[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
-mod batch;
 #[cfg(feature = "fjall")]
 mod fjall_impl;
 #[cfg(feature = "redb")]
