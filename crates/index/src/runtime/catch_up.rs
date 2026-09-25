@@ -23,6 +23,7 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyReader;
+use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
 use crossbeam_channel::Receiver;
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
@@ -96,8 +97,30 @@ impl Worker {
             || watermark.map_or(0, |w| w.height.saturating_add(1)),
             |endpoint| endpoint.height.saturating_add(1),
         );
+        // Ask the authority to hold this leg's history. While the grant
+        // lives no row at or above `start_height` is deleted, so a body that
+        // reads back absent is transient absence rather than lost history,
+        // and the pass never has to re-derive a prune line. A refused grant
+        // is the owner's decision that this consumer's history is gone:
+        // waiting is the only honest reaction, because a rebuild cannot
+        // recover deleted rows either.
+        let pass_history = match self.history.request_history(start_height) {
+            Ok(lease) => lease,
+            Err(HistoryUnavailable::Pruned { below }) => {
+                tracing::warn!(
+                    below,
+                    start_height,
+                    "derived index needs history the pruning authority deleted"
+                );
+                return Ok(ReconcileAction::Stalled);
+            }
+            Err(error) => {
+                tracing::debug!(%error, "derived index history grant deferred");
+                return Ok(ReconcileAction::Stalled);
+            }
+        };
         if start_height > target.height {
-            return if self.sync_and_commit(state)?.is_some() {
+            return if self.commit_forward(state, &pass_history)?.is_some() {
                 Ok(ReconcileAction::CaughtUp)
             } else {
                 Ok(ReconcileAction::Stalled)
@@ -145,6 +168,7 @@ impl Worker {
                     &mut body_reader,
                     capabilities,
                     &mut state,
+                    &pass_history,
                     pending,
                 )? {
                     ChunkAction::Continue => {}
@@ -154,7 +178,7 @@ impl Worker {
             }
         }
 
-        self.finish_catch_up(state, chunk_end, target, pending)
+        self.finish_catch_up(state, chunk_end, target, &pass_history, pending)
     }
 
     /// Loads bodies serially until the count or byte cap, prepares that prefix
@@ -164,12 +188,14 @@ impl Worker {
     /// was requested, `Progressed` if the batch filled and was committed, or
     /// `Continue` to keep processing.
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_and_admit_chunk(
         &self,
         identities: &mut &[BlockIdentity],
         body_reader: &mut Box<dyn BlockBodyReader + '_>,
         capabilities: IndexCapabilities,
         state: &mut PendingForward,
+        history: &HistoryLease,
         pending: &mut Option<PendingForward>,
     ) -> Result<ChunkAction, DerivedIndexWorkerError> {
         if self.runtime.should_stop() {
@@ -251,7 +277,7 @@ impl Worker {
             }
             if state.batch.try_push(prepared).is_err() {
                 return if self
-                    .sync_and_commit(state.take(self.batch_limits))?
+                    .commit_forward(state.take(self.batch_limits), history)?
                     .is_some()
                 {
                     Ok(ChunkAction::Progressed)
@@ -261,7 +287,7 @@ impl Worker {
             }
             if state.batch.is_full() {
                 return if self
-                    .sync_and_commit(state.take(self.batch_limits))?
+                    .commit_forward(state.take(self.batch_limits), history)?
                     .is_some()
                 {
                     Ok(ChunkAction::Progressed)
@@ -279,6 +305,7 @@ impl Worker {
         state: PendingForward,
         chunk_end: u32,
         target: &TipSnapshot,
+        history: &HistoryLease,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         if chunk_end < target.height {
@@ -302,11 +329,29 @@ impl Worker {
             return Ok(ReconcileAction::Buffered);
         }
 
-        if self.sync_and_commit(state)?.is_some() {
+        if self.commit_forward(state, history)?.is_some() {
             Ok(ReconcileAction::Progressed)
         } else {
             Ok(ReconcileAction::Stalled)
         }
+    }
+
+    /// Commits one forward batch and moves the history pin to the position
+    /// that batch made durable.
+    ///
+    /// POST: the authority may then prune the history this consumer has
+    /// already indexed, so a long catch-up costs a bounded window instead of
+    /// every row above its starting watermark.
+    fn commit_forward(
+        &self,
+        state: PendingForward,
+        history: &HistoryLease,
+    ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
+        let durable = self.sync_and_commit(state)?;
+        if let Some(endpoint) = durable.as_ref() {
+            history.advance(endpoint.height.saturating_add(1));
+        }
+        Ok(durable)
     }
 }
 

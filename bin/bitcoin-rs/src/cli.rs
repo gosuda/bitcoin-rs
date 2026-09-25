@@ -96,6 +96,9 @@ impl CliArgs {
                 backend: self.storage_backend,
                 dbcache_mb: self.dbcache_mb,
                 prune_target_mb: self.prune_target_mb,
+                // No command-line knob: the optional-consumer retention
+                // bound is a config-file and embedded-API setting.
+                index_retention_depth: None,
             },
             p2p: P2pOverrides {
                 magic: self.p2p_magic,

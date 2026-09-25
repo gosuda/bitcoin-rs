@@ -7,9 +7,9 @@ use std::collections::BTreeMap;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
-    BLOCK_DATA_CF, BlockPruner, ExecutedFrontier, PrunePolicy, RetentionRegistry, block_body_key,
-    load_executed_frontier, load_pruneheight, prune_to_height, reclaim_staged_flat_block_files,
-    stage_block_and_undo_prune,
+    BLOCK_DATA_CF, BlockPruner, ExecutedFrontier, HistoryAccess, HistoryUnavailable, PrunePolicy,
+    RetentionBudget, RetentionRegistry, block_body_key, load_executed_frontier, load_pruneheight,
+    prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
 };
 use bitcoin_rs_storage::{
     BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvIter, KvSnapshot, KvStore, KvUndoStore,
@@ -676,6 +676,72 @@ fn legacy_datadir_with_no_rows_falls_back_to_the_requested_line()
         "an emptied legacy datadir grants no lease below its recorded line"
     );
     assert_eq!(retention.acquire(50)?.floor(), 50);
+    Ok(())
+}
+
+/// An optional consumer inside its budget still clamps the line; one that
+/// lags beyond it stops blocking pruning, and the owner tells it the
+/// capability is gone instead of the consumer guessing from a read that
+/// returns nothing (#1151).
+#[test]
+fn optional_consumer_budget_exhaustion_unblocks_pruning() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+
+    // Inside the budget: the pin binds the line, so nothing goes.
+    let bounded = Arc::new(RetentionRegistry::new());
+    let roomy = HistoryAccess::new(Arc::clone(&bounded), RetentionBudget::Depth(5));
+    let held = roomy.request_history(10)?;
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &bounded,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12,
+        |_| Ok(()),
+    )?;
+    assert_eq!(staged.pruned_below, 0);
+    assert_eq!(bounded.pruned_below(), 0);
+    assert!(row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    held.release();
+
+    // Beyond the budget: the pass expires the pin, deletes through its line,
+    // and the consumer's next request carries the owner's permanent answer.
+    let lagging = Arc::new(RetentionRegistry::new());
+    let tight = HistoryAccess::new(Arc::clone(&lagging), RetentionBudget::Depth(1));
+    let stale = tight.request_history(10)?;
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &lagging,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12,
+        |_| Ok(()),
+    )?;
+    assert_eq!(staged.pruned_below, 12);
+    assert_eq!(lagging.active_leases(), 0, "the expired pin is gone");
+    assert_eq!(stale.floor(), 0);
+    assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert!(!row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    assert!(matches!(
+        tight.request_history(10),
+        Err(HistoryUnavailable::Pruned { below: 12 })
+    ));
+    // The consumer can still ask for history that exists.
+    assert_eq!(tight.request_history(12)?.floor(), 12);
     Ok(())
 }
 
