@@ -8,8 +8,8 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
     BLOCK_DATA_CF, BlockPruner, ExecutedFrontier, HistoryAccess, HistoryUnavailable, PrunePolicy,
-    RetentionBudget, RetentionRegistry, block_body_key, load_executed_frontier, load_pruneheight,
-    prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
+    RetentionBudget, RetentionRegistry, block_body_key, block_undo_key, load_executed_frontier,
+    load_pruneheight, prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
 };
 use bitcoin_rs_storage::{
     BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvIter, KvSnapshot, KvStore, KvUndoStore,
@@ -677,6 +677,56 @@ fn legacy_datadir_with_no_rows_falls_back_to_the_requested_line()
         "an emptied legacy datadir grants no lease below its recorded line"
     );
     assert_eq!(retention.acquire(50)?.floor(), 50);
+    Ok(())
+}
+
+/// The two families' survivor floors can diverge on a legacy datadir — an
+/// older undo-only pass, or body rows a reorg reintroduced, leaves one
+/// family's lowest survivor below the other's. The join must stay the
+/// `max`: it at worst refuses a lease over rows that still exist, and
+/// never grants one over rows the other family already lost (#1151).
+#[test]
+fn legacy_datadir_divergent_family_floors_join_on_the_safe_max()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    // Bodies survive from 30 up; undo rows survive from 20 up. Each
+    // family proves its own deletions below its floor, and the persisted
+    // requested line predates both.
+    write_body_rows(
+        &store,
+        &block_files,
+        &[(30, b"block-body"), (31, b"block-body")],
+    )?;
+    for height in [20_u32, 21] {
+        store.put(
+            ColumnFamily::UndoData,
+            &block_undo_key(height, fake_hash(height)),
+            b"undo-record",
+        )?;
+    }
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"node:pruneheight",
+        &5_u32.to_be_bytes(),
+    )?;
+
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(
+        frontier,
+        ExecutedFrontier::new(30),
+        "the join is the highest family floor, not the lower undo floor"
+    );
+    let retention = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(
+        retention.acquire(29).is_err(),
+        "a lease below the bodies floor would pin deleted bodies"
+    );
+    // Undo rows at 20 and 21 survive yet stay ungrantable: the
+    // over-refusal is the documented cost of the safe join.
+    assert!(retention.acquire(20).is_err());
+    assert_eq!(retention.acquire(30)?.floor(), 30);
     Ok(())
 }
 
