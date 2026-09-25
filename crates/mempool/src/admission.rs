@@ -2160,6 +2160,106 @@ mod tests {
         );
     }
 
+    /// A parent paying a P2WSH `OP_DROP OP_TRUE` script, so that two
+    /// different witnesses of one transaction are both valid.
+    fn p2wsh_parent_and_variants() -> (Tx, Arc<Tx>, Arc<Tx>) {
+        use bitcoin::hashes::{Hash as _, sha256};
+
+        let witness_script = vec![0x75, 0x51];
+        let mut script_pubkey = vec![0x00, 0x20];
+        script_pubkey.extend_from_slice(&sha256::Hash::hash(&witness_script).to_byte_array());
+        let mut parent =
+            standard_spend(OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0), 1);
+        parent.outputs[0] = TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: Script::from_bytes(script_pubkey),
+        };
+        let outpoint = OutPoint::new(parent.txid(), 0);
+        let mut first = standard_spend(outpoint, 2);
+        first.inputs[0].witness = Witness::from_stack(vec![vec![0x11], witness_script.clone()]);
+        let first = Arc::new(first);
+        let mut second = (*first).clone();
+        second.inputs[0].witness = Witness::from_stack(vec![vec![0x22], witness_script]);
+        let second = Arc::new(second);
+        (parent, first, second)
+    }
+
+    // TXR-06: a resident orphan suppresses only its own witness identity.
+    #[test]
+    fn orphan_txid_does_not_suppress_txid_inventory_but_wtxid_does() {
+        let gateway = gateway();
+        let (_parent, held, _other) = p2wsh_parent_and_variants();
+        assert_ne!(
+            Hash256::from(held.txid()),
+            Hash256::from(held.wtxid()),
+            "a witnessed body hashes differently per identity"
+        );
+        assert!(matches!(
+            gateway.submit_transaction(
+                Arc::clone(&held),
+                AdmissionOrigin::Peer(source()),
+                None,
+                1,
+                &Coins(vec![])
+            ),
+            Ok(SubmitOutcome::Held { .. })
+        ));
+        // Another witness of the resident txid can still be valid, so the
+        // txid inventory stays requestable while the exact wtxid does not.
+        assert!(!gateway.have_tx(Hash256::from(held.txid()), false));
+        assert!(gateway.have_tx(Hash256::from(held.wtxid()), true));
+        // A txid request never selects an orphan body: two residents can
+        // share it. Only the exact witness identity serves.
+        assert_eq!(gateway.get_tx(held.txid()), None);
+        assert_eq!(gateway.get_tx_by_wtxid(held.wtxid()), Some((*held).clone()));
+    }
+
+    // TXR-06: two valid witnesses of one txid coexist and retry on their own.
+    #[test]
+    fn same_txid_different_witnesses_both_survive_and_retry_after_parent() {
+        let gateway = gateway();
+        let (parent, first, second) = p2wsh_parent_and_variants();
+        assert_eq!(first.txid(), second.txid());
+        assert_ne!(first.wtxid(), second.wtxid());
+        let second_source = PeerToken {
+            connection_id: source().connection_id + 1,
+            ..source()
+        };
+        for (body, announcer) in [(&first, source()), (&second, second_source)] {
+            assert!(matches!(
+                gateway.submit_transaction(
+                    Arc::clone(body),
+                    AdmissionOrigin::Peer(announcer),
+                    None,
+                    1,
+                    &Coins(vec![])
+                ),
+                Ok(SubmitOutcome::Held { .. })
+            ));
+        }
+        // The second arrival does not displace the first: both bodies reside.
+        assert_eq!(gateway.orphan_count(), 2);
+        assert_eq!(
+            gateway.get_tx_by_wtxid(first.wtxid()),
+            Some((*first).clone())
+        );
+        assert_eq!(
+            gateway.get_tx_by_wtxid(second.wtxid()),
+            Some((*second).clone())
+        );
+
+        // The parent arrives: every variant spending it becomes eligible.
+        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        let results = gateway.retry_orphans(&Coins(vec![]), 2);
+        // Whichever variant commits first, the mempool then owns the shared
+        // txid, so both exact bodies resolve and nothing stays resident.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].txid, first.txid());
+        assert!(matches!(results[0].result, Ok(SubmitOutcome::Committed(_))));
+        assert_eq!(gateway.orphan_count(), 0);
+        assert!(gateway.read().contains_txid(&first.txid()));
+    }
+
     // MPL-04 and Core COutPoint::IsNull: zero-hash vout 0 is an ordinary
     // non-null outpoint, so missing-parent requests, indexing and coin lookup agree.
     #[test]

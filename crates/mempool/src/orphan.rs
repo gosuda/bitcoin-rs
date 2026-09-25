@@ -901,4 +901,65 @@ mod tests {
         assert_eq!(state.orphans.total_weight(), sibling.weight());
         assert_eq!(state.rejects_len(), 2);
     }
+
+    /// TXR-06: two peers holding different witnesses of one txid coexist, and
+    /// a disconnect removes only the departed peer's announcement.
+    #[test]
+    fn same_wtxid_keeps_all_announcers_and_disconnect_removes_one() {
+        let parent = tx(9, Txid::default()).txid();
+        let mut pool = OrphanPool::new(10);
+        let body = tx(1, parent);
+        pool.insert(Arc::clone(&body), source(1), 0);
+        pool.insert(Arc::clone(&body), source(2), 0);
+        assert_eq!(pool.len(), 1);
+        assert_eq!(
+            pool.get(body.wtxid()).map(|held| held.announcers.len()),
+            Some(2)
+        );
+
+        // One announcer's connection is gone. The body stays with the other.
+        let live = HashSet::from([source(1)]);
+        assert_eq!(pool.maintain(1, &live), 0);
+        assert!(pool.get(body.wtxid()).is_some());
+        pool.parent_ready(parent);
+        let ready = pool.take_ready();
+        assert_eq!(ready.len(), 1);
+        assert!(Arc::ptr_eq(&ready[0].0.tx, &body));
+        assert_eq!(ready[0].1, source(1));
+
+        // The last announcer leaving removes the body.
+        let live = HashSet::new();
+        assert_eq!(pool.maintain(2, &live), 1);
+        assert!(pool.get(body.wtxid()).is_none());
+        assert!(pool.peer_usage.is_empty());
+    }
+
+    /// TXR-06: global-limit relief trims the peer with the highest `DoS` score
+    /// first, so a peer within its allowance cannot be blamed for another's
+    /// reserved usage.
+    #[test]
+    fn eviction_trims_the_highest_peer_score_before_protected_peer() {
+        let parent = tx(9, Txid::default()).txid();
+        let protected = tx(1, parent);
+        let first = tx(2, parent);
+        let second = tx(3, parent);
+        let mut pool = OrphanPool::with_limits(
+            2,
+            DEFAULT_MAX_ORPHAN_WEIGHT,
+            1,
+            DEFAULT_PEER_ANNOUNCEMENT_WEIGHT,
+            DEFAULT_PEER_LATENCY,
+        );
+        pool.insert(Arc::clone(&protected), source(1), 0);
+        pool.insert(Arc::clone(&first), source(2), 1);
+        pool.insert(Arc::clone(&second), source(2), 2);
+
+        // Over the count bound. The peer with two announcements is trimmed,
+        // and its own oldest announcement goes first; the single-announcement
+        // peer keeps its body even though it arrived earliest.
+        assert_eq!(pool.len(), 2);
+        assert!(pool.get(protected.wtxid()).is_some());
+        assert!(pool.get(first.wtxid()).is_none());
+        assert!(pool.get(second.wtxid()).is_some());
+    }
 }
