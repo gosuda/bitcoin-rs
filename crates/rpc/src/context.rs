@@ -259,8 +259,9 @@ pub struct ChainHandles {
     pub block_tree: Arc<parking_lot::RwLock<bitcoin_rs_chain::BlockTree>>,
     /// Consensus network.
     pub chain_network: Network,
-    /// Authoritative chain connect/disconnect transition barrier. The chain
-    /// owner supplies it; RPC never constructs a substitute.
+    /// Authoritative chain connect/disconnect transition barrier. Production
+    /// supplies the chain owner's barrier; the synthetic `Default` builds a
+    /// private one for tests.
     pub chain_transition: Arc<Mutex<()>>,
     /// Durable block-body reader for metadata-only block records.
     pub block_body_source: Option<Arc<dyn BlockBodySource>>,
@@ -419,7 +420,7 @@ pub struct MiningHandles {
 /// `Context` itself carries only those groups plus presentation-local state
 /// (the ZMQ publisher surface, the debug-log path, the REST render budget,
 /// and the listener bind epoch). Handlers read capabilities through the
-/// groups; nothing is attached to a constructed `Context`.
+/// groups; production wiring attaches nothing after construction.
 pub struct Context {
     /// Chain capability: tips, block log, UTXO set, block tree, transition
     /// barrier, and the chain-owned control surfaces.
@@ -452,7 +453,8 @@ impl fmt::Debug for Context {
 }
 
 impl Default for ChainHandles {
-    /// Builds the empty synthetic chain world used by tests and early startup.
+    /// Builds the empty synthetic chain world used by tests, including a
+    /// private transition barrier no chain owner shares.
     #[allow(clippy::arc_with_non_send_sync)]
     fn default() -> Self {
         let coin_stats_listener = bitcoin_rs_utxo::stats::CoinStatsListener::new(
@@ -513,8 +515,8 @@ impl Default for NetworkHandles {
 }
 
 impl Default for ContextHandles {
-    /// Builds the empty synthetic capability set used by tests and early
-    /// startup. Production wiring supplies every capability it owns.
+    /// Builds the empty synthetic capability set used by tests. Production
+    /// wiring supplies every capability it owns.
     #[allow(clippy::arc_with_non_send_sync)]
     fn default() -> Self {
         Self {
@@ -536,9 +538,9 @@ impl Default for Context {
 }
 
 impl Context {
-    /// Builds an empty context over the default synthetic handles. Test and
-    /// early-startup convenience; production composes a complete
-    /// [`ContextHandles`] through [`Self::from_handles`].
+    /// Builds an empty context over the default synthetic handles. Test
+    /// convenience; production composes a complete [`ContextHandles`]
+    /// through [`Self::from_handles`].
     #[must_use]
     pub fn new() -> Self {
         Self::from_handles(ContextHandles::default())
@@ -568,9 +570,11 @@ impl Context {
     /// This is the single production composition point. PRE: `handles` names
     /// every capability the context will use, including the authoritative
     /// chain-transition barrier supplied by the chain owner. POST: the
-    /// context is complete; no capability is attached afterwards.
-    /// INVARIANT: RPC never creates a substitute transition barrier — the
-    /// barrier in `handles.chain` is the only one the context locks.
+    /// context carries that full set; the groups' `pub` fields still permit
+    /// post-hoc attachment, which only test fixtures use.
+    /// INVARIANT: production wiring supplies the chain owner's barrier
+    /// (e.g. `chainstate.transition_barrier()`); the synthetic
+    /// [`ContextHandles::default`] path builds a private barrier for tests.
     #[must_use]
     pub fn from_handles(handles: ContextHandles) -> Self {
         let ContextHandles {

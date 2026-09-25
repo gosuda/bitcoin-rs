@@ -116,8 +116,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   `MempoolHandles`, `IndexHandles`, `NetworkHandles`, `MiningHandles`), never
   through direct database access. `Context::from_handles(ContextHandles)` is
   the single composition point: one `ContextHandles` value carries every
-  capability, including the chain owner's transition barrier, and nothing
-  attaches to a built `Context`.
+  capability, including the chain owner's transition barrier, and production
+  wiring attaches nothing to a built `Context`.
 - `bitcoin-rs-rpc` defines and forwards zero backend features. (The bench-only
   dev-dependency used for offline `txoutproof` fixtures is isolated to test
   scope and documented in `crates/rpc/Cargo.toml`).
