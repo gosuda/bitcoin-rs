@@ -291,7 +291,7 @@ impl Mempool {
         entry: MempoolEntry,
         fee_estimation: FeeEstimation,
     ) -> Result<ReplacementInputs, RbfError> {
-        self.capture_pool_change(entry, Vec::new(), 0, false, fee_estimation)
+        self.capture_admission(entry, Vec::new(), 0, false, fee_estimation)
     }
 
     pub(crate) fn capture_replacement(
@@ -311,7 +311,7 @@ impl Mempool {
             height,
             candidate.sigop_cost,
         );
-        self.capture_pool_change(
+        self.capture_admission(
             entry,
             conflicts,
             candidate.min_relay_fee_rate,
@@ -320,7 +320,16 @@ impl Mempool {
         )
     }
 
-    fn capture_pool_change(
+    /// Captures one admission's graph work outside the writer.
+    ///
+    /// PRE: `conflicts` and `sibling_eviction` are the pair returned by one
+    /// `truc_conflicts` call; `entry` is complete.
+    /// POST: the inputs verify into a plan that commits only at the captured
+    /// stamp; no pool state changes here.
+    /// INVARIANT: a non-empty `conflicts` vec is the only route that applies
+    /// the BIP125 fee rules and the fee-diagram compare; the plain door passes
+    /// an empty vec.
+    pub(crate) fn capture_admission(
         &self,
         entry: MempoolEntry,
         conflicts: Vec<EntryId>,

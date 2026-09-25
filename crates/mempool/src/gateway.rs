@@ -18,6 +18,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
+use crate::entry::MempoolEntry;
 use bitcoin_rs_consensus::{ConsensusError, UtxoView, total_sigop_cost, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
@@ -344,8 +345,6 @@ fn rejection_scope(tx: &Tx) -> RejectScope {
 /// pool alive. Handoff note for ING-R34: once `Chainstate` gains a
 /// `mempool_gateway` field, the reorg caller can read the handle instead
 /// and `shared` shrinks to run-time composition plus tests.
-#[cfg(any(test, feature = "test-seam"))]
-use crate::entry::MempoolEntry;
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::orphan::RejectScope;
 use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
@@ -967,21 +966,36 @@ impl MempoolGateway {
                 }
             }
         } else if prepared.rejection.is_none() {
-            let candidate = ReplacementCandidate::new(
-                Arc::clone(&request.tx),
-                prepared.fact.vsize,
-                prepared.fact.base_fee.unwrap_or(0),
-                policy.incremental_relay_fee_sat_per_kvb,
-            )
-            .with_sigop_cost(prepared.fact.sigop_cost);
             // Reorg re-admissions must not double-count the estimator: the
             // transaction already spent time in the pool before disconnect.
-            match pool.capture_replacement(
-                &candidate,
-                request.time,
-                request.height,
-                crate::rbf::FeeEstimation::from_origin(&request.origin),
-            ) {
+            let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
+            let captured = pool
+                .truc_conflicts(&request.tx, prepared.fact.vsize, true)
+                .and_then(|(conflicts, sibling_eviction)| {
+                    let entry = MempoolEntry::new(
+                        Arc::clone(&request.tx),
+                        prepared.fact.vsize,
+                        prepared.fact.base_fee.unwrap_or(0),
+                        request.time,
+                        request.height,
+                        prepared.fact.sigop_cost,
+                    );
+                    // The conflicts `truc_conflicts` returned decide the door,
+                    // not a second direct lookup: a v3 sibling eviction has an
+                    // empty direct set yet must pay the replacement rules.
+                    if conflicts.is_empty() {
+                        pool.capture_insertion(entry, fee_estimation)
+                    } else {
+                        pool.capture_admission(
+                            entry,
+                            conflicts,
+                            policy.incremental_relay_fee_sat_per_kvb,
+                            sibling_eviction,
+                            fee_estimation,
+                        )
+                    }
+                });
+            match captured {
                 Ok(inputs) => prepared.replacement = ReplacementStage::Captured(inputs),
                 Err(error) => {
                     prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));

@@ -3772,8 +3772,8 @@ mod tests {
         );
         assert_eq!(child_entry.weight, child.weight());
         assert_eq!(
-            child_entry.sigop_cost,
-            bitcoin_rs_script::count_tx_legacy(&child)
+            child_entry.sigop_cost, 0,
+            "the fixture scripts are sigop-free and the constructor took 0"
         );
         assert_eq!(child_entry.wtxid, child.wtxid());
         assert_eq!(child_entry.ancestor_size, 200);
