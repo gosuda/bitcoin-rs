@@ -271,6 +271,7 @@ impl NodeState {
             journal,
             capture_rawtx: false,
             capture_block_bytes: false,
+            executed_frontier: storage.executed_frontier(),
         });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;

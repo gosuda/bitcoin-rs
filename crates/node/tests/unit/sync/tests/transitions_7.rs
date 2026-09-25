@@ -263,6 +263,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             journal: None,
             capture_rawtx: false,
             capture_block_bytes: true,
+            executed_frontier: bitcoin_rs_storage::pruning::ExecutedFrontier::NONE,
         });
     handles.apply_block(&genesis)?;
     for block in &blocks {

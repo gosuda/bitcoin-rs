@@ -7,8 +7,9 @@ use std::collections::BTreeMap;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
-    BLOCK_DATA_CF, BlockPruner, PrunePolicy, RetentionRegistry, block_body_key, load_pruneheight,
-    prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
+    BLOCK_DATA_CF, BlockPruner, ExecutedFrontier, PrunePolicy, RetentionRegistry, block_body_key,
+    load_executed_frontier, load_pruneheight, prune_to_height, reclaim_staged_flat_block_files,
+    stage_block_and_undo_prune,
 };
 use bitcoin_rs_storage::{
     BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvIter, KvSnapshot, KvStore, KvUndoStore,
@@ -469,6 +470,212 @@ fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dy
     let reacquired = retention.acquire(11)?;
     assert_eq!(reacquired.floor(), 11);
     reacquired.release();
+    Ok(())
+}
+
+/// The executed frontier is a durable fact: it commits with its deletions,
+/// a restart reconstructs exactly that boundary, and the restarted authority
+/// refuses a lease over rows the previous process deleted (#1151).
+#[test]
+fn executed_frontier_survives_restart_and_refuses_deleted_heights()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    )?;
+    assert_eq!(staged.pruned_below, 11);
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(11)),
+        "the frontier commits in the same batch as the deletions"
+    );
+
+    // A restart derives its authority from the store, never from memory.
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(frontier, ExecutedFrontier::new(11));
+    let restarted = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(matches!(
+        restarted.acquire(10),
+        Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow {
+            requested: 10,
+            pruned_below: 11,
+        })
+    ));
+    assert_eq!(restarted.acquire(11)?.floor(), 11);
+    Ok(())
+}
+
+/// Repeated passes, and rows a reorg reintroduces below the line, never move
+/// the persisted frontier backwards, and the rows stay deleted (#1151).
+#[test]
+fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+            (13, b"block-body"),
+        ],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    let first = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12,
+        |_| Ok(()),
+    )?;
+    assert_eq!(first.pruned_below, 12);
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(12))
+    );
+
+    // A reorg re-adds a body below the executed line. The frontier is the
+    // committed fact, so it does not retreat to the surviving row: a lease
+    // below it stays refused.
+    write_body_rows(&store, &block_files, &[(11, b"reintroduced body")])?;
+    assert!(row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    assert_eq!(
+        ExecutedFrontier::reconstruct(&*store)?,
+        ExecutedFrontier::new(12)
+    );
+    let restarted = Arc::new(RetentionRegistry::seeded(ExecutedFrontier::new(12)));
+    assert!(restarted.acquire(11).is_err());
+
+    // The next pass deletes the reintroduced row again and moves forward.
+    let second = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        13 + CORE_REORG_SAFETY_MARGIN,
+        13 + CORE_REORG_SAFETY_MARGIN,
+        13,
+        |_| Ok(()),
+    )?;
+    assert_eq!(second.pruned_below, 13);
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(13))
+    );
+    assert!(!row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    assert!(!row_stored(&store, &block_body_key(12, fake_hash(12)))?);
+    assert!(row_stored(&store, &block_body_key(13, fake_hash(13)))?);
+    Ok(())
+}
+
+/// A datadir pruned before the record existed reconstructs its boundary from
+/// the rows that survived, never from the requested line while rows remain,
+/// and the first pass pins the reconstruction (#1151).
+#[test]
+fn legacy_datadir_reconstructs_from_surviving_rows_not_the_requested_line()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    // The legacy shape: one row was deleted, the requested line was
+    // persisted, and no executed-frontier record exists.
+    let mut deleted = store.new_batch();
+    deleted.delete(BLOCK_DATA_CF, &block_body_key(10, fake_hash(10)));
+    store.write(deleted)?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"node:pruneheight",
+        &12_u32.to_be_bytes(),
+    )?;
+
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(
+        frontier,
+        ExecutedFrontier::new(11),
+        "the lowest surviving row is the provable bound, not the intent line"
+    );
+    let retention = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(retention.acquire(10).is_err());
+    assert_eq!(retention.acquire(11)?.floor(), 11);
+
+    // A pass that finds nothing left below its line still pins the
+    // reconstruction, so the next restart does not re-derive it from rows.
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    )?;
+    assert_eq!(staged.pruned_below, 0);
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(11)),
+        "an empty pass never lowers the frontier to zero"
+    );
+    Ok(())
+}
+
+/// With no rows left to prove deletion from, a legacy store falls back to its
+/// requested line; a fresh store starts at zero (#1151).
+#[test]
+fn legacy_datadir_with_no_rows_falls_back_to_the_requested_line()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    assert_eq!(
+        ExecutedFrontier::reconstruct(&*store)?,
+        ExecutedFrontier::NONE
+    );
+
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"node:pruneheight",
+        &50_u32.to_be_bytes(),
+    )?;
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(frontier, ExecutedFrontier::new(50));
+
+    let retention = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(
+        retention.acquire(49).is_err(),
+        "an emptied legacy datadir grants no lease below its recorded line"
+    );
+    assert_eq!(retention.acquire(50)?.floor(), 50);
     Ok(())
 }
 

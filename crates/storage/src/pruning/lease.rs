@@ -30,8 +30,10 @@
 //! deleted through. No consumer rechecks after the deletion, and no
 //! request can cross a deletion inconsistently.
 
+use crate::pruning::ExecutedFrontier;
 use alloc::sync::Arc;
 use core::fmt;
+use core::sync::atomic::AtomicBool;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use thiserror::Error;
@@ -47,6 +49,10 @@ use thiserror::Error;
 #[derive(Default)]
 pub struct RetentionRegistry {
     inner: Mutex<RegistryInner>,
+    /// Set once when the owner begins shutting down: after it, no new
+    /// history is granted, so a consumer stops instead of pinning rows a
+    /// process that is leaving will not serve.
+    shutting_down: AtomicBool,
 }
 
 #[derive(Debug, Default)]
@@ -103,8 +109,30 @@ impl fmt::Debug for RetentionRegistry {
 
 impl RetentionRegistry {
     /// Creates an empty registry with no prune line executed.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates a registry whose executed line is the frontier an earlier
+    /// process committed.
+    ///
+    /// PRE: `frontier` came from [`ExecutedFrontier::reconstruct`] over the
+    /// same store, so it names exactly the deletions that committed.
+    ///
+    /// POST: leases below the frontier are refused from the first moment, so
+    /// a restart grants no lease over rows the previous process deleted.
+    /// Reconstructing the boundary is therefore not a best-effort guess the
+    /// node has to re-derive later: it is the registry's starting state.
+    #[must_use]
+    pub fn seeded(frontier: ExecutedFrontier) -> Self {
+        Self {
+            inner: Mutex::new(RegistryInner {
+                pruned_below: frontier.get(),
+                ..RegistryInner::default()
+            }),
+            shutting_down: AtomicBool::new(false),
+        }
     }
 
     /// Acquires a lease pinning rows at `floor` and above against pruning.
@@ -242,13 +270,15 @@ impl PruneReservation {
         self.line
     }
 
-    /// Records that the pass deleted through `executed` (one past the
-    /// highest row it actually staged), promotes that line into the
-    /// registry's executed prune line, and releases the claim.
+    /// Records that the pass deleted through `executed`, promotes it into
+    /// the registry's executed prune line, and releases the claim.
     ///
-    /// `executed` never exceeds the reserved line: the pass staged through
-    /// the reserved line, so nothing above it can have been deleted.
-    /// Returns the reserved line.
+    /// `executed` is the frontier this pass leaves behind: one past the
+    /// highest row it deleted, clamped with the durable frontier it migrated
+    /// from. The promotion is monotonic, so a pass never lowers the line and
+    /// never claims a deletion that did not commit.
+    ///
+    /// Returns the line this reservation held.
     pub fn commit(mut self, executed: u32) -> u32 {
         self.committed = true;
         let line = self.line;
