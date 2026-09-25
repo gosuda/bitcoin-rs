@@ -113,6 +113,30 @@ pub(super) fn apply_block_admitted<'b>(
             applied_predecessor(handles, block_hash, prev_hash)?
         }
     };
+
+    // Contextual header rules, shared with header admission: the difficulty
+    // continuity, median-time-past, BIP94 timewarp, future-drift, and version
+    // floors all come from the one gate, so a block whose header never passed
+    // header sync cannot be connected and a direct `submitblock` cannot skip a
+    // rule by relying on header-sync history. The gate runs before the first
+    // mutation and before journal maintenance, so a contextually invalid block
+    // reports its own rejection instead of the backpressure its maintenance
+    // hit; the cost is that a block only the later self-PoW check rejects
+    // still pays that maintenance first. A crash-recovery replay skips the
+    // gate: its block already committed a durable head receipt, which
+    // certifies the header passed every rule at first connect, and the
+    // future-drift bound reads the wall clock, so re-running it after an
+    // operator clock rollback would refuse a block the store already holds.
+    let contextual_header_started = quanta::Instant::now();
+    let mut contextual_header_dur = std::time::Duration::ZERO;
+    if !matches!(publication, PublishMode::Replay { .. }) {
+        let contextual_header_result =
+            validate_contextual_block_header(handles, block, height, prior.as_deref());
+        contextual_header_dur = contextual_header_started.elapsed();
+        metrics::histogram!("node.apply_block.contextual_header_seconds")
+            .record(contextual_header_dur.as_secs_f64());
+        contextual_header_result?;
+    }
     if intent == ApplyIntent::Commit
         && let Some(journal) = &handles.journal
     {
@@ -128,10 +152,11 @@ pub(super) fn apply_block_admitted<'b>(
     }
 
     // Self-consistency PoW: the block header's hash must satisfy its
-    // declared target. This is the cheapest consensus gate; do it before
-    // any structural checks. Contextual difficulty-adjustment validation
+    // declared target. Contextual difficulty-adjustment validation
     // (verifying the declared target matches the network's expected
-    // difficulty at this height) requires `BlockTree` state — deferred.
+    // difficulty at this height) requires `BlockTree` state; it runs ahead of
+    // this check so its rejections also precede journal maintenance. This
+    // pass still runs before any structural check.
     let pow_self_started = quanta::Instant::now();
     let pow_self_result =
         bitcoin_rs_chain::header_sync::validate_pow(&block.header, block_hash, handles.network);
@@ -149,19 +174,6 @@ pub(super) fn apply_block_admitted<'b>(
         }
         _ => {}
     }
-
-    // Contextual header rules, shared with header admission: the difficulty
-    // continuity, median-time-past, BIP94 timewarp, future-drift, and version
-    // floors all come from the one gate, so a block whose header never passed
-    // header sync cannot be connected and a direct `submitblock` cannot skip a
-    // rule by relying on header-sync history. Runs before the first mutation.
-    let contextual_header_started = quanta::Instant::now();
-    let contextual_header_result =
-        validate_contextual_block_header(handles, block, height, prior.as_deref());
-    let contextual_header_dur = contextual_header_started.elapsed();
-    metrics::histogram!("node.apply_block.contextual_header_seconds")
-        .record(contextual_header_dur.as_secs_f64());
-    contextual_header_result?;
 
     let (prev_median_time_past, softfork_state) = if let Some(tip) = prior.as_deref() {
         let tree = handles.block_tree.read();
@@ -922,6 +934,8 @@ pub(super) fn applied_header_tip(
     // No header check here: the shared contextual gate
     // (`validate_contextual_block_header`) ran at the top of this function, in
     // the same pre-mutation phase, so a rejection there leaves nothing behind.
+    // A crash-recovery replay is exempt from the gate; its durable head
+    // receipt certifies the header instead.
     let node_id = match tree.lookup(block_hash) {
         Some(node_id) => node_id,
         None => tree.insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?,
