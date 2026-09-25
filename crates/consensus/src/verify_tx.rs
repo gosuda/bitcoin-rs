@@ -84,10 +84,28 @@ static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
 ///   - locktime >= `LOCKTIME_THRESHOLD`: timestamp-based; final iff locktime < `locktime_cutoff`.
 ///   - all inputs have sequence == `SEQUENCE_FINAL`: final regardless of locktime.
 ///
-/// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
+/// PRE: `locktime_cutoff` is the caller's header time or previous-tip MTP.
+/// POST: The result is the Bitcoin `IsFinalTx` verdict at `block_height`.
+/// INVARIANT: Final sequences override a reached locktime threshold.
 #[must_use]
 pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
-    is_final_tx_with_locktime_cutoff(tx, block_height, locktime_cutoff)
+    let lock_time = tx.lock_time.to_consensus();
+    if lock_time == 0 {
+        return true;
+    }
+
+    let threshold = if lock_time < LOCKTIME_THRESHOLD {
+        block_height
+    } else {
+        locktime_cutoff
+    };
+    if lock_time < threshold {
+        return true;
+    }
+
+    tx.inputs
+        .iter()
+        .all(|input| input.sequence == Sequence::from_consensus(SEQUENCE_FINAL))
 }
 
 /// Verifies that a coinbase transaction's scriptSig length is within consensus bounds.
@@ -133,30 +151,6 @@ pub fn check_coinbase_maturity(
         });
     }
     Ok(())
-}
-
-/// Returns `true` iff the transaction is locktime-final at `block_height` and `locktime_cutoff`.
-///
-/// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
-#[must_use]
-fn is_final_tx_with_locktime_cutoff(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
-    let lock_time = tx.lock_time.to_consensus();
-    if lock_time == 0 {
-        return true;
-    }
-
-    let threshold = if lock_time < LOCKTIME_THRESHOLD {
-        block_height
-    } else {
-        locktime_cutoff
-    };
-    if lock_time < threshold {
-        return true;
-    }
-
-    tx.inputs
-        .iter()
-        .all(|input| input.sequence == Sequence::from_consensus(SEQUENCE_FINAL))
 }
 
 /// Verifies non-contextual and input-script transaction rules for a transaction.
@@ -280,7 +274,7 @@ fn prepare_tx_checks(
     locktime_cutoff: u32,
     mut lookup: impl FnMut(usize, &OutPoint) -> Option<TxOut>,
 ) -> Result<Option<TxPrep>, ConsensusError> {
-    if !is_final_tx_with_locktime_cutoff(tx, height, locktime_cutoff) {
+    if !is_final_tx(tx, height, locktime_cutoff) {
         return Err(ConsensusError::Bip {
             bip: "BIP113",
             reason: format!(
@@ -338,7 +332,6 @@ fn finalize_tx_value_and_sigops(
         });
     }
 
-    let _ = 0usize;
     let sigop_cost = transaction_sigop_cost(tx, &prep.prevouts, flags);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
@@ -829,8 +822,7 @@ mod tests {
     use bitcoin_rs_script::{VerifyFlags, push_int};
 
     use super::{
-        ScriptStageTimings, is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size,
-        verify_transaction,
+        ScriptStageTimings, is_final_tx, verify_coinbase_script_sig_size, verify_transaction,
     };
 
     /// Wraps `txs` in a block and parses it the way production does, so tests
@@ -1379,8 +1371,8 @@ mod tests {
             }],
         };
 
-        assert!(!is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_100));
-        assert!(is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_101));
+        assert!(!is_final_tx(&tx, 1, 500_000_100));
+        assert!(is_final_tx(&tx, 1, 500_000_101));
     }
 
     #[test]
