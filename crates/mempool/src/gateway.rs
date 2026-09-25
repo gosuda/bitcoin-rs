@@ -700,7 +700,7 @@ impl MempoolGateway {
             let inputs = self
                 .pool
                 .read()
-                .capture_insertion(entry.clone())
+                .capture_insertion(entry.clone(), crate::rbf::FeeEstimation::Estimate)
                 .map_err(RbfError::into_pool_error)?;
             let plan = inputs.verify().map_err(RbfError::into_pool_error)?;
             let result = self.commit(origin, move |pool| {
@@ -729,7 +729,7 @@ impl MempoolGateway {
             let inputs = self
                 .pool
                 .read()
-                .capture_replacement(&candidate, time, height)?;
+                .capture_replacement(&candidate, time, height, crate::rbf::FeeEstimation::Estimate)?;
             let plan = inputs.verify()?;
             let result = self.commit(origin, move |pool| pool.commit_pool_change(plan));
             if !matches!(result, Err(RbfError::StalePlan)) {
@@ -973,11 +973,15 @@ impl MempoolGateway {
                 prepared.fact.base_fee.unwrap_or(0),
                 policy.incremental_relay_fee_sat_per_kvb,
             )
-            .with_sigop_cost(prepared.fact.sigop_cost)
+            .with_sigop_cost(prepared.fact.sigop_cost);
             // Reorg re-admissions must not double-count the estimator: the
             // transaction already spent time in the pool before disconnect.
-            .with_fee_estimate(!matches!(request.origin, AdmissionOrigin::Reorg));
-            match pool.capture_replacement(&candidate, request.time, request.height) {
+            match pool.capture_replacement(
+                &candidate,
+                request.time,
+                request.height,
+                crate::rbf::FeeEstimation::from_origin(&request.origin),
+            ) {
                 Ok(inputs) => prepared.replacement = ReplacementStage::Captured(inputs),
                 Err(error) => {
                     prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));

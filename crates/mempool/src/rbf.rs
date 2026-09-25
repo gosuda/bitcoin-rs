@@ -5,9 +5,33 @@ use bitcoin_rs_primitives::Tx;
 use hashbrown::HashSet;
 use thiserror::Error;
 
-use crate::mutation::RemovalReason;
+use crate::mutation::{AdmissionOrigin, RemovalReason};
 use crate::pool::tx_fee_rate;
 use crate::{EntryId, Mempool, MempoolEntry, MempoolError};
+
+/// Whether a committed entry registers with the fee estimator.
+///
+/// PRE: chosen by the admission owner from the request's origin.
+/// POST: `Skip` suppresses `record_entry_arrival` at commit; `Estimate`
+/// records it.
+/// INVARIANT: exactly reorg re-admissions skip; the value never travels as
+/// a bool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FeeEstimation {
+    Estimate,
+    Skip,
+}
+
+impl FeeEstimation {
+    /// PRE: `origin` is the admission request's entry origin.
+    /// POST: `Reorg` maps to `Skip`; every other origin maps to `Estimate`.
+    pub(crate) fn from_origin(origin: &AdmissionOrigin) -> Self {
+        match origin {
+            AdmissionOrigin::Reorg => Self::Skip,
+            _ => Self::Estimate,
+        }
+    }
+}
 
 /// Candidate transaction and feerate policy used for replacement validation.
 #[derive(Clone, Debug)]
@@ -26,12 +50,6 @@ pub struct ReplacementCandidate {
     /// acceptance would give it. Zero when the candidate was built without
     /// resolved prevouts, which means unknown rather than none.
     pub sigop_cost: u32,
-    /// Whether the committed entry registers with the fee estimator.
-    ///
-    /// Reorg re-admissions set this false: the transaction already spent its
-    /// time in the pool before the disconnect, matching Core's
-    /// `validForFeeEstimation=false` on reorg re-acceptance.
-    pub fee_estimate: bool,
 }
 
 impl ReplacementCandidate {
@@ -44,7 +62,6 @@ impl ReplacementCandidate {
             fee,
             min_relay_fee_rate,
             sigop_cost: 0,
-            fee_estimate: true,
         }
     }
 
@@ -52,13 +69,6 @@ impl ReplacementCandidate {
     #[must_use]
     pub const fn with_sigop_cost(mut self, sigop_cost: u32) -> Self {
         self.sigop_cost = sigop_cost;
-        self
-    }
-
-    /// Sets whether the committed entry registers with the fee estimator.
-    #[must_use]
-    pub const fn with_fee_estimate(mut self, fee_estimate: bool) -> Self {
-        self.fee_estimate = fee_estimate;
         self
     }
 
@@ -177,7 +187,7 @@ pub(crate) struct ReplacementInputs {
     projected_vsize: u64,
     max_vsize: u64,
     limits: crate::MempoolLimits,
-    fee_estimate: bool,
+    fee_estimation: FeeEstimation,
 }
 
 pub(crate) struct PreparedPoolChange {
@@ -185,7 +195,7 @@ pub(crate) struct PreparedPoolChange {
     pub(crate) evicted: Vec<EntryId>,
     pub(crate) removals: Vec<(EntryId, RemovalReason)>,
     pub(crate) entry: Option<crate::pool::PreparedInsert>,
-    pub(crate) fee_estimate: bool,
+    pub(crate) fee_estimation: FeeEstimation,
 }
 
 impl ReplacementInputs {
@@ -198,7 +208,7 @@ impl ReplacementInputs {
                 evicted: Vec::new(),
                 removals: Vec::new(),
                 entry: Some(self.entry),
-                fee_estimate: self.fee_estimate,
+                fee_estimation: self.fee_estimation,
             });
         };
         after_graph.check_limits(self.limits)?;
@@ -270,7 +280,7 @@ impl ReplacementInputs {
             evicted,
             removals,
             entry: Some(self.entry),
-            fee_estimate: self.fee_estimate,
+            fee_estimation: self.fee_estimation,
         })
     }
 }
@@ -279,8 +289,9 @@ impl Mempool {
     pub(crate) fn capture_insertion(
         &self,
         entry: MempoolEntry,
+        fee_estimation: FeeEstimation,
     ) -> Result<ReplacementInputs, RbfError> {
-        self.capture_pool_change(entry, Vec::new(), 0, false, true)
+        self.capture_pool_change(entry, Vec::new(), 0, false, fee_estimation)
     }
 
     pub(crate) fn capture_replacement(
@@ -288,6 +299,7 @@ impl Mempool {
         candidate: &ReplacementCandidate,
         time: u64,
         height: u32,
+        fee_estimation: FeeEstimation,
     ) -> Result<ReplacementInputs, RbfError> {
         let (conflicts, sibling_eviction) =
             self.truc_conflicts(&candidate.tx, candidate.vsize, true)?;
@@ -304,7 +316,7 @@ impl Mempool {
             conflicts,
             candidate.min_relay_fee_rate,
             sibling_eviction,
-            candidate.fee_estimate,
+            fee_estimation,
         )
     }
 
@@ -314,7 +326,7 @@ impl Mempool {
         conflicts: Vec<EntryId>,
         incremental_fee_rate: u64,
         sibling_eviction: bool,
-        fee_estimate: bool,
+        fee_estimation: FeeEstimation,
     ) -> Result<ReplacementInputs, RbfError> {
         if !u32::try_from(self.conflicting_cluster_count(&conflicts)?)
             .is_ok_and(|count| count <= self.limits.max_replacement_clusters)
@@ -386,7 +398,7 @@ impl Mempool {
             projected_vsize,
             max_vsize: self.limits.max_total_bytes,
             limits: self.limits,
-            fee_estimate,
+            fee_estimation,
         })
     }
 
@@ -395,7 +407,7 @@ impl Mempool {
         &self,
         candidate: &ReplacementCandidate,
     ) -> Result<ReplacementPlan, RbfError> {
-        let prepared = self.capture_replacement(candidate, 0, 0)?.verify()?;
+        let prepared = self.capture_replacement(candidate, 0, 0, FeeEstimation::Estimate)?.verify()?;
         Ok(ReplacementPlan {
             evicted: prepared.evicted,
         })
@@ -419,7 +431,7 @@ impl Mempool {
             .entry
             .as_ref()
             .map(|insert| insert.entry.txid)
-            .filter(|_| prepared.fee_estimate);
+            .filter(|_| prepared.fee_estimation == FeeEstimation::Estimate);
         if let Some(entry) = prepared.entry {
             changes.extend(self.commit_insert(entry).changes);
         }
@@ -443,7 +455,7 @@ impl Mempool {
     ) -> Result<crate::mutation::MutationResult, RbfError> {
         candidate.sigop_cost = sigop_cost;
         let prepared = self
-            .capture_replacement(&candidate, time, height)?
+            .capture_replacement(&candidate, time, height, FeeEstimation::Estimate)?
             .verify()?;
         self.commit_pool_change(prepared)
     }

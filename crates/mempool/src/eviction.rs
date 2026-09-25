@@ -61,7 +61,7 @@ impl EvictionInputs {
             evicted: Vec::new(),
             removals,
             entry: None,
-            fee_estimate: true,
+            fee_estimation: crate::rbf::FeeEstimation::Estimate,
         })
     }
 }

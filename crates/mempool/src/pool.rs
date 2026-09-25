@@ -700,7 +700,7 @@ impl Mempool {
         entry: MempoolEntry,
     ) -> Result<crate::mutation::MutationResult, MempoolError> {
         let inputs = self
-            .capture_insertion(entry)
+            .capture_insertion(entry, crate::rbf::FeeEstimation::Estimate)
             .map_err(crate::RbfError::into_pool_error)?;
         let plan = inputs.verify().map_err(crate::RbfError::into_pool_error)?;
         self.commit_pool_change(plan)
