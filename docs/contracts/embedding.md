@@ -13,7 +13,7 @@ the first embedder — there is one lifecycle implementation, not two.
   ownership only after every service has started. Both callers stop through
   `lifecycle.rs::NodeServices::teardown`: request shutdown and wake
   the event loop; join the event loop and RPC listener; stop metrics; join
-  P2P core, ingress, and relay workers; drain subsystems; join bootstrap,
+  P2P core, ingress, and relay workers; join bootstrap,
   checkpoint, and signal workers; then publish a clean checkpoint if eligible.
   On every stop path the derived-index worker is stopped and joined
   before `teardown` runs, so the clean checkpoint publishes and chainstate
@@ -111,7 +111,7 @@ sleep-based readiness: the snapshot is the readiness fact.
 
 Errors at the typed boundary are `NodeError`: `Startup` (configuration,
 storage, recovery, or service-bind failure, with rollback as described
-above), `Shutdown` (drain, join, or checkpoint failure — reported only by
+above), `Shutdown` (join or checkpoint failure — reported only by
 consuming shutdown, never by Drop), `Unavailable` (a capability cannot
 answer), `NotFound` (a proven-absent object), and `Broadcast` (policy
 rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.

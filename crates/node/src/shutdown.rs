@@ -1,28 +1,8 @@
-use std::time::Duration;
-
-use parking_lot::{Condvar, Mutex, const_mutex};
-
-static DRAINED: Mutex<bool> = const_mutex(true);
-static DRAINED_CVAR: Condvar = Condvar::new();
-
-/// Marks subsystem draining as active.
-pub(crate) fn mark_draining() {
-    *DRAINED.lock() = false;
-}
-
-/// Notifies waiters that all v1 tick subsystems have drained.
-pub(crate) fn notify_drained() {
-    *DRAINED.lock() = true;
-    DRAINED_CVAR.notify_all();
-}
-
-/// Waits for subsystem drain notification or the shutdown deadline.
-pub(crate) fn drain_and_shutdown(deadline: Duration) {
-    let mut drained = DRAINED.lock();
-    if !*drained {
-        let _timeout = DRAINED_CVAR.wait_for(&mut drained, deadline);
-    }
-}
+//! Teardown-entry observation seam.
+//!
+//! The daemon and embedded paths both enter `NodeServices::teardown`; the
+//! seam lets tests prove both entry points reach the same lifecycle without
+//! a fake service graph. It compiles away outside tests.
 
 /// Test-only teardown-entry observation seam.
 ///
