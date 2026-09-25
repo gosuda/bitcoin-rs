@@ -37,8 +37,9 @@
 //! index or similar consumer asks through [`HistoryAccess`], and a pass
 //! expires that pin once it lags the policy line by more than the granted
 //! [`RetentionBudget`]. An optional consumer therefore cannot retain history
-//! indefinitely, and the answer it receives — granted, pruned, missing,
-//! corrupt, or shutting down — is the owner's decision, not its own guess.
+//! indefinitely, and the answer it receives — granted, pruned, reserved,
+//! missing, corrupt, or shutting down — is the owner's decision, not its
+//! own guess.
 
 use crate::pruning::ExecutedFrontier;
 use alloc::sync::Arc;
@@ -204,11 +205,21 @@ impl RetentionBudget {
 /// frontier to decide them.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 pub enum HistoryUnavailable {
-    /// Heights below `below` are permanently gone. The defined recovery for
-    /// an optional consumer is a rebuild from what remains, not a retry.
+    /// Heights below `below` are permanently gone: a committed pass deleted
+    /// them. The defined recovery for an optional consumer is a rebuild from
+    /// what remains, not a retry.
     #[error("history below height {below} is pruned")]
     Pruned {
         /// One past the highest row a committed pass deleted.
+        below: u32,
+    },
+    /// Heights below `below` are claimed by a prune pass that has not yet
+    /// committed or aborted. The claim is provisional — it may release the
+    /// range without deleting anything — so the defined reaction is to wait
+    /// and retry, never to rebuild.
+    #[error("history below height {below} is reserved by an in-flight prune pass")]
+    Reserved {
+        /// The deletion line the outstanding pass claimed.
         below: u32,
     },
     /// The row lies inside retained history but is not there yet: it may
@@ -406,13 +417,24 @@ impl RetentionRegistry {
         floor: u32,
         budget: RetentionBudget,
     ) -> Result<HistoryLease, HistoryUnavailable> {
+        let mut inner = self.inner.lock();
+        // The shutdown answer is serialized by the same lock that inserts the
+        // pin: once `shutdown` returns, no later grant can slip in below it.
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(HistoryUnavailable::Shutdown);
         }
-        let mut inner = self.inner.lock();
         let line = inner.refusal_line();
         if floor < line {
-            return Err(HistoryUnavailable::Pruned { below: line });
+            // A floor below the executed frontier is gone permanently; one
+            // below only an outstanding reservation is claimed provisionally
+            // and may come back if the pass aborts.
+            return Err(if floor < inner.pruned_below {
+                HistoryUnavailable::Pruned {
+                    below: inner.pruned_below,
+                }
+            } else {
+                HistoryUnavailable::Reserved { below: line }
+            });
         }
         let ticket = inner.next_ticket;
         inner.next_ticket = ticket.wrapping_add(1);
@@ -427,17 +449,19 @@ impl RetentionRegistry {
 
     /// Closes the history boundary: later requests answer
     /// [`HistoryUnavailable::Shutdown`] and no new pin is granted.
+    ///
+    /// POST: once this returns, [`Self::history_from`] refuses every request.
+    /// The flag is stored under `inner` so a request that races the store is
+    /// serialized: it either granted before the boundary closed or it sees
+    /// the flag on entry and refuses.
     pub fn shutdown(&self) {
+        let _inner = self.inner.lock();
         self.shutting_down.store(true, Ordering::Release);
     }
 
-    /// The floor a live pin holds, or zero once it is gone or expired.
-    fn floor_of(&self, ticket: u64) -> u32 {
-        self.inner
-            .lock()
-            .floors
-            .get(&ticket)
-            .map_or(0, LeaseEntry::floor)
+    /// The floor a live pin holds, or `None` once it is gone or expired.
+    fn floor_of(&self, ticket: u64) -> Option<u32> {
+        self.inner.lock().floors.get(&ticket).map(LeaseEntry::floor)
     }
 
     /// Raises one pin's floor as its holder makes durable progress, so the
@@ -497,6 +521,17 @@ impl PruneReservation {
         let line = self.line;
         self.registry.commit_reservation(line, executed);
         line
+    }
+
+    /// Keeps the claim outstanding after an ambiguous outcome.
+    ///
+    /// A durability error is not a rollback receipt: the deletions may
+    /// already have been applied, so releasing the claim could let a lease
+    /// pin rows that no longer exist. Holding it refuses every lease below
+    /// the reserved line until restart-time recovery reconciles the durable
+    /// record with its deletions — the closed failure mode.
+    pub fn fail_closed(self) {
+        core::mem::forget(self);
     }
 }
 
@@ -569,11 +604,13 @@ pub struct HistoryLease {
 }
 
 impl HistoryLease {
-    /// The floor this lease pins, or zero once it is released or expired.
+    /// The floor this lease pins while it is live, or `None` once it is
+    /// released or expired. A live pin at floor zero is distinct from a
+    /// released lease: `Some(0)` is a real pin, `None` is gone.
     #[must_use]
-    pub fn floor(&self) -> u32 {
+    pub fn floor(&self) -> Option<u32> {
         self.ticket
-            .map_or(0, |ticket| self.registry.floor_of(ticket))
+            .and_then(|ticket| self.registry.floor_of(ticket))
     }
 
     /// Raises the pinned floor to `durable_progress` as the holder's own
@@ -784,7 +821,7 @@ mod tests {
     fn history_grant_is_refused_below_the_line_and_bounded_by_budget() {
         let registry = Arc::new(RetentionRegistry::new());
         let lease = pinned(registry.history_from(100, RetentionBudget::Depth(50)));
-        assert_eq!(lease.floor(), 100);
+        assert_eq!(lease.floor(), Some(100));
         assert_eq!(registry.retention_floor(), Some(100));
 
         // A pass whose line lags the pin by more than its budget expires
@@ -792,7 +829,7 @@ mod tests {
         let pass = registry.reserve(200);
         assert_eq!(pass.line(), 200);
         assert_eq!(registry.active_leases(), 0);
-        assert_eq!(lease.floor(), 0);
+        assert_eq!(lease.floor(), None);
         drop(pass);
 
         // A mandatory pin is never expired, and an optional pin inside its
@@ -816,7 +853,7 @@ mod tests {
 
         // Durable progress raises the pin; a stale report never lowers it.
         lease.advance(20);
-        assert_eq!(lease.floor(), 20);
+        assert_eq!(lease.floor(), Some(20));
         assert_eq!(registry.retention_floor(), Some(20));
         lease.advance(15);
         assert_eq!(registry.retention_floor(), Some(20));
@@ -830,9 +867,12 @@ mod tests {
     fn history_request_crosses_no_reservation() {
         let registry = Arc::new(RetentionRegistry::new());
         let pass = registry.reserve(500);
+        // A refusal below an outstanding reservation is provisional: the
+        // pass may abort and release the range, so the answer is `Reserved`,
+        // not the permanent `Pruned` the executed frontier gives.
         assert!(matches!(
             registry.history_from(499, RetentionBudget::Unlimited),
-            Err(HistoryUnavailable::Pruned { below: 500 })
+            Err(HistoryUnavailable::Reserved { below: 500 })
         ));
         // The reserved line itself is grantable: the pass deletes strictly
         // below it.
@@ -840,8 +880,28 @@ mod tests {
             registry
                 .history_from(500, RetentionBudget::Unlimited)
                 .map(|lease| lease.floor()),
-            Ok(500)
+            Ok(Some(500))
         );
+        drop(pass);
+    }
+
+    #[test]
+    fn history_request_below_the_executed_frontier_is_permanent() {
+        let registry = Arc::new(RetentionRegistry::new());
+        registry.reserve(500).commit(500);
+        // Once the pass commits, a floor below the frontier is gone for
+        // good: `Pruned` is the owner's rebuild answer, not a retry.
+        assert!(matches!(
+            registry.history_from(499, RetentionBudget::Unlimited),
+            Err(HistoryUnavailable::Pruned { below: 500 })
+        ));
+        // A floor above the frontier but below a live reservation is still
+        // only provisionally refused.
+        let pass = registry.reserve(600);
+        assert!(matches!(
+            registry.history_from(550, RetentionBudget::Unlimited),
+            Err(HistoryUnavailable::Reserved { below: 600 })
+        ));
         drop(pass);
     }
 
@@ -857,5 +917,21 @@ mod tests {
         // The mandatory path is governed by chain admission, not by this
         // boundary, so it is unchanged.
         assert_eq!(held(registry.acquire(0)).floor(), 0);
+    }
+
+    #[test]
+    fn a_live_floor_zero_is_not_a_released_lease() {
+        let registry = Arc::new(RetentionRegistry::new());
+        // A pin at genesis is a real pin: `Some(0)`, not the `None` a
+        // released or expired handle reports.
+        let lease = pinned(registry.history_from(0, RetentionBudget::Depth(1)));
+        assert_eq!(lease.floor(), Some(0));
+        assert_eq!(registry.retention_floor(), Some(0));
+
+        // After a pass expires the pin, the same handle answers `None` —
+        // distinct from the live floor-0 it reported before.
+        let pass = registry.reserve(10);
+        assert_eq!(lease.floor(), None);
+        drop(pass);
     }
 }

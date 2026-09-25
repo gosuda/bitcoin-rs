@@ -166,7 +166,9 @@ impl ExecutedFrontier {
     /// - a family with surviving rows shows that every lower height of it is
     ///   gone, so the frontier is the *highest* of the two families' lowest
     ///   surviving heights: one pass prunes bodies and undo through one
-    ///   line, so a floor must be safe for both;
+    ///   line, so a floor must be safe for both — `min` would grant a lease
+    ///   over rows the other family already lost, while `max` at worst
+    ///   refuses a lease over rows that still exist;
     /// - an empty family proves nothing, because a node that never wrote
     ///   undo records also has an empty undo family;
     /// - with no rows in either family, the requested line is the only
@@ -235,8 +237,10 @@ pub struct StagedPrune {
 ///
 /// POST: on `Ok`, the deletions and the [`ExecutedFrontier`] describing them
 /// are committed through one durable batch and the registry's executed line
-/// is at least [`StagedPrune::pruned_below`]; on `Err`, the reservation is
-/// released and neither the rows nor the frontier moved.
+/// is at least [`StagedPrune::pruned_below`]; on `Err`, the outcome is
+/// reconciled before the claim releases — a provably committed batch
+/// promotes the line, a provably unapplied one releases the reservation,
+/// and an unprovable one holds it until restart-time recovery.
 ///
 /// INVARIANT: no lease is granted below the line this pass deletes
 /// through, because the reservation refuses such grants from the moment it
@@ -291,7 +295,29 @@ pub fn prune_to_height<S: crate::KvStore>(
         PRUNE_EXECUTED_METADATA_KEY,
         &executed.get().to_be_bytes(),
     );
-    store.write_durable(batch)?;
+    if let Err(error) = store.write_durable(batch) {
+        // A durability error is not a rollback receipt: the batch may already
+        // have been applied, so the claim cannot be released on `Err` alone.
+        // The frontier record shares the deletions' atomic boundary, so its
+        // presence proves the outcome.
+        return match load_executed_frontier(store) {
+            // The receipt persisted, so the deletions did too: promote the
+            // line so readers learn the truth this pass already wrote.
+            Ok(Some(persisted)) if persisted.get() >= executed.get() => {
+                reservation.commit(persisted.get());
+                Err(error.into())
+            }
+            // No new receipt persisted, so the atomic batch applied nothing:
+            // dropping the reservation safely reopens lease grants.
+            Ok(_) => Err(error.into()),
+            // The outcome cannot be proven: fail closed and hold the claim
+            // until restart-time recovery reconciles record and deletions.
+            Err(_) => {
+                reservation.fail_closed();
+                Err(error.into())
+            }
+        };
+    }
     // The durable batch is the receipt for the line promoted here. A failed
     // pass drops the reservation instead, releasing the claim without
     // advancing the executed line, so the next pass grants again.

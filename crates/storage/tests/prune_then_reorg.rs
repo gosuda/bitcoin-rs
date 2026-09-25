@@ -16,7 +16,8 @@ use bitcoin_rs_storage::{
     StorageError, UndoStore, WriteBatch, WriteCondition, block_file_max_height_key,
     encode_block_file_max_height,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use tempfile::tempdir;
 
 /// Prune everything below the requested height; `retention_depth` still
@@ -679,6 +680,138 @@ fn legacy_datadir_with_no_rows_falls_back_to_the_requested_line()
     Ok(())
 }
 
+/// A durability error is not a rollback receipt. Before the pass releases
+/// its claim it reconciles the persisted record: a provably-applied batch
+/// promotes the line, a provably-unapplied one releases the claim, and an
+/// unprovable one holds it until a restart reconciles record and deletions
+/// (#1151).
+#[test]
+fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    // The whole atomic batch is visible and durability completion then
+    // fails: the record proves the deletions committed, so the claim must
+    // promote. Releasing it would let a lease pin rows that no longer
+    // exist.
+    store.arm_write_durable(WriteDurableOutcome::AppliedThenFailed);
+    let failed = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    );
+    assert!(
+        failed.is_err(),
+        "the pass still reports the durability error"
+    );
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(11)),
+    );
+    assert_eq!(
+        retention.pruned_below(),
+        11,
+        "a provably committed batch promotes the executed line"
+    );
+    assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    Ok(())
+}
+
+#[test]
+fn ambiguous_durability_releases_the_claim_when_nothing_applied()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[(10, b"block-body"), (11, b"block-body")],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    // The batch never became visible: atomicity proves the deletions did
+    // not apply either, so the claim releases and the next pass — or a
+    // lease — grants again.
+    store.arm_write_durable(WriteDurableOutcome::FailedBeforeApply);
+    let failed = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    );
+    assert!(failed.is_err());
+    assert_eq!(retention.pruned_below(), 0);
+    assert!(row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert!(retention.acquire(10).is_ok(), "the claim is released");
+    Ok(())
+}
+
+#[test]
+fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[(10, b"block-body"), (11, b"block-body")],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    // The record read fails at the reconcile — one read is allowed for the
+    // pass's own reconstruct, then the record becomes unreadable — so the
+    // outcome can be neither proven applied nor proven unapplied. The claim
+    // must hold: releasing it could open leases over rows already gone.
+    store.arm_executed_reads(1);
+    store.arm_write_durable(WriteDurableOutcome::AppliedThenFailed);
+    let failed = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    );
+    assert!(failed.is_err());
+    assert_eq!(
+        retention.pruned_below(),
+        0,
+        "an unprovable outcome never promotes the line"
+    );
+    assert!(
+        retention.acquire(10).is_err(),
+        "the claim refuses leases below its line until restart recovery"
+    );
+
+    // A restart reconciles record and deletions from the store: the batch
+    // did apply, so the reconstructed boundary is the committed one.
+    let restarted = Arc::new(RetentionRegistry::seeded(ExecutedFrontier::new(11)));
+    assert!(restarted.acquire(10).is_err());
+    Ok(())
+}
+
 /// An optional consumer inside its budget still clamps the line; one that
 /// lags beyond it stops blocking pruning, and the owner tells it the
 /// capability is gone instead of the consumer guessing from a read that
@@ -733,7 +866,7 @@ fn optional_consumer_budget_exhaustion_unblocks_pruning() -> Result<(), Box<dyn 
     )?;
     assert_eq!(staged.pruned_below, 12);
     assert_eq!(lagging.active_leases(), 0, "the expired pin is gone");
-    assert_eq!(stale.floor(), 0);
+    assert_eq!(stale.floor(), None);
     assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
     assert!(!row_stored(&store, &block_body_key(11, fake_hash(11)))?);
     assert!(matches!(
@@ -741,7 +874,7 @@ fn optional_consumer_budget_exhaustion_unblocks_pruning() -> Result<(), Box<dyn 
         Err(HistoryUnavailable::Pruned { below: 12 })
     ));
     // The consumer can still ask for history that exists.
-    assert_eq!(tight.request_history(12)?.floor(), 12);
+    assert_eq!(tight.request_history(12)?.floor(), Some(12));
     Ok(())
 }
 
@@ -819,15 +952,73 @@ fn fake_body(height: u32) -> [u8; 32] {
     body
 }
 
-#[derive(Default)]
+/// One-shot outcomes for the next `write_durable`, simulating the ambiguous
+/// durability error the `KvStore` contract documents: `Err` is not a
+/// rollback receipt.
+#[derive(Clone, Copy)]
+enum WriteDurableOutcome {
+    /// The atomic batch applied and durability completion then failed.
+    AppliedThenFailed,
+    /// The batch never became visible.
+    FailedBeforeApply,
+}
+
+/// The executed-frontier record key, mirrored here so the store can fault
+/// its reads; the pruning module keeps the constant private.
+const EXECUTED_FRONTIER_KEY: &[u8] = b"node:prune_executed";
+
 struct MemoryStore {
     cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
+    /// Armed outcome for the next `write_durable`.
+    write_durable_outcome: Mutex<Option<WriteDurableOutcome>>,
+    /// Reads of `node:prune_executed` fail once this many have succeeded,
+    /// making a pass's write outcome unprovable at the reconcile.
+    executed_reads_allowed: AtomicUsize,
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self {
+            cfs: RwLock::new(Default::default()),
+            write_durable_outcome: Mutex::new(None),
+            executed_reads_allowed: AtomicUsize::new(usize::MAX),
+        }
+    }
+}
+
+impl MemoryStore {
+    /// Arms the outcome of the next `write_durable` call.
+    fn arm_write_durable(&self, outcome: WriteDurableOutcome) {
+        *self.write_durable_outcome.lock() = Some(outcome);
+    }
+
+    /// Allows `allowed` reads of the executed-frontier record before its
+    /// reads start failing.
+    fn arm_executed_reads(&self, allowed: usize) {
+        self.executed_reads_allowed
+            .store(allowed, AtomicOrdering::Relaxed);
+    }
 }
 
 impl KvStore for MemoryStore {
     type WriteBatch = MemoryBatch;
 
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        if cf == ColumnFamily::UtxoMeta && key == EXECUTED_FRONTIER_KEY {
+            let remaining = self
+                .executed_reads_allowed
+                .fetch_update(
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_err();
+            if remaining {
+                return Err(StorageError::InvalidOperation(
+                    "injected executed-frontier read failure",
+                ));
+            }
+        }
         let guard = self.cfs.read();
         Ok(guard[cf.index()].get(key).cloned())
     }
@@ -880,6 +1071,24 @@ impl KvStore for MemoryStore {
             }
         }
         Ok(())
+    }
+
+    fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+        let armed = self.write_durable_outcome.lock().take();
+        match armed {
+            // The ambiguous post-application case: the whole atomic batch is
+            // visible, and durability completion then fails.
+            Some(WriteDurableOutcome::AppliedThenFailed) => {
+                self.write(batch)?;
+                Err(StorageError::InvalidOperation(
+                    "injected post-apply durability failure",
+                ))
+            }
+            Some(WriteDurableOutcome::FailedBeforeApply) => Err(StorageError::InvalidOperation(
+                "injected pre-apply durability failure",
+            )),
+            None => self.write(batch),
+        }
     }
 
     fn write_durable_if(

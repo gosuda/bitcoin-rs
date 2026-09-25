@@ -367,8 +367,9 @@ state is harmless and keeps the node operating until replay closes the gap.
   written in the same durable batch as its deletions, so a restart
   reconstructs exactly the committed boundary and refuses a lease over
   deleted history. A legacy datadir reconstructs the bound from its lowest
-  surviving rows, never from the requested `node:pruneheight`, which is
-  intent. `RetentionRegistry::reserve` is the single prune/retention
+  surviving rows; only a legacy datadir with no rows surviving in either
+  family falls back to the requested `node:pruneheight`, which is intent.
+  `RetentionRegistry::reserve` is the single prune/retention
   linearization point, and `PruneReservation::commit` is the only path that
   moves the executed line. `crates/storage/tests/prune_then_reorg.rs` proves
   the race (`history_request_between_planning_and_commit_is_refused`), the
