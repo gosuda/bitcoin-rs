@@ -397,8 +397,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - name: mold linker
-        run: command -v mold >/dev/null || { sudo apt-get update && sudo apt-get install -y mold; }
+      - uses: ./.github/actions/test-deps
       - name: Install pinned bitcoind 31.1
         run: scripts/install-bitcoind.sh --print-path
       - name: Build bitcoin-rs (quickstart, portable)
