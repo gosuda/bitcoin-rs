@@ -734,7 +734,8 @@ impl Mempool {
         }
 
         if entry.tx.inputs.iter().any(|input| {
-            self.derived.by_txid
+            self.derived
+                .by_txid
                 .get(&input.previous_output.txid)
                 .is_some_and(|indexed| excluded.contains(&indexed.id))
         }) {
@@ -857,9 +858,13 @@ impl Mempool {
                 .fee_rate_floor
                 .map_or(added_fee_rate, |floor| floor.min(added_fee_rate)),
         );
-        self.derived
-            .by_txid
-            .insert(txid, IndexedEntry { id, admitted_sequence });
+        self.derived.by_txid.insert(
+            txid,
+            IndexedEntry {
+                id,
+                admitted_sequence,
+            },
+        );
         self.derived.by_wtxid.insert(wtxid, id);
         for output in &tx.outputs {
             self.derived
@@ -984,12 +989,16 @@ impl Mempool {
 
     /// Cached summary of one component id.
     fn component_summary(&self, component: u32) -> Option<&ComponentSummary> {
-        self.derived.components.get(usize::try_from(component).ok()?)
+        self.derived
+            .components
+            .get(usize::try_from(component).ok()?)
     }
 
     /// Mutable variant of [`Self::component_summary`].
     fn component_summary_mut(&mut self, component: u32) -> Option<&mut ComponentSummary> {
-        self.derived.components.get_mut(usize::try_from(component).ok()?)
+        self.derived
+            .components
+            .get_mut(usize::try_from(component).ok()?)
     }
 
     /// Mints a component id, recycling a freed one when available.
@@ -1348,7 +1357,11 @@ impl Mempool {
     /// can walk packages without re-consulting the pool.
     #[must_use]
     pub fn mining_snapshot(&self) -> MempoolMiningSnapshot {
-        let order: Vec<EntryId> = self.derived.pareto.top_n(self.derived.pareto.len()).collect();
+        let order: Vec<EntryId> = self
+            .derived
+            .pareto
+            .top_n(self.derived.pareto.len())
+            .collect();
         debug_assert_eq!(
             order.len(),
             self.entries.len(),
@@ -1419,7 +1432,8 @@ impl Mempool {
         script_hash: ScriptHash,
     ) -> impl Iterator<Item = &MempoolEntry> + '_ {
         let entries = &self.entries;
-        self.derived.funding
+        self.derived
+            .funding
             .range((
                 Bound::Included((script_hash, 0)),
                 Bound::Included((script_hash, u32::MAX)),
@@ -1477,7 +1491,8 @@ impl Mempool {
     pub fn lowest_fee_rate(&self) -> Option<u64> {
         debug_assert_eq!(
             self.derived.fee_rate_floor,
-            self.derived.fee_rate_counts
+            self.derived
+                .fee_rate_counts
                 .first_key_value()
                 .map(|(&rate, _count)| rate),
             "cached fee-rate floor drifted from its multiset"
@@ -1505,7 +1520,8 @@ impl Mempool {
     /// never touched.
     #[must_use]
     pub fn is_outpoint_spent(&self, outpoint: &OutPoint) -> bool {
-        self.derived.spending
+        self.derived
+            .spending
             .range(outpoint_range(*outpoint))
             .next()
             .is_some()
@@ -1748,7 +1764,11 @@ impl Mempool {
     pub(crate) fn conflicts_for(&self, tx: &Tx) -> Vec<EntryId> {
         let mut conflicts = Vec::new();
         for input in &tx.inputs {
-            for (_, id) in self.derived.spending.range(outpoint_range(input.previous_output)) {
+            for (_, id) in self
+                .derived
+                .spending
+                .range(outpoint_range(input.previous_output))
+            {
                 conflicts.push(*id);
             }
         }
@@ -3175,7 +3195,9 @@ mod tests {
             vout: 0,
         };
         // No entry was ever inserted, so this row dangles.
-        pool.derived.spending.insert((SpendingKey::from(outpoint), 9_999));
+        pool.derived
+            .spending
+            .insert((SpendingKey::from(outpoint), 9_999));
         assert!(matches!(
             pool.outpoint_spender(outpoint),
             Err(MempoolError::InconsistentSpendingIndex)
@@ -3217,7 +3239,9 @@ mod tests {
             .entry_id_by_txid(&entry_txid)
             .expect("inserted entry id resolves");
         // A row the entry's inputs never earn.
-        pool.derived.spending.insert((SpendingKey::from(indexed), id));
+        pool.derived
+            .spending
+            .insert((SpendingKey::from(indexed), id));
         assert!(matches!(
             pool.outpoint_spender(indexed),
             Err(MempoolError::InconsistentSpendingIndex)
@@ -3703,7 +3727,10 @@ mod tests {
         pool.prioritise(lower_fee_txid, 2_000)
             .expect("delta applies");
 
-        assert_eq!(pool.derived.pareto.top_n(1).collect::<Vec<_>>(), vec![lower_fee_id]);
+        assert_eq!(
+            pool.derived.pareto.top_n(1).collect::<Vec<_>>(),
+            vec![lower_fee_id]
+        );
         Ok(())
     }
 
@@ -4265,7 +4292,11 @@ mod tests {
         );
 
         let incremental = totals(&pool);
-        let index = pool.derived.pareto.top_n(pool.derived.pareto.len()).collect::<Vec<_>>();
+        let index = pool
+            .derived
+            .pareto
+            .top_n(pool.derived.pareto.len())
+            .collect::<Vec<_>>();
         pool.recompute_all_metadata();
         assert_eq!(
             incremental,
@@ -4274,7 +4305,10 @@ mod tests {
         );
         assert_eq!(
             index,
-            pool.derived.pareto.top_n(pool.derived.pareto.len()).collect::<Vec<_>>(),
+            pool.derived
+                .pareto
+                .top_n(pool.derived.pareto.len())
+                .collect::<Vec<_>>(),
             "eviction left a stale priority index behind"
         );
         Ok(())
@@ -4370,7 +4404,11 @@ mod tests {
         pool.prioritise(txid, 5_000_000)
             .expect("prioritise must apply");
 
-        let after_prioritise = pool.derived.pareto.top_n(pool.derived.pareto.len()).collect::<Vec<_>>();
+        let after_prioritise = pool
+            .derived
+            .pareto
+            .top_n(pool.derived.pareto.len())
+            .collect::<Vec<_>>();
         let totals_after = totals(&pool);
         pool.recompute_all_metadata();
         assert_eq!(
@@ -4380,7 +4418,10 @@ mod tests {
         );
         assert_eq!(
             after_prioritise,
-            pool.derived.pareto.top_n(pool.derived.pareto.len()).collect::<Vec<_>>(),
+            pool.derived
+                .pareto
+                .top_n(pool.derived.pareto.len())
+                .collect::<Vec<_>>(),
             "prioritise left stale priority keys behind"
         );
         Ok(())
@@ -5124,8 +5165,8 @@ mod dynamic_memory_usage_tests {
             capacity > 0,
             "the fixture must leave a grown arena behind, or this proves nothing"
         );
-        let arena = capacity
-            .saturating_mul(u64::try_from(size_of::<Option<LiveEntry>>()).unwrap_or(0));
+        let arena =
+            capacity.saturating_mul(u64::try_from(size_of::<Option<LiveEntry>>()).unwrap_or(0));
         let cleared = pool.dynamic_memory_usage();
         assert_eq!(
             cleared, arena,
@@ -5332,7 +5373,12 @@ mod graph_tests {
     fn reference_components(pool: &Mempool) -> Vec<Vec<EntryId>> {
         let mut seen: HashSet<EntryId> = HashSet::new();
         let mut components = Vec::new();
-        let live: Vec<EntryId> = pool.derived.by_txid.values().map(|indexed| indexed.id).collect();
+        let live: Vec<EntryId> = pool
+            .derived
+            .by_txid
+            .values()
+            .map(|indexed| indexed.id)
+            .collect();
         for seed in live {
             if !seen.insert(seed) {
                 continue;
@@ -5603,6 +5649,109 @@ mod graph_tests {
         // A candidate inside the limit is admitted through the same path.
         let _e = insert_ok(&mut pool, 6, &[OutPoint::new(a, 0)], 100);
         assert_graph_exact(&pool);
+    }
+
+    /// The cached cluster check and the walk must return the same verdict
+    /// while nothing is excluded. In a debug build `check_cluster_limits`
+    /// compares the two on every admission; a release build runs only the
+    /// cache, so this test is the release-safe guard. Each shape exercises a
+    /// different way the paths could diverge: a candidate that merges two
+    /// components, a sibling reached only by an up-then-down edge, a partition
+    /// a removal just re-derived (with a limit tight enough that a stale
+    /// merged summary would flip the verdict), a size-limit verdict answered
+    /// from the merged summary weight, and a neighbour that is an in-pool
+    /// child of the candidate itself.
+    #[test]
+    fn check_cluster_limits_cached_matches_walk_across_graph_shapes() {
+        fn agrees(pool: &Mempool, tx: &Tx, weight: u64, expected: Result<(), PolicyError>) {
+            let excluded: HashSet<EntryId> = HashSet::new();
+            assert_eq!(
+                pool.check_cluster_limits_cached(tx, weight),
+                expected,
+                "cached verdict must match the pinned outcome"
+            );
+            assert_eq!(
+                pool.check_cluster_limits_by_walk(tx, weight, &excluded),
+                expected,
+                "walk verdict must match the pinned outcome"
+            );
+        }
+
+        fn shape_pool(count: u32) -> Mempool {
+            Mempool::new(MempoolLimits {
+                max_total_bytes: 0,
+                min_relay_fee_sat_per_kvb: 0,
+                cluster_count: count,
+                cluster_size_vbytes: 1_000_000,
+                ..MempoolLimits::default()
+            })
+        }
+
+        // Merge: the candidate spends one output of each of two chains, so
+        // its cluster spans five entries against a limit of four.
+        let mut pool = shape_pool(4);
+        let parent_one = insert_ok(&mut pool, 1, &[], 100);
+        let child_one = insert_ok(&mut pool, 2, &[OutPoint::new(parent_one, 0)], 100);
+        let parent_two = insert_ok(&mut pool, 3, &[], 100);
+        let child_two = insert_ok(&mut pool, 4, &[OutPoint::new(parent_two, 0)], 100);
+        let joiner = graph_tx(
+            5,
+            &[OutPoint::new(child_one, 0), OutPoint::new(child_two, 0)],
+            false,
+        );
+        agrees(&pool, &joiner, 400, Err(PolicyError::ClusterCountLimit));
+
+        // Bridge: one parent with two pooled children; the candidate spends
+        // one child, so its cluster reaches the sibling only through an
+        // up-edge followed by a down-edge. Four members at the limit of four.
+        let mut pool = shape_pool(4);
+        let probe = insert_ok(&mut pool, 1, &[], 100);
+        let c1 = insert_ok(&mut pool, 2, &[OutPoint::new(probe, 0)], 100);
+        let _c2 = insert_ok(&mut pool, 3, &[OutPoint::new(probe, 0)], 100);
+        let sibling_spender = graph_tx(4, &[OutPoint::new(c1, 0)], false);
+        agrees(&pool, &sibling_spender, 400, Ok(()));
+
+        // Split: removing the middle entry partitions a three-chain; with a
+        // limit of three the rejoiner of one side is admissible only if the
+        // cached summaries describe the partition, not the old merged
+        // component (a stale summary counts four and refuses).
+        let mut pool = shape_pool(3);
+        let split_root = insert_ok(&mut pool, 1, &[], 100);
+        let split_mid = insert_ok(&mut pool, 2, &[OutPoint::new(split_root, 0)], 100);
+        let _split_tail = insert_ok(&mut pool, 3, &[OutPoint::new(split_mid, 0)], 100);
+        let split_mid_id = pool
+            .entry_id_by_txid(&split_mid)
+            .expect("middle entry resolves");
+        pool.remove_entries_with_reasons(
+            &[(split_mid_id, RemovalReason::Conflict)],
+            &mut Vec::new(),
+        );
+        let rejoiner = graph_tx(4, &[OutPoint::new(split_root, 0)], false);
+        agrees(&pool, &rejoiner, 400, Ok(()));
+
+        // Oversized: inside the member-count limit but over the vbytes one,
+        // which the cached path answers from the merged summary weight.
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            min_relay_fee_sat_per_kvb: 0,
+            cluster_count: 8,
+            cluster_size_vbytes: 200,
+            ..MempoolLimits::default()
+        });
+        let oversize_root = insert_ok(&mut pool, 1, &[], 100);
+        let oversize_mid = insert_ok(&mut pool, 2, &[OutPoint::new(oversize_root, 0)], 100);
+        let overweight = graph_tx(3, &[OutPoint::new(oversize_mid, 0)], false);
+        agrees(&pool, &overweight, 400, Err(PolicyError::ClusterSizeLimit));
+
+        // In-pool child: the candidate's output is already spent by a pooled
+        // child (out-of-order arrival), so the candidate's cluster seeds
+        // downward through the spend index.
+        let mut pool = shape_pool(4);
+        let parent_tx = graph_tx(1, &[], false);
+        let parent_txid = parent_tx.txid();
+        let _child = insert_ok(&mut pool, 2, &[OutPoint::new(parent_txid, 0)], 100);
+        agrees(&pool, &parent_tx, 400, Ok(()));
+        assert_eq!(pool.tx_count(), 1, "the fixture pools the child only");
     }
 
     #[test]
