@@ -336,8 +336,9 @@ impl HeadersSyncState {
 
     /// Processes one received batch (`headerssync.cpp:72-149`).
     ///
-    /// PRE: `headers` is non-empty and continuous as received; `full_message`
-    ///   says whether the batch filled the wire's maximum headers page.
+    /// PRE: `headers` is non-empty; continuity is enforced here per
+    ///   header, not assumed from the sender; `full_message` says whether
+    ///   the batch filled the wire's maximum headers page.
     /// POST: PRESYNC releases nothing; REDOWNLOAD releases only ordered,
     ///   commitment-verified headers whose buffer depth has been retired. A
     ///   returned `request_more` means the caller should continue this sync
@@ -388,17 +389,19 @@ impl HeadersSyncState {
 
     /// The PRESYNC pass: minimal validation and salted commitments
     /// (`headerssync.cpp:150-218`).
+    ///
+    /// PRE: `headers` is non-empty (the caller guards the empty batch).
+    /// POST: every header passed [`Self::validate_presync_header`] —
+    ///   which enforces continuity for each header, not just the first —
+    ///   or the first failing header's error.
+    /// INVARIANT: the crossing check runs only after the whole batch
+    ///   validated, so a batch that breaks continuity mid-way never sums
+    ///   its disconnected branch work into the REDOWNLOAD decision.
     fn process_presync(
         &mut self,
         headers: &[Header],
         full_message: bool,
     ) -> Result<HeaderSyncResult, HeaderSyncError> {
-        if Hash256::from(headers[0].prev_blockhash) != self.last_header_hash {
-            return Err(HeaderSyncError::NonContinuous {
-                phase: HeadersSyncPhase::Presync,
-                height: self.current_height.saturating_add(1),
-            });
-        }
         for header in headers {
             self.validate_presync_header(header)?;
         }
@@ -414,8 +417,26 @@ impl HeadersSyncState {
     }
 
     /// Validates and commits one PRESYNC header (`headerssync.cpp:172-218`).
+    ///
+    /// PRE: `header` chains onto the running cursor — its
+    ///   `prev_blockhash` equals the hash the cursor holds. Whole-batch
+    ///   continuity lives here, as Core's `CheckHeadersAreContinuous`
+    ///   keeps it out of the caller's loop
+    ///   (`net_processing.cpp:2915-2924`).
+    /// POST: the header passed continuity, the permitted difficulty
+    ///   transition, proof of work, and the commitment bound, and the
+    ///   cursor advanced onto it; or the failing check's error with the
+    ///   cursor untouched.
+    /// INVARIANT: a rejected header leaves no trace: work, bits, height,
+    ///   and the cursor are exactly their pre-call values.
     fn validate_presync_header(&mut self, header: &Header) -> Result<(), HeaderSyncError> {
         let height = self.current_height.saturating_add(1);
+        if Hash256::from(header.prev_blockhash) != self.last_header_hash {
+            return Err(HeaderSyncError::NonContinuous {
+                phase: HeadersSyncPhase::Presync,
+                height,
+            });
+        }
         let bits = header.bits.to_consensus();
         if !permitted_difficulty_transition(
             self.chain_start.network,
