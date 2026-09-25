@@ -78,7 +78,7 @@ pub trait TxIndexWriter: Send + Sync {
         watermark: IndexWatermark,
     ) -> Result<(), IndexError> {
         let _ = (capabilities, watermark);
-        Err(IndexError::UnsupportedRollback)
+        Err(IndexError::UnsupportedAnchor)
     }
     /// Reads the opaque durable reconciliation cursor.
     fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError>;

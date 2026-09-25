@@ -319,8 +319,9 @@ pub fn prune_to_height<S: crate::KvStore>(
         };
     }
     // The durable batch is the receipt for the line promoted here. A failed
-    // pass drops the reservation instead, releasing the claim without
-    // advancing the executed line, so the next pass grants again.
+    // pass reconciled its outcome above: a provably applied batch promoted
+    // the line, a provably unapplied one released the claim, and an
+    // unprovable one still holds it until restart-time recovery.
     reservation.commit(executed.get());
     reclaim_staged_flat_block_files(store, block_files, &staged.file_numbers)?;
     Ok(staged)
