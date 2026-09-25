@@ -1145,14 +1145,19 @@ mod tests {
         let status_path = format!("/block/{a1_hash}/status");
         let (a1_text, b1_text) = (a1_hash.to_string(), b1_hash.to_string());
         let (b2_text, genesis_text) = (b2_hash.to_string(), genesis_hash.to_string());
-        let mut seen_b = 0_usize;
+        let mut seen_a = false;
+        let mut seen_b = false;
         let mut accepted = 0_usize;
         let mut attempts = 0_usize;
-        while accepted < 200 {
+        // Sampling runs until both branches have answered, not for a fixed
+        // count: the swapper's first store publishes the b2 tip, but thread
+        // startup is the scheduler's call, so a fixed budget can expire before
+        // the b2 branch is ever published.
+        while !(accepted >= 200 && seen_a && seen_b) {
             attempts += 1;
             assert!(
-                attempts < 20_000,
-                "the retry guard never let a response through"
+                attempts < 100_000,
+                "a publication was never observed, so coherence proved nothing"
             );
             let status_response = route(&handler, &status_path, "");
             // A tip change inside the projection's own validation window is
@@ -1168,11 +1173,14 @@ mod tests {
             );
             let status: Value = serde_json::from_slice(&status_response.body)?;
             match status.get("in_best_chain").and_then(Value::as_bool) {
-                Some(true) => assert!(
-                    status.get("next_best").is_none_or(|value| value.is_null()),
-                    "a1 is the tip of its branch; a next best straddles branches"
-                ),
-                Some(false) => seen_b += 1,
+                Some(true) => {
+                    assert!(
+                        status.get("next_best").is_none_or(|value| value.is_null()),
+                        "a1 is the tip of its branch; a next best straddles branches"
+                    );
+                    seen_a = true;
+                }
+                Some(false) => seen_b = true,
                 other => panic!("in_best_chain is {other:?}, which no branch explains"),
             }
 
@@ -1210,8 +1218,8 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         swapper.join().expect("swapper thread panicked");
         assert!(
-            seen_b > 0,
-            "the b2 branch was never observed, so coherence proved nothing"
+            seen_a && seen_b,
+            "a publication was never observed, so coherence proved nothing"
         );
         Ok(())
     }
