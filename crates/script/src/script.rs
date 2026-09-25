@@ -225,21 +225,12 @@ pub fn is_p2sh(script: &[u8]) -> bool {
         && script[22] == opcode::OP_EQUAL
 }
 
-/// Returns the public-key bytes of a bare P2PK script
-/// (`<33 or 65 bytes> OP_CHECKSIG`), or `None` for any other shape.
-#[must_use]
-pub fn p2pk_pubkey_bytes(script: &[u8]) -> Option<&[u8]> {
-    match script.len() {
-        67 if script[0] == 0x41 && script[66] == opcode::OP_CHECKSIG => Some(&script[1..66]),
-        35 if script[0] == 0x21 && script[34] == opcode::OP_CHECKSIG => Some(&script[1..34]),
-        _ => None,
-    }
-}
-
-/// Returns `true` for a bare P2PK script.
+/// Returns `true` for a bare P2PK script (`<33 or 65 bytes> OP_CHECKSIG`).
 #[must_use]
 pub fn is_p2pk(script: &[u8]) -> bool {
-    p2pk_pubkey_bytes(script).is_some()
+    matches!(script.len(), 67 | 35)
+        && ((script.len() == 67 && script[0] == 0x41 && script[66] == opcode::OP_CHECKSIG)
+            || (script.len() == 35 && script[0] == 0x21 && script[34] == opcode::OP_CHECKSIG))
 }
 
 /// Returns `true` for a v0 witness program: `OP_0 <20 bytes>`.

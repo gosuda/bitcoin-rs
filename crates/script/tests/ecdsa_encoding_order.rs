@@ -62,12 +62,12 @@ fn verify_witness(
     witness: &[Vec<u8>],
     flags: VerifyFlags,
 ) -> Result<bool, ScriptError> {
-    Interpreter.execute(
+    Interpreter.execute_with_prevouts(
         &prevout.script_pubkey,
         &[],
         witness,
         flags,
-        prevout,
+        std::slice::from_ref(prevout),
         tx,
         INPUT,
     )
@@ -104,24 +104,24 @@ fn empty_signature_cannot_bypass_legacy_key_encoding() {
             vec![0x00]
         };
         assert_eq!(
-            Interpreter.execute(
+            Interpreter.execute_with_prevouts(
                 &script,
                 &script_sig,
                 &[],
                 VerifyFlags::NONE,
-                &prevout,
+                std::slice::from_ref(&prevout),
                 &tx,
                 INPUT,
             ),
             Ok(true),
         );
         assert_eq!(
-            Interpreter.execute(
+            Interpreter.execute_with_prevouts(
                 &script,
                 &script_sig,
                 &[],
                 VerifyFlags::STRICTENC,
-                &prevout,
+                std::slice::from_ref(&prevout),
                 &tx,
                 INPUT,
             ),
@@ -274,7 +274,15 @@ fn zero_signature_multisig_does_not_validate_unexamined_keys() {
         script_pubkey: Script::from_bytes(script.clone()),
     };
     assert_eq!(
-        Interpreter.execute(&script, &[0x00], &[], flags, &legacy_prevout, &tx, INPUT),
+        Interpreter.execute_with_prevouts(
+            &script,
+            &[0x00],
+            &[],
+            flags,
+            std::slice::from_ref(&legacy_prevout),
+            &tx,
+            INPUT,
+        ),
         Ok(true),
     );
     let mut program = vec![0x00, 0x20];
@@ -284,12 +292,12 @@ fn zero_signature_multisig_does_not_validate_unexamined_keys() {
         script_pubkey: Script::from_bytes(program),
     };
     assert_eq!(
-        Interpreter.execute(
+        Interpreter.execute_with_prevouts(
             &witness_prevout.script_pubkey,
             &[],
             &[Vec::new(), script],
             flags,
-            &witness_prevout,
+            std::slice::from_ref(&witness_prevout),
             &tx,
             INPUT,
         ),
