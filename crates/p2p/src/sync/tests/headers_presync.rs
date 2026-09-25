@@ -250,17 +250,28 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn s
         1,
         "crossing the floor must not admit the collected pass"
     );
-    // The second pass restarts at the fork point. The request itself is
-    // deduplicated against the still-outstanding one (same locator, same
-    // target), so the state's cursor is the observable.
+    // The second pass restarts at the fork point, and the transition
+    // request must reach the wire: Core retires the request this batch
+    // answered and always sends the sync's own locator when the sync
+    // wants more (`net_processing.cpp:2932-2943`). The phase transition
+    // re-anchors at the fork — a locator identical to the one still
+    // pending — and the dedup must not silence it against the pre-answer
+    // deadline; otherwise no second pass is ever requested and expiry
+    // later blames the connection that did respond.
+    assert_eq!(
+        next_locator(&rx).map(|locator| locator.first().copied()),
+        Some(Some(Hash256::from(genesis.compute_hash()).to_le_bytes())),
+        "the second pass must be requested on the wire from the fork point",
+    );
     assert_eq!(
         with_sync_state(&sync, source, |state| state.next_locator()[0]),
         Some(Hash256::from(genesis.compute_hash())),
         "the second pass must restart at the fork point"
     );
 
-    // Serve the second pass: its last header crosses the floor inside the
-    // state, which releases the whole verified chain in wire order.
+    // Serve the second pass as the answer to that request: its last
+    // header crosses the floor inside the state, which releases the whole
+    // verified chain in wire order.
     let chain_last = chain[PAGE - 1].compute_hash();
     deliver_headers(&inbound_headers_tx, chain, source)?;
     sync.tick();
@@ -358,6 +369,209 @@ fn a_substituted_redownload_header_disconnects_the_connection()
         sync_phase(&sync, source),
         None,
         "the punished sync state must be retired"
+    );
+    Ok(())
+}
+
+/// A REDOWNLOAD release must continue from the state's own cursor. Core
+/// sends the sync's locator whenever the sync wants more, independent of
+/// whether the batch returned headers (`net_processing.cpp:2933-2943`).
+/// The state's cursor sits up to `redownload_buffer_size` headers deeper
+/// than the release point, so a continuation anchored at the release
+/// point — where the tree stops — fails the state's continuity check and
+/// restarts the whole sync. The fixture replays past one regtest buffer
+/// page (7,017) so the release path is genuinely exercised.
+#[test]
+fn redownload_release_continues_from_the_state_cursor() -> Result<(), Box<dyn std::error::Error>> {
+    // Five pages: the work floor crosses on the chain's last header, and
+    // the replay overflows the regtest buffer on its fourth page — three
+    // pages before the chain runs out, so the release is a buffer
+    // overflow, not the completion.
+    let chain = chain_on(&genesis_header(), 0, 5 * PAGE);
+    let threshold = ChainWork::from(WORK_PER_HEADER * u64::try_from(5 * PAGE).unwrap_or(u64::MAX));
+    assert_eq!(
+        chain_work(&chain),
+        threshold,
+        "the floor must sit exactly on the chain's last header"
+    );
+    let (_genesis, sync, inbound_headers_tx, peers) = presync_fixture(threshold)?;
+    let (addr, _lease, rx) = connect(&peers, 9704, 100_000);
+    let source = current_source(&peers, addr);
+    sync.tick();
+    assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
+
+    for page in 0..5 {
+        deliver_headers(
+            &inbound_headers_tx,
+            chain[page * PAGE..(page + 1) * PAGE].to_vec(),
+            source,
+        )?;
+        sync.tick();
+    }
+    assert_eq!(
+        sync_phase(&sync, source),
+        Some(HeadersSyncPhase::Redownload),
+        "the fixture must reach its second pass"
+    );
+
+    // Replay the same chain. The first three pages only fill the buffer;
+    // the fourth overflows it and releases the retired prefix.
+    for page in 0..3 {
+        deliver_headers(
+            &inbound_headers_tx,
+            chain[page * PAGE..(page + 1) * PAGE].to_vec(),
+            source,
+        )?;
+        sync.tick();
+    }
+    while rx.try_recv().is_ok() {}
+    deliver_headers(
+        &inbound_headers_tx,
+        chain[3 * PAGE..4 * PAGE].to_vec(),
+        source,
+    )?;
+    sync.tick();
+    assert_eq!(
+        tree_node_count(&sync),
+        4 * PAGE - 7_017 + 1,
+        "the overflow release must retire exactly the buffer's excess"
+    );
+    let locator = next_locator(&rx)
+        .ok_or_else(|| std::io::Error::other("the release continuation getheaders was not sent"))?;
+    assert_eq!(
+        locator.first().copied(),
+        Some(Hash256::from(chain[4 * PAGE - 1].compute_hash()).to_le_bytes()),
+        "the continuation must leave from the state's redownload cursor, not the release point",
+    );
+
+    // The last page crosses the replay's own work floor: the state
+    // releases everything left and retires.
+    deliver_headers(
+        &inbound_headers_tx,
+        chain[4 * PAGE..5 * PAGE].to_vec(),
+        source,
+    )?;
+    sync.tick();
+    assert_eq!(
+        sync_phase(&sync, source),
+        None,
+        "a completed second pass must retire the state"
+    );
+    assert_eq!(
+        tree_node_count(&sync),
+        5 * PAGE + 1,
+        "the whole replayed chain must be admitted in wire order"
+    );
+    Ok(())
+}
+
+/// A batch that breaks continuity mid-way must be rejected whole: Core
+/// checks every header of the batch against the running cursor
+/// (`CheckHeadersAreContinuous`, `net_processing.cpp:2915-2924`), so a
+/// batch whose tail forks elsewhere cannot sum its disconnected branch
+/// work into the crossing decision.
+#[test]
+fn a_midbatch_continuity_break_spends_the_sync() -> Result<(), Box<dyn std::error::Error>> {
+    let floor =
+        ChainWork::from(WORK_PER_HEADER * u64::try_from(2 * PAGE + 500).unwrap_or(u64::MAX));
+    let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
+    let (addr, lease, _rx) = connect(&peers, 9705, 100_000);
+    let source = current_source(&peers, addr);
+
+    let chain = chain_on(&genesis, 0, 2 * PAGE);
+    deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source)?;
+    sync.tick();
+    assert_eq!(
+        sync_phase(&sync, source),
+        Some(HeadersSyncPhase::Presync),
+        "the fixture must collect below the floor"
+    );
+
+    // A full page whose last header chains onto nothing the cursor knows:
+    // the batch head is honest, so only a per-header check can see it.
+    let mut midbreak = chain[PAGE..2 * PAGE - 1].to_vec();
+    midbreak.push(mine_header(
+        BlockHash(Hash256::from_le_bytes(&[0xa5; 32])),
+        u32::try_from(2 * PAGE).unwrap_or(u32::MAX),
+    ));
+    deliver_headers(&inbound_headers_tx, midbreak, source)?;
+    sync.tick();
+
+    assert_eq!(
+        sync_phase(&sync, source),
+        None,
+        "a batch that breaks continuity mid-way must spend the sync"
+    );
+    assert_eq!(
+        tree_node_count(&sync),
+        1,
+        "the disconnected branch must not reach the tree"
+    );
+    assert!(
+        !lease.is_cancelled() && peers.is_connected(addr),
+        "a lost continuation is possibly benign: the connection stays"
+    );
+    Ok(())
+}
+
+/// A header carried by a delivered body is not a wire `headers` message,
+/// and Core feeds the download-twice state only from processed `headers`
+/// messages (`net_processing.cpp:2915-2924`). A forwarded one-header page
+/// must therefore leave a live state exactly as it found it: not
+/// finalize it as a short page, not advance its cursor, not spend it on a
+/// continuity break.
+#[test]
+fn a_forwarded_body_header_leaves_the_live_sync_state_alone()
+-> Result<(), Box<dyn std::error::Error>> {
+    let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
+    let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
+    let (addr, lease, rx) = connect(&peers, 9706, 100_000);
+    let source = current_source(&peers, addr);
+
+    let chain = chain_on(&genesis, 0, PAGE);
+    deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source)?;
+    sync.tick();
+    assert_eq!(
+        sync_phase(&sync, source),
+        Some(HeadersSyncPhase::Presync),
+        "the fixture must collect below the floor"
+    );
+    let cursor = with_sync_state(&sync, source, |state| state.next_locator()[0].to_le_bytes());
+    // The collection continuation from the setup page is expected; retire
+    // it so the wire is quiet before the forwarded delivery.
+    while rx.try_recv().is_ok() {}
+
+    // The same connection delivers a body whose embedded header is
+    // forwarded through the drain: one header, not a wire response,
+    // chaining off the in-tree fork below the floor.
+    inbound_headers_tx
+        .send(InboundHeaders {
+            headers: vec![mine_header(genesis.compute_hash(), 5_000)],
+            source: Some(source),
+            wire_response: false,
+            body_fetch_owned: false,
+        })
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    sync.tick();
+
+    assert_eq!(
+        sync_phase(&sync, source),
+        Some(HeadersSyncPhase::Presync),
+        "a body-carried header must not touch the wire sync's state"
+    );
+    assert_eq!(
+        with_sync_state(&sync, source, |state| state.next_locator()[0].to_le_bytes()),
+        cursor,
+        "the forwarded header must not advance the state's cursor"
+    );
+    assert_eq!(
+        tree_node_count(&sync),
+        1,
+        "a header below the floor must not reach the tree through a body either"
+    );
+    assert!(
+        rx.try_recv().is_err() && !lease.is_cancelled() && peers.is_connected(addr),
+        "a forwarded header sends nothing and blames no one"
     );
     Ok(())
 }
