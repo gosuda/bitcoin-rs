@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_relay_queue_excludes_source_per_request() {
+    fn drained_queue_excludes_source_per_request() {
         let gateway = relay_identity_gateway();
         let (peers, ids) = fake_peers(3);
         let (queue, rx) = TxRelayQueue::new(8);
