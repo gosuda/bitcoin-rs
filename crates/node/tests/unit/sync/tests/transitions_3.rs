@@ -21,8 +21,9 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
         let mut coinbase = coinbase_transaction(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let mut block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
-        fork_parent = handles.block_tree().write().insert_node(
-            Some(fork_parent),
+        fork_parent = crate::sync::fixture_insert_header_node(
+            &handles,
+            fork_parent,
             block.header,
             NodeStatus::HeaderValid,
         )?;
@@ -106,15 +107,17 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
     let invalid = mined_block_with_prev_hash(fork_root_hash, 101, Vec::new());
-    let invalid_id = handles.block_tree().write().insert_node(
-        Some(fork_root_id),
+    let invalid_id = crate::sync::fixture_insert_header_node(
+        &handles,
+        fork_root_id,
         invalid.header,
         NodeStatus::HeaderValid,
     )?;
     let descendant =
         mined_block_with_prev_hash(invalid.block_hash(), 102, vec![coinbase_transaction(102)]);
-    let descendant_id = handles.block_tree().write().insert_node(
-        Some(invalid_id),
+    let descendant_id = crate::sync::fixture_insert_header_node(
+        &handles,
+        invalid_id,
         descendant.header,
         NodeStatus::HeaderValid,
     )?;
@@ -186,8 +189,9 @@ fn branch_switch_rejects_a_body_for_another_header_before_mutation()
     let mut target_coinbase = coinbase_transaction(101);
     target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
     let target = mined_block_with_prev_hash(fork_root_hash, 101, vec![target_coinbase]);
-    let target_id = handles.block_tree().write().insert_node(
-        Some(fork_root_id),
+    let target_id = crate::sync::fixture_insert_header_node(
+        &handles,
+        fork_root_id,
         target.header,
         NodeStatus::HeaderValid,
     )?;
@@ -248,8 +252,9 @@ fn branch_switch_rejects_mismatched_preserved_bytes_before_mutation()
     let mut target_coinbase = coinbase_transaction(101);
     target_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
     let target = mined_block_with_prev_hash(fork_root_hash, 101, vec![target_coinbase]);
-    let target_id = handles.block_tree().write().insert_node(
-        Some(fork_root_id),
+    let target_id = crate::sync::fixture_insert_header_node(
+        &handles,
+        fork_root_id,
         target.header,
         NodeStatus::HeaderValid,
     )?;

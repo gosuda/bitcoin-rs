@@ -776,6 +776,23 @@ impl Chainstate {
         Arc::clone(&self.chain_tip)
     }
 
+    /// Publishes the genesis connect outcome as the best-work header tip.
+    ///
+    /// Header admission fills the header-tip cell through the tree; a
+    /// genesis connect is the one mutation that establishes the cell before
+    /// any batch was admitted, so the cell is published here.
+    ///
+    /// PRE: `tip` is the tip of a successful genesis connect.
+    /// POST: the header-tip cell names `tip` when it named nothing; an
+    ///   already-published tip is left untouched.
+    /// INVARIANT: callers outside this crate never store the header tip
+    ///   directly.
+    pub fn publish_genesis_tip(&self, tip: TipSnapshot) {
+        if self.chain_tip.load_full().is_none() {
+            self.chain_tip.store(Some(Arc::new(tip)));
+        }
+    }
+
     /// Returns the authoritative applied-tip cell.
     #[must_use]
     pub fn applied_tip(&self) -> &ArcSwapOption<TipSnapshot> {
