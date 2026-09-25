@@ -306,18 +306,32 @@ state is harmless and keeps the node operating until replay closes the gap.
 ### `RCV-15`: Disconnect marker recovery
 
 A surviving disconnect marker is recovery evidence, not a permanent
-operator refusal. The durable head is the commit point, and `RCV-14` keeps
-every published checkpoint at or below it, so the restored state is
-self-consistent and at worst stale: startup replays the authenticated head
-chain onto it (`reconcile_at_boot`), warns with the marker identity,
-publishes a clean checkpoint, and retires the marker only after that
-publication is durable. Whether the head still certifies the disconnected
-tip or its parent decides only what the warning reports.
+operator refusal. The durable head is the commit point. `RCV-14` freezes
+each checkpoint against the head at its own moment, so a checkpoint can sit
+above a head that a later disconnect rewound below it: the restored state
+may lead the head, not only trail it. Recovery picks the one mode the
+restored state allows, and the warning names it:
 
-- An unreadable marker or head, no head at all, or a restored state that
-  does not sit below an authenticated head is divergence, not lag: recovery
-  fails closed, retains the marker, and startup stops. No partial success
-  serves.
+- `cold-replay` — nothing was restored. The certified head chain is the
+  whole state, and `reconcile_at_boot` replays it from genesis.
+- `gap-replay` — the restored tip sits below the head. The ordinary gap walk
+  closes the committed-but-unpublished lag onto it.
+- `checkpoint-rewind` — the restored tip leads the head, or meets its height
+  with another hash. The checkpoint outran the rewind, so recovery rolls the
+  restored coins back block by block against the undo rows the head batch
+  certified — to the head, or to the fork below it, where reconciliation
+  takes over — and never re-commits the head.
+
+Every mode warns with the marker identity and the mode chosen, publishes a
+clean checkpoint, and retires the marker only after that publication is
+durable.
+
+- A restored tip that leads the head is recovery input, not divergence, and
+  the rewind discards it. An unreadable marker or head, no head at all, a
+  body or undo row the durable evidence does not hold, or a chain that is
+  not an authenticated ancestor prefix of stored bodies is divergence:
+  recovery fails closed, retains the marker, and startup stops. No partial
+  success serves.
 - `InFlight` stays barred from ordinary checkpoint publication; only the
   recovery transaction may publish over it, and only after the replay
   succeeded. Retirement is an unconditional clearing owned by that recovery
@@ -376,8 +390,10 @@ tip or its parent decides only what the warning reports.
 - `crates/node/tests/crash_recovery.rs`: the `RCV-04` crash
   points — SIGKILL restart across journal, reorg, and publication scenarios,
   partial-write handling, and upgrade-matrix fallback;
-  `torn_disconnect_replays_parent_tip` and `torn_disconnect_cold_replays_head`
-  prove automatic marker recovery to the certified head (`RCV-15`), and
+  `torn_disconnect_replays_parent_tip`, `torn_disconnect_cold_replays_head`,
+  and `torn_disconnect_checkpoint_above_head_rewinds_to_head` prove automatic
+  marker recovery to the certified head, including a checkpoint that leads
+  the rewound head (`RCV-15`), and
   `checkpoint_fallback_replays_wide_gap_to_durable_head` proves an
   authenticated gap of any width replays from stored bodies (`RCV-10`).
 - `crates/node/tests/unit/state/tests/recovery.rs`:
