@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{Amount, Network, OutPoint, Sequence, Tx, TxOut, Txid};
 
 use crate::block_view::BlockView;
 use crate::sigops::transaction_sigop_cost;
@@ -76,16 +76,34 @@ static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
 
 /// Returns `true` iff the transaction is locktime-final at `block_height` and the timestamp cutoff.
 ///
-/// Implements Bitcoin Core's `IsFinalTx`:
+/// Implements Bitcoin Core's `IsFinalTx`, plus the ecash betanet fork's
+/// always-final sentinel under [`VerifyFlags::ECASH`]:
 ///   - locktime == 0: always final.
+///   - ECASH active and locktime == `LOCKTIME_THRESHOLD - 1`: always final,
+///     even with enabling sequences (the fork's sentinel; see
+///     [`ecash_locktime_sentinel_active`]).
 ///   - locktime < `LOCKTIME_THRESHOLD`: height-based; final iff locktime < `block_height`.
 ///   - locktime >= `LOCKTIME_THRESHOLD`: timestamp-based; final iff locktime < `locktime_cutoff`.
 ///   - all inputs have sequence == `SEQUENCE_FINAL`: final regardless of locktime.
 ///
 /// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
 #[must_use]
-pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
-    is_final_tx_with_locktime_cutoff(tx, block_height, locktime_cutoff)
+pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32, flags: VerifyFlags) -> bool {
+    is_final_tx_with_locktime_cutoff(tx, block_height, locktime_cutoff, flags)
+}
+
+/// Whether the ecash betanet always-final locktime sentinel is consensus-active
+/// for a block at `height`.
+///
+/// The fork's `IsFinalTx` treats `nLockTime == LOCKTIME_THRESHOLD - 1`
+/// (499,999,999) as final from the fork height on, before the height/time
+/// comparison and regardless of input sequences; vanilla networks never
+/// activate the rule.
+#[must_use]
+pub fn ecash_locktime_sentinel_active(network: Network, height: u32) -> bool {
+    network
+        .ecash_fork_height()
+        .is_some_and(|fork_height| u64::from(height) >= fork_height)
 }
 
 /// Verifies that a coinbase transaction's scriptSig length is within consensus bounds.
@@ -137,9 +155,17 @@ pub fn check_coinbase_maturity(
 ///
 /// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
 #[must_use]
-fn is_final_tx_with_locktime_cutoff(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
+fn is_final_tx_with_locktime_cutoff(
+    tx: &Tx,
+    block_height: u32,
+    locktime_cutoff: u32,
+    flags: VerifyFlags,
+) -> bool {
     let lock_time = tx.lock_time.to_consensus();
     if lock_time == 0 {
+        return true;
+    }
+    if flags.contains(VerifyFlags::ECASH) && lock_time == LOCKTIME_THRESHOLD - 1 {
         return true;
     }
 
@@ -198,7 +224,7 @@ fn verify_transaction_with_locktime_cutoff(
     flags: VerifyFlags,
     skip_scripts: bool,
 ) -> Result<(), ConsensusError> {
-    let Some(prep) = prepare_tx_checks(tx, height, locktime_cutoff, |_, outpoint| {
+    let Some(prep) = prepare_tx_checks(tx, height, locktime_cutoff, flags, |_, outpoint| {
         prevouts.lookup(outpoint)
     })?
     else {
@@ -276,9 +302,10 @@ fn prepare_tx_checks(
     tx: &Tx,
     height: u32,
     locktime_cutoff: u32,
+    flags: VerifyFlags,
     mut lookup: impl FnMut(usize, &OutPoint) -> Option<TxOut>,
 ) -> Result<Option<TxPrep>, ConsensusError> {
-    if !is_final_tx_with_locktime_cutoff(tx, height, locktime_cutoff) {
+    if !is_final_tx_with_locktime_cutoff(tx, height, locktime_cutoff, flags) {
         return Err(ConsensusError::Bip {
             bip: "BIP113",
             reason: format!(
@@ -680,7 +707,7 @@ fn prepare_block_input_checks<'b>(
     let mut checks = Vec::new();
     for (tx_index, tx) in txs.iter().enumerate() {
         let resolved_inputs = &mut resolved[tx_index];
-        let prep = match prepare_tx_checks(tx, height, locktime_cutoff, |input_index, _| {
+        let prep = match prepare_tx_checks(tx, height, locktime_cutoff, flags, |input_index, _| {
             resolved_inputs.get_mut(input_index).and_then(Option::take)
         }) {
             Ok(Some(prep)) => prep,
@@ -834,8 +861,8 @@ mod tests {
     #[cfg(feature = "kernel")]
     use bitcoin::hashes::Hash as _;
     use bitcoin_rs_primitives::{
-        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
-        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
+        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
+        Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
     };
     #[cfg(not(feature = "kernel"))]
     use bitcoin_rs_primitives::{Sighash, SighashCache};
@@ -846,8 +873,8 @@ mod tests {
     use bitcoin_rs_script::{VerifyFlags, push_int};
 
     use super::{
-        ScriptStageTimings, is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size,
-        verify_transaction,
+        ScriptStageTimings, ecash_locktime_sentinel_active, is_final_tx,
+        is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size, verify_transaction,
     };
 
     /// Wraps `txs` in a block and parses it the way production does, so tests
@@ -1384,8 +1411,75 @@ mod tests {
             }],
         };
 
-        assert!(!is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_100));
-        assert!(is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_101));
+        assert!(!is_final_tx_with_locktime_cutoff(
+            &tx,
+            1,
+            500_000_100,
+            VerifyFlags::MANDATORY
+        ));
+        assert!(is_final_tx_with_locktime_cutoff(
+            &tx,
+            1,
+            500_000_101,
+            VerifyFlags::MANDATORY
+        ));
+    }
+
+    #[test]
+    fn ecash_locktime_sentinel_is_always_final_on_fork_networks() {
+        // The real betanet divergence (issue #1182): block 968,013 carries tx
+        // 2e30da2e… with locktime 499,999,999 and enabling sequence 0xFFFFFFFD.
+        // Vanilla BIP113 reads that locktime as a height lock the chain can
+        // never reach; the ecash fork's `IsFinalTx` declares
+        // `LOCKTIME_THRESHOLD - 1` final outright, and the reference node
+        // accepted the block.
+        let sentinel = Tx {
+            version: 2,
+            lock_time: LockTime::from_consensus(499_999_999),
+            inputs: vec![TxIn {
+                previous_output: OutPoint::default(),
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xFFFF_FFFD),
+                witness: Witness::new(),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: Script::new(),
+            }],
+        };
+
+        assert!(
+            !is_final_tx(&sentinel, 968_013, 1_789_805_182, VerifyFlags::MANDATORY),
+            "vanilla rules keep the sentinel height-locked and non-final"
+        );
+        assert!(
+            is_final_tx(
+                &sentinel,
+                968_013,
+                1_789_805_182,
+                VerifyFlags::MANDATORY.union(VerifyFlags::ECASH)
+            ),
+            "the ecash fork makes the sentinel final despite the enabling sequence"
+        );
+
+        // One below the sentinel keeps vanilla rules even on betanet.
+        let below_sentinel = Tx {
+            lock_time: LockTime::from_consensus(499_999_998),
+            ..sentinel
+        };
+        assert!(
+            !is_final_tx(
+                &below_sentinel,
+                968_013,
+                1_789_805_182,
+                VerifyFlags::MANDATORY.union(VerifyFlags::ECASH)
+            ),
+            "only LOCKTIME_THRESHOLD - 1 is the fork's sentinel"
+        );
+
+        assert!(!ecash_locktime_sentinel_active(Network::Betanet, 967_679));
+        assert!(ecash_locktime_sentinel_active(Network::Betanet, 967_680));
+        assert!(!ecash_locktime_sentinel_active(Network::Mainnet, 970_000));
     }
 
     #[test]

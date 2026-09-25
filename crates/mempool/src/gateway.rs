@@ -27,6 +27,18 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Script and consensus verification flags for one admission: standardness
+/// plus the ecash fork rules when the chain reports the fork active for the
+/// next block. Without the ecash bit, betanet admissions would reject
+/// drivechain spends and the fork's locktime sentinel.
+fn admission_verify_flags(ecash_finality: bool) -> VerifyFlags {
+    if ecash_finality {
+        VerifyFlags::STANDARD.union(VerifyFlags::ECASH)
+    } else {
+        VerifyFlags::STANDARD
+    }
+}
+
 /// Adapter that lets the consensus verifier look up prevouts from a
 /// resolved `(OutPoint, TxOut)` slice, layered under the mempool by
 /// `MempoolUtxoView`.
@@ -98,6 +110,9 @@ pub struct AdmissionRequest {
     pub locktime_cutoff: u32,
     /// Whether CSV (BIP68/112/113) is active for the next block.
     pub csv_active: bool,
+    /// Whether the ecash fork's always-final locktime sentinel is active for
+    /// the next block; mirrors [`ChainAdmissionSnapshot::ecash_finality`].
+    pub ecash_finality: bool,
     /// Caller-supplied maximum fee rate in sat/kvB; `None` means no cap.
     pub max_feerate_sat_per_kvb: Option<u64>,
     /// Wall-clock seconds for the mempool entry timestamp.
@@ -229,7 +244,7 @@ impl PreparedAdmission {
             &PrevoutMap(&self.prevouts),
             height,
             request.locktime_cutoff,
-            VerifyFlags::STANDARD,
+            admission_verify_flags(request.ecash_finality),
         )
         .is_err()
         {
@@ -276,7 +291,7 @@ impl PreparedAdmission {
             &PrevoutMap(&self.prevouts),
             height,
             request.locktime_cutoff,
-            VerifyFlags::STANDARD,
+            admission_verify_flags(request.ecash_finality),
         ) {
             // Core's rejection cache must allow a different witness body for
             // witness-sensitive or possibly witness-stripped script failures.
@@ -1045,6 +1060,7 @@ impl MempoolGateway {
                     &tx,
                     next_height,
                     snapshot.locktime_cutoff,
+                    admission_verify_flags(snapshot.ecash_finality),
                 );
                 let immature = tx.inputs.iter().any(|input| {
                     snapshot
@@ -1582,6 +1598,7 @@ mod tests {
             )],
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
+            ecash_finality: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -2688,6 +2705,7 @@ mod tests {
             )],
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
+            ecash_finality: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -3060,6 +3078,7 @@ mod tests {
             prevouts: Vec::new(),
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
+            ecash_finality: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,
@@ -3111,6 +3130,7 @@ mod tests {
             )],
             prevout_meta: hashbrown::HashMap::new(),
             csv_active: false,
+            ecash_finality: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,

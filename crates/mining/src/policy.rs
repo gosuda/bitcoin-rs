@@ -2,9 +2,10 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 
-use bitcoin_rs_consensus::is_final_tx;
+use bitcoin_rs_consensus::{ecash_locktime_sentinel_active, is_final_tx};
 use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
 use bitcoin_rs_primitives::{Tx, Txid};
+use bitcoin_rs_script::VerifyFlags;
 
 use crate::MiningError;
 use crate::template::CandidateContext;
@@ -181,10 +182,19 @@ fn package_is_final(
     pooled: &HashSet<Txid>,
     package: &SelectedPackage,
 ) -> bool {
+    let finality_flags = if ecash_locktime_sentinel_active(context.network, context.height) {
+        VerifyFlags::ECASH
+    } else {
+        VerifyFlags::NONE
+    };
     package.indices.iter().all(|&index| {
         let entry = &snapshot.entries[index];
-        is_final_tx(&entry.tx, context.height, context.locktime_cutoff)
-            && next_block_sequence_locks_final(context, pooled, &entry.tx)
+        is_final_tx(
+            &entry.tx,
+            context.height,
+            context.locktime_cutoff,
+            finality_flags,
+        ) && next_block_sequence_locks_final(context, pooled, &entry.tx)
     })
 }
 

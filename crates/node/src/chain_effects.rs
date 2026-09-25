@@ -535,6 +535,7 @@ mod tests {
                 locktime_cutoff: 0,
                 prevout_meta: hashbrown::HashMap::new(),
                 csv_active: false,
+                ecash_finality: false,
                 confirmed: false,
             })
         }

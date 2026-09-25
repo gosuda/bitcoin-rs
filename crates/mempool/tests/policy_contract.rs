@@ -463,6 +463,7 @@ impl AdmissionChain for MetaChain {
             height: self.height,
             locktime_cutoff: self.locktime_cutoff,
             csv_active: self.csv_active,
+            ecash_finality: false,
             confirmed: false,
         })
     }

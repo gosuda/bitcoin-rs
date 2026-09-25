@@ -58,8 +58,8 @@ pub use verify_block::{
     verify_merkle_root_with_txids,
 };
 pub use verify_tx::{
-    COINBASE_MATURITY, ScriptStageTimings, check_coinbase_maturity, is_final_tx,
-    verify_block_input_scripts, verify_coinbase_script_sig_size, verify_transaction,
+    COINBASE_MATURITY, ScriptStageTimings, check_coinbase_maturity, ecash_locktime_sentinel_active,
+    is_final_tx, verify_block_input_scripts, verify_coinbase_script_sig_size, verify_transaction,
     verify_transaction_non_script,
 };
 

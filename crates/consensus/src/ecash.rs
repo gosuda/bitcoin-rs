@@ -5,8 +5,11 @@
 //! Betanet shares mainnet's full history, so those txids still sit in the
 //! UTXO set, but their real input scripts never replay against betanet's
 //! state: consensus skips input-script verification for exactly these txids
-//! while every other check (finality, outpoints, amounts, sigops) still
-//! applies. Mainnet, testnet, signet, and regtest keep verifying them
+//! while every other check (outpoints, amounts, sigops) still applies, and
+//! finality gains exactly one exception — the fork's always-final sentinel
+//! locktime (`LOCKTIME_THRESHOLD - 1`, see
+//! [`crate::verify_tx::ecash_locktime_sentinel_active`]). Mainnet, testnet,
+//! signet, and regtest keep verifying them
 //! normally - the skip is gated on the [`VerifyFlags::ECASH`] activation
 //! carried by `verify_flags` for networks with an ecash fork.
 //!

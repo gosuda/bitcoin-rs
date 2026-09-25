@@ -59,6 +59,10 @@ pub struct ChainAdmissionSnapshot {
     pub locktime_cutoff: u32,
     /// Whether CSV (BIP68/112/113) is active for the next block.
     pub csv_active: bool,
+    /// Whether the ecash fork's always-final locktime sentinel is active for
+    /// the next block (betanet at and past its fork height). Vanilla
+    /// networks carry `false`.
+    pub ecash_finality: bool,
     /// Peer duplicate suppression only. RPC cache membership is not admission.
     pub confirmed: bool,
 }
@@ -290,6 +294,7 @@ impl MempoolGateway {
                     prevouts,
                     prevout_meta: snapshot.prevout_meta,
                     csv_active: snapshot.csv_active,
+                    ecash_finality: snapshot.ecash_finality,
                     locktime_cutoff: snapshot.locktime_cutoff,
                     max_feerate_sat_per_kvb,
                     time: 0,
@@ -480,9 +485,9 @@ impl MempoolGateway {
             // generation/sequence first, then rejects the still-known invalid
             // outpoint before policy or finality. Changed tokens rebuild a
             // normal attempt, including chain lookup if the parent disappeared.
-            let (confirmed, height, locktime_cutoff, prevout_meta, csv_active) = snapshot
-                .map_or_else(
-                    || (HashMap::new(), 0, 0, HashMap::new(), false),
+            let (confirmed, height, locktime_cutoff, prevout_meta, csv_active, ecash_finality) =
+                snapshot.map_or_else(
+                    || (HashMap::new(), 0, 0, HashMap::new(), false, false),
                     |snapshot| {
                         (
                             snapshot.prevouts.into_iter().collect::<HashMap<_, _>>(),
@@ -490,6 +495,7 @@ impl MempoolGateway {
                             snapshot.locktime_cutoff,
                             snapshot.prevout_meta,
                             snapshot.csv_active,
+                            snapshot.ecash_finality,
                         )
                     },
                 );
@@ -504,6 +510,7 @@ impl MempoolGateway {
                 prevouts,
                 prevout_meta,
                 csv_active,
+                ecash_finality,
                 locktime_cutoff,
                 max_feerate_sat_per_kvb,
                 time,
@@ -698,6 +705,7 @@ mod tests {
                 locktime_cutoff: 0,
                 prevout_meta: HashMap::new(),
                 csv_active: false,
+                ecash_finality: false,
                 confirmed: false,
             })
         }
@@ -1342,6 +1350,7 @@ mod tests {
                 locktime_cutoff: 0,
                 prevout_meta: HashMap::new(),
                 csv_active: false,
+                ecash_finality: false,
                 confirmed: false,
             })
         }
@@ -1460,6 +1469,7 @@ mod tests {
                 locktime_cutoff: 0,
                 prevout_meta: HashMap::new(),
                 csv_active: false,
+                ecash_finality: false,
                 confirmed: false,
             })
         }
@@ -2509,6 +2519,7 @@ mod tests {
             prevouts: vec![],
             prevout_meta: HashMap::new(),
             csv_active: false,
+            ecash_finality: false,
             locktime_cutoff: 0,
             max_feerate_sat_per_kvb: None,
             time: 1,

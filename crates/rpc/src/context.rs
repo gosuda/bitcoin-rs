@@ -303,6 +303,10 @@ impl AdmissionChain for ChainAdmissionView<'_> {
         let csv_active = tip_node.is_some_and(|node| {
             softfork_state(&tree, self.network, Some(node), height + 1).csv_active
         });
+        // The ecash fork's always-final locktime sentinel activates at the
+        // same fork boundary the ECASH script rules do.
+        let ecash_finality =
+            bitcoin_rs_consensus::ecash_locktime_sentinel_active(self.network, height + 1);
         // Confirmed coin metadata for BIP68 and coinbase maturity. Height `h`
         // uses the MTP of the block before `h`, the same derivation the
         // block-connect path applies. MTP lookups are cached per height.
@@ -345,6 +349,7 @@ impl AdmissionChain for ChainAdmissionView<'_> {
             height,
             locktime_cutoff,
             csv_active,
+            ecash_finality,
             confirmed,
         })
     }

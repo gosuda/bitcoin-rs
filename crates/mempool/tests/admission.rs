@@ -114,6 +114,7 @@ fn admission_request(
         prevouts,
         prevout_meta: hashbrown::HashMap::new(),
         csv_active: false,
+        ecash_finality: false,
         locktime_cutoff: 0,
         max_feerate_sat_per_kvb: None,
         time: 1,
