@@ -24,6 +24,7 @@ thiserror.workspace = true
 
 [features]
 default = []
+test-seam = []
 
 
 [dev-dependencies]
