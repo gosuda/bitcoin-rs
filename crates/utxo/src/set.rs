@@ -549,29 +549,29 @@ pub struct UtxoSet {
 
 /// Byte-level accounting of what a UTXO set holds in memory.
 ///
-/// Every field is what the set can account for itself. What it cannot see —
-/// allocator size-class rounding, fragmentation, and per-allocation metadata —
-/// is exactly the residual against process RSS, which is the point.
+/// Every field is what the set can account for itself: the exact requested
+/// bytes of every boxed record payload and the estimated hash-table backing.
+/// What it cannot see — allocator size-class rounding, fragmentation, and
+/// allocator metadata — is exactly the residual against process RSS, which is
+/// the point.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UtxoMemoryReport {
     /// Transaction-level records held.
     pub records: usize,
     /// Live outputs across those records.
     pub outputs: usize,
-    /// Sum of every record's heap allocation: header plus buffer capacity.
-    pub record_allocation_bytes: usize,
-    /// Sum of every record's live encoded payload, excluding header and slack.
+    /// Sum of every record's complete boxed payload.
     pub record_payload_bytes: usize,
     /// Estimated hash-table backing store across all shards.
     pub table_bytes: usize,
 }
 
 impl UtxoMemoryReport {
-    /// Everything the set can attribute: record allocations plus table storage.
+    /// Everything the set can attribute: record payload bytes plus estimated
+    /// table storage.
     #[must_use]
     pub const fn accounted_bytes(&self) -> usize {
-        self.record_allocation_bytes
-            .saturating_add(self.table_bytes)
+        self.record_payload_bytes.saturating_add(self.table_bytes)
     }
 }
 
@@ -605,7 +605,7 @@ impl UtxoSetView<'_> {
     /// Exists to attribute process RSS rather than to guess at it. The set is
     /// fully memory-resident with no eviction tier, and the published
     /// 13.83 GiB at height 645,804 is far above what the record encoding alone
-    /// predicts, so the gap between `record_allocation_bytes + table_bytes` and
+    /// predicts, so the gap between `record_payload_bytes + table_bytes` and
     /// actual RSS is the number that decides whether an encoding change is worth
     /// making at all.
     ///
@@ -614,11 +614,9 @@ impl UtxoSetView<'_> {
     pub fn memory_report(&self) -> UtxoMemoryReport {
         let mut report = UtxoMemoryReport::default();
         for shard in &self.set.shards {
-            let (allocation, payload) = shard.allocation_and_payload_bytes();
             report.records += shard.record_count();
             report.outputs += shard.output_count();
-            report.record_allocation_bytes += allocation;
-            report.record_payload_bytes += payload;
+            report.record_payload_bytes += shard.record_payload_bytes();
             report.table_bytes += shard.table_bytes();
         }
         report
@@ -1293,4 +1291,45 @@ fn stable_view_len(view: &UtxoSetView<'_>) -> usize {
 
 fn stable_view_record_count(view: &UtxoSetView<'_>) -> usize {
     view.record_count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin_rs_primitives::Amount;
+
+    /// The report accounts the exact boxed record payload plus the estimated
+    /// table backing: with records resident, `accounted_bytes()` must equal
+    /// that sum and every component must be positive.
+    #[test]
+    fn memory_report_accounts_payload_plus_table_bytes() -> Result<(), UtxoError> {
+        let set = UtxoSet::new();
+        let mut changes = BlockChanges::default();
+        let txid = Hash256::from_le_bytes(&[0x11; 32]);
+        for vout in 0..3_u32 {
+            changes.add(UtxoAdd::new(
+                OutPoint::new(Txid::from(txid), vout),
+                TxOut {
+                    value: Amount::from_sat(1_000 + u64::from(vout)),
+                    script_pubkey: vec![0x51].into(),
+                },
+                false,
+                1,
+            ));
+        }
+        set.commit_block(&changes, &Hash256::from_le_bytes(&[0x22; 32]))?;
+
+        let report = set.memory_report();
+        assert_eq!(report.records, 1);
+        assert_eq!(report.outputs, 3);
+        assert!(report.record_payload_bytes > 0);
+        assert!(report.table_bytes > 0);
+        assert_eq!(
+            report.accounted_bytes(),
+            report
+                .record_payload_bytes
+                .saturating_add(report.table_bytes)
+        );
+        Ok(())
+    }
 }

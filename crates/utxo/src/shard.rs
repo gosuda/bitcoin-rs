@@ -17,7 +17,8 @@ use crate::{
 
 /// Per-shard hash table of compact, inline UTXO record owners.
 pub(crate) struct ShardTable {
-    /// Hash table of pointer-sized compact `UtxoRecord` owners stored inline (8 bytes on `x86_64`).
+    /// Hash table of boxed `UtxoRecord` owners stored inline (16 bytes on
+    /// 64-bit targets).
     pub table: HashTable<UtxoRecord>,
 }
 
@@ -36,29 +37,22 @@ impl ShardTable {
         self.table.iter().map(UtxoRecord::output_count).sum()
     }
 
-    /// Sums every record's heap allocation and live payload.
+    /// Sums the complete boxed payload length of every record in this shard.
     ///
-    /// The allocation is what the process actually holds — `AllocHeader` plus
-    /// the buffer's capacity — while the payload is the encoded bytes inside it.
-    /// The two differ wherever a record was grown and kept slack, and the gap
-    /// between the allocation total and process RSS is what allocator size
-    /// classes and fragmentation cost.
-    pub(crate) fn allocation_and_payload_bytes(&self) -> (usize, usize) {
-        self.table.iter().fold((0, 0), |(alloc, payload), record| {
-            (
-                alloc + record.allocation_bytes(),
-                payload + record.payload_bytes(),
-            )
-        })
+    /// The boxed slice owns exactly its length, so this is the complete
+    /// requested record-owner bytes; allocator metadata and fragmentation are
+    /// the residual against process RSS.
+    pub(crate) fn record_payload_bytes(&self) -> usize {
+        self.table.iter().map(UtxoRecord::payload_bytes).sum()
     }
 
     /// Estimated bytes held by the hash table itself, excluding record payloads.
     ///
     /// `hashbrown` exposes usable capacity, not bucket count, so this
     /// reconstructs the layout: buckets are a power of two above
-    /// `capacity / 0.875`, and each carries one `UtxoRecord` (a pointer) plus one
-    /// control byte. An estimate by construction — treat it as the right order of
-    /// magnitude, not an exact figure.
+    /// `capacity / 0.875`, and each carries one `UtxoRecord` (two words on
+    /// 64-bit targets) plus one control byte. An estimate by construction —
+    /// treat it as the right order of magnitude, not an exact figure.
     pub(crate) fn table_bytes(&self) -> usize {
         let capacity = self.table.capacity();
         if capacity == 0 {
@@ -257,9 +251,9 @@ impl Shard {
         table.output_count()
     }
 
-    pub(crate) fn allocation_and_payload_bytes(&self) -> (usize, usize) {
+    pub(crate) fn record_payload_bytes(&self) -> usize {
         let table = self.inner.read();
-        table.allocation_and_payload_bytes()
+        table.record_payload_bytes()
     }
 
     pub(crate) fn table_bytes(&self) -> usize {
