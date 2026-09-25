@@ -189,8 +189,10 @@ struct Derived {
     ///
     /// `entries` is crate-visible so eviction can walk the arena, but every
     /// mutation still goes through `insert_entry`, `remove_entries`,
-    /// `prioritise` or `clear` — and `debug_assert`s in `total_vsize` and
-    /// `aggregate_fees` fail the moment a future in-crate caller forgets.
+    /// `prioritise` or `clear` — and
+    /// `running_totals_track_inserts_removals_and_prioritise` holds both
+    /// running sums to an independent fold of `entries` across every mutation
+    /// kind.
     total_vsize: u64,
     /// Exact running sum of `fee` over `entries`. A `u32` entry id bounds the
     /// successful-entry sum below `u128::MAX`.
@@ -210,12 +212,14 @@ impl Derived {
     /// PRE: `entry` was accounted exactly once — its txid and wtxid rows are
     /// live in the indexes, its outputs and inputs hold funding and spending
     /// rows for `id`, and its vsize, fee, and fee rate sit in the running
-    /// totals. POST: every derived index row and total contribution for `id`
-    /// is gone, and `fee_rate_floor` advances to the next lowest live rate
-    /// when this was the last occurrence of the floor rate. INVARIANT: a
-    /// fee rate the multiset never tracked stays a debug assertion, so
-    /// accounting drift fails a test instead of silently corrupting the
-    /// floor.
+    /// totals. POST: those eight contributions are gone — the txid, wtxid,
+    /// funding, and spending indexes name nothing for `id`, and
+    /// `fee_rate_floor` advances to the next lowest live rate when this was
+    /// the last occurrence of the floor rate. The priority index retires `id`
+    /// in the same mutation through `refresh_metadata`, which is its sole
+    /// removal owner. INVARIANT: a fee rate the multiset never tracked stays
+    /// a debug assertion, so accounting drift fails a test instead of
+    /// silently corrupting the floor.
     fn account_remove(&mut self, id: EntryId, entry: &MempoolEntry) {
         self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
         self.total_fee -= u128::from(entry.fee);
@@ -247,11 +251,10 @@ impl Derived {
         }
         self.by_txid.remove(&entry.txid);
         self.by_wtxid.remove(&entry.wtxid);
-        self.pareto.remove(id);
-        for (vout, output) in entry.tx.outputs.iter().enumerate() {
-            let Ok(_) = u32::try_from(vout) else {
-                continue;
-            };
+        // The priority index and the funding rows settle through the
+        // removal's own metadata refresh: `refresh_metadata` retires ids
+        // that no longer resolve, so no duplicate removal happens here.
+        for output in &entry.tx.outputs {
             let _ = self
                 .funding
                 .remove(&(ScriptHash::from_script(&output.script_pubkey), id));
@@ -1156,14 +1159,13 @@ impl Mempool {
     }
 
     /// Returns the total virtual size of all entries.
+    ///
+    /// Answers from the sum `account_insert` and `Derived::account_remove`
+    /// maintain, so a read is constant time; the release-safe fold comparison
+    /// in `running_totals_track_inserts_removals_and_prioritise` holds the
+    /// sum to the entries it summarizes.
     #[must_use]
     pub fn total_vsize(&self) -> u64 {
-        debug_assert_eq!(
-            self.derived.total_vsize,
-            self.entries.iter().fold(0_u64, |total, (_, entry)| total
-                .saturating_add(u64::from(entry.vsize))),
-            "running vsize total drifted from the entries it summarizes"
-        );
         self.derived.total_vsize
     }
 
@@ -1182,18 +1184,13 @@ impl Mempool {
     /// Returns the sum of fees of all entries in the pool, in satoshis.
     ///
     /// Used by `getmempoolinfo.total_fee` (BTC = sats / 1e8). The exact internal
-    /// sum preserves saturating `u64` semantics after removals and fee decreases.
+    /// sum preserves saturating `u64` semantics after removals and fee decreases;
+    /// the release-safe fold comparison in
+    /// `running_totals_track_inserts_removals_and_prioritise` holds it to the
+    /// entries it summarizes.
     #[must_use]
     pub fn aggregate_fees(&self) -> u64 {
-        let total_fee = u64::try_from(self.derived.total_fee).unwrap_or(u64::MAX);
-        debug_assert_eq!(
-            total_fee,
-            self.entries
-                .iter()
-                .fold(0_u64, |acc, (_id, entry)| acc.saturating_add(entry.fee)),
-            "running fee total drifted from the entries it summarizes"
-        );
-        total_fee
+        u64::try_from(self.derived.total_fee).unwrap_or(u64::MAX)
     }
 
     /// Returns aggregate counters for the current pool.
@@ -1473,7 +1470,9 @@ impl Mempool {
     /// Reads the cached first key of the maintained fee-rate multiset so
     /// admission tightening does not scan `entries` or descend the tree.
     /// The min is over `MempoolEntry.fee_rate`, which is pre-computed at insert
-    /// time.
+    /// time; the debug assertion below holds the cached floor to its multiset,
+    /// and `lowest_fee_rate_tracks_duplicate_rates_and_every_removal_path`
+    /// holds the multiset to the entries across removals and replacements.
     #[must_use]
     pub fn lowest_fee_rate(&self) -> Option<u64> {
         debug_assert_eq!(
@@ -1482,14 +1481,6 @@ impl Mempool {
                 .first_key_value()
                 .map(|(&rate, _count)| rate),
             "cached fee-rate floor drifted from its multiset"
-        );
-        debug_assert_eq!(
-            self.derived.fee_rate_floor,
-            self.entries
-                .iter()
-                .map(|(_index, entry)| entry.fee_rate)
-                .min(),
-            "maintained fee-rate floor drifted from the entries it summarizes"
         );
         self.derived.fee_rate_floor
     }
@@ -4291,15 +4282,14 @@ mod tests {
 
     /// The running totals must survive every mutation, not just insertion.
     ///
-    /// `total_vsize` and `aggregate_fees` each guard themselves with a
-    /// `debug_assert` against a fold of `entries`, but a guard only fires when
-    /// something calls it. `total_vsize` is called by `insert_entry` on every
-    /// acceptance, so its bookkeeping was covered by accident; `aggregate_fees`
-    /// is only reached through `stats`, and deleting the fee bookkeeping in
-    /// *both* the removal path and `prioritise` turned nothing red. This calls
-    /// both accessors after each kind of mutation, and compares against an
-    /// independent fold so the check survives a release build where the
-    /// `debug_assert`s are compiled out.
+    /// The accessors answer from maintained sums, not from a fold, so a read
+    /// never re-derives them: a drift surfaces only where a consumer compares
+    /// the total against membership. `total_vsize` is consulted by
+    /// `insert_entry` on every acceptance, but `aggregate_fees` is only
+    /// reached through `stats`, and deleting the fee bookkeeping in *both*
+    /// the removal path and `prioritise` turned nothing red. This calls both
+    /// accessors after each kind of mutation, and compares against an
+    /// independent fold, which is the check a release build keeps.
     #[test]
     fn running_totals_track_inserts_removals_and_prioritise() -> Result<(), MempoolError> {
         fn folded(pool: &Mempool) -> (u64, u64) {
