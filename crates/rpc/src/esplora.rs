@@ -273,7 +273,8 @@ mod tests {
             false,
             1,
         ));
-        ctx.utxo
+        ctx.chain
+            .utxo
             .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
             .expect("fund test UTXO");
         transaction(
@@ -535,15 +536,15 @@ mod tests {
         let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
         let txid = transaction.txid();
         let mut context = Context::new();
-        context.chain_network = bitcoin_rs_primitives::Network::Regtest;
-        context.block_body_source = Some(Arc::new(SingleBlockSource {
+        context.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+        context.chain.block_body_source = Some(Arc::new(SingleBlockSource {
             height: 0,
             hash: record.hash,
             body: consensus_bytes(&block),
         }));
         context.add_block(record);
         let tip = {
-            let mut tree = context.block_tree.write();
+            let mut tree = context.chain.block_tree.write();
             tree.insert_node(None, block.header, NodeStatus::Active)?;
             tree.tip()
                 .ok_or_else(|| std::io::Error::other("fixture tip missing"))?
@@ -551,14 +552,15 @@ mod tests {
                 .clone()
         };
         context.set_applied_tip(tip);
-        context.esplora_tx_index = Some(Arc::new(FixtureTxIndex(vec![(transaction.clone(), 0)])));
+        context.indexes.esplora_tx_index =
+            Some(Arc::new(FixtureTxIndex(vec![(transaction.clone(), 0)])));
         let funding = vec![ScriptIndexRecord {
             txid,
             height: 0,
             value: 5_000_000_000,
             vout: 0,
         }];
-        context.script_index = Some(Arc::new(StaticScriptIndex {
+        context.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: vec![ScriptHistoryRecord { txid, height: 0 }],
             funding: funding.clone(),
             unspent: funding,
@@ -1001,14 +1003,14 @@ mod tests {
             0, &block,
         ));
         let tip = {
-            let mut tree = context.block_tree.write();
+            let mut tree = context.chain.block_tree.write();
             tree.insert_node(None, block.header, NodeStatus::Active)
                 .expect("insert applied tip");
             tree.tip().expect("applied tip")
         };
-        context.applied_tip.store(Some(tip));
-        context.script_index = Some(Arc::new(RepublishTipScriptIndex {
-            applied_tip: Arc::clone(&context.applied_tip),
+        context.chain.applied_tip.store(Some(tip));
+        context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
+            applied_tip: Arc::clone(&context.chain.applied_tip),
         }));
         let handler = Handler::new(Arc::new(context));
 
@@ -1032,6 +1034,7 @@ mod tests {
         let txid = transaction.txid();
         let ctx = Arc::new(Context::new());
         ctx.mempool
+            .gateway
             .pool()
             .write()
             .insert_entry(MempoolEntry::new(Arc::new(transaction), 100, 1_000, 0, 0))
@@ -1128,12 +1131,12 @@ mod tests {
                 BlockHash::default(),
             ));
         }
-        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: records,
             funding: Vec::new(),
             unspent: Vec::new(),
         }));
-        ctx.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
             transactions,
             calls: Arc::clone(&calls),
         }));
@@ -1186,12 +1189,12 @@ mod tests {
                 BlockHash::default(),
             ));
         }
-        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history,
             funding: funding.clone(),
             unspent: vec![funding[0]],
         }));
-        ctx.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
             transactions,
             calls: Arc::clone(&calls),
         }));
@@ -1236,12 +1239,13 @@ mod tests {
             },
         );
         let mut ctx = Context::new();
-        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: Vec::new(),
             funding: vec![confirmed],
             unspent: vec![confirmed],
         }));
         ctx.mempool
+            .gateway
             .pool()
             .write()
             .insert_entry(MempoolEntry::new(
@@ -1283,7 +1287,7 @@ mod tests {
         let unspent_calls = Arc::new(AtomicUsize::new(0));
         let spender_calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
-        ctx.script_index = Some(Arc::new(CountingScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(CountingScriptIndex {
             history_calls: Arc::clone(&history_calls),
             unspent_calls: Arc::clone(&unspent_calls),
             spender_calls: Arc::clone(&spender_calls),
@@ -1324,7 +1328,7 @@ mod tests {
             },
         );
         let mut ctx = Context::new();
-        ctx.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(parent)));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(parent)));
 
         let rendered = Projection::new(&ctx)
             .transaction_value(&child, None)
@@ -1374,14 +1378,14 @@ mod tests {
         };
         let stale_record = bitcoin_rs_index::block_log::BlockRecord::from_block(1, &stale_block);
         let mut ctx = Context::new();
-        ctx.block_body_source = Some(Arc::new(SingleBlockSource {
+        ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
             height: 1,
             hash: stale_record.hash,
             body: consensus_bytes(&stale_block),
         }));
         ctx.add_block(stale_record.clone());
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
             tree.insert_node(
                 Some(genesis_id),
@@ -1406,7 +1410,7 @@ mod tests {
                 .ok_or_else(|| std::io::Error::other("missing active tip"))?;
             ctx.set_applied_tip((*tip).clone());
         }
-        ctx.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(transaction)));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(transaction)));
 
         let response = block_txs(&ctx, &stale_record.hash.to_string(), 0);
         assert_eq!(

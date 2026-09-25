@@ -136,7 +136,7 @@ impl Node {
         if let Some(tx) = pooled {
             return Ok((*tx).clone());
         }
-        let cached = self.context.transactions.read().get(&txid).cloned();
+        let cached = self.context.chain.transactions.read().get(&txid).cloned();
         if let Some(tx) = cached {
             return Ok(tx);
         }

@@ -369,10 +369,9 @@ fn mining_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::e
     // API-12 mainnet gates (peers + IBD) live in the handler unit tests.
     // This rendering proof runs off-mainnet so it reaches the template.
     let mut ctx = Context::new();
-    ctx.chain_network = Network::Regtest;
-    let handler = Handler::new(Arc::new(
-        ctx.with_mining_control(Arc::new(CompatMiningControl)),
-    ));
+    ctx.chain.chain_network = Network::Regtest;
+    ctx.mining.mining_control = Some(Arc::new(CompatMiningControl));
+    let handler = Handler::new(Arc::new(ctx));
 
     let template: corepc_types::v31::GetBlockTemplate =
         typed(&handler.dispatch("getblocktemplate", &json!([{"rules": ["segwit"]}]))?)?;

@@ -94,7 +94,8 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    ctx.utxo
+    ctx.chain
+        .utxo
         .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
         .expect("commit_block");
     outpoint
@@ -120,7 +121,7 @@ fn sendrawtransaction_admits_standard_tx_to_mempool() -> Result<(), Box<dyn std:
 
     // The tx must be in the mempool.
     assert!(
-        ctx.mempool.read().contains_txid(&tx.txid()),
+        ctx.mempool.gateway.read().contains_txid(&tx.txid()),
         "tx was not admitted to mempool"
     );
     Ok(())
@@ -157,7 +158,7 @@ fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn 
 
     // Pre-insert into mempool.
     let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 1);
-    ctx.mempool.pool().write().insert_entry(entry)?;
+    ctx.mempool.gateway.pool().write().insert_entry(entry)?;
 
     let raw = hex_encode(&consensus_bytes(&tx));
     let handler = Handler::new(Arc::clone(&ctx));
@@ -185,23 +186,27 @@ fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
     let handler = Handler::new(Arc::clone(&ctx));
 
     handler.dispatch("sendrawtransaction", &json!([raw.as_str()]))?;
-    assert!(ctx.mempool.read().contains_txid(&txid), "first admission");
+    assert!(
+        ctx.mempool.gateway.read().contains_txid(&txid),
+        "first admission"
+    );
 
     // Policy eviction (fee-rate trim), not an RBF replacement: the
     // transaction is still valid and must be admitted again.
     let removed = ctx
         .mempool
+        .gateway
         .evict_below_fee_rate(AdmissionOrigin::Rpc, u64::MAX);
     assert!(
         !removed.changes.is_empty(),
         "the eviction must have removed the entry"
     );
-    assert!(!ctx.mempool.read().contains_txid(&txid));
+    assert!(!ctx.mempool.gateway.read().contains_txid(&txid));
 
     let result = handler.dispatch("sendrawtransaction", &json!([raw.as_str()]))?;
     assert_eq!(result.as_str(), Some(txid.to_string().as_str()));
     assert!(
-        ctx.mempool.read().contains_txid(&txid),
+        ctx.mempool.gateway.read().contains_txid(&txid),
         "resubmitting an evicted transaction must admit it again, not report success silently"
     );
     Ok(())
@@ -241,7 +246,7 @@ fn testmempoolaccept_reports_reject_for_already_in_mempool()
     let txid = tx.txid();
 
     let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 1);
-    ctx.mempool.pool().write().insert_entry(entry)?;
+    ctx.mempool.gateway.pool().write().insert_entry(entry)?;
 
     let raw = hex_encode(&consensus_bytes(&tx));
     let handler = Handler::new(Arc::clone(&ctx));
@@ -314,7 +319,7 @@ fn gettxout_returns_unconfirmed_output_from_mempool() -> Result<(), Box<dyn std:
     };
     let txid = tx.txid();
     let entry = MempoolEntry::new(Arc::new(tx), 100, 500, 1, 1);
-    ctx.mempool.pool().write().insert_entry(entry)?;
+    ctx.mempool.gateway.pool().write().insert_entry(entry)?;
 
     let handler = Handler::new(Arc::clone(&ctx));
     let result = handler.dispatch("gettxout", &json!([txid.to_string(), 0_u64]))?;
@@ -346,7 +351,7 @@ fn gettxout_include_mempool_false_skips_mempool() -> Result<(), Box<dyn std::err
     };
     let txid = tx.txid();
     let entry = MempoolEntry::new(Arc::new(tx), 100, 500, 1, 1);
-    ctx.mempool.pool().write().insert_entry(entry)?;
+    ctx.mempool.gateway.pool().write().insert_entry(entry)?;
 
     let handler = Handler::new(Arc::clone(&ctx));
     // include_mempool=false → skip mempool, output not in UTXO → null.
@@ -366,7 +371,7 @@ fn gettxout_returns_null_for_outpoint_spent_in_mempool() -> Result<(), Box<dyn s
     // Create a spending tx that spends the UTXO but is only in mempool.
     let spending_tx = make_tx(prevout, 9_000, script);
     let entry = MempoolEntry::new(Arc::new(spending_tx), 100, 1_000, 1, 1);
-    ctx.mempool.pool().write().insert_entry(entry)?;
+    ctx.mempool.gateway.pool().write().insert_entry(entry)?;
 
     // The original outpoint is now spent in mempool.
     let spent_txid = prevout.txid;
@@ -420,7 +425,7 @@ fn createrawtransaction_builds_valid_hex_tx() -> Result<(), Box<dyn std::error::
 fn createrawtransaction_creates_op_return_data_output() -> Result<(), Box<dyn std::error::Error>> {
     // Use a regtest context so the address network matches.
     let mut ctx = Context::new();
-    ctx.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
 
     let inputs = json!([{
@@ -453,7 +458,7 @@ fn createrawtransaction_creates_op_return_data_output() -> Result<(), Box<dyn st
 #[test]
 fn createrawtransaction_rejects_duplicate_input() {
     let mut ctx = Context::new();
-    ctx.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
 
     let inputs = json!([

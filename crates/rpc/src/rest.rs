@@ -196,7 +196,8 @@ fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response
             } else {
                 BlockTxVerbosity::Ids
             };
-            let value = crate::render::block_json(&block, &context, verbosity, ctx.chain_network);
+            let value =
+                crate::render::block_json(&block, &context, verbosity, ctx.chain.chain_network);
             text_response("application/json", sonic_bytes(&value))
         }
         _ => format_not_found(available_formats()),
@@ -367,14 +368,14 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     let mut bitmap = vec![0_u8; outpoints.len().div_ceil(8)];
     let mut outs = Vec::with_capacity(outpoints.len());
     let mut hits = Vec::with_capacity(outpoints.len());
-    let pool = ctx.mempool.read();
+    let pool = ctx.mempool.gateway.read();
     for (txid, vout) in &outpoints {
         let outpoint = bitcoin_rs_primitives::OutPoint::new(*txid, *vout);
         let mempool_spent = check_mempool && pool.is_outpoint_spent(&outpoint);
         let live = if mempool_spent {
             None
         } else {
-            ctx.utxo.get_entry(&outpoint)
+            ctx.chain.utxo.get_entry(&outpoint)
         };
         hits.push(live.is_some());
         if let Some(entry) = live {
@@ -402,7 +403,7 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
                     json!({
                         "height": height,
                         "value": tx_render::btc_amount_json(txout.value.to_sat()),
-                        "scriptPubKey": tx_render::script_pub_key_json(&txout.script_pubkey, ctx.chain_network)
+                        "scriptPubKey": tx_render::script_pub_key_json(&txout.script_pubkey, ctx.chain.chain_network)
                     })
                 })
                 .collect::<Vec<_>>();
@@ -515,8 +516,8 @@ fn route_spent_txouts(suffix: &str) -> Response {
 // ---------------------------------------------------------------------------
 
 fn header_records(ctx: &Context, hash: Hash256, count: u32) -> Vec<HeaderRecord> {
-    let applied_tip = ctx.applied_tip.load_full();
-    let tree = ctx.block_tree.read();
+    let applied_tip = ctx.chain.applied_tip.load_full();
+    let tree = ctx.chain.block_tree.read();
     if let Some(start_id) = tree.lookup(hash)
         && let Ok(start_node) = tree.node(start_id)
     {
@@ -907,7 +908,7 @@ mod tests {
 
     fn publish_active_chain(ctx: &Context, headers: &[Header]) -> Vec<Hash256> {
         let (tip_id, hashes) = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let mut parent = None;
             let mut ids = Vec::with_capacity(headers.len());
             let mut hashes = Vec::with_capacity(headers.len());
@@ -922,7 +923,7 @@ mod tests {
             let tip_id = *ids.last().expect("active tip");
             (tip_id, hashes)
         };
-        let tree = ctx.block_tree.read();
+        let tree = ctx.chain.block_tree.read();
         let tip_node = tree.node(tip_id).expect("tip node");
         let tip = TipSnapshot {
             tip_id,
@@ -979,7 +980,7 @@ mod tests {
         let record = BlockRecord::from_block(0, &block);
         let hash = record.hash.to_string();
         ctx.add_block(record);
-        ctx.block_body_source = Some(Arc::new(PanicBlockSource));
+        ctx.chain.block_body_source = Some(Arc::new(PanicBlockSource));
         publish_active_chain(&ctx, &[block.header]);
         let _first = ctx.try_acquire_rest_render().expect("first permit");
         let _second = ctx.try_acquire_rest_render().expect("second permit");
@@ -1168,7 +1169,7 @@ mod tests {
             nonce: 3,
         };
         let applied_tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis_id = tree
                 .insert_node(None, genesis, NodeStatus::Active)
                 .expect("genesis header");
@@ -1278,7 +1279,7 @@ mod tests {
         };
         let ids = publish_active_chain(&ctx, &[genesis, active_child, active_tip]);
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let parent = tree.lookup(ids[0]).expect("genesis node");
             tree.insert_node(Some(parent), side_child, NodeStatus::Stale)
                 .expect("side branch header");
@@ -1326,12 +1327,12 @@ mod tests {
         ctx.add_block(BlockRecord::from_block(0, &genesis));
         ctx.add_block(BlockRecord::from_block(1, &broken_child));
         let genesis_id = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             tree.insert_node(None, genesis.header, NodeStatus::Active)
                 .expect("genesis header")
         };
         let broken_id = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let valid_child = Header {
                 prev_blockhash: genesis.block_hash(),
                 ..broken_child.header
@@ -1339,13 +1340,14 @@ mod tests {
             tree.insert_node(Some(genesis_id), valid_child, NodeStatus::Active)
                 .expect("broken child header")
         };
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .node_mut(broken_id)
             .expect("broken child node")
             .header
             .prev_blockhash = BlockHash::default();
-        let tree = ctx.block_tree.read();
+        let tree = ctx.chain.block_tree.read();
         let broken_node = tree.node(broken_id).expect("broken tip");
         let tip = TipSnapshot {
             tip_id: broken_id,
@@ -1403,11 +1405,13 @@ mod tests {
         };
         let hashes = publish_active_chain(&ctx, &[genesis, first, middle, tail]);
         let middle_id = ctx
+            .chain
             .block_tree
             .read()
             .lookup(hashes[2])
             .expect("middle node");
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .node_mut(middle_id)
             .expect("middle node")

@@ -687,14 +687,13 @@ fn mining_handler(state: &NodeState) -> Handler {
             coin_stats: state.chainstate().coin_stats_handle(),
             block_tree: state.chainstate().block_tree_handle(),
             chain_network: state.config().network,
+            chain_transition: state.chainstate().transition_barrier(),
+            ..ChainHandles::default()
         },
         mempool: MempoolHandles {
-            mempool: MempoolGateway::shared(state.mempool()),
+            gateway: MempoolGateway::shared(state.mempool()),
         },
-        indexes: IndexHandles {
-            derived_index: None,
-            script_index: None,
-        },
+        indexes: IndexHandles::default(),
         network: NetworkHandles {
             network: state.network(),
             network_active: state.network_active(),
@@ -706,7 +705,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         mining: MiningHandles {
             mining_control: Some(mining_control),
         },
-        derived_index_status: None,
+        ..ContextHandles::default()
     });
     Handler::new(Arc::new(ctx))
 }
