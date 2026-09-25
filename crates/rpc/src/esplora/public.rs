@@ -35,8 +35,8 @@ const MEMPOOL_PAGE: usize = 50;
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) -> Response {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
-        ["blocks", "tip", "height"] => text(ctx.applied_height().to_string()),
-        ["blocks", "tip", "hash"] => text(ctx.applied_hash().to_string_be()),
+        ["blocks", "tip", "height"] => text(ctx.chain.applied_height().to_string()),
+        ["blocks", "tip", "hash"] => text(ctx.chain.applied_hash().to_string_be()),
         ["tx", id, "hex"] => tx_hex(&ctx, id),
         ["tx", id, "raw"] => tx_raw(&ctx, id),
         ["tx", id, "status"] => tx_status(&ctx, id),
@@ -59,7 +59,8 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) ->
         ["block-height", height] => height.parse::<u32>().map_or_else(
             |_| bad("height must be an unsigned integer"),
             |height| {
-                ctx.block_hash_at_height(height)
+                ctx.chain
+                    .block_hash_at_height(height)
                     .map_or_else(not_found, |hash| text(hash.to_string_be()))
             },
         ),
@@ -227,9 +228,11 @@ fn confirmed_block(
     };
     let txid = transaction.txid();
     let record = ctx
+        .chain
         .block_by_height(status.height)
         .ok_or_else(|| unavailable("confirming block unavailable"))?;
     let bytes = ctx
+        .chain
         .block_body_bytes(&record)
         .ok_or_else(|| unavailable("confirming block body unavailable"))?;
     Ok((record, bytes, txid))
@@ -323,6 +326,7 @@ pub(super) fn outspend(
     drop(pool);
 
     let index = ctx
+        .indexes
         .script_index
         .as_ref()
         .ok_or_else(|| unavailable("script index is disabled"))?;
@@ -365,13 +369,19 @@ fn block_status(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
+    // Membership and the next-best lookup select from one captured applied
+    // publication, so a reorg between them cannot mix two branches.
+    let view = ctx.chain.applied_view();
     let in_best_chain =
-        ctx.active_hash_at_height(record.height) == Some(Hash256::from(record.hash));
+        ctx.chain.active_hash_in_view(&view, record.height) == Some(Hash256::from(record.hash));
     json_response(BlockStatus {
         in_best_chain,
         height: record.height,
         next_best: in_best_chain
-            .then(|| ctx.block_hash_at_height(record.height.saturating_add(1)))
+            .then(|| {
+                ctx.chain
+                    .active_hash_in_view(&view, record.height.saturating_add(1))
+            })
             .flatten()
             .map(|hash| hash.to_string_be()),
     })
@@ -381,7 +391,7 @@ fn block_raw(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
-    let Some(bytes) = ctx.block_body_bytes(&record) else {
+    let Some(bytes) = ctx.chain.block_body_bytes(&record) else {
         return unavailable("block body unavailable");
     };
     Response {
@@ -407,7 +417,7 @@ pub(super) fn block_transaction_values<'a>(
 ) -> Result<Vec<TransactionValue>, Response> {
     // A record fetched by hash can be from a losing branch. Do not reuse the
     // active block at the same height for its transactions' confirmation data.
-    let block_status = (ctx.active_hash_at_height(record.height)
+    let block_status = (ctx.chain.active_hash_at_height(record.height)
         == Some(Hash256::from(record.hash)))
     .then_some(Confirmation {
         height: record.height,
@@ -453,14 +463,17 @@ fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
         .map_or_else(not_found, |tx| text(tx.txid().to_string()))
 }
 fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
-    let start = start_height.unwrap_or_else(|| ctx.applied_height());
-    if ctx.block_by_height(start).is_none() {
+    // One publication decides the default start and every height lookup, so the
+    // array cannot straddle two applied branches.
+    let view = ctx.chain.applied_view();
+    let start = start_height.unwrap_or_else(|| view.height());
+    if ctx.chain.block_by_height_in_view(&view, start).is_none() {
         return not_found();
     }
     let mut values = Vec::with_capacity(10);
     let projection = Projection::new(ctx);
     for height in (0..=start).rev().take(10) {
-        let Some(record) = ctx.block_by_height(height) else {
+        let Some(record) = ctx.chain.block_by_height_in_view(&view, height) else {
             continue;
         };
         let value = match projection.block_value(&record) {

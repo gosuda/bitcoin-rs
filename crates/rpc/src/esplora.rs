@@ -265,7 +265,7 @@ mod tests {
                 script_pubkey: spendable.clone().into(),
             },
         );
-        let txid = ctx.add_transaction(funding);
+        let txid = ctx.chain.add_transaction(funding);
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(
             OutPoint::new(txid, 0),
@@ -276,7 +276,8 @@ mod tests {
             false,
             1,
         ));
-        ctx.utxo
+        ctx.chain
+            .utxo
             .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
             .expect("fund test UTXO");
         transaction(
@@ -538,30 +539,31 @@ mod tests {
         let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
         let txid = transaction.txid();
         let mut context = Context::new();
-        context.chain_network = bitcoin_rs_primitives::Network::Regtest;
-        context.block_body_source = Some(Arc::new(SingleBlockSource {
+        context.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+        context.chain.block_body_source = Some(Arc::new(SingleBlockSource {
             height: 0,
             hash: record.hash,
             body: consensus_bytes(&block),
         }));
-        context.add_block(record);
+        context.chain.add_block(record);
         let tip = {
-            let mut tree = context.block_tree.write();
+            let mut tree = context.chain.block_tree.write();
             tree.insert_node(None, block.header, NodeStatus::Active)?;
             tree.tip()
                 .ok_or_else(|| std::io::Error::other("fixture tip missing"))?
                 .as_ref()
                 .clone()
         };
-        context.set_applied_tip(tip);
-        context.esplora_tx_index = Some(Arc::new(FixtureTxIndex(vec![(transaction.clone(), 0)])));
+        context.chain.set_applied_tip(tip);
+        context.indexes.esplora_tx_index =
+            Some(Arc::new(FixtureTxIndex(vec![(transaction.clone(), 0)])));
         let funding = vec![ScriptIndexRecord {
             txid,
             height: 0,
             value: 5_000_000_000,
             vout: 0,
         }];
-        context.script_index = Some(Arc::new(StaticScriptIndex {
+        context.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: vec![ScriptHistoryRecord { txid, height: 0 }],
             funding: funding.clone(),
             unspent: funding,
@@ -1000,18 +1002,20 @@ mod tests {
     fn composed_response_retries_when_the_applied_tip_identity_changes() {
         let block = fixture_genesis();
         let mut context = Context::new();
-        context.add_block(bitcoin_rs_index::block_log::BlockRecord::from_block(
-            0, &block,
-        ));
+        context
+            .chain
+            .add_block(bitcoin_rs_index::block_log::BlockRecord::from_block(
+                0, &block,
+            ));
         let tip = {
-            let mut tree = context.block_tree.write();
+            let mut tree = context.chain.block_tree.write();
             tree.insert_node(None, block.header, NodeStatus::Active)
                 .expect("insert applied tip");
             tree.tip().expect("applied tip")
         };
-        context.applied_tip.store(Some(tip));
-        context.script_index = Some(Arc::new(RepublishTipScriptIndex {
-            applied_tip: Arc::clone(&context.applied_tip),
+        context.chain.applied_tip.store(Some(tip));
+        context.indexes.script_index = Some(Arc::new(RepublishTipScriptIndex {
+            applied_tip: Arc::clone(&context.chain.applied_tip),
         }));
         let handler = Handler::new(Arc::new(context));
 
@@ -1021,6 +1025,195 @@ mod tests {
             "",
         );
         assert_eq!(response.status, 503);
+    }
+
+    /// Membership, the next-best lookup, and the block list's start and every
+    /// height lookup describe one captured applied publication, so a reorg
+    /// landing mid-response cannot mix two branches.
+    ///
+    /// The genesis has two competing children: `a1` is one applied tip; `b2`
+    /// leads a longer branch. Under `a1` the list is `[a1, genesis]` and `a1`
+    /// is in the best chain with no next best; under `b2` it is
+    /// `[b2, b1, genesis]` and `a1` is off it. Any other combination straddles
+    /// two publications.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn block_status_and_block_list_never_straddle_two_applied_branches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::AtomicBool;
+
+        use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
+        use bitcoin_rs_primitives::Header;
+
+        /// Serves every fixture block's body by identity, so the block list
+        /// can project each record.
+        struct BranchBodies {
+            bodies: Vec<(u32, BlockHash, Vec<u8>)>,
+        }
+        impl bitcoin_rs_chain::BlockBodySource for BranchBodies {
+            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
+                self.bodies
+                    .iter()
+                    .find(|(h, k, _)| *h == height && *k == hash)
+                    .map(|(_, _, body)| body.clone())
+            }
+        }
+
+        let header = |prev: BlockHash, nonce: u32, time: u32| Header {
+            version: 1,
+            prev_blockhash: prev,
+            merkle_root: Hash256::default(),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce,
+        };
+        let coinbase = transaction(
+            Some(null_outpoint()),
+            TxOut {
+                value: Amount::from_sat(5_000_000_000),
+                script_pubkey: vec![0x51].into(),
+            },
+        );
+        let block_at = |block_header: Header| Block {
+            header: block_header,
+            txs: vec![coinbase.clone()],
+        };
+        let genesis_header = header(BlockHash::default(), 0, 1_000_000);
+        let a1 = header(genesis_header.compute_hash(), 1, 1_000_900);
+        let b1 = header(genesis_header.compute_hash(), 2, 1_000_901);
+        let b2 = header(b1.compute_hash(), 3, 1_001_800);
+        let (a1_hash, b1_hash, b2_hash, genesis_hash) = (
+            a1.compute_hash(),
+            b1.compute_hash(),
+            b2.compute_hash(),
+            genesis_header.compute_hash(),
+        );
+
+        let mut context = Context::new();
+        context.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
+        let (a_tip, b_tip) = {
+            let mut tree = context.chain.block_tree.write();
+            let genesis_id = tree.insert_node(None, genesis_header, NodeStatus::Active)?;
+            let a1_id = tree.insert_node(Some(genesis_id), a1, NodeStatus::Active)?;
+            let b1_id = tree.insert_node(Some(genesis_id), b1, NodeStatus::HeaderValid)?;
+            let b2_id = tree.insert_node(Some(b1_id), b2, NodeStatus::HeaderValid)?;
+            (
+                Arc::new(TipSnapshot {
+                    tip_id: a1_id,
+                    height: 1,
+                    chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+                    hash: a1_hash.0,
+                    chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                }),
+                Arc::new(TipSnapshot {
+                    tip_id: b2_id,
+                    height: 2,
+                    chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+                    hash: b2_hash.0,
+                    chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                }),
+            )
+        };
+        let mut bodies = Vec::new();
+        for (height, block_header) in [(0, genesis_header), (1, a1), (1, b1), (2, b2)] {
+            let block = block_at(block_header);
+            let record = bitcoin_rs_index::block_log::BlockRecord::from_block(height, &block);
+            bodies.push((record.height, record.hash, consensus_bytes(&block)));
+            context.chain.add_block(record);
+        }
+        context.chain.block_body_source = Some(Arc::new(BranchBodies { bodies }));
+        context.chain.applied_tip.store(Some(Arc::clone(&a_tip)));
+
+        let ctx = Arc::new(context);
+        let handler = Handler::new(Arc::clone(&ctx));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (cell, swap_a, swap_b, flag) = (
+            Arc::clone(&ctx.chain.applied_tip),
+            a_tip,
+            b_tip,
+            Arc::clone(&stop),
+        );
+        let swapper = std::thread::spawn(move || {
+            let mut flip = false;
+            while !flag.load(Ordering::Relaxed) {
+                flip = !flip;
+                let tip = if flip { &swap_b } else { &swap_a };
+                cell.store(Some(Arc::clone(tip)));
+            }
+        });
+
+        let status_path = format!("/block/{a1_hash}/status");
+        let (a1_text, b1_text) = (a1_hash.to_string(), b1_hash.to_string());
+        let (b2_text, genesis_text) = (b2_hash.to_string(), genesis_hash.to_string());
+        let mut seen_b = 0_usize;
+        let mut accepted = 0_usize;
+        let mut attempts = 0_usize;
+        while accepted < 200 {
+            attempts += 1;
+            assert!(
+                attempts < 20_000,
+                "the retry guard never let a response through"
+            );
+            let status_response = route(&handler, &status_path, "");
+            // A tip change inside the projection's own validation window is
+            // that guard's documented retry, not a torn response.
+            if status_response.status == 503 {
+                continue;
+            }
+            assert_eq!(
+                status_response.status,
+                200,
+                "status body: {}",
+                String::from_utf8_lossy(&status_response.body)
+            );
+            let status: Value = serde_json::from_slice(&status_response.body)?;
+            match status.get("in_best_chain").and_then(Value::as_bool) {
+                Some(true) => assert!(
+                    status.get("next_best").is_none_or(|value| value.is_null()),
+                    "a1 is the tip of its branch; a next best straddles branches"
+                ),
+                Some(false) => seen_b += 1,
+                other => panic!("in_best_chain is {other:?}, which no branch explains"),
+            }
+
+            let list_response = route(&handler, "/blocks", "");
+            if list_response.status == 503 {
+                continue;
+            }
+            assert_eq!(
+                list_response.status,
+                200,
+                "list body: {}",
+                String::from_utf8_lossy(&list_response.body)
+            );
+            let list: Value = serde_json::from_slice(&list_response.body)?;
+            let ids: Vec<String> = list
+                .as_array()
+                .expect("block list")
+                .iter()
+                .map(|entry| {
+                    entry
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .expect("id")
+                        .to_owned()
+                })
+                .collect();
+            match ids.as_slice() {
+                [a, g] if a == &a1_text && g == &genesis_text => {}
+                [b2, b1, g] if b2 == &b2_text && b1 == &b1_text && g == &genesis_text => {}
+                other => panic!("block list {other:?} straddles two applied branches"),
+            }
+            accepted += 1;
+            std::thread::yield_now();
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("swapper thread panicked");
+        assert!(
+            seen_b > 0,
+            "the b2 branch was never observed, so coherence proved nothing"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1126,17 +1319,18 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
         for record in &records {
-            ctx.add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
-                record.height,
-                BlockHash::default(),
-            ));
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    record.height,
+                    BlockHash::default(),
+                ));
         }
-        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: records,
             funding: Vec::new(),
             unspent: Vec::new(),
         }));
-        ctx.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
             transactions,
             calls: Arc::clone(&calls),
         }));
@@ -1184,17 +1378,18 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
         for record in &history {
-            ctx.add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
-                record.height,
-                BlockHash::default(),
-            ));
+            ctx.chain
+                .add_block(bitcoin_rs_index::block_log::BlockRecord::synthetic(
+                    record.height,
+                    BlockHash::default(),
+                ));
         }
-        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history,
             funding: funding.clone(),
             unspent: vec![funding[0]],
         }));
-        ctx.esplora_tx_index = Some(Arc::new(CountingTxIndex {
+        ctx.indexes.esplora_tx_index = Some(Arc::new(CountingTxIndex {
             transactions,
             calls: Arc::clone(&calls),
         }));
@@ -1239,7 +1434,7 @@ mod tests {
             },
         );
         let mut ctx = Context::new();
-        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: Vec::new(),
             funding: vec![confirmed],
             unspent: vec![confirmed],
@@ -1286,7 +1481,7 @@ mod tests {
         let unspent_calls = Arc::new(AtomicUsize::new(0));
         let spender_calls = Arc::new(AtomicUsize::new(0));
         let mut ctx = Context::new();
-        ctx.script_index = Some(Arc::new(CountingScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(CountingScriptIndex {
             history_calls: Arc::clone(&history_calls),
             unspent_calls: Arc::clone(&unspent_calls),
             spender_calls: Arc::clone(&spender_calls),
@@ -1327,7 +1522,7 @@ mod tests {
             },
         );
         let mut ctx = Context::new();
-        ctx.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(parent)));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(parent)));
 
         let rendered = Projection::new(&ctx)
             .transaction_value(&child, None)
@@ -1377,14 +1572,14 @@ mod tests {
         };
         let stale_record = bitcoin_rs_index::block_log::BlockRecord::from_block(1, &stale_block);
         let mut ctx = Context::new();
-        ctx.block_body_source = Some(Arc::new(SingleBlockSource {
+        ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
             height: 1,
             hash: stale_record.hash,
             body: consensus_bytes(&stale_block),
         }));
-        ctx.add_block(stale_record.clone());
+        ctx.chain.add_block(stale_record.clone());
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
             tree.insert_node(
                 Some(genesis_id),
@@ -1407,9 +1602,9 @@ mod tests {
             let tip = tree
                 .tip()
                 .ok_or_else(|| std::io::Error::other("missing active tip"))?;
-            ctx.set_applied_tip((*tip).clone());
+            ctx.chain.set_applied_tip((*tip).clone());
         }
-        ctx.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(transaction)));
+        ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(transaction)));
 
         let response = block_txs(&ctx, &stale_record.hash.to_string(), 0);
         assert_eq!(
@@ -1659,7 +1854,7 @@ mod tests {
             });
         }
         let mut ctx = Context::new();
-        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: Vec::new(),
             funding: Vec::new(),
             unspent: Vec::new(),

@@ -20,7 +20,7 @@ fn handler() -> Handler {
 }
 
 fn only_ban(handler: &Handler) -> BannedSubnet {
-    let entries = handler.context().banned.read();
+    let entries = handler.context().network.banned.read();
     let [entry] = entries.as_slice() else {
         panic!("expected exactly one ban entry");
     };
@@ -53,7 +53,7 @@ fn overflow_does_not_create_a_permanent_ban() {
     for absolute in [false, true] {
         let handler = handler();
         assert_invalid_expiry(&handler, "192.0.2.1", absolute);
-        assert!(handler.context().banned.read().is_empty());
+        assert!(handler.context().network.banned.read().is_empty());
     }
 }
 
@@ -67,12 +67,12 @@ fn overflow_preserves_existing_entries_and_order() -> Result<(), RpcError> {
             let handler = handler();
             handler.dispatch("setban", &json!(["192.0.2.1", "add", 60]))?;
             handler.dispatch("setban", &json!(["198.51.100.0/24", "add", 120]))?;
-            let before = handler.context().banned.read().clone();
+            let before = handler.context().network.banned.read().clone();
 
             assert_invalid_expiry(&handler, target, absolute);
 
             assert_eq!(
-                handler.context().banned.read().as_slice(),
+                handler.context().network.banned.read().as_slice(),
                 before.as_slice()
             );
         }
@@ -136,7 +136,7 @@ fn absolute_expiry_uses_epoch_not_creation_time() -> Result<(), RpcError> {
 // Invalid requests must preserve full records, not just the entry count.
 fn assert_past_absolute_expiry(handler: &Handler, target: &str) {
     for bantime in [json!(null), json!(0), json!(1)] {
-        let before = handler.context().banned.read().clone();
+        let before = handler.context().network.banned.read().clone();
         let Err(error) = handler.dispatch("setban", &json!([target, "add", bantime, true])) else {
             panic!("past absolute timestamp must not succeed");
         };
@@ -147,7 +147,7 @@ fn assert_past_absolute_expiry(handler: &Handler, target: &str) {
                 if message == "Error: Absolute timestamp is in the past"
         ));
         assert_eq!(
-            handler.context().banned.read().as_slice(),
+            handler.context().network.banned.read().as_slice(),
             before.as_slice()
         );
     }
@@ -157,7 +157,7 @@ fn assert_past_absolute_expiry(handler: &Handler, target: &str) {
 fn past_absolute_expiry_does_not_create_a_ban() {
     let handler = handler();
     assert_past_absolute_expiry(&handler, "192.0.2.1");
-    assert!(handler.context().banned.read().is_empty());
+    assert!(handler.context().network.banned.read().is_empty());
 }
 
 #[test]

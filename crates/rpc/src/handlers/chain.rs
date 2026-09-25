@@ -18,7 +18,7 @@ use crate::compat::convert::{
     self, compact_target_hex, hex_encode, i32_saturated, i64_saturated, i64_saturated_len,
     sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
-use crate::context::{ChainControlError, Context, TxQueryError};
+use crate::context::{AppliedView, ChainControlError, Context, TxQueryError};
 use crate::error::RpcError;
 use crate::handlers::{
     ensure_no_params, optional_bool, params_array, required_i64, required_str, required_u64,
@@ -27,19 +27,19 @@ use bitcoin_rs_index::block_log::{BlockRecord, cumulative_tx_count_through};
 
 pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let progress = ctx.sync_progress();
+    let progress = ctx.chain.sync_progress();
     // `sync_progress` owns the shared facts; only the wire-only bits/target
     // pair, the chain string, and warnings are added on top here.
-    let tip_bits =
-        ctx.applied_tip
-            .load_full()
-            .as_deref()
-            .map_or(CompactTarget::from_consensus(0), |tip| {
-                ctx.block_tree
-                    .read()
-                    .node(tip.tip_id)
-                    .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
-            });
+    let tip_bits = ctx.chain.applied_tip.load_full().as_deref().map_or(
+        CompactTarget::from_consensus(0),
+        |tip| {
+            ctx.chain
+                .block_tree
+                .read()
+                .node(tip.tip_id)
+                .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
+        },
+    );
     let chain = match progress.network {
         Network::Mainnet => "main",
         Network::Testnet3 => "test",
@@ -67,6 +67,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
         prune_target_size: None,
         signet_challenge: None,
         warnings: ctx
+            .chain
             .rollback_warnings
             .as_ref()
             .map(|source| source.rollback_warnings())
@@ -159,11 +160,12 @@ fn i64_to_f64(value: i64) -> f64 {
 pub(crate) fn getdifficulty(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let difficulty = {
-        let tree = ctx.block_tree.read();
-        ctx.applied_tip
+        let tree = ctx.chain.block_tree.read();
+        ctx.chain
+            .applied_tip
             .load_full()
             .and_then(|tip| tree.node(tip.tip_id).ok().map(|node| node.header.bits))
-            .map_or(0.0, |bits| ctx.difficulty_for_bits(bits))
+            .map_or(0.0, |bits| ctx.chain.difficulty_for_bits(bits))
     };
     typed_to_sonic(&v31::GetDifficulty(difficulty))
 }
@@ -178,14 +180,14 @@ pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     // tip first would allow the reverse: a tip whose node this view has never
     // seen, and every lookup below it answering `None` for a block the node has
     // certainly connected.
-    let tree = ctx.block_tree.read();
+    let tree = ctx.chain.block_tree.read();
     // The active chain is the one this node has *connected*, not the one its
     // headers describe. Header-first sync runs the header tree thousands of
     // blocks ahead of the applied tip during initial sync, and calling that
     // lead "active" reports a chain the node has not validated -- while the
     // chain it has validated goes unreported. Bitcoin Core asks
     // `ActiveChain().Tip()`, which is the connected tip.
-    let active_tip = ctx.applied_tip.load_full();
+    let active_tip = ctx.chain.applied_tip.load_full();
     let active_tip_id = active_tip.as_ref().map(|tip| tip.tip_id);
 
     // Core reports the active tip whether or not it is a leaf, and during
@@ -284,23 +286,23 @@ pub(crate) fn getchaintips(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 }
 
 pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    ctx.with_stable_chainstate(|| {
+    ctx.chain.with_stable_chainstate(|| {
         // Bitcoin Core's default: one month of ten-minute blocks.
         const DEFAULT_WINDOW: u64 = 30 * 24 * 6; // ~1 month of 10-min blocks
 
         let array = params_array(params)?;
         let tip_hash = match array.get(1).filter(|value| !value.is_null()) {
-            None => ctx.applied_hash(),
+            None => ctx.chain.applied_hash(),
             Some(value) => {
                 let hash = parse_hash(
                     value
                         .as_str()
                         .ok_or(RpcError::InvalidType("blockhash must be a string"))?,
                 )?;
-                let Some(height) = ctx.height_for_hash(hash) else {
+                let Some(height) = ctx.chain.height_for_hash(hash) else {
                     return Err(RpcError::NotFound("block not found"));
                 };
-                if ctx.block_hash_at_height(height) != Some(hash) {
+                if ctx.chain.block_hash_at_height(height) != Some(hash) {
                     return Err(RpcError::InvalidParameter(
                         "Block is not in main chain".to_owned(),
                     ));
@@ -309,8 +311,9 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
             }
         };
         let tip_height = ctx
+            .chain
             .height_for_hash(tip_hash)
-            .unwrap_or_else(|| ctx.applied_height());
+            .unwrap_or_else(|| ctx.chain.applied_height());
         let default_window = DEFAULT_WINDOW.min(u64::from(tip_height.saturating_sub(1)));
         let window_block_count = match array.first().filter(|value| !value.is_null()) {
             None => default_window,
@@ -328,7 +331,7 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
             }
         };
         let stats = {
-            let tree = ctx.block_tree.read();
+            let tree = ctx.chain.block_tree.read();
             window_stats(ctx, &tree, tip_hash, window_block_count)?
         };
         let tip_hash_hex = tip_hash.to_string_be();
@@ -399,10 +402,10 @@ fn count_through(
     if let Some(count) = node.chain_tx_count.get() {
         return Some(count);
     }
-    if is_applied_tip && let Some(count) = ctx.chain_tx_count() {
+    if is_applied_tip && let Some(count) = ctx.chain.chain_tx_count() {
         return Some(count);
     }
-    let log = ctx.blocks.read();
+    let log = ctx.chain.blocks.read();
     cumulative_tx_count_through(&log, node.height)
 }
 
@@ -426,7 +429,7 @@ fn window_tx_count_between(
     {
         return Some(end_count.saturating_sub(start_count));
     }
-    let log = ctx.blocks.read();
+    let log = ctx.chain.blocks.read();
     let end_count = cumulative_tx_count_through(&log, end.height)?;
     let start_count = cumulative_tx_count_through(&log, start.height)?;
     Some(end_count.saturating_sub(start_count))
@@ -445,7 +448,7 @@ fn window_stats(
     window_block_count: u64,
 ) -> Result<ChainTxStats, RpcError> {
     let Some(selected_id) = tree.lookup(tip_hash) else {
-        let applied = ctx.applied_tip.load_full();
+        let applied = ctx.chain.applied_tip.load_full();
         let tip_time = applied
             .as_ref()
             .and_then(|tip| tree.node(tip.tip_id).ok().map(|node| node.header.time))
@@ -466,7 +469,7 @@ fn window_stats(
     let selected = tree
         .node(selected_id)
         .map_err(|error| RpcError::Internal(error.to_string()))?;
-    let is_applied_tip = ctx.applied_hash() == tip_hash;
+    let is_applied_tip = ctx.chain.applied_hash() == tip_hash;
     let total_tx_count = count_through(ctx, tree, selected_id, is_applied_tip);
     let tip_time = selected.header.time;
     if window_block_count == 0 {
@@ -503,14 +506,15 @@ fn window_stats(
 
 pub(crate) fn getblockcount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    typed_to_sonic(&v31::GetBlockCount(u64::from(ctx.applied_height())))
+    typed_to_sonic(&v31::GetBlockCount(u64::from(ctx.chain.applied_height())))
 }
 
 pub(crate) fn getblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let height = required_i64(params, 0, "height is required")?;
     let height = u32::try_from(height)
         .map_err(|_| RpcError::InvalidParameter("Block height out of range".to_owned()))?;
-    ctx.block_hash_at_height(height)
+    ctx.chain
+        .block_hash_at_height(height)
         .map(|hash| typed_to_sonic(&v31::GetBlockHash(hash.to_string_be())))
         .transpose()?
         .ok_or_else(|| RpcError::InvalidParameter("Block height out of range".to_owned()))
@@ -518,17 +522,20 @@ pub(crate) fn getblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 
 pub(crate) fn getbestblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    typed_to_sonic(&v31::GetBestBlockHash(ctx.applied_hash().to_string_be()))
+    typed_to_sonic(&v31::GetBestBlockHash(
+        ctx.chain.applied_hash().to_string_be(),
+    ))
 }
 
 pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let verbosity = getblock_verbosity(params)?;
     let record = ctx
+        .chain
         .block_by_hash(hash)
         .ok_or(RpcError::NotFound("block not found"))?;
     if verbosity == 0 {
-        let Some(block_payload_hex) = ctx.block_body_hex(&record) else {
+        let Some(block_payload_hex) = ctx.chain.block_body_hex(&record) else {
             return Err(RpcError::NotFound("block data pruned"));
         };
         return typed_to_sonic(&v31::GetBlockVerboseZero(block_payload_hex));
@@ -540,6 +547,7 @@ pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let verbose = optional_bool(params, 1, true)?;
     let record = ctx
+        .chain
         .block_by_hash(hash)
         .ok_or(RpcError::NotFound("block not found"))?;
     if !verbose {
@@ -556,12 +564,12 @@ fn blockstats_record(ctx: &Context, params: &Value) -> Result<BlockRecord, RpcEr
     let record = if let Some(height) = target.as_u64() {
         let height =
             u32::try_from(height).map_err(|_| RpcError::InvalidParams("height exceeds u32"))?;
-        ctx.block_by_height(height)
+        ctx.chain.block_by_height(height)
     } else if let Some(hash) = target.as_str() {
         let hash = parse_hash(hash)?;
-        let record = ctx.block_by_hash(hash);
+        let record = ctx.chain.block_by_hash(hash);
         if let Some(record) = &record
-            && ctx.block_hash_at_height(record.height) != Some(hash)
+            && ctx.chain.block_hash_at_height(record.height) != Some(hash)
         {
             return Err(RpcError::InvalidParams("Block is not in main chain"));
         }
@@ -580,9 +588,12 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let (_bytes, block) = decode_block(ctx, &record)?;
     let height = record.height;
     let block_hash = record.hash;
-    let subsidy_sat =
-        bitcoin_rs_consensus::block_subsidy(height, ctx.chain_network.subsidy_halving_interval());
+    let subsidy_sat = bitcoin_rs_consensus::block_subsidy(
+        height,
+        ctx.chain.chain_network.subsidy_halving_interval(),
+    );
     let mediantime = ctx
+        .chain
         .median_time_past_for_hash(Hash256::from(block_hash))
         .unwrap_or(0);
     let fee_fields = compute_fee_fields(ctx, &block).map_err(crate::error::RpcError::from)?;
@@ -682,7 +693,7 @@ struct FeeFields {
 }
 
 fn resolve_per_tx_fees(ctx: &Context, block: &Block) -> Result<Vec<(u64, u64)>, TxQueryError> {
-    let Some(derived_index) = ctx.derived_index.as_ref() else {
+    let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
         return Err(TxQueryError::Unavailable(
             "transaction index disabled".into(),
         ));
@@ -838,7 +849,7 @@ fn utxo_size_inc_for_block(ctx: &Context, block: &Block) -> Result<i64, TxQueryE
     if block.txs.len() <= 1 {
         return Ok(size_inc);
     }
-    let Some(derived_index) = ctx.derived_index.as_ref() else {
+    let Some(derived_index) = ctx.indexes.derived_index.as_ref() else {
         return Err(TxQueryError::Unavailable(
             "transaction index disabled".into(),
         ));
@@ -869,10 +880,10 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     let requested = required_u64(params, 0, "height is required")?;
     let requested_height =
         u32::try_from(requested).map_err(|_| RpcError::InvalidParams("height exceeds u32"))?;
-    let Some(prune_service) = ctx.prune_service.as_ref() else {
+    let Some(prune_service) = ctx.chain.prune_service.as_ref() else {
         return Err(RpcError::MethodDisabled("pruning is disabled"));
     };
-    let applied = ctx.applied_height();
+    let applied = ctx.chain.applied_height();
     if requested_height > applied {
         return Err(RpcError::InvalidParams(
             "prune height cannot exceed applied tip",
@@ -893,6 +904,7 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
     let control = ctx
+        .chain
         .chain_control
         .as_ref()
         .ok_or(RpcError::MethodDisabled("invalidateblock is unavailable"))?;
@@ -918,8 +930,8 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         // bitcoin-rs reports pass since this v1 doesn't surface block-read failures here.
         return typed_to_sonic(&v31::VerifyChain(true));
     }
-    let tree = ctx.block_tree.read();
-    let Some(applied) = ctx.applied_tip.load_full() else {
+    let tree = ctx.chain.block_tree.read();
+    let Some(applied) = ctx.chain.applied_tip.load_full() else {
         return typed_to_sonic(&v31::VerifyChain(true));
     };
     let mut cursor = applied.tip_id;
@@ -938,8 +950,8 @@ pub(crate) fn verifychain(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         // L2+: Merkle-root sanity when block body is available. Absent blocks
         // (header-only / pruned) skip the merkle check.
         if checklevel >= 2 {
-            if let Some(record) = ctx.block_by_hash(node.hash) {
-                if let Some(bytes) = ctx.block_body_bytes(&record) {
+            if let Some(record) = ctx.chain.block_by_hash(node.hash) {
+                if let Some(bytes) = ctx.chain.block_body_bytes(&record) {
                     if let Ok(block) = deserialize::<Block>(&bytes) {
                         let txids = block.txids();
                         if !bitcoin_rs_consensus::verify_block::block_merkle_root_matches_txids(
@@ -993,14 +1005,18 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         ));
     }
     let want_muhash = hash_type == "muhash";
-    let (stats, txouts, transactions, set_hash) = ctx.utxo.with_stable_view(|view| {
-        let stats =
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, ctx.applied_height(), want_muhash)
-                .map_err(|err| RpcError::Internal(err.to_string()))?;
+    // One capture serves the scan height and the reported height/hash, so the
+    // response cannot describe a block that was applied after the scan began.
+    let view = ctx.chain.applied_view();
+    let applied_height = view.height();
+    let (stats, txouts, transactions, set_hash) = ctx.chain.utxo.with_stable_view(|stable| {
+        let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, applied_height, want_muhash)
+            .map_err(|err| RpcError::Internal(err.to_string()))?;
         let set_hash = match hash_type {
             "hash_serialized_3" => Some((
                 "hash_serialized_3",
-                view.hash_serialized_3()
+                stable
+                    .hash_serialized_3()
                     .map_err(|err| RpcError::Internal(err.to_string()))?
                     .to_string_be(),
             )),
@@ -1012,10 +1028,10 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
                 ));
             }
         };
-        Ok::<_, RpcError>((stats, view.len(), view.record_count(), set_hash))
+        Ok::<_, RpcError>((stats, stable.len(), stable.record_count(), set_hash))
     })?;
-    let disk_size = ctx.utxo.with_stable_view(|view| {
-        u64::try_from(view.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
+    let disk_size = ctx.chain.utxo.with_stable_view(|stable| {
+        u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
     });
     let (hash_serialized_3, muhash) = set_hash.map_or((None, None), |(name, hash)| {
         if name == "hash_serialized_3" {
@@ -1025,8 +1041,8 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         }
     });
     typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
-        height: i64::from(ctx.applied_height()),
-        best_block: ctx.applied_hash().to_string_be(),
+        height: i64::from(applied_height),
+        best_block: view.hash(ctx.chain.chain_network).to_string_be(),
         transactions: Some(i64_saturated_len(transactions)),
         tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
         bogo_size: i64_saturated(stats.bogo_size),
@@ -1053,6 +1069,7 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     };
 
     let txindex_entry = ctx
+        .indexes
         .derived_index
         .as_ref()
         .map(|derived_index| derived_index.index_info())
@@ -1087,7 +1104,8 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 /// `Status::Extension` in the compatibility manifest.
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let snapshot = crate::capabilities::txindex_snapshot(ctx.derived_index_status.as_deref());
+    let snapshot =
+        crate::capabilities::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
     Ok(json!({ "capabilities": snapshot.capabilities }))
 }
 
@@ -1129,14 +1147,14 @@ fn scantxoutset_addr_scan(
     ctx: &Arc<Context>,
     scanobjects: &sonic_rs::Array,
 ) -> Result<Value, RpcError> {
-    let scan_scripts = parse_scan_scripts(ctx.chain_network, scanobjects)?;
+    let scan_scripts = parse_scan_scripts(ctx.chain.chain_network, scanobjects)?;
     let scripts = scan_scripts
         .iter()
         .map(|scan| scan.script_pubkey.clone())
         .collect::<Vec<_>>();
-    let (tip, scan) = ctx.with_stable_chainstate(|| {
-        let tip = ctx.applied_tip.load_full();
-        let scan = ctx.utxo.scan_script_pubkeys(&scripts);
+    let (tip, scan) = ctx.chain.with_stable_chainstate(|| {
+        let tip = ctx.chain.applied_tip.load_full();
+        let scan = ctx.chain.utxo.scan_script_pubkeys(&scripts);
         (tip, scan)
     });
     let scan = scan.map_err(|error| RpcError::Internal(error.to_string()))?;
@@ -1286,6 +1304,7 @@ fn scan_unspents(
                 (outpoint.txid, outpoint.vout)
             };
             let block_hash = ctx
+                .chain
                 .block_hash_at_height(utxo.height)
                 .map_or_else(|| "0".repeat(64), |hash| hash.to_string());
             v31::ScanTxOutSetUnspent {
@@ -1346,9 +1365,9 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
 /// `m_chain` is the connected, fully-validated chain, and header-first sync
 /// keeps headers ahead of it; a block whose header is known but which has not
 /// been connected is not in it, so it is `-1` rather than `0`.
-fn confirmations(ctx: &Context, hash: Hash256, height: u32) -> i64 {
-    // Membership and depth must come from the same published applied-tip state.
-    let Some(tip) = ctx.applied_tip.load_full() else {
+fn confirmations(ctx: &Context, view: &AppliedView, hash: Hash256, height: u32) -> i64 {
+    // Membership and depth come from the response's one captured publication.
+    let Some(tip) = view.tip() else {
         return -1;
     };
     if height > tip.height {
@@ -1357,7 +1376,7 @@ fn confirmations(ctx: &Context, hash: Hash256, height: u32) -> i64 {
     let active_hash = if height == tip.height {
         Some(tip.hash)
     } else {
-        let tree = ctx.block_tree.read();
+        let tree = ctx.chain.block_tree.read();
         tree.node_at_height_from(tip.tip_id, height)
             .and_then(|id| tree.node(id).ok().map(|node| node.hash))
     };
@@ -1376,14 +1395,19 @@ fn block_verbose_typed(
     verbosity: u64,
 ) -> Result<Value, RpcError> {
     let header = decode_header(record)?;
-    let block_confirmations = confirmations(ctx, Hash256::from(record.hash), record.height);
+    // One capture serves confirmations and the next-applied-block hash, so the
+    // two cannot describe different applied publications.
+    let view = ctx.chain.applied_view();
+    let block_confirmations = confirmations(ctx, &view, Hash256::from(record.hash), record.height);
     let mediantime = ctx
+        .chain
         .median_time_past_for_hash(Hash256::from(record.hash))
         .unwrap_or(0);
     let chainwork_hex = ctx
+        .chain
         .chain_work_hex_for_hash(Hash256::from(record.hash))
         .unwrap_or_else(|| "00".to_owned());
-    let next_block_hash = next_applied_block_hash(ctx, record.height);
+    let next_block_hash = next_applied_block_hash(ctx, &view, record.height);
     if !include_block_fields {
         return typed_to_sonic(&v31::GetBlockHeaderVerbose {
             hash: record.hash.to_string(),
@@ -1397,7 +1421,7 @@ fn block_verbose_typed(
             nonce: i64::from(header.nonce),
             bits: format!("{:08x}", header.bits),
             target: compact_target_hex(header.bits),
-            difficulty: ctx.difficulty_for_bits(header.bits),
+            difficulty: ctx.chain.difficulty_for_bits(header.bits),
             chain_work: chainwork_hex,
             n_tx: u32::try_from(record.tx_count).unwrap_or(u32::MAX),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
@@ -1430,7 +1454,7 @@ fn block_verbose_typed(
             nonce: i64::from(header.nonce),
             bits,
             target: compact_target_hex(header.bits),
-            difficulty: ctx.difficulty_for_bits(header.bits),
+            difficulty: ctx.chain.difficulty_for_bits(header.bits),
             chain_work: chainwork_hex,
             n_tx: i64_saturated_len(record.tx_count),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
@@ -1442,7 +1466,7 @@ fn block_verbose_typed(
     let mut txs = Vec::with_capacity(block.txs.len());
     for tx in &block.txs {
         txs.push(v31::GetBlockVerboseTwoTransaction {
-            transaction: convert::raw_transaction_verbose(tx, ctx.chain_network, None)?,
+            transaction: convert::raw_transaction_verbose(tx, ctx.chain.chain_network, None)?,
             fee: None,
         });
     }
@@ -1463,7 +1487,7 @@ fn block_verbose_typed(
         nonce: i64::from(header.nonce),
         bits,
         target: compact_target_hex(header.bits),
-        difficulty: ctx.difficulty_for_bits(header.bits),
+        difficulty: ctx.chain.difficulty_for_bits(header.bits),
         chain_work: chainwork_hex,
         n_tx: i64_saturated_len(record.tx_count),
         previous_block_hash: Some(header.prev_blockhash.to_string()),
@@ -1471,13 +1495,13 @@ fn block_verbose_typed(
     })
 }
 
-fn next_applied_block_hash(ctx: &Context, height: u32) -> Option<BlockHash> {
-    let tip = ctx.applied_tip.load_full()?;
+fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Option<BlockHash> {
+    let tip = view.tip()?;
     let next_height = height.checked_add(1)?;
     if next_height > tip.height {
         return None;
     }
-    let tree = ctx.block_tree.read();
+    let tree = ctx.chain.block_tree.read();
     let node_id = tree.node_at_height_from(tip.tip_id, next_height)?;
     let node = tree.node(node_id).ok()?;
     Some(BlockHash::from(node.hash))
@@ -1529,7 +1553,7 @@ fn decode_header(record: &BlockRecord) -> Result<Header, RpcError> {
 }
 
 fn decode_block(ctx: &Context, record: &BlockRecord) -> Result<(Vec<u8>, Block), RpcError> {
-    let Some(bytes) = ctx.block_body_bytes(record) else {
+    let Some(bytes) = ctx.chain.block_body_bytes(record) else {
         return Err(RpcError::NotFound("block data pruned"));
     };
     deserialize(bytes.as_slice())
@@ -1590,10 +1614,10 @@ mod tests {
         times: &[u32],
     ) -> Arc<Context> {
         let mut context = Context::new();
-        context.chain_network = network;
+        context.chain.chain_network = network;
         let ctx = Arc::new(context);
         let (tip_id, tip_hash) = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let mut parent = None;
             let mut previous_hash = BlockHash::default();
             let mut tip_id = NodeId::new(0);
@@ -1623,8 +1647,8 @@ mod tests {
             hash: tip_hash,
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
-        ctx.set_chain_tip(tip.clone());
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_chain_tip(tip.clone());
+        ctx.chain.set_applied_tip(tip);
         ctx
     }
 
@@ -1638,10 +1662,10 @@ mod tests {
     /// from half the state a node would have.
     fn seed_block(ctx: &Arc<Context>, block: &Block, record: BlockRecord) {
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let _ = tree.insert_node(None, block.header, NodeStatus::Active);
         }
-        ctx.add_block(record);
+        ctx.chain.add_block(record);
     }
 
     /// A minimal native genesis stand-in: one coinbase transaction whose txid
@@ -2018,6 +2042,85 @@ mod tests {
         assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error}");
     }
 
+    /// One publication supplies the scan height and the reported height and
+    /// hash, so a tip that lands mid-scan cannot split the response pair.
+    ///
+    /// The swapper moves only the applied-tip cell: the UTXO set is constant,
+    /// so this pins the tip pair, not an atomic UTXO-to-tip coupling, which is
+    /// not claimed.
+    #[test]
+    fn gettxoutsetinfo_pairs_one_height_with_one_hash_across_a_swap() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ctx = context_with_tip(
+            bitcoin_rs_primitives::Network::Regtest,
+            0x207f_ffff,
+            &[1_000_000; 6],
+        );
+        let a = ctx
+            .chain
+            .applied_tip
+            .load_full()
+            .expect("fixture publishes an applied tip");
+        let b = Arc::new(TipSnapshot {
+            tip_id: NodeId::new(u32::MAX),
+            height: 7,
+            chainwork: ChainWork::ZERO,
+            hash: Hash256::from_le_bytes(&[0x0b; 32]),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        });
+        assert_ne!(a.height, b.height, "the fixture tips must differ");
+        assert_ne!(a.hash, b.hash, "the fixture tips must differ");
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (cell, swap_a, swap_b, flag) = (
+            Arc::clone(&ctx.chain.applied_tip),
+            Arc::clone(&a),
+            Arc::clone(&b),
+            Arc::clone(&stop),
+        );
+        let swapper = std::thread::spawn(move || {
+            let mut flip = false;
+            while !flag.load(Ordering::Relaxed) {
+                flip = !flip;
+                let tip = if flip { &swap_b } else { &swap_a };
+                cell.store(Some(Arc::clone(tip)));
+            }
+        });
+
+        let mut seen_b = 0_usize;
+        for _ in 0..200 {
+            let result = gettxoutsetinfo(&ctx, &json!(null))
+                .unwrap_or_else(|error| panic!("gettxoutsetinfo failed: {error}"));
+            let height = result
+                .get("height")
+                .and_then(Value::as_i64)
+                .expect("height");
+            let best = result
+                .get("bestblock")
+                .and_then(Value::as_str)
+                .expect("best_block");
+            assert!(
+                result.get("hash_serialized_3").is_some(),
+                "the scan must still run and report its hash"
+            );
+            if height == 7 {
+                seen_b += 1;
+                assert_eq!(best, b.hash.to_string_be(), "a foreign hash rode height 7");
+            } else {
+                assert_eq!(height, 5, "the route reported an unpublished height");
+                assert_eq!(best, a.hash.to_string_be(), "a foreign hash rode height 5");
+            }
+            std::thread::yield_now();
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("swapper thread panicked");
+        assert!(
+            seen_b > 0,
+            "the swap was never observed, so coherence proved nothing"
+        );
+    }
+
     /// A genesis, an applied child at height 1, and a competing branch off the
     /// same genesis whose *header* chain reaches height 2.
     ///
@@ -2056,7 +2159,7 @@ mod tests {
         };
 
         let (applied_tip, header_tip, fork_hash, applied_header, fork_header) = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = header(BlockHash::default(), 0, 1_000_000);
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
 
@@ -2079,8 +2182,8 @@ mod tests {
             (applied_tip, header_tip, fork_hash, applied, fork)
         };
 
-        ctx.set_applied_tip((*applied_tip).clone());
-        ctx.set_chain_tip((*header_tip).clone());
+        ctx.chain.set_applied_tip((*applied_tip).clone());
+        ctx.chain.set_chain_tip((*header_tip).clone());
         Ok(Fork {
             ctx: Arc::new(ctx),
             applied: applied_tip.hash,
@@ -2102,7 +2205,10 @@ mod tests {
 
         // Header tip is height 2, applied tip height 1. The applied block is one
         // deep, not two: the header chain does not count.
-        assert_eq!(confirmations(&ctx, applied_hash, 1), 1);
+        assert_eq!(
+            confirmations(&ctx, &ctx.chain.applied_view(), applied_hash, 1),
+            1
+        );
         Ok(())
     }
 
@@ -2120,9 +2226,124 @@ mod tests {
         // Same height as the applied block, different chain. Deriving the answer
         // from height alone reports 1 here, which says "in the chain, one deep".
         assert_eq!(
-            confirmations(&ctx, fork_hash, 1),
+            confirmations(&ctx, &ctx.chain.applied_view(), fork_hash, 1),
             -1,
             "a block off the applied chain is not in it at any depth"
+        );
+        Ok(())
+    }
+
+    /// Confirmations and the next-applied-block hash describe one publication.
+    ///
+    /// The genesis has two competing children: `a1` is one applied tip; `b2`
+    /// leads a longer branch. Reporting `a1` while the applied tip swaps
+    /// between the two must never pair one branch's confirmation count with
+    /// the other branch's next-block hash.
+    #[test]
+    fn verbose_block_facts_never_straddle_two_applied_publications()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use bitcoin_rs_chain::NodeStatus;
+
+        let ctx = Context::new();
+        let header = |prev: BlockHash, nonce: u32, time: u32| Header {
+            version: 1,
+            prev_blockhash: prev,
+            merkle_root: Hash256::default(),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce,
+        };
+        let genesis = header(BlockHash::default(), 0, 1_000_000);
+        let a1 = header(genesis.compute_hash(), 1, 1_000_900);
+        let b1 = header(genesis.compute_hash(), 2, 1_000_901);
+        let b2 = header(b1.compute_hash(), 3, 1_001_800);
+        let (a1_hash, b2_hash) = (a1.compute_hash(), b2.compute_hash());
+
+        let (a_tip, b_tip) = {
+            let mut tree = ctx.chain.block_tree.write();
+            let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
+            let a1_id = tree.insert_node(Some(genesis_id), a1, NodeStatus::Active)?;
+            let b1_id = tree.insert_node(Some(genesis_id), b1, NodeStatus::HeaderValid)?;
+            let b2_id = tree.insert_node(Some(b1_id), b2, NodeStatus::HeaderValid)?;
+            (
+                Arc::new(TipSnapshot {
+                    tip_id: a1_id,
+                    height: 1,
+                    chainwork: ChainWork::ZERO,
+                    hash: a1_hash.0,
+                    chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                }),
+                Arc::new(TipSnapshot {
+                    tip_id: b2_id,
+                    height: 2,
+                    chainwork: ChainWork::ZERO,
+                    hash: b2_hash.0,
+                    chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                }),
+            )
+        };
+        // A log record for `a1`, so the verbose projection has a record to
+        // answer from. The record comes back through the tree, which carries
+        // the header, exactly as a node's record does on the way out.
+        let mut block = fixture_genesis();
+        block.header = a1;
+        ctx.chain.add_block(BlockRecord::from_block(1, &block));
+        let record = ctx
+            .chain
+            .record_for_hash(Hash256::from(a1_hash))
+            .expect("fixture record resolves through the tree");
+        ctx.chain.applied_tip.store(Some(Arc::clone(&a_tip)));
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (cell, swap_a, swap_b, flag) = (
+            Arc::clone(&ctx.chain.applied_tip),
+            a_tip,
+            b_tip,
+            Arc::clone(&stop),
+        );
+        let swapper = std::thread::spawn(move || {
+            let mut flip = false;
+            while !flag.load(Ordering::Relaxed) {
+                flip = !flip;
+                let tip = if flip { &swap_b } else { &swap_a };
+                cell.store(Some(Arc::clone(tip)));
+            }
+        });
+
+        let ctx = Arc::new(ctx);
+        let b2_text = b2_hash.to_string();
+        let mut seen_b = 0_usize;
+        for _ in 0..200 {
+            let value = block_verbose_typed(&ctx, &record, false, 1)?;
+            let confirmations = value
+                .get("confirmations")
+                .and_then(Value::as_i64)
+                .expect("confirmations");
+            let next = value.get("nextblockhash");
+            match confirmations {
+                1 => assert!(
+                    next.is_none_or(Value::is_null),
+                    "under the a1 tip the next applied height is unmined, yet {next:?} appeared"
+                ),
+                -1 => assert_eq!(
+                    next.and_then(Value::as_str),
+                    Some(b2_text.as_str()),
+                    "off the applied chain, only the b2 branch's next hash is coherent"
+                ),
+                other => panic!("confirmations {other} matches no published branch"),
+            }
+            if confirmations == -1 {
+                seen_b += 1;
+            }
+            std::thread::yield_now();
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().expect("swapper thread panicked");
+        assert!(
+            seen_b > 0,
+            "the b2 branch was never observed, so coherence proved nothing"
         );
         Ok(())
     }
@@ -2137,7 +2358,10 @@ mod tests {
         } = forked_ctx()?;
 
         // Known header, never connected. Core's m_chain does not contain it.
-        assert_eq!(confirmations(&ctx, header_tip_hash, 2), -1);
+        assert_eq!(
+            confirmations(&ctx, &ctx.chain.applied_view(), header_tip_hash, 2),
+            -1
+        );
         Ok(())
     }
     /// Header-only tree nodes remain addressable even without a log record.
@@ -2192,7 +2416,10 @@ mod tests {
         let Fork { ctx, .. } = forked_ctx()?;
         let unknown = Hash256::from_le_bytes(&[0xab_u8; 32]);
 
-        assert_eq!(confirmations(&ctx, unknown, 1), -1);
+        assert_eq!(
+            confirmations(&ctx, &ctx.chain.applied_view(), unknown, 1),
+            -1
+        );
         Ok(())
     }
 
@@ -2203,7 +2430,8 @@ mod tests {
             fork: fork_hash,
             ..
         } = forked_ctx()?;
-        ctx.add_block(BlockRecord::synthetic(1, BlockHash::from(fork_hash)));
+        ctx.chain
+            .add_block(BlockRecord::synthetic(1, BlockHash::from(fork_hash)));
 
         let result = getblockstats(&ctx, &json!([fork_hash.to_string_be()]));
         assert!(
@@ -2273,6 +2501,7 @@ mod tests {
             let fork_block = coinbase_only_block(fork_header);
             Arc::get_mut(&mut ctx)
                 .expect("unique fork fixture context")
+                .chain
                 .block_body_source = Some(Arc::new(MultiBlockSource {
                 bodies: vec![
                     (
@@ -2288,8 +2517,8 @@ mod tests {
                 ],
             }));
         }
-        ctx.add_block(applied_record);
-        ctx.add_block(fork_record);
+        ctx.chain.add_block(applied_record);
+        ctx.chain.add_block(fork_record);
 
         let handler = crate::Handler::new(Arc::clone(&ctx));
         let confirmations_of =
@@ -2345,14 +2574,14 @@ mod tests {
     fn verificationprogress_reports_half_when_applied_is_half_of_headers() {
         let ctx = Arc::new(Context::new());
         let hash = Hash256::from_le_bytes(&[7_u8; 32]);
-        ctx.set_chain_tip(TipSnapshot {
+        ctx.chain.set_chain_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 100,
             chainwork: ChainWork::ZERO,
             hash,
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 50,
             chainwork: ChainWork::ZERO,
@@ -2527,14 +2756,14 @@ mod tests {
     fn verificationprogress_is_capped_when_applied_tip_is_temporarily_higher() {
         let ctx = Arc::new(Context::new());
         let hash = Hash256::from_le_bytes(&[8_u8; 32]);
-        ctx.set_chain_tip(TipSnapshot {
+        ctx.chain.set_chain_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 50,
             chainwork: ChainWork::ZERO,
             hash,
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 100,
             chainwork: ChainWork::ZERO,
@@ -2555,7 +2784,7 @@ mod tests {
     #[test]
     fn getblockchaininfo_names_testnet4_separately_from_testnet3() {
         let mut context = Context::new();
-        context.chain_network = bitcoin_rs_primitives::Network::Testnet4;
+        context.chain.chain_network = bitcoin_rs_primitives::Network::Testnet4;
         let result = getblockchaininfo(&Arc::new(context), &json!([]))
             .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
 
@@ -2579,9 +2808,13 @@ mod tests {
     #[test]
     fn difficulty_matches_core_for_mainnet_and_regtest_targets() {
         let ctx = Context::new();
-        let mainnet = ctx.difficulty_for_bits(CompactTarget::from_consensus(0x1d00_ffff));
+        let mainnet = ctx
+            .chain
+            .difficulty_for_bits(CompactTarget::from_consensus(0x1d00_ffff));
         assert_eq!(mainnet.to_bits(), 1.0_f64.to_bits());
-        let regtest = ctx.difficulty_for_bits(CompactTarget::from_consensus(0x207f_ffff));
+        let regtest = ctx
+            .chain
+            .difficulty_for_bits(CompactTarget::from_consensus(0x207f_ffff));
         let expected = 4.656_542_373_906_924_7e-10_f64;
         assert_eq!(regtest.to_bits(), expected.to_bits());
     }
@@ -2623,15 +2856,15 @@ mod tests {
             0x207f_ffff,
             &[100, 300, 200],
         );
-        let Some(applied) = ctx.applied_tip.load_full() else {
+        let Some(applied) = ctx.chain.applied_tip.load_full() else {
             panic!("applied tip missing");
         };
         let applied_chainwork = ChainWork::from_be_bytes([1; 32]);
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             chainwork: applied_chainwork,
             ..(*applied).clone()
         });
-        ctx.set_chain_tip(TipSnapshot {
+        ctx.chain.set_chain_tip(TipSnapshot {
             tip_id: applied.tip_id,
             height: 99,
             chainwork: ChainWork::from_be_bytes([2; 32]),
@@ -2667,7 +2900,7 @@ mod tests {
         let body = consensus_bytes(&genesis);
         let record = BlockRecord::from_block(0, &genesis);
         let ctx = Arc::new(Context::new());
-        ctx.add_block(record);
+        ctx.chain.add_block(record);
 
         let result = getblockchaininfo(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
@@ -2704,7 +2937,7 @@ mod tests {
         let store_bytes = record_bytes.saturating_add(4_096);
         let ctx =
             Arc::new(Context::new().with_block_body_source(Arc::new(SizedStore(store_bytes))));
-        ctx.add_block(record);
+        ctx.chain.add_block(record);
 
         let result = getblockchaininfo(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
@@ -2740,7 +2973,7 @@ mod tests {
         let ctx = Arc::new(Context::new());
         let genesis = fixture_genesis();
         let tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let id = tree
                 .insert_node(None, genesis.header, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("insert genesis: {err}"));
@@ -2757,7 +2990,7 @@ mod tests {
                 chain_tx_count: node.chain_tx_count,
             }
         };
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
         let result = getchaintxstats(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
         let Some(txcount) = result.get("txcount").and_then(JsonValueTrait::as_u64) else {
@@ -2774,7 +3007,7 @@ mod tests {
         let ctx = Arc::new(Context::new());
         let genesis = fixture_genesis();
         let tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let id = tree
                 .insert_node(None, genesis.header, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("insert genesis: {err}"));
@@ -2789,8 +3022,8 @@ mod tests {
                 chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
             }
         };
-        ctx.set_applied_tip(tip.clone());
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip.clone());
+        ctx.chain.set_applied_tip(tip);
         let result = getchaintxstats(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
         let Some(txcount) = result.get("txcount").and_then(JsonValueTrait::as_u64) else {
@@ -2805,7 +3038,7 @@ mod tests {
         let genesis = fixture_genesis();
         let expected_time = genesis.header.time;
         let tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let id = tree
                 .insert_node(None, genesis.header, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("insert genesis: {err}"));
@@ -2820,7 +3053,7 @@ mod tests {
                 chain_tx_count: node.chain_tx_count,
             }
         };
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
         let result = getchaintxstats(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
         let Some(time) = result.get("time").and_then(JsonValueTrait::as_u64) else {
@@ -2943,7 +3176,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
         let tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let mut parent = None;
             let mut prev = BlockHash::default();
             let mut tip = None;
@@ -2976,7 +3209,7 @@ mod tests {
             }
             tip.ok_or("missing tip")?
         };
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
 
         let result = getchaintxstats(&ctx, &json!([2]))
             .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
@@ -3015,7 +3248,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
         let tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let mut parent = None;
             let mut prev = BlockHash::default();
             let mut tip = None;
@@ -3042,7 +3275,7 @@ mod tests {
             }
             tip.ok_or("missing tip")?
         };
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
 
         let rejected = getchaintxstats(&ctx, &json!([3]));
         assert!(
@@ -3062,7 +3295,7 @@ mod tests {
     fn getchaintxstats_tip_time_uses_first_applied_height_record() {
         let ctx = Arc::new(Context::new());
         let tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let mut parent = None;
             let mut prev = BlockHash::default();
             let mut tip = None;
@@ -3098,7 +3331,7 @@ mod tests {
             }
             tip.unwrap_or_else(|| panic!("missing tip"))
         };
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
 
         let result = getchaintxstats(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintxstats failed: {err}"));
@@ -3115,7 +3348,7 @@ mod tests {
         let genesis = fixture_genesis();
         let applied_hash = genesis.block_hash().0;
         let applied_id = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             tree.insert_node(None, genesis.header, NodeStatus::Active)
                 .expect("genesis")
         };
@@ -3129,18 +3362,18 @@ mod tests {
         };
         let header_hash = header_only.compute_hash().0;
         let header_id = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             tree.insert_node(Some(applied_id), header_only, NodeStatus::HeaderValid)
                 .expect("header")
         };
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id: applied_id,
             height: 0,
             chainwork: ChainWork::ZERO,
             hash: applied_hash,
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
-        ctx.set_chain_tip(TipSnapshot {
+        ctx.chain.set_chain_tip(TipSnapshot {
             tip_id: header_id,
             height: 1,
             chainwork: ChainWork::ZERO,
@@ -3210,7 +3443,7 @@ mod pruneblockchain_tests {
     }
 
     fn set_applied_tip(ctx: &Context, height: u32) {
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height,
             chainwork: ChainWork::ZERO,
@@ -3346,7 +3579,7 @@ mod pruneblockchain_tests {
         let ctx = Arc::new(Context::new());
         let genesis = fixture_genesis_header();
         let hash = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let id = tree
                 .insert_node(None, genesis, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("genesis header must insert: {err}"));
@@ -3367,7 +3600,7 @@ mod pruneblockchain_tests {
     fn getblockstats_reports_pruned_error_for_a_header_only_block() {
         let ctx = Arc::new(Context::new());
         let applied_tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = fixture_genesis_header();
             let genesis_id = tree
                 .insert_node(None, genesis, NodeStatus::Active)
@@ -3386,7 +3619,7 @@ mod pruneblockchain_tests {
             tree.tip()
                 .unwrap_or_else(|| panic!("inserted child must publish a tip"))
         };
-        ctx.set_applied_tip((*applied_tip).clone());
+        ctx.chain.set_applied_tip((*applied_tip).clone());
 
         let result = getblockstats(&ctx, &json!([1]));
 
@@ -3438,7 +3671,7 @@ mod getchaintips_tests {
         let genesis = synthetic_header(BlockHash::default(), 1_000_000);
         let hash = hash_from_header(&genesis);
         let tip_id = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             tree.insert_node(None, genesis, NodeStatus::Active)?
         };
         let tip = TipSnapshot {
@@ -3448,8 +3681,8 @@ mod getchaintips_tests {
             hash,
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
-        ctx.set_chain_tip(tip.clone());
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_chain_tip(tip.clone());
+        ctx.chain.set_applied_tip(tip);
         let result = getchaintips(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
         let Some(arr) = result.as_array() else {
@@ -3474,7 +3707,7 @@ mod getchaintips_tests {
     fn getchaintips_serves_snapshot_tip_without_a_tree_row() {
         let ctx = Arc::new(Context::new());
         let hash = Hash256::from_le_bytes(&[42_u8; 32]);
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id: NodeId::new(0),
             height: 42,
             chainwork: ChainWork::ZERO,
@@ -3511,7 +3744,7 @@ mod getchaintips_tests {
     {
         let ctx = Arc::new(Context::new());
         let (active_tip_id, active_chainwork, active_hash) = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = synthetic_header(BlockHash::default(), 1_000_000);
             let genesis_hash = genesis.compute_hash();
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -3532,8 +3765,8 @@ mod getchaintips_tests {
             hash: active_hash,
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
-        ctx.set_chain_tip(tip.clone());
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_chain_tip(tip.clone());
+        ctx.chain.set_applied_tip(tip);
 
         let result = getchaintips(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getchaintips failed: {err}"));
@@ -3565,7 +3798,7 @@ mod getchaintips_tests {
 
         // Build: genesis (active) -> sibling (header-only). Active tip stays at genesis.
         let sibling_height = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = synthetic_header(BlockHash::default(), 1_000_000);
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
             let genesis_hash = tree.node(genesis_id)?.hash;
@@ -3573,7 +3806,7 @@ mod getchaintips_tests {
             sibling.nonce = 9;
             let sibling_id =
                 tree.insert_node(Some(genesis_id), sibling, NodeStatus::HeaderValid)?;
-            ctx.set_chain_tip(TipSnapshot {
+            ctx.chain.set_chain_tip(TipSnapshot {
                 tip_id: genesis_id,
                 height: 0,
                 chainwork: ChainWork::ZERO,
@@ -3629,7 +3862,7 @@ mod getchaintips_tests {
         let mut applied = None;
         let mut header_tip = None;
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             for height in 0..=header_height {
                 let header = synthetic_header(previous, 1_000_000 + height * 600);
                 previous = header.compute_hash();
@@ -3653,7 +3886,7 @@ mod getchaintips_tests {
         else {
             panic!("the fixture builds both tips");
         };
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id: applied_id,
             height: applied_height,
             chainwork: applied_work,
@@ -3765,7 +3998,7 @@ mod getchaintips_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
         let (abandoned_height, new_tip) = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = synthetic_header(BlockHash::default(), 1_000_000);
             let genesis_hash = genesis.compute_hash();
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -3799,7 +4032,7 @@ mod getchaintips_tests {
         };
         // The node followed the reorg: the new branch is what it has applied.
         let (tip_id, height, chainwork, hash) = new_tip;
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id,
             height,
             chainwork,
@@ -3852,7 +4085,7 @@ mod getchaintips_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
         let tip = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = synthetic_header(BlockHash::default(), 1_000_000);
             let genesis_hash = genesis.compute_hash();
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
@@ -3867,7 +4100,7 @@ mod getchaintips_tests {
                 chain_tx_count: node.chain_tx_count,
             }
         };
-        ctx.set_applied_tip(tip.clone());
+        ctx.chain.set_applied_tip(tip.clone());
 
         // Before: the applied tip is the chain being followed.
         let before = tips_of(&ctx);
@@ -3884,7 +4117,7 @@ mod getchaintips_tests {
 
         // The invalidation's first half, with the tip not yet republished.
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             tree.invalidate_subtree(tip.tip_id)?;
         }
 
@@ -3936,7 +4169,7 @@ mod getchaintips_tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let ctx = Arc::new(Context::new());
         let (genesis_id, genesis_chainwork, genesis_hash) = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let genesis = synthetic_header(BlockHash::default(), 1_000_000);
             let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
             let genesis_hash = tree.node(genesis_id)?.hash;
@@ -3950,7 +4183,7 @@ mod getchaintips_tests {
             let genesis_node = tree.node(genesis_id)?;
             (genesis_id, genesis_node.chainwork, genesis_hash)
         };
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id: genesis_id,
             height: 0,
             chainwork: genesis_chainwork,
@@ -4060,7 +4293,7 @@ mod chaintxstats_durability_tests {
         counts: &[u64],
     ) -> TipSnapshot {
         assert_eq!(times.len(), counts.len());
-        let mut tree = ctx.block_tree.write();
+        let mut tree = ctx.chain.block_tree.write();
         let mut parent = None;
         let mut prev = BlockHash::default();
         let mut tip = None;
@@ -4107,10 +4340,10 @@ mod chaintxstats_durability_tests {
             None => [0, 0],
         };
         let tip = insert_counted_chain(&ctx, &[1_000_000, TIP_TIME], &counts);
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
         let ctx = Arc::new(ctx);
         assert!(
-            ctx.blocks.read().is_empty(),
+            ctx.chain.blocks.read().is_empty(),
             "the fixture must leave the record log empty, or it is not a restart"
         );
         ctx
@@ -4134,10 +4367,10 @@ mod chaintxstats_durability_tests {
     #[test]
     fn txcount_is_zero_when_the_selected_node_count_is_unknown() {
         let ctx = restarted_ctx(None);
-        let Some(tip) = ctx.applied_tip.load_full() else {
+        let Some(tip) = ctx.chain.applied_tip.load_full() else {
             panic!("fixture has no applied tip");
         };
-        ctx.add_block(BlockRecord {
+        ctx.chain.add_block(BlockRecord {
             hash: BlockHash::from(tip.hash),
             height: tip.height,
             body_size: 0,
@@ -4183,10 +4416,10 @@ mod chaintxstats_durability_tests {
             &[1_000, 1_600, 2_200, 2_800, 3_400],
             &[1, 4, 9, 16, 25],
         );
-        ctx.set_applied_tip(tip.clone());
+        ctx.chain.set_applied_tip(tip.clone());
         let ctx = Arc::new(ctx);
         let mid_hash = {
-            let tree = ctx.block_tree.read();
+            let tree = ctx.chain.block_tree.read();
             let id = tree
                 .node_at_height_from(tip.tip_id, 3)
                 .unwrap_or_else(|| panic!("missing height 3"));
@@ -4224,7 +4457,7 @@ mod chaintxstats_durability_tests {
     fn default_tip_selection_uses_the_applied_node_count() {
         let ctx = Context::new();
         let tip = insert_counted_chain(&ctx, &[1_000, TIP_TIME], &[1, 11]);
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
         let ctx = Arc::new(ctx);
         assert_eq!(
             stats_of(&ctx)
@@ -4238,10 +4471,10 @@ mod chaintxstats_durability_tests {
     fn historical_stats_survive_an_empty_block_log() {
         let ctx = Context::new();
         let tip = insert_counted_chain(&ctx, &[1_000_000, 1_000_100, TIP_TIME], &[1, 1, 42]);
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
         let ctx = Arc::new(ctx);
-        assert!(ctx.blocks.read().is_empty());
-        let hash = ctx.applied_hash().to_string_be();
+        assert!(ctx.chain.blocks.read().is_empty());
+        let hash = ctx.chain.applied_hash().to_string_be();
         let value = getchaintxstats(&ctx, &json!([1, hash.as_str()]))
             .unwrap_or_else(|err| panic!("reopen stats failed: {err}"));
         assert_eq!(
@@ -4259,7 +4492,7 @@ mod chaintxstats_durability_tests {
     /// Builds genesis, a lost equal-work sibling, and the winning branch with
     /// its child, returning (genesis hash, lost hash, winning tip snapshot).
     fn reorg_fixture(ctx: &Context) -> (Hash256, Hash256, TipSnapshot) {
-        let mut tree = ctx.block_tree.write();
+        let mut tree = ctx.chain.block_tree.write();
         let genesis = Header {
             version: 1,
             prev_blockhash: BlockHash::default(),
@@ -4338,7 +4571,7 @@ mod chaintxstats_durability_tests {
     fn reorg_selects_the_winning_branch_counts() {
         let ctx = Context::new();
         let (genesis_hash, lost_hash, won) = reorg_fixture(&ctx);
-        ctx.set_applied_tip(won.clone());
+        ctx.chain.set_applied_tip(won.clone());
         let ctx = Arc::new(ctx);
         let _ = genesis_hash;
         assert_eq!(
@@ -4436,13 +4669,13 @@ mod chaintxstats_window_tests {
             previous = candidate.compute_hash();
             let hash = previous;
             let id = {
-                let mut tree = ctx.block_tree.write();
+                let mut tree = ctx.chain.block_tree.write();
                 tree.insert_node(parent, candidate, NodeStatus::Active)
                     .unwrap_or_else(|err| panic!("insert_node failed: {err}"))
             };
             parent = Some(id);
             tip = Some((id, hash, height));
-            ctx.add_block(BlockRecord {
+            ctx.chain.add_block(BlockRecord {
                 hash,
                 height,
                 body_size: 0,
@@ -4454,7 +4687,7 @@ mod chaintxstats_window_tests {
         let Some((tip_id, hash, height)) = tip else {
             panic!("a chain fixture needs at least one block");
         };
-        ctx.set_applied_tip(bitcoin_rs_chain::TipSnapshot {
+        ctx.chain.set_applied_tip(bitcoin_rs_chain::TipSnapshot {
             tip_id,
             height,
             chainwork: bitcoin_rs_chain::ChainWork::ZERO,
@@ -4548,7 +4781,7 @@ mod chaintxstats_window_tests {
             &[1_000, 2_000, 3_000, 4_000],
             &[1, 2, PAST, END],
         );
-        ctx.set_applied_tip(tip);
+        ctx.chain.set_applied_tip(tip);
         let ctx = Arc::new(ctx);
         assert!(
             END > u64::from(u32::MAX),
@@ -4654,7 +4887,7 @@ mod chaintxstats_window_tests {
         let ctx = chain_ctx(&TIMES);
         let chosen_height = 8_usize;
         let hash = {
-            let tree = ctx.block_tree.read();
+            let tree = ctx.chain.block_tree.read();
             let Some(node) = tree.active_node_at_height(u32::try_from(chosen_height).unwrap_or(0))
             else {
                 panic!("the fixture has a block at that height");
@@ -4711,12 +4944,12 @@ mod chaintxstats_window_tests {
     #[test]
     fn a_header_only_block_above_the_applied_tip_is_refused() {
         let ctx = chain_ctx(&TIMES);
-        let Some(tip) = ctx.applied_tip.load_full() else {
+        let Some(tip) = ctx.chain.applied_tip.load_full() else {
             panic!("the fixture has an applied tip");
         };
         // One more header on the same chain, with no record and no application.
         let ahead = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let Ok(tip_node) = tree.node(tip.tip_id) else {
                 panic!("the applied tip must be in the tree");
             };
@@ -4745,7 +4978,7 @@ mod chaintxstats_window_tests {
         let ctx = chain_ctx(&TIMES);
         {
             // Drop the genesis record, leaving the rest of the log intact.
-            let mut blocks = ctx.blocks.write();
+            let mut blocks = ctx.chain.blocks.write();
             let kept: Vec<BlockRecord> = blocks.iter().skip(1).cloned().collect();
             blocks.clear();
             for record in kept {
@@ -4754,7 +4987,7 @@ mod chaintxstats_window_tests {
         }
         let chosen = TIMES.len() - 5;
         let hash = {
-            let tree = ctx.block_tree.read();
+            let tree = ctx.chain.block_tree.read();
             let Some(node) = tree.active_node_at_height(u32::try_from(chosen).unwrap_or(0)) else {
                 panic!("the fixture has a block at that height");
             };
@@ -4781,7 +5014,7 @@ mod chaintxstats_window_tests {
         let ctx = chain_ctx_with_counter(&TIMES, Some(TIP_TOTAL));
         let chosen = TIMES.len() - 5;
         let hash = {
-            let tree = ctx.block_tree.read();
+            let tree = ctx.chain.block_tree.read();
             let Some(node) = tree.active_node_at_height(u32::try_from(chosen).unwrap_or(0)) else {
                 panic!("the fixture has a block at that height");
             };
@@ -4860,7 +5093,7 @@ mod chaintxstats_window_tests {
     fn a_blockhash_off_the_active_chain_is_refused() {
         let ctx = chain_ctx(&TIMES);
         let stale = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let Some(parent) = tree.active_node_at_height(3).map(|node| node.hash) else {
                 panic!("the fixture has a block at height 3");
             };
@@ -4893,7 +5126,7 @@ mod chaintxstats_window_tests {
     #[test]
     fn window_tx_count_is_omitted_when_the_log_does_not_cover_the_window() {
         let ctx = chain_ctx(&TIMES);
-        ctx.blocks.write().clear();
+        ctx.chain.blocks.write().clear();
 
         let result = stats(&ctx, &json!([4]));
 
@@ -4925,7 +5158,7 @@ mod verification_progress_wiring_tests {
             nonce: 0,
         };
         let id = {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let id = tree
                 .insert_node(None, header, NodeStatus::Active)
                 .unwrap_or_else(|err| panic!("insert: {err}"));
@@ -4940,14 +5173,14 @@ mod verification_progress_wiring_tests {
             bitcoin_rs_chain::ChainTxCount::established,
         );
         let hash = header.compute_hash().0;
-        ctx.set_chain_tip(TipSnapshot {
+        ctx.chain.set_chain_tip(TipSnapshot {
             tip_id: id,
             height: 100,
             chainwork: ChainWork::ZERO,
             hash,
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         });
-        ctx.set_applied_tip(TipSnapshot {
+        ctx.chain.set_applied_tip(TipSnapshot {
             tip_id: id,
             height: 50,
             chainwork: ChainWork::ZERO,
@@ -5059,7 +5292,8 @@ mod scantxoutset_tests {
     ) {
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
-        ctx.utxo
+        ctx.chain
+            .utxo
             .commit_block(&changes, &test_txid(8_000))
             .unwrap_or_else(|err| panic!("commit utxo failed: {err}"));
     }
@@ -5136,7 +5370,7 @@ mod scantxoutset_tests {
             hash: test_txid(100),
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
-        context.set_applied_tip(old_tip);
+        context.chain.set_applied_tip(old_tip);
         let ctx = Arc::new(context);
         let address = "1111111111111111111114oLvT2";
         let script = burn_p2pkh_script();
@@ -5181,7 +5415,7 @@ mod scantxoutset_tests {
             hash: test_txid(103),
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         };
-        ctx.set_applied_tip(new_tip.clone());
+        ctx.chain.set_applied_tip(new_tip.clone());
         drop(transition_guard);
 
         let result = scanner

@@ -94,7 +94,8 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    ctx.utxo
+    ctx.chain
+        .utxo
         .commit_block(&changes, &Hash256::from_le_bytes(&[0xaa; 32]))
         .expect("commit_block");
     outpoint
@@ -420,7 +421,7 @@ fn createrawtransaction_builds_valid_hex_tx() -> Result<(), Box<dyn std::error::
 fn createrawtransaction_creates_op_return_data_output() -> Result<(), Box<dyn std::error::Error>> {
     // Use a regtest context so the address network matches.
     let mut ctx = Context::new();
-    ctx.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
 
     let inputs = json!([{
@@ -453,7 +454,7 @@ fn createrawtransaction_creates_op_return_data_output() -> Result<(), Box<dyn st
 #[test]
 fn createrawtransaction_rejects_duplicate_input() {
     let mut ctx = Context::new();
-    ctx.chain_network = bitcoin_rs_primitives::Network::Regtest;
+    ctx.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
     let handler = Handler::new(Arc::new(ctx));
 
     let inputs = json!([

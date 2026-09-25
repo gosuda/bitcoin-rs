@@ -144,13 +144,14 @@ impl<'a> Projection<'a> {
         if let Some(transaction) = self.ctx.mempool.read().transaction_by_txid(txid) {
             return Ok(Some(((*transaction).clone(), None)));
         }
-        if let Some(transaction) = self.ctx.transactions.read().get(txid).cloned() {
+        if let Some(transaction) = self.ctx.chain.transactions.read().get(txid).cloned() {
             return self
                 .cached_confirmation(txid)
                 .map(|confirmation| Some((transaction, confirmation)));
         }
         let index = self
             .ctx
+            .indexes
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
@@ -167,6 +168,7 @@ impl<'a> Projection<'a> {
 
     pub(super) fn confirmed_transaction(&self, txid: &Txid) -> Result<Tx, Response> {
         self.ctx
+            .indexes
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| unavailable("transaction lookup index is disabled"))?
@@ -180,11 +182,12 @@ impl<'a> Projection<'a> {
         if self.ctx.mempool.read().transaction_by_txid(txid).is_some() {
             return Ok(None);
         }
-        if self.ctx.transactions.read().contains_key(txid) {
+        if self.ctx.chain.transactions.read().contains_key(txid) {
             return self.cached_confirmation(txid);
         }
         let index = self
             .ctx
+            .indexes
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
@@ -202,7 +205,7 @@ impl<'a> Projection<'a> {
     /// disabled this reports "unconfirmed", which is also the only reason
     /// `/tx/:id` works at all in that configuration.
     fn cached_confirmation(&self, txid: &Txid) -> Result<Option<Confirmation>, Response> {
-        let Some(index) = self.ctx.esplora_tx_index.as_ref() else {
+        let Some(index) = self.ctx.indexes.esplora_tx_index.as_ref() else {
             return Ok(None);
         };
         Ok(index
@@ -212,7 +215,7 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) fn confirmation_at_height(&self, height: u32) -> Option<Confirmation> {
-        let record = self.ctx.block_by_height(height)?;
+        let record = self.ctx.chain.block_by_height(height)?;
         Some(Confirmation {
             height,
             hash: record.hash,
@@ -311,7 +314,7 @@ impl<'a> Projection<'a> {
                 .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))
                 .cloned());
         }
-        if let Some(transaction) = self.ctx.transactions.read().get(&outpoint.txid) {
+        if let Some(transaction) = self.ctx.chain.transactions.read().get(&outpoint.txid) {
             return Ok(transaction
                 .outputs
                 .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))
@@ -319,6 +322,7 @@ impl<'a> Projection<'a> {
         }
         let index = self
             .ctx
+            .indexes
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
@@ -341,6 +345,7 @@ impl<'a> Projection<'a> {
             .ok_or_else(|| unavailable("block header unavailable"))?;
         let bytes = self
             .ctx
+            .chain
             .block_body_bytes(record)
             .ok_or_else(|| unavailable("block body unavailable"))?;
         let block =
@@ -358,11 +363,12 @@ impl<'a> Projection<'a> {
                 .then(|| header.prev_blockhash.to_string()),
             mediantime: self
                 .ctx
+                .chain
                 .median_time_past_for_hash(Hash256::from(record.hash))
                 .unwrap_or(header.time),
             nonce: header.nonce,
             bits: header.bits.to_consensus(),
-            difficulty: self.ctx.difficulty_for_bits(header.bits),
+            difficulty: self.ctx.chain.difficulty_for_bits(header.bits),
         })
     }
 
@@ -373,6 +379,7 @@ impl<'a> Projection<'a> {
         let record = self.required_block_record(text_hash)?;
         let bytes = self
             .ctx
+            .chain
             .block_body_bytes(&record)
             .ok_or_else(|| unavailable("block body unavailable"))?;
         let block = deserialize(&bytes).map_err(|_| internal("stored block body is corrupt"))?;
@@ -385,7 +392,7 @@ impl<'a> Projection<'a> {
     ) -> Result<bitcoin_rs_index::block_log::BlockRecord, Response> {
         let hash = bitcoin_rs_primitives::Hash256::from_str(text_hash)
             .map_err(|_| bad("block hash must be 64 hex characters"))?;
-        self.ctx.block_by_hash(hash).ok_or_else(not_found)
+        self.ctx.chain.block_by_hash(hash).ok_or_else(not_found)
     }
 
     pub(super) fn script_activity(
@@ -394,6 +401,7 @@ impl<'a> Projection<'a> {
     ) -> Result<ScriptActivity, Response> {
         let index = self
             .ctx
+            .indexes
             .script_index
             .as_ref()
             .ok_or_else(|| unavailable("script index is disabled"))?;
@@ -437,6 +445,7 @@ impl<'a> Projection<'a> {
     pub(super) fn script_utxos(&self, script_hash: ScriptHash) -> Result<Vec<UtxoValue>, Response> {
         let mut confirmed = self
             .ctx
+            .indexes
             .script_index
             .as_ref()
             .ok_or_else(|| unavailable("script index is disabled"))?
@@ -492,14 +501,14 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) fn capture_chain_view(&self) -> Option<Arc<TipSnapshot>> {
-        self.ctx.applied_tip.load_full()
+        self.ctx.chain.applied_tip.load_full()
     }
 
     pub(super) fn ensure_chain_view(
         &self,
         expected: Option<&Arc<TipSnapshot>>,
     ) -> Result<(), Response> {
-        let current = self.ctx.applied_tip.load_full();
+        let current = self.ctx.chain.applied_tip.load_full();
         let unchanged = match (expected, current.as_ref()) {
             (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
             (None, None) => true,
@@ -613,7 +622,7 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) const fn bitcoin_network(&self) -> BitcoinNetwork {
-        match self.ctx.chain_network {
+        match self.ctx.chain.chain_network {
             Network::Mainnet => BitcoinNetwork::Bitcoin,
             Network::Testnet3 => BitcoinNetwork::Testnet,
             Network::Testnet4 => BitcoinNetwork::Testnet4,
