@@ -2741,12 +2741,11 @@ mod writer_shutdown_tests {
                     ),
                     Magic::BITCOIN,
                 );
-                // Receiving wtxidrelay chooses outbound inventory; our own
-                // advertisement alone must not switch the remote preference.
+                // Receiving wtxidrelay chooses outbound inventory; a peer
+                // that never sent `wtxidrelay` must not be treated as a
+                // wtxid-relay peer.
                 if peer_requested_wtxid {
                     peer.wtxid_relay.mark_peer_supported();
-                } else {
-                    peer.wtxid_relay.mark_local_advertised();
                 }
                 let result =
                     run_connected_session(&mut peer, peer_addr, &shared, lease, outbound_rx, info);
