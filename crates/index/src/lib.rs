@@ -25,11 +25,11 @@ pub use capabilities::{
     TXINDEX_CAPABILITY, derived_index_status, disabled_txindex, txindex_snapshot,
 };
 pub use index::{
-    BlockSource, ConsumerCursorUpdate, INDEX_FORMAT_VERSION, IndexCapabilities, IndexCapability,
-    IndexError, IndexReader, IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence,
-    IndexWriter, Indexer, MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch, PreparedBatchLimits,
-    PreparedBlock, ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan,
-    TxIndexScanRow, TxIndexSnapshot,
+    BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
+    IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
+    MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch, PreparedBatchLimits, PreparedBlock,
+    ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow,
+    TxIndexSnapshot,
 };
 pub use query_api::{
     DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource, ScriptHistoryRecord,

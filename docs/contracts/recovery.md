@@ -255,8 +255,9 @@ tests.
   increments only when the durable root format changes.
 - The fee estimator carries its own estimator-owned version. The P2P
   discovery store carries its own discovery-owned version. The index
-  carries its own `INDEX_FORMAT_VERSION`. None of these increment
-  `CURRENT_SCHEMA`.
+  carries its own durability marker (`[0x00, b'V']`, currently row-format 5),
+  which recovery full-resets for rebuild on a mismatch. None of these
+  increment `CURRENT_SCHEMA`.
 - A missing or unknown owner-local version does not fail node startup.
   The affected owner degrades to a typed, logged state and rebuilds from
   canonical or seeded data.

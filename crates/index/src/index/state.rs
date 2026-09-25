@@ -4,8 +4,7 @@ use super::{
     capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
     capability::IndexWatermarks, capability::SCRIPT_HISTORY_WATERMARK_KEY,
     capability::SCRIPT_LIVE_WATERMARK_KEY, capability::TX_LOOKUP_WATERMARK_KEY,
-    capability::WATERMARK_LEN, error::IndexError, format::INDEX_FORMAT_VERSION,
-    format::INDEX_FORMAT_VERSION_KEY,
+    capability::WATERMARK_LEN, error::IndexError,
 };
 use bitcoin_rs_storage::{
     BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit, WriteCondition,
@@ -567,15 +566,6 @@ fn acquire_capability_reset<S: KvStore>(
         let capabilities = IndexCapabilities::from_mask(mask)?;
         for capability in capabilities.iter() {
             batch.delete(ColumnFamily::UtxoMeta, capability.watermark_key());
-            // Same durable batch as FORMAT_VERSION_VALUE so a reset can never
-            // publish the row-value marker without the format marker.
-            if capability == IndexCapability::ScriptHistory {
-                batch.put(
-                    ColumnFamily::UtxoMeta,
-                    INDEX_FORMAT_VERSION_KEY,
-                    &INDEX_FORMAT_VERSION.to_le_bytes(),
-                );
-            }
         }
         batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
         if store.write_durable_if(&conditions, batch)? {
@@ -662,15 +652,6 @@ pub(super) fn resume_capability_reset<S: KvStore>(
             ORDINARY_STATE_REVISION_KEY,
             &work.next_revision,
         );
-        if capabilities.contains(IndexCapability::ScriptHistory) {
-            // Resume of a claim that predates the acquire-batch marker
-            // still publishes the current row-value format.
-            completion.put(
-                ColumnFamily::UtxoMeta,
-                INDEX_FORMAT_VERSION_KEY,
-                &INDEX_FORMAT_VERSION.to_le_bytes(),
-            );
-        }
         if store.write_durable_if(&conditions, completion)? {
             return Ok(());
         }
