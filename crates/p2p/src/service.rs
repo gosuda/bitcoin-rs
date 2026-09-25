@@ -171,20 +171,6 @@ pub enum P2pJoinError {
     BootstrapPanic,
 }
 
-/// Errors returned by RPC-facing P2P control operations.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
-pub enum P2pControlError {
-    /// The destination is covered by an active manual ban.
-    #[error("destination is banned")]
-    Banned,
-    /// The bounded dial queue has no capacity.
-    #[error("p2p outbound queue is full")]
-    QueueFull,
-    /// The P2P service has already shut down.
-    #[error("p2p outbound queue is closed")]
-    Closed,
-}
-
 struct Workers {
     listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
     outbound: Option<JoinHandle<()>>,
@@ -692,33 +678,6 @@ impl P2pService {
     #[must_use]
     pub fn added_nodes_handle(&self) -> Arc<RwLock<Vec<SocketAddr>>> {
         Arc::clone(&self.added_nodes)
-    }
-
-    /// Applies Core-like addnode state and requests a connection.
-    pub fn add_node(&self, addr: SocketAddr, persist: bool) -> Result<(), P2pControlError> {
-        if crate::subnet::is_banned(&self.banned.read(), addr.ip(), SystemTime::now()) {
-            return Err(P2pControlError::Banned);
-        }
-        if persist {
-            let mut added = self.added_nodes.write();
-            if !added.contains(&addr) {
-                added.push(addr);
-            }
-        }
-        if !self.network_active() {
-            return Ok(());
-        }
-        match self.outbound_tx.try_send(OutboundDial::pinned(addr)) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => Ok(()),
-            Err(TrySendError::Full(_)) => Err(P2pControlError::QueueFull),
-            Err(TrySendError::Disconnected(_)) => Err(P2pControlError::Closed),
-        }
-    }
-
-    /// Removes one configured addnode add address.
-    pub fn remove_node(&self, addr: SocketAddr) {
-        self.added_nodes.write().retain(|current| *current != addr);
     }
 
     /// Sends a message only to the connection identified by source.
