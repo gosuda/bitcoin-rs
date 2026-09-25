@@ -128,7 +128,10 @@ fn is_witness_commitment(script_pubkey: &[u8]) -> bool {
 
 fn solved_template_block(mining: &MiningCoordinator) -> anyhow::Result<Block> {
     let template = expect_template(mining.get_block_template(template_request(None))?);
-    let mut block = template.candidate.into_unsolved_block();
+    let mut block = template
+        .candidate
+        .into_unsolved_block()
+        .map_err(|error| anyhow::anyhow!("assemble template candidate: {error}"))?;
     solve_block(&mut block, 1_000_000)
         .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))?;
     Ok(block)

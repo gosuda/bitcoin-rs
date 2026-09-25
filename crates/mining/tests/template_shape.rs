@@ -379,11 +379,11 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
         max_sigops: 80_000,
     };
     let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
-    let unsolved = candidate.into_unsolved_block();
+    let unsolved = candidate.into_unsolved_block()?;
     assert_eq!(unsolved.txs.len(), 1);
     assert_eq!(unsolved.header.nonce, 0);
     assert_eq!(unsolved.header.bits, context.bits);
-    let mut solved = candidate.into_unsolved_block();
+    let mut solved = candidate.into_unsolved_block()?;
     solve_block(&mut solved, 1_000_000)?;
     assert_eq!(solved.txs.len(), 1);
     assert_eq!(solved.header.prev_blockhash.0, context.previous_block_hash);
