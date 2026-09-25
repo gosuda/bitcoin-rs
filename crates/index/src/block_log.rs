@@ -8,17 +8,6 @@ use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 
-/// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
 /// Block metadata made available to RPC handlers without forcing storage I/O.
 ///
 /// The serialized block body lives in durable storage behind
@@ -358,8 +347,8 @@ impl BlockRecord {
     /// the bytes back anyway.
     #[must_use]
     pub fn header_hex(&self) -> String {
-        self.header
-            .as_ref()
-            .map_or_else(String::new, |bytes| hex_encode(bytes.as_slice()))
+        self.header.as_ref().map_or_else(String::new, |bytes| {
+            bitcoin_rs_storage::checkpoint::hex_encode(bytes.as_slice())
+        })
     }
 }
