@@ -1,8 +1,11 @@
 //! Production-path mempool priority-index benchmark.
 //!
 //! `mempool_insert_entry` is the end-to-end path an attacker actually drives:
-//! `Mempool::insert_entry` calls `recompute_all_metadata`, which rebuilds the
-//! whole priority index for every accepted transaction.
+//! `Mempool::insert_entry` accounts the entry through the derived-state
+//! owners and refreshes package metadata incrementally over the affected
+//! closure (`refresh_metadata`), so an acceptance pays for its
+//! neighborhood, not a full rebuild of the priority index. The full-rebuild
+//! pass, `recompute_all_metadata`, is test-only.
 // PERF: Criterion emits public harness items whose docs are irrelevant here.
 #![allow(missing_docs)]
 // A fixture that fails to build has no meaningful degraded mode: a fill that
