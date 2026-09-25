@@ -224,7 +224,7 @@ impl NodeServices {
             return Ok(());
         }
         self.teardown_started = true;
-        let _stage = shutdown::mark_shutdown_stage();
+        shutdown::mark_shutdown_stage();
         if let Some(state) = state {
             state.shutdown().store(true, Ordering::Release);
             state.p2p().shutdown();

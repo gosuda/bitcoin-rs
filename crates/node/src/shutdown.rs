@@ -18,10 +18,10 @@ thread_local! {
     static SHUTDOWN_STAGES_REACHED: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
 }
 
-/// Marks that the shared teardown ran on this thread; test builds count the
-/// entry, non-test builds return a no-op marker.
+/// Records that the shared teardown ran. Test builds count the entry through
+/// the observation seam; other builds record nothing. Both builds share one
+/// plain call shape; the guard carries no behavior, so callers drop it.
 #[cfg(test)]
-#[must_use]
 pub(crate) fn mark_shutdown_stage() -> ShutdownStageGuard {
     SHUTDOWN_STAGES_REACHED.with(|slot| slot.set(slot.get().saturating_add(1)));
     ShutdownStageGuard
@@ -33,13 +33,6 @@ pub(crate) fn take_shutdown_stages_reached() -> u32 {
     SHUTDOWN_STAGES_REACHED.with(core::cell::Cell::take)
 }
 
-/// Non-test no-op marker so `teardown` carries the same `_stage` binding
-/// without compiling the counter.
+/// Non-test builds record nothing.
 #[cfg(not(test))]
-pub(crate) struct ShutdownStageMark;
-
-#[cfg(not(test))]
-#[must_use]
-pub(crate) fn mark_shutdown_stage() -> ShutdownStageMark {
-    ShutdownStageMark
-}
+pub(crate) fn mark_shutdown_stage() {}
