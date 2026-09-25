@@ -884,20 +884,27 @@ impl BlockSync {
     /// connection's download-twice header sync.
     ///
     /// PRE: `headers` is the received batch, `source` its delivering
-    ///   connection when known, `wire_response` says whether the batch
-    ///   answered a `getheaders`, and `batch_len` is the received size.
-    /// POST: a batch from a connection with a live sync state always
-    ///   routes into that state — the state, not the tree, owns the
-    ///   connection's chain. Otherwise return `Some` with the admission
-    ///   outcome when the batch may be admitted directly — an empty batch,
-    ///   a source-less delivery, an unknown fork, or a fork already at the
+    ///   connection when known, `wire_response` says whether the batch is
+    ///   a genuine wire `headers` message, and `batch_len` is the received
+    ///   size.
+    /// POST: only a wire batch touches the sync state: a batch from a
+    ///   connection with a live state always routes into that state — the
+    ///   state, not the tree, owns the connection's chain — and a wire
+    ///   batch on a below-floor fork opens one. A body-carried batch
+    ///   (`wire_response = false`) never opens or feeds the state: below
+    ///   the work floor it returns `None`, retiring to retry once the
+    ///   wire sync commits it; at or above the floor it takes direct
+    ///   admission. Otherwise return `Some` with the admission outcome
+    ///   when the batch may be admitted directly — an empty batch, a
+    ///   source-less delivery, an unknown fork, or a fork already at the
     ///   network minimum — or when the committed phase released headers;
     ///   and `None` when the sync state retained the batch, in which case
-    ///   this call already sent the continuation, retired the answered
-    ///   request, or ran the fault path.
+    ///   this call already retired the answered request, sent the
+    ///   state-cursor continuation, or ran the fault path.
     /// INVARIANT: a batch below the work threshold reaches
     ///   [`SyncChain::admit_headers`] only as
-    ///   [`super::headers_presync::HeaderSyncResult::ready_headers`].
+    ///   [`super::headers_presync::HeaderSyncResult::ready_headers`], and
+    ///   only a wire `headers` message mutates `headers_sync`.
     pub(super) fn route_headers_batch(
         &self,
         headers: &[Header],
@@ -908,6 +915,22 @@ impl BlockSync {
         let Some(source) = source.filter(|_| !headers.is_empty()) else {
             return Some(self.chain.admit_headers(headers));
         };
+        // Only a genuine wire `headers` message opens or feeds the
+        // download-twice state: Core feeds the sync state only from
+        // processed `headers` messages (`net_processing.cpp:2915-2924`).
+        // A header carried by a delivered body — a staged-body retry or a
+        // drain-forwarded tip — arrives as a one-header page, and feeding
+        // it to a live state would finalize the wire sync's progress (a
+        // short page never asks for more) instead of advancing it. Below
+        // the work floor it retires here and retries once the wire sync
+        // commits it; at or above the floor, direct admission applies as
+        // to any batch.
+        if !wire_response {
+            if self.presync_anchor(headers).is_some() {
+                return None;
+            }
+            return Some(self.chain.admit_headers(headers));
+        }
         let outcome = if self.scheduler.lock().headers_sync.contains_key(&source) {
             let mut scheduler = self.scheduler.lock();
             let state = scheduler
@@ -936,17 +959,26 @@ impl BlockSync {
             self.settle_presync_fault(source, error);
             return None;
         }
-        if !outcome.ready_headers.is_empty() {
-            return Some(self.chain.admit_headers(&outcome.ready_headers));
-        }
+        // The batch answered the connection's outstanding request, so
+        // that request retires here, before the continuation: Core
+        // clears the request stamp on every processed headers message
+        // and then sends the sync's own locator whenever the sync wants
+        // more (`net_processing.cpp:2932-2943`). Retiring first lets a
+        // phase transition reach the wire even when its locator repeats
+        // the request this batch answered — the transition re-anchors at
+        // the fork — and the fresh registration restarts expiry from this
+        // send, so the connection that did respond is never blamed for
+        // silence. The continuation also leaves on a releasing batch: the
+        // REDOWNLOAD cursor sits up to `redownload_buffer_size` headers
+        // deeper than the release point, and a page requested from the
+        // release point would fail the state's continuity check and
+        // restart the whole sync.
+        self.consume_header_request(Some(source), wire_response, false);
         if outcome.request_more {
             self.send_presync_getheaders(source, outcome.locator, outcome.height);
-        } else {
-            // The sync ended on a complete answer: the connection served its
-            // whole chain and the work threshold says no more of it is
-            // wanted. The request retires like any other answered one rather
-            // than expiring against a peer that did respond.
-            self.consume_header_request(Some(source), wire_response, false);
+        }
+        if !outcome.ready_headers.is_empty() {
+            return Some(self.chain.admit_headers(&outcome.ready_headers));
         }
         None
     }
