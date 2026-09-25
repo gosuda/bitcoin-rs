@@ -11,7 +11,7 @@
 
 use std::borrow::Cow;
 
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{CODESEPARATOR_POSITION, Hash256};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
@@ -339,9 +339,6 @@ fn item_bytes(item: &ScriptItem) -> Cow<'_, [u8]> {
         ScriptItem::Bytes(bytes) => Cow::Borrowed(bytes),
     }
 }
-
-/// Position marker used when no `OP_CODESEPARATOR` has executed.
-pub const CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
 
 /// Executes `script` against `stack`, mirroring Core's `EvalScript`.
 ///
