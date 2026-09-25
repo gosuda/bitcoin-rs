@@ -17,8 +17,8 @@ Rule checks live in `verify_tx` and `verify_block` with per-subject helpers
 block rules, witness-commitment checks, and mining candidate assembly.
 `kernel::KernelBlock` parses a serialized block exactly once with
 `bitcoinkernel::Block::new`, yielding the txids and borrowed transaction objects that
-script preparation reuses, and `kernel::KernelContext::verify_tx` verifies a
-transaction's inputs through bitcoinkernel over any `UtxoView`. BIP9 activation is
+script preparation reuses, and `kernel::verify_tx_scripts` verifies a
+transaction's input scripts through bitcoinkernel. BIP9 activation is
 `compute_state`
 over a `DeploymentContext` with `DeploymentParams`. Consensus bounds are exported as
 `MAX_SCRIPT_SIZE`, `MAX_BLOCK_SIGOPS_COST`, `MAX_BLOCK_WEIGHT`, and
