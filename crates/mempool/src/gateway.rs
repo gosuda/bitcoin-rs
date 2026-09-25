@@ -715,6 +715,7 @@ impl MempoolGateway {
 
     /// Verifies replacement outside the writer, then commits and publishes
     /// only while the captured pool and fee state is still current.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn replace_transaction(
         &self,
         origin: AdmissionOrigin,

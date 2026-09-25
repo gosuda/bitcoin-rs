@@ -31,6 +31,10 @@ serde_json.workspace = true
 proptest.workspace = true
 bitcoin.workspace = true
 criterion.workspace = true
+# Own integration tests compile the mempool lib without cfg(test): the gated
+# gateway replacement seam must arrive through the test-seam feature, the same
+# way bitcoin-rs-p2p and bitcoin-rs-rpc opt in.
+bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 
 [[bench]]
 name = "candidate"
