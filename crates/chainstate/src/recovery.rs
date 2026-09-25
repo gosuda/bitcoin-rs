@@ -49,8 +49,6 @@ pub struct InitialChainstate {
     pub tree: bitcoin_rs_chain::BlockTree,
     /// Recovered applied tip, absent on a cold start.
     pub applied_tip: Option<TipSnapshot>,
-    /// Recovered cumulative transaction count.
-    pub chain_tx_count: u64,
     /// Recovery source selected at startup.
     pub resume_source: ResumeSource,
     /// Journal writer bootstrap, when journaling is enabled.
@@ -106,7 +104,6 @@ fn restored_initial(
         coin_stats: restored.coin_stats,
         tree: restored.tree,
         applied_tip: Some(restored.applied_tip),
-        chain_tx_count: restored.chain_tx_count,
         resume_source,
         journal_bootstrap,
     })
@@ -126,7 +123,6 @@ fn cold_initial_chainstate(
         coin_stats: bitcoin_rs_utxo::stats::CoinStats::default(),
         tree: bitcoin_rs_chain::BlockTree::new(),
         applied_tip: None,
-        chain_tx_count: 0,
         resume_source: ResumeSource::Cold,
         journal_bootstrap: journal_config.enabled.then_some(JournalBootstrap {
             open_existing: false,
@@ -247,7 +243,6 @@ pub fn prepare_initial_chainstate(
                 coin_stats: replayed.coin_stats,
                 tree: replayed.tree,
                 applied_tip: Some(replayed.applied_tip),
-                chain_tx_count: replayed.chain_tx_count,
                 resume_source,
                 journal_bootstrap: Some(bootstrap),
             })

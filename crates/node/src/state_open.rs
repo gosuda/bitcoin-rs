@@ -130,10 +130,7 @@ impl NodeState {
             utxo: mut utxo_set,
             coin_stats: initial_coin_stats,
             tree: block_tree_value,
-            // The restored tip already carries the count its checkpoint or
-            // journal replay certified; publishing it is all the node does.
             applied_tip: restored_applied_tip,
-            chain_tx_count: _,
             resume_source,
             journal_bootstrap,
         } = prepare_initial_chainstate(
