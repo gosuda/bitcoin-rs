@@ -28,5 +28,5 @@ pub use script::{
     is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh, is_push_only, is_witness_program,
     minimal_non_dust, opcode, p2pk_pubkey_bytes, push_data, push_int, witness_program,
 };
-pub use sigops::{count_block, count_legacy, count_segwit, count_taproot, count_tx_legacy};
+pub use sigops::{count_segwit, count_tx_legacy};
 pub use stack::{ScriptItem, Stack, StackError};
