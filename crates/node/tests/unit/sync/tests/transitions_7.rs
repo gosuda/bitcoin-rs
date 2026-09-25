@@ -171,7 +171,9 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
         Some(stream.clone()),
     ));
     let followers = crate::chain_effects::ChainFollowers::new(
-        crate::chain_effects::ChainEffects::noop(),
+        Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
+        Arc::new(crate::NoOpZmqPublisher),
+        None,
         Arc::new(crate::mining::MiningGenerationSignal::new()),
         Some(Arc::clone(&gateway)),
     );

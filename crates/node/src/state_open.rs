@@ -359,18 +359,15 @@ impl NodeState {
         };
         // Construct followers before Chainstate so capture policy has one owner.
         let followers = crate::chain_effects::ChainFollowers::new(
-            crate::chain_effects::ChainEffects::new(
-                Arc::clone(&blocks),
-                Arc::clone(&zmq_publisher),
-                derived_index_parts
-                    .as_ref()
-                    .map(|(runtime, _, _, _)| Arc::clone(runtime)),
-            ),
+            Arc::clone(&blocks),
+            Arc::clone(&zmq_publisher),
+            derived_index_parts
+                .as_ref()
+                .map(|(runtime, _, _, _)| Arc::clone(runtime)),
             Arc::clone(&mining_generation),
             Some(Arc::clone(&mempool_gateway)),
         );
-        let (capture_rawtx, capture_block_bytes) = followers.capture_flags();
-        chainstate.set_capture_flags(capture_rawtx, capture_block_bytes);
+        chainstate.set_capture_flags(followers.needs_rawtx(), followers.needs_block_bytes());
         // A restored checkpoint is durable at its own height by definition, so
         // start there rather than at zero, which would refuse all undo
         // pruning. Recovery publication advances it to the reconstructed tip.

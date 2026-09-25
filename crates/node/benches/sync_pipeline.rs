@@ -631,18 +631,14 @@ impl SyncFixture {
             unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
         let derived_index_runtime = tx_index_for_mode(tx_index_mode);
-        let followers = bitcoin_rs_node::ChainFollowers::new(
-            bitcoin_rs_node::ChainEffects::noop().with_tx_index(derived_index_runtime),
-            Arc::new(bitcoin_rs_node::mining::MiningGenerationSignal::new()),
-            None,
-        );
-        let (capture_rawtx, capture_block_bytes) = followers.capture_flags();
+        let followers =
+            bitcoin_rs_node::ChainFollowers::noop().with_tx_index(derived_index_runtime);
         let handles = apply_handles(
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
         )
-        .capturing(capture_rawtx, capture_block_bytes);
+        .capturing(followers.needs_rawtx(), followers.needs_block_bytes());
         let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
             bitcoin_rs_chain::TipReader::new(Arc::clone(&applied_tip)),
             bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&block_tree)),

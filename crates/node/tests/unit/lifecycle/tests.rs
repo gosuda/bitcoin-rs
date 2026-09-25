@@ -307,7 +307,6 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Res
     let runtime = node
         .state
         .chain_followers()
-        .effects()
         .derived_index()
         .cloned()
         .ok_or_else(|| {
