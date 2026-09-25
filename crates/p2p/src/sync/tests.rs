@@ -2633,6 +2633,7 @@ mod chain_sync;
 #[cfg(test)]
 mod frontier_model;
 mod head_sync;
+mod issue_1153;
 mod limited_peers;
 mod stale_tip;
 
