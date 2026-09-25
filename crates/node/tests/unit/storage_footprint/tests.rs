@@ -282,7 +282,7 @@ fn empty_chainstate_directory_is_not_created_as_a_store() -> Result<()> {
 #[cfg(feature = "fjall")]
 #[test]
 fn logical_chainstate_rows_are_named_owners() -> Result<()> {
-    use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore, WriteBatch};
+    use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore};
     let dir = tempdir()?;
     std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
     let chainstate = dir.path().join("chainstate");
@@ -318,7 +318,7 @@ fn logical_chainstate_rows_are_named_owners() -> Result<()> {
 #[cfg(feature = "fjall")]
 #[test]
 fn corrupt_txindex_watermarks_are_errors_not_missing_evidence() -> Result<()> {
-    use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore, WriteBatch};
+    use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore};
 
     // Durable capability keys from index/capability.rs, not candidate-generated values.
     for key in [b"\0T", b"\0S", b"\0L"] {
@@ -348,7 +348,7 @@ fn corrupt_txindex_watermarks_are_errors_not_missing_evidence() -> Result<()> {
 #[cfg(feature = "fjall")]
 #[test]
 fn absent_and_valid_txindex_watermarks_remain_distinct() -> Result<()> {
-    use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore, WriteBatch};
+    use bitcoin_rs_storage::{ColumnFamily, FjallStore, KvStore};
 
     let dir = tempdir()?;
     let mut config = NodeConfig::default_for_network(Network::Regtest);

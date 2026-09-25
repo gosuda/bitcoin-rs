@@ -4,7 +4,6 @@
 //! backend dispatches every call through a `dyn KvStore` and performs the
 //! same storage operation it performs through its concrete type.
 #![cfg(feature = "fjall")]
-#![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin_rs_storage::{ColumnFamily, KvStore};
 

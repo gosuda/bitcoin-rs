@@ -176,7 +176,6 @@ fn prune_to_height_serializes_overlapping_calls() -> anyhow::Result<()> {
     use bitcoin_rs_rpc::context::PruneService;
     use bitcoin_rs_storage::FlatFileBlockStore;
     use bitcoin_rs_storage::KvStore;
-    use bitcoin_rs_storage::WriteBatch as _;
     use bitcoin_rs_storage::pruning::load_pruneheight;
     use parking_lot::RwLock;
     use std::sync::Barrier;
