@@ -1446,8 +1446,58 @@ mod tests {
         assert_eq!(gateway.get_tx_by_wtxid(tx.wtxid()), Some(tx));
     }
 
+    /// One inventory announcement against a gateway holding `item`'s body as
+    /// a pool entry or a resident orphan: only the identity the resident body
+    /// actually has is suppressed, and an unknown wtxid is always requested.
+    fn inv_announce_requests_only_unsuppressed_identity(
+        gateway: &bitcoin_rs_mempool::MempoolGateway,
+        orphan: bool,
+        item: Inventory,
+    ) {
+        let (local_requested, remote_requested) = match item {
+            Inventory::WTx(_) => (true, false),
+            _ => (false, true),
+        };
+        let mut peer = ready_peer();
+        if local_requested {
+            peer.wtxid_relay.mark_local_advertised();
+        }
+        if remote_requested {
+            peer.wtxid_relay.mark_peer_supported();
+        }
+        // A resident orphan suppresses only its own witness identity:
+        // another witness of the same txid can still be valid, so a
+        // txid announcement stays requestable.
+        let suppressed = !orphan || matches!(item, Inventory::WTx(_));
+        let announced =
+            dispatch_collect_full(&mut peer, &Message::Inv(vec![item]), None, Some(gateway));
+        if suppressed {
+            assert!(
+                announced.is_empty(),
+                "inventory type must select the held body's identity in either relay direction"
+            );
+        } else {
+            assert_eq!(announced, vec![Message::GetData(vec![item])]);
+        }
+        let unknown = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xff; 32]));
+        let mut expected = Vec::new();
+        if !suppressed {
+            expected.push(item);
+        }
+        expected.push(unknown);
+        assert_eq!(
+            dispatch_collect_full(
+                &mut peer,
+                &Message::Inv(vec![item, unknown]),
+                None,
+                Some(gateway),
+            ),
+            vec![Message::GetData(expected)]
+        );
+    }
+
     #[test]
-    fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
+    fn wtxid_negotiation_suppresses_only_the_identity_a_resident_body_has() {
         use bitcoin_rs_primitives::Script;
         use std::sync::Arc;
 
@@ -1500,7 +1550,12 @@ mod tests {
                     Ok(SubmitOutcome::Held { .. })
                 ));
                 assert_eq!(gateway.orphan_count(), 1);
-                assert_eq!(gateway.get_tx(tx.txid()).as_ref(), Some(tx.as_ref()));
+                // A resident orphan is served only by its witness identity.
+                assert_eq!(gateway.get_tx(tx.txid()), None);
+                assert_eq!(
+                    gateway.get_tx_by_wtxid(tx.wtxid()).as_ref(),
+                    Some(tx.as_ref())
+                );
             } else {
                 assert!(
                     gateway
@@ -1511,39 +1566,12 @@ mod tests {
                         .is_ok()
                 );
             }
-            for (local_requested, remote_requested, item) in [
-                (true, false, Inventory::WTx(wtxid)),
-                (false, true, Inventory::Transaction(txid)),
-                (false, true, Inventory::WitnessTransaction(txid)),
+            for item in [
+                Inventory::WTx(wtxid),
+                Inventory::Transaction(txid),
+                Inventory::WitnessTransaction(txid),
             ] {
-                let mut peer = ready_peer();
-                if local_requested {
-                    peer.wtxid_relay.mark_local_advertised();
-                }
-                if remote_requested {
-                    peer.wtxid_relay.mark_peer_supported();
-                }
-                assert!(
-                    dispatch_collect_full(
-                        &mut peer,
-                        &Message::Inv(vec![item]),
-                        None,
-                        Some(&gateway),
-                    )
-                    .is_empty(),
-                    "inventory type must select the held body's identity in either relay direction"
-                );
-
-                let unknown = Inventory::WTx(bitcoin::Wtxid::from_byte_array([0xff; 32]));
-                assert_eq!(
-                    dispatch_collect_full(
-                        &mut peer,
-                        &Message::Inv(vec![item, unknown]),
-                        None,
-                        Some(&gateway),
-                    ),
-                    vec![Message::GetData(vec![unknown])]
-                );
+                inv_announce_requests_only_unsuppressed_identity(&gateway, orphan, item);
             }
         }
     }
