@@ -98,8 +98,9 @@ const STALE_CHECK_INTERVAL: Duration = Duration::from_mins(10);
 /// chain moves again (`net_processing.cpp:5604-5668`).
 #[derive(Clone, Debug, Default)]
 struct StaleTipState {
-    /// Highest header tip height seen so far.
-    last_seen_height: u32,
+    /// The header tip identity last observed: height and hash together, so a
+    /// same-height replacement or a reorg to a lower tip is a change.
+    last_seen_tip: Option<(u32, Hash256)>,
     /// When the tip last advanced, `None` before the first observation.
     last_update: Option<Instant>,
     /// When the staleness question is next asked.
@@ -112,22 +113,26 @@ impl StaleTipState {
     /// Records what the tip did this tick and updates the extra-dial
     /// allowance.
     ///
-    /// PRE: `tip_height` is this tick's header tip, `blocks_in_flight` the
-    ///   bodies the window still expects, and `block_spacing` the network's
-    ///   target spacing.
-    /// POST: an advancing tip withdraws the allowance at once; a tip that has
-    ///   not moved is re-judged no more often than `STALE_CHECK_INTERVAL`.
+    /// PRE: `tip_height` and `tip_hash` are this tick's header tip identity,
+    ///   `blocks_in_flight` the bodies the window still expects, and
+    ///   `block_spacing` the network's target spacing.
+    /// POST: a tip whose height or hash changed withdraws the allowance at
+    ///   once and restarts the staleness clock on the new tip; a tip that
+    ///   has not moved is re-judged no more often than
+    ///   `STALE_CHECK_INTERVAL`.
     /// INVARIANT: the allowance is this record's only output, so the
     ///   connection manager never reads a staleness clock of its own.
     fn follow(
         &mut self,
         tip_height: u32,
+        tip_hash: Hash256,
         blocks_in_flight: usize,
         block_spacing: Duration,
         now: Instant,
     ) {
-        if tip_height > self.last_seen_height {
-            self.last_seen_height = tip_height;
+        let identity = (tip_height, tip_hash);
+        if self.last_seen_tip.is_none_or(|seen| seen != identity) {
+            self.last_seen_tip = Some(identity);
             self.last_update = Some(now);
             self.extra_dial_allowed = false;
             return;
@@ -284,6 +289,10 @@ pub(super) enum GetheadersOutcome {
     /// An identical request is already pending on that connection; nothing
     /// was sent.
     Suppressed,
+    /// Nothing was sent because the frontier body is already owned: the
+    /// capability question the probe exists to answer is resolved, and no
+    /// request is outstanding on this connection.
+    FrontierOwned,
     /// The connection's outbound channel is gone (the send failed or the
     /// lease no longer exists).
     Failed,
@@ -504,7 +513,7 @@ impl BlockSync {
                 GetheadersOutcome::Failed => {
                     self.request_headers_from_best_peer(&frontier, Some(source));
                 }
-                GetheadersOutcome::Suppressed => {
+                GetheadersOutcome::Suppressed | GetheadersOutcome::FrontierOwned => {
                     self.request_headers_from_best_peer(&frontier, None);
                 }
                 GetheadersOutcome::Sent => {}
@@ -526,7 +535,7 @@ impl BlockSync {
     ///   `STALE_CHECK_INTERVAL`, so a stalled tip costs one dial rather than
     ///   one decision per tick.
     fn follow_tip_progress(&self, frontier: &SyncFrontier, now: Instant) {
-        let Some(tip_height) = frontier.chain.chain_tip.as_ref().map(|tip| tip.height) else {
+        let Some(tip) = frontier.chain.chain_tip.as_ref() else {
             return;
         };
         let block_spacing =
@@ -535,7 +544,7 @@ impl BlockSync {
         let blocks_in_flight = scheduler.window.pending_len();
         scheduler
             .stale_tip
-            .follow(tip_height, blocks_in_flight, block_spacing, now);
+            .follow(tip.height, tip.hash, blocks_in_flight, block_spacing, now);
     }
 
     /// Whether the stale tip still justifies one extra full-relay dial.
