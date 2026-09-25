@@ -1179,6 +1179,9 @@ impl MempoolGateway {
     }
 
     /// Commits `pool.evict_below_fee_rate` and publishes its result.
+    ///
+    /// Test seam: exercised by eviction tests only.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn evict_below_fee_rate(
         &self,
         origin: AdmissionOrigin,
