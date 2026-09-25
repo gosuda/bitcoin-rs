@@ -4474,7 +4474,10 @@ mod chaintxstats_window_tests {
             height,
             chainwork: bitcoin_rs_chain::ChainWork::ZERO,
             hash: hash.into(),
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            chain_tx_count: chain_tx_count.map_or(
+                bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                bitcoin_rs_chain::ChainTxCount::established,
+            ),
         });
         ctx
     }
