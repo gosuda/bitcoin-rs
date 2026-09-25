@@ -861,7 +861,11 @@ fn run_connected_session(
 ///   nothing else. A `tx` message or a transaction `inv` is a protocol
 ///   violation and ends the connection, as Core's `RejectIncomingTxs`
 ///   requires (`net_processing.cpp:4706-4711`, and the `inv` branch at
-///   `net_processing.cpp:4385-4390`). `addr` and `addrv2` are dropped
+///   `net_processing.cpp:4385-4390`). A `getdata` from such a connection is
+///   answered with block inventory alone: transaction inventory is stripped
+///   before dispatch, and a request that asked for nothing else is dropped
+///   unheard, so the role cannot obtain a transaction body through
+///   `getdata`. `addr` and `addrv2` are dropped
 ///   without punishment, because Core declines address relay for such a
 ///   peer rather than faulting it (`SetupAddressRelay`,
 ///   `net_processing.cpp:5952-5970`). A full-relay connection is never
@@ -874,22 +878,31 @@ fn enforce_relay_role(
     if role.relays_transactions() {
         return Ok(Some(message));
     }
+    let is_transaction = |item: &Inventory| {
+        matches!(
+            item,
+            Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
+        )
+    };
     if matches!(message, crate::Message::Tx(_)) {
         return Err(crate::wire::PeerError::Protocol(
             "transaction sent in violation of protocol",
         ));
     }
     if let crate::Message::Inv(items) = &message
-        && items.iter().any(|item| {
-            matches!(
-                item,
-                Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
-            )
-        })
+        && items.iter().any(&is_transaction)
     {
         return Err(crate::wire::PeerError::Protocol(
             "transaction inv sent in violation of protocol",
         ));
+    }
+    if let crate::Message::GetData(mut items) = message {
+        items.retain(|item| !is_transaction(item));
+        if items.is_empty() {
+            tracing::trace!("p2p dropping transaction getdata from block-relay-only peer");
+            return Ok(None);
+        }
+        return Ok(Some(crate::Message::GetData(items)));
     }
     if matches!(message, crate::Message::Addr(_) | crate::Message::AddrV2(_)) {
         tracing::trace!("p2p dropping address message from block-relay-only peer");
@@ -1103,11 +1116,18 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         match keepalive.next_action(Instant::now()) {
             KeepaliveAction::Idle => {}
             KeepaliveAction::Ping => {
-                let nonce = generate_nonce(peer_addr);
-                lease.send(crate::Message::Ping(nonce)).map_err(|_| {
-                    crate::wire::PeerError::Protocol("outbound queue closed or saturated")
-                })?;
-                keepalive.record_send(Instant::now());
+                // A probe queued behind a saturated outbound queue would
+                // cancel the lease for our own queue state, not for the
+                // peer's silence; skip it while the queue has no production
+                // headroom and let the timeout rule judge the connection on
+                // its next due probe.
+                if budget.has_block_production_headroom() {
+                    let nonce = generate_nonce(peer_addr);
+                    lease.send(crate::Message::Ping(nonce)).map_err(|_| {
+                        crate::wire::PeerError::Protocol("outbound queue closed or saturated")
+                    })?;
+                    keepalive.record_send(Instant::now());
+                }
             }
             KeepaliveAction::Expired => {
                 tracing::debug!(
