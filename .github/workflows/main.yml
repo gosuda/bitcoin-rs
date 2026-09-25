@@ -168,6 +168,17 @@ jobs:
           cargo test --locked -p bitcoin-rs-script --no-default-features \
             --features kernel --test segwit_v0_sighash_edges -- --nocapture \
             2>&1 | tee target/script-kernel-evidence/tests.log
+      - name: Core-vectors kernel oracle
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.kernel_deps.outcome == 'success' }}
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target/script-kernel-oracle
+        run: |
+          set -euo pipefail
+          mkdir -p target/script-kernel-evidence
+          cargo test --locked -p bitcoin-rs-script --no-default-features \
+            --features kernel --test core_vectors -- --nocapture \
+            2>&1 | tee target/script-kernel-evidence/core_vectors.log
       - name: SegWit-v0 kernel Clippy
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' && steps.kernel_deps.outcome == 'success' }}
         shell: bash
