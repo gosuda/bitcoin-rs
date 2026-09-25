@@ -38,19 +38,6 @@ pub fn verify_taproot_keypath(
         .is_ok()
 }
 
-/// Verifies a tapscript Schnorr signature.
-///
-/// BIP342 changes the message construction and script rules, but the final
-/// Schnorr verification primitive is identical to key-path verification.
-#[must_use]
-pub fn verify_taproot_scriptpath(
-    signature: &Signature,
-    message: &Message,
-    public_key: &XOnlyPublicKey,
-) -> bool {
-    verify_taproot_keypath(signature, message, public_key)
-}
-
 // BIP340 "Tagged Hashes": the doubled tag digest is exactly one SHA256
 // block. Keep only these two fixed public prefixes, never request data.
 static TAPBRANCH_ENGINE: LazyLock<Sha256> = LazyLock::new(|| tagged_hash_engine(b"TapBranch"));
@@ -143,7 +130,7 @@ mod tests {
 
     use super::{
         TAPROOT_LEAF_TAPSCRIPT, compute_taproot_merkle_root, verify_taproot_commitment,
-        verify_taproot_keypath, verify_taproot_scriptpath,
+        verify_taproot_keypath,
     };
 
     fn tagged_hash(tag: &[u8], msg: &[u8]) -> [u8; 32] {
@@ -227,7 +214,6 @@ mod tests {
         let signature = secp.sign_schnorr(&message, &keypair);
 
         assert!(verify_taproot_keypath(&signature, &message, &public_key));
-        assert!(verify_taproot_scriptpath(&signature, &message, &public_key));
     }
 
     /// Rule: a control block of an invalid size must be rejected.
