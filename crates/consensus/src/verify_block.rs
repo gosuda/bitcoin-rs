@@ -6,6 +6,7 @@ use crate::ConsensusError;
 use crate::bip9::SoftforkState;
 use crate::block_view::BlockFacts;
 use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
+use crate::verify_tx::is_coinbase;
 
 /// BIP141 witness commitment output prefix: `OP_RETURN` `OP_PUSHBYTES_36` `commitment_header`.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
@@ -139,13 +140,6 @@ pub fn verify_block_rules_precomputed(
         });
     }
     Ok(())
-}
-
-/// Returns `true` for the one-input, null-prevout coinbase shape.
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1
-        && tx.inputs[0].previous_output.txid == Txid::default()
-        && tx.inputs[0].previous_output.vout == u32::MAX
 }
 
 /// Verifies the header Merkle root and rejects mutated Merkle trees.
