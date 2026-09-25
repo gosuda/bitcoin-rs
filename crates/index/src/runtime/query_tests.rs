@@ -259,6 +259,7 @@ impl QueryFixture {
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
         };
         let tree = Arc::new(RwLock::new(tree));
         let applied_tip = Arc::new(ArcSwapOption::empty());

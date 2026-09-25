@@ -114,7 +114,6 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     use bitcoin_rs_storage::StorageError;
     use bitcoin_rs_storage::block_body::BlockBodyStore;
     use parking_lot::Mutex;
-    use std::sync::atomic::AtomicU64;
 
     #[derive(Default)]
     struct Stream(Mutex<Vec<(Txid, bitcoin_rs_mempool::MutationOutcome, AdmissionOrigin)>>);
@@ -247,7 +246,6 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             network: Network::Regtest,
             chain_tip: tree.tip_handle(),
             applied_tip: Arc::new(ArcSwapOption::empty()),
-            chain_tx_count: Arc::new(AtomicU64::new(0)),
             block_tree: Arc::new(RwLock::new(tree)),
             utxo: Arc::new(UtxoSet::new()),
             coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
@@ -264,9 +262,9 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             capture_rawtx: false,
             capture_block_bytes: true,
         });
-    handles.apply_block(&genesis)?;
+    handles.apply_block(&genesis, None)?;
     for block in &blocks {
-        handles.apply_block(block)?;
+        handles.apply_block(block, None)?;
     }
 
     let parent = parent_tx.ok_or_else(|| std::io::Error::other("package not built"))?;

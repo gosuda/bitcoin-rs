@@ -1,4 +1,4 @@
-use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, ChainTxCount, NodeStatus, TipSnapshot};
 use bitcoin_rs_primitives::{
     Amount, BlockHash, CompactTarget, Hash256, Header, OutPoint, TxOut, Txid, consensus_bytes,
 };
@@ -48,13 +48,14 @@ fn base_state() -> TestResult<BaseState> {
     let mut tree = BlockTree::new();
     let base_header = header(BlockHash::default(), 1, 1);
     let base_id = tree.insert_node(None, base_header, NodeStatus::HeaderValid)?;
-    tree.restore_chain_tx_count(base_id, 1)?;
+    tree.restore_chain_tx_count(base_id, ChainTxCount::established(1))?;
     let base_node = tree.node(base_id)?;
     let base_tip = TipSnapshot {
         tip_id: base_id,
         height: base_node.height,
         chainwork: base_node.chainwork,
         hash: base_node.hash,
+        chain_tx_count: base_node.chain_tx_count,
     };
 
     let base_coin = coin(1, 0, 50);

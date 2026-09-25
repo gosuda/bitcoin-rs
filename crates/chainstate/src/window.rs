@@ -18,7 +18,7 @@ use super::durable::{
 use super::prepare::parse_block_for_apply;
 use super::prepare::plan_block_transactions;
 use super::prepare::resolve_block_prevouts;
-use super::publication::publish_connect;
+use super::publication::publish_applied;
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::Block;
@@ -49,27 +49,29 @@ pub const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
 /// [`PublishMode::Grouped`] buffers the commit facts in a [`WindowGroup`]:
 /// the window syncs once per group, lands one head batch per verified
 /// prefix, and publishes the prefix in order after the batch — one
-/// `commit_id` per committed prefix, never beyond it (`RCV-02`).
 pub(super) enum PublishMode<'a> {
     Now,
     Grouped(&'a mut WindowGroup),
     /// Crash-recovery replay of a block whose durable batch already
     /// committed. The stored head receipt covers it, so nothing syncs and
     /// nothing re-commits: replay rebuilds the derived state the crash
-    /// lost — coins, bookkeeping, journal tail — and publishes.
+    /// lost — coins, bookkeeping, journal tail — and publishes under the
+    /// receipt the head already issued.
     Replay {
-        commit_id: u64,
+        receipt: super::durable::DurableReceipt,
     },
 }
 
 /// One staged block awaiting its group's durable commit.
+///
+/// The staged outcome's tip carries this block's own cumulative chain tx
+/// count, which its publication uses; the group's receipt certifies the last
+/// staged tip.
 pub(super) struct PendingBlockCommit {
     /// Commit id 0 until the group's batch assigns the prefix id.
     pub outcome: ConnectOutcome,
     /// The block's encoded undo record, landed in the group's receipt.
     pub undo_record: Vec<u8>,
-    pub tx_count_delta: u64,
-    pub chain_tx_count_after: u64,
     /// This block's parent; the group's first entry anchors the lineage
     /// fence.
     pub prev_hash: Hash256,
@@ -121,12 +123,6 @@ impl WindowGroup {
         Ok(Some((Arc::new(last.outcome.tip.clone()), height)))
     }
 
-    /// The cumulative chain tx count the next staged block advances, when a
-    /// prefix is staged: publication has not stored the staged deltas yet.
-    pub(super) fn chain_tx_count_base(&self) -> Option<u64> {
-        self.pending.last().map(|last| last.chain_tx_count_after)
-    }
-
     pub(super) fn stage(&mut self, pending: PendingBlockCommit) {
         self.staged_bytes += pending.outcome.block_bytes.len();
         if self.pending.is_empty() {
@@ -174,7 +170,7 @@ impl WindowGroup {
             prev_hash: first_prev,
             tip: last.outcome.hash,
             height: last.outcome.height,
-            chain_tx_count_after: last.chain_tx_count_after,
+            chain_tx_count_after: last.outcome.tip.chain_tx_count.to_wire(),
             undo_extent: Some((last.outcome.height, last.outcome.hash)),
         };
         let started = quanta::Instant::now();
@@ -182,13 +178,19 @@ impl WindowGroup {
             undo_rows,
             body_rows,
         };
-        let commit_id = commit_connect_head(handles, &facts, &records)?;
+        let receipt = commit_connect_head(handles, &facts, &records)?;
+        debug_assert!(
+            self.pending
+                .last()
+                .is_some_and(|last| last.outcome.tip.chain_tx_count == receipt.chain_tx_count),
+            "the batch certifies the last staged prefix count"
+        );
         metrics::histogram!("node.durable_head.group_commit_seconds")
             .record(started.elapsed().as_secs_f64());
         let staged = u32::try_from(self.pending.len()).unwrap_or(u32::MAX);
         metrics::histogram!("node.durable_head.group_blocks").record(f64::from(staged));
         for pending in &mut self.pending {
-            pending.outcome.commit_id = commit_id;
+            pending.outcome.commit_id = receipt.commit_id;
         }
         // The journal follows the receipt, block by block, before the
         // prefix publishes — the same derived-after-durable order as the
@@ -209,7 +211,11 @@ impl WindowGroup {
             .pending
             .drain(..)
             .map(|pending| {
-                publish_connect(handles, &pending.outcome.tip, pending.tx_count_delta);
+                publish_applied(
+                    handles,
+                    &pending.outcome.tip,
+                    crate::events::HintKind::Connected,
+                );
                 pending.outcome
             })
             .collect::<Vec<_>>();
@@ -369,17 +375,16 @@ pub(super) fn invalidate_failed_subtree(
 /// must be dropped, not finished, so the mempool generation stays odd until
 /// recovery.
 ///
-/// Kernel-backed script verification failures are classified Operational
-/// because `bitcoinkernel` can reject a valid block depending on process
-/// state (issue #618): the same block applies successfully after restart.
-/// Treating these as Permanent would freeze the node at the tip and
-/// invalidate a valid header subtree with no retry path. The native
-/// interpreter path does not produce this spurious failure, so its
-/// `ConsensusError::Script` remains Permanent.
-///
+/// A kernel-backed script failure is Operational because `bitcoinkernel` can
+/// reject a valid block depending on process state (issue #618): the same
+/// block applies successfully after restart. Treating it as Permanent would
+/// freeze the node at the tip and invalidate a valid header subtree with no
+/// retry path. The native interpreter does not produce that spurious failure,
+/// so its `ConsensusError::Script` stays Permanent. The engine field decides
+/// this; the reason text is never inspected.
 pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
     use WindowApplyDisposition::{BodyMutated, Fatal, Operational, Permanent};
-    use bitcoin_rs_consensus::ConsensusError;
+    use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
     match error {
         ApplyError::UtxoCommit(_)
         | ApplyError::DurableHeadCommit(_)
@@ -396,12 +401,10 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
             | ConsensusError::UnexpectedWitness => BodyMutated,
             ConsensusError::PrevoutMatrixSize { .. }
             | ConsensusError::Kernel(_)
-            | ConsensusError::Encoding(_) => Operational,
-            ConsensusError::Script { reason, .. }
-                if reason.starts_with("kernel script verification failed:") =>
-            {
-                Operational
-            }
+            | ConsensusError::Script {
+                engine: ScriptEngine::Kernel,
+                ..
+            } => Operational,
             _ => Permanent,
         },
         _ => Operational,

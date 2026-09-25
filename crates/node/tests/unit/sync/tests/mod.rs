@@ -166,9 +166,9 @@ fn matured_chain(depth: u32) -> Result<MaturedChain, Box<dyn std::error::Error>>
         Arc::new(ArcSwapOption::empty()),
         Arc::new(RwLock::new(tree)),
     );
-    handles.apply_block(&genesis)?;
+    handles.apply_block(&genesis, None)?;
     for block in &blocks {
-        handles.apply_block(block)?;
+        handles.apply_block(block, None)?;
     }
     let bodies = blocks
         .iter()

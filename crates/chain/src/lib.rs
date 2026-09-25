@@ -5,6 +5,8 @@
 mod bip9_cache;
 /// Neutral block-body read seam.
 mod block_body;
+/// Cumulative chain transaction count arithmetic.
+mod count;
 /// BIP9/softfork lookups over [`BlockTree`].
 mod deployment;
 /// Header acceptance and proof-of-work validation.
@@ -27,6 +29,7 @@ pub(crate) use bip9_cache::CachedState;
 pub use bitcoin_rs_consensus::SoftforkState;
 pub use bitcoin_rs_primitives::Network;
 pub use block_body::{BlockBodyMetadata, BlockBodySource};
+pub use count::ChainTxCount;
 pub use deployment::{
     SignallingDeployment, bip30_duplicate_scan_required, candidate_version, signalling_deployments,
     softfork_state,

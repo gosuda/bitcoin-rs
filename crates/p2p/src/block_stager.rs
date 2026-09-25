@@ -34,7 +34,7 @@ pub struct BlockStager {
 #[derive(Debug)]
 struct ReceivedBlock {
     block: Block,
-    // Preserved P2P wire payload, reused by `apply_block_with_serialized` to
+    // Preserved P2P wire payload, reused by the unified `apply_block` to
     // skip reserialization. This is a second buffer (~block size) held next to
     // the decoded `block` while it waits for its predecessor, so a fully
     // out-of-order staging window holds roughly twice `bytes` per entry; both

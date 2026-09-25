@@ -1,3 +1,4 @@
+use crate::ChainTxCount;
 use bitcoin_rs_primitives::{Hash256, Header};
 use bytemuck::{Pod, Zeroable};
 use ruint::Uint;
@@ -57,8 +58,9 @@ pub struct BlockTreeNode {
     pub header: BlockHeader,
     /// Accumulated work through this header.
     pub chainwork: ChainWork,
-    /// Cumulative transaction count through this node, or `0` when unknown.
-    pub chain_tx_count: u64,
+    /// Cumulative transaction count through this node: `UNKNOWN` until a
+    /// counted parent or genesis establishes it.
+    pub chain_tx_count: ChainTxCount,
     /// Node validation and chain-selection status.
     pub status: NodeStatus,
 }

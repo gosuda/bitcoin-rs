@@ -67,6 +67,20 @@ pub use verify_tx::{
 
 use thiserror::Error;
 
+/// The engine that rejected a script.
+///
+/// The two backends disagree about what a rejection means, and the difference
+/// is not in the message text: `bitcoinkernel` can reject a valid block
+/// depending on process state (issue #618), so its verdicts are retryable
+/// after a restart, while the native interpreter's are consensus-final.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptEngine {
+    /// Bitcoin Core's `bitcoinkernel` C++ engine (the `kernel` feature).
+    Kernel,
+    /// The portable Rust interpreter in `bitcoin-rs-script`.
+    Native,
+}
+
 /// Consensus validation error.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ConsensusError {
@@ -118,6 +132,9 @@ pub enum ConsensusError {
         input_index: usize,
         /// Script failure reason.
         reason: String,
+        /// The engine that rejected the script. Classification reads this,
+        /// never the reason text.
+        engine: ScriptEngine,
     },
     /// Sigop cost exceeds consensus maximum.
     #[error("sigop cost {cost} exceeds max {max}")]

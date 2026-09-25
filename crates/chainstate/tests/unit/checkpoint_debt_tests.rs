@@ -44,7 +44,7 @@ fn checkpoint_refuses_inflight_disconnect_and_preserves_state()
         Arc::new(crate::events::ChainEventPublisher::detached(0)),
     );
     handles.block_body_store = Some(Arc::new(MemoryBodies::default()));
-    handles.apply_block(&network.genesis_block())?;
+    handles.apply_block(&network.genesis_block(), None)?;
     handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)))?;
     assert!(handles.publish_checkpoint()?.is_some());
 

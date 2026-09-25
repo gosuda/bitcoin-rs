@@ -6,6 +6,7 @@
 //! Replay validates header identity and live-coin preimages before committing.
 
 use bitcoin_rs_chain::BlockTree;
+use bitcoin_rs_chain::ChainTxCount;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
@@ -151,7 +152,7 @@ impl ReplayAccumulator {
         base_tip: bitcoin_rs_chain::TipSnapshot,
         base_chain_tx_count: u64,
     ) -> Result<Self, JournalReplayError> {
-        if base_chain_tx_count == 0 {
+        if ChainTxCount::from_wire(base_chain_tx_count).get().is_none() {
             return Err(JournalReplayError::CommittedRangeInvalid(
                 "checkpoint chain_tx_count is unknown".to_owned(),
             ));
@@ -266,7 +267,7 @@ fn insert_replayed_header(
         .map_err(|error| {
             JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
         })?;
-    tree.restore_chain_tx_count(node_id, chain_tx_count)
+    tree.restore_chain_tx_count(node_id, ChainTxCount::from_wire(chain_tx_count))
         .map_err(|error| {
             JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
         })?;
@@ -284,6 +285,7 @@ fn insert_replayed_header(
         height: node.height,
         chainwork: node.chainwork,
         hash: node.hash,
+        chain_tx_count: ChainTxCount::from_wire(chain_tx_count),
     })
 }
 

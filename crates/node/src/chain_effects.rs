@@ -327,7 +327,7 @@ impl ChainFollowers {
     ) -> core::result::Result<ConnectOutcome, bitcoin_rs_chainstate::ApplyError> {
         let transition = handles.begin_transition()?;
         let mempool_change = self.begin_mempool_change()?;
-        match transition.connect(block) {
+        match transition.connect(block, None) {
             Ok(outcome) => {
                 self.committed_connect(block, &outcome);
                 Self::finish_transition(handles, transition, mempool_change)?;
@@ -567,6 +567,7 @@ mod tests {
             height: node.height,
             chainwork: node.chainwork,
             hash: node.hash,
+            chain_tx_count: node.chain_tx_count,
         })
     }
 

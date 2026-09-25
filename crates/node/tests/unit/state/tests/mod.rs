@@ -57,6 +57,7 @@ fn publish_applied_tip_height(state: &NodeState, height: u32) {
             height,
             chainwork: bitcoin_rs_chain::node::ChainWork::ZERO,
             hash: bitcoin_rs_primitives::Hash256::from_le_bytes(&hash),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
         })));
 }
 

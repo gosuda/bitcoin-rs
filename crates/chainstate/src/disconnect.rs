@@ -5,18 +5,15 @@ use super::Chainstate;
 use super::DisconnectOutcome;
 use super::DisconnectPlan;
 use super::durable::commit_disconnect_head;
-use super::publication::begin_applied_publication;
-use super::publication::rewind_chain_tx_count;
-use super::publication::rewound_chain_tx_count;
+use super::publication::publish_applied;
 use super::publication::tx_count_delta_for;
 use crate::error::ApplyError;
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::Txid;
 use bitcoin_rs_utxo::{BlockRollback, RollbackError, load_block_undo, rollback_block};
-use std::sync::Arc;
 
 pub(super) fn plan_disconnect(
     handles: &Chainstate,
@@ -60,7 +57,7 @@ pub(super) fn plan_disconnect(
     bitcoin_rs_consensus::verify_merkle_root_with_txids(block, &txids)
         .map_err(|_| ApplyError::DisconnectBodyMismatch { hash: block_hash })?;
 
-    let (parent_tip, parent_prev_hash, parent_chain_tx_count) = {
+    let (parent_tip, parent_prev_hash) = {
         let tree = handles.block_tree.read();
         let node = tree.node(applied.tip_id)?;
         let parent_id = node.parent.ok_or(ApplyError::DisconnectNotTip {
@@ -78,9 +75,9 @@ pub(super) fn plan_disconnect(
                 height: parent.height,
                 chainwork: parent.chainwork,
                 hash: parent.hash,
+                chain_tx_count: ChainTxCount::UNKNOWN,
             },
             parent_prev_hash,
-            parent.chain_tx_count,
         )
     };
 
@@ -93,11 +90,19 @@ pub(super) fn plan_disconnect(
         .coin_stats
         .check_rewind(height, tx_count_delta)
         .map_err(ApplyError::CoinStatsRewind)?;
+    // The count through the parent is the applied tip's count minus exactly
+    // what the disconnected block added. The parent's own tree node cannot
+    // answer: a checkpoint restore counts only its tip and leaves ancestors
+    // unknown, and an unknown there would strand a count the next replay
+    // recomputes. An unknown applied count stays unknown either way.
+    let parent_tip = TipSnapshot {
+        chain_tx_count: applied.chain_tx_count.rewind(tx_count_delta),
+        ..parent_tip
+    };
 
     Ok(DisconnectPlan {
         parent_tip,
         parent_prev_hash,
-        parent_chain_tx_count,
         undo,
         height,
         tx_count_delta,
@@ -113,7 +118,6 @@ pub(super) fn disconnect_block_admitted(
     let DisconnectPlan {
         parent_tip,
         parent_prev_hash,
-        parent_chain_tx_count,
         undo,
         height,
         tx_count_delta,
@@ -161,7 +165,7 @@ pub(super) fn disconnect_block_admitted(
             parent_tip.height,
             parent_tip.hash.to_le_bytes(),
             parent_prev_hash.to_le_bytes(),
-            parent_chain_tx_count,
+            parent_tip.chain_tx_count.to_wire(),
         );
         rewound
             .map_err(|error| {
@@ -175,26 +179,18 @@ pub(super) fn disconnect_block_admitted(
             })
             .is_ok()
     });
-    commit_disconnect_head(
+    // Durable before published: the head batch names the parent's own
+    // cumulative count, and the tip published next carries the count that
+    // commit certified, read back from its receipt.
+    let receipt = commit_disconnect_head(
         handles,
         &parent_tip,
         block_hash,
-        rewound_chain_tx_count(handles, tx_count_delta),
+        parent_tip.chain_tx_count.to_wire(),
     )
     .map_err(fatal)?;
-
-    {
-        let _publication = begin_applied_publication(handles);
-        handles
-            .applied_tip
-            .store(Some(Arc::new(parent_tip.clone())));
-        handles.chain_events.record(
-            crate::events::HintKind::Disconnected,
-            parent_tip.height,
-            parent_tip.hash,
-        );
-        rewind_chain_tx_count(handles, tx_count_delta);
-    }
+    let parent_tip = receipt.certify(parent_tip);
+    publish_applied(handles, &parent_tip, crate::events::HintKind::Disconnected);
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
             poison(crate::DisconnectError::MarkerStuck {
