@@ -89,8 +89,9 @@ mixed-tip page.
 ### `WF-03`: Proof is a public-process consumer
 
 - `bin/bitcoin-rs/tests/wallet_facing.rs` (existing) lives in the binary
-  package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`. The package `[lib]`
-  is process-input adapters (`bitcoin.conf`). The test depends on
+  package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`; the package is a pure
+  binary crate and its `bitcoin.conf` process-input adapters are binary
+  modules. The test depends on
   rust-bitcoin and speaks only HTTP. It funds a regtest chain through
   `getblocktemplate` and `submitblock`, then issues the
   BDK/esplora-client dialect against `/api`: tip, block height, headers,
