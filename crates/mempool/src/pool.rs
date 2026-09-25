@@ -630,18 +630,11 @@ impl Mempool {
     pub fn clear(&mut self) -> MutationResult {
         let txids: Vec<Txid> = self.entries.iter().map(|(_id, entry)| entry.txid).collect();
         self.entries.clear();
-        self.derived.by_txid.clear();
-        self.derived.funding.clear();
-        self.derived.spending.clear();
-        self.derived.by_wtxid.clear();
-        self.derived.components.clear();
-        self.derived.free_components.clear();
+        // One assignment instead of a second inventory of the derived
+        // fields: a field added to `Derived` starts empty here without this
+        // list having to learn about it.
+        self.derived = Derived::default();
         self.graph_steps.store(0, Ordering::Relaxed);
-        self.derived.pareto = ParetoFront::new();
-        self.derived.total_vsize = 0;
-        self.derived.total_fee = 0;
-        self.derived.fee_rate_counts.clear();
-        self.derived.fee_rate_floor = None;
         if !self.fee_deltas.is_empty() {
             self.fee_delta_sequence = MutationSequence::advance(self.fee_delta_sequence);
             self.fee_deltas.clear();
@@ -5119,16 +5112,16 @@ mod dynamic_memory_usage_tests {
 
     /// A grown-then-emptied pool still holds its arena, and still says so.
     ///
-    /// `slab::Slab` keeps its backing allocation across removals and across
+    /// The slot array keeps its backing allocation across removals and across
     /// `clear`; nothing here hands it back. Charging the arena from `len()`
     /// therefore reported that retained memory as **zero** at exactly the
     /// moment an operator reads `usage` to find out where the memory went --
     /// a pool that peaked at a million transactions and then drained answers
     /// "nothing", while the process RSS says otherwise.
     ///
-    /// The bound below is the arena alone: after `clear` there are no live
-    /// entries, so every other term is zero and what remains is the arena or
-    /// nothing.
+    /// The figure below is the arena alone: after `clear` there are no live
+    /// entries and the derived state is a fresh default, so the one
+    /// allocation that survives is the arena.
     #[test]
     fn the_arena_is_charged_after_the_pool_is_cleared() {
         use core::mem::size_of;
@@ -5141,20 +5134,17 @@ mod dynamic_memory_usage_tests {
             capacity > 0,
             "the fixture must leave a grown arena behind, or this proves nothing"
         );
-        let arena = capacity.saturating_mul(u64::try_from(size_of::<MempoolEntry>()).unwrap_or(0));
-
+        let arena = capacity
+            .saturating_mul(u64::try_from(size_of::<Option<LiveEntry>>()).unwrap_or(0));
         let cleared = pool.dynamic_memory_usage();
-        // Strictly above the arena, not merely at it: the txid map is a hash
-        // map and keeps its capacity across `clear` for the same reason the
-        // slab does, so both retentions have to be counted or this fails.
-        assert!(
-            cleared > arena,
-            "the retained arena and txid map must both be counted: {cleared} vs {arena}"
+        assert_eq!(
+            cleared, arena,
+            "a cleared pool must report its arena and nothing else: {cleared} vs {arena}"
         );
 
         // Against a pool that never grew, which is the difference the old
-        // accounting erased: both have no live entries, and only one of them is
-        // holding memory.
+        // accounting erased: both have no live entries, and only one of them
+        // is holding memory.
         let fresh = Mempool::new(MempoolLimits {
             max_total_bytes: 0,
             ..MempoolLimits::default()
