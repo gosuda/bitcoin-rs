@@ -23,7 +23,6 @@ use std::sync::Arc;
 /// metrics without naming the implementation's error types.
 pub type SyncChainError = Box<dyn core::error::Error + Send + Sync>;
 
-
 /// How the executor must treat a failed window commit or branch connect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowCommitDisposition {
