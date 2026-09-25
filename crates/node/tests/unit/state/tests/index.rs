@@ -112,7 +112,6 @@ fn start_index_workers_twice_is_idempotent() -> anyhow::Result<()> {
 #[test]
 fn derived_index_status_answers_when_disabled() -> anyhow::Result<()> {
     use bitcoin_rs_index::CapabilityState;
-    use bitcoin_rs_index::DerivedIndexCapabilitySource;
 
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);

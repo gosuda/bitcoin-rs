@@ -33,35 +33,37 @@ struct EnabledDerivedIndex {
 
 /// The one state-machine slot that replaces the old spawn/worker pair.
 enum DerivedIndexPhase {
-    /// open() produced a spawn; start() has not run yet.
+    /// `open()` produced a spawn; `start()` has not run yet.
     Ready(TxIndexSpawn),
-    /// start() spawned the worker; live until shutdown()/Drop.
+    /// `start()` spawned the worker; live until `shutdown()`/`Drop`.
     Running(bitcoin_rs_index::runtime::DerivedIndexWorker),
-    /// shutdown()/Drop took and joined (or abandoned) the worker.
+    /// `shutdown()`/`Drop` took and joined (or abandoned) the worker.
     Stopped,
 }
+
+/// The parts a configured derived index needs from node open: its runtime,
+/// the pending spawn, the lifecycle slot, and the query adapter.
+type DerivedIndexParts = (
+    Arc<bitcoin_rs_index::runtime::DerivedIndexRuntime>,
+    TxIndexSpawn,
+    Arc<ArcSwap<bitcoin_rs_index::runtime::DerivedIndexLifecycle>>,
+    Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>,
+);
 
 impl DerivedIndexHost {
     /// PRE: `NodeState::open` has completed construction; `enabled` is `Some`
     /// only if an index capability is configured.
     /// POST: the host is in phase `Ready`, or disabled.
     pub(crate) fn from_parts(
-        enabled: Option<(
-            Arc<bitcoin_rs_index::runtime::DerivedIndexRuntime>,
-            TxIndexSpawn,
-            Arc<ArcSwap<bitcoin_rs_index::runtime::DerivedIndexLifecycle>>,
-            Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>,
-        )>,
+        enabled: Option<DerivedIndexParts>,
         status: Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>,
     ) -> Self {
-        let enabled = enabled.map(
-            |(runtime, spawn, lifecycle, adapter)| EnabledDerivedIndex {
-                runtime,
-                lifecycle,
-                adapter,
-                phase: DerivedIndexPhase::Ready(spawn),
-            },
-        );
+        let enabled = enabled.map(|(runtime, spawn, lifecycle, adapter)| EnabledDerivedIndex {
+            runtime,
+            lifecycle,
+            adapter,
+            phase: DerivedIndexPhase::Ready(spawn),
+        });
         Self { status, enabled }
     }
 
@@ -164,9 +166,7 @@ impl DerivedIndexHost {
     pub(crate) fn status(
         &self,
     ) -> Arc<dyn bitcoin_rs_rpc::capabilities::DerivedIndexCapabilitySource> {
-        let status: Arc<dyn bitcoin_rs_rpc::capabilities::DerivedIndexCapabilitySource> =
-            self.status.clone();
-        status
+        self.status.clone()
     }
 
     pub(crate) fn adapter(
