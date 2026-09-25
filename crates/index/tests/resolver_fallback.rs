@@ -13,7 +13,7 @@ use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, varint,
 };
-use bitcoin_rs_storage::{ColumnFamily, KvStore as _, WriteBatch as _};
+use bitcoin_rs_storage::{ColumnFamily, KvStore as _};
 
 use common::MemoryStore;
 

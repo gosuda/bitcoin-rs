@@ -4,7 +4,7 @@ use super::error::IndexError;
 use crate::{
     reconcile::SelectedWatermark, reconcile::selected_watermark as reconcile_selected_watermark,
 };
-use bitcoin_rs_storage::{ColumnFamily, KvSnapshot, WriteBatch};
+use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvSnapshot};
 
 pub(super) const TX_LOOKUP_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 
@@ -279,8 +279,8 @@ impl IndexWatermark {
     }
 }
 
-pub(super) fn put_selected_watermarks<B: WriteBatch>(
-    batch: &mut B,
+pub(super) fn put_selected_watermarks(
+    batch: &mut BufferedWriteBatch,
     capabilities: IndexCapabilities,
     watermark: Option<IndexWatermark>,
 ) {
