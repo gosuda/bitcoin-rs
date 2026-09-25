@@ -1,3 +1,5 @@
+> Superseded: the native interpreter now verifies every consensus spend class; see docs/contracts/validation-default.md VAL-02.
+
 # Native apply-path measurement (PERF-V5)
 
 This measurement controls the native-validation performance gate for issue #166, paired with the kernel baseline in `overhaul-kernel-baseline-20260829.md`.
