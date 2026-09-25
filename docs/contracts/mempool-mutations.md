@@ -151,22 +151,37 @@ state (`crates/mempool/src/orphan.rs`).
   `UtxoSet::has_live_outputs_for_txid`; no live output leaves confirmation
   status unknown. RPC transaction-body cache membership supplies no such
   evidence.
+- A resident orphan is identified by its witness transaction hash, as
+  [Core 31.1's orphanage](https://github.com/bitcoin/bitcoin/blob/v31.1/src/node/txorphanage.cpp)
+  does: one body per wtxid, plus the set of exact connection tokens that
+  announced it. A txid collision does not imply body identity, so two
+  witnesses of one txid reside together and each is retried on its own.
 - Peer orphan/reject transitions validate the same tokens before changing
   state, under pool-then-lifecycle lock order. An accepted parent cannot
   commit between the missing-input verdict and registration of its child.
-  The gateway stores orphan bodies, txid/wtxid indexes, parent indexes,
-  and ready IDs as one ownership unit. FIFO retention is bounded by both
+  The gateway stores orphan bodies, their announcer sets, parent indexes,
+  and ready claims as one ownership unit. Retention is bounded by both
   count and aggregate BIP141 transaction weight, using `DEFAULT_ORPHAN_QUOTA`
-  and `DEFAULT_MAX_ORPHAN_WEIGHT` from `orphan.rs`. Insertions, witness
-  refreshes, and removals update the resident weight; FIFO eviction restores
-  both bounds. Witness refresh preserves FIFO position and the first-seen
+  and `DEFAULT_MAX_ORPHAN_WEIGHT` from `orphan.rs`; the resident weight counts
+  each wtxid once. Insertions, added announcers, and removals update it. When a
+  global bound is over, the pool drops one announcement of the peer with the
+  largest score, where the score is the largest share that peer takes of its
+  own announcement-count, announcement-weight, and latency allowance
+  (`DEFAULT_PEER_ANNOUNCEMENTS`, `DEFAULT_PEER_ANNOUNCEMENT_WEIGHT`,
+  `DEFAULT_PEER_LATENCY`), and a newer connection token wins an exact tie. A
+  peer's oldest announcement goes first, and work that is not ready for
+  reconsideration goes before work that is. A body leaves only with its last
+  announcer, so one peer cannot evict another peer's reserved usage and a peer
+  within its allowance is trimmed only after every peer over its own.
+  Announcing an existing body again keeps its FIFO position and first-seen
   timestamp. The ingress poll applies the mempool-owned two-minute expiry and
-  removes bodies whose exact delivering connection token is no longer live;
-  a same-address reconnect cannot inherit the old allocation. These private
-  defaults and indexes have one owner; RPC
-  missing-input rejections do not populate peer orphan state. An out-of-range output index
-  on a resident mempool parent is rejected under the same token and retry-claim
-  checks, rather than retained as an orphan awaiting an impossible parent.
+  drops announcements whose exact connection token is no longer live; a
+  same-address reconnect cannot inherit the old allocation, and a body with
+  another live announcer stays resident. These private defaults and indexes
+  have one owner; RPC missing-input rejections do not populate peer orphan
+  state. An out-of-range output index on a resident mempool parent is rejected
+  under the same token and retry-claim checks, rather than retained as an
+  orphan awaiting an impossible parent.
 - Orphan retention excludes null outpoints: a zero transaction hash with
   output index `u32::MAX`, matching
   [Core 31.1's `COutPoint::IsNull`](https://github.com/bitcoin/bitcoin/blob/v31.1/src/primitives/transaction.h).
@@ -187,18 +202,23 @@ state (`crates/mempool/src/orphan.rs`).
   Witness-scoped refusals suppress only the checked wtxid; transaction-scoped
   refusals additionally suppress the txid. Legacy inventory does not consult
   witness-only refusals, including when a stripped body's wtxid equals its
-  txid. A witness-scoped refusal removes only the matching resident orphan
-  variant, preserving a different witness and its source. Invalid output
-  indexes on known mempool parents are transaction-scoped. This distinction
+  txid. A witness-scoped refusal removes only the resident body with that
+  wtxid, preserving another witness of the same txid and its announcers; a
+  transaction-scoped refusal removes every resident variant of that txid.
+  Invalid output indexes on known mempool parents are transaction-scoped. This distinction
   prevents a rejected witness from blocking another valid witness for the
   same transaction, as described by
   [BIP339](https://github.com/bitcoin/bips/blob/master/bip-0339.mediawiki).
 - `retry_orphans` claims one bounded ready set only while generation is
-  stable. Claimed bodies remain resident; transient retry exhaustion marks
-  them ready for a later call, without immediately consuming the same work
-  again. Ready IDs are deduplicated and retire with their resident entry.
-  Parent readiness is internal commit work, not a best-effort mutation
-  observer or an ingress-channel delivery.
+  stable. Each claim carries the body and the one announcer selected for it,
+  and the retry submits as that peer; it never infers a peer from the resident
+  body. Claimed bodies remain resident; transient retry exhaustion marks the
+  same wtxid ready again with a currently resident announcer, without changing
+  the body or its first-seen time, and without immediately consuming the same
+  work again. A claim whose body was removed is discarded. Ready claims are
+  deduplicated per wtxid and retire with their resident entry. Parent
+  readiness is internal commit work, not a best-effort mutation observer or an
+  ingress-channel delivery.
 - Node calls `chain_changed` after each committed connect/disconnect and
   before releasing the `ChainTransition`, including changes with no mempool
   mutation. It clears recent rejects and marks children of newly available
@@ -290,6 +310,8 @@ state (`crates/mempool/src/orphan.rs`).
   `rejected_witness_does_not_suppress_a_valid_body_with_the_same_txid`,
   `rejected_stripped_body_does_not_suppress_its_valid_witness_variant`,
   `zero_hash_output_zero_is_requested_and_retried_as_an_ordinary_outpoint`,
+  `orphan_txid_does_not_suppress_txid_inventory_but_wtxid_does`,
+  `same_txid_different_witnesses_both_survive_and_retry_after_parent`,
   `null_input_in_a_non_coinbase_transaction_is_not_held`,
   `reconsider_disconnected_admits_parent_then_child_under_the_guard`,
   `reconsider_disconnected_withholds_descendants_of_a_refused_parent`,
@@ -307,7 +329,7 @@ state (`crates/mempool/src/orphan.rs`).
   `admission_chain_uses_current_handles_and_one_applied_tip`.
 - `crates/mempool/src/orphan.rs` (inline tests):
   `zero_quota_retains_no_body_or_index`,
-  `witness_refresh_keeps_fifo_position_and_source_identity`,
+  `witness_refresh_keeps_fifo_position_and_announcer_set`,
   `readiness_is_deduplicated_and_removed_with_eviction`,
   `maintenance_expires_old_bodies_and_cleans_every_index`,
   `maintenance_uses_exact_connection_identity`,
@@ -315,7 +337,9 @@ state (`crates/mempool/src/orphan.rs`).
   `rejects_are_bounded_and_chain_reset_clears_both_indexes`,
   `aggregate_weight_evicts_fifo_even_when_count_quota_has_room`,
   `rejecting_another_witness_preserves_the_resident_body_and_ready_work`,
-  `transaction_scoped_rejection_releases_the_resident_variants_weight`.
+  `transaction_scoped_rejection_releases_the_resident_variants_weight`,
+  `same_wtxid_keeps_all_announcers_and_disconnect_removes_one`,
+  `eviction_trims_the_highest_peer_score_before_protected_peer`.
 - `crates/node/src/chain_effects.rs` (inline tests):
   `connect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`,
   `disconnect_without_pool_mutations_resets_rejects_and_preserves_orphan_retry`:
