@@ -2093,8 +2093,13 @@ mod tests {
             }
         });
 
-        let mut seen_b = 0_usize;
-        for _ in 0..200 {
+        let mut seen_a = false;
+        let mut seen_b = false;
+        // Sampling runs until both publications have answered, not for a fixed
+        // count: the swapper's first store publishes the new tip, but thread
+        // startup is the scheduler's call, so a fixed budget can expire before
+        // the new publication is ever observed.
+        for iteration in 0..100_000 {
             let result = gettxoutsetinfo(&ctx, &json!(null))
                 .unwrap_or_else(|error| panic!("gettxoutsetinfo failed: {error}"));
             let height = result
@@ -2110,19 +2115,23 @@ mod tests {
                 "the scan must still run and report its hash"
             );
             if height == 7 {
-                seen_b += 1;
                 assert_eq!(best, b.hash.to_string_be(), "a foreign hash rode height 7");
+                seen_b = true;
             } else {
                 assert_eq!(height, 5, "the route reported an unpublished height");
                 assert_eq!(best, a.hash.to_string_be(), "a foreign hash rode height 5");
+                seen_a = true;
+            }
+            if iteration >= 199 && seen_a && seen_b {
+                break;
             }
             std::thread::yield_now();
         }
         stop.store(true, Ordering::Relaxed);
         swapper.join().expect("swapper thread panicked");
         assert!(
-            seen_b > 0,
-            "the swap was never observed, so coherence proved nothing"
+            seen_a && seen_b,
+            "a publication was never observed, so coherence proved nothing"
         );
     }
 
@@ -2319,14 +2328,21 @@ mod tests {
 
         let ctx = Arc::new(ctx);
         let b2_text = b2_hash.to_string();
-        let mut seen_b = 0_usize;
-        for _ in 0..200 {
+        let mut seen_a = false;
+        let mut seen_b = false;
+        // Sampling runs until both publications have answered, not for a fixed
+        // count: the swapper's first store publishes the b2 tip, but thread
+        // startup is the scheduler's call, so a fixed budget can expire before
+        // the b2 branch is ever published.
+        for iteration in 0..100_000 {
             let value = block_verbose_typed(&ctx, &record, false, 1)?;
             let confirmations = value
                 .get("confirmations")
                 .and_then(Value::as_i64)
                 .expect("confirmations");
             let next = value.get("nextblockhash");
+            seen_a |= confirmations == 1;
+            seen_b |= confirmations == -1;
             match confirmations {
                 1 => assert!(
                     next.is_none_or(Value::is_null),
@@ -2339,16 +2355,16 @@ mod tests {
                 ),
                 other => panic!("confirmations {other} matches no published branch"),
             }
-            if confirmations == -1 {
-                seen_b += 1;
+            if iteration >= 199 && seen_a && seen_b {
+                break;
             }
             std::thread::yield_now();
         }
         stop.store(true, Ordering::Relaxed);
         swapper.join().expect("swapper thread panicked");
         assert!(
-            seen_b > 0,
-            "the b2 branch was never observed, so coherence proved nothing"
+            seen_a && seen_b,
+            "a publication was never observed, so coherence proved nothing"
         );
         Ok(())
     }
