@@ -235,11 +235,18 @@ impl<S: KvStore> IndexWriter<S> {
     ///
     /// The write is fenced like every ordinary commit, so a reset in flight
     /// or a moved revision reports `ResetInProgress`/`StaleIndexState`.
+    ///
+    /// `capabilities` must name only history-derived indexes: `ScriptLive`
+    /// reseeds from the authoritative UTXO view, so anchoring it would
+    /// publish a live watermark with no rows behind it.
     pub fn anchor_watermark(
         &self,
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
     ) -> Result<(), IndexError> {
+        if capabilities.is_empty() || capabilities.script_live {
+            return Err(IndexError::AnchorUnsupportedSelection);
+        }
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         let mut batch = self.indexer.store.new_batch();
         batch.put(
