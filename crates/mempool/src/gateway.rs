@@ -344,7 +344,7 @@ fn rejection_scope(tx: &Tx) -> RejectScope {
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::orphan::RejectScope;
 use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
-use crate::rbf::{RbfError, ReplacementCandidate};
+use crate::rbf::{LimitEnforcement, RbfError, ReplacementCandidate};
 
 static REGISTRY: LazyLock<Mutex<Vec<Weak<MempoolGateway>>>> =
     LazyLock::new(|| Mutex::new(alloc::vec::Vec::new()));
@@ -695,7 +695,11 @@ impl MempoolGateway {
             let inputs = self
                 .pool
                 .read()
-                .capture_insertion(entry.clone(), crate::rbf::FeeEstimation::Estimate)
+                .capture_insertion(
+                    entry.clone(),
+                    crate::rbf::FeeEstimation::Estimate,
+                    crate::rbf::LimitEnforcement::Full,
+                )
                 .map_err(RbfError::into_pool_error)?;
             let plan = inputs.verify().map_err(RbfError::into_pool_error)?;
             let result = self.commit(origin, move |pool| {
@@ -914,10 +918,30 @@ impl MempoolGateway {
                 context.sigop_cost,
             ));
         }
-        let floor = crate::eviction::mempool_min_fee_sat_per_kvb(
-            pool,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
+        // Core re-admits a disconnected transaction with `bypassLimits = true`
+        // on `AcceptToMemoryPool` (validation.cpp), which skips the
+        // `GetMinFee()` floor and the mempool size limit. The transaction
+        // already passed every one of those gates on the way in; re-running
+        // them against a pool the reorg itself just changed rejects relay for
+        // reasons that have nothing to do with the transaction. `Deferred` is
+        // that bypass: the fee floor and the ephemeral-parent rule are skipped
+        // here, the cluster and per-acceptance trim gates are skipped
+        // downstream, and one size trim runs at settlement.
+        let enforcement = match request.origin {
+            AdmissionOrigin::Reorg => LimitEnforcement::Deferred,
+            AdmissionOrigin::Rpc | AdmissionOrigin::Peer(_) | AdmissionOrigin::Block => {
+                LimitEnforcement::Full
+            }
+        };
+        let deferred = enforcement == LimitEnforcement::Deferred;
+        let floor = if deferred {
+            0
+        } else {
+            crate::eviction::mempool_min_fee_sat_per_kvb(
+                pool,
+                policy.incremental_relay_fee_sat_per_kvb,
+            )
+        };
         // BIP68 is evaluated at the next block. A resolved input that is not
         // present in the confirmed metadata is an unconfirmed (mempool/package)
         // parent and is encoded as the next block.
@@ -990,39 +1014,53 @@ impl MempoolGateway {
             // Reorg re-admissions must not double-count the estimator: the
             // transaction already spent time in the pool before disconnect.
             let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
-            let captured = pool
-                .truc_conflicts(&request.tx, prepared.fact.vsize, true)
-                .and_then(|(conflicts, sibling_eviction)| {
-                    let entry = MempoolEntry::new(
-                        Arc::clone(&request.tx),
-                        prepared.fact.vsize,
-                        prepared.fact.base_fee.unwrap_or(0),
-                        request.time,
-                        request.height,
-                        prepared.fact.sigop_cost,
-                    );
-                    // The conflicts `truc_conflicts` returned decide the door,
-                    // not a second direct lookup: a v3 sibling eviction has an
-                    // empty direct set yet must pay the replacement rules.
-                    if conflicts.is_empty() {
-                        pool.capture_insertion(entry, fee_estimation)
-                    } else {
-                        pool.capture_admission(
-                            entry,
-                            conflicts,
-                            policy.incremental_relay_fee_sat_per_kvb,
-                            sibling_eviction,
-                            fee_estimation,
-                        )
-                    }
-                });
+            // Under Deferred the TRUC topology rules are not re-run: the
+            // transaction already satisfied them before the disconnect, so
+            // only its direct conflicts are collected, the way Core's
+            // `bypassLimits` re-acceptance never re-runs policy the
+            // transaction did not cause.
+            let conflict_set = if deferred {
+                Ok((pool.conflicts_for(&request.tx), false))
+            } else {
+                pool.truc_conflicts(&request.tx, prepared.fact.vsize, true)
+            };
+            let captured = conflict_set.and_then(|(conflicts, sibling_eviction)| {
+                let entry = MempoolEntry::new(
+                    Arc::clone(&request.tx),
+                    prepared.fact.vsize,
+                    prepared.fact.base_fee.unwrap_or(0),
+                    request.time,
+                    request.height,
+                    prepared.fact.sigop_cost,
+                );
+                // The conflict set returned above decides the door, not a
+                // second direct lookup: a v3 sibling eviction has an
+                // empty direct set yet must pay the replacement rules.
+                if conflicts.is_empty() {
+                    pool.capture_insertion(entry, fee_estimation, enforcement)
+                } else {
+                    pool.capture_admission(
+                        entry,
+                        conflicts,
+                        policy.incremental_relay_fee_sat_per_kvb,
+                        sibling_eviction,
+                        fee_estimation,
+                        enforcement,
+                    )
+                }
+            });
             match captured {
                 Ok(inputs) => prepared.replacement = ReplacementStage::Captured(inputs),
                 Err(error) => {
                     prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
                 }
             }
-            if prepared.rejection.is_none()
+            // Core's `bypassLimits` re-acceptance never revisits the
+            // ephemeral-parent rule: the parent was in the pool when this
+            // transaction was first accepted, so the relationship is already
+            // established and the disconnect walk re-admits parents first.
+            if !deferred
+                && prepared.rejection.is_none()
                 && crate::package::missing_ephemeral_spends(
                     pool,
                     core::slice::from_ref(request.tx.as_ref()),

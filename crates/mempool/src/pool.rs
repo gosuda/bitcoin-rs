@@ -700,17 +700,31 @@ impl Mempool {
         entry: MempoolEntry,
     ) -> Result<crate::mutation::MutationResult, MempoolError> {
         let inputs = self
-            .capture_insertion(entry, crate::rbf::FeeEstimation::Estimate)
+            .capture_insertion(
+                entry,
+                crate::rbf::FeeEstimation::Estimate,
+                crate::rbf::LimitEnforcement::Full,
+            )
             .map_err(crate::RbfError::into_pool_error)?;
         let plan = inputs.verify().map_err(crate::RbfError::into_pool_error)?;
         self.commit_pool_change(plan)
             .map_err(crate::RbfError::into_pool_error)
     }
 
+    /// Preflights one entry against the pool's structural and cluster limits.
+    ///
+    /// PRE: `entry` carries fee, vsize, and sigop accounting already resolved
+    /// against the current chain; `excluded` is the set an in-flight
+    /// replacement removes before this entry lands.
+    /// POST: the returned prepared insert commits without further limit work.
+    /// INVARIANT: under [`crate::LimitEnforcement::Deferred`] the cluster limits are
+    /// skipped. A reorg re-admission restores a cluster the pool already held,
+    /// so re-measuring it is not a policy decision about this transaction.
     pub(crate) fn validate_insert(
         &self,
         mut entry: MempoolEntry,
         excluded: &HashSet<EntryId>,
+        enforcement: crate::rbf::LimitEnforcement,
     ) -> Result<PreparedInsert, MempoolError> {
         let txid = entry.txid;
         let min_rate = self.limits.min_relay_fee_sat_per_kvb;
@@ -743,7 +757,9 @@ impl Mempool {
         }
 
         let ancestors = self.ancestor_ids_for_tx(&entry.tx);
-        self.check_cluster_limits(&entry.tx, entry.policy_weight(), excluded)?;
+        if enforcement == crate::rbf::LimitEnforcement::Full {
+            self.check_cluster_limits(&entry.tx, entry.policy_weight(), excluded)?;
+        }
 
         if excluded.is_empty() && u32::try_from(self.entries.vacant_key()).is_err() {
             return Err(MempoolError::TooManyEntries);
@@ -6040,7 +6056,11 @@ mod graph_tests {
                             HEIGHT,
                             0,
                         );
-                        let Ok(prepared) = pool.validate_insert(entry, &excluded) else {
+                        let Ok(prepared) = pool.validate_insert(
+                            entry,
+                            &excluded,
+                            crate::rbf::LimitEnforcement::Full,
+                        ) else {
                             continue;
                         };
                         let removals = evicted
