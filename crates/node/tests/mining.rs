@@ -3,7 +3,7 @@
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MempoolSequenceWake,
-    MiningCapability, MiningControl, MiningControlError,
+    MiningCapability, MiningControl, MiningControlError, solve_block,
 };
 
 use bitcoin_rs_node::{
@@ -129,10 +129,10 @@ fn is_witness_commitment(script_pubkey: &[u8]) -> bool {
 
 fn solved_template_block(mining: &MiningCoordinator) -> anyhow::Result<Block> {
     let template = expect_template(mining.get_block_template(template_request(None))?);
-    template
-        .candidate
-        .solve(1_000_000)
-        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))
+    let mut block = template.candidate.into_unsolved_block();
+    solve_block(&mut block, 1_000_000)
+        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))?;
+    Ok(block)
 }
 
 fn mined_child(prev: BlockHash) -> anyhow::Result<Block> {
