@@ -188,14 +188,6 @@ impl Candidate {
             txs,
         }
     }
-
-    /// Assembles the unsolved block and searches nonces until the compact
-    /// target is met or `max_tries` is exhausted.
-    pub fn solve(&self, max_tries: u64) -> Result<Block, MiningError> {
-        let mut block = self.into_unsolved_block();
-        solve_block(&mut block, max_tries)?;
-        Ok(block)
-    }
 }
 
 /// Searches `block.header.nonce` until the compact target is met.
