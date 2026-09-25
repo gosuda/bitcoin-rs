@@ -27,6 +27,9 @@ use crate::event_loop::EventLoop;
 use crate::shutdown;
 use crate::state::NodeState;
 
+/// Bounded wait for the derived-index worker join on explicit shutdown and
+/// on Drop; expiry abandons the join, revokes the generation token, and
+/// poisons the index namespace.
 pub(crate) const DRAIN_DEADLINE: Duration = Duration::from_secs(5);
 
 const RPC_MAX_CONNECTIONS: usize = 128;
@@ -210,9 +213,11 @@ pub(crate) struct NodeServices {
 
 impl NodeServices {
     /// Raises shutdown, wakes and joins the event loop, joins core services,
-    /// drains subsystems, joins bootstrap/maintenance/signal workers, and only
-    /// then publishes a clean checkpoint. The first error is returned after
-    /// all remaining cleanup stages run; any error suppresses the checkpoint.
+    /// joins bootstrap/maintenance/signal workers, and only
+    /// then publishes a clean checkpoint. The derived-index worker is
+    /// stopped and joined by the caller before this teardown runs. The first
+    /// error is returned after all remaining cleanup stages run; any error
+    /// suppresses the checkpoint.
     pub(crate) fn teardown(
         &mut self,
         state: Option<&NodeState>,
@@ -235,9 +240,6 @@ impl NodeServices {
 
         let mut first_error = None;
         self.join_core_services(state, &mut first_error);
-        // Drain wait is deadline-bounded and never fails; it only bounds how
-        // long teardown parks before joining the remaining workers.
-        shutdown::drain_and_shutdown(DRAIN_DEADLINE);
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
         publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
         // Owner-local fee-estimator history: the event loop has drained, so
