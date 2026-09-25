@@ -1116,7 +1116,8 @@ impl MempoolGateway {
             }
         }
         self.commit(AdmissionOrigin::Reorg, |pool| {
-            if self.chain_generation.load(Ordering::Acquire) != change.odd_generation() {
+            let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
+            if fence.current(self) != Some(change.odd_generation()) {
                 return Err(ChainChangeError::GenerationMoved);
             }
             Ok(pool.remove_for_reorg(&failing))
