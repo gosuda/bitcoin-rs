@@ -8,8 +8,8 @@
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::HeaderAdmission;
+use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::accept_headers;
 use bitcoin_rs_chain::current_unix_seconds;
 use bitcoin_rs_consensus::rust_path::UtxoView;
@@ -745,6 +745,24 @@ impl Chainstate {
         self.shutdown.store(true, Ordering::Release);
     }
 
+    /// Reports whether chain mutation admission is closed.
+    ///
+    /// This is the "can the chain still mutate?" operational fact: true
+    /// once [`Self::fail_closed_for_recovery`] closed admission after a
+    /// fatal transition failure, or an orderly [`Self::close`] began
+    /// draining. Both close it because both refuse every later transition.
+    ///
+    /// PRE: none.
+    /// POST: reads the admission flag with acquire ordering, so a `true`
+    ///   answer follows the close that set it.
+    /// INVARIANT: this fact is separate from initial block download
+    ///   ([`bitcoin_rs_chain::InitialBlockDownload`]) and must never be
+    ///   folded into, or computed from, that boolean.
+    #[must_use]
+    pub fn is_closed_for_recovery(&self) -> bool {
+        self.admission.closed.load(Ordering::Acquire)
+    }
+
     /// Permanently closes mutation admission and waits for in-flight mutations.
     ///
     /// Dropping the returned guard releases only the exclusive drain lock;
@@ -985,8 +1003,7 @@ impl Chainstate {
             Err(error) => return HeaderAdmission::Refused(Box::new(error)),
         };
         let mut tree = self.block_tree().write();
-        let acceptance =
-            accept_headers(&mut tree, headers, self.network(), current_unix_seconds());
+        let acceptance = accept_headers(&mut tree, headers, self.network(), current_unix_seconds());
         match acceptance {
             Ok(node_ids) => {
                 let announced_tip = node_ids
