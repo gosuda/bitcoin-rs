@@ -4,9 +4,11 @@
 //! pending-reconstruction state for that connection and hands finished
 //! blocks to the caller, which delivers them through the ordinary block
 //! sink — the same validation and apply path as a `block` message, with no
-//! bypass. Short IDs are hints only: any ambiguity, missing piece, bound,
-//! or deadline miss degrades to a full-block `getdata` fallback on the same
-//! connection, so a wrong guess costs round trips, never a wrong block.
+//! bypass. Short IDs are hints only: any ambiguity, missing piece, or bound
+//! miss degrades to a full-block `getdata` fallback on the same connection,
+//! so a wrong guess costs round trips, never a wrong block; an entry whose
+//! deadline passes is dropped silently — liveness then rests on the
+//! connection's separate stall handling.
 //!
 //! BIP152 identity direction: a peer serializes the compact blocks it sends
 //! us with the version we advertised in our own `sendcmpct`
@@ -27,6 +29,7 @@ use bitcoin::bip152::{BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
 use bitcoin_rs_primitives::deserialize;
+use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 /// Compact-block protocol version this node advertises: the identity
@@ -261,12 +264,16 @@ impl Reconstruction {
 /// ID for one reconstruction whose transaction request, if any, has been
 /// answered.
 /// POST: return a block only when every slot exists, no more slots than
-/// `short_id_count` plus the prefills were declared, and the transaction-ID
-/// merkle root of the assembled body equals `header.merkle_root`; otherwise
-/// return `Err`.
+/// `short_id_count` plus the prefills were declared, the transaction-ID
+/// merkle root of the assembled body equals `header.merkle_root`, and the
+/// transaction-ID tree is not mutated; otherwise return `Err`.
 /// INVARIANT: no unverified compact reconstruction reaches
-/// [`Outcome::Complete`] (Core 31.1 rejects a seemingly complete mutated
-/// block before delivery, `blockencodings.cpp:207-219`).
+/// [`Outcome::Complete`]. The root check alone cannot detect the
+/// duplicate-final-transaction collision (CVE-2012-2459): `[a, b, c]` and
+/// `[a, b, c, c]` hash to the same root, so the reduction also rejects a
+/// mutated tree and the caller answers with the same-peer full-block
+/// fallback (Core 31.1 `READ_STATUS_FAILED` before delivery,
+/// `blockencodings.cpp:207-219`).
 fn complete_block(
     header: Header,
     filled: Vec<Option<Tx>>,
@@ -276,15 +283,69 @@ fn complete_block(
         return Err(());
     }
     let txs: Vec<Tx> = filled.into_iter().flatten().collect();
-    let root = bitcoin::merkle_tree::calculate_root(
-        txs.iter()
-            .map(|tx| bitcoin::Txid::from_byte_array(*tx.txid().as_bytes())),
-    )
-    .ok_or(())?;
-    if root.as_byte_array() != header.merkle_root.as_byte_array() {
+    let (root, mutated) = merkle_root_and_mutation(txs.iter().map(Tx::txid)).ok_or(())?;
+    if mutated || root != Txid(header.merkle_root) {
         return Err(());
     }
     Ok(Block { header, txs })
+}
+
+/// Mutation-aware transaction-ID merkle reduction over borrowed leaves:
+/// `(root, mutated)`, or `None` for an empty tree. Mirrors the consensus
+/// walker (`bitcoin_rs_consensus` `merkle_root_spine`): two equal *real*
+/// adjacent nodes at any level flag the tree as mutated, while the odd
+/// leftover paired with its duplicate-last copy never does — the property
+/// that makes `[a, b, c, c]` colliding with `[a, b, c]` a detected mutation
+/// rather than a silent pass.
+fn merkle_root_and_mutation(leaves: impl ExactSizeIterator<Item = Txid>) -> Option<(Txid, bool)> {
+    if leaves.len() == 0 {
+        return None;
+    }
+    let hash_pair = |left: Txid, right: Txid| {
+        let mut pair = [0_u8; 64];
+        pair[..32].copy_from_slice(left.as_bytes());
+        pair[32..].copy_from_slice(right.as_bytes());
+        Txid(double_sha256(&pair))
+    };
+    // One pending node per level; a block holds far fewer than 2^64 leaves.
+    let mut spine: [Option<Txid>; 64] = [None; 64];
+    let mut mutated = false;
+    for leaf in leaves {
+        let mut current = leaf;
+        let mut height = 0;
+        while let Some(left) = spine[height] {
+            spine[height] = None;
+            if left == current {
+                mutated = true;
+            }
+            current = hash_pair(left, current);
+            height += 1;
+        }
+        spine[height] = Some(current);
+    }
+    // Fold the right spine bottom-up: the carry rises to each pending height
+    // through duplicate-last self-pairs (never a mutation), then joins that
+    // pending node as its right sibling.
+    let mut carry: Option<(Txid, usize)> = None;
+    for (height, slot) in spine.iter().enumerate() {
+        let Some(node) = *slot else { continue };
+        carry = Some(match carry {
+            None => (node, height),
+            Some((accumulated, accumulated_height)) => {
+                let mut right = accumulated;
+                let mut right_height = accumulated_height;
+                while right_height < height {
+                    right = hash_pair(right, right);
+                    right_height += 1;
+                }
+                if node == right {
+                    mutated = true;
+                }
+                (hash_pair(node, right), height + 1)
+            }
+        });
+    }
+    carry.map(|(root, _height)| (root, mutated))
 }
 
 /// Matches the message's short IDs against the hint identities and fills
@@ -971,6 +1032,67 @@ mod tests {
         assert!(
             matches!(outcome, Outcome::Fallback(_)),
             "a merkle mismatch must never complete, got {outcome:?}"
+        );
+    }
+
+    /// A completion whose transaction list ends in a duplicated final
+    /// transaction hashes to the header's merkle root (CVE-2012-2459: the
+    /// duplicate leaf pairs with itself exactly as the padded single leaf
+    /// does), so the root check alone would deliver the mutated body; the
+    /// mutation-aware completion rejects it with the same-peer full-block
+    /// fallback (Core 31.1 `blockencodings.cpp:207-219`).
+    #[test]
+    fn duplicate_final_transaction_completion_falls_back() {
+        let native = conforming_block(vec![test_tx(1), test_tx(2), test_tx(3)]);
+        // Fixture validity: the mutated four-transaction set really does
+        // commit to the honest header's root — the collision this test
+        // exists to reject.
+        let mut mutated = native.clone();
+        mutated.txs.push(native.txs[2].clone());
+        assert_eq!(
+            registry_block(&mutated).compute_merkle_root(),
+            registry_block(&native).compute_merkle_root(),
+            "fixture must reproduce the duplicate-final-transaction collision"
+        );
+
+        let compact = HeaderAndShortIds {
+            header: registry_block(&native).header,
+            nonce: 0x77,
+            // The two honest non-coinbase transactions as hinted short-ID
+            // slots; the duplicated final transaction arrives as the
+            // prefill at slot 3.
+            short_ids: vec![
+                wtxid_short_id(&native, 0x77, &native.txs[1]),
+                wtxid_short_id(&native, 0x77, &native.txs[2]),
+            ],
+            prefilled_txs: vec![
+                PrefilledTransaction {
+                    idx: 0,
+                    tx: registry_tx(&native.txs[0]),
+                },
+                PrefilledTransaction {
+                    idx: 2,
+                    tx: registry_tx(&native.txs[2]),
+                },
+            ],
+        };
+        let hints = SetHints {
+            txs: vec![native.txs[1].clone(), native.txs[2].clone()],
+        };
+        let mut reconstruction = Reconstruction::new();
+
+        let outcome = reconstruction.receive_cmpctblock(
+            &CmpctBlock {
+                compact_block: compact,
+            },
+            COMPACT_BLOCK_VERSION,
+            &hints,
+            now(),
+        );
+
+        assert!(
+            matches!(outcome, Outcome::Fallback(_)),
+            "a mutated completion must fall back, got {outcome:?}"
         );
     }
 
