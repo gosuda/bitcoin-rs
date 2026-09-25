@@ -231,12 +231,7 @@ impl NodeState {
         });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
-        let (
-            derived_index_runtime,
-            derived_index_spawn,
-            derived_index_lifecycle,
-            derived_index_adapter,
-        ) = match derived_index_open_spec {
+        let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
                 spec.utxo = Some(Arc::clone(&utxo));
                 spec.chain_transition = Some(chainstate.read_fence());
@@ -258,26 +253,30 @@ impl NodeState {
                     Arc::clone(&lifecycle),
                 ));
                 let generation = bitcoin_rs_index::runtime::Generation::new(spec.epoch);
-                (
-                    Some(runtime),
-                    Some(TxIndexSpawn {
+                Some((
+                    runtime,
+                    TxIndexSpawn {
                         spec,
                         generation,
                         block_source,
                         body_source,
                         wake_rx,
                         recovery_reporter: Arc::clone(&recovery_reporter),
-                    }),
-                    Some(lifecycle),
-                    Some(adapter),
-                )
+                    },
+                    lifecycle,
+                    adapter,
+                ))
             }
-            None => (None, None, None, None),
+            None => None,
         };
         let derived_index_status =
             Arc::new(bitcoin_rs_index::runtime::DerivedIndexCapability::new(
-                derived_index_lifecycle.clone(),
-                derived_index_runtime.clone(),
+                derived_index_parts
+                    .as_ref()
+                    .map(|(_, _, lifecycle, _)| Arc::clone(lifecycle)),
+                derived_index_parts
+                    .as_ref()
+                    .map(|(runtime, _, _, _)| Arc::clone(runtime)),
                 derived_index_capabilities(&config),
             ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
@@ -363,7 +362,9 @@ impl NodeState {
             crate::chain_effects::ChainEffects::new(
                 Arc::clone(&blocks),
                 Arc::clone(&zmq_publisher),
-                derived_index_runtime.clone(),
+                derived_index_parts
+                    .as_ref()
+                    .map(|(runtime, _, _, _)| Arc::clone(runtime)),
             ),
             Arc::clone(&mining_generation),
             Some(Arc::clone(&mempool_gateway)),
@@ -434,12 +435,10 @@ impl NodeState {
             #[cfg(test)]
             resume_source,
             storage,
-            derived_index_runtime,
-            derived_index_spawn,
-            derived_index_worker: None,
-            derived_index_lifecycle,
-            derived_index_adapter,
-            derived_index_status,
+            derived_index: super::index::DerivedIndexHost::from_parts(
+                derived_index_parts,
+                derived_index_status,
+            ),
             prune_service,
             zmq_publisher,
             mempool,
