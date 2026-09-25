@@ -1186,6 +1186,18 @@ impl MempoolGateway {
         })
     }
 
+    /// The configured total-size ceiling of the underlying pool, in vbytes.
+    ///
+    /// PRE: none.
+    /// POST: the value is the pool's `max_total_bytes` at the moment of the
+    /// read; zero means unlimited. Callers pass it to
+    /// [`MempoolGateway::enforce_size_limit`] to trim to the configured limit
+    /// rather than a caller-invented target.
+    #[must_use]
+    pub fn max_total_bytes(&self) -> u64 {
+        self.pool.read().limits.max_total_bytes
+    }
+
     /// Commits `pool.enforce_size_limit` and publishes its result.
     pub fn enforce_size_limit(
         &self,
