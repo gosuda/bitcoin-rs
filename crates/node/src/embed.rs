@@ -197,10 +197,14 @@ impl Node {
 
     pub(crate) fn shutdown_blocking(mut self) -> Result<(), NodeError> {
         // Explicit shutdown must release index stores, not abandon their
-        // workers at the bounded Drop deadline.
+        // workers at the bounded Drop deadline: stop and join the
+        // derived-index worker before teardown, so the clean checkpoint
+        // publishes and chainstate closes only after the worker is gone —
+        // the same order `Drop for Node` uses.
         let Some(services) = self.services.as_mut() else {
             return Err(NodeError::Shutdown("node was already shut down".to_owned()));
         };
+        self.state.bounded_index_shutdown(DRAIN_DEADLINE);
         let result = services
             .teardown(Some(&self.state), TeardownMode::CleanShutdown)
             .map_err(|error| NodeError::Shutdown(error.to_string()));

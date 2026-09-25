@@ -15,6 +15,9 @@ the first embedder — there is one lifecycle implementation, not two.
   the event loop; join the event loop and RPC listener; stop metrics; join
   P2P core, ingress, and relay workers; drain subsystems; join bootstrap,
   checkpoint, and signal workers; then publish a clean checkpoint if eligible.
+  On every stop path the derived-index worker is stopped and joined
+  before `teardown` runs, so the clean checkpoint publishes and chainstate
+  closes only after the index released its stores.
   `TeardownMode` distinguishes `StartupAbort` from `CleanShutdown`.
   An aborted or dropped run never publishes a clean checkpoint. Clean
   shutdown publishes only after every prior cleanup stage succeeded. The
