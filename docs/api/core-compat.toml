@@ -1,27 +1,26 @@
 # Bitcoin Core reference record
 #
-# Two things live in this file, and both are machine-read:
+# Only `[reference]` is machine-read: it pins the Bitcoin Core identities
+# every claim is made against -- the released product, the kernel tree the
+# oracle lane links, the replay corpora, and the formal model checker.
+# `bin/bitcoin-rs/tests/support/reference_set.rs` parses and validates them;
+# `scripts/provision-ci-reference-fixtures.sh` consumes the release pins;
+# `scripts/check_models.py` fingerprints this file into each model-check run.
 #
-#   * `[reference]` pins the Bitcoin Core identities every claim is made
-#     against: the released product, the kernel tree the oracle lane links,
-#     the replay corpora, and the formal model checker.
-#     `bin/bitcoin-rs/tests/support/reference_set.rs` parses and validates
-#     them; `scripts/provision-ci-reference-fixtures.sh` consumes the
-#     release pins; `scripts/check_models.py` fingerprints this file into
-#     each model-check run.
-#   * `[admission_profile]` records selected policy evidence and explicit
-#     non-parity cases. `docs/policies/mempool-policy.md` reads it as
-#     prose evidence.
+# `[admission_profile]` is policy evidence, not machine-checked input: it
+# records the selected settings and explicit non-parity cases that
+# `docs/policies/mempool-policy.md` cites in prose.
 #
 # External-surface compatibility claims do not live here. `REGISTRY` in
 # `crates/rpc/src/registry.rs` is their single owner: each row binds one
-# dispatch arm to one status from the six-state vocabulary in
+# surface to one status from the six-state vocabulary in
 # `crates/rpc/src/manifest.rs` -- Supported, Deviation, Implemented
-# (unverified), Extension, Disabled, Unimplemented -- and
-# `crates/rpc/tests/manifest_coverage.rs` renders `docs/rpc-reference.md`
-# from that table, checks it against the dispatcher, the REST router and
-# the ZMQ publisher, and refuses a `Supported` claim while
-# `[reference].differential_harness` below is false.
+# (unverified), Extension, Disabled, Unimplemented -- and only a shipped
+# JSON-RPC row also carries a dispatch arm (REST, ZMQ, `Unimplemented` and
+# `pending` rows set `handler: None`). `crates/rpc/tests/manifest_coverage.rs`
+# renders `docs/rpc-reference.md` from that table, checks it against the
+# dispatcher, the REST router and the fixed Core ZMQ topic list, and refuses
+# a `Supported` claim while `[reference].differential_harness` below is false.
 
 [reference]
 # The development version of the kernel oracle, distinct from the released

@@ -230,19 +230,32 @@ fn the_pinned_core_reference_matches_the_locked_kernel() {
             .get(version_key)
             .and_then(toml::Value::as_str)
             .unwrap_or_else(|| panic!("`{version_key}` must be a string"));
-        let needle = format!("name = \"{name}\"");
-        let Some(at) = CARGO_LOCK.find(&needle) else {
-            panic!("`{name}` is pinned in the reference record but absent from Cargo.lock");
-        };
-        let locked = CARGO_LOCK[at..]
-            .lines()
-            .nth(1)
-            .and_then(|line| line.strip_prefix("version = \""))
-            .and_then(|rest| rest.strip_suffix('"'))
-            .unwrap_or_else(|| panic!("Cargo.lock entry for `{name}` has no version line"));
-        assert_eq!(
-            locked, version,
-            "`{name}` is locked at {locked} but the reference record is written \
+        // Every `[[package]]` block naming the crate contributes its version;
+        // a crate locked at two versions must agree at both, not just at the
+        // first substring hit.
+        let locked: Vec<&str> = CARGO_LOCK
+            .split("\n[[package]]\n")
+            .filter_map(|block| {
+                let mut lines = block.lines();
+                let declared = lines.next()?.strip_prefix("name = \"")?.strip_suffix('"')?;
+                if declared != name {
+                    return None;
+                }
+                lines.find_map(|line| {
+                    line.strip_prefix("version = \"")
+                        .and_then(|rest| rest.strip_suffix('"'))
+                })
+            })
+            .collect();
+        assert!(
+            !locked.is_empty(),
+            "`{name}` is pinned in the reference record but absent from Cargo.lock"
+        );
+        assert!(
+            locked
+                .iter()
+                .all(|&locked_version| locked_version == version),
+            "`{name}` is locked at {locked:?} but the reference record is written \
              against {version}. The pinned Bitcoin Core revision comes from this \
              crate's vendored tree, so a bump means the claims in \
              docs/api/core-compat.toml need re-reading, not just this line."

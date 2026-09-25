@@ -109,6 +109,31 @@ impl Status {
             Self::Unimplemented => "Unimplemented",
         }
     }
+
+    /// The generated reference's legend line for this status.
+    ///
+    /// Descriptions stay beside the labels and render in `SECTIONS` order, so
+    /// a vocabulary or ordering change cannot leave the legend describing a
+    /// different list. A legend line describes the status, never the current
+    /// table contents: a "no row claims this" clause would rot silently the
+    /// day a row does.
+    #[must_use]
+    pub const fn legend(self) -> &'static str {
+        match self {
+            Self::Supported => {
+                "differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `docs/api/core-compat.toml`."
+            }
+            Self::Deviation => {
+                "shipped with a recorded difference from Core; notes cite the source file."
+            }
+            Self::ImplementedUnverified => "shipped; not compared against the pinned reference.",
+            Self::Extension => "bitcoin-rs-specific surface with no Core counterpart.",
+            Self::Disabled => "reserved for parameter-level refusal with a stable error.",
+            Self::Unimplemented => {
+                "Core surface this node does not expose: JSON-RPC answers `method not found`, REST answers 404."
+            }
+        }
+    }
 }
 
 /// One declared surface.
@@ -230,14 +255,14 @@ pub fn render_reference() -> String {
     out.push_str("Surface contract of bitcoin-rs against Bitcoin Core ");
     out.push_str(CORE_VERSION);
     out.push_str(".\n\n");
-    out.push_str("- **Supported** - differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `docs/api/core-compat.toml`. No row qualifies yet.\n");
-    out.push_str("- **Deviation** - shipped with a recorded difference from Core; notes cite the source file.\n");
-    out.push_str(
-        "- **Implemented (unverified)** - shipped; not compared against the pinned reference.\n",
-    );
-    out.push_str("- **Extension** - bitcoin-rs-specific surface with no Core counterpart.\n");
-    out.push_str("- **Disabled** - reserved for parameter-level refusal with a stable error; no row uses it.\n");
-    out.push_str("- **Unimplemented** - Core surface this node does not expose: JSON-RPC answers `method not found`, REST answers 404.\n\n");
+    for status in SECTIONS {
+        out.push_str("- **");
+        out.push_str(status.label());
+        out.push_str("** - ");
+        out.push_str(status.legend());
+        out.push('\n');
+    }
+    out.push('\n');
     out.push_str("`since` is the bitcoin-rs version whose surface a row describes; `pending` marks a row whose implementation lands in a later change. Rows naming a cargo feature exist only when that feature is compiled.\n\n");
     out.push_str("Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source command tables (src/rpc/*.cpp, src/wallet/rpc/*.cpp, src/rest.cpp StartREST, src/zmq/zmqpublishnotifier.cpp) - the same registrations Core's `help` output prints. Hidden test/administration commands are intentionally absent.\n");
     for kind in [SurfaceKind::Rpc, SurfaceKind::Rest, SurfaceKind::Zmq] {
