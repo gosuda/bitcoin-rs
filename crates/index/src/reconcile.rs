@@ -7,7 +7,7 @@
 
 use bitcoin_rs_primitives::Hash256;
 
-use crate::{IndexCapabilities, IndexWatermark, IndexWatermarks};
+use crate::{IndexCapabilities, IndexCapability, IndexWatermark, IndexWatermarks};
 
 /// Durable consumer-cursor length: epoch (8 LE) + sequence (8 LE) + height (4 LE) + hash.
 pub(crate) const CURSOR_BYTE_LEN: usize = 52;
@@ -98,46 +98,34 @@ pub enum ReconcileLeg {
 
 /// Reconciliation legs of every capability the worker owns.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ReconcilePhase {
-    /// Transaction-lookup leg.
-    pub tx_lookup: ReconcileLeg,
-    /// Script-history leg.
-    pub script_history: ReconcileLeg,
-    /// Compact live-output leg.
-    pub script_live: ReconcileLeg,
-}
+pub struct ReconcilePhase([ReconcileLeg; 3]);
 
 impl ReconcilePhase {
     /// Every capability moving forward.
-    pub(crate) const FORWARD: Self = Self {
-        tx_lookup: ReconcileLeg::Forward,
-        script_history: ReconcileLeg::Forward,
-        script_live: ReconcileLeg::Forward,
-    };
+    pub(crate) const FORWARD: Self = Self([ReconcileLeg::Forward; 3]);
 
     /// Returns the phase with `leg` assigned to every capability in
     /// `capabilities`.
     #[must_use]
-    pub const fn with_leg(mut self, capabilities: IndexCapabilities, leg: ReconcileLeg) -> Self {
-        if capabilities.tx_lookup {
-            self.tx_lookup = leg;
-        }
-        if capabilities.script_history {
-            self.script_history = leg;
-        }
-        if capabilities.script_live {
-            self.script_live = leg;
+    pub fn with_leg(mut self, capabilities: IndexCapabilities, leg: ReconcileLeg) -> Self {
+        for capability in IndexCapability::ALL {
+            if capabilities.contains(capability) {
+                self.0[capability.index()] = leg;
+            }
         }
         self
     }
 
     /// Capabilities whose rows are rebuilding from genesis.
     #[must_use]
-    pub const fn rebuilding(self) -> IndexCapabilities {
+    pub fn rebuilding(self) -> IndexCapabilities {
+        let rebuilding = |capability: IndexCapability| {
+            matches!(self.0[capability.index()], ReconcileLeg::Rebuilding)
+        };
         IndexCapabilities {
-            tx_lookup: matches!(self.tx_lookup, ReconcileLeg::Rebuilding),
-            script_history: matches!(self.script_history, ReconcileLeg::Rebuilding),
-            script_live: matches!(self.script_live, ReconcileLeg::Rebuilding),
+            tx_lookup: rebuilding(IndexCapability::TxLookup),
+            script_history: rebuilding(IndexCapability::ScriptHistory),
+            script_live: rebuilding(IndexCapability::ScriptLive),
         }
     }
 
@@ -145,7 +133,7 @@ impl ReconcilePhase {
     /// the lowest common ancestor any capability rewinds to.
     #[must_use]
     pub(crate) fn rolling_back(self) -> Option<(u32, u32)> {
-        [self.tx_lookup, self.script_history, self.script_live]
+        self.0
             .into_iter()
             .filter_map(|leg| match leg {
                 ReconcileLeg::RollingBack {
@@ -165,11 +153,7 @@ impl ReconcilePhase {
             ReconcileLeg::RollingBack { .. } => ReconcileLeg::Forward,
             other => other,
         };
-        Self {
-            tx_lookup: finish(self.tx_lookup),
-            script_history: finish(self.script_history),
-            script_live: finish(self.script_live),
-        }
+        Self(self.0.map(finish))
     }
 }
 
