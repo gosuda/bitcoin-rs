@@ -10,7 +10,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::os::unix::fs::symlink;
 
 use bitcoin_rs_storage::{
-    ColumnFamily, DataDirAnchor, FootprintError, KvStore, PhysicalObservationKind, WriteBatch,
+    ColumnFamily, DataDirAnchor, FootprintError, KvStore, PhysicalObservationKind,
     logical_column_family, logical_store_owners, measure_physical_tree,
 };
 use tempfile::tempdir;

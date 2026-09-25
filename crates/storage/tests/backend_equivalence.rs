@@ -1,8 +1,6 @@
 //! Cross-backend equivalence tests for the storage abstraction.
 
-use bitcoin_rs_storage::{
-    ColumnFamily, KvIter, KvPair, KvStore, StorageError, WriteBatch, WriteCondition,
-};
+use bitcoin_rs_storage::{ColumnFamily, KvIter, KvPair, KvStore, StorageError, WriteCondition};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;

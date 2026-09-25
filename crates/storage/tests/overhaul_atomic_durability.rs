@@ -15,8 +15,8 @@
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin_rs_storage::{
-    ColumnFamily, KvIter, KvSnapshot, KvStore, PersistFault, StorageError, WriteBatch,
-    WriteCondition,
+    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PersistFault,
+    StorageError, WriteCondition,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -61,7 +61,7 @@ fn snapshot_all(store: &impl KvStore) -> Vec<FamilyState> {
 }
 
 /// A one-row-per-family batch tagged `label`; family index is the key.
-fn multi_family_batch<S: KvStore>(store: &S, label: &[u8]) -> S::WriteBatch {
+fn multi_family_batch<S: KvStore>(store: &S, label: &[u8]) -> BufferedWriteBatch {
     let mut batch = store.new_batch();
     for (index, cf) in FAMILIES.iter().enumerate() {
         batch.put(*cf, &[u8::try_from(index).unwrap_or(0)], label);
@@ -609,89 +609,43 @@ impl OneFamilyStore {
     }
 }
 
-enum OneFamilyOp {
-    Put {
-        cf: ColumnFamily,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    },
-    Delete {
-        cf: ColumnFamily,
-        key: Vec<u8>,
-    },
-    DeleteRange {
-        cf: ColumnFamily,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    },
-}
-
 /// The stable one-byte key the strawman stores rows under: a family's row
 /// key is its `repr(u8)` discriminant, reconstructed losslessly.
 fn family_index(cf: ColumnFamily) -> u8 {
     u8::try_from(cf.index()).unwrap_or(0)
 }
 
-impl OneFamilyOp {
-    fn cf(&self) -> ColumnFamily {
-        match self {
-            Self::Put { cf, .. } | Self::Delete { cf, .. } | Self::DeleteRange { cf, .. } => *cf,
+/// Reads the target family of one recorded operation.
+fn op_cf(op: &BatchOp) -> ColumnFamily {
+    match op {
+        BatchOp::Put { cf, .. } | BatchOp::Delete { cf, .. } | BatchOp::DeleteRange { cf, .. } => {
+            *cf
         }
-    }
-}
-
-#[derive(Default)]
-struct OneFamilyBatch {
-    ops: Vec<OneFamilyOp>,
-}
-
-impl WriteBatch for OneFamilyBatch {
-    fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
-        self.ops.push(OneFamilyOp::Put {
-            cf,
-            key: key.to_vec(),
-            value: value.to_vec(),
-        });
-    }
-
-    fn delete(&mut self, cf: ColumnFamily, key: &[u8]) {
-        self.ops.push(OneFamilyOp::Delete {
-            cf,
-            key: key.to_vec(),
-        });
-    }
-
-    fn delete_range(&mut self, cf: ColumnFamily, start: &[u8], end: &[u8]) {
-        self.ops.push(OneFamilyOp::DeleteRange {
-            cf,
-            start: start.to_vec(),
-            end: end.to_vec(),
-        });
     }
 }
 
 /// Deliberate defect under test: an armed commit lands only the batch's
 /// first family; the rest silently drops, leaving the store cross-family
 /// mixed. Unarmed commits land every family.
-fn apply_one_family_ops(rows: &mut OneFamilyShared, ops: Vec<OneFamilyOp>) {
+fn apply_one_family_ops(rows: &mut OneFamilyShared, ops: Vec<BatchOp>) {
     let defect_armed = rows.defect_armed;
     rows.defect_armed = false;
-    let Some(committed) = ops.first().map(OneFamilyOp::cf) else {
+    let Some(committed) = ops.first().map(op_cf) else {
         return;
     };
     for op in ops
         .into_iter()
-        .filter(|op| !defect_armed || op.cf() == committed)
+        .filter(|op| !defect_armed || op_cf(op) == committed)
     {
-        let cf = family_index(op.cf());
+        let cf = family_index(op_cf(&op));
         match op {
-            OneFamilyOp::Put { key, value, .. } => {
-                rows.rows.insert((cf, key), value);
+            BatchOp::Put { key, value, .. } => {
+                rows.rows.insert((cf, key), value.into());
             }
-            OneFamilyOp::Delete { key, .. } => {
+            BatchOp::Delete { key, .. } => {
                 rows.rows.remove(&(cf, key));
             }
-            OneFamilyOp::DeleteRange { start, end, .. } => {
+            BatchOp::DeleteRange { start, end, .. } => {
                 let doomed: Vec<Vec<u8>> = rows
                     .rows
                     .keys()
@@ -707,8 +661,6 @@ fn apply_one_family_ops(rows: &mut OneFamilyShared, ops: Vec<OneFamilyOp>) {
 }
 
 impl KvStore for OneFamilyStore {
-    type WriteBatch = OneFamilyBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self
             .rows
@@ -738,19 +690,19 @@ impl KvStore for OneFamilyStore {
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
-        OneFamilyBatch::default()
+    fn new_batch(&self) -> BufferedWriteBatch {
+        BufferedWriteBatch::default()
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
-        apply_one_family_ops(&mut self.rows.lock(), batch.ops);
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
+        apply_one_family_ops(&mut self.rows.lock(), batch.into_ops());
         Ok(())
     }
 
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
-        batch: Self::WriteBatch,
+        batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
         for condition in conditions {
             let (cf, key) = condition.location();
