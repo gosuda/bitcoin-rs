@@ -57,13 +57,13 @@ little-endian `u32` sequence counter frame. Reorg disconnects are emitted
 tip-first before connects on the replacement branch. Each socket owns
 `DEFAULT_ZMQ_HWM = 1_000`.
 `bitcoin_rs_rpc::zmq` owns the compatibility payload and transport;
-`ChainFollowers` / `ChainEffects` own emission timing relative to committed
+`ChainFollowers` owns emission timing relative to committed
 chain transitions.
 
 ### Post-commit chain effects
 Derived work that follows a committed connect or disconnect: RPC `BlockLog`,
 ZMQ projections, TxIndex wake, mining generation, and mempool admission-state
-notifications. `ChainFollowers` / `ChainEffects` own dispatch timing after
+notifications. `ChainFollowers` owns dispatch timing after
 the tip is published, while the chain transition is still held. Transaction
 ownership follows [ARCH-05](docs/contracts/architecture.md#arch-05-node-composition-and-orchestration-boundary).
 Derived work cannot fail the authoritative transition.

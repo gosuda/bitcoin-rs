@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Txid};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
 use parking_lot::RwLock;
 
 use bitcoin_rs_chainstate::{ConnectOutcome, DisconnectOutcome};
@@ -17,38 +17,63 @@ use bitcoin_rs_mempool::ChainChangeGuard;
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
-/// Post-commit adapters that follow a committed chain transition.
+/// Node-owned derived work that follows a committed chain event.
 ///
-/// Consumer failure is ignored. A full ZMQ socket or a lagged index cannot
-/// invalidate chainstate.
+/// `Chainstate` does not hold this. The composition root dispatches after
+/// each committed connect or disconnect, and this type is the one owner of
+/// that dispatch: the RPC block log, hash/raw ZMQ, the derived-index wake,
+/// the sequence `C`/`D` events, the mining-generation wake, and mempool
+/// admission all run from here, in the order `ARCH-07` fixes.
+///
+/// INVARIANT: consumer failure is ignored. A full ZMQ socket or a lagged
+/// index cannot invalidate chainstate.
 #[derive(Clone)]
-pub struct ChainEffects {
+pub struct ChainFollowers {
     blocks: Arc<RwLock<BlockLog>>,
     zmq: Arc<dyn ZmqPublisher>,
     derived_index: Option<Arc<DerivedIndexRuntime>>,
+    mining: Arc<crate::mining::MiningGenerationSignal>,
+    mempool: Option<Arc<MempoolGateway>>,
 }
 
-impl ChainEffects {
-    /// Builds the production consumer set.
+impl ChainFollowers {
+    /// Builds the follower set over its consumers.
+    ///
+    /// PRE: each argument is the live consumer it names; `mempool` is `None`
+    /// only for a node that runs no admission gate.
+    ///
+    /// POST: the set holds exactly those consumers and mutates none of them.
+    ///
+    /// INVARIANT: construction does not attach observers or wake any
+    /// consumer; effects run only through [`Self::on_connect`] and
+    /// [`Self::on_disconnect`].
     #[must_use]
     pub fn new(
         blocks: Arc<RwLock<BlockLog>>,
         zmq: Arc<dyn ZmqPublisher>,
         derived_index: Option<Arc<DerivedIndexRuntime>>,
+        mining: Arc<crate::mining::MiningGenerationSignal>,
+        mempool: Option<Arc<MempoolGateway>>,
     ) -> Self {
         Self {
             blocks,
             zmq,
             derived_index,
+            mining,
+            mempool,
         }
     }
 
-    /// Empty RPC log, no-op ZMQ, no `TxIndex`. Test and planner handles use this.
+    /// Empty RPC log, no-op ZMQ, no index, no admission, a fresh mining signal.
+    ///
+    /// Test and planner handles use this.
     #[must_use]
     pub fn noop() -> Self {
         Self::new(
             Arc::new(RwLock::new(BlockLog::new())),
             Arc::new(crate::NoOpZmqPublisher),
+            None,
+            Arc::new(crate::mining::MiningGenerationSignal::new()),
             None,
         )
     }
@@ -79,76 +104,6 @@ impl ChainEffects {
         self.derived_index.is_some() || self.zmq.wants_rawblock()
     }
 
-    /// Pushes the RPC block-log record. See `ARCH-07` for effect ordering.
-    pub fn record_connected(&self, height: u32, block: &Block) {
-        self.blocks
-            .write()
-            .push(BlockRecord::from_block(height, block));
-    }
-
-    /// Emits hash/raw ZMQ topics. See `ARCH-07` for effect ordering.
-    pub fn emit_connected(
-        &self,
-        tip_hash: Hash256,
-        block_bytes: &[u8],
-        txids: &[Txid],
-        raw_txs: Option<&[Vec<u8>]>,
-    ) {
-        if !self.zmq.wants_notifications() {
-            return;
-        }
-        self.zmq.publish_hashblock(tip_hash);
-        if self.zmq.wants_rawblock() {
-            self.zmq.publish_rawblock(block_bytes);
-        }
-        if let Some(raw_txs) = raw_txs {
-            for (txid, rawtx_bytes) in txids.iter().zip(raw_txs) {
-                self.zmq.publish_hashtx(*txid);
-                self.zmq.publish_rawtx(rawtx_bytes);
-            }
-        } else {
-            for txid in txids {
-                self.zmq.publish_hashtx(*txid);
-            }
-        }
-    }
-
-    /// `TxIndex` wake and sequence `C`. See `ARCH-07` for effect ordering.
-    pub fn after_connect(&self, hash: Hash256) {
-        self.wake_tx_index();
-        if self.zmq.wants_notifications() {
-            self.zmq.publish_sequence(SequenceEvent::Connected(hash));
-        }
-    }
-
-    /// Pops the RPC cache if the tail hash matches this block. See `ARCH-07`.
-    ///
-    /// The log starts empty on boot and pruning may drop the tail. Matching
-    /// the hash stops a pop of a record that is not this block.
-    pub fn before_disconnect(&self, hash: Hash256) {
-        let mut blocks = self.blocks.write();
-        if blocks
-            .last()
-            .is_some_and(|record| record.hash == BlockHash::from(hash))
-        {
-            blocks.pop();
-        }
-    }
-
-    /// `TxIndex` wake and sequence `D`. See `ARCH-07` for effect ordering.
-    pub fn after_disconnect(&self, hash: Hash256) {
-        self.wake_tx_index();
-        if self.zmq.wants_notifications() {
-            self.zmq.publish_sequence(SequenceEvent::Disconnected(hash));
-        }
-    }
-
-    fn wake_tx_index(&self) {
-        if let Some(runtime) = &self.derived_index {
-            runtime.wake();
-        }
-    }
-
     /// Shared RPC block log. Production RPC reads `NodeState::blocks`.
     #[must_use]
     pub fn block_log(&self) -> &Arc<RwLock<BlockLog>> {
@@ -161,43 +116,17 @@ impl ChainEffects {
         self.derived_index.as_ref()
     }
 
-    /// Replaces the `TxIndex` wake handle in place for tests that attach a worker
-    /// after constructing the facade.
-    pub fn set_tx_index(&mut self, derived_index: Option<Arc<DerivedIndexRuntime>>) {
-        self.derived_index = derived_index;
+    /// Mining generation signal.
+    #[must_use]
+    pub fn mining(&self) -> &Arc<crate::mining::MiningGenerationSignal> {
+        &self.mining
     }
 
-    /// RPC log, ZMQ, and index wake for a committed connect.
-    pub fn connected(&self, block: &Block, outcome: &ConnectOutcome) {
-        self.record_connected(outcome.height, block);
-        self.emit_connected(
-            outcome.hash,
-            &outcome.block_bytes,
-            &outcome.txids,
-            outcome.raw_txs.as_deref(),
-        );
-        self.after_connect(outcome.hash);
+    #[must_use]
+    pub(crate) fn mempool_gateway(&self) -> Option<&Arc<MempoolGateway>> {
+        self.mempool.as_ref()
     }
 
-    /// RPC log, ZMQ, and index wake for a committed disconnect.
-    pub fn disconnected(&self, outcome: &DisconnectOutcome) {
-        self.before_disconnect(outcome.hash);
-        self.after_disconnect(outcome.hash);
-    }
-}
-
-/// Node-owned derived work that follows a committed chain event.
-///
-/// `Chainstate` does not hold this. The composition root dispatches after
-/// each committed connect or disconnect.
-#[derive(Clone)]
-pub struct ChainFollowers {
-    effects: ChainEffects,
-    mining: Arc<crate::mining::MiningGenerationSignal>,
-    mempool: Option<Arc<MempoolGateway>>,
-}
-
-impl ChainFollowers {
     pub(crate) fn begin_mempool_change(
         &self,
     ) -> core::result::Result<Option<ChainChangeGuard>, bitcoin_rs_chainstate::ApplyError> {
@@ -233,11 +162,20 @@ impl ChainFollowers {
         Ok(())
     }
 
-    pub(crate) fn mempool_gateway(&self) -> Option<&Arc<MempoolGateway>> {
-        self.mempool.as_ref()
-    }
-
-    pub(crate) fn committed_connect(&self, block: &Block, outcome: &ConnectOutcome) {
+    /// Dispatches a committed connect: RPC log, ZMQ, index wake, sequence `C`,
+    /// mining wake, and orphan re-evaluation, in that order.
+    ///
+    /// PRE: `outcome` is committed and the mempool fence, when present, is
+    /// held.
+    ///
+    /// POST: block-log record, hash/raw ZMQ, derived-index wake plus sequence
+    /// `C`, mining wake, and mempool orphan re-evaluation run once in that
+    /// order. The block-inclusion removals are committed before sequence
+    /// `C`; a `sequence` subscriber sees no `R` event for them, because the
+    /// block event already covers the departures.
+    ///
+    /// INVARIANT: consumer failure cannot invalidate chainstate.
+    pub fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
         if let Some(gateway) = &self.mempool {
             let block_txs: Vec<&bitcoin_rs_primitives::Tx> = block.txs.iter().collect();
             gateway.remove_for_block(
@@ -247,71 +185,84 @@ impl ChainFollowers {
                 outcome.height,
             );
         }
-        self.connected(block, outcome);
-    }
-
-    /// Production follower set.
-    #[must_use]
-    pub fn new(
-        effects: ChainEffects,
-        mining: Arc<crate::mining::MiningGenerationSignal>,
-        mempool: Option<Arc<MempoolGateway>>,
-    ) -> Self {
-        Self {
-            effects,
-            mining,
-            mempool,
+        self.blocks
+            .write()
+            .push(BlockRecord::from_block(outcome.height, block));
+        self.publish_block(outcome);
+        self.wake_index();
+        if self.zmq.wants_notifications() {
+            self.zmq
+                .publish_sequence(SequenceEvent::Connected(outcome.hash));
         }
-    }
-
-    /// No RPC log, no-op ZMQ, no index, no admission, a fresh mining signal.
-    #[must_use]
-    pub fn noop() -> Self {
-        Self::new(
-            ChainEffects::noop(),
-            Arc::new(crate::mining::MiningGenerationSignal::new()),
-            None,
-        )
-    }
-
-    /// Capture flags the apply path should honour for later dispatch.
-    #[must_use]
-    pub fn capture_flags(&self) -> (bool, bool) {
-        (self.effects.needs_rawtx(), self.effects.needs_block_bytes())
-    }
-
-    /// Post-commit adapters (RPC, ZMQ, index).
-    #[must_use]
-    pub fn effects(&self) -> &ChainEffects {
-        &self.effects
-    }
-
-    /// Mutable post-commit adapters, for tests that attach an index after open.
-    pub fn effects_mut(&mut self) -> &mut ChainEffects {
-        &mut self.effects
-    }
-
-    /// Mining generation signal.
-    #[must_use]
-    pub fn mining(&self) -> &Arc<crate::mining::MiningGenerationSignal> {
-        &self.mining
-    }
-
-    /// Dispatches a committed connect: RPC/ZMQ/index, mining wake, orphan wake.
-    pub fn connected(&self, block: &Block, outcome: &ConnectOutcome) {
-        self.effects.connected(block, outcome);
         self.mining.publish_generation();
         if let Some(admission) = &self.mempool {
             admission.chain_changed(&outcome.txids);
         }
     }
 
-    /// Dispatches a committed disconnect: RPC/ZMQ/index, mining wake, orphan wake.
-    pub fn disconnected(&self, outcome: &DisconnectOutcome) {
-        self.effects.disconnected(outcome);
+    /// Dispatches a committed disconnect: log pop, index wake, and sequence
+    /// `D`, then the mining wake and orphan re-evaluation.
+    ///
+    /// PRE: `outcome` is a committed production disconnect.
+    ///
+    /// POST: the matching-tail log pop, derived-index wake, and gated
+    /// sequence `D` run once in that order; the mining wake and
+    /// `restored_parents` re-evaluation then run.
+    ///
+    /// INVARIANT: a non-matching tail is not popped, and no consumer
+    /// failure changes the chainstate result.
+    pub fn on_disconnect(&self, outcome: &DisconnectOutcome) {
+        self.pop_matching_tail(outcome.hash);
+        self.wake_index();
+        if self.zmq.wants_notifications() {
+            self.zmq
+                .publish_sequence(SequenceEvent::Disconnected(outcome.hash));
+        }
         self.mining.publish_generation();
         if let Some(admission) = &self.mempool {
             admission.chain_changed(&outcome.restored_parents);
+        }
+    }
+
+    /// Emits hash/raw ZMQ topics for a committed block. See `ARCH-07` for
+    /// effect ordering.
+    fn publish_block(&self, outcome: &ConnectOutcome) {
+        if !self.zmq.wants_notifications() {
+            return;
+        }
+        self.zmq.publish_hashblock(outcome.hash);
+        if self.zmq.wants_rawblock() {
+            self.zmq.publish_rawblock(&outcome.block_bytes);
+        }
+        if let Some(raw_txs) = &outcome.raw_txs {
+            for (txid, rawtx_bytes) in outcome.txids.iter().zip(raw_txs) {
+                self.zmq.publish_hashtx(*txid);
+                self.zmq.publish_rawtx(rawtx_bytes);
+            }
+        } else {
+            for txid in &outcome.txids {
+                self.zmq.publish_hashtx(*txid);
+            }
+        }
+    }
+
+    /// Pops the RPC cache if the tail hash matches this block. See `ARCH-07`.
+    ///
+    /// The log starts empty on boot and pruning may drop the tail. Matching
+    /// the hash stops a pop of a record that is not this block.
+    fn pop_matching_tail(&self, hash: Hash256) {
+        let mut blocks = self.blocks.write();
+        if blocks
+            .last()
+            .is_some_and(|record| record.hash == BlockHash::from(hash))
+        {
+            blocks.pop();
+        }
+    }
+
+    fn wake_index(&self) {
+        if let Some(runtime) = &self.derived_index {
+            runtime.wake();
         }
     }
 
@@ -320,6 +271,15 @@ impl ChainFollowers {
     /// See `ARCH-07`: production single-block paths must not finish the
     /// [`bitcoin_rs_chainstate::ChainTransition`] and then dispatch, or a later
     /// connect or disconnect can publish derived effects first.
+    ///
+    /// PRE: no transition or fence is held.
+    ///
+    /// POST: on success the block is committed, `on_connect` has run, and the
+    /// transition settled; on refusal nothing is dispatched and settlement is
+    /// attempted.
+    ///
+    /// INVARIANT: fatal errors drop guards without settlement; operational
+    /// refusal attempts settlement.
     pub fn apply_connect(
         &self,
         handles: &bitcoin_rs_chainstate::Chainstate,
@@ -329,7 +289,7 @@ impl ChainFollowers {
         let mempool_change = self.begin_mempool_change()?;
         match transition.connect(block, None) {
             Ok(outcome) => {
-                self.committed_connect(block, &outcome);
+                self.on_connect(block, &outcome);
                 Self::finish_transition(handles, transition, mempool_change)?;
                 Ok(outcome)
             }
@@ -372,7 +332,7 @@ impl ChainFollowers {
             .map_err(|error| bitcoin_rs_chainstate::DisconnectError::Refused(Box::new(error)))?;
         match transition.disconnect(block) {
             Ok(outcome) => {
-                self.disconnected(&outcome);
+                self.on_disconnect(&outcome);
                 // Resident entries the lower tip no longer supports leave
                 // before the fence finishes, through the same shared view.
                 if let (Some(change), Some(gateway)) =
@@ -447,80 +407,124 @@ mod tests {
     };
     use parking_lot::Mutex;
 
+    /// Records every ZMQ call in the order the follower made it.
     #[derive(Debug, Default)]
     struct RecordingPublisher {
-        hashblocks: Mutex<Vec<Hash256>>,
-        sequences: Mutex<Vec<SequenceEvent>>,
+        events: Mutex<Vec<String>>,
+    }
+
+    impl RecordingPublisher {
+        fn events(&self) -> Vec<String> {
+            self.events.lock().clone()
+        }
     }
 
     impl ZmqPublisher for RecordingPublisher {
-        fn publish_hashblock(&self, hash: Hash256) {
-            self.hashblocks.lock().push(hash);
+        fn wants_rawblock(&self) -> bool {
+            false
         }
 
-        fn publish_hashtx(&self, _: Txid) {}
+        fn publish_hashblock(&self, hash: Hash256) {
+            self.events.lock().push(format!("hashblock:{hash}"));
+        }
+
+        fn publish_hashtx(&self, txid: bitcoin_rs_primitives::Txid) {
+            self.events.lock().push(format!("hashtx:{txid}"));
+        }
 
         fn publish_rawblock(&self, _: &[u8]) {}
 
-        fn publish_rawtx(&self, _: &[u8]) {}
+        fn publish_rawtx(&self, raw: &[u8]) {
+            self.events.lock().push(format!("rawtx:{}", raw.len()));
+        }
 
         fn publish_sequence(&self, event: SequenceEvent) {
-            self.sequences.lock().push(event);
+            let label = match event {
+                SequenceEvent::Connected(hash) => format!("C:{hash}"),
+                SequenceEvent::Disconnected(hash) => format!("D:{hash}"),
+                SequenceEvent::Added(txid, sequence) => format!("A:{txid}:{sequence}"),
+                SequenceEvent::Removed(txid, sequence) => format!("R:{txid}:{sequence}"),
+            };
+            self.events.lock().push(label);
         }
     }
 
-    /// `ARCH-07`: a no-op consumer set asks for no derived payloads.
+    /// `ARCH-07`: a no-op follower set asks for no derived payloads.
     #[test]
     fn noop_asks_for_no_payloads() {
-        let effects = ChainEffects::noop();
-        assert!(!effects.needs_rawtx());
-        assert!(!effects.needs_block_bytes());
-        assert!(effects.derived_index().is_none());
-        assert!(effects.block_log().read().is_empty());
+        let followers = ChainFollowers::noop();
+        assert!(!followers.needs_rawtx());
+        assert!(!followers.needs_block_bytes());
+        assert!(followers.derived_index().is_none());
+        assert!(followers.block_log().read().is_empty());
+    }
+
+    fn connect_outcome(tip: &TipSnapshot, block: &Block) -> ConnectOutcome {
+        ConnectOutcome {
+            commit_id: 0,
+            height: tip.height,
+            hash: tip.hash,
+            tip: tip.clone(),
+            txids: block
+                .txs
+                .iter()
+                .map(bitcoin_rs_primitives::Tx::txid)
+                .collect(),
+            block_bytes: bytes::Bytes::new(),
+            raw_txs: None,
+        }
     }
 
     /// `ARCH-07`: connect then disconnect rewinds the RPC log and emits ZMQ in order.
     #[test]
-    fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() {
+    fn connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order() -> anyhow::Result<()> {
         let genesis = Network::Regtest.genesis_block();
         let hash = Hash256::from(genesis.block_hash());
         let publisher = Arc::new(RecordingPublisher::default());
         let zmq: Arc<dyn ZmqPublisher> = publisher.clone();
-        let effects = ChainEffects::noop().with_zmq_publisher(zmq);
+        let followers = ChainFollowers::noop().with_zmq_publisher(zmq);
+        let tip = genesis_tip(&genesis)?;
 
-        effects.record_connected(0, &genesis);
-        assert_eq!(effects.block_log().read().len(), 1);
-        assert!(publisher.hashblocks.lock().is_empty());
-        effects.emit_connected(hash, &[], &[], None);
-        assert_eq!(*publisher.hashblocks.lock(), vec![hash]);
-        assert!(publisher.sequences.lock().is_empty());
-
-        effects.after_connect(hash);
+        followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+        assert_eq!(followers.block_log().read().len(), 1);
         assert_eq!(
-            *publisher.sequences.lock(),
-            vec![SequenceEvent::Connected(hash)]
-        );
-
-        effects.before_disconnect(hash);
-        assert!(effects.block_log().read().is_empty());
-        effects.after_disconnect(hash);
-        assert_eq!(
-            *publisher.sequences.lock(),
+            publisher.events(),
             vec![
-                SequenceEvent::Connected(hash),
-                SequenceEvent::Disconnected(hash)
-            ]
+                format!("hashblock:{hash}"),
+                format!("hashtx:{}", genesis.txs[0].txid()),
+                format!("C:{hash}"),
+            ],
+            "the block record and its transactions publish before sequence C"
         );
+
+        followers.on_disconnect(&DisconnectOutcome {
+            parent_tip: tip,
+            hash,
+            restored_parents: Vec::new(),
+        });
+        assert!(followers.block_log().read().is_empty());
+        assert_eq!(
+            publisher.events().last(),
+            Some(&format!("D:{hash}")),
+            "sequence D closes the disconnect"
+        );
+        Ok(())
     }
 
     /// `ARCH-07`: disconnect does not pop a `BlockLog` tail that is not this block.
     #[test]
-    fn disconnect_does_not_pop_a_different_tail() {
+    fn disconnect_does_not_pop_a_different_tail() -> anyhow::Result<()> {
         let genesis = Network::Regtest.genesis_block();
-        let effects = ChainEffects::noop();
-        effects.record_connected(0, &genesis);
-        effects.before_disconnect(Hash256::from_le_bytes(&[0xAB; 32]));
-        assert_eq!(effects.block_log().read().len(), 1);
+        let tip = genesis_tip(&genesis)?;
+        let followers = ChainFollowers::noop();
+        followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
+        followers.on_disconnect(&DisconnectOutcome {
+            parent_tip: tip,
+            hash: Hash256::from_le_bytes(&[0xAB; 32]),
+            restored_parents: Vec::new(),
+        });
+        assert_eq!(followers.block_log().read().len(), 1);
+        Ok(())
     }
 
     #[derive(Default)]
@@ -571,6 +575,16 @@ mod tests {
         })
     }
 
+    fn followers_with_gateway(gateway: &Arc<MempoolGateway>) -> ChainFollowers {
+        ChainFollowers::new(
+            Arc::new(RwLock::new(BlockLog::new())),
+            Arc::new(crate::NoOpZmqPublisher),
+            None,
+            Arc::new(crate::mining::MiningGenerationSignal::new()),
+            Some(Arc::clone(gateway)),
+        )
+    }
+
     /// Exercise committed-outcome dispatch with a real gateway, without any
     /// mempool mutation or observer that could independently wake the child.
     /// Full chain application and transition ownership have separate tests in
@@ -580,11 +594,7 @@ mod tests {
         let gateway = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
             MempoolLimits::default(),
         ))));
-        let followers = ChainFollowers::new(
-            ChainEffects::noop(),
-            Arc::new(crate::mining::MiningGenerationSignal::new()),
-            Some(Arc::clone(&gateway)),
-        );
+        let followers = followers_with_gateway(&gateway);
         let block = Network::Regtest.genesis_block();
         let parent = block.txs[0].txid();
         let outpoint = OutPoint::new(parent, 0);
@@ -628,20 +638,9 @@ mod tests {
         let hash = tip.hash;
         let change = gateway.begin_chain_change()?;
         if connect {
-            followers.connected(
-                &block,
-                &ConnectOutcome {
-                    height: tip.height,
-                    commit_id: 0,
-                    tip,
-                    hash,
-                    txids: vec![parent],
-                    block_bytes: bytes::Bytes::new(),
-                    raw_txs: None,
-                },
-            );
+            followers.on_connect(&block, &connect_outcome(&tip, &block));
         } else {
-            followers.disconnected(&DisconnectOutcome {
+            followers.on_disconnect(&DisconnectOutcome {
                 parent_tip: tip,
                 hash,
                 restored_parents: vec![parent],
@@ -700,11 +699,7 @@ mod tests {
         let gateway = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
             MempoolLimits::default(),
         ))));
-        let followers = ChainFollowers::new(
-            ChainEffects::noop(),
-            Arc::new(crate::mining::MiningGenerationSignal::new()),
-            Some(Arc::clone(&gateway)),
-        );
+        let followers = followers_with_gateway(&gateway);
         let active = gateway.begin_chain_change()?;
 
         assert!(matches!(

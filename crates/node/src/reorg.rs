@@ -47,13 +47,13 @@ impl<'a> NodeReorgObserver<'a> {
 impl ReorgObserver for NodeReorgObserver<'_> {
     fn disconnected(&mut self, outcome: &DisconnectOutcome) {
         self.disconnected_blocks += 1;
-        self.followers.disconnected(outcome);
+        self.followers.on_disconnect(outcome);
     }
 
     fn connected(&mut self, block: &Block, outcome: &ConnectOutcome) {
         self.reconnected
             .extend(block.txs.iter().map(bitcoin_rs_primitives::Tx::txid));
-        self.followers.committed_connect(block, outcome);
+        self.followers.on_connect(block, outcome);
         (self.connected_body)(outcome.hash);
     }
 

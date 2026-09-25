@@ -45,7 +45,7 @@ fn open_skips_tx_index_when_disabled() -> anyhow::Result<()> {
     config.p2p.listen.clear();
     let state = NodeState::open(config, None)?;
 
-    assert!(state.chain_followers().effects().derived_index().is_none());
+    assert!(state.chain_followers().derived_index().is_none());
     assert!(
         state.derived_index_query().is_none(),
         "txindex disabled by default"
@@ -66,7 +66,7 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     config.indexes.txindex = true;
     let mut state = NodeState::open(config, None)?;
 
-    assert!(state.chain_followers().effects().derived_index().is_some());
+    assert!(state.chain_followers().derived_index().is_some());
     assert!(
         state
             .derived_index_lifecycle
@@ -114,7 +114,7 @@ fn script_index_builds_without_advertising_core_txindex() -> anyhow::Result<()> 
     let mut state = NodeState::open(config, None)?;
     state.start_index_workers()?;
 
-    assert!(state.chain_followers().effects().derived_index().is_some());
+    assert!(state.chain_followers().derived_index().is_some());
     assert!(state.derived_index_query().is_none());
     assert!(state.esplora_derived_index_query().is_some());
     assert!(state.script_index_query().is_some());

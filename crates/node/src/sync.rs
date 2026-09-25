@@ -263,14 +263,14 @@ impl SyncChain for NodeSyncChain {
         let result = match transition.connect_window(blocks, bodies) {
             Ok(outcomes) => {
                 for (block, outcome) in blocks.iter().zip(&outcomes) {
-                    self.followers.committed_connect(block, outcome);
+                    self.followers.on_connect(block, outcome);
                 }
                 let applied = outcomes.len();
                 settle_window_success(transition, mempool_change, applied, outcomes)
             }
             Err(error) => {
                 for (block, outcome) in blocks.iter().zip(&error.committed) {
-                    self.followers.committed_connect(block, outcome);
+                    self.followers.on_connect(block, outcome);
                 }
                 // A connect failure settles according to its disposition.
                 Err(settle_window_failure(transition, mempool_change, error))
