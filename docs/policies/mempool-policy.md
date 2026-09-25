@@ -68,8 +68,9 @@ package shape missing from corepc-types 0.15. Rejected rows omit fee/size fields
 Accepted rows include captured modified `effective-feerate` and their wtxid.
 
 Generic script errors and some numeric RPC error codes remain intentional
-compatibility differences. The registry keeps its `Deviation` claim for both
-admission RPCs; successful selected cases do not certify their entire surface.
+compatibility differences. The registry keeps its `Deviation` claim on
+`testmempoolaccept` while `submitpackage` stays `Unimplemented`; successful
+selected cases do not certify their entire surface.
 
 ## 5. Allowed differences and unsupported cases
 

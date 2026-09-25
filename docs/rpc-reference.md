@@ -7,11 +7,11 @@
 
 Surface contract of bitcoin-rs against Bitcoin Core 31.x.
 
-- **Supported** - differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `docs/api/core-compat.toml`. No row qualifies yet.
+- **Supported** - differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `docs/api/core-compat.toml`.
 - **Deviation** - shipped with a recorded difference from Core; notes cite the source file.
 - **Implemented (unverified)** - shipped; not compared against the pinned reference.
 - **Extension** - bitcoin-rs-specific surface with no Core counterpart.
-- **Disabled** - reserved for parameter-level refusal with a stable error; no row uses it.
+- **Disabled** - reserved for parameter-level refusal with a stable error.
 - **Unimplemented** - Core surface this node does not expose: JSON-RPC answers `method not found`, REST answers 404.
 
 `since` is the bitcoin-rs version whose surface a row describes; `pending` marks a row whose implementation lands in a later change. Rows naming a cargo feature exist only when that feature is compiled.
