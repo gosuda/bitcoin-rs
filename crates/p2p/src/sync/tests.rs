@@ -8,7 +8,9 @@ use std::time::Instant;
 use arc_swap::ArcSwapOption;
 // Wire seam: byte-array access on the retained bitcoin:: wire hash types.
 use bitcoin::hashes::Hash;
-use bitcoin_rs_chain::{BlockTree, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::{
+    BlockTree, BlockTreeReader, InitialBlockDownload, NodeId, NodeStatus, TipReader, TipSnapshot,
+};
 use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
@@ -353,16 +355,24 @@ impl SyncChain for RefusingChain {
         self.0.network()
     }
 
-    fn block_tree(&self) -> &RwLock<BlockTree> {
+    fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, BlockTree> {
         self.0.block_tree()
     }
 
-    fn chain_tip(&self) -> &ArcSwapOption<TipSnapshot> {
+    fn chain_tip(&self) -> Option<Arc<TipSnapshot>> {
         self.0.chain_tip()
     }
 
-    fn applied_tip(&self) -> &ArcSwapOption<TipSnapshot> {
+    fn applied_tip(&self) -> Option<Arc<TipSnapshot>> {
         self.0.applied_tip()
+    }
+
+    fn block_tree_mut(&self) -> parking_lot::RwLockWriteGuard<'_, BlockTree> {
+        self.0.block_tree_mut()
+    }
+
+    fn set_tips(&self, applied: TipSnapshot, header: TipSnapshot) {
+        self.0.set_tips(applied, header);
     }
 
     fn bootstrap_genesis(&self) {
@@ -1602,7 +1612,7 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block()
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9789, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 3));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 3));
     sync.tick();
     let failing_hash = Hash256::from(extra_coinbase.block_hash());
 
@@ -1860,9 +1870,8 @@ pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
         .unwrap_or_else(|| unreachable!("the chain has a tip"));
     applied_tip.store(Some(Arc::clone(&tip)));
     Arc::new(InitialBlockDownload::new(
-        applied_tip,
-        block_tree,
-        Network::Regtest,
+        TipReader::new(applied_tip),
+        BlockTreeReader::new(block_tree),
     ))
 }
 
@@ -2753,5 +2762,38 @@ fn binding_and_operational_failures_do_not_disconnect() -> Result<(), Box<dyn st
             "a {disposition:?} settlement failure must not disconnect the delivering connection"
         );
     }
+    Ok(())
+}
+
+/// Sync progress must publish the shared latch's initial-block-download
+/// answer, not a height heuristic (#1149 acceptance 1/12). The two fixtures
+/// below are the snapshots where the old `applied < header` rule disagreed
+/// with the latch: an active latch over an empty frontier, and a latched-off
+/// latch over headers ahead of an absent applied tip.
+#[test]
+fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> Result<(), Box<dyn std::error::Error>> {
+    let now = crate::counters::now_seconds();
+
+    let syncing = SyncHarness::new(BlockTree::new());
+    assert!(
+        syncing.sync.ibd.is_active(now, Network::Regtest),
+        "the fixture latch must be active for this snapshot"
+    );
+    assert!(
+        syncing.sync.in_initial_block_download(),
+        "telemetry must report initial block download while the latch is active"
+    );
+
+    let (tree, _blocks) = mined_chain(0, 3)?;
+    let synced = SyncHarness::with_ibd(tree, synced_ibd_latch());
+    assert!(
+        !synced.sync.ibd.is_active(now, Network::Regtest),
+        "the fixture latch must have left initial block download"
+    );
+    assert!(
+        !synced.sync.in_initial_block_download(),
+        "telemetry must stay out of initial block download once the latch \
+         has left it, even with headers ahead of the applied tip"
+    );
     Ok(())
 }

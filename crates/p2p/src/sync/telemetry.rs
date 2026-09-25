@@ -29,7 +29,7 @@ impl BlockSync {
             .as_ref()
             .map_or(applied_height, |tip| tip.height);
         let live_peers = frontier.usable_peers.len();
-        let in_ibd = header_height > 0 && applied_height < header_height;
+        let in_ibd = self.in_initial_block_download();
         let gap = header_height.saturating_sub(applied_height);
 
         if let Some(reason) = plan.no_progress
@@ -64,6 +64,20 @@ impl BlockSync {
                 "sync progress"
             );
         }
+    }
+
+    /// The initial-block-download fact reported by sync progress.
+    ///
+    /// PRE: none.
+    /// POST: answers with the node's shared chain-owned
+    ///   [`bitcoin_rs_chain::InitialBlockDownload`] latch at the current
+    ///   second — the same answer RPC and the listener see.
+    /// INVARIANT: telemetry never decides initial block download from
+    ///   heights. The applied and header heights, and `gap`, stay progress
+    ///   facts only.
+    pub(super) fn in_initial_block_download(&self) -> bool {
+        self.ibd
+            .is_active(crate::counters::now_seconds(), self.chain.network())
     }
 
     pub(super) fn record_sync_metrics(&self) {
