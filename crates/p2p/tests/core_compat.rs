@@ -967,6 +967,19 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         return Err("genesis carries a coinbase transaction".into());
     };
     write_message(&mut server, magic, &Message::Tx(coinbase.clone()))?;
+    // If transaction enforcement regresses, the peer loop keeps polling while
+    // this socket stays open and a bare `join` would wait forever. Give the
+    // disconnect a bounded window, and on timeout close the socket so the
+    // loop ends and the assertion below reports the regression instead of
+    // hanging CI.
+    let enforcement_deadline = Instant::now() + Duration::from_secs(5);
+    while !dial.is_finished() && Instant::now() < enforcement_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !dial.is_finished() {
+        let _ = server.shutdown(std::net::Shutdown::Both);
+        drop(server);
+    }
     let Ok(outcome) = dial.join() else {
         return Err("the dial thread panicked".into());
     };
