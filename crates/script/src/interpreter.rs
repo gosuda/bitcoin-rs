@@ -9,7 +9,9 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use bitcoin_rs_primitives::{Amount, Script, Sighash, SighashCache, Tx, TxOut, Witness};
+use bitcoin_rs_primitives::{
+    Amount, Script, Sighash, SighashCache, Tx, TxOut, Witness, varint::encoded_len,
+};
 use secp256k1::{Message, XOnlyPublicKey, schnorr::Signature};
 use thiserror::Error;
 
@@ -923,11 +925,14 @@ fn verify_taproot_scriptpath(
     // `witness.stack` is the *original* full witness (including annex,
     // control, and script). The serialization is a CompactSize count
     // prefix followed by each element as CompactSize(len) + bytes.
-    let witness_serialized_size: usize = varint_len(witness.len())
-        + witness
-            .iter()
-            .map(|elem| varint_len(elem.len()) + elem.len())
-            .sum::<usize>();
+    let witness_serialized_size: usize =
+        encoded_len(u64::try_from(witness.len()).unwrap_or(u64::MAX))
+            + witness
+                .iter()
+                .map(|elem| {
+                    encoded_len(u64::try_from(elem.len()).unwrap_or(u64::MAX)) + elem.len()
+                })
+                .sum::<usize>();
     let mut validation_weight_left = Some(
         i64::try_from(witness_serialized_size).unwrap_or(i64::MAX) + eval::VALIDATION_WEIGHT_OFFSET,
     );
@@ -950,19 +955,6 @@ fn verify_taproot_scriptpath(
     }
     require_true_top(&witness_stack)?;
     Ok(true)
-}
-
-/// Returns the varint-encoded length prefix size for `data_len` bytes.
-fn varint_len(data_len: usize) -> usize {
-    if data_len < 0xfd {
-        1
-    } else if data_len <= 0xffff {
-        3
-    } else if data_len <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 #[cfg(test)]
