@@ -24,7 +24,9 @@ use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inven
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
 use bitcoin_rs_p2p::PeerRole;
-use bitcoin_rs_p2p::dispatch::{ChainQuery, InventoryServing, dispatch_inbound};
+use bitcoin_rs_p2p::dispatch::{
+    ChainQuery, InventoryServing, dispatch_inbound, dispatch_inbound_full,
+};
 use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
@@ -262,10 +264,19 @@ fn dispatch_collect(
     chain: Option<&dyn ChainQuery>,
 ) -> Result<Vec<Message>, PeerError> {
     let collected = std::cell::RefCell::new(Vec::new());
-    dispatch_inbound_with_chain(peer, message, chain, &|| true, &mut |response| {
-        collected.borrow_mut().push(response);
-        Ok(())
-    })?;
+    dispatch_inbound_full(
+        peer,
+        message,
+        chain,
+        None,
+        &|| true,
+        &|| true,
+        &mut |response| {
+            collected.borrow_mut().push(response);
+            Ok(())
+        },
+        &mut |_| {},
+    )?;
     Ok(collected.into_inner())
 }
 

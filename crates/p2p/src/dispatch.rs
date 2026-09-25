@@ -140,46 +140,28 @@ impl crate::compact_blocks::CompactBlockHints for bitcoin_rs_mempool::MempoolGat
 /// Chainless dispatch: collects the protocol responses and returns them.
 ///
 /// With `chain: None` responses can never contain a block body, so the batch
-/// is protocol-bounded (at most [`MAX_HEADERS_MESSAGE_COUNT`] headers, or one
-/// inventory-bound notfound/getdata echo) and safe to materialize whole.
-/// Block announcements go to a no-op sink.
+/// is protocol-bounded (at most [`crate::wire::MAX_HEADERS_MESSAGE_COUNT`]
+/// headers, or one inventory-bound notfound/getdata echo) and safe to
+/// materialize whole. Block announcements go to a no-op sink.
 pub fn dispatch_inbound<S>(
     peer: &mut Peer<S>,
     message: &Message,
 ) -> Result<Vec<Message>, PeerError> {
     let responses = RefCell::new(Vec::new());
-    dispatch_inbound_with_chain(peer, message, None, &|| true, &mut |response| {
-        responses.borrow_mut().push(response);
-        Ok(())
-    })?;
-    Ok(responses.into_inner())
-}
-
-/// Dispatch with an active-chain view but no transaction-inventory filter.
-///
-/// Equivalent to [`dispatch_inbound_full`] with `tx_inventory: None` and a
-/// no-op block-announcement sink: every announced tx is requested, and
-/// tx-typed `getdata` items are reported missing. Production listeners pass
-/// a [`TxInventory`] and an announcement sink through
-/// [`dispatch_inbound_full`]; this wrapper remains for call sites that only
-/// have a chain view.
-pub fn dispatch_inbound_with_chain<S>(
-    peer: &mut Peer<S>,
-    message: &Message,
-    chain: Option<&dyn ChainQuery>,
-    headroom: &dyn Fn() -> bool,
-    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
-) -> Result<(), PeerError> {
     dispatch_inbound_full(
         peer,
         message,
-        chain,
+        None,
         None,
         &|| true,
-        headroom,
-        send,
+        &|| true,
+        &mut |response| {
+            responses.borrow_mut().push(response);
+            Ok(())
+        },
         &mut |_| {},
-    )
+    )?;
+    Ok(responses.into_inner())
 }
 
 /// Dispatch with an active-chain view and a transaction-inventory filter.
@@ -501,7 +483,7 @@ mod tests {
 
     use super::{
         ChainQuery, InventoryServing, MAX_LOCATOR_HASHES, TxInventory, dispatch_inbound,
-        dispatch_inbound_full, dispatch_inbound_with_chain,
+        dispatch_inbound_full,
     };
     use crate::connection::{OutboundBudget, PeerLease};
     use crate::inv::MAX_INV_PER_MSG;
@@ -640,10 +622,19 @@ mod tests {
         chain: Option<&dyn ChainQuery>,
     ) -> Result<Vec<Message>, PeerError> {
         let collected = RefCell::new(Vec::new());
-        dispatch_inbound_with_chain(peer, message, chain, &|| true, &mut |response| {
-            collected.borrow_mut().push(response);
-            Ok(())
-        })?;
+        dispatch_inbound_full(
+            peer,
+            message,
+            chain,
+            None,
+            &|| true,
+            &|| true,
+            &mut |response| {
+                collected.borrow_mut().push(response);
+                Ok(())
+            },
+            &mut |_| {},
+        )?;
         Ok(collected.into_inner())
     }
 
@@ -999,15 +990,18 @@ mod tests {
         let mut peer = ready_peer();
         let emitted = RefCell::new(Vec::new());
 
-        let result = dispatch_inbound_with_chain(
+        let result = dispatch_inbound_full(
             &mut peer,
             &Message::GetData(vec![known]),
             Some(&chain),
+            None,
+            &|| true,
             &|| false,
             &mut |response| {
                 emitted.borrow_mut().push(response);
                 Ok(())
             },
+            &mut |_| {},
         );
 
         assert!(matches!(
@@ -1056,16 +1050,19 @@ mod tests {
         };
         let mut peer = ready_peer();
 
-        let result = dispatch_inbound_with_chain(
+        let result = dispatch_inbound_full(
             &mut peer,
             &Message::GetData(vec![known; MAX_INV_PER_MSG]),
             Some(&chain),
+            None,
+            &|| true,
             &|| budget.has_block_production_headroom(),
             &mut |message| {
                 lease
                     .send(message)
                     .map_err(|_| PeerError::Protocol("outbound queue closed or saturated"))
             },
+            &mut |_| {},
         );
 
         assert!(matches!(
@@ -1101,16 +1098,19 @@ mod tests {
         };
         let mut peer = ready_peer();
 
-        let result = dispatch_inbound_with_chain(
+        let result = dispatch_inbound_full(
             &mut peer,
             &Message::GetData(vec![known; 4]),
             Some(&chain),
+            None,
+            &|| true,
             &|| true,
             &mut |message| {
                 lease
                     .send(message)
                     .map_err(|_| PeerError::Protocol("outbound queue closed or saturated"))
             },
+            &mut |_| {},
         );
 
         assert!(matches!(
