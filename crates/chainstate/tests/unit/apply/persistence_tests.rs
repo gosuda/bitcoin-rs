@@ -56,7 +56,7 @@ impl UndoStore for RejectingUndoStore {
     }
 }
 
-fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
+pub(crate) fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
     Chainstate::new(
         network,
         Arc::new(ArcSwapOption::empty()),
@@ -68,7 +68,7 @@ fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
     )
 }
 
-fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyError> {
+pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyError> {
     let genesis = Network::Regtest.genesis_block();
     let tip = crate::connect::applied_header_tip(
         handles,
@@ -84,7 +84,7 @@ fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyError> {
     Ok(tip)
 }
 
-fn coinbase(height: u32) -> Tx {
+pub(crate) fn coinbase(height: u32) -> Tx {
     let Ok(encoded_height) = u8::try_from(height) else {
         panic!("test coinbase height must fit in one byte");
     };
@@ -104,7 +104,10 @@ fn coinbase(height: u32) -> Tx {
     }
 }
 
-fn mined_child(parent: BlockHash, height: u32) -> Result<Block, Box<dyn std::error::Error>> {
+pub(crate) fn mined_child(
+    parent: BlockHash,
+    height: u32,
+) -> Result<Block, Box<dyn std::error::Error>> {
     let tx = coinbase(height);
     let mut leaves = vec![*tx.txid().as_bytes()];
     let merkle = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
