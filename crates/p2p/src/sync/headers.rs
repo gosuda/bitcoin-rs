@@ -671,14 +671,15 @@ impl BlockSync {
         };
         // The plan's Probe decision was taken at observation time; a body
         // request scheduled since may already own the frontier, in which
-        // case capability discovery has nothing left to resolve.
+        // case capability discovery has nothing left to resolve and nothing
+        // was sent to this connection.
         let frontier_owned = frontier.chain.next_required.is_some_and(|required| {
             let scheduler = self.scheduler.lock();
             scheduler.window.contains_pending(&required.hash)
                 || scheduler.stager.contains(&required.hash)
         });
         if frontier_owned {
-            return GetheadersOutcome::Suppressed;
+            return GetheadersOutcome::FrontierOwned;
         }
         let locator = {
             let tree = self.chain.block_tree();

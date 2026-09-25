@@ -322,3 +322,59 @@ fn progress_to_the_benchmark_re_arms_the_timeout() {
         "and the response window still closes on it"
     );
 }
+
+/// The response window starts only on a probe the connection was actually
+/// asked to answer. When the frontier body became owned after the sweep's
+/// observation and nothing was sent, the record is restored untouched, so
+/// the connection can be retired for ignoring a probe it never received,
+/// and the operator counter does not count the silence as a probe.
+#[test]
+#[allow(clippy::expect_used)]
+fn a_frontier_owned_suppression_does_not_arm_the_response_window() {
+    let t0 = Instant::now();
+    // A mined tree whose tip is one header past the last body: the frontier
+    // owes a body, and genesis is applied so the probes below have tips and
+    // a locator to build from.
+    let (tree, blocks) = mined_chain(1, 1).expect("fixture chain mines");
+    let chain_tip = tree.tip_handle();
+    let sync = Arc::new(BlockSync::new(
+        Arc::new(TestChain::new(
+            chain_tip,
+            Arc::new(ArcSwapOption::empty()),
+            Arc::new(RwLock::new(tree)),
+        )),
+        Arc::new(PeerTable::new()),
+        Arc::new(Mutex::new({
+            let (_tx, rx) = unbounded::<crate::InboundHeaders>();
+            rx
+        })),
+        Arc::new(Mutex::new({
+            let (_tx, rx) = unbounded::<crate::InboundBlock>();
+            rx
+        })),
+    ));
+    sync.chain.bootstrap_genesis();
+    // Own the frontier body: pending in the window, so nothing may be sent.
+    stage_body(&sync, &blocks[0]);
+
+    let chain_frontier = sync.observe_chain_frontier();
+    let frontier = sync.observe_frontier(chain_frontier, t0);
+    let subject = outbound(9_630, 0, PeerRole::FullRelay, t0);
+
+    assert!(
+        frontier.chain.next_required.is_some(),
+        "premise: the fixture owes a body, so the frontier can be owned"
+    );
+    assert!(
+        !sync.probe_chain_sync(subject.source, &frontier),
+        "a suppression that sent nothing is not a probe"
+    );
+    assert!(
+        !sync
+            .scheduler
+            .lock()
+            .chain_sync
+            .contains_key(&subject.source),
+        "no response window is armed for a probe the connection never received"
+    );
+}
