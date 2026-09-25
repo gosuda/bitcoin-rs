@@ -12,7 +12,7 @@ use super::ResolvedUtxoView;
 use super::WitnessPresence;
 use super::scratch::SameBlockSpentSet;
 use crate::error::ApplyError;
-use bitcoin_rs_consensus::rust_path::UtxoView;
+use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::ConsensusEncode;
 use bitcoin_rs_primitives::OutPoint;

@@ -34,8 +34,6 @@ pub mod bip9;
 pub mod block_view;
 /// Feature-gated bitcoinkernel wrapper.
 pub mod kernel;
-/// Portable Rust validator.
-pub mod rust_path;
 /// Private AVX2 SHA256d64 kernel for Merkle hashing.
 mod sha256d64;
 /// Shared transaction-level BIP141 sigop accounting.
@@ -51,7 +49,6 @@ pub use bip9::{
 };
 pub use bip113::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
 pub use block_view::BlockView;
-pub use rust_path::UtxoView;
 pub use sigops::transaction_sigop_cost;
 pub use sigops::transaction_sigop_cost as total_sigop_cost;
 pub use verify_block::{
@@ -65,7 +62,27 @@ pub use verify_tx::{
     verify_transaction_non_script,
 };
 
+use bitcoin_rs_primitives::{OutPoint, TxOut};
 use thiserror::Error;
+
+/// Minimal UTXO lookup contract used by the portable validator.
+///
+/// PRE: `outpoint` identifies the requested previous output.
+/// POST: `lookup` returns that output, or `None` if this view has no output.
+/// INVARIANT: A reference view returns the same result as its referent.
+pub trait UtxoView {
+    /// Looks up a previous output by outpoint.
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut>;
+}
+
+impl<T> UtxoView for &T
+where
+    T: UtxoView + ?Sized,
+{
+    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        (*self).lookup(outpoint)
+    }
+}
 
 /// The engine that rejected a script.
 ///
