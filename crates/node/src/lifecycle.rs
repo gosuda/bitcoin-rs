@@ -204,12 +204,6 @@ pub(crate) struct NodeServices {
     tx_relay: Option<std::thread::JoinHandle<()>>,
     signal_handler: Option<crate::signal::ShutdownHandler>,
     teardown_started: bool,
-    /// Failure injection at the core-worker join boundary, not a P2P owner.
-    #[cfg(test)]
-    outbound_worker: Option<std::thread::JoinHandle<()>>,
-    /// Failure/delay injection at the bootstrap join boundary.
-    #[cfg(test)]
-    bootstrap_worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl NodeServices {
@@ -296,16 +290,6 @@ impl NodeServices {
                 set_first_error(first_error, anyhow::anyhow!("readiness sampler panicked"));
             }
         }
-        #[cfg(test)]
-        if let Some(handle) = self.outbound_worker.take() {
-            // Injected outbound-drain worker outcome.
-            if matches!(handle.join(), Ok(())) {
-                tracing::info!("P2P outbound drain exited cleanly");
-            } else {
-                tracing::error!("P2P outbound drain panicked");
-                set_first_error(first_error, anyhow::anyhow!("P2P outbound drain panicked"));
-            }
-        }
         if let Some(state) = state {
             // P2P core worker join failure.
             if let Err(error) = state.p2p().join_core_workers() {
@@ -343,25 +327,6 @@ impl NodeServices {
                 set_first_error(first_error, anyhow::Error::new(error));
             }
             mark_bootstrap_drain_reached();
-        }
-        #[cfg(test)]
-        if let Some(handle) = self.bootstrap_worker.take() {
-            mark_bootstrap_drain_reached();
-            let thread_name = handle
-                .thread()
-                .name()
-                .unwrap_or("bitcoin-rs-p2p-bootstrap")
-                .to_owned();
-            // Injected bootstrap worker outcome.
-            if matches!(handle.join(), Ok(())) {
-                tracing::info!(thread = %thread_name, "P2P bootstrap worker exited cleanly");
-            } else {
-                tracing::error!(thread = %thread_name, "P2P bootstrap worker panicked");
-                set_first_error(
-                    first_error,
-                    anyhow::anyhow!("P2P bootstrap worker panicked"),
-                );
-            }
         }
         if let Some(handle) = self.maintenance_worker.take() {
             // Chainstate maintenance worker panic.
