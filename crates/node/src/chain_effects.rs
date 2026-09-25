@@ -200,20 +200,17 @@ impl ChainFollowers {
         }
     }
 
-    /// Dispatches a committed disconnect: ZMQ, log pop, index wake, and
-    /// sequence `D`, then the mining wake and orphan re-evaluation.
+    /// Dispatches a committed disconnect: log pop, index wake, and sequence
+    /// `D`, then the mining wake and orphan re-evaluation.
     ///
-    /// PRE: `outcome` is a committed production disconnect and carries
-    /// block-order txids.
+    /// PRE: `outcome` is a committed production disconnect.
     ///
-    /// POST: `hashtx` for every txid and gated `rawtx` for every supplied raw
-    /// payload are published before the matching-tail log pop, derived-index
-    /// wake, and sequence `D`; mining wake and `restored_parents`
-    /// re-evaluation then run.
+    /// POST: the matching-tail log pop, derived-index wake, and gated
+    /// sequence `D` run once in that order; the mining wake and
+    /// `restored_parents` re-evaluation then run.
     ///
-    /// INVARIANT: `rawtx` is never published without a captured payload; a
-    /// non-matching tail is not popped, and no consumer payload changes the
-    /// chainstate result.
+    /// INVARIANT: a non-matching tail is not popped, and no consumer
+    /// failure changes the chainstate result.
     pub fn on_disconnect(&self, outcome: &DisconnectOutcome) {
         self.pop_matching_tail(outcome.hash);
         self.wake_index();
