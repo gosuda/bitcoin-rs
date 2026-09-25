@@ -10,8 +10,9 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
     // mismatch), so the connect stops on the first body. The descendant
     // header must remain eligible for a later delivery of the correct body.
     let fork_root_hash = main[49].block_hash();
-    let mut tree = handles.block_tree().write();
-    let mut fork_parent = tree
+    let mut fork_parent = handles
+        .block_tree()
+        .read()
         .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
         .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
     let mut fork_prev = fork_root_hash;
@@ -20,22 +21,30 @@ fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
         let mut coinbase = coinbase_transaction(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
-        fork_parent = tree.insert_node(Some(fork_parent), block.header, NodeStatus::HeaderValid)?;
+        fork_parent = crate::sync::fixture_insert_header_node(
+            &handles,
+            fork_parent,
+            block.header,
+            NodeStatus::HeaderValid,
+        )?;
         fork_prev = block.block_hash();
         fork_blocks.push(block);
     }
     let fork_target = fork_parent;
-    let invalid_id = tree
+    let invalid_id = handles
+        .block_tree()
+        .read()
         .lookup(Hash256::from_le_bytes(
             fork_blocks[0].block_hash().as_bytes(),
         ))
         .ok_or_else(|| std::io::Error::other("missing invalid fork node"))?;
-    let descendant_id = tree
+    let descendant_id = handles
+        .block_tree()
+        .read()
         .lookup(Hash256::from_le_bytes(
             fork_blocks[1].block_hash().as_bytes(),
         ))
         .ok_or_else(|| std::io::Error::other("missing descendant fork node"))?;
-    drop(tree);
 
     // Corrupt the first fork block's body: change the coinbase value so
     // the txid no longer matches the header's merkle root. This is a
