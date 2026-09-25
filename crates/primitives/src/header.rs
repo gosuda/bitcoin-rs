@@ -41,7 +41,7 @@ impl Header {
 
     /// Reads an 80-byte consensus serialization.
     #[must_use]
-    pub fn from_bytes(bytes: &[u8; Self::LEN]) -> Self {
+    pub(crate) fn from_bytes(bytes: &[u8; Self::LEN]) -> Self {
         let mut version = [0_u8; 4];
         let mut time = [0_u8; 4];
         let mut bits = [0_u8; 4];
