@@ -8,10 +8,9 @@ pub(crate) const KERNEL_SCRIPT_REJECT_PREFIX: &str = "kernel script verification
 
 #[cfg(feature = "kernel")]
 mod enabled {
-    use bitcoin_rs_primitives::{Hash256, Network, OutPoint, Tx, TxOut, Txid, consensus_bytes};
+    use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxOut, Txid, consensus_bytes};
     use bitcoin_rs_script::VerifyFlags;
 
-    use crate::rust_path::UtxoView;
     use crate::{ConsensusError, ScriptEngine};
 
     /// Verifies every input script of `tx` through bitcoinkernel.
@@ -170,58 +169,6 @@ mod enabled {
         Ok(())
     }
 
-    /// Context for Core's bitcoinkernel consensus engine.
-    pub struct KernelContext {
-        ctx: bitcoinkernel::Context,
-    }
-
-    impl KernelContext {
-        /// Creates a kernel context for a network.
-        pub fn new(network: Network) -> Result<Self, ConsensusError> {
-            let chain_type = match network {
-                Network::Mainnet => bitcoinkernel::ChainType::Mainnet,
-                Network::Testnet3 => bitcoinkernel::ChainType::Testnet,
-                Network::Testnet4 => bitcoinkernel::ChainType::Testnet4,
-                Network::Signet => bitcoinkernel::ChainType::Signet,
-                Network::Regtest => bitcoinkernel::ChainType::Regtest,
-            };
-            bitcoinkernel::ContextBuilder::new()
-                .chain_type(chain_type)
-                .build()
-                .map(|ctx| Self { ctx })
-                .map_err(|error| ConsensusError::Kernel(error.to_string()))
-        }
-
-        /// Verifies a transaction's inputs through bitcoinkernel script verification.
-        pub fn verify_tx(
-            &self,
-            tx: &Tx,
-            prevouts: &impl UtxoView,
-            _height: u32,
-            flags: VerifyFlags,
-        ) -> Result<(), ConsensusError> {
-            let _ = &self.ctx;
-            let spent = collect_spent_outputs(tx, prevouts)?;
-            verify_tx_scripts(tx, &spent, flags)
-        }
-    }
-
-    fn collect_spent_outputs(
-        tx: &Tx,
-        prevouts: &impl UtxoView,
-    ) -> Result<Vec<(OutPoint, TxOut)>, ConsensusError> {
-        tx.inputs
-            .iter()
-            .enumerate()
-            .map(|(input_index, input)| {
-                prevouts
-                    .lookup(&input.previous_output)
-                    .map(|txout| (input.previous_output, txout))
-                    .ok_or(ConsensusError::MissingPrevout { input_index })
-            })
-            .collect()
-    }
-
     fn kernel_txout(prevout: &TxOut) -> Result<bitcoinkernel::TxOut, ConsensusError> {
         let script = bitcoinkernel::ScriptPubkey::new(&prevout.script_pubkey)
             .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
@@ -232,14 +179,9 @@ mod enabled {
 }
 
 #[cfg(feature = "kernel")]
-pub use enabled::{KernelBlock, KernelContext, verify_tx_scripts};
+pub use enabled::{KernelBlock, verify_tx_scripts};
 #[cfg(feature = "kernel")]
 pub(crate) use enabled::{PreparedKernelTx, prepare_kernel_tx, verify_prepared_input};
-
-#[cfg(not(feature = "kernel"))]
-/// Stub kernel context available when the `kernel` feature is off.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct KernelContext;
 
 #[cfg(not(feature = "kernel"))]
 /// Portable-build stand-in for the kernel's one-shot block parse.
