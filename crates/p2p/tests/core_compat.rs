@@ -24,16 +24,13 @@ use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inven
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
 use bitcoin_rs_p2p::PeerRole;
-use bitcoin_rs_p2p::dispatch::{
-    ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, dispatch_inbound,
-    dispatch_inbound_with_chain,
-};
+use bitcoin_rs_p2p::dispatch::{ChainQuery, InventoryServing, dispatch_inbound};
 use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::wire::{
-    MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
-    write_message,
+    MAX_HEADERS_MESSAGE_COUNT, MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION,
+    PeerError, read_message, write_message,
 };
 use bitcoin_rs_p2p::{
     BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, InboundBlock, InboundHeaders, Message,
@@ -764,7 +761,7 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
 #[test]
 fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Error>> {
     let genesis = genesis_block()?;
-    let headers = child_headers(&genesis.header, MAX_HEADERS_RESPONSE + 1);
+    let headers = child_headers(&genesis.header, MAX_HEADERS_MESSAGE_COUNT + 1);
     let chain = FakeChain::new(headers.clone(), HashMap::new());
     let mut peer = ready_peer(Magic::REGTEST)?;
 
@@ -777,7 +774,7 @@ fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Err
     let Some(Message::Headers(served)) = response.first() else {
         return Err("expected headers response".into());
     };
-    assert_eq!(served.len(), MAX_HEADERS_RESPONSE);
+    assert_eq!(served.len(), MAX_HEADERS_MESSAGE_COUNT);
     assert_eq!(served.len(), 2_000, "Core 31.1 max headers per message");
     Ok(())
 }
@@ -1268,7 +1265,7 @@ fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Err
         .iter()
         .map(|(locator, stop)| {
             (
-                before.headers_after(locator, *stop, MAX_HEADERS_RESPONSE),
+                before.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
                 before.headers_after(locator, *stop, 1),
             )
         })
@@ -1285,7 +1282,7 @@ fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Err
     let after = FakeChain::new(headers, bodies);
     for ((locator, stop), (wide, narrow)) in cases.iter().zip(&expected) {
         assert_eq!(
-            after.headers_after(locator, *stop, MAX_HEADERS_RESPONSE),
+            after.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
             *wide
         );
         assert_eq!(after.headers_after(locator, *stop, 1), *narrow);
