@@ -8,8 +8,7 @@
 mod reference_set;
 
 use bitcoin::hashes::{Hash, sha256};
-use bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML;
-use bitcoin_rs_rpc::manifest::{MANIFEST, Status};
+use bitcoin_rs_rpc::manifest::{MANIFEST, MANIFEST_TOML, Status};
 use reference_set::{CorpusCustody, ReferenceError, load_reference_set, reference_set};
 
 fn edit_reference(section: Option<&str>, edit: impl FnOnce(&mut toml::Table)) -> String {

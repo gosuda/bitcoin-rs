@@ -2,9 +2,10 @@
 
 The mempool owner implements the selected Core 31.1 replacement and preview
 profile. [The policy matrix](../policies/mempool-policy.md) records behavior,
-reference evidence and intentional unsupported cases. Compatibility claims are
-owned by [core-compat.toml](../api/core-compat.toml); admission registry metadata
-is checked against its status and rationale.
+reference evidence and intentional unsupported cases. Compatibility claims
+live in the RPC registry (`crates/rpc/src/registry.rs`), whose deviation
+notes carry the rationale; [core-compat.toml](../api/core-compat.toml)
+holds the reference pins and the admission-profile evidence.
 
 ## Clauses
 
@@ -92,8 +93,9 @@ is checked against its status and rationale.
   limits and BIP68 checks follow this contract and POL-06.
 - Core's bounded, history-dependent SFL work behavior is intentionally not
   emulated. The exact solver and its independently checked arithmetic do not
-  prove Core parity in non-optimal transient states. This difference remains
-  in the compatibility manifest and prevents a whole-surface `supported` claim.
+  prove Core parity in non-optimal transient states. This difference remains a
+  recorded `Deviation` in the registry and prevents a whole-surface `Supported`
+  claim.
 - Combined package previews enforce count/weight, txid uniqueness, dependency
   order, internal consistency and projected cluster bounds. First precheck
   failure leaves other rows unfinished. Script failures preserve only earlier

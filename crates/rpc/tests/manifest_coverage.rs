@@ -179,7 +179,7 @@ fn every_deviation_states_itself() {
 /// is the failure mode the whole vocabulary exists to prevent.
 #[test]
 fn supported_is_not_claimable_without_the_harness() {
-    let table: toml::Table = toml::from_str(bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML)
+    let table: toml::Table = toml::from_str(manifest::MANIFEST_TOML)
         .unwrap_or_else(|err| panic!("the reference custody record must parse: {err}"));
     let harness = table
         .get("reference")
@@ -212,7 +212,7 @@ fn supported_is_not_claimable_without_the_harness() {
 /// is exactly when the compatibility claims need re-reading.
 #[test]
 fn the_pinned_core_reference_matches_the_locked_kernel() {
-    let table: toml::Table = toml::from_str(bitcoin_rs_rpc::compat_manifest::MANIFEST_TOML)
+    let table: toml::Table = toml::from_str(manifest::MANIFEST_TOML)
         .unwrap_or_else(|err| panic!("the reference custody record must parse: {err}"));
     let Some(reference) = table.get("reference").and_then(toml::Value::as_table) else {
         panic!("the reference custody record must carry a `reference` table");
