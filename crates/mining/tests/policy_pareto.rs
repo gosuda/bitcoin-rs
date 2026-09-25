@@ -28,7 +28,8 @@ fn selects_independent_transactions_in_modified_fee_order() -> Result<(), Box<dy
             vsize,
             fee,
             u64::from(index),
-            800_000, 0
+            800_000,
+            0,
         ))?;
     }
 
@@ -68,7 +69,8 @@ fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dy
         200,
         10_000,
         2,
-        100, 0
+        100,
+        0,
     ))?;
 
     let snapshot = mempool.mining_snapshot();

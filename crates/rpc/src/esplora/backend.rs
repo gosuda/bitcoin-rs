@@ -452,7 +452,8 @@ mod pagination_tests {
                     100,
                     1_000,
                     u64::from(129 - index),
-                    0, 0
+                    0,
+                    0,
                 )
             })
             .collect();

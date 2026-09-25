@@ -1181,10 +1181,10 @@ mod tests {
         let outcome = gateway
             .replace_transaction(
                 AdmissionOrigin::Rpc,
-                ReplacementCandidate::new(Arc::clone(&replacement), 100, 11_000, 1_000),
+                &ReplacementCandidate::new(Arc::clone(&replacement), 100, 11_000, 1_000)
+                    .with_sigop_cost(4),
                 2,
                 0,
-                4,
             )
             .expect("local replacement");
         assert_eq!(outcome.len(), 2);

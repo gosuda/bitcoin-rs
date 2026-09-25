@@ -718,17 +718,17 @@ impl MempoolGateway {
     pub fn replace_transaction(
         &self,
         origin: AdmissionOrigin,
-        mut candidate: ReplacementCandidate,
+        candidate: &ReplacementCandidate,
         time: u64,
         height: u32,
-        sigop_cost: u32,
     ) -> Result<crate::mutation::MutationResult, RbfError> {
-        candidate.sigop_cost = sigop_cost;
         for _ in 0..crate::admission::MAX_ADMISSION_RETRIES {
-            let inputs = self
-                .pool
-                .read()
-                .capture_replacement(&candidate, time, height, crate::rbf::FeeEstimation::Estimate)?;
+            let inputs = self.pool.read().capture_replacement(
+                candidate,
+                time,
+                height,
+                crate::rbf::FeeEstimation::Estimate,
+            )?;
             let plan = inputs.verify()?;
             let result = self.commit(origin, move |pool| pool.commit_pool_change(plan));
             if !matches!(result, Err(RbfError::StalePlan)) {
@@ -1757,10 +1757,9 @@ mod tests {
         let result = gateway
             .replace_transaction(
                 AdmissionOrigin::Rpc,
-                crate::ReplacementCandidate::new(Arc::new(replacement), 100, 5_000, 1),
+                &crate::ReplacementCandidate::new(Arc::new(replacement), 100, 5_000, 1),
                 1,
                 7,
-                0,
             )
             .expect("replacement lands");
 
@@ -2389,10 +2388,10 @@ mod tests {
         let error = gateway
             .replace_transaction(
                 AdmissionOrigin::Rpc,
-                crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1),
+                &crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1)
+                    .with_sigop_cost(4),
                 2,
                 7,
-                4,
             )
             .expect_err("replacement cannot survive capacity trimming");
         assert_eq!(error, crate::RbfError::Mempool(crate::MempoolError::Full));

@@ -74,13 +74,21 @@ fn chain_accepts_sixty_four_and_rejects_the_next_cluster_member() -> Result<(), 
             1_000,
             4_000,
             u64::from(height),
-            1, 0
+            1,
+            0,
         ))?;
     }
 
     let rejected = chained_tx(100, previous);
     let err = pool
-        .insert_entry(MempoolEntry::new(Arc::new(rejected), 1_000, 4_000, 65, 1, 0))
+        .insert_entry(MempoolEntry::new(
+            Arc::new(rejected),
+            1_000,
+            4_000,
+            65,
+            1,
+            0,
+        ))
         .err();
 
     assert_eq!(
@@ -162,7 +170,8 @@ fn cluster_limit_rejects_the_sixty_fifth_fanout_member() -> Result<(), Box<dyn E
             100,
             1_000,
             u64::from(vout) + 2,
-            1, 0
+            1,
+            0,
         ))?;
     }
     assert_eq!(pool.len(), 64);
@@ -216,14 +225,16 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), Box<dyn Error
         100,
         10_000,
         1,
-        7, 0
+        7,
+        0,
     ))?;
     pool.insert_entry(MempoolEntry::new(
         Arc::new(second.clone()),
         100,
         10_000,
         1,
-        7, 0
+        7,
+        0,
     ))?;
     assert_eq!(pool.estimate_fee_rate(2), None);
 

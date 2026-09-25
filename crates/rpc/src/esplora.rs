@@ -1238,7 +1238,14 @@ mod tests {
         ctx.mempool
             .pool()
             .write()
-            .insert_entry(MempoolEntry::new(Arc::new(transaction), 100, 1_000, 0, 0, 0))
+            .insert_entry(MempoolEntry::new(
+                Arc::new(transaction),
+                100,
+                1_000,
+                0,
+                0,
+                0,
+            ))
             .expect("mempool entry accepted");
         let handler = Handler::new(Arc::clone(&ctx));
         let body = serde_json::to_vec(&vec![txid.to_string()]).expect("txids serialize");
@@ -1455,7 +1462,8 @@ mod tests {
                 100,
                 1_000,
                 0,
-                0, 0
+                0,
+                0,
             ))
             .expect("mempool entry accepted");
 
@@ -1723,7 +1731,8 @@ mod tests {
                     seed.vsize,
                     seed.fee,
                     seed.time,
-                    0, 0
+                    0,
+                    0,
                 ))
                 .expect("seed entry admitted");
         }

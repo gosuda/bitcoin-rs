@@ -675,7 +675,8 @@ mod tests {
         let rbf_txid = rbf_tx.txid();
         {
             let mut pool = ctx.mempool.pool().write();
-            let Ok(_) = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7, 0))
+            let Ok(_) =
+                pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7, 0))
             else {
                 panic!("mempool insert failed");
             };

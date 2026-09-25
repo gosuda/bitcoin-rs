@@ -275,7 +275,8 @@ fn pool_with_conflict(
         original.vsize,
         original.fee,
         2,
-        1, 0
+        1,
+        0,
     ))?;
 
     let mut last_parent = OutPoint::new(original_txid, 0);
@@ -288,7 +289,8 @@ fn pool_with_conflict(
             50,
             100,
             u64::from(i) + 3,
-            1, 0
+            1,
+            0,
         ))?;
     }
 
@@ -356,7 +358,7 @@ fn replace_transaction_leaves_only_the_replacement() -> Result<(), Box<dyn Error
         .ok_or("original missing")?;
     let replacement_txid = replacement_tx.txid();
     let candidate = ReplacementCandidate::new(Arc::new(replacement_tx), 100, 1_200, 1);
-    let _id = pool.replace_transaction(candidate, 10, 1, 4)?;
+    let _id = pool.replace_transaction(&candidate.with_sigop_cost(4), 10, 1)?;
     assert!(pool.contains_txid(&replacement_txid));
     assert!(!pool.contains_txid(&original_txid));
     assert_eq!(pool.len(), 1);
@@ -394,10 +396,9 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         let before = pool_fingerprint(&pool);
         let err = pool
             .replace_transaction(
-                ReplacementCandidate::new(Arc::new(replacement), 300, 1_300, 1),
+                &ReplacementCandidate::new(Arc::new(replacement), 300, 1_300, 1).with_sigop_cost(4),
                 10,
                 1,
-                4,
             )
             .expect_err("below-floor replacement must fail");
         assert_eq!(
@@ -433,10 +434,9 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         let before = pool_fingerprint(&pool);
         let err = pool
             .replace_transaction(
-                ReplacementCandidate::new(Arc::new(replacement), 100, 2_000, 1),
+                &ReplacementCandidate::new(Arc::new(replacement), 100, 2_000, 1).with_sigop_cost(4),
                 10,
                 1,
-                4,
             )
             .expect_err("spending an evicted parent must fail");
         assert_eq!(err, RbfError::Mempool(MempoolError::EvictedParent));
@@ -450,15 +450,15 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         let before = pool_fingerprint(&pool);
         let err = pool
             .replace_transaction(
-                ReplacementCandidate::new(
+                &ReplacementCandidate::new(
                     Arc::new(replacement_tx),
                     case.replacement.vsize,
                     case.replacement.fee,
                     case.replacement.min_relay_fee_rate,
-                ),
+                )
+                .with_sigop_cost(4),
                 10,
                 1,
-                4,
             )
             .expect_err(case.name);
         assert_eq!(Err(err), case.expected, "{}", case.name);
@@ -489,7 +489,8 @@ fn replace_transaction_cluster_limits_use_post_eviction_projection() -> Result<(
             50,
             100,
             u64::from(i) + 2,
-            1, 0
+            1,
+            0,
         ))?;
     }
     let conflict = tx_from_inputs(60, &[(OutPoint::new(parent_txid, 23), 0xFFFF_FFFD)], 1);
@@ -497,10 +498,9 @@ fn replace_transaction_cluster_limits_use_post_eviction_projection() -> Result<(
     let replacement = tx_from_inputs(40, &[(OutPoint::new(parent_txid, 23), 0xFFFF_FFFD)], 1);
     let replacement_txid = replacement.txid();
     let _id = pool.replace_transaction(
-        ReplacementCandidate::new(Arc::new(replacement), 50, 300, 1),
+        &ReplacementCandidate::new(Arc::new(replacement), 50, 300, 1).with_sigop_cost(4),
         40,
         1,
-        4,
     )?;
     assert!(pool.contains_txid(&replacement_txid));
     assert_eq!(pool.len(), 25);

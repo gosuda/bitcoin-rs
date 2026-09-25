@@ -237,7 +237,8 @@ mod tests {
             pool.insert_entry(MempoolEntry::new(Arc::new(tx(tag)), 100, fee, 1, 1, 0))?;
         }
         pool.limits.max_total_bytes = 200;
-        let changes = pool.insert_entry(MempoolEntry::new(Arc::new(tx(4)), 100, 10_000, 1, 1, 0))?;
+        let changes =
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx(4)), 100, 10_000, 1, 1, 0))?;
         assert_eq!(changes.removed_txids(), vec![tx(2).txid(), tx(3).txid()]);
         assert_eq!(pool.total_vsize(), 200);
         Ok(())

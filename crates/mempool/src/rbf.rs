@@ -412,11 +412,18 @@ impl Mempool {
     }
 
     /// Checks the complete replacement policy without changing pool state.
+    ///
+    /// Test seam: the RPC BIP125 contract oracle
+    /// (`crates/rpc/tests/policy_contract.rs`) quotes this verdict against the
+    /// RPC's.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn check_replacement(
         &self,
         candidate: &ReplacementCandidate,
     ) -> Result<ReplacementPlan, RbfError> {
-        let prepared = self.capture_replacement(candidate, 0, 0, FeeEstimation::Estimate)?.verify()?;
+        let prepared = self
+            .capture_replacement(candidate, 0, 0, FeeEstimation::Estimate)?
+            .verify()?;
         Ok(ReplacementPlan {
             evicted: prepared.evicted,
         })
@@ -455,16 +462,18 @@ impl Mempool {
 
     /// Trusted direct-pool replacement. The gateway captures and verifies
     /// separately so graph work never runs while holding its write lock.
+    ///
+    /// Test seam: fixtures and the RPC BIP125 contract oracle
+    /// (`crates/rpc/tests/policy_contract.rs`) drive this door directly.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn replace_transaction(
         &mut self,
-        mut candidate: ReplacementCandidate,
+        candidate: &ReplacementCandidate,
         time: u64,
         height: u32,
-        sigop_cost: u32,
     ) -> Result<crate::mutation::MutationResult, RbfError> {
-        candidate.sigop_cost = sigop_cost;
         let prepared = self
-            .capture_replacement(&candidate, time, height, FeeEstimation::Estimate)?
+            .capture_replacement(candidate, time, height, FeeEstimation::Estimate)?
             .verify()?;
         self.commit_pool_change(prepared)
     }

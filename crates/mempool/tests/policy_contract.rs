@@ -197,10 +197,9 @@ fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(),
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
 
     let result = pool.replace_transaction(
-        ReplacementCandidate::new(Arc::new(replacement.clone()), 4_000, 16_000, 1_000),
+        &ReplacementCandidate::new(Arc::new(replacement.clone()), 4_000, 16_000, 1_000),
         0,
         1,
-        0,
     )?;
     assert_eq!(
         result
@@ -234,10 +233,9 @@ fn rbf_rule3_replacement_must_pay_evicted_fees() -> Result<(), Box<dyn Error>> {
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
     let err = pool
         .replace_transaction(
-            ReplacementCandidate::new(Arc::new(replacement), 4_000, 4_000, 1_000),
+            &ReplacementCandidate::new(Arc::new(replacement), 4_000, 4_000, 1_000),
             0,
             1,
-            0,
         )
         .err()
         .ok_or("expected rule 3 rejection")?;
@@ -254,10 +252,9 @@ fn replacement_with_equal_direct_rate_can_improve_the_full_diagram() -> Result<(
     // originals' 2000 sat/kvB. The complete diagram still improves.
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
     pool.replace_transaction(
-        ReplacementCandidate::new(Arc::new(replacement), 16_000, 32_000, 1_000),
+        &ReplacementCandidate::new(Arc::new(replacement), 16_000, 32_000, 1_000),
         0,
         1,
-        0,
     )?;
     assert_eq!(pool.len(), 1);
     Ok(())
@@ -280,10 +277,9 @@ fn replacement_may_add_an_unconfirmed_input() -> Result<(), Box<dyn Error>> {
     );
     let replacement_txid = replacement.txid();
     pool.replace_transaction(
-        ReplacementCandidate::new(Arc::new(replacement), 4_000, 16_000, 1_000),
+        &ReplacementCandidate::new(Arc::new(replacement), 4_000, 16_000, 1_000),
         0,
         1,
-        0,
     )?;
     assert!(pool.contains_txid(&replacement_txid));
     assert!(pool.contains_txid(&unrelated.txid()));
@@ -376,10 +372,9 @@ fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), B
     pool.insert_entry(entry(original.clone(), 100, 10_000))?;
     let replacement = tx(OutPoint::new(root_txid, 0), 800, 0xFF_FF_FF_FF);
     pool.replace_transaction(
-        ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1_000),
+        &ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1_000),
         0,
         1,
-        0,
     )?;
     assert!(!pool.contains_txid(&original.txid()));
     Ok(())

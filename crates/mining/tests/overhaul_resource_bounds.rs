@@ -159,10 +159,9 @@ fn exercise(stage: &str, fixture: &Fixture) -> TestResult<Value> {
             let vsize = u32::try_from(tx.vsize())?;
             let changes = gateway.replace_transaction(
                 AdmissionOrigin::Rpc,
-                ReplacementCandidate::new(Arc::new(tx), vsize, 100_000_000, 1_000),
+                &ReplacementCandidate::new(Arc::new(tx), vsize, 100_000_000, 1_000),
                 2,
                 1,
-                0,
             )?;
             assert_eq!(changes.len(), usize::try_from(CLUSTERS * MEMBERS + 1)?);
             assert_eq!(gateway.read().tx_count(), 1);

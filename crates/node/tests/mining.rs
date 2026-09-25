@@ -68,7 +68,8 @@ fn advance_mempool_sequence(state: &NodeState) -> anyhow::Result<()> {
             100,
             10_000,
             1,
-            7, 0
+            7,
+            0,
         ))
         .map_err(|error| anyhow::anyhow!("seed insert failed: {error}"))?;
     guard.clear();

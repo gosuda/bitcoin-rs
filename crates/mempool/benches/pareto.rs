@@ -53,7 +53,14 @@ fn distinct_tx(seed: u64) -> Tx {
 }
 
 fn entry(seed: u64) -> MempoolEntry {
-    MempoolEntry::new(Arc::new(distinct_tx(seed)), 200, spread_fee(seed), seed, 0, 0)
+    MempoolEntry::new(
+        Arc::new(distinct_tx(seed)),
+        200,
+        spread_fee(seed),
+        seed,
+        0,
+        0,
+    )
 }
 
 fn bench_mempool_fill(c: &mut Criterion) {

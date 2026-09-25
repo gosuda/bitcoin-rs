@@ -2598,10 +2598,18 @@ mod tests {
             100,
             u64::MAX - 1,
             1,
-            7, 0
+            7,
+            0,
         ))?;
         pool.insert_entry(MempoolEntry::new(Arc::new(prioritised), 100, 100, 2, 7, 0))?;
-        pool.insert_entry(MempoolEntry::new(Arc::new(removed.clone()), 100, 50, 3, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(removed.clone()),
+            100,
+            50,
+            3,
+            7,
+            0,
+        ))?;
 
         assert_eq!(pool.aggregate_fees(), u64::MAX);
         assert!(
@@ -2843,7 +2851,8 @@ mod tests {
             1_000,
             1_500,
             1,
-            7, 0
+            7,
+            0,
         ))?;
         assert_floor(&pool, Some(1_500), "insert lower rate");
 
@@ -2867,7 +2876,8 @@ mod tests {
             1_000,
             2_000,
             1,
-            7, 0
+            7,
+            0,
         ))?;
         assert_floor(&pool, Some(2_000), "insert new min before block");
         let removed = pool.remove_for_block(&[&mined], &[mined_txid], 8);
@@ -2926,7 +2936,8 @@ mod tests {
             1_000,
             1_500,
             1,
-            7, 0
+            7,
+            0,
         ))?;
         assert_floor(&pool, Some(1_500), "before replacement");
 
@@ -2945,10 +2956,10 @@ mod tests {
             }],
         };
         pool.replace_transaction(
-            crate::ReplacementCandidate::new(Arc::new(replacement), 1_000, 4_000, 1),
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 1_000, 4_000, 1)
+                .with_sigop_cost(4),
             10,
             1,
-            4,
         )
         .expect("replacement must apply");
         assert_floor(
@@ -3026,7 +3037,14 @@ mod tests {
             outputs: Vec::new(),
         };
         let non_rbf_txid = non_rbf_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(non_rbf_tx), 100, 10_000, 1, 7, 0));
+        let _ = pool.insert_entry(MempoolEntry::new(
+            Arc::new(non_rbf_tx),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ));
         let replaceable = pool.iter_replaceable_txids();
         assert!(replaceable.contains(&rbf_txid));
         assert!(!replaceable.contains(&non_rbf_txid));
@@ -3163,14 +3181,22 @@ mod tests {
         let matching_tx = funder(matching.clone(), 0xaa);
         let matching_txid = matching_tx.txid();
         let matching_wtxid = matching_tx.wtxid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(matching_tx), 100, 10_000, 1, 7, 0))
-            .expect("matching insert");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(matching_tx),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ))
+        .expect("matching insert");
         pool.insert_entry(MempoolEntry::new(
             Arc::new(funder(other, 0xbb)),
             100,
             10_000,
             1,
-            7, 0
+            7,
+            0,
         ))
         .expect("other insert");
 
@@ -3283,7 +3309,8 @@ mod tests {
             100,
             10_000,
             1,
-            7, 0
+            7,
+            0,
         ));
         let spender = pool
             .outpoint_spender(outpoint)
@@ -3341,7 +3368,8 @@ mod tests {
             100,
             1_000,
             1,
-            7, 0
+            7,
+            0,
         ))?;
         pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 2, 7, 0))?;
         let child_id = pool
@@ -3479,7 +3507,8 @@ mod tests {
 
         let other = tx(4, Vec::new());
         let other_txid = other.txid();
-        let _other_id = pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 1, 7, 0))?;
+        let _other_id =
+            pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 1, 7, 0))?;
         pool.prioritise(other_txid, i64::MAX)
             .expect("the signed range edge itself is storable");
         assert_eq!(
@@ -3657,7 +3686,8 @@ mod tests {
             100,
             1_000,
             1,
-            7, 0
+            7,
+            0,
         ))?;
         let child = tx(11, vec![OutPoint::new(parent_txid, 0)]);
         let child_txid = child.txid();
@@ -3709,13 +3739,27 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let lower_fee_tx = tx(13, Vec::new());
         let lower_fee_txid = lower_fee_tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(lower_fee_tx), 100, 1_000, 1, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(lower_fee_tx),
+            100,
+            1_000,
+            1,
+            7,
+            0,
+        ))?;
         let lower_fee_id = pool
             .entry_id_by_txid(&lower_fee_txid)
             .expect("lower id resolves");
         let higher_fee_tx = tx(14, Vec::new());
         let higher_fee_txid = higher_fee_tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(higher_fee_tx), 100, 2_000, 2, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(higher_fee_tx),
+            100,
+            2_000,
+            2,
+            7,
+            0,
+        ))?;
         let higher_fee_id = pool
             .entry_id_by_txid(&higher_fee_txid)
             .expect("higher id resolves");
@@ -3843,14 +3887,16 @@ mod tests {
             100,
             10_000,
             1,
-            7, 0
+            7,
+            0,
         ))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(second.clone()),
             100,
             10_000,
             1,
-            7, 0
+            7,
+            0,
         ))?;
         assert_eq!(
             pool.estimate_fee_rate(2),
@@ -4068,8 +4114,14 @@ mod tests {
 
         // Bystander: 850 vbytes, high fee rate (10_000 sat/vbyte), fills pool.
         let bystander = tx(8, Vec::new());
-        let seated_by =
-            pool.insert_entry(MempoolEntry::new(Arc::new(bystander), 850, 8_500_000, 1, 7, 0));
+        let seated_by = pool.insert_entry(MempoolEntry::new(
+            Arc::new(bystander),
+            850,
+            8_500_000,
+            1,
+            7,
+            0,
+        ));
         assert!(seated_by.is_ok(), "bystander must fit: {seated_by:?}");
         assert_eq!(pool.len(), 2);
 
@@ -4101,10 +4153,10 @@ mod tests {
             pool.policy_stamp(),
         );
         let result = pool.replace_transaction(
-            crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1),
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1)
+                .with_sigop_cost(4),
             2,
             7,
-            4,
         );
         assert!(matches!(
             result,
@@ -4157,7 +4209,8 @@ mod tests {
                 vsize,
                 u64::from(vsize) * 10,
                 u64::from(label),
-                1, 0
+                1,
+                0,
             ))?;
             Ok(OutPoint::new(txid, 0))
         };
@@ -4270,21 +4323,24 @@ mod tests {
             100,
             100_000,
             2,
-            1, 0
+            1,
+            0,
         ))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx(34, vec![OutPoint::default()])),
             100,
             200,
             3,
-            1, 0
+            1,
+            0,
         ))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx(35, vec![OutPoint::default()])),
             100,
             300,
             4,
-            1, 0
+            1,
+            0,
         ))?;
         assert!(
             pool.len() < 5,
@@ -4819,10 +4875,10 @@ mod spend_index_tests {
 
         let replacement = tx_with(&[OutPoint::new(root_txid, 0)], 1, 4);
         let result = pool.replace_transaction(
-            crate::ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1),
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1)
+                .with_sigop_cost(4),
             4,
             7,
-            4,
         );
         assert!(
             result.is_ok(),
@@ -4876,7 +4932,8 @@ mod spend_index_tests {
             "the preview must reject a cluster-only violation: {preview:?}"
         );
 
-        let admission = pool.insert_entry(MempoolEntry::new(Arc::new(child_c), 100, 10_000, 4, 7, 0));
+        let admission =
+            pool.insert_entry(MempoolEntry::new(Arc::new(child_c), 100, 10_000, 4, 7, 0));
         assert!(
             matches!(
                 admission,
@@ -4932,8 +4989,15 @@ mod spend_index_tests {
         assert_eq!(preview.evicted, vec![a_id]);
         assert_eq!(pool.tx_count(), 3, "preview does not mutate");
         assert_eq!(
-            pool.insert_entry(MempoolEntry::new(Arc::new(replacement), 100, 20_000, 1, 7, 0))
-                .err(),
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(replacement),
+                100,
+                20_000,
+                1,
+                7,
+                0
+            ))
+            .err(),
             Some(MempoolError::Policy(PolicyError::ClusterCountLimit)),
             "ordinary insertion cannot grow this full cluster"
         );
@@ -5362,8 +5426,15 @@ mod graph_tests {
     fn insert_ok(pool: &mut Mempool, nonce: u32, inputs: &[OutPoint], vsize: u32) -> Txid {
         let tx = graph_tx(nonce, inputs, false);
         let txid = tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 1_000, TIME, HEIGHT, 0))
-            .expect("fixture insert must pass validation");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx),
+            vsize,
+            1_000,
+            TIME,
+            HEIGHT,
+            0,
+        ))
+        .expect("fixture insert must pass validation");
         txid
     }
 
@@ -5865,7 +5936,8 @@ mod graph_tests {
             vsize,
             1_000,
             TIME,
-            HEIGHT, 0
+            HEIGHT,
+            0,
         ));
         outcome.ok()?;
         txs.push(tx);
@@ -5960,8 +6032,14 @@ mod graph_tests {
                         }
                         let excluded: HashSet<EntryId> = evicted.iter().copied().collect();
                         let fee = 2_000 + u64::try_from(rng.below(1_000)).unwrap_or(0);
-                        let entry =
-                            MempoolEntry::new(Arc::new(candidate.clone()), 100, fee, TIME, HEIGHT, 0);
+                        let entry = MempoolEntry::new(
+                            Arc::new(candidate.clone()),
+                            100,
+                            fee,
+                            TIME,
+                            HEIGHT,
+                            0,
+                        );
                         let Ok(prepared) = pool.validate_insert(entry, &excluded) else {
                             continue;
                         };
