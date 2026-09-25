@@ -6,19 +6,15 @@
 // WHY rust-bitcoin: address strings, `asm`, and `desc` in RPC response bodies
 // are wire-format strings that must match Bitcoin Core byte-for-byte. They ride
 // the sanctioned rust-bitcoin compat seam (`Address<T>`/`Script` disassembly);
-// all transaction/amount/hash plumbing here is native.
-use bitcoin::Address;
+// all transaction/amount/hash plumbing here is native. The script-shape
+// classification behind `type` lives once in `compat::convert`.
 use bitcoin_rs_primitives::{BlockHash, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes};
 
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use sonic_rs::{Value, json};
 
-use bitcoin_rs_script::{
-    is_multisig, is_op_return, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh,
-};
-
-use crate::compat::convert::hex_encode;
+use crate::compat::convert::{self, hex_encode};
 
 /// Optional confirmed-chain fields projected beside a transaction object.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,19 +30,6 @@ pub(crate) struct TransactionChainContext {
     /// Rendered only when `Some`. Explicit `blockhash` lookups set this;
     /// txindex lookups leave it absent.
     pub in_active_chain: Option<bool>,
-}
-
-/// Per-input prevout projected by Core verbosity 2.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TxPrevout {
-    /// Whether the prevout was created by a coinbase.
-    pub generated: bool,
-    /// Confirming height of the prevout.
-    pub height: u32,
-    /// Prevout value in satoshis.
-    pub value: u64,
-    /// Prevout scriptPubKey.
-    pub script_pubkey: Vec<u8>,
 }
 
 /// Exact eight-decimal BTC spelling used by Core JSON amount fields.
@@ -66,22 +49,20 @@ pub(crate) fn btc_amount_json(satoshis: u64) -> Value {
 }
 
 /// Render one transaction in Bitcoin Core's verbose object shape.
+///
+/// PRE: `tx` is the transaction to project, `network` is the selected Bitcoin
+///   network, and `chain` carries confirmed-chain fields when the caller has
+///   them.
+/// POST: returns the ordinary Core verbose object: identifiers, sizes, weight,
+///   lock time, inputs, outputs, hex, and the chain fields when `chain` is
+///   set.
+/// INVARIANT: the projection reads no node state and emits no `fee` or
+///   per-input `prevout` field.
 #[must_use]
 pub(crate) fn transaction_json(
     tx: &Tx,
     network: Network,
     chain: Option<TransactionChainContext>,
-) -> Value {
-    transaction_json_with_prevouts(tx, network, chain, None)
-}
-
-/// Render one transaction, optionally including verbosity-2 `fee` and `prevout`.
-#[must_use]
-pub(crate) fn transaction_json_with_prevouts(
-    tx: &Tx,
-    network: Network,
-    chain: Option<TransactionChainContext>,
-    prevouts: Option<&[Option<TxPrevout>]>,
 ) -> Value {
     let txid = tx.txid().to_string();
     let hash = tx.wtxid().to_string();
@@ -93,11 +74,7 @@ pub(crate) fn transaction_json_with_prevouts(
         .inputs
         .iter()
         .enumerate()
-        .map(|(index, input)| {
-            let prevout =
-                prevouts.and_then(|prevouts| prevouts.get(index).and_then(Option::as_ref));
-            input_json(input, index == 0 && coinbase, prevout, network)
-        })
+        .map(|(index, input)| input_json(input, index == 0 && coinbase))
         .collect();
     let vout: Vec<Value> = tx
         .outputs
@@ -127,47 +104,26 @@ pub(crate) fn transaction_json_with_prevouts(
             let _ = value.insert("in_active_chain", json!(in_active_chain));
         }
     }
-    if !coinbase
-        && let Some(prevouts) = prevouts
-        && prevouts.len() == tx.inputs.len()
-        && prevouts.iter().all(Option::is_some)
-    {
-        let input_value = prevouts.iter().fold(0_u64, |sum, prevout| {
-            sum.saturating_add(prevout.as_ref().map_or(0, |prevout| prevout.value))
-        });
-        let output_value = tx.outputs.iter().fold(0_u64, |sum, output| {
-            sum.saturating_add(output.value.to_sat())
-        });
-        let _ = value.insert(
-            "fee",
-            btc_amount_json(input_value.saturating_sub(output_value)),
-        );
-    }
     value
 }
 
 /// Render a `scriptPubKey` object in Bitcoin Core's verbose shape.
 #[must_use]
 pub(crate) fn script_pub_key_json(script: &[u8], network: Network) -> Value {
-    let script_type = classify_script(script);
+    let script_type = convert::core_type_name(convert::classify(script));
     let mut value = json!({
-        "asm": script_asm(script),
+        "asm": convert::script_asm(script),
         "desc": script_desc(script, network),
         "hex": hex_encode(script),
         "type": script_type
     });
-    if let Some(address) = script_address(script, network) {
+    if let Some(address) = convert::script_address(script, network) {
         let _ = value.insert("address", json!(address));
     }
     value
 }
 
-fn input_json(
-    input: &TxIn,
-    coinbase: bool,
-    prevout: Option<&TxPrevout>,
-    network: Network,
-) -> Value {
+fn input_json(input: &TxIn, coinbase: bool) -> Value {
     if coinbase {
         let mut value = json!({
             "coinbase": hex_encode(&input.script_sig),
@@ -187,7 +143,7 @@ fn input_json(
         "txid": prev_txid.to_string(),
         "vout": prev_vout,
         "scriptSig": {
-            "asm": script_asm(&input.script_sig),
+            "asm": convert::script_asm(&input.script_sig),
             "hex": hex_encode(&input.script_sig)
         },
         "sequence": input.sequence.to_consensus()
@@ -195,17 +151,6 @@ fn input_json(
     if !input.witness.is_empty() {
         let witness: Vec<String> = input.witness.iter().map(|item| hex_encode(item)).collect();
         let _ = value.insert("txinwitness", json!(witness));
-    }
-    if let Some(prevout) = prevout {
-        let _ = value.insert(
-            "prevout",
-            json!({
-                "generated": prevout.generated,
-                "height": prevout.height,
-                "value": btc_amount_json(prevout.value),
-                "scriptPubKey": script_pub_key_json(&prevout.script_pubkey, network)
-            }),
-        );
     }
     value
 }
@@ -226,61 +171,11 @@ pub(crate) fn is_coinbase(tx: &Tx) -> bool {
     tx.inputs.len() == 1 && tx.inputs[0].previous_output == OutPoint::new(Txid::default(), u32::MAX)
 }
 
-fn script_asm(script: &[u8]) -> String {
-    bitcoin::Script::from_bytes(script).to_asm_string()
-}
-
-/// Maps a native network to the rust-bitcoin network for the address seam.
-#[must_use]
-const fn bitcoin_network(network: Network) -> bitcoin::Network {
-    match network {
-        Network::Mainnet => bitcoin::Network::Bitcoin,
-        Network::Testnet3 => bitcoin::Network::Testnet,
-        Network::Testnet4 => bitcoin::Network::Testnet4,
-        Network::Signet => bitcoin::Network::Signet,
-        Network::Regtest => bitcoin::Network::Regtest,
-    }
-}
-
-/// Renders the Core address string for a script, or `None` when the script has
-/// no address form (via the sanctioned rust-bitcoin seam).
-#[must_use]
-fn script_address(script: &[u8], network: Network) -> Option<String> {
-    Address::from_script(
-        bitcoin::Script::from_bytes(script),
-        bitcoin_network(network),
-    )
-    .ok()
-    .map(|address| address.to_string())
-}
-
 fn script_desc(script: &[u8], network: Network) -> String {
-    if let Some(address) = script_address(script, network) {
+    if let Some(address) = convert::script_address(script, network) {
         return format!("addr({address})");
     }
     format!("raw({})", hex_encode(script))
-}
-
-fn classify_script(script: &[u8]) -> &'static str {
-    if is_p2tr(script) {
-        "witness_v1_taproot"
-    } else if is_p2wpkh(script) {
-        "witness_v0_keyhash"
-    } else if is_p2wsh(script) {
-        "witness_v0_scripthash"
-    } else if is_p2pkh(script) {
-        "pubkeyhash"
-    } else if is_p2sh(script) {
-        "scripthash"
-    } else if is_p2pk(script) {
-        "pubkey"
-    } else if is_op_return(script) {
-        "nulldata"
-    } else if is_multisig(script) {
-        "multisig"
-    } else {
-        "nonstandard"
-    }
 }
 
 #[cfg(test)]

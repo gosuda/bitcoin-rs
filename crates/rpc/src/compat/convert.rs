@@ -13,7 +13,11 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use bitcoin::Address;
 use bitcoin_rs_primitives::{CompactTarget, Network, Tx, TxIn, TxOut, consensus_bytes};
+use bitcoin_rs_script::{
+    is_multisig, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, witness_program,
+};
 use sonic_rs::{JsonValueMutTrait as _, JsonValueTrait as _, Value};
 
 use crate::error::RpcError;
@@ -124,6 +128,120 @@ pub(crate) fn compact_target_hex(bits: CompactTarget) -> String {
 #[must_use]
 pub(crate) fn script_asm(script: &[u8]) -> String {
     bitcoin::Script::from_bytes(script).to_asm_string()
+}
+
+/// The internal script-shape classification shared by the Core RPC/REST
+/// renderer and the Esplora renderer.
+///
+/// Each protocol names a shape in its own spelling table: [`core_type_name`]
+/// for Core `scriptPubKey.type`, and `esplora_type_name` in
+/// `esplora/projection.rs` for Esplora `scriptpubkey_type`.
+///
+/// INVARIANT: a shape is a pure function of raw output-script bytes; no
+/// transaction, witness, network, or chain state takes part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScriptShape {
+    Empty,
+    Nonstandard,
+    Pubkey,
+    PubkeyHash,
+    ScriptHash,
+    Multisig,
+    NullData,
+    WitnessV0KeyHash,
+    WitnessV0ScriptHash,
+    WitnessV1Taproot,
+    Anchor,
+    WitnessUnknown,
+}
+
+/// Classifies one raw `scriptPubKey` into its shape.
+///
+/// PRE: `script` is the raw `scriptPubKey` byte slice.
+/// POST: returns exactly one shape. Empty bytes return `ScriptShape::Empty`;
+///   a recognized template returns its shape; all other bytes return
+///   `ScriptShape::Nonstandard`.
+/// INVARIANT: classification is a pure function of script bytes.
+///
+/// The order follows pinned Bitcoin Core 31.1
+/// `bitcoin-core/src/script/solver.cpp::Solver`: P2SH first, then recognized
+/// witness program forms, with pay-to-anchor ahead of the generic unknown
+/// witness arm, then null data, pubkey, pubkey hash, and bare multisig.
+#[must_use]
+pub(crate) fn classify(script: &[u8]) -> ScriptShape {
+    if script.is_empty() {
+        return ScriptShape::Empty;
+    }
+    if is_p2sh(script) {
+        return ScriptShape::ScriptHash;
+    }
+    if let Some((version, program)) = witness_program(script) {
+        return match (version, program.len()) {
+            (0, 20) => ScriptShape::WitnessV0KeyHash,
+            (0, 32) => ScriptShape::WitnessV0ScriptHash,
+            (1, 32) => ScriptShape::WitnessV1Taproot,
+            _ if is_p2a(script) => ScriptShape::Anchor,
+            _ if version != 0 => ScriptShape::WitnessUnknown,
+            _ => ScriptShape::Nonstandard,
+        };
+    }
+    if is_op_return(script) {
+        return ScriptShape::NullData;
+    }
+    if is_p2pk(script) {
+        return ScriptShape::Pubkey;
+    }
+    if is_p2pkh(script) {
+        return ScriptShape::PubkeyHash;
+    }
+    if is_multisig(script) {
+        return ScriptShape::Multisig;
+    }
+    ScriptShape::Nonstandard
+}
+
+/// Names one script shape in the Core `scriptPubKey.type` vocabulary.
+///
+/// PRE: `shape` is a value returned by [`classify`].
+/// POST: returns the exact name from the Core spelling table. An empty script
+///   is spelled `nonstandard`, matching Core.
+/// INVARIANT: the match is exhaustive. A new `ScriptShape` variant does not
+///   compile until both this table and the Esplora table name it.
+#[must_use]
+pub(crate) const fn core_type_name(shape: ScriptShape) -> &'static str {
+    match shape {
+        // Core spells an empty script `nonstandard`, like any unrecognized one.
+        ScriptShape::Empty | ScriptShape::Nonstandard => "nonstandard",
+        ScriptShape::Pubkey => "pubkey",
+        ScriptShape::PubkeyHash => "pubkeyhash",
+        ScriptShape::ScriptHash => "scripthash",
+        ScriptShape::Multisig => "multisig",
+        ScriptShape::NullData => "nulldata",
+        ScriptShape::WitnessV0KeyHash => "witness_v0_keyhash",
+        ScriptShape::WitnessV0ScriptHash => "witness_v0_scripthash",
+        ScriptShape::WitnessV1Taproot => "witness_v1_taproot",
+        ScriptShape::Anchor => "anchor",
+        ScriptShape::WitnessUnknown => "witness_unknown",
+    }
+}
+
+/// Renders the Core address string for a script, or `None` when the script
+/// has no standard address form (via the sanctioned rust-bitcoin seam).
+///
+/// PRE: `script` is raw script bytes and `network` is the selected Bitcoin
+///   network.
+/// POST: returns the existing rust-bitcoin address string, or `None` when
+///   conversion fails.
+/// INVARIANT: non-address scripts are omitted by the caller; no fallback
+///   string is produced here.
+#[must_use]
+pub(crate) fn script_address(script: &[u8], network: Network) -> Option<String> {
+    Address::from_script(
+        bitcoin::Script::from_bytes(script),
+        bitcoin_network(network),
+    )
+    .ok()
+    .map(|address| address.to_string())
 }
 
 /// Re-serializes one typed Core wire value through the serde boundary into
@@ -365,6 +483,116 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Representative raw `scriptPubKey` bytes for every [`ScriptShape`].
+///
+/// Both spelling-table tests classify these scripts, so one list states what
+/// a script of each shape looks like; each protocol's names stay in its own
+/// test.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use alloc::vec::Vec;
+
+    use super::ScriptShape;
+
+    /// No bytes at all.
+    pub(crate) fn empty() -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Bytes no template recognizes.
+    pub(crate) fn nonstandard() -> Vec<u8> {
+        vec![0x51, 0x52]
+    }
+
+    /// `<33-byte key> OP_CHECKSIG`.
+    pub(crate) fn p2pk() -> Vec<u8> {
+        let mut script = vec![0x21, 0x02];
+        script.extend([0x11; 32]);
+        script.push(0xac);
+        script
+    }
+
+    /// `OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG`.
+    pub(crate) fn p2pkh() -> Vec<u8> {
+        let mut script = vec![0x76, 0xa9, 0x14];
+        script.extend([0x11; 20]);
+        script.extend([0x88, 0xac]);
+        script
+    }
+
+    /// `OP_HASH160 <20> OP_EQUAL`.
+    pub(crate) fn p2sh() -> Vec<u8> {
+        let mut script = vec![0xa9, 0x14];
+        script.extend([0x11; 20]);
+        script.push(0x87);
+        script
+    }
+
+    /// `OP_1 <key> OP_1 OP_CHECKMULTISIG`: bare multisig with one key.
+    pub(crate) fn multisig() -> Vec<u8> {
+        let mut script = vec![0x51, 0x21, 0x03];
+        script.extend([0x22; 32]);
+        script.extend([0x51, 0xae]);
+        script
+    }
+
+    /// `OP_RETURN <4>`.
+    pub(crate) fn op_return() -> Vec<u8> {
+        vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef]
+    }
+
+    /// `OP_0 <20>`.
+    pub(crate) fn p2wpkh() -> Vec<u8> {
+        let mut script = vec![0x00, 0x14];
+        script.extend([0x11; 20]);
+        script
+    }
+
+    /// `OP_0 <32>`.
+    pub(crate) fn p2wsh() -> Vec<u8> {
+        let mut script = vec![0x00, 0x20];
+        script.extend([0x11; 32]);
+        script
+    }
+
+    /// `OP_1 <32>`.
+    pub(crate) fn p2tr() -> Vec<u8> {
+        let mut script = vec![0x51, 0x20];
+        script.extend([0x11; 32]);
+        script
+    }
+
+    /// `OP_1 OP_PUSHBYTES_2 0x4e73`: pay-to-anchor.
+    pub(crate) fn anchor() -> Vec<u8> {
+        vec![0x51, 0x02, 0x4e, 0x73]
+    }
+
+    /// `OP_2 <20>`: a valid witness program no recognized version carries.
+    pub(crate) fn future_witness() -> Vec<u8> {
+        let mut script = vec![0x52, 0x14];
+        script.extend([0x11; 20]);
+        script
+    }
+
+    /// Every shape with one representative script, in declaration order.
+    pub(crate) fn by_shape() -> Vec<(ScriptShape, Vec<u8>)> {
+        vec![
+            (ScriptShape::Empty, empty()),
+            (ScriptShape::Nonstandard, nonstandard()),
+            (ScriptShape::Pubkey, p2pk()),
+            (ScriptShape::PubkeyHash, p2pkh()),
+            (ScriptShape::ScriptHash, p2sh()),
+            (ScriptShape::Multisig, multisig()),
+            (ScriptShape::NullData, op_return()),
+            (ScriptShape::WitnessV0KeyHash, p2wpkh()),
+            (ScriptShape::WitnessV0ScriptHash, p2wsh()),
+            (ScriptShape::WitnessV1Taproot, p2tr()),
+            (ScriptShape::Anchor, anchor()),
+            (ScriptShape::WitnessUnknown, future_witness()),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +662,71 @@ mod tests {
         assert_eq!(
             compact_target_hex(CompactTarget::from_consensus(0x2300_ffff)),
             "0".repeat(64)
+        );
+    }
+
+    #[test]
+    fn classify_matches_core_type_name_for_every_shape() {
+        let expected: &[(ScriptShape, &str)] = &[
+            (ScriptShape::Empty, "nonstandard"),
+            (ScriptShape::Nonstandard, "nonstandard"),
+            (ScriptShape::Pubkey, "pubkey"),
+            (ScriptShape::PubkeyHash, "pubkeyhash"),
+            (ScriptShape::ScriptHash, "scripthash"),
+            (ScriptShape::Multisig, "multisig"),
+            (ScriptShape::NullData, "nulldata"),
+            (ScriptShape::WitnessV0KeyHash, "witness_v0_keyhash"),
+            (ScriptShape::WitnessV0ScriptHash, "witness_v0_scripthash"),
+            (ScriptShape::WitnessV1Taproot, "witness_v1_taproot"),
+            (ScriptShape::Anchor, "anchor"),
+            (ScriptShape::WitnessUnknown, "witness_unknown"),
+        ];
+        let cases = fixtures::by_shape();
+        assert_eq!(cases.len(), expected.len());
+        for ((shape, script), (want_shape, name)) in cases.iter().zip(expected) {
+            assert_eq!(classify(script), *want_shape, "classify {script:?}");
+            assert_eq!(core_type_name(*shape), *name);
+        }
+    }
+
+    #[test]
+    fn core_json_types_anchor_and_future_witness_programs() {
+        let anchor = tx_render::script_pub_key_json(&fixtures::anchor(), Network::Mainnet);
+        assert_eq!(
+            anchor
+                .get("type")
+                .and_then(sonic_rs::JsonValueTrait::as_str),
+            Some("anchor")
+        );
+        assert_eq!(
+            anchor.get("hex").and_then(sonic_rs::JsonValueTrait::as_str),
+            Some("51024e73")
+        );
+        assert_eq!(
+            anchor
+                .get("desc")
+                .and_then(sonic_rs::JsonValueTrait::as_str),
+            Some("addr(bc1pfeessrawgf)")
+        );
+        assert_eq!(
+            anchor
+                .get("address")
+                .and_then(sonic_rs::JsonValueTrait::as_str),
+            Some("bc1pfeessrawgf")
+        );
+
+        let future = tx_render::script_pub_key_json(&fixtures::future_witness(), Network::Mainnet);
+        assert_eq!(
+            future
+                .get("type")
+                .and_then(sonic_rs::JsonValueTrait::as_str),
+            Some("witness_unknown")
+        );
+        assert_eq!(
+            future
+                .get("address")
+                .and_then(sonic_rs::JsonValueTrait::as_str),
+            Some("bc1zzyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg35w7nfk")
         );
     }
 }
