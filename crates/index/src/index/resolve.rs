@@ -1,4 +1,4 @@
-//! Exact transaction and script resolution, including independent scan references.
+//! Exact transaction and script resolution over lossy prefix rows.
 
 use super::{error::IndexError, reader::Indexer};
 use bitcoin_rs_primitives::{Block, OutPoint, Tx, Txid};
@@ -54,50 +54,6 @@ impl<S: KvStore> Indexer<S> {
         Ok(entries)
     }
 
-    /// Naive reference implementation of [`Self::resolve_script_history`].
-    ///
-    /// Loads and fully decodes the block once per funding row, then hashes every
-    /// output script in it. Retained as the correctness oracle for the resolver
-    /// equivalence tests, as the `before` arm of the `resolve_script_history`
-    /// benchmark group, and as the live fallback for rows written before row
-    /// values carried transaction positions.
-    ///
-    /// Like [`Self::resolve_script_history`], this sorts the final entry list by
-    /// numeric height so the reference and the optimized resolver agree on order.
-    pub fn resolve_script_history_scan<B: BlockSource>(
-        &self,
-        scripthash: crate::ScriptHash,
-        source: &B,
-    ) -> Result<Vec<crate::ScriptHistoryEntry>, IndexError> {
-        let rows = self.iter_funding_rows(scripthash)?;
-        let mut entries = Vec::new();
-        let mut last_height: Option<u32> = None;
-        let mut cached_block: Option<Block> = None;
-        for row in &rows {
-            let height = row.height();
-            if last_height != Some(height) {
-                cached_block = source.block_at_height(height);
-                last_height = Some(height);
-            }
-            let Some(block) = cached_block.as_ref() else {
-                continue;
-            };
-            for tx in &block.txs {
-                let mut matched = false;
-                for output in &tx.outputs {
-                    if crate::ScriptHash::from_script_bytes(&output.script_pubkey) == scripthash {
-                        matched = true;
-                        break;
-                    }
-                }
-                if matched {
-                    entries.push(crate::ScriptHistoryEntry::confirmed(tx.txid(), height));
-                }
-            }
-        }
-        entries.sort_by_key(|entry| entry.height);
-        Ok(entries)
-    }
     /// Resolves confirmed unspent-output candidates for `scripthash` via `source`.
     ///
     /// For every funding-row (prefix, height), fetches the block and emits a
@@ -134,7 +90,7 @@ impl<S: KvStore> Indexer<S> {
 
     /// Resolves a transaction by txid via `source`.
     ///
-    /// Scans `iter_txid_rows(txid)` for candidate `(prefix, height)` entries.
+    /// Scans `iter_txid_rows_with_values(txid)` for candidate `(prefix, height)` entries.
     /// For each height, fetches the block and looks for the transaction whose
     /// full computed txid matches `txid` exactly. Returns the first match, or
     /// `None` if no candidates resolve to the requested txid.
@@ -192,42 +148,6 @@ impl<S: KvStore> Indexer<S> {
             return Ok(None);
         };
         Ok(tx.outputs.get(vout_idx).map(|output| output.value.to_sat()))
-    }
-
-    /// Resolves a transaction by txid and returns it alongside the block
-    /// height where it was confirmed.
-    ///
-    /// Same scanning strategy as [`Self::resolve_transaction`]: iterates the
-    /// `iter_txid_rows(txid)` prefix candidates, fetches each candidate height's
-    /// block via `source`, and compares full-32-byte txid for exact match.
-    /// Returns the first match.
-    ///
-    /// Cost: O(R + B) where R = number of prefix rows for `txid` and B = block
-    /// fetch cost per candidate height.
-    pub fn resolve_tx_with_height<B: BlockSource + ?Sized>(
-        &self,
-        txid: Txid,
-        source: &B,
-    ) -> Result<Option<(Tx, u32)>, IndexError> {
-        let rows = self.iter_txid_rows(&txid)?;
-        let mut last_height: Option<u32> = None;
-        let mut cached_block: Option<Block> = None;
-        for row in &rows {
-            let height = row.height();
-            if last_height != Some(height) {
-                cached_block = source.block_at_height(height);
-                last_height = Some(height);
-            }
-            let Some(block) = cached_block.as_ref() else {
-                continue;
-            };
-            for tx in &block.txs {
-                if tx.txid() == txid {
-                    return Ok(Some((tx.clone(), height)));
-                }
-            }
-        }
-        Ok(None)
     }
 }
 
