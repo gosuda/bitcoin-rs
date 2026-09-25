@@ -194,7 +194,7 @@ impl MiningCoordinator {
         let transition = lock.into_transition();
         match transition.connect(block, serialized) {
             Ok(outcome) => {
-                self.followers.committed_connect(block, &outcome);
+                self.followers.on_connect(block, &outcome);
                 let tip = outcome.tip;
                 let Some(visible) = self.chainstate.applied_tip().load_full() else {
                     self.chainstate.fail_closed_for_recovery();

@@ -275,7 +275,7 @@ composition seam.
 - `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
-  owned by `ChainEffects`, not by apply; the connect/disconnect test also
+  owned by `ChainFollowers`, not by apply; the connect/disconnect test also
   proves that the configured ZMQ publisher receives the committed effects.
 - `crates/node/src/config.rs` test `user_config_overlay_lets_set_fields_win`:
   later `UserConfig` layers win on set fields, including nested
