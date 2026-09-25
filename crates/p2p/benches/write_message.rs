@@ -8,8 +8,9 @@
 //! serialization overhead.
 //!
 //! `compact_reconstruction` measures one receive-side BIP152 `cmpctblock`
-//! reconstruction: the short-ID scan over a resident mempool and the verified
-//! completion that delivers the block.
+//! reconstruction in two stages: the short-ID scan over a resident pool,
+//! then — when the scan leaves transactions missing — the verified
+//! completion that delivers the block after the `getblocktxn` answer.
 
 use std::hint::black_box;
 use std::io::Read;
@@ -20,19 +21,19 @@ use std::time::Instant;
 use hashbrown::HashMap;
 
 use bitcoin::Network;
-use bitcoin::bip152::HeaderAndShortIds;
+use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShortIds};
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
-use bitcoin::p2p::message_compact_blocks::CmpctBlock;
+use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Sequence, Tx,
     TxIn, TxOut, Txid, Witness, Wtxid, consensus_bytes,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use bitcoin_rs_p2p::compact_blocks::COMPACT_BLOCK_VERSION;
+use bitcoin_rs_p2p::compact_blocks::{COMPACT_BLOCK_VERSION, Outcome};
 use bitcoin_rs_p2p::wire::{Message, write_message};
 use bitcoin_rs_p2p::{CompactBlockHints, Reconstruction};
 
@@ -180,33 +181,95 @@ fn bench_cmpctblock(txs: &[Tx], nonce: u64) -> CmpctBlock {
     }
 }
 
-/// Times one receive-side `cmpctblock` reconstruction: the short-ID scan over
-/// a resident mempool and the verified completion that delivers the block.
+/// The `blocktxn` a peer answers with: the bodies for the request's
+/// absolute indexes, taken from the block's own transactions.
+#[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
+fn bench_block_txn(request: &BlockTransactionsRequest, body: &[Tx]) -> BlockTxn {
+    let transactions = request
+        .indexes
+        .iter()
+        .map(|index| {
+            let tx = body
+                .get(usize::try_from(*index).expect("request index fits usize"))
+                .expect("a requested index names a block transaction");
+            bitcoin::consensus::encode::deserialize(&consensus_bytes(tx))
+                .expect("fixture tx bridges to the registry type")
+        })
+        .collect();
+    BlockTxn {
+        transactions: BlockTransactions {
+            block_hash: request.block_hash,
+            transactions,
+        },
+    }
+}
+
+/// Times one receive-side BIP152 reconstruction in two stages: the
+/// short-ID scan over a resident pool, then — when the scan leaves
+/// transactions missing — the verified completion that delivers the block
+/// after the `getblocktxn` answer.
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_compact_reconstruction(c: &mut Criterion) {
     let mut group = c.benchmark_group("compact_reconstruction");
-    for (block_txs, pool_txs, missing) in [(100_usize, 5_000_usize, 0_usize), (100, 5_000, 5)] {
+    for (block_txs, decoys, missing) in [(100_usize, 5_000_usize, 0_usize), (100, 5_000, 5)] {
         let body: Vec<Tx> = (1..=u32::try_from(block_txs).expect("block size fits u32"))
             .map(bench_tx)
             .collect();
-        let mut pool: Vec<Tx> = (1..=u32::try_from(pool_txs).expect("pool size fits u32"))
+        let mut pool: Vec<Tx> = (1..=u32::try_from(decoys).expect("decoy count fits u32"))
             .map(|seed| bench_tx(seed + 1_000_000))
             .collect();
-        // The first `missing` block transactions stay out of the pool, so the
-        // reconstruction has to ask for them by absolute index.
-        pool.extend(body.iter().skip(missing).cloned());
+        // The coinbase is a mandatory prefill and never needs a hint, so
+        // the `missing` transactions after it stay out of the pool: the
+        // reconstruction must then request exactly those indexes.
+        pool.extend(body.iter().skip(1 + missing).cloned());
         let hints = BenchHints::new(pool);
         let cmpct = bench_cmpctblock(&body, 0x1234);
-        let label = format!("block_{block_txs}_pool_{pool_txs}_missing_{missing}");
+        // One untimed pipeline run proves the fixture completes: the first
+        // stage must request exactly the excluded transactions and the
+        // second must deliver the verified block. A fixture that regressed
+        // to `Fallback` would time a shorter early return and report a
+        // phantom win.
+        let mut probe = Reconstruction::new();
+        let first = probe.receive_cmpctblock(&cmpct, COMPACT_BLOCK_VERSION, &hints, Instant::now());
+        let reply = match first {
+            Outcome::Complete(block) => {
+                assert_eq!(block.txs, body, "missing=0 reconstructs the block");
+                None
+            }
+            Outcome::RequestMissing(request) => {
+                assert_eq!(
+                    request.txs_request.indexes,
+                    (1_u64..).take(missing).collect::<Vec<u64>>(),
+                    "the request must name exactly the excluded transactions"
+                );
+                Some(bench_block_txn(&request.txs_request, &body))
+            }
+            outcome => panic!("fixture must complete or request missing txs, got {outcome:?}"),
+        };
+        if let Some(reply) = &reply {
+            assert!(
+                matches!(
+                    probe.receive_blocktxn(reply, Instant::now()),
+                    Outcome::Complete(_)
+                ),
+                "the completion stage must deliver the verified block"
+            );
+        }
+        let label = format!("block_{block_txs}_decoys_{decoys}_missing_{missing}");
         group.bench_function(label, |b| {
             b.iter(|| {
                 let mut reconstruction = Reconstruction::new();
-                reconstruction.receive_cmpctblock(
+                let outcome = reconstruction.receive_cmpctblock(
                     black_box(&cmpct),
                     COMPACT_BLOCK_VERSION,
                     black_box(&hints),
                     Instant::now(),
                 );
+                black_box(&outcome);
+                if let Outcome::RequestMissing(_) = outcome {
+                    let reply = reply.as_ref().expect("missing cells always have a reply");
+                    black_box(reconstruction.receive_blocktxn(black_box(reply), Instant::now()));
+                }
             });
         });
     }
