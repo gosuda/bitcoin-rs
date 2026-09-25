@@ -25,31 +25,6 @@ const LOCAL_SERVICES_FLAGS: u64 = (1_u64 << 0) | (1_u64 << 3);
 const LOCAL_SERVICES_HEX: &str = "0000000000000009";
 
 const _: () = assert!(LOCAL_SERVICES_FLAGS == 0x09);
-/// Decodes a Bitcoin service-flags bitmask into a list of name strings.
-///
-/// Order follows Bitcoin Core's bit assignment. Unrecognized bits are dropped.
-fn services_names_from_flags(flags: u64) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    if flags & (1_u64 << 0) != 0 {
-        names.push("NETWORK".to_owned());
-    }
-    if flags & (1_u64 << 1) != 0 {
-        names.push("GETUTXO".to_owned());
-    }
-    if flags & (1_u64 << 2) != 0 {
-        names.push("BLOOM".to_owned());
-    }
-    if flags & (1_u64 << 3) != 0 {
-        names.push("WITNESS".to_owned());
-    }
-    if flags & (1_u64 << 10) != 0 {
-        names.push("NETWORK_LIMITED".to_owned());
-    }
-    if flags & (1_u64 << 11) != 0 {
-        names.push("P2P_V2".to_owned());
-    }
-    names
-}
 
 const DEFAULT_RELAY_FEE_BTC_PER_KVB: f64 = 0.00001;
 const DEFAULT_INCREMENTAL_FEE_BTC_PER_KVB: f64 = 0.00001;
@@ -161,7 +136,10 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         subversion: USER_AGENT.to_owned(),
         protocol_version: 70016,
         local_services: LOCAL_SERVICES_HEX.to_owned(),
-        local_services_names: services_names_from_flags(LOCAL_SERVICES_FLAGS),
+        local_services_names: bitcoin_rs_p2p::service_flag_names(LOCAL_SERVICES_FLAGS)
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         local_relay: true,
         time_offset: isize::try_from(median_time_offset(&peers)).unwrap_or(0),
         connections: total,
@@ -615,54 +593,6 @@ mod tests {
         assert!(!names.contains(&"COMPACT_FILTERS".to_owned()));
     }
 
-    #[test]
-    fn services_names_from_flags_decodes_known_bits() {
-        let names = services_names_from_flags(0_u64);
-        assert!(names.is_empty());
-
-        let names = services_names_from_flags((1_u64 << 0) | (1_u64 << 3));
-        assert_eq!(names, vec!["NETWORK".to_owned(), "WITNESS".to_owned()]);
-
-        let names = services_names_from_flags((1_u64 << 0) | (1_u64 << 3) | (1_u64 << 10));
-        assert_eq!(
-            names,
-            vec![
-                "NETWORK".to_owned(),
-                "WITNESS".to_owned(),
-                "NETWORK_LIMITED".to_owned()
-            ]
-        );
-    }
-
-    #[test]
-    fn getpeerinfo_servicesnames_matches_peer_info_services_names() {
-        use bitcoin_rs_p2p::PeerInfo;
-
-        let info = PeerInfo {
-            wtxid_relay: false,
-            compact_block_relay: false,
-            addr: "127.0.0.1:8333".parse().unwrap_or_else(|_| panic!("addr")),
-            version: 70_016,
-            services: (1_u64 << 0) | (1_u64 << 3),
-            user_agent: "stub".to_owned(),
-            start_height: 0,
-            best_known_height: 0,
-            conn_time: 0,
-            inbound: false,
-            addr_bind: "127.0.0.1:8333".parse().unwrap_or_else(|_| panic!("addr")),
-            time_offset: 0,
-            counters: Arc::new(bitcoin_rs_p2p::PeerCounters::default()),
-        };
-
-        assert_eq!(info.services_names(), vec!["NETWORK", "WITNESS"]);
-    }
-
-    #[test]
-    fn services_names_from_flags_ignores_unknown_bits() {
-        // Bit 63 is not in the decoder's recognized set.
-        let names = services_names_from_flags(1_u64 << 63);
-        assert!(names.is_empty());
-    }
 }
 #[cfg(test)]
 mod ping_tests {

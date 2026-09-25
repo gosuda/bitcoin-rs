@@ -1124,7 +1124,7 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let snapshot =
-        crate::capabilities::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
+        bitcoin_rs_index::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
     Ok(json!({ "capabilities": snapshot.capabilities }))
 }
 

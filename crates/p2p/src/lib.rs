@@ -61,7 +61,7 @@ pub use peer::{
     DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerState,
     SystemDnsResolver,
 };
-pub use peer_info::{PeerInfo, PeerRole};
+pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{
     OutboundDial, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError, apply_network_active,
