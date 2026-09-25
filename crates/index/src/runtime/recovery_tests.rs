@@ -383,6 +383,21 @@ fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
     h.set_tip(&b3);
     let action = h.worker.reconcile_once(&mut pending).expect("rebuild pass");
     assert!(!matches!(action, ReconcileAction::CaughtUp));
+    assert_eq!(
+        h.runtime.phase(),
+        ReconcilePhase::FORWARD.with_leg(IndexCapabilities::HISTORICAL, ReconcileLeg::Rebuilding),
+        "the frontier answer must publish a rebuild, not a stall or a plain rollback"
+    );
+    let anchored = Some(IndexWatermark {
+        height: 1,
+        hash: f.b[0].1.to_le_bytes(),
+    });
+    let watermarks = h.watermarks();
+    assert_eq!(
+        watermarks.tx_lookup, anchored,
+        "the durable watermark is anchored at the first surviving height"
+    );
+    assert_eq!(watermarks.script_history, anchored);
 
     // The leg converges: the rebuilt index covers the retained heights and
     // reports the B tip, proving the anchor let it restart above the

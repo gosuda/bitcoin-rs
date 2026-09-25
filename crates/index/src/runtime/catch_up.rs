@@ -385,24 +385,28 @@ impl Worker {
             // rows and waits rather than churning a reset every pass.
             return Ok(ReconcileAction::Stalled);
         }
-        self.reset_for_rebuild(capabilities)?;
         let anchored = IndexCapabilities {
             script_live: false,
             ..capabilities
         };
-        if anchored.is_empty() {
+        // Resolve the anchor identity before the durable reset: it is a pure
+        // read — the block tree keeps headers for pruned heights — so a
+        // missing node fails before any derived row is erased, not after.
+        let identity = if anchored.is_empty() {
+            None
+        } else {
+            Some(
+                self.collect_target_chain(target, anchor_height, anchor_height)?
+                    .into_iter()
+                    .next()
+                    .ok_or(DerivedIndexWorkerError::MissingTargetChain {
+                        height: anchor_height,
+                    })?,
+            )
+        };
+        self.reset_for_rebuild(capabilities)?;
+        let Some(identity) = identity else {
             return Ok(ReconcileAction::Progressed);
-        }
-        // The block tree keeps headers for pruned heights, so the anchor
-        // identity is always available on the target chain.
-        let Some(identity) = self
-            .collect_target_chain(target, anchor_height, anchor_height)?
-            .into_iter()
-            .next()
-        else {
-            return Err(DerivedIndexWorkerError::MissingTargetChain {
-                height: anchor_height,
-            });
         };
         self.writer
             .anchor_watermark(

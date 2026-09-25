@@ -807,7 +807,14 @@ fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable()
 
     // A restart reconciles record and deletions from the store: the batch
     // did apply, so the reconstructed boundary is the committed one.
-    let restarted = Arc::new(RetentionRegistry::seeded(ExecutedFrontier::new(11)));
+    store.arm_executed_reads(usize::MAX);
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(
+        frontier,
+        ExecutedFrontier::new(11),
+        "the restart reconciles the committed boundary"
+    );
+    let restarted = Arc::new(RetentionRegistry::seeded(frontier));
     assert!(restarted.acquire(10).is_err());
     Ok(())
 }
