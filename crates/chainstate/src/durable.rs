@@ -22,12 +22,17 @@ use super::Chainstate;
 use super::ProvenApply;
 use super::PublishMode;
 use super::error::ApplyError;
+use super::publication::publish_applied;
+use super::publication::tx_count_delta_for;
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
-use bitcoin_rs_utxo::{LiveOutput, OutputSource, UndoLoadError, load_block_undo};
+use bitcoin_rs_utxo::{
+    BlockRollback, LiveOutput, OutputSource, RollbackError, UndoLoadError, load_block_undo,
+    rollback_block,
+};
 
 /// What one durable head commit certified.
 ///
@@ -210,14 +215,6 @@ pub(super) fn commit_disconnect_head(
     Ok(DurableReceipt::from_head(&next))
 }
 
-/// Bound on how many blocks one crash can leave committed-but-unpublished
-/// above a restored chainstate.
-///
-/// The apply path publishes every durable batch before the next begins
-/// (`RCV-02`), so a crash can strand at most one group: the crash-redo
-/// bound the contract states, not an emergent number.
-const REPLAY_GAP_BLOCK_LIMIT: usize = super::window::DURABLE_HEAD_GROUP_BLOCKS;
-
 /// Resolves one replayed block's spends from its own durable undo row.
 ///
 /// The stored head certifies the undo record in the same batch as the body,
@@ -253,8 +250,12 @@ impl OutputSource for UndoRowSpends<'_> {
 /// restored chainstate — a crash before the first clean checkpoint, or a
 /// forced full revalidation — is the same gap measured from the empty chain:
 /// the head certifies the bodies, and replaying them from genesis rebuilds
-/// exactly the state it names. That rebuild is not a publication lag, so the
-/// one-group bound does not apply to it.
+/// exactly the state it names.
+///
+/// Recoverability is defined by the identity and ancestry checks the replay
+/// performs, never by gap width. Any authenticated ancestor chain above the
+/// restored tip replays, however wide; a gap that is not an ancestor prefix
+/// of stored bodies fails closed.
 pub fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> {
     let stored = handles
         .durable_head
@@ -270,9 +271,306 @@ pub fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> {
     replay_committed_gap(handles, head, restored.as_deref())
 }
 
+/// Reconciles disconnect evidence before the node accepts work.
+///
+/// With no marker this is ordinary durable-head reconciliation
+/// ([`reconcile_at_boot`]) unchanged. A marker is recovery evidence, not a
+/// permanent operator refusal. A checkpoint is written atomically and the
+/// publisher refuses a tip the head has not certified, so the restored
+/// state is self-consistent — but it is not always below the head: a
+/// disconnect rewinds the head, and a checkpoint published before that
+/// rewind then leads it. What the marker records is a branch decision whose
+/// consequences may exist only in memory. Recovery picks the one mode the
+/// restored state allows:
+///
+/// - nothing restored (`cold-replay`): the certified head chain is the whole
+///   state, and the ordinary walk replays it from genesis;
+/// - a restored tip below the head (`gap-replay`): the publication lag any
+///   crash leaves, closed by replaying the head chain onto it;
+/// - a restored tip that leads the head, or meets its height with another
+///   hash (`checkpoint-rewind`): a checkpoint the rewind outran. Roll the
+///   restored coins back against the undo rows the head batch certified —
+///   the way Core's `ReplayBlocks` rolls them back to the fork point — and
+///   then reconcile.
+///
+/// Either way recovery warns with the marker identity and the mode chosen,
+/// publishes a clean checkpoint, and retires the marker only after that
+/// publication is durable.
+///
+/// PRE: the chainstate is restored; no network or worker can observe it
+/// yet.
+///
+/// POST: success has a coherent applied tip at the durable head, with the
+/// UTXO set and coin statistics rewound or replayed to match it, has warned
+/// with the recovery mode, and has retired the marker after durable
+/// publication.
+///
+/// INVARIANT: marker presence never authorizes a partially reconstructed
+/// state. An unreadable marker or head, or a chain the durable bodies and
+/// undo rows cannot authenticate, fails closed with the existing recovery
+/// error and retains the marker; each restart then repeats that refusal
+/// until an operator clears the state.
+pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError> {
+    let marker = handles
+        .undo_store
+        .load_disconnect_marker()
+        .map_err(ApplyError::UndoPersistence)?;
+    let Some(marker) = marker else {
+        return reconcile_at_boot(handles);
+    };
+    let fail_closed = |head_tip: Hash256, head_height: u32, reason: &'static str| {
+        ApplyError::DurableHeadGapUnrecoverable {
+            head_tip,
+            head_height,
+            restored_tip: handles.applied_tip.load_full().map(|tip| tip.hash),
+            restored_height: handles.applied_tip.load_full().map(|tip| tip.height),
+            reason,
+        }
+    };
+    let Some(head) = handles
+        .durable_head
+        .load()
+        .map_err(ApplyError::DurableHeadCommit)?
+    else {
+        return Err(fail_closed(
+            marker.hash,
+            marker.height,
+            "a disconnect marker exists with no durable head to reconcile it against",
+        ));
+    };
+    // The mode the restored state forces. A tip that leads the head is not
+    // a gap the walk can close, and it is not divergence either: the
+    // disconnect rewound the head along this chain, so the restored coins
+    // roll back to the head the batch already certified. Every other shape
+    // reconciles exactly as an ordinary boot would.
+    let restored = handles.applied_tip.load_full();
+    let mode = match restored.as_ref().map(|tip| (tip.height, tip.hash)) {
+        None => "cold-replay",
+        Some((height, hash)) if hash != head.tip && height >= head.height => {
+            rewind_restored_to_head(handles, &head)?;
+            "checkpoint-rewind"
+        }
+        Some(_) => "gap-replay",
+    };
+    reconcile_at_boot(handles)?;
+    tracing::warn!(
+        height = marker.height,
+        hash = %marker.hash,
+        head = %head.tip,
+        head_height = head.height,
+        mode,
+        "automatic disconnect recovery replayed the certified head chain"
+    );
+    // Publication is the durability fence: the marker retires only after the
+    // repaired state lands in a clean checkpoint. A failure retains it.
+    if let Err(error) = handles.publish_recovery_checkpoint() {
+        return Err(ApplyError::RecoveryPublication(Box::new(error)));
+    }
+    handles
+        .undo_store
+        .retire_disconnect_marker()
+        .map_err(|error| {
+            tracing::error!(%error, "disconnect marker retirement failed after publication");
+            fail_closed(
+                head.tip,
+                head.height,
+                "the disconnect marker did not retire after recovery publication",
+            )
+        })
+}
+
+/// The fail-closed refusal one rewind step reports.
+fn rewind_refused(handles: &Chainstate, head: &DurableHead, reason: &'static str) -> ApplyError {
+    let restored = handles.applied_tip.load_full();
+    ApplyError::DurableHeadGapUnrecoverable {
+        head_tip: head.tip,
+        head_height: head.height,
+        restored_tip: restored.as_ref().map(|tip| tip.hash),
+        restored_height: restored.as_ref().map(|tip| tip.height),
+        reason,
+    }
+}
+
+/// Rolls a restored state that leads the durable head back to that head.
+///
+/// The blocks above the head are the ones a completed disconnect rewound
+/// past: the head batch certified each one's body and undo row in the same
+/// receipt, so every step resolves against durable evidence rather than a
+/// guess. Each step is the rollback half of a disconnect without the head
+/// commit — the stored head already names the tip the walk lands on.
+///
+/// PRE: the applied tip leads `head`, or meets its height with another hash,
+/// and no other applier can observe the chainstate.
+///
+/// POST: the applied tip names `head.tip`, or descends from it below
+/// `head.height` with the UTXO set and coin statistics rewound by exactly
+/// the blocks the walk removed; reconciliation owns the forward step.
+///
+/// INVARIANT: a missing body or undo row, a body that does not hash to the
+/// applied tip, a parent that does not match the block's own previous hash,
+/// or a rewind the set refuses fails closed and retains the marker. A
+/// partial rewind never publishes.
+fn rewind_restored_to_head(handles: &Chainstate, head: &DurableHead) -> Result<(), ApplyError> {
+    let transition = handles.begin_transition()?;
+    rewind_walk(handles, head)?;
+    drop(transition);
+    Ok(())
+}
+
+/// Steps the applied tip down one block at a time until it reaches the
+/// durable head or finds the fork point below it.
+fn rewind_walk(handles: &Chainstate, head: &DurableHead) -> Result<(), ApplyError> {
+    loop {
+        let applied = handles
+            .applied_tip
+            .load_full()
+            .ok_or_else(|| rewind_refused(handles, head, "the applied tip vanished mid-rewind"))?;
+        // Landed on the head, or stepped below it onto the fork the head
+        // chain descends from: reconciliation replays the rest forward.
+        let landed_on_head = applied.hash == head.tip;
+        let onto_fork = applied.height < head.height;
+        if landed_on_head || onto_fork {
+            return Ok(());
+        }
+        rewind_one_step(handles, head, &applied)?;
+    }
+}
+
+/// Rolls one applied block back against the undo row its head commit
+/// certified, then publishes the parent tip the stored head names.
+fn rewind_one_step(
+    handles: &Chainstate,
+    head: &DurableHead,
+    applied: &TipSnapshot,
+) -> Result<(), ApplyError> {
+    let height = applied.height;
+    let hash = applied.hash;
+    let Some(store) = handles.block_body_store.as_ref() else {
+        return Err(rewind_refused(
+            handles,
+            head,
+            "no block body store is attached",
+        ));
+    };
+    let bytes = store
+        .load_block_body(height, hash)
+        .map_err(ApplyError::BlockBodyPersistence)?
+        .ok_or_else(|| rewind_refused(handles, head, "a rewound block body is missing"))?;
+    let block: Block = bitcoin_rs_primitives::deserialize(&bytes)
+        .map_err(|_| rewind_refused(handles, head, "a rewound block body does not decode"))?;
+    if block.block_hash().0 != hash {
+        return Err(rewind_refused(
+            handles,
+            head,
+            "a rewound block body does not hash to the applied tip",
+        ));
+    }
+    let undo = load_block_undo(handles.undo_store.as_ref(), height, hash).map_err(|_| {
+        rewind_refused(handles, head, "a rewound block's undo record does not load")
+    })?;
+    let tx_count_delta = tx_count_delta_for(&block);
+    let parent_tip = rewound_parent(handles, head, applied, &block, tx_count_delta)?;
+    rollback_block(
+        handles.undo_store.as_ref(),
+        handles.utxo.as_ref(),
+        handles.coin_stats.as_ref(),
+        &BlockRollback {
+            hash,
+            height,
+            parent_height: parent_tip.height,
+            tx_count_delta,
+        },
+        &undo,
+    )
+    .map_err(|error| match error {
+        RollbackError::Refused(_) => {
+            rewind_refused(handles, head, "the disconnect marker refused the rewind")
+        }
+        RollbackError::Utxo(_) => rewind_refused(
+            handles,
+            head,
+            "the UTXO set refused the rewind to the durable head",
+        ),
+        RollbackError::CoinStats(_) => rewind_refused(
+            handles,
+            head,
+            "the coin statistics refused the rewind to the durable head",
+        ),
+        RollbackError::Marker(_) => rewind_refused(
+            handles,
+            head,
+            "the disconnect marker did not record the rewind",
+        ),
+    })?;
+    publish_applied(handles, &parent_tip, crate::events::HintKind::Disconnected);
+    Ok(())
+}
+
+/// The parent tip one rewind step lands on, resolved against the block tree
+/// and the block's own previous hash.
+fn rewound_parent(
+    handles: &Chainstate,
+    head: &DurableHead,
+    applied: &TipSnapshot,
+    block: &Block,
+    tx_count_delta: u64,
+) -> Result<TipSnapshot, ApplyError> {
+    let tree = handles.block_tree.read();
+    let node = tree.node(applied.tip_id)?;
+    let parent_id = node
+        .parent
+        .ok_or_else(|| rewind_refused(handles, head, "the applied tip has no parent node"))?;
+    let parent = tree.node(parent_id)?;
+    if parent.height + 1 != node.height {
+        return Err(rewind_refused(
+            handles,
+            head,
+            "the parent node's height does not step down from the applied tip",
+        ));
+    }
+    let parent_tip = TipSnapshot {
+        tip_id: parent_id,
+        height: parent.height,
+        chainwork: parent.chainwork,
+        hash: parent.hash,
+        chain_tx_count: applied.chain_tx_count.rewind(tx_count_delta),
+    };
+    if parent_tip.hash != block.header.prev_blockhash.0 {
+        return Err(rewind_refused(
+            handles,
+            head,
+            "the rewound parent does not match the block's own previous hash",
+        ));
+    }
+    Ok(parent_tip)
+}
+
 /// Replays the committed-but-unpublished gap onto the restored chainstate.
 ///
-/// The walk is bounded and durable-resolved: the stored head names the tip,
+/// Replays every authenticated durable-head body above `restored`, or the
+/// complete certified head chain when `restored` is `None`.
+///
+/// # Errors
+///
+/// The first body that is missing from storage, does not hash to the stored
+/// head identity, or does not descend from the stored tip fails startup
+/// closed: no partial success publishes.
+///
+/// # PRE
+///
+/// The stored head is loaded successfully and every body it names exists,
+/// and every body equals the committed hash.
+///
+/// # POST
+///
+/// Success publishes exactly `head.tip`, `head.height`, and
+/// `head.commit_id`; failure leaves admission closed and publishes no
+/// guess.
+///
+/// # INVARIANT
+///
+/// Body identity, ancestry, durable receipt, and publication order are
+/// checked. The walk is durable-resolved: the stored head names the tip,
 /// every step loads `(height, hash)` by the parent chain the previous body
 /// names, and peak retained state is one block plus the hash descriptors.
 /// Each block re-enters through [`PublishMode::Replay`], which redoes the
@@ -304,11 +602,13 @@ fn replay_committed_gap(
         }
         None => 0,
     };
+    // Width bounds the descriptor allocation only. Recoverability is decided
+    // by the body-identity and ancestry checks below, never by how wide the
+    // gap is: any authenticated ancestor chain above the restored tip
+    // replays, however many commit groups it spans.
     let gap_width = usize::try_from(head.height - base_height + 1)
         .map_err(|_| unrecoverable("gap width exceeds the address space"))?;
-    if restored.is_some() && gap_width > REPLAY_GAP_BLOCK_LIMIT {
-        return Err(unrecoverable("the gap is wider than one commit group"));
-    }
+
     let Some(store) = handles.block_body_store.as_ref() else {
         return Err(unrecoverable("no block body store is attached"));
     };

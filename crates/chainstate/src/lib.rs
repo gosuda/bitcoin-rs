@@ -33,6 +33,7 @@ use connect::apply_block_admitted;
 use connect::apply_committed_block_admitted;
 use disconnect::disconnect_block_admitted;
 pub use durable::reconcile_at_boot;
+pub use durable::recover_disconnect_marker;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use parking_lot::MutexGuard;
@@ -413,7 +414,10 @@ enum ApplyIntent {
 #[allow(clippy::large_enum_variant)]
 enum ApplyFinish {
     /// Commit path: the new applied tip, already published.
-    Committed(ConnectOutcome),
+    ///
+    /// Boxed so the propose path's unit variant does not pay the outcome's
+    /// width on every match.
+    Committed(Box<ConnectOutcome>),
     /// See `ARCH-07` in `docs/contracts/architecture.md`.
     Proposed,
 }
@@ -1046,6 +1050,37 @@ impl Chainstate {
         }
     }
 
+    /// Publishes the recovery checkpoint of the disconnect-marker recovery
+    /// transaction.
+    ///
+    /// PRE: recovery has reconstructed a coherent applied tip at the durable
+    /// head.
+    ///
+    /// POST: success has published the clean checkpoint and retired the
+    /// disconnect marker.
+    ///
+    /// INVARIANT: a missing publisher or a skipped tip is a recovery failure,
+    /// never a silent skip: the marker must not survive without the
+    /// checkpoint that makes the repaired state durable.
+    pub fn publish_recovery_checkpoint(&self) -> core::result::Result<(), CheckpointError> {
+        let invalid = |reason: &str| {
+            CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
+                reason.to_owned(),
+            ))
+        };
+        let Some(publisher) = &self.checkpoint_publisher else {
+            return Err(invalid(
+                "disconnect recovery requires a configured checkpoint publisher",
+            ));
+        };
+        match publisher.publish_recovered()? {
+            crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
+                Err(invalid("recovery found no applied tip to checkpoint"))
+            }
+            crate::checkpoint::CheckpointWrite::Published { .. } => Ok(()),
+        }
+    }
+
     /// Admits a transition, connects `block`, then releases the transition lock.
     /// A refusal releases the same chainstate locks; retry semantics come from
     /// [`ChainTransition::connect`], whose `serialized` rules this method
@@ -1267,13 +1302,16 @@ pub struct WindowApplyError {
     pub source: ApplyError,
     /// How the caller must treat this failure: `Permanent` failures poisoned
     /// the failed block's header subtree while the chain transition was still
-    /// held; `BodyMutated` discards only the delivered body; `Operational`
-    /// failures poisoned nothing; `Fatal` means mutation or durable-head
-    /// state may be torn, so recovery must run before another mutation.
+    /// held, and the published tip and assume-valid gate were re-synchronized
+    /// with the mutated tree; `BodyMutated` discards only the delivered body;
+    /// `Operational` failures poisoned nothing; `Fatal` means mutation or
+    /// durable-head state may be torn, so recovery must run before another
+    /// mutation.
     pub disposition: WindowApplyDisposition,
     /// Hashes marked invalid under the held transition when `disposition` is
     /// [`WindowApplyDisposition::Permanent`]: the failed block and every
-    /// descendant, in deterministic slab order. Empty otherwise.
+    /// descendant, in deterministic slab order. Empty otherwise, including a
+    /// header that was never in the tree.
     pub invalidated: Box<[Hash256]>,
 }
 
@@ -1315,8 +1353,10 @@ impl WindowApplyError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowApplyDisposition {
     /// The failed block and its descendants can never be valid. Their header
-    /// subtrees were invalidated under the window's chain transition; purge
-    /// every returned hash from staged/download state without retrying.
+    /// subtrees were invalidated under the window's chain transition, the
+    /// best valid tip was republished from the mutated tree, and the
+    /// assume-valid gate was re-evaluated; purge every returned hash from
+    /// staged/download state without retrying.
     Permanent,
     /// The delivered body is mutated or not bound to its header. Discard this
     /// body and retry the same header/hash from another source; do not poison
@@ -1327,8 +1367,10 @@ pub enum WindowApplyDisposition {
     Operational,
     /// Mutation or durable-head state may already have changed without a
     /// reliable commit receipt. Do not retry in-process; recovery must
-    /// re-establish authoritative chainstate first. Nothing about the blocks is
-    /// necessarily invalid, so no header subtree is purged.
+    /// re-establish authoritative chainstate first. Nothing about the blocks
+    /// is necessarily invalid, so no header subtree is purged — except a
+    /// permanent failure whose subtree could not be marked, which escalates
+    /// here because the tree may be partially marked.
     Fatal,
 }
 
@@ -1647,6 +1689,10 @@ mod persistence_tests;
 #[cfg(test)]
 #[path = "../tests/unit/apply/window_tx_count_tests.rs"]
 mod window_tx_count_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/apply/window_invalidation_tests.rs"]
+mod window_invalidation_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/checkpoint_debt_tests.rs"]

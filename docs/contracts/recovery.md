@@ -303,13 +303,53 @@ the head without being certified by it. A tip below the head is the
 committed-but-unpublished gap a crash can leave; checkpointing the older
 state is harmless and keeps the node operating until replay closes the gap.
 
+### `RCV-15`: Disconnect marker recovery
+
+A surviving disconnect marker is recovery evidence, not a permanent
+operator refusal. The durable head is the commit point. `RCV-14` freezes
+each checkpoint against the head at its own moment, so a checkpoint can sit
+above a head that a later disconnect rewound below it: the restored state
+may lead the head, not only trail it. Recovery picks the one mode the
+restored state allows, and the warning names it:
+
+- `cold-replay` — nothing was restored. The certified head chain is the
+  whole state, and `reconcile_at_boot` replays it from genesis.
+- `gap-replay` — the restored tip sits below the head. The ordinary gap walk
+  closes the committed-but-unpublished lag onto it.
+- `checkpoint-rewind` — the restored tip leads the head, or meets its height
+  with another hash. The checkpoint outran the rewind, so recovery rolls the
+  restored coins back block by block against the undo rows the head batch
+  certified — to the head, or to the fork below it, where reconciliation
+  takes over — and never re-commits the head.
+
+Every mode warns with the marker identity and the mode chosen, publishes a
+clean checkpoint, and retires the marker only after that publication is
+durable.
+
+- A restored tip that leads the head is recovery input, not divergence, and
+  the rewind discards it. An unreadable marker or head, no head at all, a
+  body or undo row the durable evidence does not hold, or a chain that is
+  not an authenticated ancestor prefix of stored bodies is divergence:
+  recovery fails closed, retains the marker, and startup stops. No partial
+  success serves.
+- `InFlight` stays barred from ordinary checkpoint publication; only the
+  recovery transaction may publish over it, and only after the replay
+  succeeded. Retirement is an unconditional clearing owned by that recovery
+  path alone.
+- Core v31.1 reconstructs interrupted branch state the same way:
+  `Chainstate::ReplayBlocks` reads the two persisted heads, rolls the
+  restored coins back to the fork point, replays the active chain forward,
+  and flushes the result
+  (`bitcoin-core/src/validation.cpp:4792-4880`). An interrupted disconnect
+  is replayed, not deleted.
+
 ## Proven by
 
 - `crates/chainstate/src/durable.rs`: owns the durable-head
   advance for connect, group, and disconnect commits, the lineage fence, and
   the boot reconciliation of the stored head. `reconcile_at_boot` replays a
   committed-but-unpublished gap from the durable bodies the stored head
-  chain names — bounded by one commit group above a restored tip, applied
+  chain names — any authenticated width above a restored tip, applied
   through the ordinary commit path with the head suppressed
   (`PublishMode::Replay`), publishing only the state the head already
   certifies — replays the whole head chain from genesis when no chainstate
@@ -347,13 +387,16 @@ state is harmless and keeps the node operating until replay closes the gap.
 - `crates/chainstate/src/recovery.rs` orchestrates restart recovery and invokes
   schema admission; `crates/storage/src/checkpoint/fs.rs` owns the
   `incompatible_schema` refusal and the `CURRENT_SCHEMA` gate.
-- `crates/node/tests/crash_recovery.rs` (existing): the `RCV-04` crash
+- `crates/node/tests/crash_recovery.rs`: the `RCV-04` crash
   points — SIGKILL restart across journal, reorg, and publication scenarios,
-  partial-write handling, and upgrade-matrix fallback.
+  partial-write handling, and upgrade-matrix fallback;
+  `torn_disconnect_replays_parent_tip`, `torn_disconnect_cold_replays_head`,
+  and `torn_disconnect_checkpoint_above_head_rewinds_to_head` prove automatic
+  marker recovery to the certified head, including a checkpoint that leads
+  the rewound head (`RCV-15`), and
+  `checkpoint_fallback_replays_wide_gap_to_durable_head` proves an
+  authenticated gap of any width replays from stored bodies (`RCV-10`).
 - `crates/node/tests/unit/state/tests/recovery.rs`:
-  `torn_disconnect_refusal_names_authoritative_stores_to_remove` proves an
-  armed disconnect marker refuses startup while naming the `chainstate`,
-  `chainstate-checkpoints`, and `txindex` paths the operator must remove;
   `restart_without_periodic_publication_restores_tip_and_commit_id` proves
   the durable head replays past the last checkpoint with `commit_id`
   preserved across restarts (`RCV-10`).

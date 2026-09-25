@@ -99,6 +99,13 @@ Owners:
   chainstate dependency.
 - The `UndoStore` trait abstracts the durable marker over all retained
   backends.
+- A marker that survives to startup no longer refuses it: recovery reconciles the
+  certified durable-head chain with the restored state — rewinding a checkpoint
+  the disconnect outran, replaying a gap that trails it — publishes a clean
+  checkpoint, and retires the marker only after that publication is durable
+  (`recovery.md` `RCV-15`). Divergence — durable evidence the head chain cannot
+  authenticate, such as a missing body or undo row — still fails closed with the
+  marker retained.
 
 ## Startup crash recovery
 
