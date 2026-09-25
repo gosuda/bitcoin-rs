@@ -63,6 +63,6 @@ pub use pool::{
     Mempool, MempoolChunk, MempoolError, MempoolMiningSnapshot, MempoolStats, PrioritiseError,
     PrioritisedTransaction, ScriptHash, SnapshotEntry,
 };
-pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
+pub use rbf::{LimitEnforcement, RbfError, ReplacementCandidate, ReplacementPlan};
 pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};
 pub use truc::TrucError;
