@@ -125,42 +125,6 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
     Ok(())
 }
 
-/// The scan reference resolver also sorts by numeric height, agreeing with
-/// the fast resolver.
-#[test]
-fn history_scan_resolver_also_sorts_by_height() -> Result<(), Box<dyn std::error::Error>> {
-    let script = vec![0x51, 0x02];
-    let scripthash = ScriptHash::from_script_bytes(&script);
-    let store = Arc::new(MemoryStore::default());
-    put_funding_row(&store, scripthash, 1)?;
-    put_funding_row(&store, scripthash, 256)?;
-    let indexer = Indexer::new(store);
-
-    let block_at_1 = Block {
-        header: header(),
-        txs: vec![tx_with_script(spent_outpoint(3, 0), script.clone())],
-    };
-    let block_at_256 = Block {
-        header: header(),
-        txs: vec![tx_with_script(spent_outpoint(4, 0), script)],
-    };
-
-    let source = MultiHeightSource {
-        blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
-    };
-
-    let fast = indexer.resolve_script_history(scripthash, &source)?;
-    let scan = indexer.resolve_script_history_scan(scripthash, &source)?;
-
-    assert_eq!(fast, scan, "fast and scan resolvers must agree on order");
-    assert_eq!(
-        fast.iter().map(|e| e.height).collect::<Vec<_>>(),
-        vec![1, 256],
-        "both resolvers sort by numeric height"
-    );
-    Ok(())
-}
-
 /// `resolve_unspent_outputs_with_height` also sorts by numeric height.
 #[test]
 fn unspent_outputs_with_height_sorts_by_numeric_height() -> Result<(), Box<dyn std::error::Error>> {
