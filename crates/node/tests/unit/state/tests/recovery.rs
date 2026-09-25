@@ -348,7 +348,8 @@ fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<(
     let (_dir, state, fork_tip, fork_bodies) = forked_regtest_state()?;
     let handles = state.chainstate();
     let tip_before = handles.applied_tip().load_full().map(|tip| tip.hash);
-    handles.retention_handle().record_pruned_below(5);
+    let reservation = handles.retention_handle().reserve(5);
+    reservation.commit(5);
 
     let outcome = crate::reorg::switch_to_branch(
         &handles,

@@ -18,9 +18,11 @@
 //! [`crate::pruning::reclaim_staged_flat_block_files`] deletes the staged flat block files,
 //! and [`crate::pruning::PruneOutcome`] reports the bytes and row counts freed.
 //!
-//! Rows pinned by a live [`RetentionLease`] are never staged: the policy
-//! line folds with the registry's retention floor before any deletion is
-//! selected, so a reader holding a lease keeps exactly its required history.
+//! Rows pinned by a live [`RetentionLease`] are never staged: the pass
+//! reserves its deletion line through [`RetentionRegistry::reserve`], which
+//! folds every live lease floor into that line before any deletion is
+//! selected, so a reader holding a lease keeps exactly its required
+//! history.
 //!
 //! [`crate::pruning::PrunePolicy`] carries no behaviour of its own: the node builds one from
 //! configuration and hands it in, which is the policy/mechanism split this
@@ -31,6 +33,7 @@
 //! through them on the ordinary path. That is the sharper reason this is a
 //! storage module: the schema was living in the crate that deletes rows.
 
+use alloc::sync::Arc;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use core::mem::size_of;
 
@@ -44,7 +47,7 @@ pub mod policy;
 pub mod undo_pruner;
 
 pub use block_pruner::{BLOCK_DATA_CF, BlockPruner, block_body_key};
-pub use lease::{RetentionError, RetentionLease, RetentionRegistry};
+pub use lease::{PruneReservation, RetentionError, RetentionLease, RetentionRegistry};
 pub use policy::PrunePolicy;
 pub use undo_pruner::{UndoPruner, block_undo_key};
 
@@ -72,9 +75,9 @@ pub fn load_pruneheight<S: crate::KvStore>(store: &S) -> Result<Option<u32>, Sto
 /// What one pruning pass staged for its caller's atomic batch.
 ///
 /// [`stage_block_and_undo_prune`] fills this; the caller commits the batch,
-/// reclaims the flat files, and then records [`StagedPrune::pruned_below`]
-/// through [`RetentionRegistry::record_pruned_below`] so later lease
-/// requests learn what is actually gone.
+/// reclaims the flat files, and then promotes [`StagedPrune::pruned_below`]
+/// through [`PruneReservation::commit`] so later lease requests learn what
+/// is actually gone.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct StagedPrune {
     /// Block-body rows the batch deletes.
@@ -84,19 +87,29 @@ pub struct StagedPrune {
     /// Flat block files to reclaim after the batch commits.
     pub file_numbers: Vec<u32>,
     /// One past the highest deleted row height; zero when the pass staged
-    /// nothing. This is the value to record through
-    /// [`RetentionRegistry::record_pruned_below`]: floors at or below it
-    /// may name deleted rows, floors above it name rows the pass left.
+    /// nothing. This is the value to promote through
+    /// [`PruneReservation::commit`]: floors at or below it may name deleted
+    /// rows, floors above it name rows the pass left.
     pub pruned_below: u32,
 }
 
-/// One manual prune pass: clamps the line under the Core reorg margin, stages
-/// rows, persists the prune height in the same batch, commits, records the
-/// line, and reclaims files.
+/// One manual prune pass: clamps the line under the Core reorg margin,
+/// reserves it, stages rows, persists the prune height in the same batch,
+/// commits, promotes the executed line, and reclaims files.
+///
+/// PRE: the caller holds the pruning authority, so passes do not overlap.
+///
+/// POST: on `Ok`, the batch's deletions are committed and the registry's
+/// executed prune line is at least [`StagedPrune::pruned_below`]; on `Err`,
+/// the reservation is released and the executed line is untouched.
+///
+/// INVARIANT: no lease is granted below the line this pass deletes
+/// through, because the reservation refuses such grants from the moment it
+/// is taken.
 pub fn prune_to_height<S: crate::KvStore>(
     store: &S,
     block_files: &crate::FlatFileBlockStore,
-    retention: &RetentionRegistry,
+    retention: &Arc<RetentionRegistry>,
     applied_tip_height: u32,
     durable_tip_height: u32,
     pruneheight: u32,
@@ -110,20 +123,20 @@ pub fn prune_to_height<S: crate::KvStore>(
         );
     }
     let pruner_tip = pruneheight + CORE_REORG_SAFETY_MARGIN;
+    let policy = PrunePolicy {
+        target_size_mb: 0,
+        keep_below_tip: CORE_REORG_SAFETY_MARGIN,
+    };
+    let policy_line = pruner_tip
+        .min(durable_tip_height)
+        .saturating_sub(policy.retention_depth());
+    // Claim the deletion range before staging anything: from this point a
+    // lease request below the reserved line is refused, so nothing can pin
+    // rows this batch is about to delete.
+    let reservation = retention.reserve(policy_line);
 
     let mut batch = store.new_batch();
-    let staged = stage_block_and_undo_prune(
-        store,
-        &mut batch,
-        block_files,
-        pruner_tip,
-        durable_tip_height,
-        PrunePolicy {
-            target_size_mb: 0,
-            keep_below_tip: CORE_REORG_SAFETY_MARGIN,
-        },
-        retention,
-    )?;
+    let staged = stage_block_and_undo_prune(store, &mut batch, block_files, policy, &reservation)?;
     before_commit(staged.pruned_below)?;
     batch.put(
         crate::ColumnFamily::UtxoMeta,
@@ -131,11 +144,10 @@ pub fn prune_to_height<S: crate::KvStore>(
         &pruneheight.to_be_bytes(),
     );
     store.write(batch)?;
-    // Record before reclaim: acquiring a lease takes no transition lock,
-    // so a lease granted between the committing write and this record
-    // could otherwise pin rows the batch already deleted. Reclaim only
-    // ever deletes files this recorded line already covers.
-    retention.record_pruned_below(staged.pruned_below);
+    // The committed batch is the receipt for the line promoted here. A
+    // failed pass drops the reservation instead, releasing the claim
+    // without advancing the executed line, so the next pass grants again.
+    reservation.commit(staged.pruned_below);
     reclaim_staged_flat_block_files(store, block_files, &staged.file_numbers)?;
     Ok(staged)
 }
@@ -145,38 +157,37 @@ pub fn prune_to_height<S: crate::KvStore>(
 /// This is intentionally narrow: node wiring uses it to combine manual-prune
 /// row deletion with prune-height metadata in one backend commit.
 ///
-/// `durable_tip_height` is the height the node would restore to after a
-/// crash. Both block bodies and undo records are pruned against it rather
-/// than against `current_tip_height`, because the in-memory applied tip can
-/// run far ahead of the last durable checkpoint. Bodies above this base may
-/// be named by the crash-recovery sidecar and must remain available for
-/// local replay; undo records below the base would prevent a restored chain
-/// from disconnecting its own tip.
+/// PRE: `reservation` was taken from the registry the pass commits through,
+/// with a line derived from the durable tip and the policy's retention
+/// depth. The pass deletes through [`PruneReservation::line`] and never
+/// re-derives it, so a lease registered after the reservation cannot narrow
+/// the range this batch has already staged.
 ///
-/// The pass never deletes rows pinned by a live [`RetentionLease`]: the
-/// policy line is folded with [`RetentionRegistry::retention_floor`]. The
-/// line reported in [`StagedPrune::pruned_below`] is one past the highest
-/// row the pass actually staged — a byte target that stops early, or one
-/// already met, leaves nothing to record.
+/// POST: the batch holds deletions strictly below the reserved line, and
+/// [`StagedPrune::pruned_below`] is one past the highest row staged — a
+/// byte target that stops early, or one already met, leaves nothing to
+/// record.
+///
+/// INVARIANT: block bodies and undo records stage through the one reserved
+/// line, so a lease never holds block bodies while their undo records
+/// delete around them (or the reverse). Both kinds prune against the
+/// durable tip rather than the in-memory applied tip: a crash restores to
+/// the last durable checkpoint, bodies above that base may be named by the
+/// crash-recovery sidecar and must stay available for local replay, and
+/// undo records below the base are needed to disconnect the restored
+/// chain's own tip.
 pub fn stage_block_and_undo_prune<S: crate::KvStore>(
     store: &S,
     batch: &mut S::WriteBatch,
     block_files: &crate::FlatFileBlockStore,
-    current_tip_height: u32,
-    durable_tip_height: u32,
     policy: PrunePolicy,
-    retention: &RetentionRegistry,
+    reservation: &PruneReservation,
 ) -> Result<StagedPrune, PruneError> {
     if policy.is_full_node() {
         return Ok(StagedPrune::default());
     }
 
-    let durable_tip = current_tip_height.min(durable_tip_height);
-    let policy_line = durable_tip.saturating_sub(policy.retention_depth());
-    // The retention floor binds before the byte target does: a lease holder
-    // proved it needs rows at or above its floor, so the line stops there
-    // even when the pass could free more below it.
-    let prune_line = policy_line.min(retention.retention_floor().unwrap_or(u32::MAX));
+    let prune_line = reservation.line();
     let (blocks, file_numbers) =
         block_pruner::stage_flat_block_file_prune(store, batch, block_files, prune_line, policy)?;
     let undo = block_pruner::prune_prefixed_rows_into_batch(

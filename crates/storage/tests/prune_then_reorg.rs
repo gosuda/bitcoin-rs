@@ -83,7 +83,7 @@ fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> Result<(), Box<dy
     for height in 10_u32..=12 {
         undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
     }
-    let retention = RetentionRegistry::new();
+    let retention = Arc::new(RetentionRegistry::new());
     let staged = prune_to_height(
         &*store,
         &block_files,
@@ -124,7 +124,7 @@ fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
     for height in 10_u32..=12 {
         undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
     }
-    let retention = RetentionRegistry::new();
+    let retention = Arc::new(RetentionRegistry::new());
     let staged = prune_to_height(
         &*store,
         &block_files,
@@ -239,16 +239,10 @@ fn staged_flat_file_pruning_removes_all_selected_indexes_before_reclaim()
     let current_key = block_body_key(800, current.1);
 
     let retention = Arc::new(RetentionRegistry::new());
+    let reservation = retention.reserve(1_000_u32.saturating_sub(policy.retention_depth()));
     let mut prune_batch = store.new_batch();
-    let staged = stage_block_and_undo_prune(
-        &store,
-        &mut prune_batch,
-        &block_files,
-        1_000,
-        1_000,
-        policy,
-        &retention,
-    )?;
+    let staged =
+        stage_block_and_undo_prune(&store, &mut prune_batch, &block_files, policy, &reservation)?;
     assert_eq!(staged.blocks.blocks_removed, 2);
     assert_eq!(staged.blocks.bytes_freed, 32);
     assert!(staged.undo.is_empty());
@@ -300,15 +294,14 @@ fn target_pruning_deletes_old_indexes_in_the_current_flat_file()
     store.write(initial_batch)?;
 
     let retention = Arc::new(RetentionRegistry::new());
+    let reservation = retention.reserve(1_000_u32.saturating_sub(AGGRESSIVE.retention_depth()));
     let mut prune_batch = store.new_batch();
     let staged = stage_block_and_undo_prune(
         &store,
         &mut prune_batch,
         &block_files,
-        1_000,
-        1_000,
         AGGRESSIVE,
-        &retention,
+        &reservation,
     )?;
     assert!(staged.file_numbers.is_empty());
     assert_eq!(staged.blocks.blocks_removed, 1);
@@ -349,21 +342,24 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std
     let lease = retention.acquire(2)?;
     assert_eq!(retention.retention_floor(), Some(2));
 
+    let policy = PrunePolicy {
+        target_size_mb: 0,
+        keep_below_tip: 0,
+    };
     let mut leased_batch = store.new_batch();
+    let leased_pass = retention.reserve(1_000_u32.saturating_sub(policy.retention_depth()));
+    // The policy line (1000 - 288) folds down to the lease floor at the
+    // reservation, so the pass can only claim rows below it.
+    assert_eq!(leased_pass.line(), 2);
     let staged = stage_block_and_undo_prune(
         &store,
         &mut leased_batch,
         &block_files,
-        1_000,
-        1_000,
-        PrunePolicy {
-            target_size_mb: 0,
-            keep_below_tip: 0,
-        },
-        &retention,
+        policy,
+        &leased_pass,
     )?;
-    // The policy line (1000 - 288) folds down to the lease floor, and the
-    // row at the floor survives; only strictly-below rows delete.
+    // The row at the reserved floor survives; only strictly-below rows
+    // delete.
     assert_eq!(staged.pruned_below, 2);
     assert_eq!(staged.blocks.blocks_removed, 1);
     store.write(leased_batch)?;
@@ -374,29 +370,105 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std
     // deletes through the policy line again.
     lease.release();
     assert_eq!(retention.retention_floor(), None);
+    drop(leased_pass);
     let mut released_batch = store.new_batch();
+    let released_pass = retention.reserve(1_000_u32.saturating_sub(policy.retention_depth()));
     let staged = stage_block_and_undo_prune(
         &store,
         &mut released_batch,
         &block_files,
-        1_000,
-        1_000,
-        PrunePolicy {
-            target_size_mb: 0,
-            keep_below_tip: 0,
-        },
-        &retention,
+        policy,
+        &released_pass,
     )?;
     assert_eq!(staged.pruned_below, 3);
     store.write(released_batch)?;
     assert!(store.get(BLOCK_DATA_CF, &leased_key)?.is_none());
-    // The recorded line is what later lease requests are bounded by: a
+    // The committed line is what later lease requests are bounded by: a
     // floor the prune line already crossed is refused as gone.
-    retention.record_pruned_below(staged.pruned_below);
+    released_pass.commit(staged.pruned_below);
     assert!(matches!(
         retention.acquire(2),
         Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow { .. })
     ));
+    Ok(())
+}
+
+/// The reservation is the prune/retention linearization point: a lease
+/// request that arrives after a pass planned its deletions but before the
+/// batch commits is refused, so it can never pin rows the batch staged. A
+/// pass that fails before committing releases the claim again (#1151).
+#[test]
+fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let undo_store = KvUndoStore::new(Arc::clone(&store));
+    for height in 10_u32..=12 {
+        undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
+    }
+    let retention = Arc::new(RetentionRegistry::new());
+
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |pruned_below| {
+            // Mid-pass: the batch holds the deletions, nothing is committed
+            // yet, and the executed line is still 0. The reservation must
+            // already refuse the floor the pass is about to delete through.
+            assert_eq!(retention.pruned_below(), 0);
+            assert!(matches!(
+                retention.acquire(pruned_below - 1),
+                Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow {
+                    requested: 10,
+                    pruned_below: 11,
+                })
+            ));
+            // The reserved line itself stays grantable: the pass deletes
+            // strictly below it.
+            assert!(retention.acquire(pruned_below).is_ok());
+            Ok(())
+        },
+    )?;
+    assert_eq!(staged.pruned_below, 11);
+    assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert_eq!(retention.pruned_below(), 11);
+
+    // A pass that fails after staging releases its claim: the floor it
+    // refused is grantable again and nothing above the executed line went.
+    let failed = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12,
+        |pruned_below| {
+            assert!(retention.acquire(pruned_below - 1).is_err());
+            Err(StorageError::InvalidOperation(
+                "injected pre-commit failure",
+            ))
+        },
+    );
+    assert!(failed.is_err());
+    assert_eq!(retention.pruned_below(), 11);
+    assert!(row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    let reacquired = retention.acquire(11)?;
+    assert_eq!(reacquired.floor(), 11);
+    reacquired.release();
     Ok(())
 }
 

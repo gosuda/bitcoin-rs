@@ -21,6 +21,14 @@
 //! partial success). An optional consumer that falls that far behind must
 //! rebuild to follow again; it can never pin rows it already lost, and
 //! releasing its lease always returns pruning to exactly the policy line.
+//!
+//! One prune pass claims the rows it means to delete through
+//! [`RetentionRegistry::reserve`]. That reservation is the protocol's
+//! single linearization point: a lease request that arrives before it is
+//! folded into the reserved line, and a request that arrives after it and
+//! below that line is refused. The pass then commits the line it actually
+//! deleted through. No consumer rechecks after the deletion, and no
+//! request can cross a deletion inconsistently.
 
 use alloc::sync::Arc;
 use core::fmt;
@@ -31,11 +39,11 @@ use thiserror::Error;
 /// Registry of live retention leases and the highest prune line executed.
 ///
 /// One instance per open node, shared by the pruning pass and every reader
-/// that needs prunable history to stay. Leases and prune-line updates are
-/// serialized by the inner mutex, so a lease can never straddle a prune
-/// that deletes its data: a floor is either registered before the line
-/// crosses it (the prune respects it) or refused after (the reader learns
-/// the data is gone).
+/// that needs prunable history to stay. Leases, reservations, and
+/// prune-line updates are serialized by the inner mutex, so a lease can
+/// never straddle a prune that deletes its data: a floor is either
+/// registered before the reserved line crosses it (the prune respects it)
+/// or refused after (the reader learns the data is gone).
 #[derive(Default)]
 pub struct RetentionRegistry {
     inner: Mutex<RegistryInner>,
@@ -46,8 +54,22 @@ struct RegistryInner {
     next_ticket: u64,
     /// Heights below this line were already handed to a completed prune.
     pruned_below: u32,
+    /// Deletion lines of prune passes that reserved rows but have not yet
+    /// committed. A lease is refused below any of them, so no history
+    /// request can cross a reservation between staging and commit.
+    reservations: Vec<u32>,
     /// Live leases: ticket -> floor.
     floors: HashMap<u64, u32>,
+}
+
+impl RegistryInner {
+    /// The lowest line a lease floor must reach: everything below the
+    /// executed prune line or below any outstanding prune reservation is
+    /// gone or already claimed for deletion.
+    fn refusal_line(&self) -> u32 {
+        self.pruned_below
+            .max(self.reservations.iter().copied().max().unwrap_or(0))
+    }
 }
 
 /// Why a retention lease could not be granted.
@@ -71,6 +93,7 @@ impl fmt::Debug for RetentionRegistry {
         let inner = self.inner.lock();
         f.debug_struct("RetentionRegistry")
             .field("inner", &self.inner)
+            .field("shutting_down", &self.shutting_down)
             .field("active_leases", &inner.floors.len())
             .field("retention_floor", &inner.floors.values().min())
             .field("pruned_below", &inner.pruned_below)
@@ -86,14 +109,17 @@ impl RetentionRegistry {
 
     /// Acquires a lease pinning rows at `floor` and above against pruning.
     ///
-    /// Fails when the floor is below the highest prune line already
-    /// executed: those rows are gone, and a lease cannot resurrect them.
+    /// Fails when the floor is below the executed prune line or below the
+    /// deletion line of an outstanding [`PruneReservation`]: those rows are
+    /// gone or already claimed for deletion, and a lease cannot resurrect
+    /// them.
     pub fn acquire(self: &Arc<Self>, floor: u32) -> Result<RetentionLease, RetentionError> {
         let mut inner = self.inner.lock();
-        if floor < inner.pruned_below {
+        let line = inner.refusal_line();
+        if floor < line {
             return Err(RetentionError::PrunedBelow {
                 requested: floor,
-                pruned_below: inner.pruned_below,
+                pruned_below: line,
             });
         }
         let ticket = inner.next_ticket;
@@ -129,20 +155,113 @@ impl RetentionRegistry {
         self.inner.lock().floors.len()
     }
 
-    /// Records the prune line a completed pass deleted through.
+    /// Reserves the deletion range of one prune pass.
     ///
-    /// Callers invoke this only after the deletion batch and its flat-file
-    /// reclamation have both committed, so the recorded line never claims a
-    /// deletion that did not happen.
-    pub fn record_pruned_below(&self, line: u32) {
+    /// PRE: the caller holds the pruning authority, so at most one pass
+    /// reserves at a time, and `policy_line` is the line the pass would
+    /// delete through before any retention folding.
+    ///
+    /// POST: the returned reservation's line — `policy_line` folded with
+    /// every live lease floor — is snapshotted, and [`Self::acquire`]
+    /// refuses floors below it until the reservation commits or aborts.
+    ///
+    /// INVARIANT: the executed prune line advances only through
+    /// [`PruneReservation::commit`], so mutation authority stays inside
+    /// this protocol and no caller records a line on the side.
+    #[must_use = "a dropped reservation releases the prune claim"]
+    pub fn reserve(self: &Arc<Self>, policy_line: u32) -> PruneReservation {
         let mut inner = self.inner.lock();
-        if line > inner.pruned_below {
-            inner.pruned_below = line;
+        let line = policy_line.min(inner.floors.values().copied().min().unwrap_or(u32::MAX));
+        inner.reservations.push(line);
+        PruneReservation {
+            registry: Arc::clone(self),
+            line,
+            committed: false,
+        }
+    }
+
+    /// Promotes a committed reservation's executed line and releases it.
+    fn commit_reservation(&self, line: u32, executed: u32) {
+        let mut inner = self.inner.lock();
+        Self::release_reservation(&mut inner, line);
+        if executed > inner.pruned_below {
+            inner.pruned_below = executed;
+        }
+    }
+
+    /// Releases an aborted reservation without advancing the executed line.
+    fn abort_reservation(&self, line: u32) {
+        Self::release_reservation(&mut self.inner.lock(), line);
+    }
+
+    fn release_reservation(inner: &mut RegistryInner, line: u32) {
+        if let Some(index) = inner
+            .reservations
+            .iter()
+            .position(|&reserved| reserved == line)
+        {
+            inner.reservations.swap_remove(index);
         }
     }
 
     fn release(&self, ticket: u64) {
         self.inner.lock().floors.remove(&ticket);
+    }
+}
+
+/// One prune pass's claim on the rows it is about to delete.
+///
+/// A pass reserves its folded deletion line before it stages rows, holds
+/// the claim across the commit, and then promotes the line it actually
+/// deleted through. While the claim is outstanding, a lease request below
+/// it is refused, so no reader can pin rows the pass has already staged.
+///
+/// PRE: built only by [`RetentionRegistry::reserve`].
+///
+/// POST: exactly one of [`Self::commit`] (the pass deleted through its
+/// line) or `Drop` (the pass failed and grants flow again) settles the
+/// claim.
+///
+/// INVARIANT: the executed prune line never moves backwards, and it never
+/// advances for a deletion that did not commit.
+#[derive(Debug)]
+pub struct PruneReservation {
+    registry: Arc<RetentionRegistry>,
+    line: u32,
+    committed: bool,
+}
+
+impl PruneReservation {
+    /// The deletion line this reservation holds: the policy line folded
+    /// with every live lease floor at reserve time.
+    ///
+    /// A pass stages through this line and must not re-derive it, or a
+    /// lease registered after the reservation would be crossed.
+    #[must_use]
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    /// Records that the pass deleted through `executed` (one past the
+    /// highest row it actually staged), promotes that line into the
+    /// registry's executed prune line, and releases the claim.
+    ///
+    /// `executed` never exceeds the reserved line: the pass staged through
+    /// the reserved line, so nothing above it can have been deleted.
+    /// Returns the reserved line.
+    pub fn commit(mut self, executed: u32) -> u32 {
+        self.committed = true;
+        let line = self.line;
+        self.registry.commit_reservation(line, executed);
+        line
+    }
+}
+
+impl Drop for PruneReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.registry.abort_reservation(self.line);
+        }
     }
 }
 
@@ -237,7 +356,8 @@ mod tests {
     #[test]
     fn acquire_refuses_floors_the_prune_line_already_crossed() {
         let registry = Arc::new(RetentionRegistry::new());
-        registry.record_pruned_below(500);
+        let reservation = registry.reserve(500);
+        reservation.commit(500);
 
         assert!(matches!(
             registry.acquire(499),
@@ -251,8 +371,66 @@ mod tests {
         assert_eq!(held(registry.acquire(500)).floor(), 500);
 
         // The line is monotonic; a smaller recording cannot roll it back.
-        registry.record_pruned_below(100);
+        let second = registry.reserve(100);
+        assert_eq!(second.commit(100), 100);
         assert_eq!(registry.pruned_below(), 500);
         assert!(registry.acquire(499).is_err());
+    }
+
+    #[test]
+    fn reservation_refuses_history_until_it_commits_or_aborts() {
+        let registry = Arc::new(RetentionRegistry::new());
+        assert_eq!(held(registry.acquire(499)).floor(), 499);
+
+        // A pass planning deletions through 500 blocks every request that
+        // would cross its claim, before any deletion has committed.
+        let reservation = registry.reserve(500);
+        assert!(matches!(
+            registry.acquire(499),
+            Err(RetentionError::PrunedBelow {
+                requested: 499,
+                pruned_below: 500
+            })
+        ));
+        // The reserved line itself is still grantable: the pass deletes
+        // strictly below it.
+        assert_eq!(held(registry.acquire(500)).floor(), 500);
+
+        // Committing promotes the executed line, so the refusal survives
+        // the reservation.
+        assert_eq!(reservation.commit(500), 500);
+        assert!(registry.acquire(499).is_err());
+        assert_eq!(registry.pruned_below(), 500);
+
+        // A pass that fails hands the authority back: the same floor that
+        // the aborted claim refused is grantable again.
+        let aborted = registry.reserve(700);
+        assert!(registry.acquire(699).is_err());
+        drop(aborted);
+        assert_eq!(registry.pruned_below(), 500);
+        assert_eq!(held(registry.acquire(699)).floor(), 699);
+    }
+
+    #[test]
+    fn reservation_line_folds_live_floors_and_nests() {
+        let registry = Arc::new(RetentionRegistry::new());
+        let lease = held(registry.acquire(300));
+
+        // A reader that pinned 300 before the pass planned constrains the
+        // reservation, so the pass cannot claim rows the lease holds.
+        let outer = registry.reserve(500);
+        assert_eq!(outer.line(), 300);
+
+        // A nested claim refuses to the deepest outstanding line, and
+        // releasing one claim keeps the other's refusal.
+        let inner_reservation = registry.reserve(700);
+        assert_eq!(inner_reservation.line(), 300);
+        assert!(registry.acquire(299).is_err());
+        inner_reservation.commit(300);
+        assert!(registry.acquire(299).is_err());
+        drop(outer);
+        assert_eq!(registry.pruned_below(), 300);
+        assert_eq!(held(registry.acquire(400)).floor(), 400);
+        lease.release();
     }
 }
