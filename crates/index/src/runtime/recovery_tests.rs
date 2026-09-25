@@ -356,12 +356,15 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
 }
 
 /// The pruning authority, not the worker, decides whether absent history is
-/// permanent. A height the frontier names as deleted routes to a rebuild; a
-/// height the authority granted and the store cannot yet show is a wait.
+/// permanent. A height the frontier names as deleted routes to a rebuild
+/// anchored at the first surviving row; a height the authority granted and
+/// the store cannot yet show is a wait.
 #[test]
-fn pruned_history_rebuilds_and_absent_history_waits() {
-    // Pruned below the frontier: the owner says gone, so the capabilities
-    // reset for a rebuild rather than waiting on rows that never return.
+fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
+    // Pruned below the frontier: the owner says gone. The rollback hits the
+    // frontier, the capabilities reset, and the rebuild anchors at the first
+    // surviving height — then the forward leg actually converges on the new
+    // tip instead of stalling on rows that never return.
     let f = ForkFixture::new(3);
     let h = Harness::new(&f, u32::MAX);
     let mut pending = None;
@@ -370,17 +373,23 @@ fn pruned_history_rebuilds_and_absent_history_waits() {
     h.settle(&mut pending);
     h.assert_at(&a3);
 
-    let pass = h.retention.reserve(4);
-    pass.commit(4);
-    let a1 = f.tip(f.a[0]);
-    h.set_tip(&a1);
-    let action = h.worker.reconcile_once(&mut pending).expect("reset pass");
+    // Commit the frontier at 2: heights below it are permanently gone.
+    h.retention.reserve(2).commit(2);
+
+    // Move the tip to the rival branch. The rollback unwinds to height 1,
+    // where the frontier refuses the body read, so the owner routes the
+    // index to a rebuild anchored at height 1 on the B branch.
+    let b3 = f.tip(f.b[2]);
+    h.set_tip(&b3);
+    let action = h.worker.reconcile_once(&mut pending).expect("rebuild pass");
     assert!(!matches!(action, ReconcileAction::CaughtUp));
-    assert_eq!(
-        h.runtime.phase(),
-        ReconcilePhase::FORWARD.with_leg(IndexCapabilities::HISTORICAL, ReconcileLeg::Rebuilding),
-        "a pruned height is the owner's rebuild decision"
-    );
+
+    // The leg converges: the rebuilt index covers the retained heights and
+    // reports the B tip, proving the anchor let it restart above the
+    // frontier rather than resetting forever.
+    h.settle(&mut pending);
+    h.assert_at(&b3);
+    assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
 
     // Granted but absent: the owner says the history is retained, so the
     // worker waits and keeps the rows it already derived.

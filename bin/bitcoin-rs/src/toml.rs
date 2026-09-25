@@ -31,7 +31,6 @@ struct TomlFile {
     connect: Option<Vec<String>>,
     fast_sync: Option<bool>,
     prune_target_mb: Option<u64>,
-    index_retention_depth: Option<u32>,
     txindex: Option<bool>,
     dbcache_mb: Option<u64>,
     log_level: Option<String>,
@@ -75,7 +74,6 @@ impl TomlFile {
                     .map_err(anyhow::Error::msg)?,
                 dbcache_mb: self.dbcache_mb,
                 prune_target_mb: self.prune_target_mb,
-                index_retention_depth: self.index_retention_depth,
             },
             p2p: P2pOverrides {
                 magic: self.p2p_magic.as_deref().map(parse_p2p_magic).transpose()?,

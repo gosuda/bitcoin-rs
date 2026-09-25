@@ -426,8 +426,10 @@ impl NodeState {
             self.chainstate.block_body_store_handle(),
             bitcoin_rs_storage::pruning::HistoryAccess::new(
                 self.chainstate.retention_handle(),
+                // A stalled optional consumer is bounded by the reorg
+                // margin, so it never competes with the mandatory window.
                 bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
-                    self.config.storage.index_retention_depth,
+                    bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
                 ),
             ),
             spawn.block_source,

@@ -224,6 +224,33 @@ impl<S: KvStore> IndexWriter<S> {
         )
     }
 
+    /// Stamps `watermark` on the selected capabilities without deriving rows.
+    ///
+    /// A rebuild from a pruned prefix needs the durable cursor to start at
+    /// the first surviving height, not at genesis: the pruning authority has
+    /// already deleted the bodies below it, so no commit can ever produce
+    /// them. The anchor names the chain identity at that boundary — the
+    /// block tree keeps headers for pruned heights, so the identity is
+    /// always available — and the next prepared block must be its child.
+    ///
+    /// The write is fenced like every ordinary commit, so a reset in flight
+    /// or a moved revision reports `ResetInProgress`/`StaleIndexState`.
+    pub fn anchor_watermark(
+        &self,
+        capabilities: IndexCapabilities,
+        watermark: IndexWatermark,
+    ) -> Result<(), IndexError> {
+        let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        let mut batch = self.indexer.store.new_batch();
+        batch.put(
+            ColumnFamily::UtxoMeta,
+            FORMAT_VERSION_KEY,
+            &FORMAT_VERSION_VALUE,
+        );
+        put_selected_watermarks(&mut batch, capabilities, Some(watermark));
+        commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)
+    }
+
     /// Commits one serialized block through the prepared-write owner.
     ///
     /// The successful return is the commit point: all prepared rows and the
