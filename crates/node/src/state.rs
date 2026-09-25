@@ -140,6 +140,10 @@ pub struct NodeState {
 impl Drop for NodeState {
     fn drop(&mut self) {
         let _admission = self.chainstate.close();
+        // Close the history boundary first, so a worker still reconciling
+        // stops on the owner's shutdown answer instead of pinning rows a
+        // process that is leaving will not serve.
+        self.chainstate.retention_handle().shutdown();
         // Safety net: if `bounded_index_shutdown` was not called (e.g. in
         // tests that drop `NodeState` directly), request shutdown and join
         // any worker not already taken by `bounded_index_shutdown`.
@@ -420,6 +424,12 @@ impl NodeState {
             self.chainstate.applied_tip_handle(),
             self.chainstate.block_tree_handle(),
             self.chainstate.block_body_store_handle(),
+            bitcoin_rs_storage::pruning::HistoryAccess::new(
+                self.chainstate.retention_handle(),
+                bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
+                    self.config.storage.index_retention_depth,
+                ),
+            ),
             spawn.block_source,
             Some(spawn.body_source),
             Arc::new(IndexChainCursorSource(

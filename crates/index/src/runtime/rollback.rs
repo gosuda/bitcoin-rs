@@ -13,6 +13,7 @@ use crate::ScriptHash;
 use crate::reconcile::ReconcileLeg;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_storage::pruning::HistoryUnavailable;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
     let mut names = Vec::new();
@@ -186,6 +187,18 @@ impl Worker {
         Ok(prev)
     }
 
+    /// Loads one body through the owner's typed history boundary.
+    ///
+    /// PRE: none; the caller names the row it needs.
+    ///
+    /// POST: `Ok` returns the body. `MissingBody` means the pruning authority
+    /// answered that the height is permanently gone — the owner's rebuild
+    /// decision, relayed rather than inferred. `HistoryUnavailable` means the
+    /// authority granted the history and the row is absent for now, or the
+    /// node is shutting down: the caller waits instead of rebuilding.
+    ///
+    /// INVARIANT: permanence comes from the grant. The worker never compares a
+    /// height against a copied prune frontier to decide it.
     pub(super) fn load_body(
         &self,
         height: u32,
@@ -194,10 +207,20 @@ impl Worker {
         let Some(store) = self.body_store.as_ref() else {
             return Err(DerivedIndexWorkerError::NoBodyStore);
         };
-        store
-            .load_block_body(height, hash)
-            .map_err(DerivedIndexWorkerError::Storage)?
-            .ok_or(DerivedIndexWorkerError::MissingBody { height, hash })
+        let lease = match self.history.request_history(height) {
+            Ok(lease) => lease,
+            Err(HistoryUnavailable::Pruned { .. }) => {
+                return Err(DerivedIndexWorkerError::MissingBody { height, hash });
+            }
+            Err(error) => return Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
+        };
+        // The grant pins this height, so an absent body under it is transient
+        // absence, which the boundary types as `Missing`.
+        let body = store.load_block_body(height, hash)?;
+        lease.release();
+        body.ok_or(DerivedIndexWorkerError::HistoryUnavailable(
+            HistoryUnavailable::Missing,
+        ))
     }
 
     pub(super) fn live_anchor(

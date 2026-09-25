@@ -83,6 +83,9 @@ pub struct StorageOverrides {
     pub dbcache_mb: Option<u64>,
     /// Pruning target in MiB.
     pub prune_target_mb: Option<u64>,
+    /// Blocks of history an optional consumer may pin against pruning.
+    /// `Some(0)` means unlimited.
+    pub index_retention_depth: Option<u32>,
 }
 
 /// User-supplied P2P overrides.
@@ -181,6 +184,11 @@ const DEFAULT_STORAGE_BACKEND: StorageBackend = StorageBackend::Fjall;
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_DBCACHE_MB: u64 = 450;
 
+/// Blocks of history an optional consumer may pin by default: the Core reorg
+/// margin, so a consumer inside the mandatory window never competes with it.
+const DEFAULT_INDEX_RETENTION_DEPTH: u32 =
+    bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
+
 /// Resolved storage configuration.
 #[derive(Clone, Debug)]
 pub struct StorageConfig {
@@ -190,6 +198,14 @@ pub struct StorageConfig {
     pub dbcache_mb: u64,
     /// Pruning target in MiB.
     pub prune_target_mb: u64,
+    /// Blocks of history a derived index may pin against pruning.
+    ///
+    /// The bound belongs to the pruning authority, so a stalled optional
+    /// consumer cannot retain history indefinitely. `0` means unlimited and
+    /// is only ever the operator's explicit choice; the default matches the
+    /// mandatory reorg margin, so a consumer inside that window never
+    /// competes with it.
+    pub index_retention_depth: u32,
 }
 
 /// Resolved P2P configuration.
@@ -291,6 +307,7 @@ impl NodeConfig {
                 backend: DEFAULT_STORAGE_BACKEND,
                 dbcache_mb: DEFAULT_DBCACHE_MB,
                 prune_target_mb: 0,
+                index_retention_depth: DEFAULT_INDEX_RETENTION_DEPTH,
             },
             p2p: P2pConfig {
                 magic: Network::Mainnet.magic(),
@@ -398,6 +415,9 @@ impl NodeConfig {
         }
         if let Some(value) = layer.storage.prune_target_mb {
             self.storage.prune_target_mb = value;
+        }
+        if let Some(value) = layer.storage.index_retention_depth {
+            self.storage.index_retention_depth = value;
         }
         if let Some(bind) = layer.rpc.bind {
             self.rpc.bind = bind;

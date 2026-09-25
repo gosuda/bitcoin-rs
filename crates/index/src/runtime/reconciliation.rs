@@ -229,6 +229,18 @@ impl Worker {
                     (fence, watermarks) = self.reset_for_rebuild(IndexCapabilities::SCRIPT_LIVE)?;
                     continue;
                 }
+                Err(error @ DerivedIndexWorkerError::HistoryUnavailable(_)) => {
+                    // The owner granted this history and the row is not there
+                    // yet, or the node is shutting down. Waiting is the whole
+                    // reaction: a rebuild cannot recover what already exists,
+                    // and rebuilding on a transient gap would discard rows the
+                    // consumer had already derived.
+                    tracing::debug!(
+                        error = %error,
+                        "index rollback waits for history the owner granted"
+                    );
+                    return Ok(ReconcileAction::Stalled);
+                }
                 Err(error) if error.requires_capability_rebuild() => {
                     tracing::warn!(
                         error = %error,
@@ -248,11 +260,21 @@ impl Worker {
                 Err(error) => return Err(error),
             }
         }
-        // A rewind ends with the rollback loop; a rebuild ends only when the
-        // reset capabilities reach the tip again.
+        self.finish_reconcile_pass(target, fence, watermarks, pending)
+    }
+
+    /// Publishes the rollbacks-finished phase and runs the forward catch-up:
+    /// a rewind ends with the rollback loop, a rebuild ends only when the
+    /// reset capabilities reach the tip again.
+    fn finish_reconcile_pass(
+        &self,
+        target: Option<Arc<TipSnapshot>>,
+        fence: IndexWriteFence,
+        watermarks: IndexWatermarks,
+        pending: &mut Option<PendingForward>,
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         self.runtime
             .publish_phase(self.runtime.phase().rollbacks_finished());
-
         let Some(target) = target else {
             return Ok(ReconcileAction::CaughtUp);
         };

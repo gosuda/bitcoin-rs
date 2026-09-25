@@ -23,6 +23,7 @@ use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::pruning::HistoryAccess;
 use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use std::path::Path;
@@ -55,6 +56,7 @@ pub(super) fn run_worker_with_open(
     applied_tip: Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: Arc<RwLock<BlockTree>>,
     body_store: Option<Arc<dyn BlockBodyStore>>,
+    history: HistoryAccess,
     block_source: IndexBlockSource,
     body_source: Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
@@ -95,6 +97,7 @@ pub(super) fn run_worker_with_open(
         &applied_tip,
         &block_tree,
         &body_store,
+        history,
         &block_source,
         &body_source,
         chain_events,
@@ -185,6 +188,7 @@ pub(super) fn open_and_run(
     applied_tip: &Arc<arc_swap::ArcSwapOption<TipSnapshot>>,
     block_tree: &Arc<RwLock<BlockTree>>,
     body_store: &Option<Arc<dyn BlockBodyStore>>,
+    history: HistoryAccess,
     block_source: &IndexBlockSource,
     body_source: &Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
@@ -240,6 +244,7 @@ pub(super) fn open_and_run(
         applied_tip: Arc::clone(applied_tip),
         block_tree: Arc::clone(block_tree),
         body_store: body_store.clone(),
+        history,
         batch_limits: open.batch_limits,
         enabled: spec.enabled,
         rollback_rebuild_cutover: spec.rollback_rebuild_cutover,
