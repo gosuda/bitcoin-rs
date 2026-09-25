@@ -1148,25 +1148,12 @@ impl Mempool {
 
     /// Returns the txids of every entry in the pool.
     ///
-    /// Order is the underlying slab iteration order (i.e., NOT fee-rate sorted;
-    /// use `iter_by_fee_rate_desc` for that).
+    /// Order is the underlying slab iteration order.
     #[must_use]
     pub fn iter_txids(&self) -> Vec<Txid> {
         self.entries.iter().map(|(_id, entry)| entry.txid).collect()
     }
 
-    /// Returns txids with explicit BIP125 sequence signaling.
-    ///
-    /// This reports transaction metadata. Full-RBF admission also considers
-    /// replacements of entries without that signal.
-    #[must_use]
-    pub fn iter_replaceable_txids(&self) -> Vec<Txid> {
-        self.entries
-            .iter()
-            .filter(|(_id, entry)| entry.is_replaceable())
-            .map(|(_id, entry)| entry.txid)
-            .collect()
-    }
 
     /// Returns the relay-policy snapshot this pool enforces, for the RPC
     /// `getmempoolinfo` projection and the transaction-admission surface.
@@ -1473,25 +1460,6 @@ impl Mempool {
         self.entry(id)
     }
 
-    /// Returns mempool entry ids in order of descending `fee_rate` (sat/kvB).
-    ///
-    /// Walks `entries` and sorts; cost O(N log N) per call. Used by mining
-    /// template builders and fee estimators that want actual-fee-ordered
-    /// traversal without going through `ParetoFront` (which ranks on signed
-    /// modified fees with ancestor-aware package scoring).
-    #[must_use]
-    pub fn iter_by_fee_rate_desc(&self) -> Vec<EntryId> {
-        let mut pairs: Vec<(u64, EntryId)> = self
-            .entries
-            .iter()
-            .filter_map(|(index, entry)| {
-                let id = EntryId::try_from(index).ok()?;
-                Some((entry.fee_rate, id))
-            })
-            .collect();
-        pairs.sort_by_key(|pair| core::cmp::Reverse(pair.0));
-        pairs.into_iter().map(|(_, id)| id).collect()
-    }
 
     /// Returns the minimum `fee_rate` (sat/kvB) among all entries, or `None`
     /// for an empty pool.
@@ -2761,50 +2729,6 @@ mod tests {
     }
 
     #[test]
-    fn iter_by_fee_rate_desc_orders_highest_first() {
-        let mut pool = Mempool::new(MempoolLimits::default());
-        // Two distinct txs with different fee rates.
-        let low_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
-        let low_txid = low_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0));
-        let high_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(99_000),
-                script_pubkey: vec![0x52].into(),
-            }],
-        };
-        let high_txid = high_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0));
-        let ordered = pool.iter_by_fee_rate_desc();
-        assert_eq!(ordered.len(), 2);
-        let Some(&first_id) = ordered.first() else {
-            panic!("expected at least one entry");
-        };
-        let Some(first_entry) = pool.entry(first_id) else {
-            panic!("first entry missing");
-        };
-        assert_eq!(first_entry.tx.txid(), high_txid);
-        let Some(&second_id) = ordered.get(1) else {
-            panic!("expected two entries");
-        };
-        let Some(second_entry) = pool.entry(second_id) else {
-            panic!("second entry missing");
-        };
-        assert_eq!(second_entry.tx.txid(), low_txid);
-    }
-
-    #[test]
     fn lowest_fee_rate_returns_none_for_empty_pool() {
         let pool = Mempool::new(MempoolLimits::default());
         assert!(pool.lowest_fee_rate().is_none());
@@ -3014,56 +2938,6 @@ mod tests {
         assert_eq!(both.len(), 2);
         let none = pool.iter_above_fee_rate(200_000);
         assert_eq!(none.len(), 0);
-    }
-
-    #[test]
-    fn iter_replaceable_txids_returns_only_rbf_signaled_txs() {
-        let mut pool = Mempool::new(MempoolLimits::default());
-        // RBF-signalled tx (sequence < 0xFFFFFFFE).
-        let rbf_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: txid_of([0xaa; 32]),
-                    vout: 0,
-                },
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0x0000_0001),
-                witness: Witness::new(),
-            }],
-            outputs: Vec::new(),
-        };
-        let rbf_txid = rbf_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7, 0));
-        // Non-RBF tx (sequence = MAX = 0xFFFFFFFF).
-        let non_rbf_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: OutPoint {
-                    txid: txid_of([0xbb; 32]),
-                    vout: 0,
-                },
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: Vec::new(),
-        };
-        let non_rbf_txid = non_rbf_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(
-            Arc::new(non_rbf_tx),
-            100,
-            10_000,
-            1,
-            7,
-            0,
-        ));
-        let replaceable = pool.iter_replaceable_txids();
-        assert!(replaceable.contains(&rbf_txid));
-        assert!(!replaceable.contains(&non_rbf_txid));
-        assert_eq!(replaceable.len(), 1);
     }
 
     #[test]
