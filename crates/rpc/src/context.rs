@@ -238,7 +238,10 @@ pub struct ChainHandles {
     pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     /// Best fully-applied block tip.
     pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Serializes whole-chainstate RPC reads with node-owned connect/disconnect transitions.
+    /// Excludes RPC reads that need a stable mutable chainstate — a live UTXO
+    /// scan or mempool admission — from node-owned connect/disconnect
+    /// transitions. Published status reads answer from an [`AppliedView`]
+    /// instead and never take it.
     chain_transition: Arc<Mutex<()>>,
     /// Process-wide initial-block-download latch over the applied chain,
     /// shared with P2P so both surfaces answer identically.
@@ -664,7 +667,13 @@ impl Context {
         self
     }
 
-    /// Shares the node's authoritative connect/disconnect lock with RPC readers.
+    /// Attaches the node's authoritative connect/disconnect mutex.
+    ///
+    /// PRE: `chain_transition` is the node's own transition mutex.
+    /// POST: exclusive chainstate reads use it; see
+    ///   [`ChainHandles::with_stable_chainstate`].
+    /// INVARIANT: published status reads do not acquire it, so a block
+    ///   transition cannot stall `getblockchaininfo` or `getchaintxstats`.
     #[must_use]
     pub fn with_chain_transition(mut self, chain_transition: Arc<Mutex<()>>) -> Self {
         self.chain.chain_transition = chain_transition;
@@ -803,23 +812,17 @@ fn unix_time_secs() -> u64 {
 }
 
 impl ChainHandles {
-    /// Runs a read while authoritative UTXO and applied-tip transitions are excluded.
+    /// Runs a read with authoritative UTXO and applied-tip transitions excluded.
+    ///
+    /// PRE: `read` does not reacquire the transition mutex.
+    /// POST: `read` completes before the mutex is released, so its live tip and
+    ///   UTXO observations describe one uninterrupted chainstate.
+    /// INVARIANT: this is mutable-chainstate exclusion, not status
+    ///   synchronization: published status reads answer from a retained
+    ///   `AppliedView` capture and never call it.
     pub fn with_stable_chainstate<R>(&self, read: impl FnOnce() -> R) -> R {
         let _transition = self.chain_transition.lock();
         read()
-    }
-
-    /// Captures the applied publication behind `getblockchaininfo`, with the
-    /// node's connect/disconnect transition excluded.
-    ///
-    /// PRE: none.
-    /// POST: one applied-tip load taken while the transition barrier is held,
-    ///   so the height, hash, work, and count projected from it describe a
-    ///   state the node actually reached.
-    /// INVARIANT: the barrier is still required here; removing it is the status
-    ///   reader's own change, tracked separately from this grouping.
-    fn applied_progress_snapshot(&self) -> AppliedView {
-        self.with_stable_chainstate(|| self.applied_view())
     }
 
     /// Returns the pruning state reported by `getblockchaininfo`.
@@ -832,30 +835,45 @@ impl ChainHandles {
 
     /// Typed synchronization progress: the `getblockchaininfo` facts without
     /// RPC JSON. Chainwork is the applied tip's when one exists.
+    ///
+    /// PRE: none.
+    /// POST: progress projected from one applied publication captured here.
+    /// INVARIANT: neither capture nor projection acquires `chain_transition`,
+    ///   so a block transition in progress cannot stall this response.
     #[must_use]
     pub fn sync_progress(&self) -> SyncProgress {
-        let applied_tip = self.applied_progress_snapshot();
-        let applied = applied_tip.height();
+        let applied = self.applied_view();
+        self.sync_progress_at(&applied)
+    }
+
+    /// Synchronization progress projected from a retained applied publication.
+    ///
+    /// PRE: `applied` is the view this response is built from.
+    /// POST: applied fields use that view's tip and count; the header height is
+    ///   sampled separately, so best-header may lead applied.
+    /// INVARIANT: the projection never reloads the applied publication.
+    #[must_use]
+    pub(crate) fn sync_progress_at(&self, applied: &AppliedView) -> SyncProgress {
+        let height = applied.height();
         let headers = self.height();
-        let (difficulty, time, median_time) =
-            applied_tip.tip().map_or((0.0, 0_u64, 0_u64), |tip| {
-                let tree = self.block_tree.read();
-                tree.node(tip.tip_id).map_or((0.0, 0, 0), |node| {
-                    (
-                        self.difficulty_for_bits(node.header.bits),
-                        u64::from(node.header.time),
-                        u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
-                    )
-                })
-            });
+        let (difficulty, time, median_time) = applied.tip().map_or((0.0, 0_u64, 0_u64), |tip| {
+            let tree = self.block_tree.read();
+            tree.node(tip.tip_id).map_or((0.0, 0, 0), |node| {
+                (
+                    self.difficulty_for_bits(node.header.bits),
+                    u64::from(node.header.time),
+                    u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
+                )
+            })
+        });
         let now = crate::handlers::chain::unix_now();
         // Core's estimate when the verified-transaction count is known, the
         // height ratio when it is not; `None` is a pre-tracking datadir and
         // means unknown, never zero.
-        let verification_progress = applied_tip.chain_tx_count().map_or_else(
+        let verification_progress = applied.chain_tx_count().map_or_else(
             || {
                 if headers > 0 {
-                    (f64::from(applied) / f64::from(headers)).min(1.0)
+                    (f64::from(height) / f64::from(headers)).min(1.0)
                 } else {
                     0.0
                 }
@@ -864,7 +882,7 @@ impl ChainHandles {
                 crate::handlers::chain::verification_progress(
                     self.chain_network,
                     chain_tx_count,
-                    applied,
+                    height,
                     headers,
                     time,
                     now,
@@ -874,9 +892,9 @@ impl ChainHandles {
         let prune_status = self.prune_status();
         SyncProgress {
             network: self.chain_network,
-            blocks: applied,
+            blocks: height,
             headers,
-            best_block_hash: applied_tip.hash(self.chain_network),
+            best_block_hash: applied.hash(self.chain_network),
             difficulty,
             time,
             median_time,
@@ -884,8 +902,8 @@ impl ChainHandles {
             initial_block_download: self.ibd.is_active(now),
             // The applied chain's work once one block is connected; before the
             // first applied tip, the header chain's, which is all such a node has.
-            chain_work: match applied_tip.tip() {
-                Some(_) => applied_tip.chainwork_hex(),
+            chain_work: match applied.tip() {
+                Some(_) => applied.chainwork_hex(),
                 None => self.chainwork_hex(),
             },
             size_on_disk: self
@@ -1091,6 +1109,29 @@ impl ChainHandles {
     pub(crate) fn block_hash_at_height(&self, height: u32) -> Option<Hash256> {
         if let Some(tip) = self.applied_tip.load_full() {
             return self.hash_at_height_from_tip(&tip, height);
+        }
+        if height == 0 {
+            return Some(self.chain_network.genesis_block_hash());
+        }
+        record_at_height(&self.blocks.read(), height).map(|candidate| Hash256::from(candidate.hash))
+    }
+
+    /// Returns the applied-chain hash at `height` within a retained view.
+    ///
+    /// PRE: `view` is the response's retained applied publication.
+    /// POST: that branch's hash at `height`; with no applied tip yet, the
+    ///   genesis hash at height 0 or the block-log record's hash, which is the
+    ///   cache-only fallback such contexts use.
+    /// INVARIANT: reads the tree and the log as necessary but never reloads
+    ///   `applied_tip`, so one response cannot straddle two applied branches.
+    #[must_use]
+    pub(crate) fn block_hash_at_height_in_view(
+        &self,
+        view: &AppliedView,
+        height: u32,
+    ) -> Option<Hash256> {
+        if let Some(tip) = view.tip() {
+            return self.hash_at_height_from_tip(tip, height);
         }
         if height == 0 {
             return Some(self.chain_network.genesis_block_hash());
@@ -1620,54 +1661,47 @@ mod tests {
         assert_eq!(ctx.chain.chain_tx_count(), Some(42));
     }
 
+    /// One retained publication answers a whole status response: after the
+    /// publisher advances to a second tip, the view captured at the first still
+    /// reports that first tip's height, hash, work, and count together.
     #[test]
-    fn progress_snapshot_waits_for_a_complete_chain_transition() -> anyhow::Result<()> {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        let barrier = Arc::new(Mutex::new(()));
-        let ctx = Arc::new(Context::new().with_chain_transition(Arc::clone(&barrier)));
-        let genesis = Network::Regtest.genesis_block();
-        let tip = {
-            let mut tree = ctx.chain.block_tree.write();
-            let tip_id = tree.insert_node(
-                None,
-                genesis.header,
-                bitcoin_rs_chain::node::NodeStatus::Active,
-            )?;
-            let node = tree.node(tip_id)?;
-            TipSnapshot {
-                tip_id,
-                height: node.height,
-                chainwork: node.chainwork,
-                hash: node.hash,
-                chain_tx_count: node.chain_tx_count,
-            }
+    fn status_keeps_the_captured_applied_pair() {
+        let ctx = Context::new();
+        let tip = |height: u32, byte: u8, work: u64, count| {
+            Arc::new(TipSnapshot {
+                tip_id: bitcoin_rs_chain::NodeId::new(height),
+                height,
+                chainwork: bitcoin_rs_chain::ChainWork::from(work),
+                hash: Hash256::from_le_bytes(&[byte; 32]),
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(count),
+            })
         };
+        ctx.chain.applied_tip.store(Some(tip(3, 0xaa, 7, 42)));
+        let captured = ctx.chain.applied_view();
 
-        let tip = TipSnapshot {
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
-            ..tip
-        };
-        let transition = barrier.lock();
-        ctx.chain.applied_tip.store(Some(Arc::new(tip.clone())));
-        let worker = Arc::clone(&ctx);
-        let (tx, rx) = mpsc::channel();
-        let join = std::thread::spawn(move || {
-            let _ = tx.send(worker.chain.applied_progress_snapshot());
-        });
-        assert!(
-            rx.recv_timeout(Duration::from_millis(20)).is_err(),
-            "RPC progress must not observe a half-published transition"
+        // The publisher advances while the response is still being built.
+        ctx.chain.applied_tip.store(Some(tip(9, 0xbb, 9, 84)));
+
+        let progress = ctx.chain.sync_progress_at(&captured);
+        assert_eq!(progress.blocks, 3, "blocks must stay at the capture");
+        assert_eq!(
+            progress.best_block_hash,
+            Hash256::from_le_bytes(&[0xaa_u8; 32]),
+            "the applied hash must stay at the capture"
         );
-        drop(transition);
+        assert_eq!(
+            progress.chain_work,
+            format!("{:064x}", bitcoin_rs_chain::ChainWork::from(7_u64)),
+            "chainwork must stay at the capture"
+        );
+        assert_eq!(
+            captured.chain_tx_count(),
+            Some(42),
+            "the captured count must stay paired with the captured tip"
+        );
 
-        let published = rx.recv_timeout(Duration::from_secs(1))?;
-        join.join()
-            .map_err(|_| anyhow::anyhow!("snapshot worker panicked"))?;
-        assert_eq!(published.tip(), Some(&tip));
-        assert_eq!(published.chain_tx_count(), Some(42));
-        Ok(())
+        // A fresh capture follows the publisher; header height is sampled apart.
+        assert_eq!(ctx.chain.sync_progress().blocks, 9);
     }
 
     /// Every fact projected from one view describes the publication that view
@@ -1732,9 +1766,9 @@ mod tests {
         assert_eq!(unknown.chain_tx_count(), None);
     }
 
-    /// Capturing a view never waits on the transition barrier. This pins the
-    /// primitive only; the status readers keep their own barrier until their
-    /// separate change.
+    /// Capturing a view never waits on the transition barrier. The status
+    /// readers project from such a capture, so a held transition no longer
+    /// stalls `getblockchaininfo`, `getchaintxstats`, or `sync_progress`.
     #[test]
     fn applied_view_does_not_wait_for_transition() -> anyhow::Result<()> {
         use std::sync::mpsc;
