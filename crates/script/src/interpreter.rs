@@ -410,46 +410,16 @@ pub enum ScriptError {
 pub struct Interpreter;
 
 impl Interpreter {
-    /// Executes a script spend through the enabled script backend.
-    ///
-    /// When `script_sig` and `witness` already match the bytes stored on
-    /// `tx.inputs[input_idx]` — true for every block/mempool validation caller,
-    /// which reads them straight off the transaction — `tx` is used as-is with
-    /// no clone. Only callers that pass substitute bytes (e.g. vector tests
-    /// grafting a foreign witness) pay for a clone to splice them in.
-    ///
-    /// Taproot key-path verification needs every spent output. Callers that only
-    /// have the current input's prevout should prefer
-    /// [`Self::execute_with_prevouts`] when the full ordered set is available;
-    /// this wrapper forwards a one-element slice and therefore still rejects
-    /// multi-input taproot key-path spends with
-    /// [`ScriptError::TaprootPrevoutsUnavailable`].
-    pub fn execute(
-        &self,
-        script_pubkey: &[u8],
-        script_sig: &[u8],
-        witness: &[Vec<u8>],
-        flags: VerifyFlags,
-        prevout: &TxOut,
-        tx: &Tx,
-        input_idx: usize,
-    ) -> Result<bool, ScriptError> {
-        self.execute_with_prevouts(
-            script_pubkey,
-            script_sig,
-            witness,
-            flags,
-            std::slice::from_ref(prevout),
-            tx,
-            input_idx,
-        )
-    }
-
     /// Executes a script spend with the complete ordered prevout set.
     ///
-    /// `prevouts` must be aligned with `tx.inputs` (same length, input order).
-    /// BIP341 key-path sighashes commit to every spent output, so multi-input
-    /// taproot spends require the full slice.
+    /// PRE: `prevouts.len() == tx.inputs.len()`, in input order.
+    /// POST: returns the spend verdict for input `input_idx`; a prevout
+    ///       slice whose length differs from the input count is refused
+    ///       with [`ScriptError::TaprootPrevoutsUnavailable`] before any
+    ///       evaluation.
+    /// INVARIANT: every accepted call evaluates against the prevout of the
+    ///       input being spent; no length-mismatched slice is ever
+    ///       re-indexed.
     pub fn execute_with_prevouts(
         &self,
         script_pubkey: &[u8],
@@ -468,13 +438,10 @@ impl Interpreter {
                 index: input_idx,
                 inputs,
             })?;
-        // `execute` forwards a one-element slice for the current input. Full-set
-        // callers pass `prevouts.len() == tx.inputs.len()` in input order.
         let prevout = if prevouts.len() == inputs {
-            prevouts
-                .get(input_idx)
-                .ok_or(ScriptError::TaprootPrevoutsUnavailable)?
+            &prevouts[input_idx]
         } else if prevouts.len() == 1 {
+            // `execute` forwards a one-element slice for the current input.
             prevouts
                 .first()
                 .ok_or(ScriptError::TaprootPrevoutsUnavailable)?
@@ -929,9 +896,7 @@ fn verify_taproot_scriptpath(
         encoded_len(u64::try_from(witness.len()).unwrap_or(u64::MAX))
             + witness
                 .iter()
-                .map(|elem| {
-                    encoded_len(u64::try_from(elem.len()).unwrap_or(u64::MAX)) + elem.len()
-                })
+                .map(|elem| encoded_len(u64::try_from(elem.len()).unwrap_or(u64::MAX)) + elem.len())
                 .sum::<usize>();
     let mut validation_weight_left = Some(
         i64::try_from(witness_serialized_size).unwrap_or(i64::MAX) + eval::VALIDATION_WEIGHT_OFFSET,
@@ -975,12 +940,12 @@ mod tests {
         };
 
         assert_eq!(
-            interpreter.execute(
+            interpreter.execute_with_prevouts(
                 &prevout.script_pubkey,
                 &[],
                 &[],
                 VerifyFlags::MANDATORY,
-                &prevout,
+                std::slice::from_ref(&prevout),
                 &tx,
                 0,
             ),
@@ -989,22 +954,73 @@ mod tests {
 
         // OP_0 leaves one empty element, which CastToBool reads as false.
         assert!(matches!(
-            interpreter.execute(&[0x00], &[], &[], VerifyFlags::MANDATORY, &prevout, &tx, 0,),
+            interpreter.execute_with_prevouts(
+                &[0x00],
+                &[],
+                &[],
+                VerifyFlags::MANDATORY,
+                std::slice::from_ref(&prevout),
+                &tx,
+                0,
+            ),
             Err(ScriptError::Invalid {
                 code: ScriptErrCode::EvalFalse
             })
         ));
     }
 
+    /// The [`Interpreter::execute_with_prevouts`] POST contract: a prevout
+    /// slice that is neither the full input set nor the single current-input
+    /// convention is refused before any evaluation.
+    #[test]
+    fn execute_with_prevouts_rejects_a_mismatched_prevout_slice() {
+        let interpreter = Interpreter;
+        let tx = two_input_spend();
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: vec![0x51].into(),
+        };
+
+        let three = [prevout.clone(), prevout.clone(), prevout.clone()];
+        assert_eq!(
+            interpreter.execute_with_prevouts(
+                &prevout.script_pubkey,
+                &[],
+                &[],
+                VerifyFlags::MANDATORY,
+                &three,
+                &tx,
+                0,
+            ),
+            Err(ScriptError::TaprootPrevoutsUnavailable)
+        );
+    }
+
+    fn two_input_spend() -> Tx {
+        Tx {
+            version: 2,
+            inputs: vec![unsigned_input(), unsigned_input()],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(98_000),
+                script_pubkey: Script::new(),
+            }],
+            lock_time: LockTime::ZERO,
+        }
+    }
+
+    fn unsigned_input() -> TxIn {
+        TxIn {
+            previous_output: OutPoint::new(Txid::default(), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xffff_fffe),
+            witness: Witness::new(),
+        }
+    }
+
     fn unsigned_spend() -> Tx {
         Tx {
             version: 2,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0xffff_fffe),
-                witness: Witness::new(),
-            }],
+            inputs: vec![unsigned_input()],
             outputs: vec![TxOut {
                 value: Amount::from_sat(49_000),
                 script_pubkey: Script::new(),
