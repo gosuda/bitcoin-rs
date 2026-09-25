@@ -1852,11 +1852,9 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
     seed_populated_store(&store, 1)?;
 
     assert_eq!(
-        store
-            .get(ColumnFamily::UtxoMeta, b"index:format_version")?
-            .as_deref(),
-        Some(3u32.to_le_bytes().as_slice()),
-        "the row-format marker survives reset and rebuild"
+        store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
+        Some(5u32.to_le_bytes().as_slice()),
+        "the row-format gate survives reset and rebuild"
     );
     assert!(
         store
