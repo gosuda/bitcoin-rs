@@ -57,8 +57,6 @@ runtime crate.
   crate.
 - `kernel`: route consensus verification through bitcoinkernel
   (`bitcoin-rs-consensus/kernel`).
-- `prometheus-http`: enables the `metrics-exporter-prometheus/http-listener` feature;
-  the production listener itself is controlled by `metrics_bind`.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
