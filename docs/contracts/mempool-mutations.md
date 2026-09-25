@@ -205,9 +205,9 @@ state (`crates/mempool/src/orphan.rs`).
   parents ready. Generation remains odd until the transition finishes, so
   that notification cannot prematurely consume the ready work.
 - `reconsider_disconnected` re-admits transactions displaced by a reorg
-  through the shared submission evaluator — the same policy, finality,
-  BIP68, coinbase-maturity and script checks an ingress submission gets —
-  while the node holds the `ChainChangeGuard` fence. Requests prepared
+  through the shared submission evaluator — the same finality, BIP68,
+  coinbase-maturity and script checks an ingress submission gets — while
+  the node holds the `ChainChangeGuard` fence. Requests prepared
   under the guard's reserved odd generation commit exactly where ordinary
   submissions commit under the stable even value. The odd fence is derived
   from the gateway's own `ChainChangeGuard`, never from a caller-supplied
@@ -218,7 +218,18 @@ state (`crates/mempool/src/orphan.rs`).
   spending it or spending a txid an earlier commit removed, is withheld so
   a refused parent never leaves a partial family. Commits publish with
   `AdmissionOrigin::Reorg` and do not register with the fee estimator,
-  matching Core's `validForFeeEstimation=false` re-acceptance. Node
+  matching Core's `validForFeeEstimation=false` re-acceptance. Each
+  re-admission runs with `LimitEnforcement::Deferred`, the equivalent of
+  Core passing `bypassLimits=true` to `AcceptToMemoryPool` from the same
+  call: the mempool fee floor, the ephemeral-parent rule, the BIP431
+  topology rules, the cluster limits and the per-acceptance size trim do
+  not apply to it. Consensus and script verification, duplicate and
+  evicted-parent rejection, ancestry accounting and the replacement fee
+  rules still apply. After `remove_for_reorg` the node trims the settled
+  pool once with `enforce_size_limit(AdmissionOrigin::Reorg,
+  max_total_bytes)`; that is the only size trim one reorg performs, and
+  it runs last so the walk cannot shed a parent before its child lands.
+  Node
   streams disconnected bodies oldest-first and bounds the candidate set
   at 20,000,000 serialized bytes (Core's
   `MAX_DISCONNECTED_TX_POOL_BYTES`); once the cap is hit the newest
@@ -282,6 +293,7 @@ state (`crates/mempool/src/orphan.rs`).
   `reconsider_disconnected_withholds_descendants_of_a_refused_parent`,
   `reconsider_disconnected_refuses_a_script_failure`,
   `reconsider_disconnected_does_not_register_with_the_estimator`,
+  `reconsider_disconnected_admits_below_floor_then_trims_once`,
   `remove_for_reorg_sweeps_only_unsupported_residents`,
   `remove_for_reorg_refuses_a_moved_generation`,
   `reorg_methods_refuse_a_guard_from_another_gateway`,

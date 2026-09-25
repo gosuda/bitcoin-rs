@@ -394,6 +394,22 @@ impl MempoolGateway {
     /// removed, is withheld so a refused parent never leaves a partial family.
     /// A guard issued by a different gateway admits nothing and returns an
     /// empty result: the odd value alone is not authority.
+    ///
+    /// Every candidate is admitted with [`crate::LimitEnforcement::Deferred`],
+    /// the equivalent of Core passing `bypassLimits = true` to
+    /// `AcceptToMemoryPool` from its disconnect walk. The mempool fee floor,
+    /// the ephemeral-parent rule, the TRUC topology rules, the cluster limits,
+    /// and the per-acceptance size trim are therefore not applied here: a
+    /// disconnected transaction satisfied all of them on the way in, and
+    /// trimming per admission would shed a parent before the child that spends
+    /// it is re-admitted. Consensus and script verification, duplicate and
+    /// evicted-parent rejection, ancestry accounting, and the replacement fee
+    /// rules still apply.
+    ///
+    /// POST: the pool may exceed its `max_total_bytes` ceiling when this
+    /// returns. The caller owns the one size trim over the settled pool; see
+    /// [`MempoolGateway::enforce_size_limit`] and `settle_node_reorg` in the
+    /// node crate.
     pub fn reconsider_disconnected(
         &self,
         change: &crate::gateway::ChainChangeGuard,
@@ -427,8 +443,10 @@ impl MempoolGateway {
                 fence,
             ) {
                 Ok(SubmitOutcome::Committed(result)) => {
-                    // An earlier parent evicted to make room is unavailable
-                    // to later spenders, just like a refused parent.
+                    // A replacement victim is unavailable to later spenders,
+                    // just like a refused parent. Capacity is never trimmed
+                    // here: the deferred-enforcement walk above evicts nothing,
+                    // and one settlement trim runs after the whole batch.
                     for removed in result.removed_txids() {
                         refused.insert(removed);
                     }
@@ -2278,6 +2296,30 @@ mod tests {
         }
     }
 
+    /// One committed batch: its origin and the per-transaction outcomes it
+    /// produced.
+    type ReorgBatch = (AdmissionOrigin, Vec<(Txid, crate::MutationOutcome)>);
+
+    /// Records each committed batch with its origin and outcomes, keeping
+    /// batch boundaries so a test can pin publication order.
+    #[derive(Default)]
+    struct ReorgBatchLog(Mutex<Vec<ReorgBatch>>);
+
+    impl crate::MempoolObserver for ReorgBatchLog {
+        fn on_mutation(&self, envelope: &crate::MutationEnvelope) {
+            let mut seen = self.0.lock();
+            seen.push((
+                envelope.origin,
+                envelope
+                    .result
+                    .changes
+                    .iter()
+                    .map(|change| (Txid::from(change.txid), change.outcome))
+                    .collect(),
+            ));
+        }
+    }
+
     fn observed_gateway(observer: &Arc<ReorgRecording>) -> Arc<MempoolGateway> {
         let leg: Arc<dyn crate::MempoolObserver> = observer.clone();
         Arc::new(MempoolGateway::new(
@@ -2425,6 +2467,178 @@ mod tests {
             Ok(SubmitOutcome::Committed(_))
         ));
         assert_ne!(gateway.read().estimator_history(), before);
+    }
+
+    /// A disconnected family re-enters whole below the pressure floor, and
+    /// the pool is trimmed once only after the walk and the resident sweep.
+    /// The pressure fee floor, the cluster limit, and the per-acceptance size
+    /// trim would each refuse the child on fresh relay; under a reorg they
+    /// are deferred, which is the ordering that keeps a parent from being
+    /// shed before the child that spends it is re-admitted.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn reconsider_disconnected_admits_below_floor_then_trims_once() {
+        // The ceiling falls between the parent's and the family's virtual
+        // size, so a per-acceptance trim would have to act on the child. One
+        // member per cluster refuses any child joining a resident parent, and
+        // a pool holding only the 106 sat/vB parent lifts the pressure floor
+        // far above the child's 11 sat/vB.
+        const CEILING: u64 = 150;
+        let limits = crate::MempoolLimits {
+            max_total_bytes: CEILING,
+            cluster_count: 1,
+            ..crate::MempoolLimits::default()
+        };
+        let log = Arc::new(ReorgBatchLog::default());
+        let leg: Arc<dyn crate::MempoolObserver> = log.clone();
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(limits))),
+            Some(leg),
+        ));
+        let (parent, child) = witness_parent_and_child();
+        let parent_txid = parent.txid();
+        let child_txid = child.txid();
+        let chain = funded_chain(parent.inputs[0].previous_output, 20_000);
+
+        let change = gateway.begin_chain_change().expect("fence");
+        let committed = gateway.reconsider_disconnected(
+            &change,
+            &chain,
+            1,
+            [Arc::new(parent), Arc::clone(&child)],
+        );
+        assert_eq!(committed.len(), 2, "the whole family must re-enter");
+        assert!(gateway.read().contains_txid(&parent_txid));
+        assert!(
+            gateway.read().contains_txid(&child_txid),
+            "a below-floor re-admission must not be refused"
+        );
+        assert!(
+            gateway.read().total_vsize() > CEILING,
+            "no size trim may run during the walk"
+        );
+
+        // The production order: walk, resident sweep, then one trim. The
+        // funded family survives the sweep, so it publishes nothing here.
+        let swept = gateway.remove_for_reorg(&change, &chain).expect("sweep");
+        assert!(swept.is_empty(), "the funded family stays supported");
+
+        let trimmed = gateway
+            .enforce_size_limit(AdmissionOrigin::Reorg, CEILING)
+            .expect("settlement trim");
+        change.finish().expect("finish");
+
+        assert!(!trimmed.changes.is_empty(), "the trim must act");
+        assert!(
+            gateway.read().total_vsize() <= CEILING,
+            "one trim over the settled pool must reach the ceiling"
+        );
+
+        // Publication order: every reorg admission precedes the one
+        // policy-eviction batch, and nothing commits after it.
+        assert_reorg_publication_order(&log.0.lock(), &[parent_txid, child_txid], child_txid);
+    }
+
+    /// Pins the batch log for one reorg settlement: every reorg admission
+    /// precedes the single policy-eviction batch, the trim publishes as Reorg
+    /// shedding `trimmed_txid`, and nothing commits after it.
+    #[allow(clippy::expect_used)]
+    fn assert_reorg_publication_order(
+        batches: &[ReorgBatch],
+        admissions: &[Txid],
+        trimmed_txid: Txid,
+    ) {
+        let is_eviction = |(_, changes): &ReorgBatch| {
+            changes.iter().any(|(_, outcome)| {
+                matches!(
+                    outcome,
+                    crate::MutationOutcome::Removed(crate::RemovalReason::PolicyEviction)
+                )
+            })
+        };
+        let trim_index = batches
+            .iter()
+            .position(is_eviction)
+            .expect("the settlement trim publishes one policy-eviction batch");
+        assert_eq!(
+            batches.iter().filter(|batch| is_eviction(batch)).count(),
+            1,
+            "exactly one policy-eviction batch in all"
+        );
+        assert_eq!(
+            batches[trim_index].0,
+            AdmissionOrigin::Reorg,
+            "the trim publishes as Reorg"
+        );
+        assert_eq!(
+            batches[trim_index].1,
+            vec![(
+                trimmed_txid,
+                crate::MutationOutcome::Removed(crate::RemovalReason::PolicyEviction)
+            )],
+            "the trim sheds the lowest fee-rate member"
+        );
+        assert_eq!(
+            batches.len(),
+            trim_index + 1,
+            "nothing commits after the trim"
+        );
+        assert!(
+            batches[..trim_index].iter().all(|(origin, changes)| {
+                origin == &AdmissionOrigin::Reorg
+                    && changes
+                        .iter()
+                        .all(|(_, outcome)| matches!(outcome, crate::MutationOutcome::Accepted))
+            }),
+            "only reorg admissions may precede the one trim"
+        );
+        assert_eq!(
+            batches[..trim_index]
+                .iter()
+                .flat_map(|(_, changes)| changes.iter().map(|(txid, _)| *txid))
+                .collect::<Vec<_>>(),
+            admissions,
+            "admissions publish parent before child"
+        );
+    }
+
+    /// The deferral is scoped to the reorg origin: with the same resident
+    /// parent lifting the pressure floor, the same child offered as fresh
+    /// relay is refused, so the gates are live and only the reorg origin
+    /// defers them.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn reconsider_control_refuses_fresh_relay_below_floor() {
+        const CEILING: u64 = 150;
+        let limits = crate::MempoolLimits {
+            max_total_bytes: CEILING,
+            cluster_count: 1,
+            ..crate::MempoolLimits::default()
+        };
+        let control = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(limits))),
+            None,
+        ));
+        let (control_parent, control_child) = witness_parent_and_child();
+        let control_chain = funded_chain(control_parent.inputs[0].previous_output, 20_000);
+        let change = control.begin_chain_change().expect("control fence");
+        let _ =
+            control.reconsider_disconnected(&change, &control_chain, 1, [Arc::new(control_parent)]);
+        change.finish().expect("control finish");
+        let relay = control.submit_transaction(
+            control_child,
+            AdmissionOrigin::Rpc,
+            None,
+            1,
+            &Coins(vec![]),
+        );
+        assert_eq!(
+            relay,
+            Err(SubmitError::Policy(
+                AcceptanceRejectReason::MinRelayFeeNotMet
+            )),
+            "fresh relay must meet the pressure floor"
+        );
     }
 
     /// The sweep removes residents the lower tip no longer supports �� a
