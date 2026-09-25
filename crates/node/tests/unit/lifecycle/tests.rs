@@ -283,6 +283,51 @@ fn startup_rollback_joins_workers_and_preserves_checkpoint() -> anyhow::Result<(
 }
 
 #[test]
+// CONTRACT: docs/contracts/embedding.md EMB-01 — on explicit embedded
+// shutdown the derived-index worker is stopped and joined before the clean
+// checkpoint publishes and before chainstate closes.
+fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut config = isolated_config(&temp.path().join("node-index-join"));
+    config.indexes.txindex = true;
+    let node = start_node(config, RuntimeInputs::default(), true)?;
+    // Wait until the worker's store is open (the lifecycle leaves Opening),
+    // so shutdown exercises the live-worker join, not an open race.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while matches!(
+        node.state.derived_index_status().capability().state,
+        bitcoin_rs_index::CapabilityState::Opening
+    ) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "txindex lifecycle remained Opening"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let runtime = node
+        .state
+        .chain_followers()
+        .effects()
+        .derived_index()
+        .cloned()
+        .expect("txindex is configured, so the chain effects hold the runtime");
+    let stop_requested_before_checkpoint = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop_requested_before_checkpoint);
+    inject_before_clean_checkpoint(move || {
+        flag.store(runtime.should_stop(), Ordering::Release);
+    });
+
+    node.shutdown_blocking()?;
+
+    assert!(
+        stop_requested_before_checkpoint.load(Ordering::Acquire),
+        "the derived-index worker must be stopped and joined before the \
+         clean checkpoint publishes"
+    );
+    Ok(())
+}
+
+#[test]
 // CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
