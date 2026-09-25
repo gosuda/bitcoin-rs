@@ -70,7 +70,7 @@ pub use service::{
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
-    RelayRequest, RelaySink, TxRelayQueue, drain_relay_queue, spawn_tx_relay_worker,
+    RelayRequest, RelaySink, TxRelayQueue, spawn_tx_relay_worker,
 };
 pub use wire::{Message, PeerError};
 
