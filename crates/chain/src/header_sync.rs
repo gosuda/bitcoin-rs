@@ -111,7 +111,8 @@ fn unix_seconds_at(now: std::time::SystemTime) -> u32 {
 ///
 /// INVARIANT: header admission and direct block connection use this
 /// operation; no caller implements a second version, timewarp, or nBits
-/// predicate.
+/// predicate. The BIP94 boundary predicate and floor live in
+/// [`minimum_candidate_time`], which the mining candidate context shares.
 pub fn validate_contextual_header(
     tree: &BlockTree,
     parent_id: NodeId,
@@ -144,17 +145,14 @@ pub fn validate_contextual_header(
     // BIP94 timewarp floor at a difficulty-adjustment boundary: the
     // candidate may not fall more than `MAX_TIMEWARP` below its parent
     // (`src/validation.cpp:4100-4110`).
-    let retarget_interval = network.retarget_interval();
-    if network.enforce_bip94() && retarget_interval != 0 && height.is_multiple_of(retarget_interval)
+    if let Some(minimum) = minimum_candidate_time(parent.header.time, height, network)
+        && header.time < minimum
     {
-        let minimum = parent.header.time.saturating_sub(MAX_TIMEWARP);
-        if header.time < minimum {
-            return Err(ChainError::TimewarpAttack {
-                height,
-                timestamp: header.time,
-                minimum,
-            });
-        }
+        return Err(ChainError::TimewarpAttack {
+            height,
+            timestamp: header.time,
+            minimum,
+        });
     }
 
     // Future-drift ceiling.
@@ -183,6 +181,27 @@ pub fn validate_contextual_header(
         }
     }
     Ok(())
+}
+
+/// The BIP94 timewarp floor a candidate at `height` inherits from a parent
+/// that carried `parent_time`.
+///
+/// PRE: `height` is the candidate's height, one above its parent.
+///
+/// POST: returns `Some(minimum)` only at a difficulty-adjustment boundary of
+/// a network that enforces BIP94, where `minimum` is `parent_time` minus
+/// [`MAX_TIMEWARP`]; `None` when the floor does not apply to this height or
+/// network.
+///
+/// INVARIANT: this operation is the one BIP94 boundary predicate and floor.
+/// Header admission refuses a candidate under it
+/// (`src/validation.cpp:4100-4110`), and the mining candidate context raises
+/// a template's minimum time to it, so no caller carries its own copy of the
+/// predicate (Core's `GetMinimumTime`, `src/node/miner.cpp:42-49`).
+pub fn minimum_candidate_time(parent_time: u32, height: u32, network: Network) -> Option<u32> {
+    let retarget_interval = network.retarget_interval();
+    (network.enforce_bip94() && retarget_interval != 0 && height.is_multiple_of(retarget_interval))
+        .then(|| parent_time.saturating_sub(MAX_TIMEWARP))
 }
 
 fn validate_empty_tree_root(
