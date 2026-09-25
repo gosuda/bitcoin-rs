@@ -7,8 +7,8 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_storage::{ColumnFamily, KvStore, RocksDbStore, WriteBatch};
 
-use super::{BlockSource, IndexError, IndexWriter, Indexer};
-use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, SpendingPrefixRow};
+use super::{BlockSource, IndexError, IndexWatermark, IndexWriter, Indexer};
+use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, ScriptLiveRow, SpendingPrefixRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
@@ -76,6 +76,46 @@ fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error:
         rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
         vec![1, 256],
         "BE byte order matches numeric height order"
+    );
+    Ok(())
+}
+
+/// A persisted `ScriptLive` key with the wrong byte length fails the live
+/// scan with `InvalidPrefixRowLength`, naming the observed length. The
+/// length error belongs to prefix-row decoding, not to watermark decoding.
+#[test]
+fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn std::error::Error>>
+{
+    let script = vec![0x51, 0x05];
+    let scripthash = ScriptHash::from_script_bytes(&script);
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+
+    let outpoint = spent_outpoint(5, 0);
+    writer.seed_script_live(
+        [(outpoint, scripthash)],
+        IndexWatermark {
+            height: 7,
+            hash: [0x07; 32],
+        },
+    )?;
+
+    let mut malformed = ScriptLiveRow::new(scripthash, &outpoint)
+        .as_bytes()
+        .to_vec();
+    malformed.truncate(40);
+    let mut batch = store.new_batch();
+    batch.put(ColumnFamily::ScriptLive, &malformed, &[]);
+    store.write(batch)?;
+
+    let error = writer
+        .indexer()
+        .iter_live_outpoints(scripthash)
+        .unwrap_err();
+    assert!(
+        matches!(error, IndexError::InvalidPrefixRowLength { len: 40 }),
+        "malformed live-row key must report its length: {error:?}"
     );
     Ok(())
 }
