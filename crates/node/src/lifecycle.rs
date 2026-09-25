@@ -67,25 +67,36 @@ fn bind_rpc(
 ) -> Result<(Arc<Context>, RpcServer)> {
     let rpc_auth = Arc::new(state.config().rpc.auth.to_rpc_auth()?);
     let chainstate = state.chainstate();
-    let mut context = Context::from_handles(ContextHandles {
+    let context = Context::from_handles(ContextHandles {
         chain: ChainHandles {
-            chain_tip: chainstate.header_tip_reader(),
-            applied_tip: chainstate.applied_tip_reader(),
+            chain_tip: chainstate.chain_tip_handle(),
+            applied_tip: chainstate.applied_tip_handle(),
             chain_tx_count: chainstate.chain_tx_count_handle(),
             ibd: Arc::clone(ibd),
             blocks: state.blocks(),
             transactions: state.transactions(),
             utxo: chainstate.utxo_handle(),
             coin_stats: chainstate.coin_stats_handle(),
-            block_tree: chainstate.block_tree_reader(),
+            block_tree: chainstate.block_tree_handle(),
             chain_network: state.config().network,
+            chain_transition: chainstate.read_fence(),
+            block_body_source: Some(block_body_source),
+            prune_service: state.prune_service(),
+            chain_control: Some(Arc::new(RpcChainControl {
+                handles: chainstate,
+                followers: state.chain_followers(),
+                sync: state.sync(),
+            })),
+            rollback_warnings: Some(state.recovery_reporter()),
         },
         mempool: MempoolHandles {
-            mempool: state.mempool_gateway(),
+            gateway: state.mempool_gateway(),
         },
         indexes: IndexHandles {
             derived_index: state.derived_index_query(),
             script_index: state.script_index_query(),
+            esplora_tx_index: state.esplora_derived_index_query(),
+            derived_index_status: Some(state.derived_index_status()),
         },
         network: NetworkHandles {
             network: state.network(),
@@ -98,23 +109,9 @@ fn bind_rpc(
         mining: MiningHandles {
             mining_control: Some(Arc::clone(mining_control)),
         },
-        derived_index_status: Some(state.derived_index_status()),
-    })
-    .with_esplora_derived_index(state.esplora_derived_index_query())
-    .with_block_body_source(block_body_source)
-    .with_chain_transition(chainstate.read_fence());
-    if let Some(prune_service) = state.prune_service() {
-        context = context.with_prune_service(prune_service);
-    }
-    context = context
-        .with_chain_control(Arc::new(RpcChainControl {
-            handles: chainstate,
-            followers: state.chain_followers(),
-            sync: state.sync(),
-        }))
-        .with_zmq_publisher(state.zmq_publisher())
-        .with_debug_log_path(state.data_dir().join("debug.log"))
-        .with_rollback_warnings(state.recovery_reporter());
+        zmq_publisher: state.zmq_publisher(),
+        debug_log_path: Some(state.data_dir().join("debug.log")),
+    });
     let context = Arc::new(context);
     let handler = Arc::new(bitcoin_rs_rpc::Handler::new(Arc::clone(&context)));
     let server = RpcServer::bind(
@@ -554,9 +551,6 @@ pub(crate) fn start_node(
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
-        // The latch answers against the configured consensus network, not a
-        // magic-derived one: a custom `--p2p-magic` can carry another
-        // network's bytes.
         ibd: Some((Arc::clone(&ibd), state.config().network)),
         // One orchestrator: the listener announces block inventory to the
         // same sync loop the event loop drives.

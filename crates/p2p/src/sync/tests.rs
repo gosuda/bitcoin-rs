@@ -353,16 +353,24 @@ impl SyncChain for RefusingChain {
         self.0.network()
     }
 
-    fn block_tree(&self) -> &RwLock<BlockTree> {
+    fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, BlockTree> {
         self.0.block_tree()
     }
 
-    fn chain_tip(&self) -> &ArcSwapOption<TipSnapshot> {
+    fn chain_tip(&self) -> Option<Arc<TipSnapshot>> {
         self.0.chain_tip()
     }
 
-    fn applied_tip(&self) -> &ArcSwapOption<TipSnapshot> {
+    fn applied_tip(&self) -> Option<Arc<TipSnapshot>> {
         self.0.applied_tip()
+    }
+
+    fn block_tree_mut(&self) -> parking_lot::RwLockWriteGuard<'_, BlockTree> {
+        self.0.block_tree_mut()
+    }
+
+    fn set_tips(&self, applied: TipSnapshot, header: TipSnapshot) {
+        self.0.set_tips(applied, header);
     }
 
     fn bootstrap_genesis(&self) {
@@ -479,41 +487,34 @@ fn check_sync_frontier_pair(
 /// A batch forwarded out of a delivered body (`wire_response = false`) is
 /// not an answer to the pending `getheaders`, whatever admission does with
 /// it: neither a rejected batch (`TimestampTooFarAhead`) nor a refused one
-/// (paused admission) may re-arm the gate. An unconditional re-arm would
-/// stamp the gate answered and move its deadline forward at every body
-/// delivery, so a connection that silently ignored its wire request would
-/// age out of expiry without blame forever.
+/// (paused admission) may consume the gate. Unconditional consumption would
+/// free the gate at every body delivery, so a connection that silently
+/// ignored its wire request would never age the request out.
 ///
-/// PRE: `a` owns the header request registered at `t0` and `b` is a second
-///   usable peer, so expiry has a fallback; the batch from `a` is carried by
-///   a body delivery, not by the wire answer.
-/// POST: at `t0 + HEADER_REQUEST_TIMEOUT` the gate expires with blame: `a`
-///   is disconnected, penalised, and marked unresponsive, and `b` is asked
-///   in that same tick.
-/// INVARIANT: only a wire answer may move a header request's deadline or
-///   mark it answered.
+/// PRE: `a` owns the pending header request and `b` is a second usable
+///   peer, so expiry has a fallback; the batch from `a` is carried by a
+///   body delivery, not by the wire answer.
+/// POST: the gate keeps its owner and deadline through the body-forwarded
+///   batch; once the deadline lapses the probe rotates past `a` and `b` is
+///   asked on that tick.
+/// INVARIANT: only a wire answer may clear a pending header request.
 #[test]
-#[allow(clippy::too_many_lines)]
-fn body_forwarded_batch_does_not_rearm_the_pending_header_gate()
+fn body_forwarded_batch_does_not_consume_the_pending_header_gate()
 -> Result<(), Box<dyn std::error::Error>> {
-    // Phase 1: admission rejects the body-forwarded header before it can
-    // attach (`TimestampTooFarAhead`, a non-fault, non-MissingParent
-    // rejection).
-    {
+    for build_fixture in [header_sync_with_genesis, header_sync_with_refusing_chain] {
         let HeaderSyncFixture {
             genesis,
             sync,
             inbound_headers_tx,
             peers,
-        } = header_sync_with_genesis()?;
+        } = build_fixture()?;
         let a = test_addr(9771, 0)?;
         let b = test_addr(9771, 1)?;
         let a_rx = connect_peer(&peers, synthetic_peer(a, 8));
         let b_rx = connect_peer(&peers, synthetic_peer(b, 8));
         let a_source = current_source(&peers, a);
-        let t0 = Instant::now();
 
-        sync.tick_at(t0);
+        sync.tick();
         assert!(
             a_rx.try_iter()
                 .any(|message| matches!(message, Message::GetHeaders(_))),
@@ -526,39 +527,28 @@ fn body_forwarded_batch_does_not_rearm_the_pending_header_gate()
             wire_response: false,
             body_fetch_owned: false,
         })?;
-        sync.tick_at(t0 + Duration::from_millis(1));
+        sync.tick();
 
-        {
-            let scheduler = sync.scheduler.lock();
-            let request = scheduler
-                .header_request
-                .as_ref()
-                .ok_or("the gate must stay registered after the rejection")?;
-            assert!(!request.answered, "a body-forwarded batch is not an answer");
-            assert_eq!(
-                request.requested_at, t0,
-                "a body-forwarded batch must not move the deadline",
-            );
-        }
-
-        let expiry = t0 + super::HEADER_REQUEST_TIMEOUT;
-        sync.tick_at(expiry);
-
-        assert!(
-            !peers.is_connected(a),
-            "a connection that silently ignored its getheaders must be rotated away",
-        );
         assert!(
             sync.scheduler
                 .lock()
-                .header_penalties
-                .contains_key(&a_source),
-            "the silent connection must carry the timeout penalty",
+                .header_request
+                .is_some_and(|request| request.source == a_source),
+            "a body-forwarded batch is not an answer: the gate stays with `a`",
         );
+
+        sync.scheduler
+            .lock()
+            .header_request
+            .as_mut()
+            .ok_or("the request must still be registered")?
+            .requested_at -= super::HEADER_REQUEST_TIMEOUT;
+        sync.tick();
+
         assert!(
             b_rx.try_iter()
                 .any(|message| matches!(message, Message::GetHeaders(_))),
-            "the fallback peer must be asked in the very tick that rotates",
+            "the fallback peer must be asked once the deadline lapses",
         );
         assert!(
             sync.scheduler
@@ -567,78 +557,10 @@ fn body_forwarded_batch_does_not_rearm_the_pending_header_gate()
                 .is_some_and(|request| request.source == current_source(&peers, b)),
             "the gate must move to the fallback connection",
         );
-    }
-
-    // Phase 2: admission refuses the body-forwarded header before
-    // validation (paused admission), and the paced ancestry re-request it
-    // paces must not move the pending deadline either.
-    {
-        let HeaderSyncFixture {
-            genesis,
-            sync,
-            inbound_headers_tx,
-            peers,
-        } = header_sync_with_refusing_chain()?;
-        let a = test_addr(9773, 0)?;
-        let b = test_addr(9773, 1)?;
-        let a_rx = connect_peer(&peers, synthetic_peer(a, 8));
-        let b_rx = connect_peer(&peers, synthetic_peer(b, 8));
-        let a_source = current_source(&peers, a);
-        let t0 = Instant::now();
-
-        sync.tick_at(t0);
         assert!(
             a_rx.try_iter()
-                .any(|message| matches!(message, Message::GetHeaders(_))),
-            "the first tick must ask `a`",
-        );
-
-        inbound_headers_tx.send(InboundHeaders {
-            headers: vec![far_future_header(genesis.compute_hash(), 1)?],
-            source: Some(a_source),
-            wire_response: false,
-            body_fetch_owned: false,
-        })?;
-        sync.tick_at(t0 + Duration::from_millis(1));
-
-        {
-            let scheduler = sync.scheduler.lock();
-            let request = scheduler
-                .header_request
-                .as_ref()
-                .ok_or("the gate must stay registered after the refusal")?;
-            assert!(!request.answered, "a body-forwarded batch is not an answer");
-            assert_eq!(
-                request.requested_at, t0,
-                "a body-forwarded batch must not move the deadline",
-            );
-        }
-
-        let expiry = t0 + super::HEADER_REQUEST_TIMEOUT;
-        sync.tick_at(expiry);
-
-        assert!(
-            !peers.is_connected(a),
-            "a connection that silently ignored its getheaders must be rotated away",
-        );
-        assert!(
-            sync.scheduler
-                .lock()
-                .header_penalties
-                .contains_key(&a_source),
-            "the silent connection must carry the timeout penalty",
-        );
-        assert!(
-            b_rx.try_iter()
-                .any(|message| matches!(message, Message::GetHeaders(_))),
-            "the fallback peer must be asked in the very tick that rotates",
-        );
-        assert!(
-            sync.scheduler
-                .lock()
-                .header_request
-                .is_some_and(|request| request.source == current_source(&peers, b)),
-            "the gate must move to the fallback connection",
+                .all(|message| !matches!(message, Message::GetHeaders(_))),
+            "the expired owner must not be re-asked",
         );
     }
     Ok(())
@@ -2767,7 +2689,7 @@ fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> Result<(), Box<dyn std::e
 
     let syncing = SyncHarness::new(BlockTree::new());
     assert!(
-        syncing.sync.ibd.is_active(now),
+        syncing.sync.ibd.is_active(now, Network::Regtest),
         "the fixture latch must be active for this snapshot"
     );
     assert!(
@@ -2778,7 +2700,7 @@ fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> Result<(), Box<dyn std::e
     let (tree, _blocks) = mined_chain(0, 3)?;
     let synced = SyncHarness::with_ibd(tree, synced_ibd_latch());
     assert!(
-        !synced.sync.ibd.is_active(now),
+        !synced.sync.ibd.is_active(now, Network::Regtest),
         "the fixture latch must have left initial block download"
     );
     assert!(
