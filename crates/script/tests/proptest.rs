@@ -39,12 +39,12 @@ proptest! {
         let input = &fixture.tx.inputs[0];
         let witness = input.witness.clone();
         let interpreter = Interpreter;
-        let ok = interpreter.execute(
+        let ok = interpreter.execute_with_prevouts(
             &fixture.prevout.script_pubkey,
             &input.script_sig,
             &witness,
             VerifyFlags::MANDATORY,
-            &fixture.prevout,
+            std::slice::from_ref(&fixture.prevout),
             &fixture.tx,
             0,
         );
@@ -63,12 +63,12 @@ proptest! {
         witness.push(extra);
         let input = &fixture.tx.inputs[0];
         let interpreter = Interpreter;
-        let ok = interpreter.execute(
+        let ok = interpreter.execute_with_prevouts(
             &fixture.prevout.script_pubkey,
             &input.script_sig,
             &witness,
             VerifyFlags::MANDATORY,
-            &fixture.prevout,
+            std::slice::from_ref(&fixture.prevout),
             &fixture.tx,
             0,
         );

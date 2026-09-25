@@ -121,12 +121,12 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let interpreter = Interpreter::default();
-    let _ = interpreter.execute(
+    let _ = interpreter.execute_with_prevouts(
         &script_pubkey,
         &script_sig,
         &witness,
         flags,
-        &prevout,
+        std::slice::from_ref(&prevout),
         &tx,
         0,
     );
