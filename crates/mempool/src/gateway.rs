@@ -760,7 +760,7 @@ impl MempoolGateway {
     pub(crate) fn admit_transaction_claimed(
         &self,
         request: &AdmissionRequest,
-        claim: Option<&crate::orphan::HeldOrphan>,
+        claim: Option<(&crate::orphan::HeldOrphan, &crate::PeerToken)>,
         fence: crate::admission::AdmissionFence,
     ) -> Result<AdmitOutcome, AdmitError> {
         let mut prepared = {
@@ -790,12 +790,17 @@ impl MempoolGateway {
             fence,
             Some(prepared.stamp),
         )?;
-        if claim.is_some_and(|claim| !self.lifecycle.lock().orphans.is_current(claim)) {
+        if claim.is_some_and(|(claim, announcer)| {
+            !self.lifecycle.lock().orphans.is_current(claim, announcer)
+        }) {
             return Ok(AdmitOutcome::AlreadyKnown);
         }
         let txid = request.tx.txid();
         if pool.contains_txid(&txid) {
-            self.lifecycle.lock().orphans.remove(txid);
+            self.lifecycle
+                .lock()
+                .orphans
+                .remove_transaction_variants(txid);
             return Ok(AdmitOutcome::AlreadyKnown);
         }
         if let Some((error, scope)) = prepared.rejection {
@@ -1325,7 +1330,7 @@ impl MempoolGateway {
         for change in &result.changes {
             if matches!(change.outcome, crate::mutation::MutationOutcome::Accepted) {
                 let txid = Txid::from(change.txid);
-                lifecycle.orphans.remove(txid);
+                lifecycle.orphans.remove_transaction_variants(txid);
                 if pool.contains_txid(&txid) {
                     lifecycle.orphans.parent_ready(txid);
                 }

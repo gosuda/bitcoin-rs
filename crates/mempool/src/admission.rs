@@ -127,14 +127,16 @@ pub enum SubmitError {
     RetryExhausted,
 }
 
-/// One resident orphan's bounded retry result and its original source.
+/// One resident orphan's bounded retry result and the announcer selected for
+/// that retry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OrphanRetry {
     /// Transaction identifier for relay.
     pub txid: Txid,
     /// Witness identifier of the exact body offered for re-admission.
     pub wtxid: Wtxid,
-    /// Delivering connection metadata; never a socket/connection handle.
+    /// The announcer this retry was submitted as; never a socket or
+    /// connection handle. Other announcers of the same body stay recorded.
     pub source: PeerToken,
     /// The same result a fresh submission receives.
     pub result: Result<SubmitOutcome, SubmitError>,
@@ -206,6 +208,56 @@ fn combine_input_facts(
         }
     }
     (prevouts, missing_parents)
+}
+
+/// Builds the one admission request for an attempt from the resolved chain
+/// facts, returning it with the txids of still-missing parents. Without
+/// chain facts, the empty/missing context and zero tip fields cannot
+/// authorize a commit: the gate checks the same generation and sequence
+/// first, then rejects the still-known invalid outpoint before policy or
+/// finality. Changed tokens rebuild a normal attempt, including chain
+/// lookup if the parent disappeared.
+fn build_admission_request(
+    tx: Arc<Tx>,
+    mempool_prevouts: Option<HashMap<OutPoint, TxOut>>,
+    snapshot: Option<ChainAdmissionSnapshot>,
+    max_feerate_sat_per_kvb: Option<u64>,
+    time: u64,
+    origin: AdmissionOrigin,
+    generation: u64,
+    sequence: u64,
+) -> (AdmissionRequest, Vec<Txid>) {
+    let (confirmed, height, locktime_cutoff, prevout_meta, csv_active) = snapshot.map_or_else(
+        || (HashMap::new(), 0, 0, HashMap::new(), false),
+        |snapshot| {
+            (
+                snapshot.prevouts.into_iter().collect::<HashMap<_, _>>(),
+                snapshot.height,
+                snapshot.locktime_cutoff,
+                snapshot.prevout_meta,
+                snapshot.csv_active,
+            )
+        },
+    );
+    let mempool_prevouts = mempool_prevouts.unwrap_or_default();
+    let (prevouts, missing_parents) = combine_input_facts(&tx, &mempool_prevouts, &confirmed);
+    let missing_inputs = prevouts.len() != tx.inputs.len();
+    let context = crate::accounting::prepared_context(&tx, &prevouts, missing_inputs);
+    let request = AdmissionRequest {
+        tx,
+        context,
+        prevouts,
+        prevout_meta,
+        csv_active,
+        locktime_cutoff,
+        max_feerate_sat_per_kvb,
+        time,
+        height,
+        origin,
+        expected_generation: generation,
+        expected_sequence: sequence,
+    };
+    (request, missing_parents)
 }
 
 impl MempoolGateway {
@@ -471,7 +523,7 @@ impl MempoolGateway {
         max_feerate_sat_per_kvb: Option<u64>,
         time: u64,
         chain: &dyn AdmissionChain,
-        claim: Option<&crate::orphan::HeldOrphan>,
+        claim: Option<(&crate::orphan::HeldOrphan, &PeerToken)>,
         fence: AdmissionFence,
     ) -> Result<SubmitOutcome, SubmitError> {
         let txid = tx.txid();
@@ -495,6 +547,15 @@ impl MempoolGateway {
                 if peer && self.lifecycle.lock().rejects_transaction(txid, tx.wtxid()) {
                     return Ok(SubmitOutcome::AlreadyKnown);
                 }
+                // A claim that lost its race with eviction or a witness
+                // refresh is decidable from the lifecycle state alone, so it
+                // short-circuits before any chain read; the gate revalidates
+                // it under the writer lock.
+                if claim.is_some_and(|(claim, announcer)| {
+                    !self.lifecycle.lock().orphans.is_current(claim, announcer)
+                }) {
+                    return Ok(SubmitOutcome::AlreadyKnown);
+                }
                 let prevouts = resolve_mempool_inputs(&pool, &tx);
                 (
                     sequence,
@@ -502,9 +563,10 @@ impl MempoolGateway {
                     peer && can_hold_orphan(&pool, &tx, &pool.policy_snapshot().standardness),
                 )
             };
-            // A nonexistent output of a known parent needs no chain data. It
-            // still goes through the one atomic gate, including private-claim
-            // validation; no separate lifecycle writer is introduced here.
+            // A nonexistent output of a known parent needs no chain data, and
+            // a stale private claim returned above. What remains goes through
+            // the one atomic gate, which revalidates the claim under the
+            // writer lock; no separate lifecycle writer is introduced here.
             let snapshot = if mempool_prevouts.is_some() {
                 let Some(snapshot) = chain.snapshot(&tx) else {
                     continue;
@@ -522,49 +584,24 @@ impl MempoolGateway {
                     continue;
                 }
                 let mut lifecycle = self.lifecycle.lock();
-                if claim.is_some_and(|claim| !lifecycle.orphans.is_current(claim)) {
+                if claim.is_some_and(|(claim, announcer)| {
+                    !lifecycle.orphans.is_current(claim, announcer)
+                }) {
                     return Ok(SubmitOutcome::AlreadyKnown);
                 }
-                lifecycle.orphans.remove(txid);
+                lifecycle.orphans.remove_transaction_variants(txid);
                 return Ok(SubmitOutcome::AlreadyConfirmed);
             }
-            // Without chain facts, the empty/missing context and zero tip
-            // fields cannot authorize a commit: the gate checks the same
-            // generation/sequence first, then rejects the still-known invalid
-            // outpoint before policy or finality. Changed tokens rebuild a
-            // normal attempt, including chain lookup if the parent disappeared.
-            let (confirmed, height, locktime_cutoff, prevout_meta, csv_active) = snapshot
-                .map_or_else(
-                    || (HashMap::new(), 0, 0, HashMap::new(), false),
-                    |snapshot| {
-                        (
-                            snapshot.prevouts.into_iter().collect::<HashMap<_, _>>(),
-                            snapshot.height,
-                            snapshot.locktime_cutoff,
-                            snapshot.prevout_meta,
-                            snapshot.csv_active,
-                        )
-                    },
-                );
-            let mempool_prevouts = mempool_prevouts.unwrap_or_default();
-            let (prevouts, missing_parents) =
-                combine_input_facts(&tx, &mempool_prevouts, &confirmed);
-            let missing_inputs = prevouts.len() != tx.inputs.len();
-            let context = crate::accounting::prepared_context(&tx, &prevouts, missing_inputs);
-            let request = AdmissionRequest {
+            let (request, missing_parents) = build_admission_request(
                 tx,
-                context,
-                prevouts,
-                prevout_meta,
-                csv_active,
-                locktime_cutoff,
+                mempool_prevouts,
+                snapshot,
                 max_feerate_sat_per_kvb,
                 time,
-                height,
                 origin,
-                expected_generation: generation,
-                expected_sequence: sequence,
-            };
+                generation,
+                sequence,
+            );
             match self.admit_transaction_claimed(&request, claim, fence) {
                 Ok(AdmitOutcome::Committed(result)) => return Ok(SubmitOutcome::Committed(result)),
                 Ok(AdmitOutcome::AlreadyKnown) => return Ok(SubmitOutcome::AlreadyKnown),
@@ -583,6 +620,9 @@ impl MempoolGateway {
 
     /// Processes the current bounded ready set once. Work remains resident when
     /// generation changes, and no call immediately consumes its own retry again.
+    ///
+    /// Each claim carries the announcer selected for it; the retry submits as
+    /// that peer and never infers a source from the resident body.
     pub fn retry_orphans(&self, chain: &dyn AdmissionChain, time: u64) -> Vec<OrphanRetry> {
         let ready = {
             let _pool = self.pool.read();
@@ -592,32 +632,32 @@ impl MempoolGateway {
             self.lifecycle.lock().orphans.take_ready()
         };
         let mut results = Vec::with_capacity(ready.len());
-        for held in ready {
+        for (held, announcer) in ready {
             let txid = held.tx.txid();
             let wtxid = held.tx.wtxid();
-            // An intervening eviction or witness refresh retires this claim.
-            if !self.lifecycle.lock().orphans.is_current(&held) {
+            // An intervening eviction or a lost announcer retires this claim.
+            if !self.lifecycle.lock().orphans.is_current(&held, &announcer) {
                 continue;
             }
             let result = self.submit_transaction_claimed(
                 Arc::clone(&held.tx),
-                AdmissionOrigin::Peer(held.source),
+                AdmissionOrigin::Peer(announcer),
                 None,
                 time,
                 chain,
-                Some(&held),
+                Some((&held, &announcer)),
                 AdmissionFence::Stable,
             );
             if matches!(result, Err(SubmitError::RetryExhausted)) {
                 let mut lifecycle = self.lifecycle.lock();
-                if lifecycle.orphans.is_current(&held) {
-                    lifecycle.orphans.mark_ready(txid);
+                if lifecycle.orphans.is_current(&held, &announcer) {
+                    lifecycle.orphans.mark_ready(wtxid, announcer);
                 }
             }
             results.push(OrphanRetry {
                 txid,
                 wtxid,
-                source: held.source,
+                source: announcer,
                 result,
             });
         }
@@ -653,6 +693,8 @@ impl MempoolGateway {
     ///
     /// A txid announcement is suppressed only by a base-transaction rejection;
     /// a witness-specific rejection suppresses only the corresponding wtxid.
+    /// A resident orphan suppresses only its own wtxid: another witness of the
+    /// same txid can still be valid, so a txid inventory stays requestable.
     #[must_use]
     pub fn have_tx(&self, hash: Hash256, wtxid: bool) -> bool {
         let pool = self.pool.read();
@@ -666,25 +708,18 @@ impl MempoolGateway {
         }
         let lifecycle = self.lifecycle.lock();
         lifecycle.rejects_inventory(hash, wtxid)
-            || if wtxid {
-                lifecycle.orphans.get_by_wtxid(&Wtxid::from(hash)).is_some()
-            } else {
-                lifecycle.orphans.contains(&Txid::from(hash))
-            }
+            || (wtxid && lifecycle.orphans.get(Wtxid::from(hash)).is_some())
     }
 
-    /// Returns an accepted or resident orphan transaction body by txid.
+    /// Returns an accepted mempool transaction body by txid.
+    ///
+    /// Resident orphan bodies are never selected here: two resident bodies can
+    /// share one txid, so a txid names no single orphan. Serve an orphan only
+    /// through the exact witness identity, [`Self::get_tx_by_wtxid`].
     #[must_use]
     pub fn get_tx(&self, txid: Txid) -> Option<Tx> {
         let pool = self.pool.read();
-        if let Some(tx) = pool.transaction_by_txid(&txid) {
-            return Some((*tx).clone());
-        }
-        self.lifecycle
-            .lock()
-            .orphans
-            .get(&txid)
-            .map(|held| (*held.tx).clone())
+        pool.transaction_by_txid(&txid).map(|tx| (*tx).clone())
     }
 
     /// Returns an accepted or resident orphan transaction body by witness txid.
@@ -697,7 +732,7 @@ impl MempoolGateway {
         self.lifecycle
             .lock()
             .orphans
-            .get_by_wtxid(&wtxid)
+            .get(wtxid)
             .map(|held| (*held.tx).clone())
     }
 
@@ -841,9 +876,10 @@ mod tests {
                     missing_parents: vec![parent.txid()]
                 })
             );
-            assert!(gateway.have_tx(Hash256::from(child.txid()), false));
+            // A resident orphan suppresses only its own witness identity.
+            assert!(!gateway.have_tx(Hash256::from(child.txid()), false));
             assert!(gateway.have_tx(Hash256::from(child.wtxid()), true));
-            assert_eq!(gateway.get_tx(child.txid()), Some((*child).clone()));
+            assert_eq!(gateway.get_tx(child.txid()), None);
             assert_eq!(
                 gateway.get_tx_by_wtxid(child.wtxid()),
                 Some((*child).clone())
@@ -1084,14 +1120,15 @@ mod tests {
     #[test]
     fn stale_invalid_outpoint_claim_cannot_reject_a_refreshed_orphan() {
         let gateway = gateway();
-        let (parent, child) = parent_and_child();
+        let (_parent, child) = parent_and_child();
         let mut invalid = (*child).clone();
         invalid.inputs[0].previous_output.vout = 1;
         let invalid = Arc::new(invalid);
+        let departed = source();
         assert!(matches!(
             gateway.submit_transaction(
                 Arc::clone(&invalid),
-                AdmissionOrigin::Peer(source()),
+                AdmissionOrigin::Peer(departed),
                 None,
                 1,
                 &Coins(vec![])
@@ -1102,38 +1139,54 @@ mod tests {
             .lifecycle
             .lock()
             .orphans
-            .get(&invalid.txid())
+            .get(invalid.wtxid())
             .cloned();
         let Some(claim) = claim else {
             panic!("the missing transaction must be resident")
         };
+        // A second witness of the same txid is a separate resident body.
         let mut refreshed = (*invalid).clone();
         refreshed.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
         let refreshed = Arc::new(refreshed);
+        let survivor = PeerToken {
+            connection_id: departed.connection_id + 1,
+            ..departed
+        };
         assert!(matches!(
             gateway.submit_transaction(
                 Arc::clone(&refreshed),
-                AdmissionOrigin::Peer(source()),
+                AdmissionOrigin::Peer(survivor),
                 None,
                 2,
                 &Coins(vec![])
             ),
             Ok(SubmitOutcome::Held { .. })
         ));
-        insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+        assert_eq!(gateway.orphan_count(), 2);
+
+        // The first connection is gone: its body leaves, the other stays.
+        gateway.maintain_orphans(50, [survivor]);
+        assert_eq!(gateway.orphan_count(), 1);
+
+        // The retired body's claim is stale. It may not reject the variant
+        // that is still resident, and it short-circuits before chain facts.
         assert_eq!(
             gateway.submit_transaction_claimed(
-                Arc::clone(&invalid),
-                AdmissionOrigin::Peer(source()),
+                Arc::clone(&refreshed),
+                AdmissionOrigin::Peer(survivor),
                 None,
                 3,
                 &Unavailable,
-                Some(&claim),
+                Some((&claim, &departed)),
                 AdmissionFence::Stable,
             ),
             Ok(SubmitOutcome::AlreadyKnown)
         );
-        assert_eq!(gateway.get_tx(invalid.txid()), Some((*refreshed).clone()));
+        assert_eq!(
+            gateway.get_tx_by_wtxid(refreshed.wtxid()),
+            Some((*refreshed).clone())
+        );
+        assert_eq!(gateway.orphan_count(), 1);
         assert_eq!(gateway.recent_rejects_count(), 0);
     }
 
@@ -1491,8 +1544,11 @@ mod tests {
         fn snapshot(&self, _: &Tx) -> Option<ChainAdmissionSnapshot> {
             let replacement = self.replacement.lock().take();
             if let Some(replacement) = replacement {
+                // The replacement arrives on an older connection token. Equal
+                // per-peer scores make the newer token the eviction victim, so
+                // the original claim's body is the one trimmed.
                 let mut new_source = source();
-                new_source.connection_id += 1;
+                new_source.connection_id -= 1;
                 assert!(matches!(
                     self.gateway.submit_transaction(
                         replacement,
@@ -1528,7 +1584,13 @@ mod tests {
             for mode in 0..4 {
                 let gateway = gateway();
                 gateway.lifecycle.lock().orphans = crate::orphan::OrphanPool::new(1);
-                let (parent, child) = parent_and_child();
+                let (parent, base) = parent_and_child();
+                // The resident body carries a witness so the refresh arm below
+                // changes its wtxid without changing its weight: equal per-peer
+                // scores then retire the original body under the count bound.
+                let mut child = (*base).clone();
+                child.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
+                let child = Arc::new(child);
                 assert!(matches!(
                     gateway.submit_transaction(
                         Arc::clone(&child),
@@ -1542,7 +1604,7 @@ mod tests {
                 gateway.chain_changed(&[parent.txid()]);
                 let mut replacement = (*child).clone();
                 if refresh {
-                    replacement.inputs[0].witness = Witness::from_stack(vec![vec![1]]);
+                    replacement.inputs[0].witness = Witness::from_stack(vec![vec![2]]);
                 } else {
                     replacement.outputs[0].value =
                         Amount::from_sat(replacement.outputs[0].value.to_sat() - 1);
@@ -1575,15 +1637,14 @@ mod tests {
                     Some((*replacement).clone())
                 );
                 let mut new_source = source();
-                new_source.connection_id += 1;
-                assert_eq!(
+                new_source.connection_id -= 1;
+                assert!(
                     gateway
                         .lifecycle
                         .lock()
                         .orphans
-                        .get(&replacement.txid())
-                        .map(|held| held.source),
-                    Some(new_source)
+                        .get(replacement.wtxid())
+                        .is_some_and(|held| held.announcers.contains(&new_source))
                 );
                 assert!(!gateway.is_rejected(Hash256::from(child.txid())));
                 assert!(!gateway.is_rejected(Hash256::from(replacement.txid())));
@@ -2077,14 +2138,13 @@ mod tests {
             gateway.get_tx_by_wtxid(valid.wtxid()),
             Some((*valid).clone())
         );
-        assert_eq!(
+        assert!(
             gateway
                 .lifecycle
                 .lock()
                 .orphans
-                .get(&valid.txid())
-                .map(|held| held.source),
-            Some(source())
+                .get(valid.wtxid())
+                .is_some_and(|held| held.announcers.contains(&source()))
         );
         // A mempool parent accept wakes the retained variant without clearing
         // the rejection cache. Retry must relay the actual accepted wtxid.
