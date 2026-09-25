@@ -170,9 +170,9 @@ impl ChainFollowers {
     ///
     /// POST: block-log record, hash/raw ZMQ, derived-index wake plus sequence
     /// `C`, mining wake, and mempool orphan re-evaluation run once in that
-    /// order. Block-inclusion removals are emitted before sequence `C`, so a
-    /// `sequence` subscriber sees the `R` events for confirmed transactions
-    /// before the block event that confirms them.
+    /// order. The block-inclusion removals are committed before sequence
+    /// `C`; a `sequence` subscriber sees no `R` event for them, because the
+    /// block event already covers the departures.
     ///
     /// INVARIANT: consumer failure cannot invalidate chainstate.
     pub fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
