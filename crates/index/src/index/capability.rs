@@ -21,11 +21,7 @@ pub(super) const SCRIPT_HISTORY_FLOOR_KEY: &[u8] = &[0x00, b's'];
 pub(super) const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
 
 pub(super) const fn watermark_key(capability: IndexCapability) -> &'static [u8] {
-    match capability {
-        IndexCapability::TxLookup => TX_LOOKUP_WATERMARK_KEY,
-        IndexCapability::ScriptHistory => SCRIPT_HISTORY_WATERMARK_KEY,
-        IndexCapability::ScriptLive => SCRIPT_LIVE_WATERMARK_KEY,
-    }
+    capability.watermark_key()
 }
 
 /// The durable floor key for a capability, when it carries one.
@@ -60,6 +56,81 @@ pub enum IndexCapability {
     /// filed under its script (#225). Rebuildable from the authoritative UTXO
     /// set alone, unlike history.
     ScriptLive,
+}
+
+impl IndexCapability {
+    /// Every capability in mask-bit and report order.
+    ///
+    /// PRE: none.
+    /// POST: distinct entries, ordered `TxLookup`, `ScriptHistory`, `ScriptLive`.
+    /// INVARIANT: this order is load-bearing; the query-refusal text and the
+    /// index-ahead capability label follow it.
+    pub const ALL: [Self; 3] = [Self::TxLookup, Self::ScriptHistory, Self::ScriptLive];
+
+    /// PRE: none.
+    /// POST: the single mask bit this capability owns, matching the persisted
+    /// reset-marker mask (`TxLookup` 0b001, `ScriptHistory` 0b010, `ScriptLive` 0b100).
+    pub(super) const fn bit(self) -> u8 {
+        match self {
+            Self::TxLookup => 0b001,
+            Self::ScriptHistory => 0b010,
+            Self::ScriptLive => 0b100,
+        }
+    }
+
+    /// PRE: none.
+    /// POST: the position of this capability in [`Self::ALL`], 0 to 2.
+    pub const fn index(self) -> usize {
+        match self {
+            Self::TxLookup => 0,
+            Self::ScriptHistory => 1,
+            Self::ScriptLive => 2,
+        }
+    }
+
+    /// PRE: none.
+    /// POST: the persisted watermark key, byte-identical to the constants
+    /// this method replaces (the `T`, `S`, `L` keys under `0x00`).
+    pub(super) const fn watermark_key(self) -> &'static [u8] {
+        match self {
+            Self::TxLookup => TX_LOOKUP_WATERMARK_KEY,
+            Self::ScriptHistory => SCRIPT_HISTORY_WATERMARK_KEY,
+            Self::ScriptLive => SCRIPT_LIVE_WATERMARK_KEY,
+        }
+    }
+
+    /// PRE: none.
+    /// POST: the column families this capability occupies
+    /// (`TxLookup`: `TxConfirmed`; `ScriptHistory`: Funding, Spending;
+    /// `ScriptLive`: `ScriptLive`).
+    pub(super) const fn column_families(self) -> &'static [ColumnFamily] {
+        match self {
+            Self::TxLookup => &[ColumnFamily::TxConfirmed],
+            Self::ScriptHistory => &[ColumnFamily::Funding, ColumnFamily::Spending],
+            Self::ScriptLive => &[ColumnFamily::ScriptLive],
+        }
+    }
+
+    /// PRE: none.
+    /// POST: the display name (`tx_lookup`, `script_history`, `script_live`).
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::TxLookup => "tx_lookup",
+            Self::ScriptHistory => "script_history",
+            Self::ScriptLive => "script_live",
+        }
+    }
+
+    /// PRE: none.
+    /// POST: the query-refusal text for this capability, byte-identical to
+    /// the inline literals this method replaces.
+    pub(crate) const fn disabled_message(self) -> &'static str {
+        match self {
+            Self::TxLookup => "txindex is disabled",
+            Self::ScriptHistory => "script history is disabled",
+            Self::ScriptLive => "script live is disabled",
+        }
+    }
 }
 
 /// Capabilities included in one prepared index transition.
@@ -308,5 +379,100 @@ pub(super) fn selected_watermark(
     match reconcile_selected_watermark(watermarks, capabilities) {
         SelectedWatermark::Valid(watermark) => Ok(watermark),
         SelectedWatermark::Invalid => Err(IndexError::NonContiguousPrepared { watermark: None }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each fact method must equal the literal it replaces: a swapped arm
+    /// would silently change persisted bytes, column families, or refusal
+    /// text.
+    #[test]
+    fn per_capability_facts_match_the_literals_they_replace() {
+        for (capability, bit, index, key, families, name, message) in [
+            (
+                IndexCapability::TxLookup,
+                0b001_u8,
+                0_usize,
+                TX_LOOKUP_WATERMARK_KEY,
+                &[ColumnFamily::TxConfirmed][..],
+                "tx_lookup",
+                "txindex is disabled",
+            ),
+            (
+                IndexCapability::ScriptHistory,
+                0b010,
+                1,
+                SCRIPT_HISTORY_WATERMARK_KEY,
+                &[ColumnFamily::Funding, ColumnFamily::Spending][..],
+                "script_history",
+                "script history is disabled",
+            ),
+            (
+                IndexCapability::ScriptLive,
+                0b100,
+                2,
+                SCRIPT_LIVE_WATERMARK_KEY,
+                &[ColumnFamily::ScriptLive][..],
+                "script_live",
+                "script live is disabled",
+            ),
+        ] {
+            assert_eq!(capability.bit(), bit);
+            assert_eq!(capability.index(), index);
+            assert_eq!(capability.watermark_key(), key);
+            assert_eq!(capability.column_families(), families);
+            assert_eq!(capability.name(), name);
+            assert_eq!(capability.disabled_message(), message);
+        }
+    }
+
+    #[test]
+    fn all_lists_every_capability_in_mask_bit_order() {
+        assert_eq!(
+            IndexCapability::ALL,
+            [
+                IndexCapability::TxLookup,
+                IndexCapability::ScriptHistory,
+                IndexCapability::ScriptLive,
+            ]
+        );
+        for (position, capability) in IndexCapability::ALL.into_iter().enumerate() {
+            assert_eq!(capability.index(), position);
+            assert_eq!(capability.bit(), 1 << position);
+        }
+    }
+
+    /// The reset marker round-trips byte-identically and refuses an empty
+    /// mask and any bit above bit 2 (the pre-#225 marker rule).
+    #[test]
+    fn reset_marker_mask_round_trips_and_refuses_invalid_masks() {
+        for selection in [
+            IndexCapabilities::TX_LOOKUP,
+            IndexCapabilities::SCRIPT_HISTORY,
+            IndexCapabilities::SCRIPT_LIVE,
+            IndexCapabilities::HISTORICAL,
+            IndexCapabilities::ALL,
+        ] {
+            assert!(
+                matches!(
+                    IndexCapabilities::from_mask(selection.to_mask()),
+                    Ok(selected) if selected == selection
+                ),
+                "mask round trip must hold for {selection:?}"
+            );
+        }
+        assert!(matches!(
+            IndexCapabilities::from_mask(0),
+            Err(IndexError::InvalidResetMarker)
+        ));
+        for mask in [0b1000_u8, 0b0001_0000, 0b1001, 0b1111] {
+            assert!(
+                IndexCapabilities::from_mask(mask).is_err(),
+                "mask {mask:#b} must be refused"
+            );
+        }
     }
 }
