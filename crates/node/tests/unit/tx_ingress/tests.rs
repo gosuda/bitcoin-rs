@@ -7,80 +7,15 @@ use bitcoin_rs_chainstate::events::ChainEventPublisher;
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolLimits, MempoolObserver, MutationEnvelope, MutationOutcome,
 };
+use bitcoin_rs_mining::FakeMiningControl;
 use bitcoin_rs_p2p::DEFAULT_TX_RELAY_QUEUE_CAPACITY;
 use bitcoin_rs_primitives::{
-    Amount, Block, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    Amount, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
 };
 use bitcoin_rs_utxo::UtxoSet;
 use parking_lot::{Mutex, RwLock};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::atomic::AtomicUsize;
-
-#[derive(Default)]
-struct RecordingMining {
-    publishes: AtomicUsize,
-}
-
-impl MiningControl for RecordingMining {
-    fn get_block_template(
-        &self,
-        _request: bitcoin_rs_mining::BlockTemplateRequest,
-    ) -> Result<bitcoin_rs_mining::BlockTemplateResult, bitcoin_rs_mining::MiningControlError> {
-        Err(bitcoin_rs_mining::MiningControlError::Failed(
-            "not implemented".to_owned().into(),
-        ))
-    }
-
-    fn mining_info(
-        &self,
-    ) -> Result<bitcoin_rs_mining::MiningInfo, bitcoin_rs_mining::MiningControlError> {
-        Err(bitcoin_rs_mining::MiningControlError::Failed(
-            "not implemented".to_owned().into(),
-        ))
-    }
-
-    fn network_hash_ps(
-        &self,
-        _lookup: i64,
-        _height: i64,
-    ) -> Result<f64, bitcoin_rs_mining::MiningControlError> {
-        Err(bitcoin_rs_mining::MiningControlError::Failed(
-            "not implemented".to_owned().into(),
-        ))
-    }
-
-    fn submit_block(
-        &self,
-        _block: Block,
-    ) -> Result<bitcoin_rs_mining::BlockValidationResult, bitcoin_rs_mining::MiningControlError>
-    {
-        Err(bitcoin_rs_mining::MiningControlError::Failed(
-            "not implemented".to_owned().into(),
-        ))
-    }
-
-    fn submit_header(
-        &self,
-        _header: bitcoin_rs_primitives::Header,
-    ) -> Result<(), bitcoin_rs_mining::MiningControlError> {
-        Err(bitcoin_rs_mining::MiningControlError::Failed(
-            "not implemented".to_owned().into(),
-        ))
-    }
-
-    fn publish_generation(&self) {
-        self.publishes.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn generate(
-        &self,
-        _request: bitcoin_rs_mining::GenerateRequest,
-    ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, bitcoin_rs_mining::MiningControlError> {
-        Err(bitcoin_rs_mining::MiningControlError::Failed(
-            "not implemented".to_owned().into(),
-        ))
-    }
-}
+use std::sync::Arc;
 
 fn coinbase_tx(value: u64) -> Tx {
     Tx {
@@ -129,7 +64,10 @@ fn zero_fee_gateway() -> Arc<MempoolGateway> {
     }))))
 }
 
-fn make_consumer(gateway: &Arc<MempoolGateway>, mining: Arc<RecordingMining>) -> TxIngressConsumer {
+fn make_consumer(
+    gateway: &Arc<MempoolGateway>,
+    mining: &Arc<FakeMiningControl>,
+) -> TxIngressConsumer {
     use bitcoin_rs_utxo::{BlockChanges, UtxoAdd};
     let utxo = Arc::new(UtxoSet::new());
     let parent_txid = Txid::from(Hash256::from_le_bytes(&[0xAA; 32]));
@@ -164,7 +102,7 @@ fn make_consumer(gateway: &Arc<MempoolGateway>, mining: Arc<RecordingMining>) ->
         chainstate,
         peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
         mempool_gateway: Arc::clone(gateway),
-        mining_control: mining,
+        mining_control: mining.clone(),
         relay,
     }
 }
@@ -212,8 +150,8 @@ fn consumer_preserves_exact_connection_id() {
     let tx = spending_tx();
     let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
 
-    let mining = Arc::new(RecordingMining::default());
-    let consumer = make_consumer(&gateway, mining);
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
 
     consumer.process_one(inbound);
 
@@ -238,12 +176,12 @@ fn rejected_tx_does_not_relay_or_wake_mining() {
     let tx = coinbase_tx(50_000);
     let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
 
-    let mining = Arc::new(RecordingMining::default());
-    let consumer = make_consumer(&gateway, Arc::clone(&mining));
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
 
     consumer.process_one(inbound);
 
-    assert_eq!(mining.publishes.load(Ordering::Relaxed), 0);
+    assert_eq!(mining.publish_count(), 0);
 }
 
 #[test]
@@ -258,12 +196,12 @@ fn duplicate_tx_does_not_relay_or_wake_mining() {
     let source = test_source();
     let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
 
-    let mining = Arc::new(RecordingMining::default());
-    let consumer = make_consumer(&gateway, Arc::clone(&mining));
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
 
     consumer.process_one(inbound);
 
-    assert_eq!(mining.publishes.load(Ordering::Relaxed), 0);
+    assert_eq!(mining.publish_count(), 0);
     assert!(gateway.read().contains_txid(&txid));
 }
 
@@ -275,12 +213,12 @@ fn accepted_tx_relays_and_wakes_mining() {
     let tx = spending_tx();
     let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
 
-    let mining = Arc::new(RecordingMining::default());
-    let consumer = make_consumer(&gateway, Arc::clone(&mining));
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
 
     consumer.process_one(inbound);
 
-    assert_eq!(mining.publishes.load(Ordering::Relaxed), 1);
+    assert_eq!(mining.publish_count(), 1);
 }
 
 #[test]
@@ -288,8 +226,8 @@ fn coinbase_is_rejected_not_orphaned() {
     let gateway = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
         MempoolLimits::default(),
     ))));
-    let mining = Arc::new(RecordingMining::default());
-    let consumer = make_consumer(&gateway, mining);
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
     let coinbase = coinbase_tx(50_000);
     let txid = coinbase.txid();
     consumer.process_one(bitcoin_rs_p2p::InboundTx::new(coinbase, test_source()));
@@ -300,8 +238,8 @@ fn coinbase_is_rejected_not_orphaned() {
 #[test]
 fn non_final_tx_is_rejected_not_admitted() {
     let gateway = zero_fee_gateway();
-    let mining = Arc::new(RecordingMining::default());
-    let consumer = make_consumer(&gateway, mining);
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
     let mut tx = spending_tx();
     tx.lock_time = LockTime::from_consensus(100);
     tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
@@ -316,8 +254,8 @@ fn oversized_missing_input_tx_is_rejected_not_orphaned() {
     let gateway = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
         MempoolLimits::default(),
     ))));
-    let mining = Arc::new(RecordingMining::default());
-    let consumer = make_consumer(&gateway, mining);
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
     // Witness counts 1× toward BIP141 weight. A 400_000-byte stack
     // item puts the body over the 400k standard cap so MissingInputs
@@ -353,8 +291,8 @@ fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
     let gateway = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
         MempoolLimits::default(),
     ))));
-    let mining = Arc::new(RecordingMining::default());
-    let consumer = make_consumer(&gateway, mining);
+    let mining = FakeMiningControl::unavailable("not implemented");
+    let consumer = make_consumer(&gateway, &mining);
     // Spend an unfunded parent so the tx lands in the orphan pool.
     let mut orphan = spending_tx();
     orphan.inputs[0].previous_output =
