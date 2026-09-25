@@ -155,36 +155,6 @@ pub trait DnsResolver: Send + Sync {
     fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError>;
 }
 
-/// Peer manager skeleton with injectable DNS resolution.
-pub struct PeerManager {
-    dns_resolver: Box<dyn DnsResolver>,
-    seeds: Vec<String>,
-}
-
-impl PeerManager {
-    /// Create a peer manager from a resolver implementation.
-    pub fn new(dns_resolver: Box<dyn DnsResolver>) -> Self {
-        Self {
-            dns_resolver,
-            seeds: Vec::new(),
-        }
-    }
-
-    /// Add a DNS seed name.
-    pub fn add_seed(&mut self, seed: impl Into<String>) {
-        self.seeds.push(seed.into());
-    }
-
-    /// Resolve every configured seed.
-    pub fn bootstrap_addresses(&self) -> Result<Vec<SocketAddr>, PeerError> {
-        let mut addresses = Vec::new();
-        for seed in &self.seeds {
-            addresses.extend(self.dns_resolver.resolve(seed)?);
-        }
-        Ok(addresses)
-    }
-}
-
 /// DNS resolver backed by the operating system resolver.
 #[derive(Debug, Clone, Copy)]
 pub struct SystemDnsResolver {
@@ -244,35 +214,6 @@ pub const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn peer_manager_resolves_configured_seeds() -> Result<(), PeerError> {
-        struct StaticResolver;
-
-        impl DnsResolver for StaticResolver {
-            fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError> {
-                let port = match seed {
-                    "seed-one.example" => 8333,
-                    "seed-two.example" => 18333,
-                    _ => return Err(PeerError::Protocol("unexpected test seed")),
-                };
-                Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
-            }
-        }
-
-        let mut manager = PeerManager::new(Box::new(StaticResolver));
-        manager.add_seed("seed-one.example");
-        manager.add_seed("seed-two.example");
-
-        assert_eq!(
-            manager.bootstrap_addresses()?,
-            vec![
-                SocketAddr::from(([127, 0, 0, 1], 8333)),
-                SocketAddr::from(([127, 0, 0, 1], 18333)),
-            ]
-        );
-        Ok(())
-    }
 
     #[test]
     fn system_dns_resolver_uses_configured_port_for_literal_hosts() -> Result<(), PeerError> {
