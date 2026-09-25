@@ -21,7 +21,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 
 /// Storage-backed implementation of RPC manual pruning.
-pub struct NodePruneService<S: KvStore> {
+pub(super) struct NodePruneService<S: KvStore> {
     store: Arc<S>,
     block_files: Arc<FlatFileBlockStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,

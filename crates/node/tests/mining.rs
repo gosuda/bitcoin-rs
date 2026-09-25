@@ -1090,43 +1090,15 @@ fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
     let waiter =
         thread::spawn(move || mining_wait.get_block_template(template_request(Some(long_poll_id))));
     thread::sleep(Duration::from_millis(50));
+    // Bounded wait slices must observe the flag even without a direct wake:
+    // correctness does not depend on a wake notification, so the coordinator
+    // carries none.
     shutdown.store(true, Ordering::Release);
-    mining.notify_shutdown();
     let outcome = waiter
         .join()
         .unwrap_or_else(|_| panic!("shutdown waiter panicked"));
     let Err(err) = outcome else {
         panic!("shutdown wait unexpectedly succeeded");
-    };
-    assert!(matches!(err, MiningControlError::Unavailable(_)));
-    Ok(())
-}
-
-#[test]
-fn shutdown_exits_long_poll_without_direct_wake() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let shutdown = state.shutdown();
-    let mining = Arc::new(MiningCoordinator::new(
-        state.mempool(),
-        state.chainstate(),
-        state.chain_followers(),
-        state.config().mining.payout_script.clone(),
-    ));
-    mining.publish_generation();
-    let current = expect_template(mining.get_block_template(template_request(None))?);
-    let long_poll_id = CompactString::from(current.candidate.template_id.as_str());
-    let mining_wait = Arc::clone(&mining);
-    let waiter =
-        thread::spawn(move || mining_wait.get_block_template(template_request(Some(long_poll_id))));
-    thread::sleep(Duration::from_millis(50));
-    // Bounded wait slices must observe the flag even without notify_shutdown.
-    shutdown.store(true, Ordering::Release);
-    let outcome = waiter
-        .join()
-        .unwrap_or_else(|_| panic!("bounded shutdown waiter panicked"));
-    let Err(err) = outcome else {
-        panic!("bounded shutdown wait unexpectedly succeeded");
     };
     assert!(matches!(err, MiningControlError::Unavailable(_)));
     Ok(())

@@ -32,7 +32,6 @@ use crossbeam_channel::Sender;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
-pub use prune::NodePruneService;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
