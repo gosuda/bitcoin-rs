@@ -9,7 +9,7 @@ use std::thread;
 use super::super::{StaleTipState, tip_may_be_stale};
 use super::*;
 use crate::listener::ListenerExtras;
-use crate::service::{P2pService, P2pServiceConfig};
+use crate::service::{OutboundDial, P2pService, P2pServiceConfig};
 
 /// The network's target spacing: ten minutes, as every production chain
 /// configures it.
@@ -93,7 +93,10 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
         .collect();
     for listener in &listeners {
         let addr = listener.local_addr().expect("fake peer address");
-        service.add_node(addr, false).expect("queue the dial");
+        service
+            .outbound_sender()
+            .send(OutboundDial::pinned(addr))
+            .expect("queue the dial");
     }
 
     let mut held = Vec::new();
