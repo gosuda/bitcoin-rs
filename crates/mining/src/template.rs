@@ -5,7 +5,7 @@ use bitcoin_rs_consensus::compute_merkle_root;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
-    encode::double_sha256,
+    encode::double_sha256, varint,
 };
 use hashbrown::HashMap;
 
@@ -39,9 +39,9 @@ pub struct CandidateContext {
     pub csv_active: bool,
     /// Whether BIP141 is active at `height`.
     pub segwit_active: bool,
-    /// Maximum candidate block weight, including the coinbase.
+    /// Maximum whole-block weight, including the header, transaction count, and coinbase.
     pub max_weight: u64,
-    /// Maximum serialized block size, including the coinbase.
+    /// Maximum whole-block serialized size, including the header, count, and coinbase.
     pub max_size: u64,
     /// Maximum sigop cost, including the coinbase reservation.
     pub max_sigops: u64,
@@ -143,9 +143,9 @@ pub struct Candidate {
     pub coinbase_value: u64,
     /// Sum of actual fees from selected non-coinbase transactions.
     pub fees: u64,
-    /// Total block weight including the coinbase.
+    /// Total block weight including the header, transaction count, and coinbase.
     pub weight: u64,
-    /// Total serialized size including the coinbase.
+    /// Total serialized size including the header, transaction count, and coinbase.
     pub size: u64,
     /// Total sigop cost including the coinbase.
     pub sigop_cost: u64,
@@ -218,7 +218,7 @@ pub fn assemble_candidate(
     snapshot: &MempoolMiningSnapshot,
     payout: &[u8],
 ) -> Result<Candidate, MiningError> {
-    let reservation = coinbase_reservation(context, payout)?;
+    let reservation = fixed_reservation(context, payout)?;
     let (ordered, fees, weight, size, sigops) = select_packages(
         context,
         snapshot,
@@ -245,13 +245,14 @@ pub fn assemble_ordered_candidate(
     snapshot: &MempoolMiningSnapshot,
     payout: &[u8],
 ) -> Result<Candidate, MiningError> {
-    let reservation = coinbase_reservation(context, payout)?;
+    let reservation = fixed_reservation(context, payout)?;
     let body = exact_order(context, snapshot, reservation)?;
     finish_candidate(context, snapshot, payout, &body, reservation)
 }
 
+// The fixed block header and coinbase are reserved before selecting the body.
 #[derive(Clone, Copy)]
-struct CoinbaseReservation {
+struct FixedReservation {
     weight: u64,
     size: u64,
     sigops: u64,
@@ -260,15 +261,29 @@ struct CoinbaseReservation {
 struct SelectedBody {
     ordered: Vec<usize>,
     fees: u64,
+    // Include the exact CompactSize transaction count as well as body transactions.
     weight: u64,
     size: u64,
     sigops: u64,
 }
 
-fn coinbase_reservation(
+/// Size of the block transaction count, including its reserved coinbase.
+pub(crate) fn transaction_count_size(body_count: usize) -> Result<u64, MiningError> {
+    let overflow = MiningError::CandidateScalarOverflow {
+        field: "transaction count",
+    };
+    let count = u64::try_from(body_count)
+        .ok()
+        .and_then(|count| count.checked_add(1))
+        .ok_or(overflow)?;
+    Ok(u64::try_from(varint::encoded_len(count)).unwrap_or(u64::MAX))
+}
+
+/// Reserves the header and a coinbase with the final witness-commitment shape.
+fn fixed_reservation(
     context: &CandidateContext,
     payout: &[u8],
-) -> Result<CoinbaseReservation, MiningError> {
+) -> Result<FixedReservation, MiningError> {
     let dummy_commitment = Hash256::from_le_bytes(&[0_u8; 32]);
     let reservation = build_coinbase(
         context.height,
@@ -282,17 +297,25 @@ fn coinbase_reservation(
             field: "coinbase size",
         }
     })?;
-    Ok(CoinbaseReservation {
-        weight: reservation.weight(),
-        size,
+    let header_size = u64::try_from(Header::LEN).unwrap_or(u64::MAX);
+    Ok(FixedReservation {
+        weight: reservation
+            .weight()
+            .checked_add(header_size * 4)
+            .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?,
+        size: size
+            .checked_add(header_size)
+            .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?,
         sigops: u64::from(bitcoin_rs_script::count_tx_legacy(&reservation)),
     })
 }
 
+/// Includes every requested transaction or refuses the whole ordered candidate.
+/// Transaction-count bytes belong to the body; the header and coinbase are fixed.
 fn exact_order(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,
-    reservation: CoinbaseReservation,
+    reservation: FixedReservation,
 ) -> Result<SelectedBody, MiningError> {
     if reservation.weight > context.max_weight {
         return Err(MiningError::CapacityExhausted { field: "weight" });
@@ -306,8 +329,8 @@ fn exact_order(
 
     // Core's generateblock does not claim fees from explicitly ordered transactions.
     let fees = 0_u64;
-    let mut weight = 0_u64;
-    let mut size = 0_u64;
+    let mut size = transaction_count_size(snapshot.entries.len())?;
+    let mut weight = size * 4;
     let mut sigops = 0_u64;
     for entry in &snapshot.entries {
         weight = weight
@@ -322,10 +345,18 @@ fn exact_order(
             },
         )?;
     }
-    if reservation.weight.saturating_add(weight) > context.max_weight {
+    let total_weight = reservation
+        .weight
+        .checked_add(weight)
+        .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
+    let total_size = reservation
+        .size
+        .checked_add(size)
+        .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?;
+    if total_weight > context.max_weight {
         return Err(MiningError::CapacityExhausted { field: "weight" });
     }
-    if reservation.size.saturating_add(size) > context.max_size {
+    if total_size > context.max_size {
         return Err(MiningError::CapacityExhausted { field: "size" });
     }
     if reservation.sigops.saturating_add(sigops) > context.max_sigops {
@@ -340,12 +371,13 @@ fn exact_order(
     })
 }
 
+/// Builds commitments and adds the fixed reservation to the selected body totals.
 fn finish_candidate(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,
     payout: &[u8],
     body: &SelectedBody,
-    reservation: CoinbaseReservation,
+    reservation: FixedReservation,
 ) -> Result<Candidate, MiningError> {
     let (witness_merkle_root, witness_reserved_value, witness_commitment) = if context.segwit_active
     {
@@ -369,7 +401,7 @@ fn finish_candidate(
         .map(|output| output.value.to_sat())
         .ok_or(MiningError::CoinbaseValueOverflow)?;
     // Fees change a fixed-width amount and the witness commitment replaces a
-    // fixed-width hash, so the reservation and final coinbase have the same
+    // fixed-width hash, so the reserved and final coinbase have the same
     // weight, serialized size, and sigop cost.
 
     let transactions = candidate_transactions(snapshot, &body.ordered)?;

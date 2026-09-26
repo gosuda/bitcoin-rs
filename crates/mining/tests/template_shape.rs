@@ -17,6 +17,7 @@ use bitcoin_rs_primitives::{
     Txid, Witness,
 };
 
+/// Checks whole-block scalars and selected dependency indexes against wire and hash oracles.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {
@@ -83,15 +84,11 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
     assert_eq!(candidate.segwit_active, context.segwit_active);
 
     let mut fees = 0_u64;
-    let mut weight = candidate.coinbase.weight();
-    let mut size = u64::try_from(candidate.coinbase.total_size())?;
     let mut sigops = 0_u64;
     let mut positions = std::collections::BTreeMap::new();
     for (offset, tx) in candidate.transactions.iter().enumerate() {
         positions.insert(tx.txid, u32::try_from(offset + 1)?);
         fees = fees.checked_add(tx.fee).ok_or("fee")?;
-        weight = weight.checked_add(tx.weight).ok_or("weight")?;
-        size = size.checked_add(u64::from(tx.size)).ok_or("size")?;
         sigops = sigops
             .checked_add(u64::from(tx.sigop_cost))
             .ok_or("sigops")?;
@@ -118,8 +115,11 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
         }
     }
     assert_eq!(candidate.fees, fees);
-    assert_eq!(candidate.weight, weight);
-    assert_eq!(candidate.size, size);
+    let block = candidate.into_unsolved_block();
+    let oracle: bitcoin::Block =
+        bitcoin::consensus::deserialize(&bitcoin_rs_primitives::encode::consensus_bytes(&block))?;
+    assert_eq!(candidate.weight, oracle.weight().to_wu());
+    assert_eq!(candidate.size, u64::try_from(oracle.total_size())?);
     assert_eq!(candidate.sigop_cost, sigops);
     assert_eq!(
         candidate.coinbase_value,
