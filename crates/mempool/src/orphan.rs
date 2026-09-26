@@ -465,9 +465,11 @@ impl OrphanPool {
         self.remove_announcer(wtxid, victim);
         if let Some(usage) = self.peer_usage.get_mut(&victim) {
             let entries = &self.entries;
-            usage
-                .announced
-                .retain(|id| entries.get(id).is_some_and(|h| h.announcers.contains(&victim)));
+            usage.announced.retain(|id| {
+                entries
+                    .get(id)
+                    .is_some_and(|h| h.announcers.contains(&victim))
+            });
         }
         true
     }
