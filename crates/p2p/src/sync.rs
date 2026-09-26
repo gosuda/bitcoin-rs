@@ -88,9 +88,6 @@ const LOCATOR_MAX_ENTRIES: usize = 32;
 /// many is a full page, so the peer almost certainly has more.
 const MAX_HEADERS_RESULTS: usize = 2_000;
 
-/// Wire protocol version we advertise on outbound `getheaders`.
-const PROTOCOL_VERSION: u32 = 70_016;
-
 /// Time after which an unanswered `getheaders` request may be retried.
 const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -484,6 +481,11 @@ impl BlockSync {
         frontier
             .usable_peers
             .retain(|peer| self.peer_table.is_current(peer.source));
+        // Expiry, the sweep, and the retain above can retire the pending
+        // request's owner after the observation stamped it live; a stale
+        // `AwaitPending` would defer header recovery a whole tick.
+        frontier.header_request_live =
+            header_request_live(frontier.header_request, &frontier.usable_peers, now);
         self.follow_tip_progress(&frontier, now);
         let plan = frontier.plan();
 
@@ -499,6 +501,7 @@ impl BlockSync {
                         peer_idx + 1 == request_peer_count,
                         peer_best_height,
                         &frontier.chain,
+                        now,
                     );
                     sent_getdata |= request_outcome.sent;
                     if request_outcome.sent && !request_outcome.has_request_capacity {
@@ -545,6 +548,12 @@ impl BlockSync {
         let block_spacing =
             Duration::from_secs(u64::from(self.chain.network().target_spacing_seconds()));
         let mut scheduler = self.scheduler.lock();
+        if self.ibd.is_active(crate::counters::now_seconds()) {
+            // Core withholds the extra full-relay dial until the node has
+            // left initial block download (`net_processing.cpp:1434-1448`).
+            scheduler.stale_tip.extra_dial_allowed = false;
+            return;
+        }
         let blocks_in_flight = scheduler.window.pending_len();
         scheduler
             .stale_tip

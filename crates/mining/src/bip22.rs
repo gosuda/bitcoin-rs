@@ -66,7 +66,7 @@ pub fn chain_reject_reason(error: &ChainError) -> CompactString {
         // Core prints `bad-version(0x%08x)` with the rejected version's
         // unsigned bit pattern (`src/validation.cpp:4112-4126`).
         ChainError::BadVersion { version, .. } => {
-            return CompactString::from(format!("bad-version(0x{version:08x})"));
+            return CompactString::from(format!("bad-version(0x{:08x})", version.cast_unsigned()));
         }
         ChainError::TimewarpAttack { .. } => return CompactString::from("time-timewarp-attack"),
         _ => return CompactString::from(error.to_string()),

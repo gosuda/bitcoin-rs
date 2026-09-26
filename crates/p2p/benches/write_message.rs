@@ -32,7 +32,7 @@ use bitcoin_rs_primitives::{
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use bitcoin_rs_p2p::compact_blocks::COMPACT_BLOCK_VERSION;
+use bitcoin_rs_p2p::peer::COMPACT_BLOCK_VERSION;
 use bitcoin_rs_p2p::wire::{Message, write_message};
 use bitcoin_rs_p2p::{CompactBlockHints, Reconstruction};
 
@@ -184,6 +184,10 @@ fn bench_cmpctblock(txs: &[Tx], nonce: u64) -> CmpctBlock {
 /// a resident mempool and the verified completion that delivers the block.
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_compact_reconstruction(c: &mut Criterion) {
+    use bitcoin::bip152::BlockTransactions;
+    use bitcoin::p2p::message_compact_blocks::BlockTxn;
+    use bitcoin_rs_p2p::compact_blocks::Outcome;
+
     let mut group = c.benchmark_group("compact_reconstruction");
     for (block_txs, pool_txs, missing) in [(100_usize, 5_000_usize, 0_usize), (100, 5_000, 5)] {
         let body: Vec<Tx> = (1..=u32::try_from(block_txs).expect("block size fits u32"))
@@ -197,16 +201,55 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
         pool.extend(body.iter().skip(missing).cloned());
         let hints = BenchHints::new(pool);
         let cmpct = bench_cmpctblock(&body, 0x1234);
+        // The completion half of the round trip: run the reconstruction once
+        // outside the timed loop and answer the `RequestMissing` reply it
+        // asks for, so `missing` cases measure the verified completion too.
+        let reply = match Reconstruction::new().receive_cmpctblock(
+            &cmpct,
+            COMPACT_BLOCK_VERSION,
+            &hints,
+            Instant::now(),
+        ) {
+            Outcome::RequestMissing(reply) => Some(reply),
+            outcome => {
+                assert!(missing == 0, "a missing fixture must request: {outcome:?}");
+                None
+            }
+        };
+        let blocktxn = reply.map(|reply| BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: reply.txs_request.block_hash,
+                transactions: reply
+                    .txs_request
+                    .indexes
+                    .iter()
+                    .map(|index| {
+                        let index = usize::try_from(*index).expect("index fits usize");
+                        let native = &body[index];
+                        bitcoin::consensus::encode::deserialize::<bitcoin::Transaction>(
+                            &consensus_bytes(native),
+                        )
+                        .expect("fixture transaction bridges")
+                    })
+                    .collect(),
+            },
+        });
         let label = format!("block_{block_txs}_pool_{pool_txs}_missing_{missing}");
         group.bench_function(label, |b| {
             b.iter(|| {
                 let mut reconstruction = Reconstruction::new();
-                reconstruction.receive_cmpctblock(
+                let outcome = reconstruction.receive_cmpctblock(
                     black_box(&cmpct),
                     COMPACT_BLOCK_VERSION,
                     black_box(&hints),
                     Instant::now(),
                 );
+                match (outcome, &blocktxn) {
+                    (Outcome::RequestMissing(_), Some(response)) => {
+                        black_box(reconstruction.receive_blocktxn(response, Instant::now()))
+                    }
+                    (outcome, _) => black_box(outcome),
+                }
             });
         });
     }

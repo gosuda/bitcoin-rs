@@ -5,7 +5,6 @@ use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
 use super::LOCATOR_MAX_ENTRIES;
 use super::MAX_HEADERS_RESULTS;
-use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
@@ -26,6 +25,7 @@ use crate::InboundHeaders;
 use crate::Message;
 use crate::PeerSource;
 use crate::download_window::SyncPeer;
+use crate::wire::PROTOCOL_VERSION;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_chain::{ChainError, NodeId};
@@ -96,7 +96,7 @@ impl BlockSync {
                     self.continue_full_page(Some(source), batch_len, Some(tip_hash), now);
                 }
                 if body_fetch_owned {
-                    self.note_owned_body_fetch(source, headers.last());
+                    self.note_owned_body_fetch(source, headers.last(), now);
                 }
                 continue;
             }
@@ -110,7 +110,7 @@ impl BlockSync {
                 self.route_headers_batch(&headers, source, wire_response, batch_len, now)
             else {
                 if body_fetch_owned {
-                    self.note_owned_body_fetch(source, headers.last());
+                    self.note_owned_body_fetch(source, headers.last(), now);
                 }
                 continue;
             };
@@ -245,7 +245,7 @@ impl BlockSync {
                 }
             }
             if body_fetch_owned {
-                self.note_owned_body_fetch(source, headers.last());
+                self.note_owned_body_fetch(source, headers.last(), now);
             }
         }
         if credit_refresh_needed {
@@ -253,11 +253,11 @@ impl BlockSync {
         }
         // The drain may have attached the ancestry a deferred owned fetch
         // was waiting on — resolve it against the tree now.
-        self.resolve_owned_body_fetches();
+        self.resolve_owned_body_fetches(now);
         if !direct_fetch.is_empty() {
             let chain = self.observe_chain_frontier();
             for (source, announced_tip) in direct_fetch {
-                self.direct_fetch_announced_tip(source, announced_tip, &chain);
+                self.direct_fetch_announced_tip(source, announced_tip, &chain, now);
             }
         }
         self.drain_block_announcements(now);
@@ -327,6 +327,7 @@ impl BlockSync {
         source: PeerSource,
         announced_tip: Hash256,
         chain: &ChainFrontier,
+        now: Instant,
     ) -> GetdataRequestOutcome {
         let (Some(chain_tip), Some(required)) = (chain.chain_tip.as_ref(), chain.next_required)
         else {
@@ -346,7 +347,7 @@ impl BlockSync {
         {
             return GetdataRequestOutcome::default();
         }
-        let outcome = self.send_getdata_for_pending_blocks(source, false, height, chain);
+        let outcome = self.send_getdata_for_pending_blocks(source, false, height, chain, now);
         // The request path primes the expected-apply cache with exactly this
         // batch. A direct fetch runs before this round's apply pass, where
         // more bodies may already be staged, so drop the primed cache and let
@@ -469,6 +470,7 @@ impl BlockSync {
         &self,
         source: Option<PeerSource>,
         header: Option<&bitcoin_rs_primitives::Header>,
+        now: Instant,
     ) {
         let (Some(source), Some(header)) = (source, header) else {
             return;
@@ -500,14 +502,14 @@ impl BlockSync {
             return;
         };
         let SchedulerState { window, stager, .. } = &mut *scheduler;
-        window.mark_owned_fetch(stager, source, hash, height, Instant::now());
+        window.mark_owned_fetch(stager, source, hash, height, now);
     }
 
     /// Resolves deferred owned-fetch marks now that this drain may have
     /// admitted the ancestry their tips were waiting on. Marks whose source
     /// went stale are dropped: the dead connection's fetch died with it and
     /// normal scheduling asks a live peer instead.
-    pub(super) fn resolve_owned_body_fetches(&self) {
+    pub(super) fn resolve_owned_body_fetches(&self, now: Instant) {
         let deferred = {
             let mut scheduler = self.scheduler.lock();
             if scheduler.owned_body_fetches.is_empty() {
@@ -533,7 +535,6 @@ impl BlockSync {
             }
         }
         let mut scheduler = self.scheduler.lock();
-        let now = Instant::now();
         let SchedulerState { window, stager, .. } = &mut *scheduler;
         for (source, hash, height) in resolved {
             window.mark_owned_fetch(stager, source, hash, height, now);

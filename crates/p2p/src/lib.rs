@@ -53,24 +53,23 @@ pub use compact_blocks::{CompactBlockHints, Reconstruction};
 pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, Command, CommandStatus, PINNED_CORE_VERSION};
 pub use connection::{ConnectionId, PeerLease, PeerSource, ReadyPeer};
 pub use counters::{CountingStream, PeerCounters};
-pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
+pub use dispatch::{ChainQuery, InventoryServing, TxInventory, dispatch_inbound_full};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::ListenerExtras;
 pub use peer::{
-    DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerManager, PeerState,
+    DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerState,
     SystemDnsResolver,
 };
 pub use peer_info::{PeerInfo, PeerRole};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{
-    OutboundDial, P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
-    apply_network_active,
+    OutboundDial, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError, apply_network_active,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
-    RelayRequest, RelaySink, TxRelayQueue, drain_relay_queue, spawn_tx_relay_worker,
+    RelayRequest, RelaySink, TxRelayQueue, spawn_tx_relay_worker,
 };
 pub use wire::{Message, PeerError};
 

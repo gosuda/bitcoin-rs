@@ -25,15 +25,14 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
 use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
-    ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, dispatch_inbound,
-    dispatch_inbound_with_chain,
+    ChainQuery, InventoryServing, dispatch_inbound, dispatch_inbound_full,
 };
 use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::wire::{
-    MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
-    write_message,
+    MAX_HEADERS_MESSAGE_COUNT, MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION,
+    PeerError, read_message, write_message,
 };
 use bitcoin_rs_p2p::{
     BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, InboundBlock, InboundHeaders, Message,
@@ -265,10 +264,19 @@ fn dispatch_collect(
     chain: Option<&dyn ChainQuery>,
 ) -> Result<Vec<Message>, PeerError> {
     let collected = std::cell::RefCell::new(Vec::new());
-    dispatch_inbound_with_chain(peer, message, chain, &|| true, &mut |response| {
-        collected.borrow_mut().push(response);
-        Ok(())
-    })?;
+    dispatch_inbound_full(
+        peer,
+        message,
+        chain,
+        None,
+        &|| true,
+        &|| true,
+        &mut |response| {
+            collected.borrow_mut().push(response);
+            Ok(())
+        },
+        &mut |_| {},
+    )?;
     Ok(collected.into_inner())
 }
 
@@ -764,7 +772,7 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
 #[test]
 fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Error>> {
     let genesis = genesis_block()?;
-    let headers = child_headers(&genesis.header, MAX_HEADERS_RESPONSE + 1);
+    let headers = child_headers(&genesis.header, MAX_HEADERS_MESSAGE_COUNT + 1);
     let chain = FakeChain::new(headers.clone(), HashMap::new());
     let mut peer = ready_peer(Magic::REGTEST)?;
 
@@ -777,7 +785,7 @@ fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Err
     let Some(Message::Headers(served)) = response.first() else {
         return Err("expected headers response".into());
     };
-    assert_eq!(served.len(), MAX_HEADERS_RESPONSE);
+    assert_eq!(served.len(), MAX_HEADERS_MESSAGE_COUNT);
     assert_eq!(served.len(), 2_000, "Core 31.1 max headers per message");
     Ok(())
 }
@@ -991,6 +999,13 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         return Err("genesis carries a coinbase transaction".into());
     };
     write_message(&mut server, magic, &Message::Tx(coinbase.clone()))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dial.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !dial.is_finished() {
+        return Err("the connection did not terminate within 5s".into());
+    }
     let Ok(outcome) = dial.join() else {
         return Err("the dial thread panicked".into());
     };
@@ -1268,7 +1283,7 @@ fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Err
         .iter()
         .map(|(locator, stop)| {
             (
-                before.headers_after(locator, *stop, MAX_HEADERS_RESPONSE),
+                before.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
                 before.headers_after(locator, *stop, 1),
             )
         })
@@ -1285,7 +1300,7 @@ fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Err
     let after = FakeChain::new(headers, bodies);
     for ((locator, stop), (wide, narrow)) in cases.iter().zip(&expected) {
         assert_eq!(
-            after.headers_after(locator, *stop, MAX_HEADERS_RESPONSE),
+            after.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
             *wide
         );
         assert_eq!(after.headers_after(locator, *stop, 1), *narrow);
@@ -1542,6 +1557,13 @@ fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error
         &remote_version(ServiceFlags::NETWORK_LIMITED),
     )?;
 
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dial.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !dial.is_finished() {
+        return Err("the connection was not refused within 5s".into());
+    }
     let inner = match dial.join() {
         Ok(inner) => inner,
         Err(panic) => std::panic::resume_unwind(panic),

@@ -257,19 +257,25 @@ pub struct BlockDownloadPolicy {
 ///   height. During initial block download the peer must advertise
 ///   `NODE_NETWORK`, so a pruned peer is never asked for old blocks (Core
 ///   `net_processing.cpp:6521`). Afterwards a peer without `NODE_NETWORK`
-///   serves only the last [`NODE_NETWORK_LIMITED_MIN_BLOCKS`] blocks of its
+///   serves only when it advertises `NODE_NETWORK_LIMITED` (BIP159), and
+///   then only the last [`NODE_NETWORK_LIMITED_MIN_BLOCKS`] blocks of its
 ///   own demonstrated chain (`net_processing.cpp:1637`); one below the
-///   requested height is ineligible.
+///   requested height is ineligible. A peer advertising neither flag never
+///   serves bodies.
 /// INVARIANT: every body-selection path applies this clause; a peer that
 ///   cannot serve the range is never asked for it.
 pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
     let network = ServiceFlags::NETWORK.to_u64();
     let witness = ServiceFlags::WITNESS.to_u64();
+    let limited = ServiceFlags::NETWORK_LIMITED.to_u64();
     if peer.services & witness == 0 {
         return false;
     }
     if peer.services & network != 0 {
         return true;
+    }
+    if peer.services & limited == 0 {
+        return false;
     }
     if policy.ibd.is_active(crate::counters::now_seconds()) {
         return false;
@@ -2372,6 +2378,19 @@ impl DownloadWindow {
         }
     }
 
+    /// Releases the pending request for `hash` without moving the request
+    /// cursor: the purge path for hashes the node refuses to re-request.
+    ///
+    /// PRE: none.
+    /// POST: a pending entry for `hash` is gone and its slot accounting is
+    ///   released; `next_request_height` is unchanged.
+    /// INVARIANT: an invalidated hash is never re-requested, so its removal
+    ///   cannot rewind the cursor into a rescan of committed heights
+    ///   (`purge_invalidated`, count eviction).
+    pub fn release_pending_without_rewind(&mut self, hash: &Hash256, now: Instant) {
+        self.remove_pending(hash, now);
+    }
+
     /// The request cursor: the lowest height not yet scanned or offered.
     #[cfg(test)]
     pub(crate) fn request_cursor(&self) -> u32 {
@@ -2742,22 +2761,93 @@ fn contiguous_request_entries(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use arc_swap::ArcSwapOption;
+    use bitcoin::p2p::ServiceFlags;
     use bitcoin_rs_primitives::Hash256;
+    use core::net::SocketAddr;
 
-    use bitcoin_rs_chain::Network;
+    use bitcoin_rs_chain::{BlockTree, ChainWork, InitialBlockDownload, Network, TipSnapshot};
     use bitcoin_rs_primitives::{
         Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
         consensus_bytes,
     };
 
     use super::{
-        BlameReason, BlockStager, BlockedContext, BlockedDecision, ColdFrontState, DownloadWindow,
-        FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT, FAST_OUTBOUND_PEER_TARGET,
-        PENDING_BUDGET, SyncBudget, count_stall_episode_cleared, fast_sync_budget,
+        BlameReason, BlockDownloadPolicy, BlockStager, BlockedContext, BlockedDecision,
+        ColdFrontState, DownloadWindow, FAST_BLOCKS_IN_TRANSIT_PER_PEER, FAST_MIN_PEERS_FOR_FANOUT,
+        FAST_OUTBOUND_PEER_TARGET, PENDING_BUDGET, SyncBudget, count_stall_episode_cleared,
+        fast_sync_budget, serves_requested_height,
     };
     use crate::connection::PeerSource;
+    use crate::counters::PeerCounters;
+    use crate::peer_info::PeerInfo;
+
+    /// An outbound peer advertising only `NODE_WITNESS`: it may relay
+    /// transactions but can never serve block bodies (BIP159).
+    fn witness_only_peer() -> PeerInfo {
+        PeerInfo {
+            addr: SocketAddr::from(([127, 0, 0, 1], 1)),
+            version: 0,
+            wtxid_relay: true,
+            compact_block_relay: false,
+            services: ServiceFlags::WITNESS.to_u64(),
+            user_agent: String::new(),
+            start_height: 900,
+            best_known_height: 900,
+            conn_time: 0,
+            inbound: false,
+            addr_bind: SocketAddr::from(([127, 0, 0, 1], 1)),
+            time_offset: 0,
+            counters: Arc::new(PeerCounters::default()),
+        }
+    }
+
+    /// A body-service policy for a node that has left initial block download:
+    /// a regtest tip one block above genesis, stamped now, so the latch sees
+    /// enough work (regtest's minimum is zero) and a fresh tip.
+    fn post_ibd_policy(requested_height: u32) -> BlockDownloadPolicy {
+        let network = Network::Regtest;
+        let genesis = network.genesis_block().header;
+        let mut child = genesis;
+        child.prev_blockhash = genesis.compute_hash();
+        child.time = u32::try_from(crate::counters::now_seconds()).unwrap_or(u32::MAX);
+        let mut tree = BlockTree::new();
+        tree.insert_header(genesis, bitcoin_rs_chain::NodeStatus::HeaderValid)
+            .unwrap_or_else(|error| panic!("fixture genesis header: {error}"));
+        let tip_id = tree
+            .insert_header(child, bitcoin_rs_chain::NodeStatus::HeaderValid)
+            .unwrap_or_else(|error| panic!("fixture child header: {error}"));
+        let tip = TipSnapshot {
+            tip_id,
+            height: 1,
+            chainwork: ChainWork::ZERO,
+            hash: Hash256::from(child.compute_hash()),
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+        };
+        BlockDownloadPolicy {
+            ibd: Arc::new(InitialBlockDownload::new(
+                Arc::new(ArcSwapOption::from_pointee(tip)),
+                Arc::new(parking_lot::RwLock::new(tree)),
+                network,
+            )),
+            requested_height,
+        }
+    }
+
+    /// The limited-height window applies only to a peer that advertises
+    /// `NODE_NETWORK_LIMITED`: a witness-only peer within the window never
+    /// becomes a body source.
+    #[test]
+    fn witness_only_peer_never_serves_bodies() {
+        let peer = witness_only_peer();
+        assert!(
+            !serves_requested_height(&peer, &post_ibd_policy(800)),
+            "a peer without NODE_NETWORK or NODE_NETWORK_LIMITED serves no bodies"
+        );
+    }
 
     /// A stager whose budget mirrors `window`'s, so window-side backpressure
     /// reads see the same bytes/counts a real sync pair would.

@@ -142,8 +142,8 @@ impl BlockSync {
         allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
         frontier: &ChainFrontier,
+        now: Instant,
     ) -> GetdataRequestOutcome {
-        let now = Instant::now();
         let (Some(chain_tip), Some(applied_tip), Some(required)) = (
             frontier.chain_tip.as_ref(),
             frontier.applied_tip.as_ref(),

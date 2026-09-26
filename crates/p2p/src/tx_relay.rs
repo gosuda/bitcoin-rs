@@ -19,7 +19,7 @@
 //! a running node.
 //!
 //! [`spawn_tx_relay_worker`] drains the queue on a dedicated thread; tests
-//! call [`drain_relay_queue`] synchronously for deterministic fixtures. Both
+//! drain the queue's receiver directly for deterministic fixtures. Both
 //! paths re-check the shared mempool at send time and announce only
 //! transactions still resident there, so a queued request for a transaction
 //! removed by block connection, replacement, eviction, or reorg never emits
@@ -276,45 +276,19 @@ impl RelaySink for PeerRelaySink {
     }
 }
 
-/// Returns whether the queued transaction is still relayable.
+/// Returns the wtxid the mempool currently holds for `txid`, or `None` when
+/// the transaction is not resident.
 ///
 /// PRE: `gateway` is the shared gateway for the node's live mempool.
-/// POST: returns true exactly when `txid` is present in the mempool read at
-/// this call.
+/// POST: returns the resident entry's wtxid exactly when `txid` is present
+/// in the mempool read at this call.
 /// INVARIANT: the check does not mutate the mempool, relay queue, or
 /// observer state. The read guard is released before this function
-/// returns, so no caller holds it while it sends to peers.
-fn transaction_is_live(gateway: &MempoolGateway, txid: &Txid) -> bool {
-    gateway.read().contains_txid(txid)
-}
-
-/// Synchronously drains every currently-queued relay request into `sink`,
-/// announcing only transactions still resident in `gateway`.
-///
-/// Returns the number of requests processed. Tests call it to flush the
-/// queue deterministically.
-///
-/// PRE: `gateway` is the shared gateway for the node's live mempool; `rx`
-/// is the relay queue receiver.
-/// POST: every request queued at the call is consumed and counted once. A
-/// request whose transaction is in the mempool at its send is announced
-/// through `sink`, excluding its source connection. A request whose
-/// transaction left the mempool (block connect, replacement, eviction, or
-/// reorg) produces no announcement.
-/// INVARIANT: no mempool guard is held while `sink` sends to peers.
-pub fn drain_relay_queue(
-    rx: &Receiver<RelayRequest>,
-    sink: &dyn RelaySink,
-    gateway: &MempoolGateway,
-) -> usize {
-    let mut processed = 0;
-    while let Ok(request) = rx.try_recv() {
-        if transaction_is_live(gateway, &request.txid) {
-            sink.announce_inv(request.txid, request.wtxid, request.source);
-        }
-        processed += 1;
-    }
-    processed
+/// returns, so no caller holds it while it sends to peers. A re-admitted
+/// same-txid witness variant answers with its own wtxid, so an `inv` never
+/// advertises a wtxid a BIP339 `getdata` cannot resolve.
+fn resident_wtxid(gateway: &MempoolGateway, txid: &Txid) -> Option<Wtxid> {
+    gateway.read().entry_by_txid(txid).map(|entry| entry.wtxid)
 }
 
 /// Spawns the single tx-relay worker thread.
@@ -329,7 +303,7 @@ pub fn drain_relay_queue(
 /// mempool at its send; a request for a removed transaction is consumed
 /// with no announcement. The thread ends on `shutdown` or queue close.
 /// INVARIANT: no mempool guard is held while `sink` sends to peers. The
-/// worker applies the same send-time rule as [`drain_relay_queue`].
+/// worker applies the same send-time rule for every consumed request.
 pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
     sink: S,
     rx: Receiver<RelayRequest>,
@@ -342,8 +316,8 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
             while !shutdown.load(Ordering::Relaxed) {
                 match rx.recv_timeout(RELAY_POLL) {
                     Ok(request) => {
-                        if transaction_is_live(&gateway, &request.txid) {
-                            sink.announce_inv(request.txid, request.wtxid, request.source);
+                        if let Some(wtxid) = resident_wtxid(&gateway, &request.txid) {
+                            sink.announce_inv(request.txid, wtxid, request.source);
                         }
                     }
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
@@ -370,8 +344,9 @@ mod tests {
         capacity: usize,
     }
 
-    /// One recorded announcement: txid, excluded source, outcome.
-    type SinkEntry = (Txid, Option<u64>, RelayOutcome);
+    /// One recorded announcement: txid, announced wtxid, excluded source,
+    /// outcome.
+    type SinkEntry = (Txid, Wtxid, Option<u64>, RelayOutcome);
 
     /// Test sink that records announcements without a live connection.
     struct FakeSink {
@@ -395,7 +370,7 @@ mod tests {
     }
 
     impl RelaySink for FakeSink {
-        fn announce_inv(&self, txid: Txid, _wtxid: Wtxid, exclude: Option<u64>) -> RelayOutcome {
+        fn announce_inv(&self, txid: Txid, wtxid: Wtxid, exclude: Option<u64>) -> RelayOutcome {
             let mut peers = self.peers.lock();
             let mut outcome = RelayOutcome::default();
             for peer in peers.iter_mut() {
@@ -414,7 +389,7 @@ mod tests {
                     peer.capacity -= 1;
                 }
             }
-            self.log.lock().push((txid, exclude, outcome));
+            self.log.lock().push((txid, wtxid, exclude, outcome));
             outcome
         }
     }
@@ -546,7 +521,7 @@ mod tests {
         assert_eq!(outcome.saturated, 0);
         let entry = &sink.log()[0];
         assert_eq!(entry.0, replacement);
-        assert_eq!(entry.1, Some(ids[2]));
+        assert_eq!(entry.2, Some(ids[2]));
     }
 
     #[test]
@@ -568,13 +543,19 @@ mod tests {
         // The dropped request never reaches the sink.
         let (peers, _ids) = fake_peers(1);
         let sink = FakeSink::new(peers);
-        let processed = drain_relay_queue(&rx, &sink, &gateway);
+        let mut processed = 0;
+        while let Ok(request) = rx.try_recv() {
+            processed += 1;
+            if let Some(wtxid) = resident_wtxid(&gateway, &request.txid) {
+                sink.announce_inv(request.txid, wtxid, request.source);
+            }
+        }
         assert_eq!(processed, 2);
         assert_eq!(sink.log().len(), 2);
     }
 
     #[test]
-    fn drain_relay_queue_excludes_source_per_request() {
+    fn drained_queue_excludes_source_per_request() {
         let gateway = relay_identity_gateway();
         let (peers, ids) = fake_peers(3);
         let (queue, rx) = TxRelayQueue::new(8);
@@ -587,16 +568,22 @@ mod tests {
         queue.announce(live[1], dummy_wtxid(2), Some(ids[1]));
         queue.announce(live[2], dummy_wtxid(3), None);
 
-        let processed = drain_relay_queue(&rx, &sink, &gateway);
+        let mut processed = 0;
+        while let Ok(request) = rx.try_recv() {
+            processed += 1;
+            if let Some(wtxid) = resident_wtxid(&gateway, &request.txid) {
+                sink.announce_inv(request.txid, wtxid, request.source);
+            }
+        }
         assert_eq!(processed, 3);
 
         let log = sink.log();
-        assert_eq!(log[0].1, Some(ids[0]));
-        assert_eq!(log[0].2.excluded, 1);
-        assert_eq!(log[1].1, Some(ids[1]));
-        assert_eq!(log[1].2.excluded, 1);
-        assert_eq!(log[2].1, None);
-        assert_eq!(log[2].2.excluded, 0);
+        assert_eq!(log[0].2, Some(ids[0]));
+        assert_eq!(log[0].3.excluded, 1);
+        assert_eq!(log[1].2, Some(ids[1]));
+        assert_eq!(log[1].3.excluded, 1);
+        assert_eq!(log[2].2, None);
+        assert_eq!(log[2].3.excluded, 0);
     }
 
     #[test]
@@ -613,7 +600,13 @@ mod tests {
         // replacement, or eviction) before the drain.
         gateway.clear(AdmissionOrigin::Block);
 
-        let processed = drain_relay_queue(&rx, &sink, &gateway);
+        let mut processed = 0;
+        while let Ok(request) = rx.try_recv() {
+            processed += 1;
+            if let Some(wtxid) = resident_wtxid(&gateway, &request.txid) {
+                sink.announce_inv(request.txid, wtxid, request.source);
+            }
+        }
 
         // A stale request is consumed so the queue cannot retain it, but it
         // must never produce an `inv` for a body `getdata` cannot retrieve.
@@ -621,6 +614,70 @@ mod tests {
         assert!(
             sink.log().is_empty(),
             "a removed transaction must not be announced"
+        );
+    }
+
+    /// A re-admitted same-txid witness variant announces its own resident
+    /// wtxid, never the stale wtxid the queued request carried: a BIP339
+    /// `getdata` for the announced wtxid must resolve against the pool.
+    #[test]
+    fn re_admitted_witness_variant_announces_its_resident_wtxid() {
+        use bitcoin_rs_mempool::MempoolEntry;
+        use bitcoin_rs_primitives::Witness;
+
+        let gateway = relay_identity_gateway();
+        let (queue, rx) = TxRelayQueue::new(8);
+
+        let original = (*relay_identity_tx()).clone();
+        let mut malleated = original.clone();
+        malleated.inputs[0].witness = Witness::from_stack(vec![vec![2]]);
+        assert_eq!(
+            original.txid(),
+            malleated.txid(),
+            "witness malleation keeps the txid"
+        );
+        assert_ne!(original.wtxid(), malleated.wtxid());
+
+        let original = Arc::new(original);
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::clone(&original), 100, 10_000, 1, 0, 0),
+            )
+            .unwrap_or_else(|error| panic!("admit original fixture: {error}"));
+        queue.announce(original.txid(), original.wtxid(), None);
+
+        // The original leaves the pool and the malleated witness variant of
+        // the same txid is re-admitted before the worker drains the request.
+        gateway.clear(AdmissionOrigin::Block);
+        let malleated = Arc::new(malleated);
+        gateway
+            .insert_entry(
+                AdmissionOrigin::Rpc,
+                MempoolEntry::new(Arc::clone(&malleated), 100, 10_000, 1, 0, 0),
+            )
+            .unwrap_or_else(|error| panic!("admit malleated fixture: {error}"));
+
+        let (peers, _ids) = fake_peers(1);
+        let sink = FakeSink::new(peers);
+        let log = Arc::clone(&sink.log);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker = spawn_tx_relay_worker(sink, rx, Arc::clone(&gateway), shutdown)
+            .unwrap_or_else(|error| panic!("relay worker spawns: {error}"));
+        // Deterministic release: dropping the last sender disconnects the
+        // queue once the buffered request is consumed. No sleeping.
+        drop(queue);
+        worker
+            .join()
+            .unwrap_or_else(|_| panic!("relay worker exits"));
+
+        let entries = log.lock().clone();
+        assert_eq!(entries.len(), 1, "the resident txid is announced once");
+        assert_eq!(entries[0].0, malleated.txid());
+        assert_eq!(
+            entries[0].1,
+            malleated.wtxid(),
+            "the announced wtxid is the resident one"
         );
     }
 

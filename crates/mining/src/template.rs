@@ -27,9 +27,9 @@ pub struct CandidateContext {
     pub version: i32,
     /// Compact target the candidate header must carry (`nBits`).
     pub bits: CompactTarget,
-    /// Earliest legal timestamp: the minimum the chain context resolved, which
-    /// is the previous MTP + 1 or, at a BIP94 adjustment boundary, the parent's
-    /// timestamp minus the timewarp allowance.
+    /// Earliest legal timestamp: the minimum the chain context resolved — the
+    /// previous MTP + 1, or at a BIP94 adjustment boundary the higher of that
+    /// and the parent's timestamp minus the timewarp allowance.
     pub min_time: u32,
     /// Candidate header time used for the template clock.
     pub current_time: u32,
