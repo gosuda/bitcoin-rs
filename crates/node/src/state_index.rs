@@ -6,6 +6,8 @@
 //! delegates its index surface to it.
 
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -20,6 +22,15 @@ use super::TxIndexSpawn;
 pub(crate) struct DerivedIndexHost {
     status: Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>,
     enabled: Option<EnabledDerivedIndex>,
+    /// Workers this host has spawned; the idempotence contract needs a
+    /// measure that distinguishes one worker from two.
+    #[cfg(test)]
+    spawned_workers: usize,
+    /// Set once the owned worker's join returns. An abandoned join never
+    /// sets it, so the lifecycle tests prove join-before-checkpoint rather
+    /// than only shutdown-requested-before-checkpoint.
+    #[cfg(test)]
+    worker_joined: Arc<AtomicBool>,
 }
 
 /// The configured index parts. They live as long as the node so status and
@@ -64,7 +75,14 @@ impl DerivedIndexHost {
             adapter,
             phase: DerivedIndexPhase::Ready(spawn),
         });
-        Self { status, enabled }
+        Self {
+            status,
+            enabled,
+            #[cfg(test)]
+            spawned_workers: 0,
+            #[cfg(test)]
+            worker_joined: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     /// PRE: the applied tip is authoritative (after crash recovery).
@@ -114,25 +132,31 @@ impl DerivedIndexHost {
         )
         .context("spawn txindex worker")?;
         enabled.phase = DerivedIndexPhase::Running(worker);
+        #[cfg(test)]
+        {
+            self.spawned_workers += 1;
+        }
         Ok(())
     }
 
     /// PRE: teardown or drop started.
     /// POST: a `Running` host becomes `Stopped`; a clean join happened before
     /// `deadline`, or the join is abandoned, the generation token revoked,
-    /// `ShutdownAbandoned` published, and the namespace poisoned.
+    /// `ShutdownAbandoned` published, the namespace poisoned, and an error
+    /// returned so the caller's teardown records the abandonment and
+    /// suppresses the clean checkpoint.
     /// INVARIANT: `shutdown` is idempotent; `request_shutdown` runs on every
     /// call.
-    pub(crate) fn shutdown(&mut self, deadline: Duration) {
+    pub(crate) fn shutdown(&mut self, deadline: Duration) -> Result<()> {
         let start = Instant::now();
         let Some(enabled) = self.enabled.as_mut() else {
-            return;
+            return Ok(());
         };
         enabled.runtime.request_shutdown();
         let DerivedIndexPhase::Running(mut worker) =
             core::mem::replace(&mut enabled.phase, DerivedIndexPhase::Stopped)
         else {
-            return;
+            return Ok(());
         };
         let tx_deadline = start + deadline;
         while Instant::now() < tx_deadline {
@@ -143,22 +167,27 @@ impl DerivedIndexHost {
         }
         if worker.is_finished() {
             worker.join();
-        } else {
-            tracing::warn!("txindex worker still blocked; abandoning join");
-            // Revoke the generation token so late publication is a no-op.
-            if let Some(generation_token) = &worker.generation {
-                generation_token.revoke();
-            }
-            enabled.lifecycle.store(Arc::new(
-                bitcoin_rs_index::runtime::DerivedIndexLifecycle::ShutdownAbandoned,
-            ));
-            // Poison the namespace so it cannot be reclaimed in this process.
-            worker.poison_namespace();
-            // Detach the join handle so Drop does not block on join. The
-            // worker thread continues running but will exit after shutdown is
-            // observed; Drop is a no-op for the handle.
-            worker.detach();
+            #[cfg(test)]
+            self.worker_joined.store(true, Ordering::Release);
+            return Ok(());
         }
+        tracing::warn!("txindex worker still blocked; abandoning join");
+        // Revoke the generation token so late publication is a no-op.
+        if let Some(generation_token) = &worker.generation {
+            generation_token.revoke();
+        }
+        enabled.lifecycle.store(Arc::new(
+            bitcoin_rs_index::runtime::DerivedIndexLifecycle::ShutdownAbandoned,
+        ));
+        // Poison the namespace so it cannot be reclaimed in this process.
+        worker.poison_namespace();
+        // Detach the join handle so Drop does not block on join. The
+        // worker thread continues running but will exit after shutdown is
+        // observed; Drop is a no-op for the handle.
+        worker.detach();
+        Err(anyhow::anyhow!(
+            "derived-index worker did not exit within the join deadline; join abandoned"
+        ))
     }
 
     /// POST: returns a concrete answer in every phase, including disabled.
@@ -183,6 +212,19 @@ impl DerivedIndexHost {
             .is_some_and(|enabled| matches!(enabled.phase, DerivedIndexPhase::Running(_)))
     }
 
+    /// Workers this host has spawned; a correct `start` never exceeds one.
+    #[cfg(test)]
+    pub(crate) fn spawn_count(&self) -> usize {
+        self.spawned_workers
+    }
+
+    /// `true` once the owned worker's join returned; stays `false` when the
+    /// bounded join was abandoned.
+    #[cfg(test)]
+    pub(crate) fn worker_joined(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.worker_joined)
+    }
+
     /// Observation accessor for the unit tests.
     #[cfg(test)]
     pub(crate) fn lifecycle_is_opening(&self) -> bool {
@@ -190,6 +232,22 @@ impl DerivedIndexHost {
             matches!(
                 &**enabled.lifecycle.load(),
                 bitcoin_rs_index::runtime::DerivedIndexLifecycle::Opening
+            )
+        })
+    }
+
+    /// Observation accessor for the unit tests: the worker published a
+    /// durable terminal failure or its join was abandoned. A transient
+    /// progress-read race surfaces as `CapabilityState::Failed` without
+    /// touching the lifecycle slot, so this distinguishes real open
+    /// failures from raced status reads.
+    #[cfg(test)]
+    pub(crate) fn lifecycle_is_failed(&self) -> bool {
+        self.enabled.as_ref().is_some_and(|enabled| {
+            matches!(
+                &**enabled.lifecycle.load(),
+                bitcoin_rs_index::runtime::DerivedIndexLifecycle::Failed(_)
+                    | bitcoin_rs_index::runtime::DerivedIndexLifecycle::ShutdownAbandoned
             )
         })
     }
@@ -210,6 +268,8 @@ impl Drop for DerivedIndexHost {
             core::mem::replace(&mut enabled.phase, DerivedIndexPhase::Stopped)
         {
             worker.join();
+            #[cfg(test)]
+            self.worker_joined.store(true, Ordering::Release);
         }
     }
 }

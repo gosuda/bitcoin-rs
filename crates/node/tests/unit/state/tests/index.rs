@@ -104,6 +104,11 @@ fn start_index_workers_twice_is_idempotent() -> anyhow::Result<()> {
         state.derived_index.is_running(),
         "the second call must leave the one worker running"
     );
+    assert_eq!(
+        state.derived_index.spawn_count(),
+        1,
+        "the second call must not have spawned another worker"
+    );
     Ok(())
 }
 
@@ -151,17 +156,33 @@ fn bounded_shutdown_stops_the_worker_and_allows_reopen() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(20));
     }
 
-    state.bounded_index_shutdown(Duration::from_secs(5));
+    state.bounded_index_shutdown(Duration::from_secs(5))?;
     assert!(!state.derived_index.is_running());
     // A second call is a no-op, not a second stop or a panic.
-    state.bounded_index_shutdown(Duration::from_secs(5));
+    state.bounded_index_shutdown(Duration::from_secs(5))?;
     drop(state);
 
     // The worker joined cleanly, so the namespace is free and the store
-    // reopens: a replacement worker starts and leaves Opening.
+    // reopens: a replacement worker starts, opens the store, and leaves
+    // Opening for a real capability state — never Failed or abandoned.
     let mut reopened = NodeState::open(config, None)?;
     reopened.start_index_workers()?;
     assert!(reopened.derived_index.is_running());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while reopened.derived_index.lifecycle_is_opening() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "replacement txindex worker remained Opening"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The lifecycle slot — not the derived capability row — is the durable
+    // open signal: a progress read that raced a moving watermark answers a
+    // transient `Failed` while the worker is Serving.
+    assert!(
+        !reopened.derived_index.lifecycle_is_failed(),
+        "the replacement worker must open the reclaimed namespace"
+    );
     Ok(())
 }
 
