@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use bitcoin_rs_chain::compact_is_met_by;
-use bitcoin_rs_consensus::compute_merkle_root;
+use bitcoin_rs_consensus::{compute_merkle_root, transaction_sigop_cost};
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
     encode::double_sha256, varint,
 };
+use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashMap;
 
 use crate::MiningError;
@@ -306,7 +307,7 @@ fn fixed_reservation(
         size: size
             .checked_add(header_size)
             .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?,
-        sigops: u64::from(bitcoin_rs_script::count_tx_legacy(&reservation)),
+        sigops: u64::from(transaction_sigop_cost(&reservation, &[], VerifyFlags::NONE)),
     })
 }
 

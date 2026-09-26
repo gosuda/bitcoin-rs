@@ -4,7 +4,9 @@ use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_consensus::ConsensusError;
 use compact_str::CompactString;
 
-use crate::MiningControlError;
+use crate::{MiningControlError, MiningError};
+
+const SIGOPS_LIMIT_REASON: &str = "bad-blk-sigops";
 
 /// Core `GetRejectReason` strings for consensus failures (API-19).
 pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
@@ -17,7 +19,7 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
         ConsensusError::MissingPrevout { .. } => "bad-txns-inputs-missingorspent",
         ConsensusError::OutputValueOverflow => "bad-txns-txouttotal-toolarge",
         ConsensusError::InputsLessThanOutputs { .. } => "bad-txns-in-belowout",
-        ConsensusError::SigopsLimit { .. } => "bad-blk-sigops",
+        ConsensusError::SigopsLimit { .. } => SIGOPS_LIMIT_REASON,
         ConsensusError::EmptyBlock | ConsensusError::MissingCoinbase => "bad-cb-missing",
         ConsensusError::ExtraCoinbase { .. } => "bad-cb-multiple",
         ConsensusError::MerkleMutation => "bad-txns-duplicate",
@@ -76,6 +78,17 @@ pub fn header_reject_reason(error: ChainError) -> MiningControlError {
         }
         other => chain_reject_reason(&other),
     })
+}
+
+/// Keeps ordered-generate sigop preflight refusals in the API-30 error vocabulary.
+pub(crate) fn ordered_assembly_error(error: &MiningError) -> MiningControlError {
+    if matches!(error, MiningError::CapacityExhausted { field: "sigops" }) {
+        MiningControlError::Rejected(CompactString::from(format!(
+            "TestBlockValidity failed: {SIGOPS_LIMIT_REASON}"
+        )))
+    } else {
+        MiningControlError::Failed(CompactString::from(error.to_string()))
+    }
 }
 
 #[cfg(test)]
