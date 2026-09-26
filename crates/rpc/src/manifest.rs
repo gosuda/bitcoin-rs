@@ -121,11 +121,11 @@ impl Status {
 ///
 /// PRE: the embedded file parses as TOML and carries the `[reference]` and
 ///   `[admission_profile]` tables.
-/// POST: the constant is the exact bytes of `docs/api/core-compat.toml` at
-///   compile time.
+/// POST: the constant is the exact bytes of `crates/rpc/core-compat.toml`
+///   at compile time — inside the package so `cargo package` stays whole.
 /// INVARIANT: it carries no external-surface row arrays; REGISTRY in
 ///   [`crate::registry`] is the only owner of surface claims.
-pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
+pub const MANIFEST_TOML: &str = include_str!("../core-compat.toml");
 
 /// One declared surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

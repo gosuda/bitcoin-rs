@@ -305,22 +305,25 @@ fn the_pinned_core_reference_matches_the_locked_kernel() {
             .get(version_key)
             .and_then(toml::Value::as_str)
             .unwrap_or_else(|| panic!("`reference.{version_key}` must be a string"));
-        let needle = format!("name = \"{name}\"");
-        let Some(at) = CARGO_LOCK.find(&needle) else {
-            panic!("`{name}` is pinned in the manifest but absent from Cargo.lock");
-        };
-        let locked = CARGO_LOCK[at..]
-            .lines()
-            .nth(1)
-            .and_then(|line| line.strip_prefix("version = \""))
-            .and_then(|rest| rest.strip_suffix('"'))
-            .unwrap_or_else(|| panic!("Cargo.lock entry for `{name}` has no version line"));
+        let lock: toml::Table = CARGO_LOCK
+            .parse()
+            .unwrap_or_else(|error| panic!("Cargo.lock must parse: {error}"));
+        let locked: Vec<&str> = lock
+            .get("package")
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("Cargo.lock must hold a [[package]] array"))
+            .iter()
+            .filter(|package| package.get("name").and_then(toml::Value::as_str) == Some(name))
+            .filter_map(|package| package.get("version").and_then(toml::Value::as_str))
+            .collect();
         assert_eq!(
-            locked, version,
-            "`{name}` is locked at {locked} but the compatibility manifest is \
-             written against {version}. The pinned Bitcoin Core revision comes \
-             from this crate's vendored tree, so a bump means the claims in \
-             docs/api/core-compat.toml need re-reading, not just this line."
+            locked.as_slice(),
+            [version],
+            "`{name}` must resolve to exactly the version the compatibility \
+             manifest names ({version}); {locked:?} was locked. The pinned \
+             Bitcoin Core revision comes from this crate's vendored tree, so a \
+             bump means the claims in crates/rpc/core-compat.toml need \
+             re-reading, not just this line."
         );
     }
 }

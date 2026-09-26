@@ -79,6 +79,10 @@ pub struct SpawnOptions<'a> {
     /// reserved loopback port so bind-failure scenarios exercise a real
     /// `bind()` error rather than a duplicate CLI flag.
     pub rpc_bind: Option<SocketAddr>,
+    /// Exact binary to launch (bitcoin-rs only). Tests living in the binary
+    /// package pass `env!("CARGO_BIN_EXE_bitcoin-rs")` so cargo's build pins
+    /// the artifact instead of the newest-file heuristic.
+    pub binary: Option<&'a Path>,
 }
 
 /// A decoded HTTP response from the node's RPC/REST/Esplora listener.
@@ -207,25 +211,13 @@ pub fn verified_core_binary() -> Result<PathBuf> {
         return Ok(path.clone());
     }
     let path = core_binary();
-    let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
-        .parse()
-        .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
-    let expected = table
-        .get("reference")
-        .and_then(|r| r.get("release"))
-        .and_then(|r| r.get("bitcoind_sha256"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))?
-        .to_owned();
-    let mut file = File::open(&path).map_err(|e| {
+    let expected = manifest_reference_sha256()?;
+    let actual = file_sha256(&path).map_err(|e| {
         Error::Assertion(format!(
             "pinned bitcoind {} not readable (install via scripts/install-bitcoind.sh): {e}",
             path.display()
         ))
     })?;
-    let mut engine = sha256::Hash::engine();
-    std::io::copy(&mut file, &mut engine)?;
-    let actual = sha256::Hash::from_engine(engine).to_string();
     if actual != expected {
         return Err(Error::Assertion(format!(
             "bitcoind sha256 mismatch: expected {expected}, got {actual}"
@@ -233,6 +225,28 @@ pub fn verified_core_binary() -> Result<PathBuf> {
     }
     let _ = VERIFIED_CORE.set(path.clone());
     Ok(path)
+}
+
+/// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins.
+pub(crate) fn manifest_reference_sha256() -> Result<String> {
+    let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
+        .parse()
+        .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
+    table
+        .get("reference")
+        .and_then(|r| r.get("release"))
+        .and_then(|r| r.get("bitcoind_sha256"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))
+}
+
+/// Hash one file with SHA256; callers shape the error vocabulary.
+pub(crate) fn file_sha256(path: &Path) -> std::io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut engine = sha256::Hash::engine();
+    std::io::copy(&mut file, &mut engine)?;
+    Ok(sha256::Hash::from_engine(engine).to_string())
 }
 
 /// Reserve two loopback ports; callers drop the listeners right before spawn.
@@ -249,9 +263,10 @@ fn launch_command(
     p2p_addr: SocketAddr,
     options: &SpawnOptions<'_>,
 ) -> Result<(Command, ClockControl)> {
-    let mut command = match kind {
-        Kind::BitcoinRs => Command::new(bitcoin_rs_binary()?),
-        Kind::Core => Command::new(verified_core_binary()?),
+    let mut command = match (kind, options.binary) {
+        (Kind::BitcoinRs, Some(binary)) => Command::new(binary),
+        (Kind::BitcoinRs, None) => Command::new(bitcoin_rs_binary()?),
+        (Kind::Core, _) => Command::new(verified_core_binary()?),
     };
     // Host configuration must not leak into the isolated regtest profile.
     for (key, _) in std::env::vars_os() {
@@ -817,8 +832,10 @@ mod tests {
             .flatten()
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("run-"))
             .filter(|entry| {
+                // A marker distinct from the flag the sibling test binary uses,
+                // so concurrent harness binaries never collide on this count.
                 fs::read_to_string(entry.path().join("launch.json"))
-                    .is_ok_and(|text| text.contains("--process-harness-invalid-option"))
+                    .is_ok_and(|text| text.contains("--process-harness-invalid-option-retry-audit"))
             })
             .count()
     }
@@ -833,7 +850,7 @@ mod tests {
         let error = ProcessNode::spawn_in_datadir(
             Kind::BitcoinRs,
             &SpawnOptions {
-                extra_args: &["--process-harness-invalid-option"],
+                extra_args: &["--process-harness-invalid-option-retry-audit"],
                 ..Default::default()
             },
             datadir,

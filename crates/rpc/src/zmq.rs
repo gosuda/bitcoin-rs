@@ -978,6 +978,15 @@ mod compat_manifest_tests {
                 "`{}` is published but carries no compatibility claim",
                 topic.as_str()
             );
+            // getzmqnotifications names each topic `pub<topic>`; the manifest
+            // row is keyed by the bare topic, so the wire-visible notifier
+            // name must derive from it exactly.
+            assert_eq!(
+                topic.notifier_type(),
+                format!("pub{}", topic.as_str()),
+                "the notifier name for `{}` no longer follows pub<topic>",
+                topic.as_str()
+            );
         }
         for topic in &claimed {
             assert!(
