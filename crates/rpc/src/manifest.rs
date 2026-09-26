@@ -1,20 +1,25 @@
 //! Machine-readable compatibility manifest for every external surface this
 //! node exposes, declared against Bitcoin Core 31.x.
 //!
-//! [`MANIFEST`] is the single source of truth for the dispatcher: a JSON-RPC
-//! method answers only when a non-`Unimplemented` RPC row carries its name,
-//! so the manifest cannot drift from what actually dispatches. The coverage
-//! gate (`crates/rpc/tests/manifest_coverage.rs`) proves the other
-//! direction — it asserts set equality between the dispatcher's live
-//! registry and the shipped rows in both directions — and regenerates
-//! `docs/rpc-reference.md` from this table.
+//! [`MANIFEST`] projects the single [`crate::registry::REGISTRY`] table,
+//! which is the source of truth for the dispatcher: a JSON-RPC method
+//! answers only when a non-`Unimplemented` RPC row carries its name, so the
+//! manifest cannot drift from what actually dispatches. The coverage gate
+//! (`crates/rpc/tests/manifest_coverage.rs`) proves the other direction — it
+//! asserts set equality between the dispatcher's live registry and the
+//! shipped rows in both directions — and regenerates `docs/rpc-reference.md`
+//! from this table.
 //!
 //! Row semantics:
-//! - `status`: [`Status::Implemented`] ships shape-compatible with Core;
-//!   [`Status::Deviation`] ships with a recorded difference (the `notes`
-//!   field cites the source file carrying it); [`Status::Extension`] has no
-//!   Core counterpart; [`Status::Unimplemented`] is Core surface this node
-//!   does not expose.
+//! - `status`: [`Status::Supported`] is differentially verified against the
+//!   pinned reference and requires `reference.differential_harness` in
+//!   `docs/api/core-compat.toml`; [`Status::Deviation`] ships with a
+//!   recorded difference (the `notes` field cites the source file carrying
+//!   it); [`Status::ImplementedUnverified`] ships without a comparison
+//!   against the pinned reference; [`Status::Extension`] has no Core
+//!   counterpart; [`Status::Disabled`] is reserved for parameter-level
+//!   refusal with a stable error (no row uses it); [`Status::Unimplemented`]
+//!   is Core surface this node does not expose.
 //! - `feature`: cargo feature that must be active for the surface to exist
 //!   (empty for always-compiled surfaces).
 //! - `core_version`: the Core contract version the row is declared against.
@@ -67,30 +72,66 @@ impl SurfaceKind {
     }
 }
 
-/// Compatibility status of one surface.
+/// Compatibility status of one surface against the pinned Bitcoin Core reference.
 ///
-/// Declaration order is also the section order of the generated reference.
+/// PRE: The declared order is the generated-reference section order.
+/// POST: The status makes no stronger claim than the recorded evidence supports.
+/// INVARIANT: No row is Supported when `reference.differential_harness` is false.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum Status {
-    /// Shipped and shape-compatible with the Core contract.
-    Implemented,
-    /// Shipped with a recorded difference from Core; notes cite the source.
+    /// Verified against the pinned reference by the differential harness;
+    /// no row qualifies yet.
+    Supported,
+    /// Shipped, with the difference recorded in nonempty `notes`.
     Deviation,
-    /// bitcoin-rs-specific surface with no Core counterpart.
+    /// Shipped; nothing has compared it against the pinned reference.
+    ImplementedUnverified,
+    /// bitcoin-rs-only surface with no Core counterpart.
     Extension,
-    /// Core surface this node does not expose.
+    /// Parameter-level refusal with a stable error; reserved, no row uses it.
+    Disabled,
+    /// Not exposed: JSON-RPC answers `-32601`, REST answers 404.
     Unimplemented,
 }
 
 impl Status {
-    /// Label used in the generated reference.
+    /// PRE: self is one of the six Status variants.
+    /// POST: Return one unique public label for that variant.
+    /// INVARIANT: The labels match the reference legend and footer.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Implemented => "Implemented",
+            Self::Supported => "Supported",
             Self::Deviation => "Deviation",
+            Self::ImplementedUnverified => "Implemented (unverified)",
             Self::Extension => "Extension",
+            Self::Disabled => "Disabled",
             Self::Unimplemented => "Unimplemented",
+        }
+    }
+
+    /// The generated reference's legend line for this status.
+    ///
+    /// Descriptions stay beside the labels and render in `SECTIONS` order, so
+    /// a vocabulary or ordering change cannot leave the legend describing a
+    /// different list. A legend line describes the status, never the current
+    /// table contents: a "no row claims this" clause would rot silently the
+    /// day a row does.
+    #[must_use]
+    pub const fn legend(self) -> &'static str {
+        match self {
+            Self::Supported => {
+                "differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `docs/api/core-compat.toml`."
+            }
+            Self::Deviation => {
+                "shipped with a recorded difference from Core; notes cite the source file."
+            }
+            Self::ImplementedUnverified => "shipped; not compared against the pinned reference.",
+            Self::Extension => "bitcoin-rs-specific surface with no Core counterpart.",
+            Self::Disabled => "reserved for parameter-level refusal with a stable error.",
+            Self::Unimplemented => {
+                "Core surface this node does not expose: JSON-RPC answers `method not found`, REST answers 404."
+            }
         }
     }
 }
@@ -136,6 +177,13 @@ pub const CORE_VERSION: &str = "31.x";
 pub(crate) const NO_WALLET: &str =
     "No wallet: this process holds no private-key material (crates/rpc/src/lib.rs).";
 
+/// The reference custody record, embedded so it cannot drift from the binary.
+///
+/// PRE: The embedded TOML contains reference custody and admission evidence.
+/// POST: The constant is the exact bytes used by the reference custody tests.
+/// INVARIANT: It contains no external-surface row arrays.
+pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
+
 /// Every external surface, declared against Core 31.x.
 ///
 /// Projection of the single [`crate::registry::REGISTRY`] table: each row's
@@ -176,6 +224,17 @@ fn feature_active(feature: &str) -> bool {
     }
 }
 
+/// Statuses in declaration order. The generated reference's legend order,
+/// section order, and footer order all follow this one list.
+const SECTIONS: [Status; 6] = [
+    Status::Supported,
+    Status::Deviation,
+    Status::ImplementedUnverified,
+    Status::Extension,
+    Status::Disabled,
+    Status::Unimplemented,
+];
+
 /// Renders `docs/rpc-reference.md` deterministically from [`crate::registry::REGISTRY`].
 ///
 /// The output is a pure function of the table: fixed section order, fixed row
@@ -186,7 +245,7 @@ pub fn render_reference() -> String {
     let mut out = String::new();
     out.push_str("# External API Compatibility Reference\n\n");
     out.push_str("<!-- GENERATED FILE - do not edit by hand.\n");
-    out.push_str("     Source of truth: MANIFEST in crates/rpc/src/manifest.rs.\n");
+    out.push_str("     Source of truth: REGISTRY in crates/rpc/src/registry.rs.\n");
     out.push_str(
         "     Regenerate: REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test manifest_coverage -- --ignored regenerate_reference\n",
     );
@@ -196,20 +255,19 @@ pub fn render_reference() -> String {
     out.push_str("Surface contract of bitcoin-rs against Bitcoin Core ");
     out.push_str(CORE_VERSION);
     out.push_str(".\n\n");
-    out.push_str("- **Implemented** - shipped and shape-compatible with the Core contract.\n");
-    out.push_str("- **Deviation** - shipped with a recorded difference from Core; notes cite the source file.\n");
-    out.push_str("- **Extension** - bitcoin-rs-specific surface with no Core counterpart.\n");
-    out.push_str("- **Unimplemented** - Core surface this node does not expose: JSON-RPC answers `method not found`, REST answers 404.\n\n");
+    for status in SECTIONS {
+        out.push_str("- **");
+        out.push_str(status.label());
+        out.push_str("** - ");
+        out.push_str(status.legend());
+        out.push('\n');
+    }
+    out.push('\n');
     out.push_str("`since` is the bitcoin-rs version whose surface a row describes; `pending` marks a row whose implementation lands in a later change. Rows naming a cargo feature exist only when that feature is compiled.\n\n");
     out.push_str("Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source command tables (src/rpc/*.cpp, src/wallet/rpc/*.cpp, src/rest.cpp StartREST, src/zmq/zmqpublishnotifier.cpp) - the same registrations Core's `help` output prints. Hidden test/administration commands are intentionally absent.\n");
     for kind in [SurfaceKind::Rpc, SurfaceKind::Rest, SurfaceKind::Zmq] {
         let mut printed_heading = false;
-        for status in [
-            Status::Implemented,
-            Status::Deviation,
-            Status::Extension,
-            Status::Unimplemented,
-        ] {
+        for status in SECTIONS {
             let rows: Vec<&Entry> = entries_of_kind(kind)
                 .filter(|entry| entry.status == status)
                 .collect();
@@ -239,15 +297,7 @@ pub fn render_reference() -> String {
         }
     }
     out.push_str("\nRow counts: ");
-    for (index, status) in [
-        Status::Implemented,
-        Status::Deviation,
-        Status::Extension,
-        Status::Unimplemented,
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (index, status) in SECTIONS.into_iter().enumerate() {
         if index > 0 {
             out.push_str(", ");
         }

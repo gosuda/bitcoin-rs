@@ -4,7 +4,7 @@
 
 The [policy contract](../contracts/mempool-policy.md) owns the rules below;
 this page maps them to evidence and intentional compatibility differences.
-[core-compat.toml](../api/core-compat.toml) owns the Core source and binary pins.
+[core-compat.toml](../api/core-compat.toml) pins the Core source and binary identities.
 
 The process policy tests explicitly configure Core with
 `-acceptnonstdtxn=0 -minrelaytxfee=0.00001000
@@ -68,8 +68,9 @@ package shape missing from corepc-types 0.15. Rejected rows omit fee/size fields
 Accepted rows include captured modified `effective-feerate` and their wtxid.
 
 Generic script errors and some numeric RPC error codes remain intentional
-compatibility differences. The manifest retains `deviation` for both admission
-RPCs; successful selected cases do not certify their entire surface.
+compatibility differences. The registry keeps its `Deviation` claim on
+`testmempoolaccept` while `submitpackage` stays `Unimplemented`; successful
+selected cases do not certify their entire surface.
 
 ## 5. Allowed differences and unsupported cases
 

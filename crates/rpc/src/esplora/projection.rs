@@ -3,18 +3,16 @@
 use core::str::FromStr as _;
 use std::sync::Arc;
 
-use bitcoin::{Address, Network as BitcoinNetwork, Script};
+use bitcoin::Network as BitcoinNetwork;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxOut, Txid, deserialize,
+    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxOut, Txid, deserialize,
 };
-use bitcoin_rs_script::script::{
-    instructions, is_op_return, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh,
-};
+use bitcoin_rs_script::script::{instructions, is_p2sh, is_p2wsh};
 
-use crate::compat::convert::hex_encode;
+use crate::compat::convert::{self, hex_encode};
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
 use crate::rest::Response;
 
@@ -255,7 +253,7 @@ impl<'a> Projection<'a> {
                     .as_ref()
                     .map(|output| self.transaction_output(output)),
                 scriptsig: hex_encode(&input.script_sig),
-                scriptsig_asm: script_asm(&input.script_sig),
+                scriptsig_asm: convert::script_asm(&input.script_sig),
                 witness: (!input.witness.is_empty()).then(|| {
                     input
                         .witness
@@ -266,8 +264,8 @@ impl<'a> Projection<'a> {
                 }),
                 is_coinbase: coinbase,
                 sequence: input.sequence.to_consensus(),
-                inner_redeemscript_asm: redeem.as_deref().map(script_asm),
-                inner_witnessscript_asm: witness_script.as_deref().map(script_asm),
+                inner_redeemscript_asm: redeem.as_deref().map(convert::script_asm),
+                inner_witnessscript_asm: witness_script.as_deref().map(convert::script_asm),
             });
         }
         let outputs = transaction
@@ -295,14 +293,9 @@ impl<'a> Projection<'a> {
         let script = &output.script_pubkey;
         TransactionOutput {
             scriptpubkey: hex_encode(script),
-            scriptpubkey_asm: script_asm(script),
-            scriptpubkey_type: script_type(script),
-            scriptpubkey_address: Address::from_script(
-                Script::from_bytes(script),
-                self.bitcoin_network(),
-            )
-            .ok()
-            .map(|address| address.to_string()),
+            scriptpubkey_asm: convert::script_asm(script),
+            scriptpubkey_type: esplora_type_name(convert::classify(script)),
+            scriptpubkey_address: convert::script_address(script, self.ctx.chain.chain_network),
             value: output.value.to_sat(),
         }
     }
@@ -621,40 +614,42 @@ impl<'a> Projection<'a> {
             })
     }
 
+    /// The rust-bitcoin network for the selected chain, for the address and
+    /// descriptor seams.
+    ///
+    /// PRE: `self.ctx.chain.chain_network` is the network to map.
+    /// POST: returns the same rust-bitcoin network as
+    ///   `convert::bitcoin_network`.
+    /// INVARIANT: the mapping lives in `convert::bitcoin_network`; this method
+    ///   adds no local match.
     pub(super) const fn bitcoin_network(&self) -> BitcoinNetwork {
-        match self.ctx.chain.chain_network {
-            Network::Mainnet => BitcoinNetwork::Bitcoin,
-            Network::Testnet3 => BitcoinNetwork::Testnet,
-            Network::Testnet4 => BitcoinNetwork::Testnet4,
-            Network::Signet => BitcoinNetwork::Signet,
-            Network::Regtest => BitcoinNetwork::Regtest,
-        }
+        convert::bitcoin_network(self.ctx.chain.chain_network)
     }
 }
 
-fn script_asm(script: &[u8]) -> String {
-    Script::from_bytes(script).to_asm_string()
-}
-
-fn script_type(script: &[u8]) -> &'static str {
-    if script.is_empty() {
-        "empty"
-    } else if is_op_return(script) {
-        "op_return"
-    } else if is_p2pk(script) {
-        "p2pk"
-    } else if is_p2pkh(script) {
-        "p2pkh"
-    } else if is_p2sh(script) {
-        "p2sh"
-    } else if is_p2wpkh(script) {
-        "v0_p2wpkh"
-    } else if is_p2wsh(script) {
-        "v0_p2wsh"
-    } else if is_p2tr(script) {
-        "v1_p2tr"
-    } else {
-        "unknown"
+/// Names one script shape in the Esplora `scriptpubkey_type` dialect.
+///
+/// PRE: `shape` is a value returned by `convert::classify`.
+/// POST: returns the exact Esplora name for the shape. Bare multisig is
+///   `multisig` and pay-to-anchor is `anchor`, as the Esplora and electrs
+///   dialects spell them; an empty script keeps `empty`, and every
+///   unrecognized or future witness shape keeps `unknown`.
+/// INVARIANT: the match is exhaustive. A new `ScriptShape` variant does not
+///   compile until both this table and the Core table name it.
+const fn esplora_type_name(shape: convert::ScriptShape) -> &'static str {
+    match shape {
+        convert::ScriptShape::Empty => "empty",
+        // An unrecognized script and a future witness version share `unknown`.
+        convert::ScriptShape::Nonstandard | convert::ScriptShape::WitnessUnknown => "unknown",
+        convert::ScriptShape::Pubkey => "p2pk",
+        convert::ScriptShape::PubkeyHash => "p2pkh",
+        convert::ScriptShape::ScriptHash => "p2sh",
+        convert::ScriptShape::Multisig => "multisig",
+        convert::ScriptShape::NullData => "op_return",
+        convert::ScriptShape::WitnessV0KeyHash => "v0_p2wpkh",
+        convert::ScriptShape::WitnessV0ScriptHash => "v0_p2wsh",
+        convert::ScriptShape::WitnessV1Taproot => "v1_p2tr",
+        convert::ScriptShape::Anchor => "anchor",
     }
 }
 
@@ -677,4 +672,74 @@ fn inner_scripts(
         .flatten()
         .cloned();
     (redeem, witness_script)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compat::convert::fixtures;
+    use bitcoin_rs_primitives::Amount;
+
+    #[test]
+    fn esplora_type_name_matches_dialect_for_every_shape() {
+        let expected: &[&str] = &[
+            "empty",
+            "unknown",
+            "p2pk",
+            "p2pkh",
+            "p2sh",
+            "multisig",
+            "op_return",
+            "v0_p2wpkh",
+            "v0_p2wsh",
+            "v1_p2tr",
+            "anchor",
+            "unknown",
+        ];
+        let cases = fixtures::by_shape();
+        assert_eq!(cases.len(), expected.len());
+        for ((shape, script), name) in cases.iter().zip(expected) {
+            assert_eq!(convert::classify(script), *shape, "classify {script:?}");
+            assert_eq!(esplora_type_name(*shape), *name);
+        }
+    }
+
+    fn txout(script: Vec<u8>) -> TxOut {
+        TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: script.into(),
+        }
+    }
+
+    #[test]
+    fn transaction_output_names_bare_multisig_and_anchor() {
+        let ctx = Context::new();
+        let projection = Projection::new(&ctx);
+        let multi = projection.transaction_output(&txout(fixtures::multisig()));
+        assert_eq!(multi.scriptpubkey_type, "multisig");
+        let anchored = projection.transaction_output(&txout(fixtures::anchor()));
+        assert_eq!(anchored.scriptpubkey_type, "anchor");
+        assert_eq!(anchored.scriptpubkey, "51024e73");
+        assert_eq!(
+            anchored.scriptpubkey_address.as_deref(),
+            Some("bc1pfeessrawgf")
+        );
+    }
+
+    #[test]
+    fn transaction_output_renders_address_through_the_shared_seam() {
+        // BIP 173 program `751e76e8…3bd6` on the fixture's mainnet.
+        let mut script = vec![0x00, 0x14];
+        script.extend([
+            0x75, 0x1e, 0x76, 0xe8, 0x19, 0x91, 0x96, 0xd4, 0x54, 0x94, 0x1c, 0x45, 0xd1, 0xb3,
+            0xa3, 0x23, 0xf1, 0x43, 0x3b, 0xd6,
+        ]);
+        let ctx = Context::new();
+        let output = Projection::new(&ctx).transaction_output(&txout(script));
+        assert_eq!(output.scriptpubkey_type, "v0_p2wpkh");
+        assert_eq!(
+            output.scriptpubkey_address.as_deref(),
+            Some("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+        );
+    }
 }

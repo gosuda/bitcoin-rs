@@ -17,8 +17,6 @@ pub mod capabilities;
 /// Bitcoin Core wire-contract boundary: versioned response types and the
 /// sanctioned native<->bitcoin conversions backing them.
 mod compat;
-/// The Bitcoin Core compatibility manifest, and the checks that keep it true.
-pub mod compat_manifest;
 /// Dependency-injected RPC state.
 pub mod context;
 /// JSON-RPC error mapping.
@@ -43,7 +41,7 @@ mod tx_render;
 pub mod zmq;
 
 pub use auth::Auth;
-pub use compat_manifest::{MANIFEST_TOML, Status as CompatStatus};
+pub use manifest::MANIFEST_TOML;
 
 pub use error::RpcError;
 pub use handlers::Handler;

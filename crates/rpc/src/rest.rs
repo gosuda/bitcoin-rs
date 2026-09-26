@@ -1831,8 +1831,13 @@ mod tests {
             }
         });
 
-        let mut seen_b = 0_usize;
-        for _ in 0..200 {
+        let mut seen_a = false;
+        let mut seen_b = false;
+        // Sampling runs until both publications have answered, not for a fixed
+        // count: the swapper's first store publishes the new tip, but thread
+        // startup is the scheduler's call, so a fixed budget can expire before
+        // the new publication is ever observed.
+        for iteration in 0..100_000 {
             let response = route(&ctx, GETUTXOS_JSON, "", true);
             assert_eq!(response.status, 200);
             let value: Value = sonic_rs::from_slice(&response.body).expect("getutxos JSON");
@@ -1848,19 +1853,23 @@ mod tests {
                 .and_then(Value::as_str)
                 .expect("chaintipHash");
             if height == 20 {
-                seen_b += 1;
                 assert_eq!(hash, b.hash.to_string_be(), "a foreign hash rode height 20");
+                seen_b = true;
             } else {
                 assert_eq!(height, 10, "the route reported an unpublished height");
                 assert_eq!(hash, a.hash.to_string_be(), "a foreign hash rode height 10");
+                seen_a = true;
+            }
+            if iteration >= 199 && seen_a && seen_b {
+                break;
             }
             std::thread::yield_now();
         }
         stop.store(true, Ordering::Relaxed);
         swapper.join().expect("swapper thread panicked");
         assert!(
-            seen_b > 0,
-            "the swap was never observed, so coherence proved nothing"
+            seen_a && seen_b,
+            "a publication was never observed, so coherence proved nothing"
         );
     }
 

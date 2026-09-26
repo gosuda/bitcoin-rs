@@ -307,11 +307,10 @@ fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Res
     let runtime = node
         .state
         .chain_followers()
-        .effects()
         .derived_index()
         .cloned()
         .ok_or_else(|| {
-            anyhow::anyhow!("txindex is configured, so the chain effects hold the runtime")
+            anyhow::anyhow!("txindex is configured, so the chain followers hold the runtime")
         })?;
     let stop_requested_before_checkpoint = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&stop_requested_before_checkpoint);

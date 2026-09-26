@@ -1,15 +1,17 @@
 # External API Compatibility Reference
 
 <!-- GENERATED FILE - do not edit by hand.
-     Source of truth: MANIFEST in crates/rpc/src/manifest.rs.
+     Source of truth: REGISTRY in crates/rpc/src/registry.rs.
      Regenerate: REGEN_RPC_REFERENCE=1 cargo test -p bitcoin-rs-rpc --test manifest_coverage -- --ignored regenerate_reference
      The generated_reference_matches_checked_in test fails when this file drifts. -->
 
 Surface contract of bitcoin-rs against Bitcoin Core 31.x.
 
-- **Implemented** - shipped and shape-compatible with the Core contract.
+- **Supported** - differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `docs/api/core-compat.toml`.
 - **Deviation** - shipped with a recorded difference from Core; notes cite the source file.
+- **Implemented (unverified)** - shipped; not compared against the pinned reference.
 - **Extension** - bitcoin-rs-specific surface with no Core counterpart.
+- **Disabled** - reserved for parameter-level refusal with a stable error.
 - **Unimplemented** - Core surface this node does not expose: JSON-RPC answers `method not found`, REST answers 404.
 
 `since` is the bitcoin-rs version whose surface a row describes; `pending` marks a row whose implementation lands in a later change. Rows naming a cargo feature exist only when that feature is compiled.
@@ -18,11 +20,27 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 
 ## JSON-RPC methods
 
-### Implemented
+### Deviation
 
 | surface | since | notes |
 |---|---|---|
-| `getblockchaininfo` | 0.4.0 |  |
+| `getblockchaininfo` | 0.4.0 | Core declares warnings as a string; this node emits an array. Optional prune and signet fields serialize as null rather than omitted (automatic_pruning, prune_target_size, pruneheight, signet_challenge). Tracked in #160. |
+| `scantxoutset` | 0.4.0 | Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null. |
+| `sendrawtransaction` | 0.4.0 | Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity/floor accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; aggregate package submission is unsupported. |
+| `testmempoolaccept` | 0.4.0 | Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity/floor behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Aggregate package submission is unsupported. |
+| `getmempoolinfo` | 0.4.0 | Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The pressure floor is a local heuristic, not Core rolling decay. See docs/policies/mempool-policy.md. |
+| `estimatesmartfee` | 0.4.0 | See docs/contracts/external-api.md#API-26 for conf_target and estimate_mode validation. The estimate comes from this node's mempool confirmation-history estimator with a 25-block horizon; estimate_mode is accepted and ignored (no ECONOMICAL/CONSERVATIVE split), and insufficient history returns an `errors` array (crates/rpc/src/handlers/util.rs). |
+| `getrpcinfo` | 0.4.0 | active_commands is always an empty array; this node does not track in-flight RPC calls. logpath reports the configured debug log path (crates/rpc/src/handlers/util.rs). |
+| `getmemoryinfo` | 0.4.0 | mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs). The figures are resident set size read from the OS, not Core's locked-pool allocator accounting. |
+| `estimaterawfee` | 0.4.0 | local_shape: the fee estimator does not expose Core decay/scale/pass/fail internals, so horizon objects carry feerate only and the no-estimate branch stays {} (crates/rpc/src/handlers/util.rs). All three horizons carry the same feerate where Core computes three independent estimates. |
+| `getnetworkinfo` | 0.4.0 | Core declares warnings as a string; this node emits an array. Tracked in #160. |
+| `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
+| `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. warnings is an array here and a string in Core's declaration. Tracked in #160. |
+
+### Implemented (unverified)
+
+| surface | since | notes |
+|---|---|---|
 | `getdifficulty` | 0.4.0 |  |
 | `getchaintips` | 0.4.0 |  |
 | `getchaintxstats` | 0.4.0 |  |
@@ -50,12 +68,10 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getmempoolancestors` | 0.4.0 |  |
 | `getmempooldescendants` | 0.4.0 |  |
 | `uptime` | 0.4.0 |  |
-| `getrpcinfo` | 0.4.0 |  |
 | `getzmqnotifications` | 0.4.0 | Requires the zmq feature and --enablezmq* startup flags. |
 | `validateaddress` | 0.4.0 | local_shape (invalid branch): a malformed or wrong-network address is hand-built as Core's sparse {isvalid:false} object because corepc-types models the valid-only fields (address, scriptPubKey, isscript, iswitness) as required and cannot represent that wire shape; valid addresses round-trip the typed v31 contract (crates/rpc/src/handlers/util.rs). |
 | `getdescriptorinfo` | 0.4.0 |  |
 | `deriveaddresses` | 0.4.0 |  |
-| `getnetworkinfo` | 0.4.0 |  |
 | `getpeerinfo` | 0.4.0 | Pinned v31 shape; telemetry this node does not measure (byte counters, pingwait, addr relay stats) reports Core's zero-value defaults. |
 | `addnode` | 0.4.0 |  |
 | `disconnectnode` | 0.4.0 |  |
@@ -68,7 +84,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `setnetworkactive` | 0.4.0 |  |
 | `getnodeaddresses` | 0.4.0 |  |
 | `getblocktemplate` | 0.4.0 | BIP22/BIP23 template: client must advertise segwit (and signet on signet); submitold after long-poll, signet_challenge on signet, capabilities proposal+longpoll, coinbaseaux.flags empty hex. |
-| `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. |
 | `submitblock` | 0.4.0 | Decode failures are -22 (Block decode failed). Extra bytes after a complete block and BIP22's dummy second argument are ignored. A header already admitted by submitheader still accepts the body; a previously connected body (scripts-valid), including after a later reorg, is duplicate. |
 | `submitheader` | 0.4.0 | See API-13 in docs/contracts/external-api.md for submitheader behavior. |
 | `prioritisetransaction` | 0.4.0 | Dummy (params[1]) must be 0 or null; fee_delta is params[2]. Non-zero dummy is Core -8. Pooled dust outputs are -8 except on regtest. See API-23 in docs/contracts/external-api.md for dummy and fee_delta compatibility. |
@@ -76,19 +91,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `generateblock` | 0.4.0 | Assembles and solves one block paying an address or descriptor from the listed mempool txids or raw txs in that order. See the canonical contract: docs/contracts/external-api.md#API-31. |
 | `getnetworkhashps` | 0.4.0 | Estimated hashes/s over a caller-chosen lookback ending at a caller-chosen height; default lookback 120, height the applied tip. |
 | `getprioritisedtransactions` | 0.4.0 | Projects the mempool's signed fee-delta overlay, including txids not currently pooled. See docs/contracts/external-api.md#API-28 for modified_fee units. |
-
-### Deviation
-
-| surface | since | notes |
-|---|---|---|
-| `scantxoutset` | 0.4.0 | Accepts only addr() scan descriptors; Core supports the full descriptor set (crates/rpc/src/handlers/chain.rs). Response uses the v28 scan contract; the status action answers null. |
-| `sendrawtransaction` | 0.4.0 | Core 31.1 replacement, modified-fee, cluster and TRUC cases are process-verified in overhaul_process_harness::policy_cases. Exact optimal graph ordering does not emulate Core transient SFL work-budget states. Capacity/floor accounting and generic consensus error details retain the differences in docs/policies/mempool-policy.md; aggregate package submission is unsupported. |
-| `testmempoolaccept` | 0.4.0 | Single preview shares committed admission verification. Core 31.1 package shape, dependency, fail-fast and replacement-disallowed cases are process-verified in overhaul_process_harness::policy_cases. Exact graph ordering, capacity/floor behavior and generic error details retain the differences in docs/policies/mempool-policy.md. Aggregate package submission is unsupported. |
-| `getmempoolinfo` | 0.4.0 | Policy fields project the enforced MempoolPolicySnapshot: fullrbf is true and cluster bounds are enforced. optimal is always true for exact graph ordering rather than Core background SFL state. usage estimates local structures; maxmempool bounds virtual size rather than allocator usage. The pressure floor is a local heuristic, not Core rolling decay. See docs/policies/mempool-policy.md. |
-| `estimatesmartfee` | 0.4.0 | See docs/contracts/external-api.md#API-26 for conf_target and estimate_mode validation. The estimate comes from this node's mempool confirmation-history estimator with a 25-block horizon; estimate_mode is accepted and ignored (no ECONOMICAL/CONSERVATIVE split), and insufficient history returns an `errors` array (crates/rpc/src/handlers/util.rs). |
-| `getmemoryinfo` | 0.4.0 | mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs). |
-| `estimaterawfee` | 0.4.0 | local_shape: the fee estimator does not expose Core decay/scale/pass/fail internals, so horizon objects carry feerate only and the no-estimate branch stays {} (crates/rpc/src/handlers/util.rs). |
-| `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 
 ### Extension
 
@@ -196,27 +198,27 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 
 ## REST endpoints
 
-### Implemented
+### Deviation
+
+| surface | since | notes |
+|---|---|---|
+| `/rest/headers/` | 0.4.0 | Unknown but well-formed block hashes answer an empty 200 rather than 404; query parameters other than count are ignored (crates/rpc/src/rest.rs). |
+| `/rest/getutxos` | 0.4.0 | URI-scheme input only; Core also accepts a POST raw-transaction body (crates/rpc/src/rest.rs). |
+| `/rest/spenttxouts/` | 0.4.0 | Always answers undo-unavailable: undo data is not persisted (crates/rpc/src/rest.rs). |
+
+### Implemented (unverified)
 
 | surface | since | notes |
 |---|---|---|
 | `/rest/tx/` | 0.4.0 |  |
 | `/rest/block/notxdetails/` | 0.4.0 |  |
 | `/rest/block/` | 0.4.0 |  |
-| `/rest/blockpart/` | 0.4.0 | bin/hex only; JSON rejected as in Core's original part endpoint. |
+| `/rest/blockpart/` | 0.4.0 | bin/hex only; JSON rejected, matching Core's /rest/blockpart (bitcoin-core/src/rest.cpp rest_block_part). |
 | `/rest/chaininfo` | 0.4.0 |  |
 | `/rest/mempool/` | 0.4.0 |  |
-| `/rest/headers/` | 0.4.0 |  |
 | `/rest/deploymentinfo/` | 0.4.0 |  |
 | `/rest/deploymentinfo` | 0.4.0 |  |
 | `/rest/blockhashbyheight/` | 0.4.0 |  |
-
-### Deviation
-
-| surface | since | notes |
-|---|---|---|
-| `/rest/getutxos` | 0.4.0 | URI-scheme input only; Core also accepts a POST raw-transaction body (crates/rpc/src/rest.rs). |
-| `/rest/spenttxouts/` | 0.4.0 | Always answers undo-unavailable: undo data is not persisted (crates/rpc/src/rest.rs). |
 
 ### Extension
 
@@ -226,7 +228,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 
 ## ZMQ topics
 
-### Implemented
+### Implemented (unverified)
 
 | surface | since | notes |
 |---|---|---|
@@ -236,4 +238,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Implemented 69, Deviation 10, Extension 2, Unimplemented 93 - total 174.
+Row counts: Supported 0, Deviation 15, Implemented (unverified) 64, Extension 2, Disabled 0, Unimplemented 93 - total 174.

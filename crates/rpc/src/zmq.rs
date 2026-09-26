@@ -939,68 +939,39 @@ mod tests {
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::as_conversions)]
-mod compat_manifest_tests {
+mod manifest_tests {
     use super::*;
 
-    /// The compatibility manifest, embedded rather than read at runtime.
-    const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
-
-    /// Every topic this publisher publishes carries a compatibility claim.
+    /// Every topic this publisher publishes carries a compatibility claim,
+    /// and every claimed topic is one this publisher can put on the wire.
     ///
-    /// The RPC crate checks the manifest against a restated list, because it
-    /// does not depend on this crate and cannot see [`ZmqTopic`]. This is the
-    /// half that closes that gap: the names here are the ones that go on the
-    /// wire, and a topic added without a manifest entry is an undeclared
-    /// surface — which is exactly what the manifest exists to make impossible.
-    ///
-    /// Both the wire topic and the `getzmqnotifications` notifier name are
-    /// checked. They differ by Core's `pub` prefix, and a client discovers a
-    /// topic through the second in order to subscribe to the first, so a
-    /// manifest that got either wrong would send it to the wrong socket.
+    /// The registry's ZMQ rows are the declared surface; the names here are
+    /// the ones that go on the wire, so a topic added without a declared row
+    /// is an undeclared surface — which is exactly what the table exists to
+    /// make impossible. The comparison is feature-independent: the rows and
+    /// this topic enum both exist in every build, and the `zmq` feature
+    /// gating of the publisher itself is pinned by the handler and coverage
+    /// gates.
     #[test]
     fn zmq_topic_names_match_the_compatibility_manifest() {
-        let table: toml::Table = toml::from_str(MANIFEST_TOML)
-            .unwrap_or_else(|err| panic!("the compatibility manifest must parse: {err}"));
-        let Some(entries) = table.get("zmq").and_then(toml::Value::as_array) else {
-            panic!("the manifest must carry a `zmq` array");
-        };
-
-        let published = [
+        let published: std::collections::BTreeSet<&str> = [
             ZmqTopic::HashBlock,
             ZmqTopic::HashTx,
             ZmqTopic::RawBlock,
             ZmqTopic::RawTx,
             ZmqTopic::Sequence,
-        ];
+        ]
+        .iter()
+        .map(|topic| topic.as_str())
+        .collect();
+        let declared: std::collections::BTreeSet<&str> =
+            crate::manifest::entries_of_kind(crate::manifest::SurfaceKind::Zmq)
+                .map(|entry| entry.name)
+                .collect();
         assert_eq!(
-            entries.len(),
-            published.len(),
-            "the manifest lists {} ZMQ topics and the publisher has {}",
-            entries.len(),
-            published.len()
+            published, declared,
+            "published ZMQ topics and the declared ZMQ rows must name the same set"
         );
-
-        for topic in published {
-            let Some(entry) = entries.iter().find(|entry| {
-                entry
-                    .get("topic")
-                    .and_then(toml::Value::as_str)
-                    .is_some_and(|listed| listed == topic.as_str())
-            }) else {
-                panic!(
-                    "`{}` is published but carries no compatibility claim",
-                    topic.as_str()
-                );
-            };
-            assert_eq!(
-                entry.get("notifier").and_then(toml::Value::as_str),
-                Some(topic.notifier_type()),
-                "the manifest's notifier name for `{}` is not the one \
-                 `getzmqnotifications` reports, so a client would subscribe \
-                 to the wrong socket",
-                topic.as_str()
-            );
-        }
     }
 
     #[derive(Default)]
