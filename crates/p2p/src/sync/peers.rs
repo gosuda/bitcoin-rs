@@ -380,7 +380,8 @@ impl BlockSync {
         let (request_peer_limit, fanout_active, cold_preferred) = {
             // The tree guard comes before the scheduler lock, matching the
             // tree -> scheduler order the request path follows.
-            let tree = (frontier.chain.chain_tip.is_some()
+            let tree = (!frontier.chain.apply_halted
+                && frontier.chain.chain_tip.is_some()
                 && frontier.chain.next_required.is_some())
             .then(|| self.chain.block_tree());
             let mut scheduler = self.scheduler.lock();
@@ -390,12 +391,15 @@ impl BlockSync {
             // a retarget runs, and a stale pending/staged set that fills the
             // window would truncate `request_peers` to zero and never reach
             // it, leaving the winning branch unwired until the pending
-            // timeout fires.
-            if let (Some(tree), Some(chain_tip), Some(required)) = (
-                tree.as_deref(),
-                frontier.chain.chain_tip.as_ref(),
-                frontier.chain.next_required.as_ref(),
-            ) {
+            // timeout fires. A halted apply side keeps its staged bodies —
+            // the retarget would discard state the halted path still needs.
+            if !frontier.chain.apply_halted
+                && let (Some(tree), Some(chain_tip), Some(required)) = (
+                    tree.as_deref(),
+                    frontier.chain.chain_tip.as_ref(),
+                    frontier.chain.next_required.as_ref(),
+                )
+            {
                 window.retarget_request_branch(stager, chain_tip, required.height, tree, now);
             }
             for candidate in &mut candidates {
