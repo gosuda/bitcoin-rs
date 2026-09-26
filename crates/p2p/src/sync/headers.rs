@@ -206,7 +206,7 @@ impl BlockSync {
             // The tree read is scoped so no lock is held across the peer
             // table or the outbound send the unknown case performs.
             let (known, active_height) = {
-                let tree = self.chain.block_tree().read();
+                let tree = self.chain.block_tree();
                 let height = tree
                     .tip()
                     .and_then(|tip| shared_active_height(&tree, tip.tip_id, hash))
@@ -275,7 +275,7 @@ impl BlockSync {
     /// Height of `hash` when it lies on the branch that ends at `tip`, and
     /// `None` when the tree does not know it or it belongs to another branch.
     fn tip_height_on_active_branch(&self, tip: NodeId, hash: Hash256) -> Option<u32> {
-        let tree = self.chain.block_tree().read();
+        let tree = self.chain.block_tree();
         let node_id = tree.lookup(hash)?;
         let height = tree.node(node_id).ok()?.height;
         tree.node_at_height_from(tip, height)

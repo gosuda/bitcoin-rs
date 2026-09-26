@@ -2303,7 +2303,7 @@ struct PunishmentFixture {
 }
 
 fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>> {
-    let (tree, blocks) = mined_chain(1, 0)?;
+    let (mut tree, blocks) = mined_chain(1, 0)?;
     let chain_tip = tree.tip_handle();
     let block_tree = Arc::new(RwLock::new(tree));
     let peers = Arc::new(PeerTable::new());
