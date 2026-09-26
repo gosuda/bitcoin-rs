@@ -985,14 +985,13 @@ mod tests {
         let shallow_block = block_at(&headers, 11)?;
         let shallow_query = chain_at(&headers, 11, &shallow_block)?;
         for indexes in [Vec::new(), vec![1, 1]] {
-            let refused =
-                shallow_query.block_transactions(
-                    &bitcoin::bip152::BlockTransactionsRequest {
-                        block_hash: wire_hash(shallow_block.block_hash()),
-                        indexes,
-                    },
-                    &|| true,
-                );
+            let refused = shallow_query.block_transactions(
+                &bitcoin::bip152::BlockTransactionsRequest {
+                    block_hash: wire_hash(shallow_block.block_hash()),
+                    indexes,
+                },
+                &|| true,
+            );
             assert!(
                 matches!(refused, Err(PeerError::Protocol(_))),
                 "a shallow malformed list is a protocol disconnect, got {refused:?}"
