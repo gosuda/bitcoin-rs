@@ -69,9 +69,12 @@ fn addr_of(port: u16) -> SocketAddr {
 fn usable(port: u16, best_known: i32, active_height: Option<u32>) -> UsablePeer {
     UsablePeer {
         source: PeerSource::for_test(addr_of(port)),
-        info: eligible_peer(addr_of(port), best_known),
+        info: synthetic_peer(addr_of(port), best_known),
         demonstrated_tips: Vec::new(),
         active_height,
+        role: crate::peer_info::PeerRole::FullRelay,
+        manual: false,
+        connected_at: Instant::now(),
     }
 }
 
@@ -276,6 +279,7 @@ fn live_pending_header_request_awaits_its_connection() {
         locator_tip_hash: hash(0x01),
         target_height: 6,
         requested_at: Instant::now(),
+        answered: false,
     });
     frontier.header_request_live = true;
     assert_eq!(frontier.plan().header_action, HeaderAction::AwaitPending);
@@ -297,6 +301,7 @@ fn probe_rotates_past_the_dead_pending_owner() {
         locator_tip_hash: hash(0x01),
         target_height: 6,
         requested_at: Instant::now(),
+        answered: false,
     });
     frontier.header_request_live = super::super::frontier::header_request_live(
         frontier.header_request,
@@ -392,6 +397,7 @@ proptest::proptest! {
                 locator_tip_hash: hash(0x01),
                 target_height: 9,
                 requested_at: Instant::now(),
+                answered: false,
             })
         } else {
             None
@@ -486,7 +492,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     let (tx, rx) = unbounded::<Message>();
     let conn1 = PeerLease::new(tx);
     peers.register(staller, conn1.clone());
-    peers.publish_info(staller, &conn1, eligible_peer(staller, 200));
+    peers.publish_info(staller, &conn1, synthetic_peer(staller, 200));
 
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
@@ -549,7 +555,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     let (tx2, rx2) = unbounded::<Message>();
     let conn2 = PeerLease::new(tx2);
     peers.register(staller, conn2.clone());
-    peers.publish_info(staller, &conn2, eligible_peer(staller, 200));
+    peers.publish_info(staller, &conn2, synthetic_peer(staller, 200));
 
     // Conviction is exact: the convicted source is conn1, already replaced,
     // so the disconnect lands on nobody — and specifically not on conn2.
@@ -587,7 +593,7 @@ fn release_sweep_is_connection_exact_at_the_same_address() -> Result<(), Box<dyn
 {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
     let addr = test_addr(9820, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(addr, 200));
+    let rx = connect_peer(&peers, synthetic_peer(addr, 200));
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {
@@ -617,6 +623,65 @@ fn release_sweep_is_connection_exact_at_the_same_address() -> Result<(), Box<dyn
         sync.scheduler.lock().window.pending_owner(&front),
         None,
         "a sweep missing the connection must release its pending"
+    );
+    Ok(())
+}
+
+/// The header-request deadline is evaluated on the injected clock, never on
+/// wall time: one nanosecond short of `HEADER_REQUEST_TIMEOUT` keeps the gate
+/// live, the deadline itself retires it and penalises its owner.
+#[test]
+fn header_request_deadline_is_evaluated_on_the_injected_clock()
+-> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        sync,
+        inbound_headers_tx: _inbound_headers_tx,
+        peers,
+        ..
+    } = header_sync_with_genesis()?;
+    let addr = test_addr(9160, 0)?;
+    let rx = connect_peer(&peers, synthetic_peer(addr, 8));
+    connect_peer(&peers, synthetic_peer(test_addr(9160, 1)?, 8));
+    let t0 = Instant::now();
+    let source = current_source(&peers, addr);
+
+    sync.tick_at(t0);
+    assert!(
+        rx.try_iter()
+            .any(|message| matches!(message, Message::GetHeaders(_))),
+        "the first tick must put the request on the wire"
+    );
+
+    // A tick well inside the deadline: nothing may be retired or penalised.
+    let well_inside = t0 + super::super::HEADER_REQUEST_TIMEOUT / 2;
+    sync.tick_at(well_inside);
+    let scheduler = sync.scheduler.lock();
+    assert!(
+        scheduler
+            .header_request
+            .is_some_and(|request| request.source == source),
+        "a request still inside its deadline must stay as the gate"
+    );
+    assert!(
+        scheduler.header_penalties.is_empty(),
+        "a request still inside its deadline must not be penalised"
+    );
+    drop(scheduler);
+
+    // The deadline itself retires the request and charges its owner.
+    let at_deadline = t0 + super::super::HEADER_REQUEST_TIMEOUT;
+    sync.tick_at(at_deadline);
+    let scheduler = sync.scheduler.lock();
+    assert!(
+        !scheduler
+            .header_request
+            .is_some_and(|request| request.source == source),
+        "the deadline retires the timed-out connection's gate"
+    );
+    assert_eq!(
+        scheduler.header_penalties.get(&source).copied(),
+        Some(1),
+        "the timed-out connection carries exactly its own strike"
     );
     Ok(())
 }

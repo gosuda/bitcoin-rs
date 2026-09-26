@@ -72,7 +72,17 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
             .map(|source| source.rollback_warnings())
             .unwrap_or_default(),
     };
-    typed_to_sonic(&response)
+    let mut response = typed_to_sonic(&response)?;
+    if let Some(object) = response.as_object_mut() {
+        object.insert(
+            "is_closed_for_recovery",
+            json!(
+                ctx.closed_for_recovery
+                    .load(core::sync::atomic::Ordering::Acquire)
+            ),
+        );
+    }
+    Ok(response)
 }
 
 /// UNIX seconds now.

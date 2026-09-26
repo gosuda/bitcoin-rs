@@ -207,7 +207,7 @@ fn mined_regtest_child_at(
     };
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash,
             merkle_root: Hash256::default(),
             time,

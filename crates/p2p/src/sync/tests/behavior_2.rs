@@ -168,7 +168,7 @@ fn drain_inbound_blocks_prunes_stale_received_blocks_without_new_arrivals()
         .window
         .mark_received_from(hash, bytes, None, Instant::now());
 
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
 
     assert_eq!(sync.scheduler.lock().stager.received_len(), 0);
     Ok(())
@@ -238,7 +238,7 @@ fn tick_falls_back_to_single_deep_peer_below_fanout_threshold()
         let addr = test_addr(9021, idx)?;
         rxs.push(connect_peer(
             &peers,
-            eligible_peer(addr, 300 - i32::try_from(idx)?),
+            synthetic_peer(addr, 300 - i32::try_from(idx)?),
         ));
     }
 
@@ -265,17 +265,20 @@ fn tick_falls_back_to_single_deep_peer_below_fanout_threshold()
 fn inbound_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std::error::Error>> {
     let ineligible = PeerInfo {
         inbound: true,
-        ..eligible_peer(test_addr(9200, 0)?, 300)
+        ..synthetic_peer(test_addr(9200, 0)?, 300)
     };
-    assert_fallback_with_ineligible_candidate(ineligible, true)
+    // The inbound peer advertises the full services, so it passes the
+    // block-service clause and keeps the deep fallback batch; it just
+    // never counts toward the fan-out threshold.
+    assert_fallback_served_by_candidate(ineligible)
 }
 
 #[test]
 fn low_chain_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std::error::Error>> {
     // Outbound + witness, but its known chain does not reach past our
     // applied tip (genesis, height 0): fails the height clause outright.
-    let ineligible = eligible_peer(test_addr(9220, 0)?, 0);
-    assert_fallback_with_ineligible_candidate(ineligible, false)
+    let ineligible = synthetic_peer(test_addr(9220, 0)?, 0);
+    assert_fallback_refused_to_candidate(ineligible)
 }
 
 #[test]
@@ -289,7 +292,7 @@ fn demoted_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std:
     );
     // Phase 1: the lone peer takes the deep window; the zero timeout
     // expires every pending immediately, soft-demoting it.
-    let demoted_rx = connect_peer(&peers, eligible_peer(test_addr(9240, 0)?, 300));
+    let demoted_rx = connect_peer(&peers, synthetic_peer(test_addr(9240, 0)?, 300));
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(initial) = demoted_rx.try_recv()? else {
@@ -309,7 +312,7 @@ fn demoted_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std:
         let addr = test_addr(9241, idx)?;
         rxs.push(connect_peer(
             &peers,
-            eligible_peer(addr, 200 - i32::try_from(idx)?),
+            synthetic_peer(addr, 200 - i32::try_from(idx)?),
         ));
     }
     sync.tick();
@@ -345,7 +348,7 @@ fn ineligible_peers_receive_no_block_requests_during_fanout()
     );
     // Soft-demote one otherwise-eligible peer: it takes the deep window
     // and never delivers.
-    let demoted_rx = connect_peer(&peers, eligible_peer(test_addr(9250, 0)?, 290));
+    let demoted_rx = connect_peer(&peers, synthetic_peer(test_addr(9250, 0)?, 290));
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(initial) = demoted_rx.try_recv()? else {
@@ -362,23 +365,23 @@ fn ineligible_peers_receive_no_block_requests_during_fanout()
         &peers,
         PeerInfo {
             inbound: true,
-            ..eligible_peer(test_addr(9251, 0)?, 310)
+            ..synthetic_peer(test_addr(9251, 0)?, 310)
         },
     );
     let non_witness_rx = connect_peer(
         &peers,
         PeerInfo {
             services: 1,
-            ..eligible_peer(test_addr(9252, 0)?, 305)
+            ..synthetic_peer(test_addr(9252, 0)?, 305)
         },
     );
-    let low_chain_rx = connect_peer(&peers, eligible_peer(test_addr(9253, 0)?, 0));
+    let low_chain_rx = connect_peer(&peers, synthetic_peer(test_addr(9253, 0)?, 0));
     let mut rxs = Vec::new();
     for idx in 0..super::super::MIN_PEERS_FOR_FANOUT {
         let addr = test_addr(9254, idx)?;
         rxs.push(connect_peer(
             &peers,
-            eligible_peer(addr, 300 - i32::try_from(idx)?),
+            synthetic_peer(addr, 300 - i32::try_from(idx)?),
         ));
     }
 

@@ -7,6 +7,39 @@ use bitcoin::p2p::message_network::VersionMessage;
 
 use crate::counters::PeerCounters;
 
+/// What one connection relays.
+///
+/// PRE: assigned once, by the code that creates the connection.
+/// POST: `FullRelay` carries transactions, addresses, blocks, and
+///   announcements; `BlockRelayOnly` carries blocks and headers alone.
+/// INVARIANT: a connection's role never changes after assignment; a
+///   same-address replacement is a new connection and gets a fresh role.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeerRole {
+    /// Full relay: transactions, addresses, blocks, and announcements.
+    ///
+    /// Core: an inbound or `OUTBOUND_FULL_RELAY` connection.
+    FullRelay,
+    /// Block relay only: blocks and headers, never a transaction or address
+    /// message in either direction.
+    ///
+    /// Core: a `BLOCK_RELAY` connection
+    /// (`MAX_BLOCK_RELAY_ONLY_CONNECTIONS`, `net.h:73`).
+    BlockRelayOnly,
+}
+
+impl PeerRole {
+    /// Whether this role may carry transaction and address relay.
+    ///
+    /// PRE: none.
+    /// POST: `true` only for `FullRelay`.
+    /// INVARIANT: block and header relay is never restricted by role.
+    #[must_use]
+    pub const fn relays_transactions(&self) -> bool {
+        matches!(self, Self::FullRelay)
+    }
+}
+
 /// Information collected during a successful Bitcoin v1 handshake.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerInfo {
@@ -168,6 +201,16 @@ mod tests {
         }
     }
 
+    /// A `version` message whose remote peer advertises `services`. The
+    /// advertised set is resolved once by the node's service policy, so no
+    /// test restates a local advertisement inline.
+    fn version_with_services(services: ServiceFlags) -> VersionMessage {
+        VersionMessage {
+            services,
+            ..fake_version()
+        }
+    }
+
     fn counters() -> Arc<PeerCounters> {
         Arc::new(PeerCounters::default())
     }
@@ -240,8 +283,7 @@ mod tests {
 
     #[test]
     fn services_names_decodes_inbound_peer_with_network_witness() {
-        let mut version = fake_version();
-        version.services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+        let version = version_with_services(ServiceFlags::NETWORK | ServiceFlags::WITNESS);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
         let info = PeerInfo::inbound_from_version(addr, addr, &version, 0, 0, counters());
         assert_eq!(info.services_names(), vec!["NETWORK", "WITNESS"]);
@@ -249,8 +291,7 @@ mod tests {
 
     #[test]
     fn services_names_empty_for_no_flags() {
-        let mut version = fake_version();
-        version.services = ServiceFlags::NONE;
+        let version = version_with_services(ServiceFlags::NONE);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
         let info = PeerInfo::inbound_from_version(addr, addr, &version, 0, 0, counters());
         assert!(info.services_names().is_empty());

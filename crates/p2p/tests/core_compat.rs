@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::Cursor;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -23,13 +23,14 @@ use bitcoin::p2p::message::{CommandString, NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
+use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
     ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, dispatch_inbound,
     dispatch_inbound_with_chain,
 };
 use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
-use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve};
+use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::wire::{
     MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
     write_message,
@@ -203,6 +204,10 @@ impl ChainQuery for FakeChain {
         headers
     }
 
+    fn best_block_time(&self) -> Option<u32> {
+        self.active.last().map(|header| header.time)
+    }
+
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
@@ -304,7 +309,12 @@ fn ready_peer(magic: Magic) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
 }
 
 fn version_for_handshake() -> Message {
-    Message::Version(version_message(1, 0))
+    Message::Version(version_message(
+        1,
+        0,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    ))
 }
 
 fn get_headers(locator: Vec<NativeBlockHash>, stop: NativeBlockHash) -> Message {
@@ -511,7 +521,12 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
 #[test]
 fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result<(), Box<dyn Error>>
 {
-    let version = version_message(0xdead_beef, 777);
+    let version = version_message(
+        0xdead_beef,
+        777,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    );
     let inv = vec![Inventory::Transaction(Txid::from_byte_array([9u8; 32]))];
     let cases = [
         (Message::Ping(42), NetworkMessage::Ping(42)),
@@ -547,7 +562,12 @@ fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result
 
 #[test]
 fn version_message_pins_core_31_handshake_fields() {
-    let version = version_message(0xdead_beef, 777);
+    let version = version_message(
+        0xdead_beef,
+        777,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    );
 
     assert_eq!(version.version, PROTOCOL_VERSION);
     assert_eq!(
@@ -576,7 +596,13 @@ fn version_message_pins_core_31_handshake_fields() {
 #[test]
 fn outbound_handshake_sends_version_then_core_feature_set() {
     let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
-    let messages = start(&mut peer, 1, 0);
+    let messages = start(
+        &mut peer,
+        1,
+        0,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    );
 
     assert_eq!(peer.state, PeerState::VersionExchange);
     assert_eq!(messages.len(), 4);
@@ -884,6 +910,102 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Bo
         "inbound tx relay is decode-accepted, not processed yet"
     );
     assert_eq!(peer.state, PeerState::Ready);
+    Ok(())
+}
+
+/// A block-relay-only dial is prohibited from transaction relay on the real
+/// wire: it advertises `relay = false`, keeps taking blocks, drops address
+/// gossip unheard, and ends the connection on a transaction. Core
+/// disconnects a block-relay peer that pushes a transaction
+/// (`RejectIncomingTxs`, `net_processing.cpp:4706-4711`, and the `inv` branch
+/// at `net_processing.cpp:4385-4390`) and declines address relay instead of
+/// punishing it (`SetupAddressRelay`, `net_processing.cpp:5952-5970`).
+#[test]
+fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Box<dyn Error>> {
+    let magic = Magic::BITCOIN;
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let addr = listener.local_addr()?;
+    let (headers_tx, headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
+    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
+    let shared = ConnectionShared::new(
+        Arc::new(PeerTable::new()),
+        Arc::new(parking_lot::RwLock::new(Vec::<BannedSubnet>::new())),
+        Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
+            true,
+        )))),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        magic,
+        headers_tx,
+        blocks_tx,
+        None,
+        None,
+        ListenerExtras::default(),
+    );
+    let dial = spawn_outbound_connection(addr, shared, PeerRole::BlockRelayOnly);
+
+    let (mut server, _) = listener.accept()?;
+    server.set_read_timeout(Some(Duration::from_secs(5)))?;
+    server.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+    let Ok((Message::Version(version), _)) = read_message(&mut server, magic) else {
+        return Err("the dial opens with a version message".into());
+    };
+    assert!(
+        !version.relay,
+        "a block-relay-only dial advertises no transaction relay"
+    );
+
+    write_message(&mut server, magic, &version_for_handshake())?;
+    write_message(&mut server, magic, &Message::Verack)?;
+    let mut completed = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !completed && Instant::now() < deadline {
+        let message = match read_message(&mut server, magic) {
+            Ok((message, _)) => message,
+            Err(PeerError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        completed = matches!(message, Message::Verack);
+    }
+    assert!(completed, "the block-relay handshake completes");
+
+    // Address gossip is dropped unheard, and the next message still reaches
+    // the node: a live `block` proves the connection survived the `addr`.
+    let genesis = genesis_block()?;
+    write_message(&mut server, magic, &Message::Addr(Vec::new()))?;
+    write_message(&mut server, magic, &Message::Block(genesis.clone()))?;
+    let Ok(announced) = headers_rx.recv_timeout(Duration::from_secs(5)) else {
+        return Err("a block must reach the scheduler on a block-relay connection".into());
+    };
+    assert!(
+        !announced.headers.is_empty(),
+        "the block header is forwarded"
+    );
+
+    let Some(coinbase) = genesis.txs.first() else {
+        return Err("genesis carries a coinbase transaction".into());
+    };
+    write_message(&mut server, magic, &Message::Tx(coinbase.clone()))?;
+    let Ok(outcome) = dial.join() else {
+        return Err("the dial thread panicked".into());
+    };
+    let Err(error) = outcome else {
+        return Err("a transaction on a block-relay connection must end it".into());
+    };
+    assert!(
+        matches!(&error, PeerError::Protocol(reason)
+            if *reason == "transaction sent in violation of protocol"),
+        "unexpected connection end: {error:?}"
+    );
     Ok(())
 }
 
@@ -1277,7 +1399,16 @@ fn drive_handshake_as_core(
         match message {
             Message::Version(version) => {
                 assert_eq!(version.version, PROTOCOL_VERSION);
-                assert_eq!(version.services, version_message(0, 0).services);
+                assert_eq!(
+                    version.services,
+                    version_message(
+                        0,
+                        0,
+                        PeerRole::FullRelay,
+                        ServiceFlags::NETWORK | ServiceFlags::WITNESS
+                    )
+                    .services
+                );
             }
             Message::WtxidRelay => saw_features[0] = true,
             Message::SendAddrV2 => saw_features[1] = true,
@@ -1318,4 +1449,234 @@ fn drive_handshake_as_core(
         }
     }
     Ok(())
+}
+
+/// A dial wiring with a shared table, an active network, and no chain view.
+fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared {
+    let (headers_tx, _headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
+    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
+    ConnectionShared::new(
+        peer_table,
+        Arc::new(parking_lot::RwLock::new(Vec::<BannedSubnet>::new())),
+        Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
+            true,
+        )))),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        magic,
+        headers_tx,
+        blocks_tx,
+        None,
+        None,
+        ListenerExtras::default(),
+    )
+}
+
+/// One remote `version` advertising exactly `services`.
+fn remote_version(services: ServiceFlags) -> Message {
+    let mut version = version_message(
+        1,
+        0,
+        PeerRole::FullRelay,
+        ServiceFlags::NETWORK | ServiceFlags::WITNESS,
+    );
+    version.services = services;
+    Message::Version(version)
+}
+
+/// Core's outbound desirable-service policy (`HasAllDesirableServiceFlags`
+/// and `GetDesirableServiceFlags`, `net_processing.cpp:1857-1872`):
+/// NETWORK|WITNESS is always required, and a LIMITED peer is desirable only
+/// while the local tip is younger than `NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS`
+/// — 144 target-spacing units (`net_processing.cpp:161`).
+#[test]
+fn desirable_service_policy_matches_core() {
+    let network_witness = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
+    let limited_witness = ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS;
+    assert!(bitcoin_rs_p2p::listener::has_all_desirable_service_flags(
+        network_witness,
+        0
+    ));
+    assert!(bitcoin_rs_p2p::listener::has_all_desirable_service_flags(
+        network_witness,
+        u64::MAX
+    ));
+    assert!(bitcoin_rs_p2p::listener::has_all_desirable_service_flags(
+        limited_witness,
+        143
+    ));
+    assert!(!bitcoin_rs_p2p::listener::has_all_desirable_service_flags(
+        limited_witness,
+        144
+    ));
+    assert!(!bitcoin_rs_p2p::listener::has_all_desirable_service_flags(
+        ServiceFlags::NETWORK_LIMITED,
+        0
+    ));
+    assert!(!bitcoin_rs_p2p::listener::has_all_desirable_service_flags(
+        ServiceFlags::WITNESS,
+        0
+    ));
+    assert!(!bitcoin_rs_p2p::listener::has_all_desirable_service_flags(
+        ServiceFlags::NETWORK,
+        0
+    ));
+    assert!(!bitcoin_rs_p2p::listener::has_all_desirable_service_flags(
+        ServiceFlags::NONE,
+        0
+    ));
+}
+
+/// A dialed peer that does not offer the desirable services is disconnected
+/// right after its `version` and never published: it would otherwise hold an
+/// outbound slot that maintenance cannot replace
+/// (`net_processing.cpp:3864-3871`).
+#[test]
+fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error>> {
+    let magic = Magic::BITCOIN;
+    let peer_table = Arc::new(PeerTable::new());
+    let shared = outbound_shared(Arc::clone(&peer_table), magic);
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let addr = listener.local_addr()?;
+    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+
+    let (mut server, _) = listener.accept()?;
+    server.set_read_timeout(Some(Duration::from_secs(5)))?;
+    server.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let Ok((Message::Version(_), _)) = read_message(&mut server, magic) else {
+        return Err("the dial opens with a version message".into());
+    };
+    write_message(
+        &mut server,
+        magic,
+        &remote_version(ServiceFlags::NETWORK_LIMITED),
+    )?;
+
+    let inner = match dial.join() {
+        Ok(inner) => inner,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    let Err(error) = inner else {
+        return Err("a LIMITED-only peer without NETWORK must be refused".into());
+    };
+    assert!(
+        matches!(&error, PeerError::Protocol(reason)
+            if *reason == "outbound peer lacks desirable services"),
+        "unexpected handshake error: {error}"
+    );
+    assert!(
+        peer_table.live_sessions().is_empty(),
+        "the refused peer leaves no live entry"
+    );
+    assert!(!peer_table.is_connected(addr));
+    Ok(())
+}
+
+/// A NETWORK|WITNESS peer passes the service gate and is published ready.
+#[test]
+fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Error>> {
+    let magic = Magic::BITCOIN;
+    let peer_table = Arc::new(PeerTable::new());
+    let shared = outbound_shared(Arc::clone(&peer_table), magic);
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let addr = listener.local_addr()?;
+    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+
+    let (mut server, _) = listener.accept()?;
+    server.set_read_timeout(Some(Duration::from_secs(5)))?;
+    server.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let Ok((Message::Version(_), _)) = read_message(&mut server, magic) else {
+        return Err("the dial opens with a version message".into());
+    };
+    write_message(
+        &mut server,
+        magic,
+        &remote_version(ServiceFlags::NETWORK | ServiceFlags::WITNESS),
+    )?;
+    write_message(&mut server, magic, &Message::Verack)?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while peer_table.ready_source(addr).is_none() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        peer_table.ready_source(addr).is_some(),
+        "an eligible peer is published ready"
+    );
+    drop(server);
+    drop(dial);
+    Ok(())
+}
+
+/// A LIMITED|WITNESS peer is desirable while the local tip is near
+/// (`GetDesirableServiceFlags`, `net_processing.cpp:1865-1871`): with the
+/// chain view's tip header stamped now, the dial completes instead of
+/// disconnecting.
+#[test]
+fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
+    let magic = Magic::BITCOIN;
+    let peer_table = Arc::new(PeerTable::new());
+    let mut shared = outbound_shared(Arc::clone(&peer_table), magic);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let recent = Header {
+        time: u32::try_from(now).unwrap_or(u32::MAX),
+        ..genesis_block()?.header
+    };
+    shared.chain_query = Some(Arc::new(FakeChain::new(vec![recent], HashMap::new())));
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let addr = listener.local_addr()?;
+    let dial = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
+
+    let (mut server, _) = listener.accept()?;
+    server.set_read_timeout(Some(Duration::from_secs(5)))?;
+    server.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let Ok((Message::Version(_), _)) = read_message(&mut server, magic) else {
+        return Err("the dial opens with a version message".into());
+    };
+    write_message(
+        &mut server,
+        magic,
+        &remote_version(ServiceFlags::NETWORK_LIMITED | ServiceFlags::WITNESS),
+    )?;
+    write_message(&mut server, magic, &Message::Verack)?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while peer_table.ready_source(addr).is_none() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        peer_table.ready_source(addr).is_some(),
+        "a LIMITED peer near the local tip is desirable"
+    );
+    drop(server);
+    drop(dial);
+    Ok(())
+}
+
+/// A pruned node advertises `WITNESS | NODE_NETWORK_LIMITED` and never the
+/// full-history bit, because the advertisement would be false after bodies
+/// are pruned (Core `init.cpp:2022-2026`).
+#[test]
+fn pruned_version_message_advertises_network_limited_only() {
+    let pruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK_LIMITED;
+    let version = version_message(1, 0, PeerRole::FullRelay, pruned);
+    assert!(version.services.has(ServiceFlags::NETWORK_LIMITED));
+    assert!(!version.services.has(ServiceFlags::NETWORK));
+    assert!(version.services.has(ServiceFlags::WITNESS));
+    assert_eq!(version.sender.services, pruned);
+    assert_eq!(version.receiver.services, pruned);
+}
+
+/// The unpruned advertisement is the inverse: NETWORK set, LIMITED clear,
+/// WITNESS kept.
+#[test]
+fn unpruned_version_message_advertises_network() {
+    let unpruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK;
+    let version = version_message(1, 0, PeerRole::FullRelay, unpruned);
+    assert!(version.services.has(ServiceFlags::NETWORK));
+    assert!(!version.services.has(ServiceFlags::NETWORK_LIMITED));
+    assert!(version.services.has(ServiceFlags::WITNESS));
 }

@@ -37,12 +37,14 @@ pub fn block_sync(
     peer_table: Arc<PeerTable>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
 ) -> BlockSync {
     BlockSync::new(
         Arc::new(NodeSyncChain { handles, followers }),
         peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
+        ibd,
     )
 }
 
@@ -124,6 +126,24 @@ fn window_disposition(
         }
         bitcoin_rs_chainstate::WindowApplyDisposition::Fatal => WindowCommitDisposition::Fatal,
     }
+}
+
+/// Test fixture: the one owner of header-tree writes node tests must
+/// synthesize directly — mid-chain forks that must not become the best tip,
+/// and subtrees admission would reject — which [`Chainstate::admit_headers`]
+/// cannot produce because admission validates and republishes the best-work
+/// tip. Production never calls this.
+///
+/// [`Chainstate::admit_headers`]: bitcoin_rs_chainstate::Chainstate::admit_headers
+#[cfg(test)]
+pub(crate) fn fixture_insert_header_node(
+    handles: &bitcoin_rs_chainstate::Chainstate,
+    parent: bitcoin_rs_chain::NodeId,
+    header: bitcoin_rs_primitives::Header,
+    status: bitcoin_rs_chain::NodeStatus,
+) -> Result<bitcoin_rs_chain::NodeId, bitcoin_rs_chain::ChainError> {
+    let mut tree = handles.block_tree().write();
+    tree.insert_node(Some(parent), header, status)
 }
 
 impl SyncChain for NodeSyncChain {

@@ -78,7 +78,7 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap()
     );
 
     let peer = test_addr(9700, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(peer, 3));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 3));
 
     let block2 =
         mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
@@ -89,8 +89,8 @@ fn body_arriving_ahead_of_its_header_chain_requests_the_gap()
     // `getheaders` on this connection (a `tick` tail could also queue one
     // via `request_headers_from_best_peer` and mask a regression).
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(block3.clone()))?;
-    sync.drain_inbound_blocks();
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
+    sync.drain_inbound_blocks(Instant::now());
     next_getheaders(&rx)?;
 
     // The ancestry fill lands: the gap headers admit, both bodies stage,
@@ -128,7 +128,7 @@ fn headers_batch_missing_parent_requests_ancestry() -> Result<(), Box<dyn std::e
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9701, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(peer, 10));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 10));
 
     let gap_parent = test_header(genesis.compute_hash(), 1);
     let orphan_tip = test_header(gap_parent.compute_hash(), 2);
@@ -140,7 +140,7 @@ fn headers_batch_missing_parent_requests_ancestry() -> Result<(), Box<dyn std::e
         body_fetch_owned: false,
     })?;
 
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     next_getheaders(&rx)?;
     Ok(())
@@ -163,7 +163,7 @@ fn known_header_batch_still_credits_the_announcer() -> Result<(), Box<dyn std::e
         ..
     } = SyncHarness::new(tree);
     let peer = test_addr(9702, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip1],
@@ -172,7 +172,7 @@ fn known_header_batch_still_credits_the_announcer() -> Result<(), Box<dyn std::e
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert_eq!(
         peers
@@ -205,7 +205,7 @@ fn headers_batch_too_far_ahead_does_not_replay_a_request() -> Result<(), Box<dyn
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9704, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     // The header must keep valid PoW while carrying a far-future timestamp:
     // `test_header`'s mined nonce no longer validates once `time` is
@@ -219,7 +219,7 @@ fn headers_batch_too_far_ahead_does_not_replay_a_request() -> Result<(), Box<dyn
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert!(
         next_getheaders(&rx).is_err(),
@@ -285,7 +285,7 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted()
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9709, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 2));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
     // Put requested bodies in flight next to the unsolicited one: the
     // getdata marks heights 1..=2 pending in the window.
@@ -338,7 +338,7 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header()
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9711, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 2));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
 
     // A losing fork: a side header at height 1 and a height-2 body on it,
     // so the body's header cannot attach until the side header admits.
@@ -389,7 +389,7 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> Result<(), Box<dyn std
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9712, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 2));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
 
     let fork_root = test_header(genesis_header().compute_hash(), 1);
@@ -468,7 +468,7 @@ fn unrequested_body_at_the_count_budget_is_refused() -> Result<(), Box<dyn std::
     // on every clause except the free slot it does not have.
     let refused_hash = Hash256::from(blocks[2].block_hash());
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[2].clone()))?;
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
 
     let scheduler = sync.scheduler.lock();
     assert_eq!(
@@ -499,7 +499,7 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> Result<(), Box<dyn std
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9713, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 2));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
 
     let fork_root = test_header(genesis_header().compute_hash(), 1);
@@ -562,7 +562,7 @@ fn binding_failure_does_not_burn_the_last_staging_slot() -> Result<(), Box<dyn s
     let good_hash = Hash256::from(blocks[1].block_hash());
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(bad))?;
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
-    sync.drain_inbound_blocks();
+    sync.drain_inbound_blocks(Instant::now());
 
     let scheduler = sync.scheduler.lock();
     assert_eq!(
@@ -658,13 +658,14 @@ fn body_carried_header_does_not_consume_a_pending_getheaders()
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9705, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let source = current_source(&peers, peer);
     sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
         source,
         locator_tip_hash: Hash256::default(),
         target_height: 1,
         requested_at: Instant::now(),
+        answered: false,
     });
 
     let body_tip = test_header(genesis.compute_hash(), 1);
@@ -674,7 +675,7 @@ fn body_carried_header_does_not_consume_a_pending_getheaders()
         wire_response: false,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         sync.scheduler.lock().header_request.is_some(),
         "a body-carried header must not consume the pending request"
@@ -686,7 +687,7 @@ fn body_carried_header_does_not_consume_a_pending_getheaders()
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         sync.scheduler.lock().header_request.is_none(),
         "a wire `headers` response consumes the pending request"
@@ -712,7 +713,7 @@ fn staged_retry_acceptance_credits_the_delivering_peer() -> Result<(), Box<dyn s
     sync.tick();
 
     let peer = test_addr(9706, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     let unannounced =
         mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
@@ -752,7 +753,7 @@ fn fork_tip_attests_its_shared_active_ancestor() -> Result<(), Box<dyn std::erro
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9707, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     // An equal-work fork rooted at height 1 stays off the active chain
     // (first-seen wins a tie), so the batch's tip is retained as fork
@@ -765,7 +766,7 @@ fn fork_tip_attests_its_shared_active_ancestor() -> Result<(), Box<dyn std::erro
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert_eq!(
         peers
@@ -797,7 +798,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> Result<(), Box<dyn 
     } = SyncHarness::new(tree);
 
     let peer = test_addr(9708, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let source = current_source(&peers, peer);
 
     // An ancestor and its descendant on the same fork branch: the retained
@@ -816,7 +817,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> Result<(), Box<dyn 
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert_eq!(
         peers
             .sessions()
@@ -843,7 +844,7 @@ fn retained_unresolved_tips_are_deduplicated_and_capped() -> Result<(), Box<dyn 
             body_fetch_owned: false,
         })?;
     }
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     let retained = peers
         .sessions()
@@ -886,7 +887,7 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip()
         ..
     } = SyncHarness::new(tree);
     let peer = test_addr(9703, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
 
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![tip1],
@@ -902,7 +903,7 @@ fn delivered_tip_evidence_is_compacted_to_the_max_resolving_tip()
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert_eq!(
         peers
@@ -934,7 +935,7 @@ fn compact_owned_body_fetch_marks_the_tip_pending() -> Result<(), Box<dyn std::e
         ..
     } = SyncHarness::new(tree);
     let peer = test_addr(9706, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let tip = test_header(genesis.compute_hash(), 1);
     let tip_hash = Hash256::from(tip.compute_hash());
 
@@ -944,7 +945,7 @@ fn compact_owned_body_fetch_marks_the_tip_pending() -> Result<(), Box<dyn std::e
         wire_response: false,
         body_fetch_owned: true,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
 
     assert!(
         sync.scheduler.lock().window.contains_pending(&tip_hash),
@@ -971,7 +972,7 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches()
         ..
     } = SyncHarness::new(tree);
     let peer = test_addr(9707, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 0));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
     let mid = test_header(genesis.compute_hash(), 1);
     let tip = test_header(mid.compute_hash(), 2);
     let tip_hash = Hash256::from(tip.compute_hash());
@@ -984,7 +985,7 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches()
         wire_response: false,
         body_fetch_owned: true,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         !sync.scheduler.lock().window.contains_pending(&tip_hash),
         "an unattached tip cannot be window-pending yet"
@@ -997,7 +998,7 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches()
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         sync.scheduler.lock().window.contains_pending(&tip_hash),
         "the retained owned fetch must mark once its tip attaches"
@@ -1029,7 +1030,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> Result<(), Box<dyn std:
 
     let peer = test_addr(9740, 0)?;
     // The outbound receiver stays alive: dropping it would cancel the lease.
-    let rx = connect_peer(&peers, eligible_peer(peer, 3));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 3));
     let source = current_source(&peers, peer);
     let block2 =
         mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
@@ -1040,7 +1041,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> Result<(), Box<dyn std:
         body_fetch_owned: false,
     })?;
 
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert_eq!(
         witness_block_inventory(next_getdata(&rx)?)?,
         vec![block2.block_hash()],
@@ -1064,7 +1065,7 @@ fn announced_near_tip_is_direct_fetched_before_tick() -> Result<(), Box<dyn std:
         wire_response: true,
         body_fetch_owned: false,
     })?;
-    sync.drain_inbound_headers();
+    sync.drain_inbound_headers(Instant::now());
     assert!(
         matches!(next_getdata(&rx)?.first(), Some(Inventory::CompactBlock(_))),
         "a compact-relay peer's single near-tip fetch rides the compact flavor"

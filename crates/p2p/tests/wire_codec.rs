@@ -18,6 +18,7 @@ use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn, SendCmpct};
 use bitcoin::pow::CompactTarget;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness};
+use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::handshake::version_message;
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::wire::{
@@ -30,7 +31,12 @@ fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError
     let messages = vec![
         Message::Ping(42),
         Message::Pong(42),
-        Message::Version(version_message(99, 123)),
+        Message::Version(version_message(
+            99,
+            123,
+            PeerRole::FullRelay,
+            bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        )),
         Message::Verack,
         Message::Inv(vec![Inventory::Transaction(Txid::from_byte_array(
             [7u8; 32],

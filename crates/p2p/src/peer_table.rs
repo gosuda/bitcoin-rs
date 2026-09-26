@@ -17,7 +17,7 @@ use parking_lot::RwLock;
 
 use crate::connection::{ConnectionId, PeerLease, PeerSource};
 use crate::counters::PeerCounters;
-use crate::peer_info::PeerInfo;
+use crate::peer_info::{PeerInfo, PeerRole};
 
 /// One live connection joined with its handshake metadata.
 #[derive(Clone, Debug)]
@@ -127,6 +127,81 @@ impl PeerTable {
                 false
             }
         }
+    }
+
+    /// Live inbound connections, including handshakes that have not
+    /// published metadata yet.
+    ///
+    /// PRE: none.
+    /// POST: returns the number of uncancelled leases whose identity is
+    ///   inbound.
+    /// INVARIANT: the count is always derived from the live entry set; no
+    ///   separate inbound counter exists.
+    #[must_use]
+    pub fn live_inbound_count(&self) -> usize {
+        Self::live_inbound_count_of(&self.entries.read())
+    }
+
+    fn live_inbound_count_of(entries: &TableView) -> usize {
+        entries
+            .values()
+            .filter(|entry| entry.lease.is_inbound() && !entry.lease.is_cancelled())
+            .count()
+    }
+
+    /// Reserves an inbound lease if the Core-derived inbound capacity is
+    /// available, registering it as the live connection at `addr`.
+    ///
+    /// PRE: `lease.is_inbound()` and `max_inbound` is the resolved
+    ///   automatic-connection remainder.
+    /// POST: returns the registered lease only when the live inbound count
+    ///   stays below `max_inbound`; otherwise returns `None` and changes no
+    ///   table state. A lease at an address already holding a LIVE inbound
+    ///   connection replaces and cancels it exactly as [`Self::register`]
+    ///   does, which never grows the count; a replacement over an already
+    ///   cancelled predecessor does grow it, because the cancelled lease was
+    ///   never counted, so it faces the same capacity test as a new address.
+    /// INVARIANT: the count test and the reservation are one `PeerTable`
+    ///   write operation; every reserved lease is counted until its
+    ///   identity is removed.
+    #[must_use]
+    pub fn try_register_inbound(
+        &self,
+        addr: SocketAddr,
+        lease: PeerLease,
+        max_inbound: usize,
+    ) -> Option<PeerLease> {
+        debug_assert!(lease.is_inbound(), "only inbound leases reserve here");
+        let mut entries = self.entries.write();
+        let grows_count = match entries.get(&addr) {
+            Some(current) => {
+                if current.lease.same_connection(&lease) {
+                    return Some(lease);
+                }
+                // A live inbound predecessor is displaced by this insert, so
+                // the net count is unchanged. An outbound predecessor, or an
+                // inbound one already cancelled (and therefore outside the
+                // live count), leaves the new lease as a net addition.
+                !current.lease.is_inbound() || current.lease.is_cancelled()
+            }
+            None => true,
+        };
+        if grows_count && Self::live_inbound_count_of(&entries) >= max_inbound {
+            return None;
+        }
+        let prior = entries.insert(
+            addr,
+            Entry {
+                lease: lease.clone(),
+                info: None,
+                demonstrated_tips: Vec::new(),
+            },
+        );
+        if let Some(prior) = prior {
+            prior.lease.cancel();
+            Self::retain_traffic(&mut entries, &prior);
+        }
+        Some(lease)
     }
 
     /// Publishes handshake metadata for the connection `lease` refers to.
@@ -515,6 +590,29 @@ impl PeerTable {
         sessions
     }
 
+    /// Counts live outbound connections by relay role, including those still
+    /// handshaking.
+    ///
+    /// PRE: none.
+    /// POST: `(full_relay, block_relay)` counts of outbound connections;
+    ///   inbound connections are never counted.
+    /// INVARIANT: a cancelled lease holds no slot, so a dying connection
+    ///   cannot keep its role occupied past its own teardown.
+    #[must_use]
+    pub fn outbound_role_counts(&self) -> (usize, usize) {
+        let mut counts = (0_usize, 0_usize);
+        for entry in self.entries.read().values() {
+            if entry.lease.is_inbound() || entry.lease.is_cancelled() {
+                continue;
+            }
+            match entry.lease.role() {
+                PeerRole::FullRelay => counts.0 += 1,
+                PeerRole::BlockRelayOnly => counts.1 += 1,
+            }
+        }
+        counts
+    }
+
     /// Returns the current connection source only when `addr` is published as
     /// ready and its lease is not cancelled. Registration clears predecessor
     /// metadata, so a handshaking replacement cannot inherit an old scheduler
@@ -667,6 +765,125 @@ mod tests {
         assert_eq!(table.len(), 1);
     }
 
+    fn inbound_lease() -> PeerLease {
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        PeerLease::new_inbound(tx)
+    }
+
+    #[test]
+    fn try_register_inbound_refuses_at_zero_capacity() {
+        let table = PeerTable::new();
+        let lease = inbound_lease();
+        assert!(
+            table.try_register_inbound(addr(1), lease, 0).is_none(),
+            "zero capacity refuses"
+        );
+        assert!(table.is_empty(), "a refusal changes no table state");
+    }
+
+    #[test]
+    fn try_register_inbound_admits_below_the_cap_only() {
+        let table = PeerTable::new();
+        let first = inbound_lease();
+        assert!(table.try_register_inbound(addr(1), first, 1).is_some());
+        // The unpublished (handshaking) lease already occupies capacity.
+        assert_eq!(table.live_inbound_count(), 1);
+        let second = inbound_lease();
+        assert!(
+            table
+                .try_register_inbound(addr(2), second.clone(), 1)
+                .is_none()
+        );
+        assert!(!second.is_cancelled(), "a refusal cancels nothing");
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn live_inbound_count_ignores_outbound_leases() {
+        let table = PeerTable::new();
+        table.register(addr(1), lease());
+        assert_eq!(table.live_inbound_count(), 0);
+        assert!(
+            table
+                .try_register_inbound(addr(2), inbound_lease(), 1)
+                .is_some()
+        );
+        assert_eq!(table.live_inbound_count(), 1);
+    }
+
+    #[test]
+    fn removal_releases_inbound_capacity() -> Result<(), Box<dyn std::error::Error>> {
+        let table = PeerTable::new();
+        let registered = table
+            .try_register_inbound(addr(1), inbound_lease(), 1)
+            .ok_or("capacity must admit the first inbound lease")?;
+        assert!(table.remove_current(addr(1), &registered));
+        assert_eq!(table.live_inbound_count(), 0);
+        assert!(
+            table
+                .try_register_inbound(addr(2), inbound_lease(), 1)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_replacement_at_capacity_keeps_the_count_and_cancels_the_predecessor() {
+        let table = PeerTable::new();
+        let first = inbound_lease();
+        assert!(
+            table
+                .try_register_inbound(addr(1), first.clone(), 1)
+                .is_some(),
+            "capacity must admit the first inbound lease"
+        );
+        assert!(
+            table
+                .try_register_inbound(addr(1), inbound_lease(), 1)
+                .is_some(),
+            "a same-address replacement never grows the count and is admitted at capacity"
+        );
+        assert!(first.is_cancelled());
+        assert_eq!(table.live_inbound_count(), 1);
+    }
+
+    #[test]
+    fn inbound_replacement_over_a_cancelled_predecessor_faces_the_cap() {
+        let table = PeerTable::new();
+        let displaced = inbound_lease();
+        assert!(
+            table
+                .try_register_inbound(addr(1), displaced.clone(), 1)
+                .is_some(),
+            "capacity must admit the first inbound lease"
+        );
+        // An external conviction cancels the lease; its owning thread has
+        // not yet run the identity-checked teardown, so the entry stays in
+        // the table while sitting outside the live count.
+        displaced.cancel();
+        assert_eq!(
+            table.live_inbound_count(),
+            0,
+            "a cancelled lease stops counting the moment it is cancelled"
+        );
+        assert!(
+            table
+                .try_register_inbound(addr(2), inbound_lease(), 1)
+                .is_some(),
+            "the slot the cancellation freed goes to the next address"
+        );
+        assert!(
+            table
+                .try_register_inbound(addr(1), inbound_lease(), 1)
+                .is_none(),
+            "replacing a cancelled inbound lease adds a live entry, so it must face the cap"
+        );
+        assert_eq!(
+            table.live_inbound_count(),
+            1,
+            "the refusal must not admit a second live inbound lease"
+        );
+    }
     #[test]
     fn re_registering_current_connection_is_noop_and_keeps_info() {
         let table = PeerTable::new();
@@ -986,5 +1203,30 @@ mod tests {
         assert!(table.disconnect(addr(3)));
         assert!(table.entries.read().retired.is_empty());
         assert_eq!(table.traffic_totals(), (0, 42));
+    }
+
+    /// Slot arithmetic counts outbound connections by relay role. Inbound
+    /// connections and cancelled leases hold no outbound slot.
+    #[test]
+    fn outbound_role_counts_split_by_relay_role() {
+        let table = PeerTable::new();
+        let (full_tx, _full_rx) = crossbeam_channel::unbounded();
+        table.register(addr(1), PeerLease::new(full_tx));
+        let (second_full_tx, _second_full_rx) = crossbeam_channel::unbounded();
+        table.register(addr(2), PeerLease::new(second_full_tx));
+        let (block_tx, _block_rx) = crossbeam_channel::unbounded();
+        table.register(addr(3), PeerLease::new_block_relay(block_tx));
+        let (inbound_tx, _inbound_rx) = crossbeam_channel::unbounded();
+        table.register(addr(4), PeerLease::new_inbound(inbound_tx));
+        let (dead_tx, _dead_rx) = crossbeam_channel::unbounded();
+        let cancelled = PeerLease::new(dead_tx);
+        cancelled.cancel();
+        table.register(addr(5), cancelled);
+
+        assert_eq!(
+            table.outbound_role_counts(),
+            (2, 1),
+            "two full-relay and one block-relay outbound connection"
+        );
     }
 }

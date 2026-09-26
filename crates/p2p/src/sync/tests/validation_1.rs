@@ -4,18 +4,19 @@ use super::*;
 fn non_witness_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std::error::Error>>
 {
     let ineligible = PeerInfo {
-        // NODE_NETWORK only — no NODE_WITNESS.
+        // NODE_NETWORK only — no NODE_WITNESS: the peer fails the
+        // block-service clause, so no body path asks it for anything.
         services: 1,
-        ..eligible_peer(test_addr(9210, 0)?, 300)
+        ..synthetic_peer(test_addr(9210, 0)?, 300)
     };
-    assert_fallback_with_ineligible_candidate(ineligible, true)
+    assert_fallback_refused_to_candidate(ineligible)
 }
 
 #[test]
 fn far_behind_duplicate_of_applied_block_is_not_staged() -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, applied_tip, blocks, blocks_tx) = sync_with_mined_chain(64)?;
     let peer = test_addr(9321, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(peer, 100));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 100));
 
     sync.tick();
     let requested = next_getdata(&rx)?;

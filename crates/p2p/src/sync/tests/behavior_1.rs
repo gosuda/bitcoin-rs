@@ -301,8 +301,7 @@ fn inbound_headers_response_releases_getheaders_gate() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn rejected_matching_peer_headers_release_gate_and_retry_immediately()
--> Result<(), Box<dyn std::error::Error>> {
+fn unconnecting_headers_retain_gate_and_pace_retry() -> Result<(), Box<dyn std::error::Error>> {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -331,8 +330,10 @@ fn rejected_matching_peer_headers_release_gate_and_retry_immediately()
         return Err(std::io::Error::other("expected first getheaders").into());
     }
 
-    // A syntactically valid response consumes the matching request even when
-    // acceptance rejects its headers. Otherwise one bad response stalls sync.
+    // An unconnecting batch is not a valid answer, so the request stays
+    // registered. The live gate paces the retry instead of letting the same
+    // locator be replayed at round-trip pace against a peer that already said
+    // it cannot serve the ancestry.
     let orphan_prev = BlockHash(Hash256::from_le_bytes(&[0x11; 32]));
     let orphan = test_header(orphan_prev, 5);
     inbound_headers_tx.send(InboundHeaders {
@@ -343,8 +344,10 @@ fn rejected_matching_peer_headers_release_gate_and_retry_immediately()
         body_fetch_owned: false,
     })?;
     sync.tick();
-    assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
-    assert!(rx.try_recv().is_err());
+    assert!(
+        rx.try_recv().is_err(),
+        "a retained gate must not replay getheaders"
+    );
     let tip = chain_tip
         .load_full()
         .ok_or_else(|| std::io::Error::other("missing header tip"))?;

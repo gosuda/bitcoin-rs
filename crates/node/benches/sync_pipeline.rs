@@ -643,12 +643,14 @@ impl SyncFixture {
             Arc::clone(&block_tree),
         )
         .capturing(capture_rawtx, capture_block_bytes);
+        let ibd = handles.ibd_latch();
         let sync = bitcoin_rs_node::sync::block_sync(
             Arc::new(handles),
             followers,
             Arc::clone(&peer_table),
             inbound_headers_rx,
             inbound_blocks_rx,
+            Arc::clone(&ibd),
         );
 
         let outbound_rxs = install_synthetic_peers(&peer_table, peer_count);
@@ -1281,7 +1283,7 @@ fn spend_heavy_proxy_blocks() -> Vec<Block> {
 fn child_coinbase_block(parent: &Block, height: u32) -> Block {
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
@@ -1298,7 +1300,7 @@ fn child_coinbase_block(parent: &Block, height: u32) -> Block {
 fn child_fanout_coinbase_block(parent: &Block, height: u32) -> Block {
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
@@ -1328,7 +1330,7 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
     }
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
@@ -1344,7 +1346,7 @@ fn child_spend_fanout_block(parent: &Block, height: u32, source_block: &Block) -
 
 fn child_header(prev_blockhash: BlockHash, time: u32) -> Header {
     Header {
-        version: 1,
+        version: 4,
         prev_blockhash,
         merkle_root: Hash256::default(),
         time,
@@ -1579,7 +1581,7 @@ fn child_signed_fanout_coinbase_block(parent: &Block, height: u32, keys: &Signin
     let coinbase = signed_fanout_coinbase_transaction(height, keys);
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),
@@ -1705,7 +1707,7 @@ fn child_signed_spend_fanout_block(
     }
     let mut block = Block {
         header: Header {
-            version: 1,
+            version: 4,
             prev_blockhash: parent.block_hash(),
             merkle_root: Hash256::default(),
             time: parent.header.time.saturating_add(1),

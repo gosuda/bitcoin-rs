@@ -63,10 +63,10 @@ pub use peer::{
     DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerManager, PeerState,
     SystemDnsResolver,
 };
-pub use peer_info::PeerInfo;
+pub use peer_info::{PeerInfo, PeerRole};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{
-    P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
+    OutboundDial, P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
     apply_network_active,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
@@ -78,7 +78,7 @@ pub use wire::{Message, PeerError};
 
 pub use block_stager::{BlockStager, DrainedBlock, DroppedBlock, StagedBlock};
 pub use download_window::{
-    BlameReason, BlockedContext, BlockedDecision, DownloadWindow, FanoutCandidate, RejectDelivery,
-    SyncBudget, SyncPeer, SyncPeerSelection, configure_request_mode, default_sync_budget,
-    statically_fanout_eligible,
+    BlameReason, BlockDownloadPolicy, BlockedContext, BlockedDecision, DownloadWindow,
+    FanoutCandidate, RejectDelivery, SyncBudget, SyncPeer, SyncPeerSelection,
+    configure_request_mode, default_sync_budget, statically_fanout_eligible,
 };

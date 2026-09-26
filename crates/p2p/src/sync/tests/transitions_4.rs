@@ -148,7 +148,7 @@ fn tick_fanout_distributes_window_front_first_across_eligible_peers()
         let addr = test_addr(9001, idx)?;
         rxs.push(connect_peer(
             &peers,
-            eligible_peer(addr, 300 - i32::try_from(idx)?),
+            synthetic_peer(addr, 300 - i32::try_from(idx)?),
         ));
     }
 
@@ -243,8 +243,8 @@ fn common_prefix_winner_takes_over_deep_window() -> Result<(), Box<dyn std::erro
     let (sync, peers, _applied_tip, blocks, blocks_tx) = sync_with_mined_chain(16)?;
     let owner = test_addr(9321, 0)?;
     let alternate = test_addr(9321, 1)?;
-    let owner_rx = connect_peer(&peers, eligible_peer(owner, 200));
-    let alternate_rx = connect_peer(&peers, eligible_peer(alternate, 100));
+    let owner_rx = connect_peer(&peers, synthetic_peer(owner, 200));
+    let alternate_rx = connect_peer(&peers, synthetic_peer(alternate, 100));
 
     sync.tick();
     assert_eq!(
@@ -306,8 +306,8 @@ fn same_address_reconnect_does_not_inherit_stalled_inflight()
     let (sync, peers, _applied_tip, blocks, blocks_tx) = sync_with_mined_chain(16)?;
     let owner = test_addr(9322, 0)?;
     let winner = test_addr(9322, 1)?;
-    let owner_rx = connect_peer(&peers, eligible_peer(owner, 200));
-    let winner_rx = connect_peer(&peers, eligible_peer(winner, 100));
+    let owner_rx = connect_peer(&peers, synthetic_peer(owner, 200));
+    let winner_rx = connect_peer(&peers, synthetic_peer(winner, 100));
     sync.tick();
     let _ = next_getdata(&owner_rx)?;
     let _ = next_getdata(&winner_rx)?;
@@ -336,7 +336,7 @@ fn same_address_reconnect_does_not_inherit_stalled_inflight()
     let (replacement_tx, replacement_rx) = unbounded::<Message>();
     let lease = PeerLease::new(replacement_tx);
     peers.register(winner, lease.clone());
-    peers.publish_info(winner, &lease, eligible_peer(winner, 100));
+    peers.publish_info(winner, &lease, synthetic_peer(winner, 100));
     let replacement = lease.source(winner);
     sync.on_peer_ready(replacement);
     assert!(
@@ -415,7 +415,7 @@ fn stall_eviction_does_not_disconnect_replacement_connection()
     let (replacement_tx, _replacement_rx) = unbounded::<Message>();
     let replacement = PeerLease::new(replacement_tx);
     peers.register(staller, replacement.clone());
-    peers.publish_info(staller, &replacement, eligible_peer(staller, 200));
+    peers.publish_info(staller, &replacement, synthetic_peer(staller, 200));
     // The convicted owner is the predecessor's source: the replacement at
     // the same address must not be blamed for it.
     let evicted = selected.is_some_and(|owner| sync.peer_table.disconnect_source(owner));

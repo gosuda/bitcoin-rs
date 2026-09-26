@@ -154,14 +154,14 @@ const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 
 /// Admission barrier shared by every cloned apply handle.
 pub(crate) struct ApplyAdmission {
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     barrier: RwLock<()>,
 }
 
 impl ApplyAdmission {
     pub(crate) fn new() -> Self {
         Self {
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             barrier: RwLock::new(()),
         }
     }
@@ -750,6 +750,34 @@ impl Chainstate {
     pub fn fail_closed_for_recovery(&self) {
         self.admission.close_permanently();
         self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Reports whether chain mutation admission is closed.
+    ///
+    /// This is the "can the chain still mutate?" operational fact: true
+    /// once [`Self::fail_closed_for_recovery`] closed admission after a
+    /// fatal transition failure, or an orderly [`Self::close`] began
+    /// draining. Both close it because both refuse every later transition.
+    ///
+    /// PRE: none.
+    /// POST: reads the admission flag with acquire ordering, so a `true`
+    ///   answer follows the close that set it.
+    /// INVARIANT: this fact is separate from initial block download
+    ///   ([`bitcoin_rs_chain::InitialBlockDownload`]) and must never be
+    ///   folded into, or computed from, that boolean.
+    #[must_use]
+    pub fn is_closed_for_recovery(&self) -> bool {
+        self.admission.closed.load(Ordering::Acquire)
+    }
+
+    /// Shares the admission-closed flag with the other read surfaces (RPC
+    /// and P2P), so all three answer from one owner.
+    ///
+    /// PRE: none.
+    /// POST: returns the same flag [`Self::is_closed_for_recovery`] reads.
+    #[must_use]
+    pub fn closed_for_recovery_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.admission.closed)
     }
 
     /// Permanently closes mutation admission and waits for in-flight mutations.

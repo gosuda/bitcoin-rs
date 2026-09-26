@@ -28,8 +28,9 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
         let mut coinbase = coinbase_transaction(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
-        fork_parent = handles.block_tree().write().insert_node(
-            Some(fork_parent),
+        fork_parent = crate::sync::fixture_insert_header_node(
+            &handles,
+            fork_parent,
             block.header,
             NodeStatus::HeaderValid,
         )?;
@@ -122,8 +123,9 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
         let mut coinbase = coinbase_transaction(height);
         coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
         let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
-        fork_parent = handles.block_tree().write().insert_node(
-            Some(fork_parent),
+        fork_parent = crate::sync::fixture_insert_header_node(
+            &handles,
+            fork_parent,
             block.header,
             NodeStatus::HeaderValid,
         )?;
@@ -143,8 +145,9 @@ fn branch_switch_replans_after_a_competing_connect_before_transition()
     let mut racing_coinbase = coinbase_transaction(102);
     racing_coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(3));
     let racing = mined_block_with_prev_hash(main[100].block_hash(), 102, vec![racing_coinbase]);
-    handles.block_tree().write().insert_node(
-        Some(main_tip_id),
+    crate::sync::fixture_insert_header_node(
+        &handles,
+        main_tip_id,
         racing.header,
         NodeStatus::HeaderValid,
     )?;

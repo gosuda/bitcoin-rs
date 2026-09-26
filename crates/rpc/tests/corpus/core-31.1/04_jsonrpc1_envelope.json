@@ -82,7 +82,8 @@
           "automatic_pruning": null,
           "prune_target_size": null,
           "pruneheight": null,
-          "signet_challenge": null
+          "signet_challenge": null,
+          "is_closed_for_recovery": false
         },
         "error": null,
         "id": 4
@@ -129,7 +130,8 @@
             "automatic_pruning",
             "prune_target_size",
             "pruneheight",
-            "signet_challenge"
+            "signet_challenge",
+            "is_closed_for_recovery"
           ]
         }
       }
@@ -151,6 +153,7 @@
     "body.result.prune_target_size",
     "body.result.pruneheight",
     "body.result.signet_challenge",
+    "body.result.is_closed_for_recovery",
     "headers.content-type"
   ]
 }

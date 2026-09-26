@@ -39,6 +39,7 @@ use bitcoin_rs_mining::{
 use bitcoin_rs_node::state::NodeState;
 use bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;
 use bitcoin_rs_node::{Network, NodeConfig};
+use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::dispatch_inbound_full;
 use bitcoin_rs_p2p::handshake::{run_inbound_handshake, version_message};
 use bitcoin_rs_p2p::wire::{PeerError, read_message, write_message};
@@ -344,7 +345,16 @@ fn serve_connection(
     }
     let mut peer = Peer::new(stream, magic);
     let deadline = Instant::now() + HANDSHAKE_DEADLINE;
-    if run_inbound_handshake(&mut peer, 1, 0, lease, deadline).is_err() {
+    if run_inbound_handshake(
+        &mut peer,
+        1,
+        0,
+        bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        lease,
+        deadline,
+    )
+    .is_err()
+    {
         return;
     }
     let Some(version) = peer.remote_version.as_ref() else {
@@ -410,7 +420,16 @@ fn dial_handshake(dialer: &TcpStream, magic: Magic, wtxid_relay: bool) -> anyhow
         .try_clone()
         .map_err(|error| anyhow!("dialer clone failed: {error}"))?;
     stream.set_read_timeout(Some(HANDSHAKE_DEADLINE))?;
-    write_message(&mut stream, magic, &Message::Version(version_message(7, 0)))?;
+    write_message(
+        &mut stream,
+        magic,
+        &Message::Version(version_message(
+            7,
+            0,
+            PeerRole::FullRelay,
+            bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+        )),
+    )?;
     loop {
         let (message, _raw) = read_message(&mut stream, magic)?;
         if matches!(message, Message::Verack) {

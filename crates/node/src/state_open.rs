@@ -3,7 +3,8 @@
 use super::INBOUND_BLOCK_CHANNEL_LIMIT;
 use super::INBOUND_TX_CHANNEL_LIMIT;
 use super::NodeState;
-use super::P2P_OUTBOUND_QUEUE_LIMIT;
+use super::P2P_OUTBOUND_BLOCK_RELAY_SLOTS;
+use super::P2P_OUTBOUND_FULL_RELAY_SLOTS;
 use super::TxIndexSpawn;
 use super::build_derived_index_open_spec;
 use super::derived_index_capabilities;
@@ -323,12 +324,14 @@ impl NodeState {
                 derived_index_capabilities(&config),
             ));
         let network = Arc::new(RwLock::new(NetworkState::default()));
-        // One active generation of outbound requests keeps the drain fed, so
-        // the active and queue limits track the peer target.
-        let outbound_target = if config.p2p.fast_sync {
+        // Two outbound populations: full-relay slots carry transactions,
+        // addresses, and blocks; block-relay-only slots carry blocks alone.
+        // Fast sync deepens the download stripe across more full-relay peers,
+        // so it raises that count, not a separate active limit.
+        let outbound_full_relay_slots = if config.p2p.fast_sync {
             FAST_OUTBOUND_PEER_TARGET
         } else {
-            P2P_OUTBOUND_QUEUE_LIMIT
+            P2P_OUTBOUND_FULL_RELAY_SLOTS
         };
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
             bitcoin_rs_p2p::P2pServiceConfig {
@@ -343,10 +346,21 @@ impl NodeState {
                     .collect(),
                 dns_port: config.network.default_p2p_port(),
                 fixed_peers: config.p2p.connect.clone(),
-                outbound_active_limit: outbound_target,
-                outbound_peer_target: outbound_target,
-                outbound_queue_limit: outbound_target,
+                outbound_full_relay_slots,
+                outbound_block_relay_slots: P2P_OUTBOUND_BLOCK_RELAY_SLOTS,
+                outbound_queue_limit: outbound_full_relay_slots,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
+                // A pruned node cannot serve the full block history, so it
+                // advertises `NODE_NETWORK_LIMITED` instead of
+                // `NODE_NETWORK` (Core `init.cpp:2022-2026`); witness relay
+                // is unaffected.
+                local_services: if config.storage.prune_target_mb > 0 {
+                    bitcoin::p2p::ServiceFlags::WITNESS
+                        | bitcoin::p2p::ServiceFlags::NETWORK_LIMITED
+                } else {
+                    bitcoin::p2p::ServiceFlags::WITNESS | bitcoin::p2p::ServiceFlags::NETWORK
+                },
+                ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
             Arc::clone(&shutdown),
         ));
@@ -413,12 +427,19 @@ impl NodeState {
         ));
         chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
         let chainstate = Arc::new(chainstate);
+        // One chain-owned latch for the whole process: the chainstate builds
+        // it once, and the block-download executor, the RPC context, and the
+        // P2P listener all hold this same `Arc`, so `initialblockdownload`,
+        // the transaction-relay gate, and block-peer eligibility can never
+        // disagree.
+        let ibd = chainstate.ibd_latch();
         let sync = Arc::new(crate::sync::block_sync(
             Arc::clone(&chainstate),
             followers.clone(),
             Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
+            Arc::clone(&ibd),
         ));
         if config.p2p.fast_sync {
             sync.install_budget(fast_sync_budget(config.network));
@@ -474,6 +495,7 @@ impl NodeState {
             chainstate,
             followers,
             sync,
+            ibd,
             recovery_reporter,
         })
     }

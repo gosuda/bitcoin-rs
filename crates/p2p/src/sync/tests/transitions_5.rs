@@ -135,7 +135,7 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
             let addr = test_addr(9470, idx)?;
             rxs.push(connect_peer(
                 &peers,
-                eligible_peer(addr, 200 - i32::try_from(idx)?),
+                synthetic_peer(addr, 200 - i32::try_from(idx)?),
             ));
             sources.push(current_source(&peers, addr));
         }

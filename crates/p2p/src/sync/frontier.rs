@@ -78,6 +78,13 @@ pub(crate) struct UsablePeer {
     /// The peer's demonstrated height resolved on the active chain, `None`
     /// when its announced tips do not intersect it.
     pub active_height: Option<u32>,
+    /// What this connection relays, fixed when it was created.
+    pub role: crate::peer_info::PeerRole,
+    /// Whether the operator pinned this dial by name (`--connect` or
+    /// `addnode`). Core: `ConnectionType::MANUAL`.
+    pub manual: bool,
+    /// Monotonic instant this connection was created.
+    pub connected_at: Instant,
 }
 
 impl UsablePeer {
@@ -88,6 +95,21 @@ impl UsablePeer {
     pub(crate) fn capability(&self) -> Option<u32> {
         if self.demonstrated_tips.is_empty() {
             return u32::try_from(self.info.best_known_height).ok();
+        }
+        self.active_height
+    }
+
+    /// The height this connection PROVED it can serve by handing us headers
+    /// that entered the block tree. `None` while it has announced nothing we
+    /// accepted, whatever its handshake claimed: Core's eviction rule reads
+    /// `pindexBestKnownBlock`, a tip the peer actually sent, and never the
+    /// version height (`net_processing.cpp:3203-3210`). Where `capability`
+    /// falls back to the claimed height to choose whom to ask for a body,
+    /// this one has no fallback, because the rule that reads it decides
+    /// whether to keep the connection.
+    pub(crate) fn demonstrated_height(&self) -> Option<u32> {
+        if self.demonstrated_tips.is_empty() {
+            return None;
         }
         self.active_height
     }

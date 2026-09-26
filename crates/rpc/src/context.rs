@@ -252,6 +252,10 @@ pub struct ChainHandles {
     pub block_tree: BlockTreeReader,
     /// Consensus network.
     pub chain_network: Network,
+    /// Chain-mutation admission closed: the same flag
+    /// `Chainstate::is_closed_for_recovery` reads. Kept separate from
+    /// [`Self::ibd`] by that fact's invariant.
+    pub closed_for_recovery: Arc<core::sync::atomic::AtomicBool>,
 }
 
 /// Borrowed provisional chain facts used by both RPC and P2P admission.
@@ -372,8 +376,9 @@ pub struct NetworkHandles {
     pub network_active: Arc<core::sync::atomic::AtomicBool>,
     /// Authoritative live peer sessions.
     pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
-    /// Channel that requests outbound P2P connections.
-    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
+    /// Channel that requests outbound P2P connections, tagged with the
+    /// origin that asked for each one.
+    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>>,
     /// Manual IP/CIDR bans.
     pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     /// Persisted `addnode add` entries.
@@ -449,7 +454,7 @@ pub struct Context {
     pub block_body_source: Option<Arc<dyn BlockBodySource>>,
     /// Optional outbound channel for `addnode` to request new P2P connections.
     /// `None` for embedded/test callers without a live P2P listener.
-    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<std::net::SocketAddr>>,
+    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>>,
     /// Manual IP/CIDR bans shared with P2P enforcement.
     pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     /// Persisted `addnode add` entries.
@@ -470,6 +475,8 @@ pub struct Context {
     /// `None` in test contexts; populated by `NodeState` with the process-wide
     /// `WarningStore`. Each request loads one immutable snapshot.
     pub rollback_warnings: Option<Arc<dyn RollbackWarningSource>>,
+    /// Chain-mutation admission closed; see [`ChainHandles::closed_for_recovery`].
+    pub closed_for_recovery: Arc<core::sync::atomic::AtomicBool>,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
 // handle behind it uses atomics, channels, or locks for interior mutation.
@@ -547,6 +554,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
+            closed_for_recovery: Arc::new(core::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -607,6 +615,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
+            closed_for_recovery: Arc::new(core::sync::atomic::AtomicBool::new(false)),
         }
     }
     /// Builds a context that shares pre-existing handles owned elsewhere.
@@ -625,6 +634,7 @@ impl Context {
                     coin_stats,
                     block_tree,
                     chain_network,
+                    closed_for_recovery,
                 },
             mempool: MempoolHandles { mempool },
             indexes:
@@ -676,6 +686,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
+            closed_for_recovery,
         }
     }
 
@@ -1416,6 +1427,7 @@ mod tests {
                 )),
                 block_tree: BlockTreeReader::new(Arc::clone(&block_tree)),
                 chain_network: Network::Mainnet,
+                closed_for_recovery: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             },
             mempool: MempoolHandles {
                 mempool: MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(

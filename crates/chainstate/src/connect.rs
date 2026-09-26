@@ -150,6 +150,19 @@ pub(super) fn apply_block_admitted<'b>(
         _ => {}
     }
 
+    // Contextual header rules, shared with header admission: the difficulty
+    // continuity, median-time-past, BIP94 timewarp, future-drift, and version
+    // floors all come from the one gate, so a block whose header never passed
+    // header sync cannot be connected and a direct `submitblock` cannot skip a
+    // rule by relying on header-sync history. Runs before the first mutation.
+    let contextual_header_started = quanta::Instant::now();
+    let contextual_header_result =
+        validate_contextual_block_header(handles, block, height, prior.as_deref());
+    let contextual_header_dur = contextual_header_started.elapsed();
+    metrics::histogram!("node.apply_block.contextual_header_seconds")
+        .record(contextual_header_dur.as_secs_f64());
+    contextual_header_result?;
+
     let (prev_median_time_past, softfork_state) = if let Some(tip) = prior.as_deref() {
         let tree = handles.block_tree.read();
         let mtp = tree
@@ -204,23 +217,6 @@ pub(super) fn apply_block_admitted<'b>(
         tx_plan,
         resolved,
     } = prepared;
-    // Before any mutation. A header the tree has never seen skips header
-    // sync's timestamp rules entirely, so this gate applies them itself; the
-    // header insert in `applied_header_tip` below is part of the same
-    // fallible preparation phase and still precedes the first write.
-    // Unseen headers bypass header-sync timestamp checks, so validate them before mutation.
-    // Headers already in the tree were checked by header sync and need no second walk.
-    {
-        let tree = handles.block_tree.read();
-        if tree.lookup(block_hash).is_none() {
-            bitcoin_rs_chain::validate_header_timestamp(
-                &tree,
-                &block.header,
-                block_hash,
-                bitcoin_rs_chain::current_unix_seconds(),
-            )?;
-        }
-    }
 
     let block_rules_started = quanta::Instant::now();
     // Witness IDs are needed only for a witness-carrying block under active
@@ -252,42 +248,6 @@ pub(super) fn apply_block_admitted<'b>(
     metrics::histogram!("node.apply_block.bip30_bip34_seconds")
         .record(bip30_bip34_dur.as_secs_f64());
     bip30_bip34_result?;
-    // PoW limit + DAA non-retarget continuity.
-    let pow_limit_started = quanta::Instant::now();
-    let pow_limit_result = if height == 0 {
-        Ok(())
-    } else {
-        let tree = handles.block_tree.read();
-        let Some(parent_id) = prior.as_deref().map(|tip| tip.tip_id) else {
-            // Non-genesis block applied with no admitted tip.
-            let prev_hash = block.header.prev_blockhash.0;
-            return Err(ApplyError::Chain(
-                bitcoin_rs_chain::ChainError::MissingParent { prev_hash },
-            ));
-        };
-        bitcoin_rs_chain::header_sync::validate_header_nbits(
-            &tree,
-            parent_id,
-            &block.header,
-            handles.network,
-        )
-        .map_err(|error| match error {
-            bitcoin_rs_chain::ChainError::NbitsMismatch {
-                actual,
-                expected,
-                height,
-            } => ApplyError::NbitsNonRetargetMismatch {
-                actual,
-                expected,
-                height,
-            },
-            error => ApplyError::Chain(error),
-        })
-    };
-    let pow_limit_dur = pow_limit_started.elapsed();
-    metrics::histogram!("node.apply_block.pow_limit_continuity_seconds")
-        .record(pow_limit_dur.as_secs_f64());
-    pow_limit_result?;
 
     let script_verify_started = quanta::Instant::now();
     // A matching proof certifies exactly this transaction-validation slot.
@@ -528,7 +488,7 @@ pub(super) fn apply_block_admitted<'b>(
         %block_hash,
         tx_count = block.txs.len(),
         pow_self_us = pow_self_dur.as_micros(),
-        pow_limit_us = pow_limit_dur.as_micros(),
+        contextual_header_us = contextual_header_dur.as_micros(),
         block_rules_us = block_rules_dur.as_micros(),
         bip30_bip34_us = bip30_bip34_dur.as_micros(),
         script_verify_us = script_verify_dur.as_micros(),
@@ -873,6 +833,58 @@ pub(super) fn check_bip30_and_bip34(
     Ok(())
 }
 
+/// Applies the shared contextual header gate to a block being connected.
+///
+/// PRE: `prior` is the applied predecessor of `block`, if it has one, and
+/// `height` is that predecessor's child height.
+///
+/// POST: `Ok(())` only when
+/// [`bitcoin_rs_chain::validate_contextual_header`] accepts the block's
+/// header against its parent. A difficulty mismatch keeps its dedicated
+/// [`ApplyError`] variant so the sync window still classifies it as a
+/// permanent refusal.
+///
+/// INVARIANT: this operation adds no header rule of its own; header
+/// admission and block connection share the one contextual implementation.
+fn validate_contextual_block_header(
+    handles: &Chainstate,
+    block: &Block,
+    height: u32,
+    prior: Option<&TipSnapshot>,
+) -> Result<(), ApplyError> {
+    if height == 0 {
+        // Genesis has no parent, so no contextual rule applies to it.
+        return Ok(());
+    }
+    let Some(prior) = prior else {
+        return Err(ApplyError::Chain(
+            bitcoin_rs_chain::ChainError::MissingParent {
+                prev_hash: block.header.prev_blockhash.0,
+            },
+        ));
+    };
+    let tree = handles.block_tree.read();
+    bitcoin_rs_chain::validate_contextual_header(
+        &tree,
+        prior.tip_id,
+        &block.header,
+        handles.network,
+        bitcoin_rs_chain::current_unix_seconds(),
+    )
+    .map_err(|error| match error {
+        bitcoin_rs_chain::ChainError::NbitsMismatch {
+            actual,
+            expected,
+            height,
+        } => ApplyError::NbitsNonRetargetMismatch {
+            actual,
+            expected,
+            height,
+        },
+        error => ApplyError::Chain(error),
+    })
+}
+
 pub(super) fn applied_predecessor(
     handles: &Chainstate,
     block_hash: bitcoin_rs_primitives::Hash256,
@@ -907,9 +919,9 @@ pub(super) fn applied_header_tip(
     height: u32,
 ) -> core::result::Result<TipSnapshot, ApplyError> {
     let mut tree = handles.block_tree.write();
-    // No timestamp check here: `check_unseen_header_timestamp` ran just before
-    // this call, in the same pre-mutation phase, and this whole function runs
-    // before the first write so a rejection here leaves nothing behind.
+    // No header check here: the shared contextual gate
+    // (`validate_contextual_block_header`) ran at the top of this function, in
+    // the same pre-mutation phase, so a rejection there leaves nothing behind.
     let node_id = match tree.lookup(block_hash) {
         Some(node_id) => node_id,
         None => tree.insert_header(block.header, bitcoin_rs_chain::node::NodeStatus::Active)?,

@@ -155,6 +155,14 @@ impl ChainQuery for ActiveChainQuery {
         headers
     }
 
+    /// The active tip's header time, read from the same tree the serving
+    /// paths use.
+    fn best_block_time(&self) -> Option<u32> {
+        let tree = self.block_tree.read();
+        let tip = tree.tip()?;
+        tree.node(tip.tip_id).ok().map(|node| node.header.time)
+    }
+
     fn serve_inventory_blocks(
         &self,
         items: &[Inventory],
