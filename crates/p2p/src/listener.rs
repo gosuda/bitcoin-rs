@@ -846,6 +846,11 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             return Ok(());
         }
 
+        // The deadline is enforced on every loop pass — including read
+        // timeouts — so a peer that stops sending compact messages cannot
+        // pin pending reconstruction state past its deadline.
+        compact_reconstruction.prune(Instant::now());
+
         let read_result = crate::wire::read_message(&mut peer.stream, peer.magic);
         if lease.is_cancelled() {
             tracing::debug!(peer_addr = %peer_addr, "p2p peer lease revoked during read; closing");
