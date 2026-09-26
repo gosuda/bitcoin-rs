@@ -381,14 +381,15 @@ fn stall_eviction_does_not_disconnect_replacement_connection()
         .seed_front_cadence_for_test(50, Instant::now());
 
     sync.tick();
-    let applied_tip = sync
-        .chain
-        .applied_tip()
-        .ok_or_else(|| std::io::Error::other("missing applied tip"))?;
-    let next_apply_height = applied_tip
-        .height
-        .checked_add(1)
-        .ok_or_else(|| std::io::Error::other("applied height overflow"))?;
+    let frontier = sync.observe_chain_frontier();
+    let next_apply_height = frontier
+        .next_required
+        .as_ref()
+        .map(|required| required.height);
+    let frontier_hash = frontier
+        .next_required
+        .as_ref()
+        .map(|required| required.hash);
     let selected = {
         let tree = sync.chain.block_tree();
         let mut scheduler = sync.scheduler.lock();
@@ -396,9 +397,9 @@ fn stall_eviction_does_not_disconnect_replacement_connection()
         let active = state.window.active_downloading_peers();
         match state.window.observe_blocked(
             crate::download_window::BlockedContext {
-                next_apply_height: Some(next_apply_height),
-                frontier_hash: None,
-                apply_side_busy: false,
+                next_apply_height,
+                frontier_hash,
+                apply_side_busy: frontier_hash.is_some_and(|hash| state.stager.contains(&hash)),
                 active_downloading_peers: active,
             },
             &state.stager,
