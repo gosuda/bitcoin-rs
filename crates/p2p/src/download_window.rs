@@ -3292,7 +3292,7 @@ mod tests {
     #[test]
     fn pending_timeout_override_wins_over_spacing_policy() {
         let mut window = DownloadWindow::new(SyncBudget {
-            block_spacing: Duration::from_secs(600),
+            block_spacing: Duration::from_mins(10),
             pending_timeout_override: Some(Duration::from_secs(5)),
             ..test_budget()
         });
@@ -6125,7 +6125,7 @@ mod tests {
     fn test_budget() -> SyncBudget {
         SyncBudget {
             max_pending_blocks: 128,
-            block_spacing: Duration::from_secs(600),
+            block_spacing: Duration::from_mins(10),
             max_pending_bytes: usize::MAX,
             max_received_blocks: 128,
             max_received_bytes: usize::MAX,
