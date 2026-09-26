@@ -195,7 +195,7 @@ mod tests {
             false,
             1,
         ));
-        utxo.undo_block(&seed)?;
+        utxo.undo_block(&seed, (0, Hash256::default()))?;
         let mut overlay = WindowOverlay::new(&utxo, MAX_SCRIPT_SIZE);
         let tx = paying(vec![0x51], 500);
         let created = OutPoint::new(tx.txid(), 0);

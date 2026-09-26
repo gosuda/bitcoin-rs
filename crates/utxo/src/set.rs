@@ -543,7 +543,10 @@ pub(crate) struct SpendPayload<'a> {
 /// In-memory 256-shard UTXO set.
 pub struct UtxoSet {
     pub(crate) shards: [Shard; UtxoKey::SHARD_COUNT],
-    stable_view_lock: RwLock<()>,
+    /// Holds the `(height, hash)` of the batch that produced the set's
+    /// current rows — the fence a stable reader uses to pair a tip label
+    /// with the scanned set. Written only inside a commit's write hold.
+    stable_view_lock: RwLock<Option<(u32, Hash256)>>,
     listener: Option<Box<dyn UtxoChangeListener + Send + Sync>>,
 }
 
@@ -578,10 +581,21 @@ impl UtxoMemoryReport {
 /// Read guard for a stable whole-set UTXO view.
 pub struct UtxoSetView<'a> {
     set: &'a UtxoSet,
-    _guard: RwLockReadGuard<'a, ()>,
+    guard: RwLockReadGuard<'a, Option<(u32, Hash256)>>,
 }
 
 impl UtxoSetView<'_> {
+    /// The `(height, hash)` whose batch committed exactly this set.
+    ///
+    /// The value lives inside the stable-view lock, so it can only change
+    /// while a commit holds the write side — a reader holding this view can
+    /// never see rows newer than the reported tip. `None` until the first
+    /// commit; genesis bootstrap does not count as a commit.
+    #[must_use]
+    pub fn committed_tip(&self) -> Option<(u32, Hash256)> {
+        *self.guard
+    }
+
     /// Returns the number of live outpoint entries in this stable view.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -684,7 +698,7 @@ impl UtxoSet {
     pub fn new() -> Self {
         Self {
             shards: [(); UtxoKey::SHARD_COUNT].map(|()| Shard::new()),
-            stable_view_lock: RwLock::new(()),
+            stable_view_lock: RwLock::new(None),
             listener: None,
         }
     }
@@ -707,18 +721,23 @@ impl UtxoSet {
     pub fn lock_stable_view(&self) -> UtxoSetView<'_> {
         UtxoSetView {
             set: self,
-            _guard: self.stable_view_lock.read(),
+            guard: self.stable_view_lock.read(),
         }
     }
 
     /// Applies all UTXO changes for a connected block.
+    ///
+    /// The committed tip recorded for stable readers is `(first add's
+    /// height, block_hash)`: every add names the connecting height. A
+    /// commit with no adds leaves the recorded tip untouched.
     pub fn commit_block<T: Borrow<TxOut>>(
         &self,
         changes: &BlockChanges<T>,
         block_hash: &Hash256,
     ) -> Result<(), UtxoError> {
         tracing::trace!(%block_hash, adds = changes.adds.len(), removes = changes.removes.len(), "commit utxo block");
-        self.commit_adds_and_removes(&changes.adds, &changes.removes)
+        let tip_after = changes.adds.first().map(|add| (add.height, *block_hash));
+        self.commit_adds_and_removes(&changes.adds, &changes.removes, tip_after)
     }
 
     /// Returns an owned transaction output if the outpoint is live.
@@ -767,9 +786,15 @@ impl UtxoSet {
         self.shards[usize::from(key.shard())].has_live_outputs_for_txid(key, txid)
     }
 
-    /// Reverses one connected block using its undo data.
-    pub fn undo_block(&self, undo: &UndoBatch) -> Result<(), UtxoError> {
-        self.commit_adds_and_removes(&undo.restores, &undo.removes)
+    /// Reverses one connected block using its undo data. `parent_tip` is
+    /// the `(height, hash)` the set rolls back to, recorded for stable
+    /// readers inside the same commit boundary as the row changes.
+    pub fn undo_block(
+        &self,
+        undo: &UndoBatch,
+        parent_tip: (u32, Hash256),
+    ) -> Result<(), UtxoError> {
+        self.commit_adds_and_removes(&undo.restores, &undo.removes, Some(parent_tip))
     }
 
     /// Returns the number of live outpoint entries.
@@ -803,6 +828,7 @@ impl UtxoSet {
         &self,
         adds: &[UtxoAdd<T>],
         removes: &[OutPoint],
+        tip_after: Option<(u32, Hash256)>,
     ) -> Result<(), UtxoError> {
         let mut add_counts = [0_usize; UtxoKey::SHARD_COUNT];
         let mut remove_counts = [0_usize; UtxoKey::SHARD_COUNT];
@@ -820,10 +846,10 @@ impl UtxoSet {
         }
         let (active_shards, active_shard_count) = active_shards(&add_counts, &remove_counts);
         if active_shard_count == 0 {
+            if let Some(tip) = tip_after {
+                *self.stable_view_lock.write() = Some(tip);
+            }
             return Ok(());
-        }
-        if active_shard_count == 1 {
-            return self.commit_single_shard(adds, removes, active_shards[0]);
         }
 
         let listener = self.listener.as_deref();
@@ -832,17 +858,36 @@ impl UtxoSet {
         let buckets =
             ShardCommitBuckets::new(adds, removes, &add_counts, &remove_counts, group_txid_runs);
 
-        let _stable_commit = self.stable_view_lock.write();
-
-        if let Some(listener) = listener {
-            return self.commit_multi_shard_with_listener(
+        let mut stable_commit = self.stable_view_lock.write();
+        let result = if active_shard_count == 1 {
+            self.commit_single_shard(adds, removes, active_shards[0])
+        } else if let Some(listener) = listener {
+            self.commit_multi_shard_with_listener(
                 &active_shards,
                 active_shard_count,
                 &buckets,
                 listener,
-            );
+            )
+        } else {
+            self.commit_shards_parallel(adds, removes, &buckets, &active_shards, active_shard_count)
+        };
+        if result.is_ok() {
+            if let Some(tip) = tip_after {
+                *stable_commit = Some(tip);
+            }
         }
+        result
+    }
 
+    /// PRE: the caller holds `stable_view_lock` for writing.
+    fn commit_shards_parallel<T: Borrow<TxOut>>(
+        &self,
+        adds: &[UtxoAdd<T>],
+        removes: &[OutPoint],
+        buckets: &ShardCommitBuckets<'_>,
+        active_shards: &[usize; UtxoKey::SHARD_COUNT],
+        active_shard_count: usize,
+    ) -> Result<(), UtxoError> {
         let total_ops = adds.len().saturating_add(removes.len());
         if total_ops < PARALLEL_NO_LISTENER_OP_THRESHOLD {
             for &shard_idx in &active_shards[..active_shard_count] {
@@ -959,13 +1004,13 @@ impl UtxoSet {
         Ok(())
     }
 
+    /// PRE: the caller holds `stable_view_lock` for writing.
     fn commit_single_shard<T: Borrow<TxOut>>(
         &self,
         adds: &[UtxoAdd<T>],
         removes: &[OutPoint],
         shard_idx: usize,
     ) -> Result<(), UtxoError> {
-        let _stable_commit = self.stable_view_lock.write();
         let Some(listener) = self.listener.as_deref() else {
             return self.shards[shard_idx].commit_single_shard_batch(adds, removes, shard_idx);
         };

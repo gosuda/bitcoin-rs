@@ -353,7 +353,7 @@ fn listener_undo_restores_muhash_and_accounting() -> Result<(), Box<dyn std::err
     undo.remove(replacement_outpoint);
 
     full.commit_block(&second, &txid(141))?;
-    full.undo_block(&undo)?;
+    full.undo_block(&undo, (140, txid(140)))?;
 
     let (first_only, first_only_listener) = listener_set();
     first_only.commit_block(&first, &txid(140))?;

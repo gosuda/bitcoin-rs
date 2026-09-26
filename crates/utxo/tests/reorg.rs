@@ -61,8 +61,8 @@ fn undoing_last_five_blocks_matches_first_five_only_state() -> Result<(), Box<dy
     for (height, (changes, _undo)) in (1_u64..=10).zip(&blocks) {
         full.commit_block(changes, &txid(height))?;
     }
-    for (_changes, undo) in blocks.iter().rev().take(5) {
-        full.undo_block(undo)?;
+    for (height, (_changes, undo)) in (6_u64..=10).rev().zip(blocks.iter().rev()) {
+        full.undo_block(undo, (u32::try_from(height - 1)?, txid(height - 1)))?;
     }
 
     let first_five = UtxoSet::new();

@@ -146,6 +146,7 @@ pub(super) fn disconnect_block_admitted(
             hash: block_hash,
             height,
             parent_height: parent_tip.height,
+            parent_hash: parent_tip.hash,
             tx_count_delta,
         },
         &undo,

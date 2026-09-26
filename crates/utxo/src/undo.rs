@@ -68,6 +68,9 @@ pub struct BlockRollback {
     pub hash: Hash256,
     pub height: u32,
     pub parent_height: u32,
+    /// The tip the UTXO set rolls back to, recorded in the same commit
+    /// boundary as the row changes so stable readers pair it with them.
+    pub parent_hash: Hash256,
     /// Transactions the block added to the coinstats count.
     pub tx_count_delta: u64,
 }
@@ -114,6 +117,7 @@ pub fn rollback_block(
         hash,
         height,
         parent_height,
+        parent_hash,
         tx_count_delta,
     } = *rollback;
     store
@@ -122,7 +126,8 @@ pub fn rollback_block(
     store
         .arm_disconnect(height, hash)
         .map_err(RollbackError::Refused)?;
-    utxo.undo_block(undo).map_err(RollbackError::Utxo)?;
+    utxo.undo_block(undo, (parent_height, parent_hash))
+        .map_err(RollbackError::Utxo)?;
     coin_stats
         .rewind_block(height, parent_height, tx_count_delta)
         .map_err(RollbackError::CoinStats)?;
@@ -154,10 +159,12 @@ mod tests {
         txid: Txid(Hash256::from_le_bytes(&[0x42; 32])),
         vout: 0,
     };
+    const PARENT: Hash256 = Hash256::from_le_bytes(&[0x01; 32]);
     const ROLLBACK: BlockRollback = BlockRollback {
         hash: HASH,
         height: HEIGHT,
         parent_height: 1,
+        parent_hash: PARENT,
         tx_count_delta: 2,
     };
 

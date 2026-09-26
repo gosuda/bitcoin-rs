@@ -997,13 +997,17 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         ));
     }
     let want_muhash = hash_type == "muhash";
-    // The applied capture runs inside the stable-view barrier: a block
-    // apply takes the matching write authority, so the tip observed here
-    // and the UTXO set being scanned cannot come from different commits.
-    let (view, stats, txouts, transactions, set_hash) =
+    // The label comes from the set's own committed tip, not the published
+    // applied tip: publication runs after the UTXO commit outside the
+    // stable-view write hold, so the applied tip can trail the scanned rows
+    // by a block. The committed tip is written inside that same hold, so it
+    // always names the commit that produced the set being scanned.
+    let (tip_label, stats, txouts, transactions, set_hash) =
         ctx.chain.utxo.with_stable_view(|stable| {
-            let view = ctx.chain.applied_view();
-            let applied_height = view.height();
+            let (applied_height, tip_hash) = stable.committed_tip().unwrap_or_else(|| {
+                let view = ctx.chain.applied_view();
+                (view.height(), view.hash(ctx.chain.chain_network))
+            });
             let stats =
                 bitcoin_rs_utxo::stats::scan_coin_stats(stable, applied_height, want_muhash)
                     .map_err(|err| RpcError::Internal(err.to_string()))?;
@@ -1023,9 +1027,15 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
                     ));
                 }
             };
-            Ok::<_, RpcError>((view, stats, stable.len(), stable.record_count(), set_hash))
+            Ok::<_, RpcError>((
+                (applied_height, tip_hash),
+                stats,
+                stable.len(),
+                stable.record_count(),
+                set_hash,
+            ))
         })?;
-    let applied_height = view.height();
+    let (applied_height, tip_hash) = tip_label;
     let disk_size = ctx.chain.utxo.with_stable_view(|stable| {
         u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
     });
@@ -1038,7 +1048,7 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     });
     typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
         height: i64::from(applied_height),
-        best_block: view.hash(ctx.chain.chain_network).to_string_be(),
+        best_block: tip_hash.to_string_be(),
         transactions: Some(i64_saturated_len(transactions)),
         tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
         bogo_size: i64_saturated(stats.bogo_size),

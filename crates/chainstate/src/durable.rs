@@ -478,6 +478,7 @@ fn rewind_one_step(
             hash,
             height,
             parent_height: parent_tip.height,
+            parent_hash: parent_tip.hash,
             tx_count_delta,
         },
         &undo,

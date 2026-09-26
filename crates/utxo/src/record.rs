@@ -497,12 +497,18 @@ impl UtxoRecord {
         vouts: &[u32],
         mut removed: Option<&mut Vec<Option<OwnedUtxoOut>>>,
     ) -> Result<RemovedRecord, UtxoError> {
-        if let Some(outputs) = self.full_removal_outputs(vouts) {
-            if let Some(sink) = removed.as_deref_mut() {
+        if let Some(sink) = removed.as_deref_mut() {
+            // With a sink the exact-cover check also reuses the located
+            // outputs instead of repeating their lookup.
+            if let Some(outputs) = self.full_removal_outputs(vouts) {
                 for output in &outputs {
                     sink.push(Some(OutputParts::from_view(output).into_owned()));
                 }
+                return Ok(RemovedRecord::Emptied);
             }
+        } else if self.is_full_removal(vouts) {
+            // No sink: the question is only whether the removal empties the
+            // record, answered by the allocation-free scan.
             return Ok(RemovedRecord::Emptied);
         }
         let mut parts = self.output_parts();
