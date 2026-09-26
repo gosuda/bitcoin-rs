@@ -7,7 +7,7 @@ use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
 use bitcoin_rs_primitives::{Tx, Txid};
 
 use crate::MiningError;
-use crate::template::CandidateContext;
+use crate::template::{CandidateContext, transaction_count_size};
 
 #[cfg(test)]
 thread_local! {
@@ -35,6 +35,7 @@ pub(crate) struct SelectedPackage {
 /// Mining applies finality and block resource limits to each complete chunk.
 /// A package that fails finality or would overflow weight, serialized size, or
 /// sigop cost is skipped atomically; later packages may still fit.
+/// Returned body weight and size include the block transaction count.
 pub(crate) fn select_packages(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,
@@ -42,10 +43,17 @@ pub(crate) fn select_packages(
     reserved_size: u64,
     reserved_sigops: u64,
 ) -> Result<(Vec<usize>, u64, u64, u64, u64), MiningError> {
-    if reserved_weight > context.max_weight {
+    let count_size = transaction_count_size(0)?;
+    let mut used_weight = reserved_weight
+        .checked_add(count_size * 4)
+        .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
+    let mut used_size = reserved_size
+        .checked_add(count_size)
+        .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?;
+    if used_weight > context.max_weight {
         return Err(MiningError::CapacityExhausted { field: "weight" });
     }
-    if reserved_size > context.max_size {
+    if used_size > context.max_size {
         return Err(MiningError::CapacityExhausted { field: "size" });
     }
     if reserved_sigops > context.max_sigops {
@@ -54,8 +62,6 @@ pub(crate) fn select_packages(
 
     let mut selected = vec![false; snapshot.entries.len()];
     let mut ordered = Vec::new();
-    let mut used_weight = reserved_weight;
-    let mut used_size = reserved_size;
     let mut used_sigops = reserved_sigops;
     let mut fees = 0_u64;
     let pooled: HashSet<Txid> = snapshot.entries.iter().map(|entry| entry.txid).collect();
@@ -88,10 +94,23 @@ pub(crate) fn select_packages(
             continue;
         }
 
-        let Some(next_weight) = used_weight.checked_add(package.weight) else {
+        let next_count = ordered.len().checked_add(package.indices.len()).ok_or(
+            MiningError::CandidateScalarOverflow {
+                field: "transaction count",
+            },
+        )?;
+        let count_growth =
+            transaction_count_size(next_count)? - transaction_count_size(ordered.len())?;
+        let Some(next_weight) = used_weight
+            .checked_add(package.weight)
+            .and_then(|weight| weight.checked_add(count_growth * 4))
+        else {
             continue;
         };
-        let Some(next_size) = used_size.checked_add(package.size) else {
+        let Some(next_size) = used_size
+            .checked_add(package.size)
+            .and_then(|size| size.checked_add(count_growth))
+        else {
             continue;
         };
         let Some(next_sigops) = used_sigops.checked_add(package.sigop_cost) else {
@@ -245,20 +264,20 @@ mod tests {
         };
 
         CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
-        let weight_full = select_packages(&context(1_000, 4_000_000, 80_000), &snapshot, 0, 0, 0)
+        let weight_full = select_packages(&context(1_004, 4_000_000, 80_000), &snapshot, 0, 0, 0)
             .expect("weight-full selection");
         assert_eq!(weight_full.0, vec![0]);
         assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
 
         CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
-        let size_full = select_packages(&context(4_000_000, 1_000, 80_000), &snapshot, 0, 0, 0)
+        let size_full = select_packages(&context(4_000_000, 1_001, 80_000), &snapshot, 0, 0, 0)
             .expect("size-full selection");
         assert_eq!(size_full.0, vec![0]);
         assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
     }
 
     #[test]
-    fn zero_capacity_limits_still_consider_zero_size_chunks() {
+    fn transaction_count_reservation_rejects_zero_size_capacity() {
         let zero_size = snapshot_entry(independent_tx(1), 1_000, 10, 0, 0);
         let snapshot = MempoolMiningSnapshot {
             sequence: 2,
@@ -266,10 +285,11 @@ mod tests {
         };
 
         CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
-        let selected = select_packages(&context(4_000_000, 0, 80_000), &snapshot, 0, 0, 0)
-            .expect("zero serialized-size limit still considers packages");
-        assert_eq!(selected.0, vec![0]);
-        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
+        assert!(matches!(
+            select_packages(&context(4_000_000, 0, 80_000), &snapshot, 0, 0, 0),
+            Err(crate::MiningError::CapacityExhausted { field: "size" })
+        ));
+        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 0);
     }
 
     fn context(max_weight: u64, max_size: u64, max_sigops: u64) -> CandidateContext {
