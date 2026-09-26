@@ -155,6 +155,7 @@ pub enum SequenceEvent {
 }
 
 impl SequenceEvent {
+    #[cfg(any(feature = "zmq", test))]
     const fn label(self) -> u8 {
         match self {
             Self::Connected(_) => b'C',
