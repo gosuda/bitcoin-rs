@@ -11,6 +11,12 @@
 
 extern crate alloc;
 
+#[expect(
+    dead_code,
+    reason = "core_compat reaches only the chaininfo decoder from this shared test-support module"
+)]
+mod support;
+
 use alloc::sync::Arc;
 
 use bitcoin_rs_chain::{ChainWork, NodeId, TipSnapshot};
@@ -51,8 +57,9 @@ fn tipped_context() -> Arc<Context> {
 fn chain_state_responses_deserialize_into_pinned_types() -> Result<(), Box<dyn std::error::Error>> {
     let handler = Handler::new(tipped_context());
 
-    let info: corepc_types::v31::GetBlockchainInfo =
-        typed(&handler.dispatch("getblockchaininfo", &json!([]))?)?;
+    let info = support::compare::typed_getblockchain_info(
+        sonic_rs::to_string(&handler.dispatch("getblockchaininfo", &json!([]))?)?.as_bytes(),
+    )?;
     assert_eq!(info.chain, "main");
     assert_eq!(info.blocks, 42);
     assert_eq!(info.headers, 42);

@@ -252,6 +252,10 @@ pub struct ChainHandles {
     pub block_tree: BlockTreeReader,
     /// Consensus network.
     pub chain_network: Network,
+    /// Chain-mutation admission closed: the same flag
+    /// `Chainstate::is_closed_for_recovery` reads. Kept separate from
+    /// [`Self::ibd`] by that fact's invariant.
+    pub closed_for_recovery: Arc<core::sync::atomic::AtomicBool>,
 }
 
 /// Borrowed provisional chain facts used by both RPC and P2P admission.
@@ -471,6 +475,8 @@ pub struct Context {
     /// `None` in test contexts; populated by `NodeState` with the process-wide
     /// `WarningStore`. Each request loads one immutable snapshot.
     pub rollback_warnings: Option<Arc<dyn RollbackWarningSource>>,
+    /// Chain-mutation admission closed; see [`ChainHandles::closed_for_recovery`].
+    pub closed_for_recovery: Arc<core::sync::atomic::AtomicBool>,
 }
 // SAFETY: `Context` is shared by RPC worker threads. Each mutable subsystem
 // handle behind it uses atomics, channels, or locks for interior mutation.
@@ -548,6 +554,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
+            closed_for_recovery: Arc::new(core::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -608,6 +615,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
+            closed_for_recovery: Arc::new(core::sync::atomic::AtomicBool::new(false)),
         }
     }
     /// Builds a context that shares pre-existing handles owned elsewhere.
@@ -626,6 +634,7 @@ impl Context {
                     coin_stats,
                     block_tree,
                     chain_network,
+                    closed_for_recovery,
                 },
             mempool: MempoolHandles { mempool },
             indexes:
@@ -677,6 +686,7 @@ impl Context {
             debug_log_path: None,
             rest_render_budget: Arc::new(RestRenderBudget::new()),
             rollback_warnings: None,
+            closed_for_recovery,
         }
     }
 
@@ -1417,6 +1427,7 @@ mod tests {
                 )),
                 block_tree: BlockTreeReader::new(Arc::clone(&block_tree)),
                 chain_network: Network::Mainnet,
+                closed_for_recovery: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             },
             mempool: MempoolHandles {
                 mempool: MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(

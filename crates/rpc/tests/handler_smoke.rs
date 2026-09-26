@@ -222,6 +222,20 @@ fn getblockhash_zero_returns_mainnet_genesis_on_fresh_context()
     Ok(())
 }
 
+#[test]
+fn getblockchaininfo_reports_the_closed_for_recovery_fact() -> Result<(), Box<dyn std::error::Error>>
+{
+    let ctx = Arc::new(Context::new());
+    let handler = Handler::new(Arc::clone(&ctx));
+    let open = handler.dispatch("getblockchaininfo", &json!([]))?;
+    assert_eq!(open["is_closed_for_recovery"], json!(false));
+    ctx.closed_for_recovery
+        .store(true, core::sync::atomic::Ordering::Release);
+    let closed = handler.dispatch("getblockchaininfo", &json!([]))?;
+    assert_eq!(closed["is_closed_for_recovery"], json!(true));
+    Ok(())
+}
+
 #[derive(Debug)]
 struct RecordingChainControl {
     called: Arc<AtomicBool>,

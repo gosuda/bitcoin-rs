@@ -1649,6 +1649,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
                 coin_stats: chainstate.coin_stats_handle(),
                 block_tree: chainstate.block_tree_reader(),
                 chain_network: Network::Regtest,
+                closed_for_recovery: Arc::new(core::sync::atomic::AtomicBool::new(false)),
             },
             mempool: MempoolHandles {
                 mempool: MempoolGateway::shared(state.mempool()),

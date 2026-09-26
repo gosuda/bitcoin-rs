@@ -154,14 +154,14 @@ const LOCAL_OVERLAY_TXID_SET_THRESHOLD: usize = 8;
 
 /// Admission barrier shared by every cloned apply handle.
 pub(crate) struct ApplyAdmission {
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     barrier: RwLock<()>,
 }
 
 impl ApplyAdmission {
     pub(crate) fn new() -> Self {
         Self {
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             barrier: RwLock::new(()),
         }
     }
@@ -768,6 +768,16 @@ impl Chainstate {
     #[must_use]
     pub fn is_closed_for_recovery(&self) -> bool {
         self.admission.closed.load(Ordering::Acquire)
+    }
+
+    /// Shares the admission-closed flag with the other read surfaces (RPC
+    /// and P2P), so all three answer from one owner.
+    ///
+    /// PRE: none.
+    /// POST: returns the same flag [`Self::is_closed_for_recovery`] reads.
+    #[must_use]
+    pub fn closed_for_recovery_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.admission.closed)
     }
 
     /// Permanently closes mutation admission and waits for in-flight mutations.
