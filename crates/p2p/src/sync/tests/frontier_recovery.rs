@@ -479,31 +479,56 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
 
-    let common = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
+    let common = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let common_id = tree.insert_node(Some(genesis_id), common.header, NodeStatus::HeaderValid)?;
 
-    let losing_2 =
-        mined_block_with_prev_hash(common.block_hash(), 2, vec![coinbase_transaction(2_002)]);
+    let losing_2 = regtest_fixture::mined_block_with_prev_hash(
+        common.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2_002)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let losing_2_id =
         tree.insert_node(Some(common_id), losing_2.header, NodeStatus::HeaderValid)?;
-    let losing_3 =
-        mined_block_with_prev_hash(losing_2.block_hash(), 3, vec![coinbase_transaction(2_003)]);
+    let losing_3 = regtest_fixture::mined_block_with_prev_hash(
+        losing_2.block_hash(),
+        3,
+        vec![regtest_fixture::coinbase(2_003)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let losing_3_id =
         tree.insert_node(Some(losing_2_id), losing_3.header, NodeStatus::HeaderValid)?;
 
-    let winning_2 =
-        mined_block_with_prev_hash(common.block_hash(), 2, vec![coinbase_transaction(1_002)]);
+    let winning_2 = regtest_fixture::mined_block_with_prev_hash(
+        common.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(1_002)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let winning_2_id =
         tree.insert_node(Some(common_id), winning_2.header, NodeStatus::HeaderValid)?;
-    let winning_3 =
-        mined_block_with_prev_hash(winning_2.block_hash(), 3, vec![coinbase_transaction(1_003)]);
+    let winning_3 = regtest_fixture::mined_block_with_prev_hash(
+        winning_2.block_hash(),
+        3,
+        vec![regtest_fixture::coinbase(1_003)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let winning_3_id = tree.insert_node(
         Some(winning_2_id),
         winning_3.header,
         NodeStatus::HeaderValid,
     )?;
-    let winning_4 =
-        mined_block_with_prev_hash(winning_3.block_hash(), 4, vec![coinbase_transaction(1_004)]);
+    let winning_4 = regtest_fixture::mined_block_with_prev_hash(
+        winning_3.block_hash(),
+        4,
+        vec![regtest_fixture::coinbase(1_004)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let winning_4_id = tree.insert_node(
         Some(winning_3_id),
         winning_4.header,
@@ -585,11 +610,12 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> Result<(), Box<dyn 
         received_timeout: Duration::ZERO,
         ..super::super::default_sync_budget(Network::Regtest)
     });
-    let orphan = mined_block_with_prev_hash(
+    let orphan = regtest_fixture::mined_block_with_prev_hash(
         BlockHash::from(Hash256::from_le_bytes(&[0x5a; 32])),
         9,
-        vec![coinbase_transaction(9)],
-    );
+        vec![regtest_fixture::coinbase(9)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let orphan_hash = Hash256::from(orphan.block_hash());
     let mut inbound = vec![crate::InboundBlock::from_decoded(orphan)];
     assert_eq!(sync.buffer_received_block_chunk(&mut inbound, None), 1);

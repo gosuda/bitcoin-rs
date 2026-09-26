@@ -469,8 +469,14 @@ pub fn bip94_timewarp_floor(network: Network, height: u32, parent_time: u32) -> 
 
 /// Compact proof-of-work target decode/encode and block-work helpers.
 ///
-/// These mirror Bitcoin Core's `arith_uint256::SetCompact`/`GetCompact`
-/// exactly, including sign-bit normalization and overflow classification.
+/// `decode_compact` mirrors Bitcoin Core's `arith_uint256::SetCompact`: the
+/// sign bit is masked out of the mantissa, the magnitude is decoded, and
+/// the sign is reported separately (`negative`, like Core's `pfNegative`,
+/// with `pfOverflow` for size overflow). `compact_to_target` then diverges
+/// deliberately: Core's consensus check rejects the flagged encoding,
+/// while this crate maps a signed encoding to `ChainWork::ZERO` — both
+/// reject the header in practice. `target_to_compact` covers `GetCompact`
+/// for non-negative targets.
 pub(crate) mod pow {
     use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
@@ -546,10 +552,13 @@ pub(crate) mod pow {
     /// Encodes a non-negative 256-bit target into compact consensus form.
     #[must_use]
     pub(crate) fn target_to_compact(target: ChainWork) -> CompactTarget {
-        CompactTarget::from_consensus(get_compact(target, false))
+        CompactTarget::from_consensus(get_compact(target))
     }
 
-    fn get_compact(target: ChainWork, negative: bool) -> u32 {
+    /// PRE: `target` is a non-negative 256-bit chain target.
+    /// POST: Return its compact consensus encoding.
+    /// INVARIANT: No signed-target bit is added.
+    fn get_compact(target: ChainWork) -> u32 {
         if target == ChainWork::ZERO {
             return 0;
         }
@@ -568,13 +577,7 @@ pub(crate) mod pow {
         debug_assert_eq!(compact & !0x007f_ffff, 0);
         debug_assert!(size < 256);
 
-        compact
-            | (u32::try_from(size).unwrap_or(0) << 24)
-            | if negative && compact & 0x007f_ffff != 0 {
-                0x0080_0000
-            } else {
-                0
-            }
+        compact | (u32::try_from(size).unwrap_or(0) << 24)
     }
 }
 
@@ -934,33 +937,5 @@ mod contextual_header_tests {
             "the refused child must not extend the invalid subtree"
         );
         Ok(())
-    }
-
-    #[test]
-    fn child_of_invalid_parent_is_rejected() {
-        let network = Network::Regtest;
-        let genesis = network.genesis_block();
-        let base_time = genesis.header.time;
-        let mut prev = genesis.block_hash();
-        let mut tree = BlockTree::new();
-        accept_headers(&mut tree, &[genesis.header], network, base_time)
-            .expect("the regtest genesis admits");
-        extend_regtest(&mut tree, &mut prev, 1, 4, base_time);
-        let block_one = tree.lookup(prev.0).expect("block one is in the tree");
-        tree.invalidate_subtree(block_one)
-            .expect("invalidate block one");
-
-        let now = base_time + 2 * 600;
-        let child = mine_regtest(prev, 2, now, 4);
-        assert_eq!(
-            accept_headers(&mut tree, &[child], network, now),
-            Err(ChainError::InvalidParent { parent: block_one }),
-            "a child of an invalidated header is refused, not accepted as invalid"
-        );
-        assert_eq!(
-            tree.lookup(hash_from_header(&child)),
-            None,
-            "the refused child must not extend the invalid subtree"
-        );
     }
 }

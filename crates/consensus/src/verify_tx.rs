@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut, Txid};
+use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut};
 
 use crate::block_view::BlockView;
 use crate::sigops::transaction_sigop_cost;
@@ -13,7 +13,7 @@ use rayon::prelude::*;
 
 #[cfg(not(feature = "kernel"))]
 use crate::ScriptEngine;
-use crate::rust_path::UtxoView;
+use crate::UtxoView;
 use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST};
 
 const LOCKTIME_THRESHOLD: u32 = 500_000_000;
@@ -84,10 +84,28 @@ static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
 ///   - locktime >= `LOCKTIME_THRESHOLD`: timestamp-based; final iff locktime < `locktime_cutoff`.
 ///   - all inputs have sequence == `SEQUENCE_FINAL`: final regardless of locktime.
 ///
-/// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
+/// PRE: `locktime_cutoff` is the caller's header time or previous-tip MTP.
+/// POST: The result is the Bitcoin `IsFinalTx` verdict at `block_height`.
+/// INVARIANT: Final sequences override a reached locktime threshold.
 #[must_use]
 pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
-    is_final_tx_with_locktime_cutoff(tx, block_height, locktime_cutoff)
+    let lock_time = tx.lock_time.to_consensus();
+    if lock_time == 0 {
+        return true;
+    }
+
+    let threshold = if lock_time < LOCKTIME_THRESHOLD {
+        block_height
+    } else {
+        locktime_cutoff
+    };
+    if lock_time < threshold {
+        return true;
+    }
+
+    tx.inputs
+        .iter()
+        .all(|input| input.sequence == Sequence::from_consensus(SEQUENCE_FINAL))
 }
 
 /// Verifies that a coinbase transaction's scriptSig length is within consensus bounds.
@@ -101,14 +119,13 @@ pub fn verify_coinbase_script_sig_size(tx: &Tx) -> Result<(), ConsensusError> {
     Ok(())
 }
 
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && is_null_outpoint(&tx.inputs[0].previous_output)
-}
-
-/// Core's `OutPoint::IsNull`: null hash plus `NULL_INDEX` (`u32::MAX`), the
-/// coinbase marker. The derived all-zero outpoint (`vout` 0) is not null.
-fn is_null_outpoint(outpoint: &OutPoint) -> bool {
-    outpoint.txid == Txid::default() && outpoint.vout == u32::MAX
+/// Returns `true` for the one-input, null-prevout coinbase shape.
+///
+/// PRE: `tx` is a decoded transaction.
+/// POST: Return true only for one input with a null previous outpoint.
+/// INVARIANT: An all-zero txid with output index zero is not coinbase.
+pub(crate) fn is_coinbase(tx: &Tx) -> bool {
+    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Checks whether a transaction may spend a coinbase output at `spend_height`.
@@ -133,30 +150,6 @@ pub fn check_coinbase_maturity(
         });
     }
     Ok(())
-}
-
-/// Returns `true` iff the transaction is locktime-final at `block_height` and `locktime_cutoff`.
-///
-/// Callers choose the timestamp cutoff: block header time before BIP113, previous-tip MTP after.
-#[must_use]
-fn is_final_tx_with_locktime_cutoff(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
-    let lock_time = tx.lock_time.to_consensus();
-    if lock_time == 0 {
-        return true;
-    }
-
-    let threshold = if lock_time < LOCKTIME_THRESHOLD {
-        block_height
-    } else {
-        locktime_cutoff
-    };
-    if lock_time < threshold {
-        return true;
-    }
-
-    tx.inputs
-        .iter()
-        .all(|input| input.sequence == Sequence::from_consensus(SEQUENCE_FINAL))
 }
 
 /// Verifies non-contextual and input-script transaction rules for a transaction.
@@ -259,7 +252,7 @@ pub fn verify_transaction_input_outpoints(tx: &Tx) -> Result<(), ConsensusError>
     }
     let mut seen = HashSet::new();
     for (input_index, input) in tx.inputs.iter().enumerate() {
-        if is_null_outpoint(&input.previous_output) {
+        if input.previous_output.is_null() {
             return Err(ConsensusError::NullPrevout { input_index });
         }
         if !seen.insert(input.previous_output) {
@@ -280,7 +273,7 @@ fn prepare_tx_checks(
     locktime_cutoff: u32,
     mut lookup: impl FnMut(usize, &OutPoint) -> Option<TxOut>,
 ) -> Result<Option<TxPrep>, ConsensusError> {
-    if !is_final_tx_with_locktime_cutoff(tx, height, locktime_cutoff) {
+    if !is_final_tx(tx, height, locktime_cutoff) {
         return Err(ConsensusError::Bip {
             bip: "BIP113",
             reason: format!(
@@ -338,7 +331,6 @@ fn finalize_tx_value_and_sigops(
         });
     }
 
-    let _ = 0usize;
     let sigop_cost = transaction_sigop_cost(tx, &prep.prevouts, flags);
     if sigop_cost > MAX_BLOCK_SIGOPS_COST {
         return Err(ConsensusError::SigopsLimit {
@@ -829,8 +821,7 @@ mod tests {
     use bitcoin_rs_script::{VerifyFlags, push_int};
 
     use super::{
-        ScriptStageTimings, is_final_tx_with_locktime_cutoff, verify_coinbase_script_sig_size,
-        verify_transaction,
+        ScriptStageTimings, is_final_tx, verify_coinbase_script_sig_size, verify_transaction,
     };
 
     /// Wraps `txs` in a block and parses it the way production does, so tests
@@ -862,7 +853,7 @@ mod tests {
         view.set_resolved(resolved);
         view
     }
-    use crate::{ConsensusError, ScriptEngine, rust_path::UtxoView};
+    use crate::{ConsensusError, ScriptEngine, UtxoView};
 
     impl UtxoView for hashbrown::HashMap<OutPoint, TxOut> {
         fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
@@ -1379,8 +1370,8 @@ mod tests {
             }],
         };
 
-        assert!(!is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_100));
-        assert!(is_final_tx_with_locktime_cutoff(&tx, 1, 500_000_101));
+        assert!(!is_final_tx(&tx, 1, 500_000_100));
+        assert!(is_final_tx(&tx, 1, 500_000_101));
     }
 
     #[test]

@@ -9,9 +9,8 @@ use arc_swap::ArcSwapOption;
 // Wire seam: byte-array access on the retained bitcoin:: wire hash types.
 use bitcoin::hashes::Hash;
 use bitcoin_rs_chain::{
-    BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot,
+    BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
 };
-use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
@@ -410,30 +409,6 @@ impl SyncChain for RefusingChain {
     }
 }
 
-/// Script-int encoding used by the regtest fixture coinbases (duplicated
-/// rather than depending on `bitcoin-rs-script` from `p2p` tests).
-fn push_int(value: i64) -> Vec<u8> {
-    if value == 0 {
-        return Vec::new();
-    }
-    let negative = value < 0;
-    let mut magnitude = value.unsigned_abs();
-    let mut out = Vec::new();
-    while magnitude > 0 {
-        out.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
-        magnitude >>= 8;
-    }
-    if let Some(last) = out.last_mut() {
-        if *last & 0x80 != 0 {
-            out.push(if negative { 0x80 } else { 0 });
-        } else if negative {
-            *last |= 0x80;
-        }
-    }
-    out.insert(0, u8::try_from(out.len() - 1).unwrap_or_default());
-    out
-}
-
 fn check_sync_frontier_pair(
     sync: &BlockSync,
     rx: &crossbeam_channel::Receiver<Message>,
@@ -771,8 +746,18 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
 fn unsolicited_stale_block_retries_from_resolved_header_height()
 -> Result<(), Box<dyn std::error::Error>> {
     let genesis = Network::Regtest.genesis_block();
-    let block1 = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
-    let block2 = mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
+    let block1 = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let block2 = regtest_fixture::mined_block_with_prev_hash(
+        block1.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let block1_hash = block1.block_hash();
     let expected_hash = block2.block_hash();
     let mut tree = BlockTree::new();
@@ -847,7 +832,12 @@ fn unsolicited_stale_block_retries_from_resolved_header_height()
 fn inv_delivered_block_admits_carried_header_and_applies() -> Result<(), Box<dyn std::error::Error>>
 {
     let genesis = Network::Regtest.genesis_block();
-    let block = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
+    let block = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let block_hash = block.block_hash();
     let mut tree = BlockTree::new();
     tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
@@ -905,8 +895,18 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> Result<(), Box<dyn
 #[test]
 fn out_of_order_delivered_blocks_admit_and_apply() -> Result<(), Box<dyn std::error::Error>> {
     let genesis = Network::Regtest.genesis_block();
-    let block1 = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
-    let block2 = mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
+    let block1 = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let block2 = regtest_fixture::mined_block_with_prev_hash(
+        block1.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let mut tree = BlockTree::new();
     tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let SyncHarness {
@@ -960,8 +960,18 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> Result<(), Box<dyn std::er
 fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dyn std::error::Error>>
 {
     let genesis = Network::Regtest.genesis_block();
-    let block1 = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
-    let block2 = mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
+    let block1 = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let block2 = regtest_fixture::mined_block_with_prev_hash(
+        block1.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let mut tree = BlockTree::new();
     tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let SyncHarness {
@@ -1330,9 +1340,24 @@ struct ExhaustionFixture {
 
 fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error::Error>> {
     let genesis = Network::Regtest.genesis_block();
-    let block1 = mined_block_with_prev_hash(genesis.block_hash(), 1, vec![coinbase_transaction(1)]);
-    let block2 = mined_block_with_prev_hash(block1.block_hash(), 2, vec![coinbase_transaction(2)]);
-    let block3 = mined_block_with_prev_hash(block2.block_hash(), 3, vec![coinbase_transaction(3)]);
+    let block1 = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let block2 = regtest_fixture::mined_block_with_prev_hash(
+        block1.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    let block3 = regtest_fixture::mined_block_with_prev_hash(
+        block2.block_hash(),
+        3,
+        vec![regtest_fixture::coinbase(3)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     let block1_hash = block1.block_hash();
     let block2_hash = block2.block_hash();
     let mut tree = BlockTree::new();
@@ -1538,8 +1563,12 @@ fn unrequested_body_admission_matches_core_acceptance() -> Result<(), Box<dyn st
     let fork_parent = tree
         .lookup(Hash256::from(blocks[4].block_hash()))
         .ok_or("missing height 5")?;
-    let fork_body =
-        mined_block_with_prev_hash(blocks[4].block_hash(), 606, vec![coinbase_transaction(606)]);
+    let fork_body = regtest_fixture::mined_block_with_prev_hash(
+        blocks[4].block_hash(),
+        606,
+        vec![regtest_fixture::coinbase(606)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     tree.insert_node(Some(fork_parent), fork_body.header, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(fork_parent)?;
@@ -1714,14 +1743,19 @@ pub(crate) fn mined_chain(
     let mut prev_hash = genesis.block_hash();
     let mut blocks = Vec::with_capacity(usize::try_from(body_height)?);
     for height in 1..=body_height {
-        let block =
-            mined_block_with_prev_hash(prev_hash, height, vec![coinbase_transaction(height)]);
+        let block = regtest_fixture::mined_block_with_prev_hash(
+            prev_hash,
+            height,
+            vec![regtest_fixture::coinbase(height)],
+        )
+        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
         tip_id = tree.insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)?;
         prev_hash = block.block_hash();
         blocks.push(block);
     }
     for height in body_height.saturating_add(1)..=body_height.saturating_add(header_only) {
-        let header = test_header(prev_hash, height);
+        let header = regtest_fixture::mined_regtest_header(prev_hash, height)
+            .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
         tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
         prev_hash = header.compute_hash();
     }
@@ -1895,8 +1929,12 @@ fn header_chain_block(
     } else {
         expected[index - 1]
     };
-    let block =
-        mined_block_with_prev_hash(prev_blockhash, height, vec![coinbase_transaction(height)]);
+    let block = regtest_fixture::mined_block_with_prev_hash(
+        prev_blockhash,
+        height,
+        vec![regtest_fixture::coinbase(height)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     assert_eq!(
         block.block_hash(),
         expected[index],
@@ -2080,86 +2118,24 @@ fn witness_block_inventory(
         .collect()
 }
 
-/// Regtest genesis timestamp. Fixture headers must advance past it or the
-/// median-time-past rule rejects them, since the median is taken over the
-/// ancestors actually present in the tree.
-const GENESIS_TIME: u32 = 1_296_688_602;
-
-fn test_header(prev_blockhash: BlockHash, height: u32) -> Header {
-    use bitcoin_rs_primitives::CompactTarget;
-    let mut merkle = [0_u8; 32];
-    merkle[..4].copy_from_slice(&height.to_le_bytes());
-    let mut header = Header {
-        version: 1,
-        prev_blockhash,
-        merkle_root: Hash256::from_le_bytes(&merkle),
-        time: GENESIS_TIME.saturating_add(height),
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        nonce: height,
-    };
-    // Mine rather than hope: the fixture previously relied on nonce=height
-    // happening to satisfy regtest's easy target, so any change to another
-    // header field silently broke proof-of-work validation.
-    while !pow_met(
-        header.bits.to_consensus(),
-        Hash256::from(header.compute_hash()),
-    ) {
-        header.nonce = header.nonce.wrapping_add(1);
-    }
-    header
-}
-
 fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
     use bitcoin_rs_primitives::CompactTarget;
-    let mut header = test_header(prev_blockhash, height);
+    let mut header = regtest_fixture::mined_regtest_header(prev_blockhash, height)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     header.bits = CompactTarget::from_consensus(0x207f_fffe);
-    for nonce in 0..=u32::MAX {
-        header.nonce = nonce;
-        if pow_met(
-            header.bits.to_consensus(),
-            Hash256::from(header.compute_hash()),
-        ) {
-            return header;
-        }
-    }
-    panic!("exhausted the header nonce space while mining a regtest fixture");
+    regtest_fixture::mine_header_to_declared_target(&mut header)
+        .unwrap_or_else(|error| panic!("regtest fixture grind: {error}"));
+    header
 }
 
 fn far_future_header(
     prev_blockhash: BlockHash,
     height: u32,
 ) -> Result<Header, Box<dyn std::error::Error>> {
-    let mut header = test_header(prev_blockhash, height);
+    let mut header = regtest_fixture::mined_regtest_header(prev_blockhash, height)?;
     header.time = bitcoin_rs_chain::current_unix_seconds().saturating_add(3 * 60 * 60);
-    for nonce in 0..=u32::MAX {
-        header.nonce = nonce;
-        if pow_met(
-            header.bits.to_consensus(),
-            Hash256::from(header.compute_hash()),
-        ) {
-            return Ok(header);
-        }
-    }
-    Err(std::io::Error::other("exhausted future-header nonce space").into())
-}
-
-/// Regtest-easy compact-target `PoW` check over the hash as a 256-bit
-/// little-endian integer (mirrors `chain::pow::compact_is_met_by` for the
-/// >3-exponent, 3-byte-mantissa forms these fixtures mine).
-fn pow_met(bits: u32, hash: Hash256) -> bool {
-    let exponent = bits >> 24;
-    let mantissa = bits & 0x007f_ffff;
-    if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {
-        return false;
-    }
-    let bytes = hash.as_byte_array();
-    let lo = usize::try_from(exponent).unwrap_or(32) - 3;
-    let window =
-        u32::from(bytes[lo]) | u32::from(bytes[lo + 1]) << 8 | u32::from(bytes[lo + 2]) << 16;
-    window <= mantissa
-        && bytes[usize::try_from(exponent).unwrap_or(32)..]
-            .iter()
-            .all(|&byte| byte == 0)
+    regtest_fixture::mine_header_to_declared_target(&mut header)?;
+    Ok(header)
 }
 
 struct HeaderSyncFixture {
@@ -2241,26 +2217,6 @@ fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, Box<dyn std::e
     })
 }
 
-pub(crate) fn coinbase_transaction(height: u32) -> Tx {
-    use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
-    let mut script_sig = push_int(i64::from(height));
-    script_sig.extend_from_slice(&push_int(1));
-    Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: Script::from_bytes(script_sig),
-            sequence: Sequence::from_consensus(0xffff_ffff),
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
-        }],
-        lock_time: LockTime::from_consensus(0),
-    }
-}
-
 fn transaction(seed: u8) -> Tx {
     use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
     Tx {
@@ -2280,62 +2236,6 @@ fn transaction(seed: u8) -> Tx {
         }],
         lock_time: LockTime::from_consensus(0),
     }
-}
-
-pub(crate) fn mined_block_with_prev_hash(
-    prev_blockhash: BlockHash,
-    height: u32,
-    txdata: Vec<Tx>,
-) -> Block {
-    use bitcoin_rs_primitives::CompactTarget;
-    let mut block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash,
-            merkle_root: Hash256::default(),
-            time: GENESIS_TIME.saturating_add(height),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txs: txdata,
-    };
-    block.header.merkle_root = merkle_root(&block.txs);
-    while !pow_met(
-        block.header.bits.to_consensus(),
-        Hash256::from(block.block_hash()),
-    ) {
-        block.header.nonce = block.header.nonce.saturating_add(1);
-    }
-    block
-}
-
-/// Consensus merkle fold: pairwise double-SHA256 over little-endian txid
-/// bytes, duplicating the last leaf on odd levels.
-#[allow(clippy::expect_used)]
-fn merkle_root(txs: &[Tx]) -> Hash256 {
-    let mut hashes: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    if hashes.is_empty() {
-        return Hash256::default();
-    }
-    while hashes.len() > 1 {
-        if hashes.len() % 2 == 1 {
-            let last = hashes.last().expect("odd merkle level has a last leaf");
-            hashes.push(*last);
-        }
-        hashes = hashes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| {
-                let mut buffer = [0_u8; 64];
-                buffer[..32].copy_from_slice(&pair[0]);
-                buffer[32..].copy_from_slice(&pair[1]);
-                double_sha256(&buffer).to_le_bytes()
-            })
-            .collect();
-    }
-    let root = hashes.first().expect("merkle fold reduces to one root");
-    Hash256::from_le_bytes(root)
 }
 
 fn assert_applied_genesis(
@@ -2523,8 +2423,12 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
     let addr = test_addr(9770, 0)?;
     let peer_rx = connect_peer(&peers, synthetic_peer(addr, 2));
     let source = current_source(&peers, addr);
-    let block2 =
-        mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
+    let block2 = regtest_fixture::mined_block_with_prev_hash(
+        blocks[0].block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
     headers_tx.send(InboundHeaders {
         headers: vec![block2.header],
         source: Some(source),

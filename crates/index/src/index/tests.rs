@@ -7,9 +7,8 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore};
 
-use super::{BlockSource, IndexError, IndexWriter, Indexer};
-use crate::types::TxidRow;
-use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, SpendingPrefixRow};
+use super::{BlockSource, IndexError, IndexWatermark, IndexWriter, Indexer};
+use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, ScriptLiveRow, SpendingPrefixRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
 
@@ -81,6 +80,46 @@ fn iter_funding_rows_height_order_is_numeric() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
+/// A persisted `ScriptLive` key with the wrong byte length fails the live
+/// scan with `InvalidPrefixRowLength`, naming the observed length. The
+/// length error belongs to prefix-row decoding, not to watermark decoding.
+#[test]
+fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn std::error::Error>>
+{
+    let script = vec![0x51, 0x05];
+    let scripthash = ScriptHash::from_script_bytes(&script);
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
+
+    let outpoint = spent_outpoint(5, 0);
+    writer.seed_script_live(
+        [(outpoint, scripthash)],
+        IndexWatermark {
+            height: 7,
+            hash: [0x07; 32],
+        },
+    )?;
+
+    let mut malformed = ScriptLiveRow::new(scripthash, &outpoint)
+        .as_bytes()
+        .to_vec();
+    malformed.truncate(40);
+    let mut batch = store.new_batch();
+    batch.put(ColumnFamily::ScriptLive, &malformed, &[]);
+    store.write(batch)?;
+
+    let error = writer
+        .indexer()
+        .iter_live_outpoints(scripthash)
+        .unwrap_err();
+    assert!(
+        matches!(error, IndexError::InvalidPrefixRowLength { len: 40 }),
+        "malformed live-row key must report its length: {error:?}"
+    );
+    Ok(())
+}
+
 #[test]
 fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
     let outpoint = spent_outpoint(2, 3);
@@ -93,19 +132,6 @@ fn iter_spending_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::E
         writer.indexer().iter_spending_rows(&outpoint)?,
         vec![SpendingPrefixRow::row(&outpoint, 0)]
     );
-    Ok(())
-}
-
-#[test]
-fn iter_txid_rows_returns_indexed_rows() -> Result<(), Box<dyn std::error::Error>> {
-    let tx = tx(spent_outpoint(4, 5), vec![0x51, 0x03]);
-    let txid = tx.txid();
-    let (_dir, mut writer) = writer()?;
-
-    writer.commit_block(0, &consensus_bytes(&block(vec![tx])))?;
-
-    let rows = writer.indexer().iter_txid_rows(&txid)?;
-    assert!(rows.contains(&TxidRow::row(&txid, 0)));
     Ok(())
 }
 
@@ -210,46 +236,6 @@ fn resolve_transaction_returns_none_when_indexed_height_is_not_visible()
     let resolved = writer.indexer().resolve_transaction(txid, &source)?;
 
     assert_eq!(resolved, None);
-    Ok(())
-}
-
-#[test]
-fn resolve_tx_with_height_returns_genesis_coinbase_at_height_zero()
--> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let Some(tx) = block.txs.first() else {
-        return Err(std::io::Error::other("genesis block has no transactions").into());
-    };
-    let coinbase = tx.clone();
-    let txid = tx.txid();
-    let (_dir, mut writer) = writer()?;
-
-    writer.commit_block(0, &consensus_bytes(&block))?;
-
-    let source = FakeSource {
-        block,
-        target_height: 0,
-    };
-    let resolved = writer.indexer().resolve_tx_with_height(txid, &source)?;
-
-    assert_eq!(resolved, Some((coinbase, 0)));
-    Ok(())
-}
-
-#[test]
-fn resolve_tx_with_height_returns_none_for_unknown_txid() -> Result<(), Box<dyn std::error::Error>>
-{
-    let (_dir, writer) = writer()?;
-    let txid = Txid(Hash256::from_le_bytes(&[0xff; 32]));
-    let source = FakeSource {
-        block: Network::Regtest.genesis_block(),
-        target_height: 0,
-    };
-
-    assert_eq!(
-        writer.indexer().resolve_tx_with_height(txid, &source)?,
-        None
-    );
     Ok(())
 }
 

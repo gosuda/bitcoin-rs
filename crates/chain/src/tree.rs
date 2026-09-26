@@ -10,7 +10,7 @@ use slab::Slab;
 use crate::{
     CachedState, ChainError, ChainTxCount,
     bip9_cache::Bip9Cache,
-    node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus},
+    node::{BlockHeader, BlockTreeNode, NodeId, NodeStatus},
     tip::TipSnapshot,
 };
 
@@ -181,28 +181,6 @@ impl BlockTree {
         }
 
         None
-    }
-
-    /// Returns up to `limit` parent `NodeId`s of `start` (excluding `start` itself).
-    ///
-    /// Walks parent pointers in order from nearest to farthest. Stops at the root
-    /// (no parent) or after `limit` ancestors. Used by header-distance queries and
-    /// reorg cost analysis.
-    #[must_use]
-    pub fn ancestors(&self, start: NodeId, limit: usize) -> Vec<NodeId> {
-        let mut out = Vec::with_capacity(limit);
-        let mut cursor = start;
-        while out.len() < limit {
-            let Ok(node) = self.node(cursor) else {
-                break;
-            };
-            let Some(parent_id) = node.parent else {
-                break;
-            };
-            out.push(parent_id);
-            cursor = parent_id;
-        }
-        out
     }
 
     /// Looks up a node id by header hash.
@@ -610,7 +588,7 @@ impl BlockTree {
             return Err(ChainError::DuplicateHeader { hash });
         }
 
-        let block_work = work_from_header(&header);
+        let block_work = crate::header_sync::pow::work_from_header(&header);
         let (height, chainwork, status) = match parent {
             Some(parent_id) => {
                 let parent_node = self.node(parent_id)?;
@@ -888,20 +866,14 @@ fn node_hash_key(nodes: &Slab<BlockTreeNode>, id: NodeId) -> u64 {
         .map_or(0, |node| hash_table_key(node.hash))
 }
 
-fn work_from_header(header: &BlockHeader) -> ChainWork {
-    crate::header_sync::pow::work_from_header(header)
-}
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{BlockHash, CompactTarget};
 
-    use std::sync::Arc;
-
     use super::{BlockTree, Hash256, hash_from_header};
     use crate::{
         ChainTxCount,
-        node::{BlockHeader, ChainWork, NodeId, NodeStatus},
-        tip::TipSnapshot,
+        node::{BlockHeader, NodeId, NodeStatus},
     };
 
     #[test]
@@ -1363,6 +1335,10 @@ mod tests {
 
         assert_eq!(tree.tip_id(), Some(genesis_id));
         assert_eq!(tree.node(genesis_id)?.hash, genesis_hash);
+        // The published snapshot is coherent with the active insertion:
+        // genesis's height and hash, not hand-stored values.
+        assert_eq!(tree.tip_height(), Some(0));
+        assert_eq!(tree.tip_hash(), Some(genesis_hash));
         Ok(())
     }
 
@@ -1376,40 +1352,6 @@ mod tests {
     fn tip_hash_returns_none_before_publish() {
         let tree = BlockTree::new();
         assert!(tree.tip_hash().is_none());
-    }
-
-    #[test]
-    fn tip_height_returns_published_tip_height() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
-        tree.tip_handle().store(Some(Arc::new(TipSnapshot {
-            tip_id: genesis_id,
-            height: 7,
-            chainwork: ChainWork::ZERO,
-            hash: genesis_hash,
-            chain_tx_count: ChainTxCount::UNKNOWN,
-        })));
-        assert_eq!(tree.tip_height(), Some(7));
-        Ok(())
-    }
-
-    #[test]
-    fn tip_hash_returns_published_tip_hash() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
-        tree.tip_handle().store(Some(Arc::new(TipSnapshot {
-            tip_id: genesis_id,
-            height: 0,
-            chainwork: ChainWork::ZERO,
-            hash: genesis_hash,
-            chain_tx_count: ChainTxCount::UNKNOWN,
-        })));
-        assert_eq!(tree.tip_hash(), Some(genesis_hash));
-        Ok(())
     }
 
     #[test]
@@ -1511,46 +1453,6 @@ mod tests {
             tree.node_at_height_from(main_tip_id, 1),
             Some(main_child_id)
         );
-        Ok(())
-    }
-
-    #[test]
-    fn ancestors_returns_empty_for_root() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let result = tree.ancestors(genesis_id, 10);
-        assert!(result.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn ancestors_walks_parent_chain_in_order() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let child = test_header(BlockHash(hash_from_header(&genesis)), 1);
-        let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::HeaderValid)?;
-        let grandchild = test_header(BlockHash(hash_from_header(&child)), 2);
-        let grandchild_id =
-            tree.insert_node(Some(child_id), grandchild, NodeStatus::HeaderValid)?;
-        let result = tree.ancestors(grandchild_id, 10);
-        assert_eq!(result, vec![child_id, genesis_id]);
-        Ok(())
-    }
-
-    #[test]
-    fn ancestors_respects_limit() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let child = test_header(BlockHash(hash_from_header(&genesis)), 1);
-        let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::HeaderValid)?;
-        let grandchild = test_header(BlockHash(hash_from_header(&child)), 2);
-        let grandchild_id =
-            tree.insert_node(Some(child_id), grandchild, NodeStatus::HeaderValid)?;
-        let result = tree.ancestors(grandchild_id, 1);
-        assert_eq!(result, vec![child_id]);
         Ok(())
     }
 

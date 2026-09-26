@@ -10,7 +10,7 @@ use bitcoin::Wtxid as OracleWtxid;
 use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
 use bitcoin_rs_mining::{
     CandidateContext, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
-    assemble_ordered_candidate,
+    assemble_ordered_candidate, solve_block,
 };
 use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
@@ -359,7 +359,7 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// API-05: `Candidate::solve` searches nonces until the compact target is met.
+/// API-05: solving searches nonces until the compact target is met.
 #[test]
 fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
     let mempool = Mempool::new(MempoolLimits {
@@ -383,11 +383,12 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
         max_sigops: 80_000,
     };
     let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
-    let unsolved = candidate.into_unsolved_block();
+    let unsolved = candidate.into_unsolved_block()?;
     assert_eq!(unsolved.txs.len(), 1);
     assert_eq!(unsolved.header.nonce, 0);
     assert_eq!(unsolved.header.bits, context.bits);
-    let solved = candidate.solve(1_000_000)?;
+    let mut solved = candidate.into_unsolved_block()?;
+    solve_block(&mut solved, 1_000_000)?;
     assert_eq!(solved.txs.len(), 1);
     assert_eq!(solved.header.prev_blockhash.0, context.previous_block_hash);
     Ok(())

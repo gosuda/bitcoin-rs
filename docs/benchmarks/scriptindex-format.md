@@ -1,6 +1,6 @@
 # Generic index on-disk format
 
-This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes bump whichever version axis they move and keep `CURRENT_SCHEMA` unchanged: the durability marker (`[0x00, b'V']`, currently row-format 5) is the hard open gate with full-reset recovery, and the row-value marker (`INDEX_FORMAT_VERSION`, currently 3) is the soft capability report that degrades to scans. There is no translator and no legacy reader; an unknown durability marker refuses start and recovery unattended-resets the derived namespace for rebuild from retained chainstate (operator cost of a format bump: one derived re-index on first start; authoritative data untouched). A rejected non-derived file is left in place until explicit authorized rebuild.
+This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes bump the durability marker and keep `CURRENT_SCHEMA` unchanged: the durability marker (`[0x00, b'V']`, currently row-format 5) is the hard open gate with full-reset recovery, and it covers key layout and row-value widths alike. There is no translator and no legacy reader; an unknown durability marker refuses start and recovery unattended-resets the derived namespace for rebuild from retained chainstate (operator cost of a format bump: one derived re-index on first start; authoritative data untouched). A rejected non-derived file is left in place until explicit authorized rebuild.
 
 ## Row families
 
@@ -259,13 +259,12 @@ cheaply, and BE would buy nothing the API does not already guarantee:
    key layout for compatibility reasoning. Switching to BE would diverge
    from the reference design for no measurable query benefit.
 
-The sort-in-reader approach (`entries.sort_by_key(|entry| entry.height)`) is
-applied in `resolve_script_history`, `resolve_script_history_scan`,
-`resolve_unspent_outputs_with_height`, and
-`resolve_unspent_outputs_with_height_scan`. The raw `iter_funding_rows`,
-`iter_spending_rows`, and `iter_txid_rows` functions document the LE caveat
-and return rows in store order, so callers that want chronological order
-must sort — but the high-level resolvers already do it for them.
+The format-5 height suffix is big-endian, so store iteration order already
+is numeric height order within one 8-byte prefix. The high-level resolvers
+(`resolve_script_history`, `resolve_unspent_outputs_with_height`) return
+entries sorted by numeric height. The raw `iter_funding_rows`,
+`iter_spending_rows`, and `iter_txid_rows` functions return rows in store
+order, so callers get chronological order without sorting.
 
 #### Q4: Per-CF cost table (fixture-scale)
 
@@ -338,14 +337,12 @@ The index tracks two independently versioned capabilities via
 | `TxLookup` | `TxConfirmed`, `BlockHeaders` | `TX_LOOKUP_WATERMARK_KEY` |
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
 
-**Per-capability format version.** The row-value format version
-(`INDEX_FORMAT_VERSION`, currently 3) is the soft report marker in `UtxoMeta` (the
-hard open-gate marker is the durability key `[0x00, b'V']`, row-format 5). It
-arrays, and at which width (version 3: 6-byte u24 positions). The anticipated
-`TxPosition`-width bump is this version. A durability marker other than the
-current value refuses start (`UnsupportedTxIndexFormatVersion`) and recovery
-full-resets the store for rebuild, so a foreign-format index is rebuilt
-rather than read in place.
+**Per-capability format version.** The single durable format marker is the
+durability key `[0x00, b'V']` in `UtxoMeta`, currently row-format 5. The marker
+covers the key layout and the row-value widths alike (format 5: 6-byte u24
+positions). A marker other than the current value refuses start
+(`UnsupportedTxIndexFormatVersion`) and recovery full-resets the store for
+rebuild, so a foreign-format index is rebuilt rather than read in place.
 
 **Per-capability reset.** The `IndexCapabilities` mask allows resetting one
 capability without touching the other. `acquire_capability_reset` and
@@ -357,7 +354,7 @@ prevents ABA across repeated resets.
 Every durability marker (`[0x00, b'V']`) older than the current row-format 5
 refuses start (`UnsupportedTxIndexFormatVersion`) and recovery full-resets
 the store for rebuild: format 5 changed every row family, so no in-place
-upgrade path exists. (Row-value format 3 is the soft report axis, not the gate.)
+upgrade path exists.
 
 **Adding ScriptLive later must not force a History reindex.** ScriptLive
 rows would occupy a new column family (not one of the existing four). The
@@ -369,7 +366,7 @@ watermark key. Because the reset mechanism is per-capability:
 - A `ScriptHistory` reset (clearing `Funding` + `Spending`) does not touch
   `ScriptLive` rows.
 - A `ScriptLive` reset clears only the Live CF.
-- The `INDEX_FORMAT_VERSION` marker does not change: it governs the
+- The `[0x00, b'V']` durability marker does not change: it governs the
   row-value format of existing CFs, not the existence of a new CF.
 
 The only shared state between capabilities is the `ORDINARY_STATE_REVISION`

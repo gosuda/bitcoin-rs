@@ -244,6 +244,7 @@ version = "0.9.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
+ "bitcoin-rs-chain",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",

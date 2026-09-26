@@ -11,16 +11,24 @@ fn indexed_sync_frontiers_match_parent_plans() -> Result<(), Box<dyn std::error:
     let mut main = vec![root];
     for tag in 1..=12 {
         let parent = *main.last().ok_or("missing main parent")?;
-        let header = test_header(BlockHash::from(tree.node(parent)?.hash), tag);
+        let header =
+            regtest_fixture::mined_regtest_header(BlockHash::from(tree.node(parent)?.hash), tag)
+                .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
         main.push(tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)?);
     }
     let mut fork = vec![main[2]];
     for tag in 101..=106 {
         let parent = *fork.last().ok_or("missing fork parent")?;
-        let header = test_header(BlockHash::from(tree.node(parent)?.hash), tag);
+        let header =
+            regtest_fixture::mined_regtest_header(BlockHash::from(tree.node(parent)?.hash), tag)
+                .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
         fork.push(tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)?);
     }
-    let foreign_header = test_header(BlockHash::from(Hash256::from_le_bytes(&[0; 32])), 200);
+    let foreign_header = regtest_fixture::mined_regtest_header(
+        BlockHash::from(Hash256::from_le_bytes(&[0; 32])),
+        200,
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let foreign = tree.insert_node(None, foreign_header, NodeStatus::HeaderValid)?;
     let endpoints = [root, main[2], main[6], main[12], fork[2], fork[6], foreign];
     let snapshots = endpoints
@@ -68,7 +76,8 @@ fn request_frontier_retains_parent_plan_on_height_gaps() -> Result<(), Box<dyn s
     let mut tree = BlockTree::new();
     let root = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
     let root_hash = tree.node(root)?.hash;
-    let header = test_header(BlockHash::from(root_hash), 1);
+    let header = regtest_fixture::mined_regtest_header(BlockHash::from(root_hash), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let child = tree.insert_node(Some(root), header, NodeStatus::HeaderValid)?;
     tree.node_mut(child)?.height = 2;
     let plan = bitcoin_rs_chain::plan_reorg(&tree, root, child)?;
@@ -88,9 +97,11 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
 
-    let losing1 = test_header(genesis.compute_hash(), 1);
+    let losing1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
-    let losing2 = test_header(losing1.compute_hash(), 2);
+    let losing2 = regtest_fixture::mined_regtest_header(losing1.compute_hash(), 2)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(losing2_id)?;
@@ -103,11 +114,14 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
         }
     };
 
-    let winning1 = test_header(genesis.compute_hash(), 101);
+    let winning1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let winning1_id = tree.insert_node(Some(genesis_id), winning1, NodeStatus::HeaderValid)?;
-    let winning2 = test_header(winning1.compute_hash(), 102);
+    let winning2 = regtest_fixture::mined_regtest_header(winning1.compute_hash(), 102)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let winning2_id = tree.insert_node(Some(winning1_id), winning2, NodeStatus::HeaderValid)?;
-    let winning3 = test_header(winning2.compute_hash(), 103);
+    let winning3 = regtest_fixture::mined_regtest_header(winning2.compute_hash(), 103)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     tree.insert_node(Some(winning2_id), winning3, NodeStatus::HeaderValid)?;
     let expected = vec![
         winning1.compute_hash(),
@@ -153,9 +167,11 @@ fn pending_reorg_fixture()
 -> Result<(SyncHarness, TipSnapshot, Vec<Block>), Box<dyn std::error::Error>> {
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
-    let losing1 = test_header(genesis_header().compute_hash(), 1);
+    let losing1 = regtest_fixture::mined_regtest_header(genesis_header().compute_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
-    let losing2 = test_header(losing1.compute_hash(), 2);
+    let losing2 = regtest_fixture::mined_regtest_header(losing1.compute_hash(), 2)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(losing2_id)?;
@@ -172,7 +188,12 @@ fn pending_reorg_fixture()
     let mut parent = genesis_id;
     let mut prev = genesis_header().compute_hash();
     for tag in 101..=103_u32 {
-        let block = mined_block_with_prev_hash(prev, tag, vec![coinbase_transaction(tag)]);
+        let block = regtest_fixture::mined_block_with_prev_hash(
+            prev,
+            tag,
+            vec![regtest_fixture::coinbase(tag)],
+        )
+        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
         parent = tree.insert_node(Some(parent), block.header, NodeStatus::HeaderValid)?;
         prev = block.block_hash();
         winning.push(block);
@@ -287,7 +308,8 @@ fn inbound_headers_response_releases_getheaders_gate() -> Result<(), Box<dyn std
         return Err(std::io::Error::other("expected first getheaders").into());
     }
 
-    let header = test_header(genesis.compute_hash(), 1);
+    let header = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![header],
         source: Some(current_source(&peers, addr)),
@@ -343,7 +365,8 @@ fn unconnecting_headers_retain_gate_and_pace_retry() -> Result<(), Box<dyn std::
     // locator be replayed at round-trip pace against a peer that already said
     // it cannot serve the ancestry.
     let orphan_prev = BlockHash(Hash256::from_le_bytes(&[0x11; 32]));
-    let orphan = test_header(orphan_prev, 5);
+    let orphan = regtest_fixture::mined_regtest_header(orphan_prev, 5)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![orphan],
         source: Some(current_source(&peers, addr)),
@@ -374,10 +397,13 @@ fn orphan_headers_keep_source_peer_connected() -> Result<(), Box<dyn std::error:
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     let _rx = connect_peer(&peers, synthetic_peer(peer_addr, 8));
     inbound_headers_tx.send(InboundHeaders {
-        headers: vec![test_header(
-            BlockHash(Hash256::from_le_bytes(&[0x11; 32])),
-            1,
-        )],
+        headers: vec![
+            regtest_fixture::mined_regtest_header(
+                BlockHash(Hash256::from_le_bytes(&[0x11; 32])),
+                1,
+            )
+            .unwrap_or_else(|error| panic!("regtest fixture header: {error}")),
+        ],
         source: Some(current_source(&peers, peer_addr)),
 
         wire_response: true,

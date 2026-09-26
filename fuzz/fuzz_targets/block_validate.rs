@@ -3,7 +3,7 @@
 use bitcoin::consensus::encode::{deserialize, serialize};
 use libfuzzer_sys::fuzz_target;
 
-use bitcoin_rs_consensus::rust_path::UtxoView;
+use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_consensus::{verify_block_rules, verify_transaction_non_script};
 use bitcoin_rs_primitives::{Amount, Block, OutPoint, Script, TxOut};
 use bitcoin_rs_script::VerifyFlags;

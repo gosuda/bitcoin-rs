@@ -535,11 +535,6 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std
         // owner; row cardinality does not depend on the height suffix.
         writer.commit_block(0, &block)?;
         assert_eq!(
-            writer.last_counts(),
-            expected,
-            "height {height} committed counts"
-        );
-        assert_eq!(
             store.count(ColumnFamily::TxConfirmed),
             expected.txids,
             "height {height} txid rows"
@@ -1878,11 +1873,9 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
     seed_populated_store(&store, 1)?;
 
     assert_eq!(
-        store
-            .get(ColumnFamily::UtxoMeta, b"index:format_version")?
-            .as_deref(),
-        Some(3u32.to_le_bytes().as_slice()),
-        "the row-format marker survives reset and rebuild"
+        store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
+        Some(5u32.to_le_bytes().as_slice()),
+        "the row-format gate survives reset and rebuild"
     );
     assert!(
         store

@@ -200,7 +200,7 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
 }
 
 /// A P2SH spend whose redeem script is heavy with `OP_CHECKMULTISIG` is
-/// rejected before script verification because `total_sigop_cost` sees the
+/// rejected before script verification because `transaction_sigop_cost` sees the
 /// P2SH sigops once the prevout is known.
 #[test]
 fn p2sh_sigop_cost_exceeds_standard_limit() {
@@ -253,7 +253,7 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
 }
 
 /// A P2WSH spend whose witness script is heavy with `OP_CHECKMULTISIG` is
-/// rejected before script verification because `total_sigop_cost` sees the
+/// rejected before script verification because `transaction_sigop_cost` sees the
 /// witness sigops once the prevout is known.
 #[test]
 fn p2wsh_sigop_cost_exceeds_standard_limit() {

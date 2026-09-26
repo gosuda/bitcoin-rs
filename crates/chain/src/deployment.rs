@@ -211,7 +211,6 @@ fn cached_deployment_state(
         deployment_id,
         CachedState {
             tag: state.cache_tag(),
-            since_height: period_start,
         },
     );
     state

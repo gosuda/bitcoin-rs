@@ -40,6 +40,13 @@ const WORK_PER_HEADER: u64 = 2;
 /// minimum block version at heights 500, 1251, and 1351, and these fixture
 /// chains are longer than all of them.
 fn mine_header(prev_blockhash: BlockHash, height: u32) -> Header {
+    regtest_fixture::mined_regtest_header(prev_blockhash, height)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"))
+}
+
+/// One regtest-easy header with the height salted into its merkle root, the
+/// shape the presync commitment tests vary; grinds at the declared target.
+fn test_header(prev_blockhash: BlockHash, height: u32) -> Header {
     use bitcoin_rs_primitives::CompactTarget;
     let mut merkle = [0_u8; 32];
     merkle[..4].copy_from_slice(&height.to_le_bytes());
@@ -47,16 +54,12 @@ fn mine_header(prev_blockhash: BlockHash, height: u32) -> Header {
         version: 4,
         prev_blockhash,
         merkle_root: Hash256::from_le_bytes(&merkle),
-        time: GENESIS_TIME.saturating_add(height),
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        nonce: height,
+        time: regtest_fixture::genesis_time().saturating_add(height),
+        bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
+        nonce: 0,
     };
-    while !pow_met(
-        header.bits.to_consensus(),
-        Hash256::from(header.compute_hash()),
-    ) {
-        header.nonce = header.nonce.wrapping_add(1);
-    }
+    regtest_fixture::mine_header_to_declared_target(&mut header)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     header
 }
 
@@ -334,6 +337,12 @@ fn a_substituted_redownload_header_disconnects_the_connection()
         chain[commitment_index - 2].compute_hash(),
         commitment_height,
     );
+    // The fixture header mines `version: 4` at the declared regtest target;
+    // the substitution loop below regrinds only the nonce, so the rogue
+    // header keeps a version and target the admission rules accept.
+    let mut merkle = [0_u8; 32];
+    merkle[..4].copy_from_slice(&commitment_height.to_le_bytes());
+    rogue.merkle_root = Hash256::from_le_bytes(&merkle);
     let original_bit = with_sync_state(&sync, source, |state| {
         state.commitment_bit(Hash256::from(original_hash))
     })
@@ -344,7 +353,7 @@ fn a_substituted_redownload_header_disconnects_the_connection()
             .unwrap_or_else(|| unreachable!("the sync state is live"));
         if hash != Hash256::from(original_hash)
             && bit != original_bit
-            && pow_met(rogue.bits.to_consensus(), hash)
+            && bitcoin_rs_chain::compact_is_met_by(rogue.bits, hash)
         {
             break;
         }

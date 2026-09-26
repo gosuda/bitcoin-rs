@@ -164,19 +164,22 @@ pub struct Candidate {
 impl Candidate {
     /// Builds the unsolved block this candidate describes.
     ///
-    /// Coinbase is first, then the selected transactions in topological order.
-    /// The header carries the candidate version, parent, merkle root, time,
-    /// and compact target with a zero nonce.
-    #[must_use]
-    pub fn into_unsolved_block(&self) -> Block {
+    /// PRE: the candidate contains its assembled coinbase and transactions.
+    /// POST: the method returns the corresponding unsolved block, or the
+    /// merkle-root error. Coinbase is first, then the selected transactions
+    /// in topological order. The header carries the candidate version,
+    /// parent, merkle root, time, and compact target with a zero nonce.
+    /// INVARIANT: the returned header merkle root is computed from the block
+    /// transaction IDs. An error is never replaced by a hash value.
+    pub fn into_unsolved_block(&self) -> Result<Block, MiningError> {
         let mut txs = Vec::with_capacity(self.transactions.len().saturating_add(1));
         txs.push(self.coinbase.clone());
         txs.extend(self.transactions.iter().map(|tx| (*tx.tx).clone()));
         let merkle_root = merkle_root_from_txids(
             core::iter::once(self.coinbase.txid())
                 .chain(self.transactions.iter().map(|tx| tx.tx.txid())),
-        );
-        Block {
+        )?;
+        Ok(Block {
             header: Header {
                 version: self.version,
                 prev_blockhash: BlockHash::from(self.previous_block_hash),
@@ -186,15 +189,7 @@ impl Candidate {
                 nonce: 0,
             },
             txs,
-        }
-    }
-
-    /// Assembles the unsolved block and searches nonces until the compact
-    /// target is met or `max_tries` is exhausted.
-    pub fn solve(&self, max_tries: u64) -> Result<Block, MiningError> {
-        let mut block = self.into_unsolved_block();
-        solve_block(&mut block, max_tries)?;
-        Ok(block)
+        })
     }
 }
 
@@ -475,12 +470,12 @@ fn witness_merkle_root(
     merkle_root_from_leaves(&mut leaves)
 }
 
-fn merkle_root_from_txids(txids: impl IntoIterator<Item = Txid>) -> Hash256 {
+fn merkle_root_from_txids(txids: impl IntoIterator<Item = Txid>) -> Result<Hash256, MiningError> {
     let mut leaves = txids
         .into_iter()
         .map(|txid| *txid.as_bytes())
         .collect::<Vec<_>>();
-    merkle_root_from_leaves(&mut leaves).unwrap_or_else(|_| Hash256::from_le_bytes(&[0_u8; 32]))
+    merkle_root_from_leaves(&mut leaves)
 }
 
 fn merkle_root_from_leaves(leaves: &mut Vec<[u8; 32]>) -> Result<Hash256, MiningError> {

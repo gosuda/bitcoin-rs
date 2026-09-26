@@ -38,6 +38,7 @@ tracing.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true
 proptest.workspace = true

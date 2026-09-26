@@ -500,11 +500,12 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     let now = Instant::now();
     {
         let mut scheduler = sync.scheduler.lock();
-        let block = super::mined_block_with_prev_hash(
+        let block = regtest_fixture::mined_block_with_prev_hash(
             BlockHash(Hash256::from_le_bytes(expected[2].as_bytes())),
             4,
             vec![super::transaction(0xEE)],
-        );
+        )
+        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         scheduler.window.seed_front_cadence_for_test(50, now);
         scheduler.stager.insert(

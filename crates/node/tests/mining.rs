@@ -1,9 +1,10 @@
 //! Focused behavioral tests for the node-owned mining coordinator.
 
+use bitcoin_rs_chain::{compact_is_met_by, regtest_fixture};
 use bitcoin_rs_mining::{
     BlockTemplate, BlockTemplateMode, BlockTemplateRequest, BlockTemplateResult,
     BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx, MempoolSequenceWake,
-    MiningCapability, MiningControl, MiningControlError,
+    MiningCapability, MiningControl, MiningControlError, solve_block,
 };
 
 use bitcoin_rs_node::{
@@ -13,7 +14,7 @@ use bitcoin_rs_node::{
 
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, encode::double_sha256,
+    Tx, TxIn, TxOut, Txid, Witness,
 };
 
 use compact_str::CompactString;
@@ -129,10 +130,13 @@ fn is_witness_commitment(script_pubkey: &[u8]) -> bool {
 
 fn solved_template_block(mining: &MiningCoordinator) -> anyhow::Result<Block> {
     let template = expect_template(mining.get_block_template(template_request(None))?);
-    template
+    let mut block = template
         .candidate
-        .solve(1_000_000)
-        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))
+        .into_unsolved_block()
+        .map_err(|error| anyhow::anyhow!("assemble template candidate: {error}"))?;
+    solve_block(&mut block, 1_000_000)
+        .map_err(|error| anyhow::anyhow!("solve template candidate: {error}"))?;
+    Ok(block)
 }
 
 fn mined_child(prev: BlockHash) -> anyhow::Result<Block> {
@@ -161,13 +165,13 @@ fn mined_child_labeled(prev: BlockHash, label: i64) -> anyhow::Result<Block> {
             prev_blockhash: prev,
             merkle_root: Hash256::default(),
             time: 1_296_688_603 + 600,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
+            bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
             nonce: 0,
         },
         txs: vec![coinbase],
     };
     block.header.merkle_root = block.txs[0].txid().into();
-    mine_block_to_regtest_target(&mut block)?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
 }
 
@@ -177,79 +181,10 @@ fn excess_coinbase_child(prev: BlockHash) -> anyhow::Result<Block> {
         panic!("coinbase has no output");
     };
     output.value = output.value.saturating_add(Amount::from_sat(1));
-    block.header.merkle_root = block_merkle_root(&block);
-    mine_block_to_regtest_target(&mut block)?;
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
-}
-
-fn mine_block_to_regtest_target(block: &mut Block) -> anyhow::Result<()> {
-    while !pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("nonce exhausted"))?;
-    }
-    Ok(())
-}
-
-/// Consensus merkle root over the block's txids: pairwise double-SHA256 with
-/// the last leaf duplicated on odd levels.
-fn block_merkle_root(block: &Block) -> Hash256 {
-    let mut leaves: Vec<[u8; 32]> = block.txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair).to_le_bytes());
-        }
-        leaves = next;
-    }
-    Hash256::from_le_bytes(&leaves[0])
-}
-
-/// Decodes a 256-bit compact target into little-endian bytes. Negative,
-/// overflowed, and zero-mantissa encodings decode to an unreachable zero.
-fn compact_to_target(bits: u32) -> [u8; 32] {
-    let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
-    let mantissa = u64::from(bits & 0x007f_ffff);
-    let mut target = [0_u8; 32];
-    if mantissa == 0 || bits & 0x0080_0000 != 0 || exponent > 34 {
-        return target;
-    }
-    let mantissa_bytes = mantissa.to_le_bytes();
-    if exponent >= 3 {
-        let offset = exponent - 3;
-        for (index, byte) in mantissa_bytes.iter().enumerate().take(3) {
-            if let Some(slot) = target.get_mut(offset + index) {
-                *slot = *byte;
-            }
-        }
-    } else {
-        let shifted = mantissa >> (8 * (3 - exponent));
-        target[..8].copy_from_slice(&shifted.to_le_bytes());
-    }
-    target
-}
-
-/// Returns true when `hash` is at or below the compact target, comparing the
-/// little-endian byte arrays from the most significant end.
-fn pow_met(bits: u32, hash: &BlockHash) -> bool {
-    let target = compact_to_target(bits);
-    let hash_le = hash.as_bytes();
-    for index in (0..32).rev() {
-        match hash_le[index].cmp(&target[index]) {
-            std::cmp::Ordering::Less => return true,
-            std::cmp::Ordering::Greater => return false,
-            std::cmp::Ordering::Equal => {}
-        }
-    }
-    true
 }
 
 /// Fixture transaction whose admission is one emitted mempool change, so
@@ -611,7 +546,8 @@ fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
         panic!("child missing coinbase input");
     };
     input.previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0);
-    block.header.merkle_root = block_merkle_root(&block);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
     match propose_block(&mining, block)? {
         BlockValidationResult::Rejected(reason) => {
             assert_eq!(reason.as_str(), "bad-cb-missing");
@@ -701,8 +637,9 @@ fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result
             "coinbase must keep a payout output after stripping the commitment"
         );
     }
-    block.header.merkle_root = block_merkle_root(&block);
-    mine_block_to_regtest_target(&mut block)?;
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     match propose_block(&mining, block)? {
         BlockValidationResult::Rejected(reason) => {
             assert_eq!(reason.as_str(), "unexpected-witness");
@@ -731,8 +668,9 @@ fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> anyhow::Re
         };
         output.script_pubkey[6] ^= 0xff;
     }
-    block.header.merkle_root = block_merkle_root(&block);
-    mine_block_to_regtest_target(&mut block)?;
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     match propose_block(&mining, block)? {
         BlockValidationResult::Rejected(reason) => {
             assert_eq!(reason.as_str(), "bad-witness-merkle-match");
@@ -970,7 +908,7 @@ fn submit_header_rejects_bad_diffbits() -> anyhow::Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let mut child = mined_child(genesis.block_hash())?;
     child.header.bits = CompactTarget::from_consensus(0x207f_fffe);
-    mine_block_to_regtest_target(&mut child)?;
+    regtest_fixture::mine_block_to_declared_target(&mut child)?;
     match mining.submit_header(child.header) {
         Err(MiningControlError::Rejected(reason)) => {
             assert_eq!(reason.as_str(), "bad-diffbits");
@@ -988,7 +926,7 @@ fn submit_header_rejects_time_too_new() -> anyhow::Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let mut child = mined_child(genesis.block_hash())?;
     child.header.time = u32::MAX;
-    mine_block_to_regtest_target(&mut child)?;
+    regtest_fixture::mine_block_to_declared_target(&mut child)?;
     match mining.submit_header(child.header) {
         Err(MiningControlError::Rejected(reason)) => {
             assert_eq!(reason.as_str(), "time-too-new");
@@ -1031,15 +969,11 @@ fn mined_regtest_header(prev: BlockHash, time: u32, version: i32) -> Header {
         prev_blockhash: prev,
         merkle_root: Hash256::default(),
         time,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
+        bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
         nonce: 0,
     };
-    while !pow_met(header.bits.to_consensus(), &header.compute_hash()) {
-        header.nonce = header
-            .nonce
-            .checked_add(1)
-            .unwrap_or_else(|| panic!("nonce exhausted mining a regtest header"));
-    }
+    regtest_fixture::mine_header_to_declared_target(&mut header)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     header
 }
 
@@ -1050,15 +984,10 @@ fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
     let mining = coordinator(&state);
     let mut block = mined_child(BlockHash::from(Hash256::from_le_bytes(&[0x11; 32])))?;
     // Ensure PoW still valid for the mutated prev hash by remine.
-    block.header.merkle_root = block_merkle_root(&block);
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
     block.header.nonce = 0;
-    while !pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("nonce exhausted"))?;
-    }
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     let result = mining.submit_block(block)?;
     match result {
         BlockValidationResult::Rejected(reason) => {
@@ -1231,7 +1160,7 @@ fn concurrent_duplicate_submissions_leave_admission_open() -> anyhow::Result<()>
     assert_eq!(state.chainstate().chain_snapshot().tip_height, 1);
     let mut next = mined_child_labeled(child.block_hash(), 2)?;
     next.header.time = child.header.time + 1;
-    mine_block_to_regtest_target(&mut next)?;
+    regtest_fixture::mine_block_to_declared_target(&mut next)?;
     assert_eq!(
         mining.submit_block(next)?,
         BlockValidationResult::Accepted,
@@ -1248,7 +1177,7 @@ fn unsolved_pow_is_rejected_by_proposal_and_submit() -> anyhow::Result<()> {
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let mut block = mined_child(genesis.block_hash())?;
-    while pow_met(block.header.bits.to_consensus(), &block.block_hash()) {
+    while compact_is_met_by(block.header.bits, block.block_hash().into()) {
         block.header.nonce = block
             .header
             .nonce

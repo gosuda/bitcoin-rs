@@ -422,17 +422,12 @@ fn chained_headers(
     let mut prev = start_prev;
     for index in 0..count {
         let height = first_height.saturating_add(u32::try_from(index)?);
-        let mut header = test_header(prev, height);
-        // `test_header` mines version 1, which regtest rejects from height 500
-        // (BIP 34) and again from height 1251 (BIP 66 requires version 3), so a
-        // full page has to carry a modern version throughout.
-        header.version = if height >= 1251 { 4 } else { 3 };
-        while !pow_met(
-            header.bits.to_consensus(),
-            Hash256::from(header.compute_hash()),
-        ) {
-            header.nonce = header.nonce.wrapping_add(1);
-        }
+        // `mined_regtest_header` mines `version: 4`, which regtest accepts at
+        // every height; version 1 would be rejected from height 500 (BIP 34)
+        // and version 3 from height 1251 (BIP 66 requires version 3 only
+        // from there, but a full page stays modern throughout).
+        let header = regtest_fixture::mined_regtest_header(prev, height)
+            .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
         prev = header.compute_hash();
         out.push(header);
     }
@@ -584,9 +579,11 @@ fn unconnecting_headers_leave_request_pending() -> Result<(), Box<dyn std::error
 
     // A batch whose parent the tree never saw is not an answer to anything.
     let orphan_prev = BlockHash(Hash256::from_le_bytes(&[0x22; 32]));
+    let orphan = regtest_fixture::mined_regtest_header(orphan_prev, 9)
+        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
     deliver_headers(
         &inbound_headers_tx,
-        vec![test_header(orphan_prev, 9)],
+        vec![orphan],
         current_source(&peers, addr),
     )?;
     sync.tick_at(now);
