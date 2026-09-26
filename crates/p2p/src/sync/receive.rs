@@ -498,7 +498,7 @@ impl BlockSync {
                     StagedBlock::DroppedForRetry { dropped } => {
                         // Count-evicted before staging: release what the
                         // window holds without a cursor rewind.
-                        window.requeue_for_retry(&dropped.hash, None, now);
+                        window.release_pending_without_rewind(&dropped.hash, now);
                         retry_count = retry_count.saturating_add(1);
                         tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
                     }

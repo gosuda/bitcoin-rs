@@ -138,10 +138,11 @@ impl BlockSync {
         let mut scheduler = self.scheduler.lock();
         for hash in hashes {
             scheduler.stager.retire_applied(hash);
-            // Invalidated hashes are never re-requested: no cursor rewind.
+            // Invalidated hashes are never re-requested: the pending slot is
+            // released without moving the request cursor.
             scheduler
                 .window
-                .requeue_for_retry(hash, None, Instant::now());
+                .release_pending_without_rewind(hash, Instant::now());
         }
     }
 
