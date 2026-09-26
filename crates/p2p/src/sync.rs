@@ -749,8 +749,9 @@ pub(crate) mod tests;
 #[must_use]
 pub(crate) fn syncing_ibd_latch() -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
     Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-        Arc::new(arc_swap::ArcSwapOption::empty()),
-        Arc::new(parking_lot::RwLock::new(BlockTree::new())),
-        bitcoin_rs_primitives::Network::Regtest,
+        bitcoin_rs_chain::TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(
+            parking_lot::RwLock::new(BlockTree::new()),
+        )),
     ))
 }

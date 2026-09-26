@@ -1375,7 +1375,7 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block()
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9789, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 3));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 3));
     sync.tick();
     let failing_hash = Hash256::from(extra_coinbase.block_hash());
 
@@ -1555,7 +1555,7 @@ impl SyncHarness {
     }
 
     /// The same executor over a caller-chosen initial-block-download latch.
-    fn with_ibd(tree: BlockTree, ibd: Arc<InitialBlockDownload>) -> Self {
+    fn with_ibd(mut tree: BlockTree, ibd: Arc<InitialBlockDownload>) -> Self {
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
         let applied_tip = Arc::new(ArcSwapOption::empty());
@@ -1633,9 +1633,8 @@ pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
         .unwrap_or_else(|| unreachable!("the chain has a tip"));
     applied_tip.store(Some(Arc::clone(&tip)));
     Arc::new(InitialBlockDownload::new(
-        applied_tip,
-        block_tree,
-        Network::Regtest,
+        bitcoin_rs_chain::TipReader::new(applied_tip),
+        bitcoin_rs_chain::BlockTreeReader::new(block_tree),
     ))
 }
 

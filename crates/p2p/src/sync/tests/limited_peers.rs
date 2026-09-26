@@ -37,6 +37,7 @@ fn policy(ibd: Arc<InitialBlockDownload>, requested_height: u32) -> BlockDownloa
     BlockDownloadPolicy {
         ibd,
         requested_height,
+        network: Network::Regtest,
     }
 }
 
