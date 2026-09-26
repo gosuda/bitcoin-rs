@@ -1986,8 +1986,12 @@ mod tests {
             false,
             1,
         ));
-        bitcoin_rs_utxo::contract::commit_block_changes(&ctx.chain.utxo, &changes, &Hash256::from_le_bytes(&[0xaa; 32]))
-            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &ctx.chain.utxo,
+            &changes,
+            &Hash256::from_le_bytes(&[0xaa; 32]),
+        )
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
         OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0)
     }
 
@@ -2197,8 +2201,12 @@ mod acceptance_tests {
             false,
             7,
         ));
-        bitcoin_rs_utxo::contract::commit_block_changes(&ctx.chain.utxo, &changes, &Hash256::default())
-            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &ctx.chain.utxo,
+            &changes,
+            &Hash256::default(),
+        )
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
     }
 
     fn spending_tx(tag: u8, output_value: u64) -> Tx {

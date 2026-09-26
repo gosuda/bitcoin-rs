@@ -273,8 +273,12 @@ mod tests {
             false,
             1,
         ));
-        bitcoin_rs_utxo::contract::commit_block_changes(&ctx.chain.utxo, &changes, &Hash256::from_le_bytes(&[0xaa; 32]))
-            .expect("fund test UTXO");
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &ctx.chain.utxo,
+            &changes,
+            &Hash256::from_le_bytes(&[0xaa; 32]),
+        )
+        .expect("fund test UTXO");
         transaction(
             Some(OutPoint::new(txid, 0)),
             TxOut {

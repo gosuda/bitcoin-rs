@@ -105,9 +105,12 @@ fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         false,
         1,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(&ctx.chain
-        .utxo, &changes, &Hash256::from_le_bytes(&[0xaa; 32]))
-        .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
+    bitcoin_rs_utxo::contract::commit_block_changes(
+        &ctx.chain.utxo,
+        &changes,
+        &Hash256::from_le_bytes(&[0xaa; 32]),
+    )
+    .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
     OutPoint {
         txid: Txid(Hash256::from_le_bytes(&[label; 32])),
         vout: 0,
@@ -1835,9 +1838,12 @@ fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutP
         true,
         height,
     ));
-    bitcoin_rs_utxo::contract::commit_block_changes(&ctx.chain
-        .utxo, &changes, &Hash256::from_le_bytes(&[0xaa; 32]))
-        .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
+    bitcoin_rs_utxo::contract::commit_block_changes(
+        &ctx.chain.utxo,
+        &changes,
+        &Hash256::from_le_bytes(&[0xaa; 32]),
+    )
+    .unwrap_or_else(|error| panic!("commit_block failed: {error}"));
     OutPoint {
         txid: Txid(Hash256::from_le_bytes(&[label; 32])),
         vout: 0,
