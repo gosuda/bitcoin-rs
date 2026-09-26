@@ -38,18 +38,23 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
         | ChainError::HeightOverflow { .. }
         // A median-time-past violation is decided entirely by the chain the peer
         // itself sent, so it is unambiguously the peer's fault. The same holds
-        // for the version floors, the BIP94 timewarp bound, and the
-        // invalid-parent refusal: each compares the candidate against the
-        // chain the peer itself announced or a block this node already
-        // rejected, so blaming the sender cannot ban an honest peer.
+        // for the version floors and the BIP94 timewarp bound: each compares
+        // the candidate against the chain the peer itself announced, so
+        // blaming the sender cannot ban an honest peer.
         | ChainError::TimestampTooEarly { .. }
         | ChainError::BadVersion { .. }
-        | ChainError::TimewarpAttack { .. }
-        | ChainError::InvalidParent { .. } => true,
+        | ChainError::TimewarpAttack { .. } => true,
         // Future drift is judged against OUR clock, so a wrong local clock
         // would otherwise let us ban every honest peer and partition
         // ourselves. The header is rejected without blaming the sender.
+        // An invalid parent is likewise not attributable: the tree's only
+        // production invalidation path is the operator's own
+        // `invalidate_block` (`chainstate::reorg`), which the sender cannot
+        // see, so a child of that parent is refused — `bad-prevblk` — but
+        // the sender is spared, as Core spares children of manually
+        // invalidated blocks.
         ChainError::TimestampTooFarAhead { .. }
+        | ChainError::InvalidParent { .. }
         | ChainError::DuplicateHeader { .. }
         | ChainError::MissingParent { .. }
         | ChainError::NodeIdOverflow { .. }
@@ -743,9 +748,6 @@ mod tests {
                 timestamp: 1,
                 minimum: 601,
             },
-            ChainError::InvalidParent {
-                parent: NodeId::new(3),
-            },
             ChainError::TimestampTooEarly {
                 hash,
                 timestamp: 1,
@@ -775,6 +777,12 @@ mod tests {
             // A missing parent is a sync-ordering fact, not misconduct: the
             // same headers may arrive from a peer that already has them.
             ChainError::MissingParent { prev_hash: hash },
+            // An invalid parent names our own operator-driven invalidation,
+            // which the sender cannot see, so the child is refused without
+            // blame.
+            ChainError::InvalidParent {
+                parent: NodeId::new(3),
+            },
             ChainError::UnknownNode { id: NodeId::new(1) },
         ] {
             assert!(!is_peer_fault(&error), "{error:?} must spare the peer");
