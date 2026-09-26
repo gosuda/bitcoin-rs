@@ -10,16 +10,21 @@ pub enum IndexError {
     /// Backend storage failed while applying index rows.
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
-    /// `bitcoin_slices` rejected the serialized block.
+    /// The layout parser rejected the serialized block.
+    ///
+    /// PRE: Block preparation received a byte slice that is not one complete block.
+    /// POST: The contained error identifies the layout parser failure.
+    /// INVARIANT: No rows from a failed parse are committed.
     #[error("invalid serialized block: {0:?}")]
-    BlockParse(bitcoin_slices::Error),
+    BlockParse(bitcoin_rs_primitives::DecodeError),
     /// This indexer cannot undo a block, so a reorg cannot be made consistent.
     #[error("this indexer does not support block disconnect")]
     UnsupportedRollback,
     /// A block header did not have the consensus 80-byte length.
     #[error("invalid block header length {len}")]
     InvalidHeaderLength {
-        /// Actual header length observed by the visitor.
+        /// Observed length at the validation boundary — a header row, a short
+        /// block body, or a malformed prefix row.
         len: usize,
     },
     /// A transaction's byte range in the block does not fit the `u32` that
