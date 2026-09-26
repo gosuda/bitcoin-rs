@@ -181,7 +181,12 @@ pub(super) fn disconnect_block_admitted(
     });
     // Durable before published: the head batch names the parent's own
     // cumulative count, and the tip published next carries the count that
-    // commit certified, read back from its receipt.
+    // commit certified, read back from its receipt. The parent's tree node
+    // records the same certified count: after a checkpoint restore its
+    // ancestors are explicitly unknown, and a replacement child of this
+    // parent derives its own count from the node, not from the published
+    // snapshot — an unwritten node would collapse the restored lineage to
+    // UNKNOWN on the first reorg.
     let receipt = commit_disconnect_head(
         handles,
         &parent_tip,
@@ -190,6 +195,11 @@ pub(super) fn disconnect_block_admitted(
     )
     .map_err(fatal)?;
     let parent_tip = receipt.certify(parent_tip);
+    {
+        let mut tree = handles.block_tree.write();
+        tree.restore_chain_tx_count(parent_tip.tip_id, parent_tip.chain_tx_count)
+            .map_err(|error| fatal(ApplyError::from(error)))?;
+    }
     publish_applied(handles, &parent_tip, crate::events::HintKind::Disconnected);
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
