@@ -183,7 +183,6 @@ impl BlockSync {
                 next_apply_height,
                 frontier_hash,
                 apply_side_busy: frontier_hash.is_some_and(|hash| stager.contains(&hash)),
-                active_downloading_peers: window.active_downloading_peers(),
             };
             let decision = window.observe_blocked(ctx, stager, &tree, now);
             let stall_seconds = window

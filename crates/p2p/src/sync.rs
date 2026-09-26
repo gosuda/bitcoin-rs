@@ -127,6 +127,27 @@ pub struct BlockSync {
 /// never admit. The oldest mark is evicted first.
 const MAX_DEFERRED_OWNED_FETCHES: usize = 16;
 
+/// Appends one deferred owned-fetch mark, keeping the queue deduplicated and
+/// bounded at every insertion point — the initial record, the header-drain
+/// deferral, and the post-resolve requeue all share this tail.
+///
+/// Dedup keys on `(source, hash)`: two live connections that each issued a
+/// compact fetch for the same hash both hold ownership, because inbound
+/// admission checks the exact source. The oldest mark is evicted first.
+fn defer_owned_body_fetch(scheduler: &mut SchedulerState, source: PeerSource, hash: Hash256) {
+    if scheduler
+        .owned_body_fetches
+        .iter()
+        .any(|(owner, owned)| *owner == source && *owned == hash)
+    {
+        return;
+    }
+    if scheduler.owned_body_fetches.len() >= MAX_DEFERRED_OWNED_FETCHES {
+        scheduler.owned_body_fetches.remove(0);
+    }
+    scheduler.owned_body_fetches.push((source, hash));
+}
+
 struct SchedulerState {
     window: DownloadWindow,
     stager: BlockStager,
@@ -258,8 +279,8 @@ impl BlockSync {
     ///
     /// PRE: `source` identifies the current connection and `hash` is a
     /// `MSG_BLOCK` or `MSG_WITNESS_BLOCK` inventory hash.
-    /// POST: the announcement is queued and the sync loop is woken; no block
-    /// body request is emitted here.
+    /// POST: the announcement is queued; the caller wakes the sync loop. No
+    /// block body request is emitted here.
     /// INVARIANT: one entry per connection — the first unprocessed
     /// announcement wins, so a later vector cannot replace an unknown tip
     /// before header sync drains it — and a flooding peer cannot grow the
@@ -286,17 +307,7 @@ impl BlockSync {
             return;
         }
         let mut scheduler = self.scheduler.lock();
-        if scheduler
-            .owned_body_fetches
-            .iter()
-            .any(|(_, owned)| *owned == hash)
-        {
-            return;
-        }
-        if scheduler.owned_body_fetches.len() >= MAX_DEFERRED_OWNED_FETCHES {
-            scheduler.owned_body_fetches.remove(0);
-        }
-        scheduler.owned_body_fetches.push((source, hash));
+        defer_owned_body_fetch(&mut scheduler, source, hash);
     }
 
     /// Whether `source` already owns the download of `hash`.

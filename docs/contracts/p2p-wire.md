@@ -240,8 +240,8 @@ covers the delivery-path forward.
 ### `P2P-07`: Block announcements lead with headers; ingress is bounded twice
 
 - **Owner**: the block branch of `dispatch_inbound_full`
-  (`crates/p2p/src/dispatch.rs`), `BlockSync::announce_block` and
-  `BlockSync::drain_block_announcements`
+  (`crates/p2p/src/dispatch.rs`), `BlockSync::announce_block`
+  (`crates/p2p/src/sync.rs`) and `BlockSync::drain_block_announcements`
   (`crates/p2p/src/sync/headers.rs`).
 - `MSG_BLOCK` and `MSG_WITNESS_BLOCK` inventory vectors are availability
   information, never a body request: each one is queued against the
@@ -289,7 +289,9 @@ covers the delivery-path forward.
   branch switch (`BranchSwitchError::ConnectFailed`, attributed through the
   staged entry's recorded source) —
   `BlockSync::punish_permanent_delivery_source` disconnects the delivering
-  connection after the invalidated hashes are purged, and releases its
+  connection — in the apply pass, after the invalidated hashes are purged;
+  in a branch switch, before the purge drops the staged entry that carries
+  the source — and releases its
   `getheaders` gate and marks it unresponsive only when that exact
   connection was current and removed (Core `net_processing.cpp:2031-2068`).
   Each punishment increments `node.sync.invalid_block_disconnects`. A

@@ -393,13 +393,11 @@ fn stall_eviction_does_not_disconnect_replacement_connection()
         let tree = sync.chain.block_tree();
         let mut scheduler = sync.scheduler.lock();
         let state = &mut *scheduler;
-        let active = state.window.active_downloading_peers();
         match state.window.observe_blocked(
             crate::download_window::BlockedContext {
                 next_apply_height: Some(next_apply_height),
                 frontier_hash: None,
                 apply_side_busy: false,
-                active_downloading_peers: active,
             },
             &state.stager,
             &tree,

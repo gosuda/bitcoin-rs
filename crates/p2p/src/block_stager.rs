@@ -370,6 +370,7 @@ impl BlockStager {
 
         let mut dropped = Vec::new();
         let mut received_bytes = self.received_bytes;
+        let mut gate_pending_dropped = 0_usize;
         let mut next_received_deadline = None;
         let timeout = self.budget.received_timeout;
         self.received.retain(|hash, entry| {
@@ -382,9 +383,11 @@ impl BlockStager {
                 return true;
             }
             received_bytes = received_bytes.saturating_sub(entry.bytes);
+            gate_pending_dropped += usize::from(entry.gate_pending);
             dropped.push(DroppedBlock { hash: *hash });
             false
         });
+        self.gate_pending_count = self.gate_pending_count.saturating_sub(gate_pending_dropped);
         self.received_bytes = received_bytes;
         self.next_received_deadline = next_received_deadline;
         self.maybe_compact_received_order();
@@ -700,6 +703,33 @@ mod tests {
 
         assert_eq!(final_drop.len(), 1);
         assert_eq!(final_drop[0].hash, fresh);
+        assert_eq!(stager.received_len(), 0);
+    }
+
+    /// A gate-pending entry dropped by expiry must return its quota slot:
+    /// the count would otherwise climb until every unresolved body is
+    /// refused while staging sits empty.
+    #[test]
+    fn prune_expired_releases_gate_pending_count() {
+        let block = Network::Regtest.genesis_block();
+        let serialized = bytes::Bytes::from(consensus_bytes(&block));
+        let mut budget = default_sync_budget(Network::Regtest);
+        budget.received_timeout = Duration::from_secs(10);
+        let mut stager = BlockStager::new(budget);
+        let now = Instant::now();
+        let stale_received_at = now
+            .checked_sub(Duration::from_secs(11))
+            .unwrap_or_else(|| panic!("test instant underflow"));
+        let hash = Hash256::from_le_bytes(&[0x43; 32]);
+
+        stager.insert(hash, None, block, serialized, None, stale_received_at);
+        stager.set_gate_pending(&hash);
+        assert_eq!(stager.gate_pending_count(), 1);
+
+        let dropped = stager.prune_expired(now);
+
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(stager.gate_pending_count(), 0);
         assert_eq!(stager.received_len(), 0);
     }
 
