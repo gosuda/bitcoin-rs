@@ -32,6 +32,13 @@ enum DeliveryCredit {
     Delivery(Option<u32>),
 }
 
+/// Shared bound on staged bodies whose headers the tree cannot yet resolve:
+/// the per-connection forward credit still lets up to
+/// [`crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS`] unresolved bodies in
+/// per peer, and without a global cap a multi-peer orphan flood could fill
+/// the staging budget and evict valid progress.
+const MAX_UNRESOLVED_STAGED_BODIES: usize = 64;
+
 /// How one inbound body passed the arrival gate, decided under the
 /// scheduler lock and carried into the insert pass.
 #[derive(Clone, Copy)]
@@ -447,6 +454,16 @@ impl BlockSync {
                 {
                     return false;
                 }
+                let header_unknown = tree.lookup(hash).is_none();
+                if !requested
+                    && header_unknown
+                    && scheduler.stager.gate_pending_count() >= MAX_UNRESOLVED_STAGED_BODIES
+                {
+                    // The shared orphan-body quota is full: drop this
+                    // unresolvable body rather than let a flood evict staged
+                    // progress.
+                    return false;
+                }
                 // A body staged while its header is unknown passed the
                 // gate's missing-header arm without facing the clauses —
                 // flag it so `recheck_staged_gates` re-gates it once the
@@ -455,7 +472,7 @@ impl BlockSync {
                     BodyAdmission::Requested
                 } else {
                     BodyAdmission::Unrequested {
-                        gate_pending: tree.lookup(hash).is_none(),
+                        gate_pending: header_unknown,
                     }
                 });
                 true

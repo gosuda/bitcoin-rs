@@ -65,6 +65,12 @@ impl BlockSync {
                 invalidated,
                 ..
             }) => {
+                // Capture the delivering connection before the purge drops
+                // the staged entry that carries it.
+                let failed_source = self.scheduler.lock().stager.staged_source(&hash);
+                if disposition == WindowCommitDisposition::Permanent {
+                    self.punish_permanent_delivery_source(failed_source, hash);
+                }
                 if disposition == WindowCommitDisposition::BodyMutated {
                     // Only the delivered body is bad. Keep the header branch
                     // and its descendants, but free this slot for a new body;
@@ -142,8 +148,9 @@ impl BlockSync {
         let now = Instant::now();
         for hash in hashes {
             scheduler.stager.retire_applied(hash);
-            // Invalidated hashes are never re-requested: no cursor rewind.
-            scheduler.window.requeue_for_retry(hash, None, now);
+            // Invalidated hashes are never re-requested: release the pending
+            // entry without rewinding the request cursor.
+            scheduler.window.release_pending(hash, now);
         }
     }
 

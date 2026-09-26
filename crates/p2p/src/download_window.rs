@@ -2622,6 +2622,8 @@ impl DownloadWindow {
     /// request frontier — a below-frontier entry could never be scheduled
     /// anyway, and its expiry would drag `next_request_height` back down
     /// into a re-request sweep of heights already applied.
+    /// `false` when capacity refused the mark: the caller keeps the deferred
+    /// ownership record so a fast delivery still counts as requested.
     pub fn mark_owned_fetch(
         &mut self,
         stager: &mut BlockStager,
@@ -2629,22 +2631,22 @@ impl DownloadWindow {
         hash: Hash256,
         height: u32,
         now: Instant,
-    ) {
+    ) -> bool {
         if self.pending.contains_key(&hash) {
-            return;
+            return true;
         }
         if stager.contains(&hash) {
             // The fetch's body is already staged: the owned fetch is its
             // request evidence, so the body counts as requested and owes
             // no unrequested-admission gate.
             stager.clear_gate_pending(&hash);
-            return;
+            return true;
         }
         if height < self.next_request_height
             || !self.has_request_capacity(stager)
             || self.pending_count_for(owner) >= self.effective_peer_inflight()
         {
-            return;
+            return false;
         }
         let request = PeerRequest {
             owner,
@@ -2658,6 +2660,14 @@ impl DownloadWindow {
         let attempted_owner = self.prefix_probe_attempted_owner;
         self.mark_requested(stager, &request, owner, now);
         self.prefix_probe_attempted_owner = attempted_owner;
+        true
+    }
+
+    /// Releases `hash`'s pending entry without rewinding the request cursor:
+    /// drop-only release for hashes that must never be re-requested
+    /// (invalidated subtrees).
+    pub(crate) fn release_pending(&mut self, hash: &Hash256, now: Instant) {
+        let _ = self.remove_pending(hash, now);
     }
 
     fn remove_pending(&mut self, hash: &Hash256, now: Instant) -> Option<PendingBlock> {

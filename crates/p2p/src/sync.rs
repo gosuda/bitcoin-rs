@@ -122,6 +122,11 @@ pub struct BlockSync {
     apply_halted: std::sync::atomic::AtomicBool,
 }
 
+/// Cap on deferred owned-fetch marks waiting on unattached tip headers:
+/// bounded so a peer cannot grow the scheduler by announcing tips that
+/// never admit. The oldest mark is evicted first.
+const MAX_DEFERRED_OWNED_FETCHES: usize = 16;
+
 struct SchedulerState {
     window: DownloadWindow,
     stager: BlockStager,
@@ -255,11 +260,43 @@ impl BlockSync {
     /// `MSG_BLOCK` or `MSG_WITNESS_BLOCK` inventory hash.
     /// POST: the announcement is queued and the sync loop is woken; no block
     /// body request is emitted here.
-    /// INVARIANT: one entry per connection — the latest announcement wins, as
-    /// Core keeps one best block per `inv` message — so a flooding peer
-    /// cannot grow the queue past the live session set.
+    /// INVARIANT: one entry per connection — the first unprocessed
+    /// announcement wins, so a later vector cannot replace an unknown tip
+    /// before header sync drains it — and a flooding peer cannot grow the
+    /// queue past the live session set.
     pub fn announce_block(&self, source: PeerSource, hash: Hash256) {
-        self.block_announcements.lock().insert(source, hash);
+        self.block_announcements
+            .lock()
+            .entry(source)
+            .or_insert(hash);
+    }
+
+    /// Records an in-flight body fetch the window does not own yet — the
+    /// compact path's `getblocktxn` or fallback `getdata` — so the body
+    /// counts as requested if it arrives before its header drains. The mark
+    /// resolves into a real pending entry on the next header drain
+    /// (`note_owned_body_fetch`/`resolve_owned_body_fetches`).
+    ///
+    /// PRE: `source` issued the fetch for `hash`.
+    /// POST: [`Self::owns_body_fetch`] answers `true` for the pair.
+    /// INVARIANT: bounded by `MAX_DEFERRED_OWNED_FETCHES`; a stale source's
+    /// mark is dropped at resolve time, never attributed to a replacement.
+    pub fn record_owned_body_fetch(&self, source: PeerSource, hash: Hash256) {
+        if !self.peer_table.is_current(source) {
+            return;
+        }
+        let mut scheduler = self.scheduler.lock();
+        if scheduler
+            .owned_body_fetches
+            .iter()
+            .any(|(_, owned)| *owned == hash)
+        {
+            return;
+        }
+        if scheduler.owned_body_fetches.len() >= MAX_DEFERRED_OWNED_FETCHES {
+            scheduler.owned_body_fetches.remove(0);
+        }
+        scheduler.owned_body_fetches.push((source, hash));
     }
 
     /// Whether `source` already owns the download of `hash`.

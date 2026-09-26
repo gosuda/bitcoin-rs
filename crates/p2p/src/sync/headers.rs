@@ -4,6 +4,7 @@ use super::GetdataRequestOutcome;
 use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
 use super::LOCATOR_MAX_ENTRIES;
+use super::MAX_DEFERRED_OWNED_FETCHES;
 use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
 use super::chain::HeaderAdmission;
@@ -31,11 +32,6 @@ use std::vec::Vec;
 /// chain, so more than this many distinct side branches is a misbehavior
 /// signal rather than evidence worth keeping.
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
-
-/// Cap on deferred owned-fetch marks waiting on unattached tip headers:
-/// bounded so a peer cannot grow the scheduler by announcing tips that
-/// never admit. The oldest mark is evicted first.
-const MAX_DEFERRED_OWNED_FETCHES: usize = 16;
 
 impl BlockSync {
     #[allow(clippy::too_many_lines)]
@@ -199,6 +195,10 @@ impl BlockSync {
             return;
         }
         let mut credit_refresh_needed = false;
+        // `header_request` is a singleton: asking a second peer before the
+        // first answers would orphan the earlier request untracked, so
+        // unknown announcements queue back for a later drain instead.
+        let mut deferred: Vec<(PeerSource, Hash256)> = Vec::new();
         for (source, hash) in pending {
             if !self.peer_table.is_current(source) {
                 continue;
@@ -214,12 +214,22 @@ impl BlockSync {
                 (tree.lookup(hash).is_some(), height)
             };
             if !known {
-                self.request_headers_from(Some(source));
+                if self.scheduler.lock().header_request.is_some() {
+                    deferred.push((source, hash));
+                } else {
+                    self.request_headers_from(Some(source));
+                }
                 continue;
             }
             self.peer_table
                 .note_announced_tip(source, hash, active_height);
             credit_refresh_needed = true;
+        }
+        if !deferred.is_empty() {
+            let mut announcements = self.block_announcements.lock();
+            for (source, hash) in deferred {
+                announcements.entry(source).or_insert(hash);
+            }
         }
         if credit_refresh_needed {
             self.refresh_active_peer_credit();
@@ -267,8 +277,12 @@ impl BlockSync {
         // The request path primes the expected-apply cache with exactly this
         // batch. A direct fetch runs before this round's apply pass, where
         // more bodies may already be staged, so drop the primed cache and let
-        // the apply path walk the tree and repopulate it with the full run.
-        *self.expected_apply_cache.lock() = None;
+        // the apply path walk the tree and repopulate it with the full run —
+        // but only when a request actually went out; a refused outcome left
+        // the cache untouched.
+        if outcome.sent {
+            *self.expected_apply_cache.lock() = None;
+        }
         outcome
     }
 
@@ -385,7 +399,9 @@ impl BlockSync {
             return;
         };
         let SchedulerState { window, stager, .. } = &mut *scheduler;
-        window.mark_owned_fetch(stager, source, hash, height, Instant::now());
+        if !window.mark_owned_fetch(stager, source, hash, height, Instant::now()) {
+            scheduler.owned_body_fetches.push((source, hash));
+        }
     }
 
     /// Resolves deferred owned-fetch marks now that this drain may have
@@ -424,7 +440,11 @@ impl BlockSync {
         let now = Instant::now();
         let SchedulerState { window, stager, .. } = &mut *scheduler;
         for (source, hash, height) in resolved {
-            window.mark_owned_fetch(stager, source, hash, height, now);
+            // A refusal leaves the fetch in flight: keep the deferred mark so
+            // the delivered body still classifies as requested.
+            if !window.mark_owned_fetch(stager, source, hash, height, now) {
+                unresolved.push((source, hash));
+            }
         }
         scheduler.owned_body_fetches.extend(unresolved);
     }

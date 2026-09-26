@@ -227,14 +227,19 @@ pub fn dispatch_inbound_full<S>(
                     announce_block(hash);
                     continue;
                 }
-                let held = inventory_tx_hash(item).is_some_and(|hash| {
-                    !relay_open
-                        || tx_inventory
-                            .is_some_and(|inv| inv.have_tx(hash, matches!(item, Inventory::WTx(_))))
-                });
-                if !held {
-                    requested.push(*item);
+                // Only tx-typed vectors are ever requested from an `inv`;
+                // compact, unknown, and error vectors are ignored (Core
+                // `ProcessMessage(INV)`).
+                let Some(hash) = inventory_tx_hash(item) else {
+                    continue;
+                };
+                if !relay_open
+                    || tx_inventory
+                        .is_some_and(|inv| inv.have_tx(hash, matches!(item, Inventory::WTx(_))))
+                {
+                    continue;
                 }
+                requested.push(*item);
             }
             if !requested.is_empty() {
                 let witness = peer.remote_version.as_ref().is_some_and(|version| {

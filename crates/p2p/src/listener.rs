@@ -228,10 +228,11 @@ impl ConnectionShared {
     /// `getdata` for a tip learned only by delivery.
     ///
     /// PRE: `lease` belongs to the connection that delivered `block`.
-    /// POST: the block's header always reaches the headers sink; the body
-    ///   reaches the shared inbound block channel when
-    ///   [`crate::PeerLease::admit_block_forward`] admits it, and is dropped
-    ///   with a counter record otherwise.
+    /// POST: when [`crate::PeerLease::admit_block_forward`] admits the body,
+    ///   the body reaches the shared inbound block channel and then its
+    ///   header reaches the headers sink; a refused body drops both with a
+    ///   counter record, so a peer over its unsolicited bound cannot grow
+    ///   the header queue either.
     /// INVARIANT: one connection holds at most
     ///   [`crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS`] unsolicited
     ///   bodies in the shared channel at once, and a body the download
@@ -269,8 +270,10 @@ impl ConnectionShared {
             .as_ref()
             .is_some_and(|sync| sync.owns_body_fetch(source, hash));
         let Some(credit) = lease.admit_block_forward(source, hash, requested) else {
+            // The connection is over its unsolicited bound: drop the header
+            // too, or a flood of refused bodies still grows the header queue
+            // without limit.
             metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
-            self.send_headers(source, vec![header], false, false);
             return;
         };
         self.forward_block(block, serialized, source, Some(credit));
@@ -970,6 +973,15 @@ fn process_compact_wire_message(
             crate::compact_blocks::Outcome::RequestMissing(_)
                 | crate::compact_blocks::Outcome::Fallback(_)
         );
+        // Record the fetch before the follow-up leaves: a response landing
+        // before the header drains still counts as requested, not
+        // unsolicited (`SchedulerState::owned_body_fetches`).
+        if body_fetch_owned && let Some(sync) = shared.block_sync.as_ref() {
+            sync.record_owned_body_fetch(
+                lease.source(peer_addr),
+                bitcoin_rs_primitives::Hash256::from(header.compute_hash()),
+            );
+        }
         shared.send_headers(
             lease.source(peer_addr),
             vec![header],
