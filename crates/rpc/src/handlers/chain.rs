@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use core::cell::OnceCell;
 use core::str::FromStr as _;
 
 use bitcoin_rs_chain::NodeStatus;
@@ -393,18 +394,18 @@ struct ChainTxStats {
     window_interval: u64,
 }
 
-/// The selected branch's hash at every height down to `floor`, in one walk.
+/// The selected branch's hash at every height down to genesis, in one walk.
 ///
 /// PRE: `tree` is the guard the request holds; `branch_tip` is a node of it.
-/// POST: `hashes[h]` is that branch's hash at height `h`; heights the walk
-///   never reached stay zero-filled, which no applied record can match.
+/// POST: `hashes[h]` is that branch's hash at height `h` through the tip;
+///   heights above the tip stay zero-filled, which no applied record can match.
 /// INVARIANT: reads only the guarded tree, so the answer cannot shift while
 ///   the caller verifies a mutable log against it.
 fn branch_hashes(
     tree: &bitcoin_rs_chain::BlockTree,
     branch_tip: bitcoin_rs_chain::NodeId,
-    floor: u32,
 ) -> Option<Vec<Hash256>> {
+    let floor = tree.node(branch_tip).ok()?.height;
     let width = usize::try_from(floor).ok()?.checked_add(1)?;
     let mut hashes = vec![Hash256::default(); width];
     let mut cursor = Some(branch_tip);
@@ -430,14 +431,8 @@ fn branch_hashes(
 /// INVARIANT: the log is mutable without transition exclusion — a reorg
 ///   displaces its records — so a prefix that no longer matches the selected
 ///   branch is reported as unknown rather than as a chain total.
-fn log_prefix_count(
-    log: &BlockLog,
-    tree: &bitcoin_rs_chain::BlockTree,
-    branch_tip: bitcoin_rs_chain::NodeId,
-    height: u32,
-) -> Option<u64> {
+fn log_prefix_count(log: &BlockLog, branch: &[Hash256], height: u32) -> Option<u64> {
     let total = cumulative_tx_count_through(log, height)?;
-    let branch = branch_hashes(tree, branch_tip, height)?;
     let records: &[BlockRecord] = log;
     for record in &records[..records.partition_point(|candidate| candidate.height <= height)] {
         let index = usize::try_from(record.height).ok()?;
@@ -455,15 +450,18 @@ fn log_prefix_count(
 /// prefix that still matches the selected branch answers for any height it
 /// holds back to genesis. `None` when nobody knows.
 ///
-/// PRE: `tree` is the guard the request holds; `applied` is its capture.
+/// PRE: `tree` is the guard the request holds; `applied` is its capture, and
+///   `node_id` lies on the branch `branch` indexes lazily on first use.
 /// POST: the count from the first source that can name it.
 /// INVARIANT: the published count is used only for the captured applied tip,
-///   and the call never reloads that publication.
+///   the call never reloads that publication, and one shared branch index —
+///   built at most once per request — serves every log prefix checked.
 fn count_through(
     ctx: &Context,
     tree: &bitcoin_rs_chain::BlockTree,
     applied: &AppliedView,
     node_id: bitcoin_rs_chain::NodeId,
+    branch: &OnceCell<Option<Vec<Hash256>>>,
 ) -> Option<u64> {
     let node = tree.node(node_id).ok()?;
     if let Some(count) = node.chain_tx_count.get() {
@@ -475,7 +473,10 @@ fn count_through(
         return Some(count);
     }
     let log = ctx.chain.blocks.read();
-    log_prefix_count(&log, tree, node_id, node.height)
+    let branch = branch
+        .get_or_init(|| branch_hashes(tree, node_id))
+        .as_deref()?;
+    log_prefix_count(&log, branch, node.height)
 }
 
 /// Transactions inside the window, from one source for both ends.
@@ -490,6 +491,7 @@ fn window_tx_count_between(
     tree: &bitcoin_rs_chain::BlockTree,
     start_id: bitcoin_rs_chain::NodeId,
     end_id: bitcoin_rs_chain::NodeId,
+    branch: &OnceCell<Option<Vec<Hash256>>>,
 ) -> Option<u64> {
     let start = tree.node(start_id).ok()?;
     let end = tree.node(end_id).ok()?;
@@ -499,8 +501,11 @@ fn window_tx_count_between(
         return Some(end_count.saturating_sub(start_count));
     }
     let log = ctx.chain.blocks.read();
-    let end_count = log_prefix_count(&log, tree, end_id, end.height)?;
-    let start_count = log_prefix_count(&log, tree, end_id, start.height)?;
+    let branch = branch
+        .get_or_init(|| branch_hashes(tree, end_id))
+        .as_deref()?;
+    let end_count = log_prefix_count(&log, branch, end.height)?;
+    let start_count = log_prefix_count(&log, branch, start.height)?;
     Some(end_count.saturating_sub(start_count))
 }
 
@@ -544,7 +549,8 @@ fn window_stats(
         .node(selected_id)
         .map_err(|error| RpcError::Internal(error.to_string()))?;
     let is_applied_tip = applied.hash(ctx.chain.chain_network) == tip_hash;
-    let total_tx_count = count_through(ctx, tree, applied, selected_id);
+    let branch_cache = OnceCell::new();
+    let total_tx_count = count_through(ctx, tree, applied, selected_id, &branch_cache);
     let tip_time = selected.header.time;
     if window_block_count == 0 {
         return Ok(ChainTxStats {
@@ -564,7 +570,7 @@ fn window_stats(
             "selected chain is missing the window ancestor".to_owned(),
         ));
     };
-    let window_tx_count = window_tx_count_between(ctx, tree, start_id, selected_id);
+    let window_tx_count = window_tx_count_between(ctx, tree, start_id, selected_id, &branch_cache);
     let end_mtp = tree.median_time_past_at(selected_id, 11).unwrap_or(0);
     let start_mtp = tree.median_time_past_at(start_id, 11).unwrap_or(0);
     let window_interval = u64::from(end_mtp.saturating_sub(start_mtp));
