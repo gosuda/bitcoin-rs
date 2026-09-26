@@ -47,7 +47,19 @@ impl BlockSync {
     ///   a same-address replacement is never blamed for its predecessor
     ///   (Core 31.1 `net_processing.cpp:2031-2068`).
     fn punish_permanent_block_delivery(&self, blocker: &DrainedBlock) {
-        let Some(source) = blocker.source() else {
+        self.punish_permanent_delivery_source(blocker.source(), blocker.hash);
+    }
+
+    /// Same punishment when the failing body was consumed inside a branch
+    /// switch: the staged entry carries the delivering connection, captured
+    /// before [`Self::purge_invalidated`] drops it. `None` means a locally
+    /// injected body — purged without blame.
+    pub(super) fn punish_permanent_delivery_source(
+        &self,
+        source: Option<crate::PeerSource>,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) {
+        let Some(source) = source else {
             return;
         };
         if !self.peer_table.disconnect_source(source) {
@@ -61,7 +73,7 @@ impl BlockSync {
         metrics::counter!("node.sync.invalid_block_disconnects").increment(1);
         tracing::warn!(
             peer_addr = %source.addr,
-            hash = %blocker.hash,
+            %hash,
             "block sync: disconnected the connection that delivered a consensus-invalid block"
         );
     }
