@@ -309,6 +309,10 @@ pub fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u32 {
     {
         return 0;
     }
+    if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
+        // No block-serving flag at all: nothing is servable.
+        return u32::MAX;
+    }
     u32::try_from(peer.best_known_height)
         .unwrap_or(0)
         .saturating_sub(NODE_NETWORK_LIMITED_MIN_BLOCKS.saturating_sub(1))
