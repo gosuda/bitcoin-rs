@@ -61,9 +61,14 @@ impl bitcoin_rs_index::reconcile::ChainCursorSource for IndexChainCursorSource {
     }
 }
 
-// One active generation of outbound requests is enough to keep the drain fed;
-// extra backlog is overload and must fail fast at producers.
-pub(crate) const P2P_OUTBOUND_QUEUE_LIMIT: usize = 8;
+// Outbound full-relay slots, and the one active generation of outbound
+// requests that keeps the drain fed: extra backlog is overload and must fail
+// fast at producers. Bitcoin Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS`.
+pub(crate) const P2P_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
+
+// Outbound block-relay-only slots: connections that relay blocks and nothing
+// else. Bitcoin Core's `MAX_BLOCK_RELAY_ONLY_CONNECTIONS`.
+pub(crate) const P2P_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
 // Bounds transient inbound-block buffering between the per-peer listener
 // threads and the single-threaded `BlockSync::tick` drain. Decoded inbound
@@ -116,7 +121,7 @@ pub struct NodeState {
     p2p: Arc<bitcoin_rs_p2p::P2pService>,
     peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
     banned: Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
-    p2p_outbound_tx: crossbeam_channel::Sender<std::net::SocketAddr>,
+    p2p_outbound_tx: crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>,
     inbound_blocks_tx: Sender<bitcoin_rs_p2p::InboundBlock>,
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
     inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
@@ -261,7 +266,7 @@ impl NodeState {
     }
     /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
     #[must_use]
-    pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<std::net::SocketAddr> {
+    pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial> {
         self.p2p_outbound_tx.clone()
     }
 

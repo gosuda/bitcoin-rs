@@ -21,11 +21,18 @@ use thiserror::Error;
 use crate::connection::PeerSource;
 use crate::listener::ListenerError;
 
-const DEFAULT_OUTBOUND_TARGET: usize = 8;
+/// Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
+const DEFAULT_OUTBOUND_FULL_RELAY_SLOTS: usize = 8;
 
-const DEFAULT_OUTBOUND_ACTIVE_LIMIT: usize = 8;
+/// Core's `MAX_OUTBOUND_BLOCK_RELAY_CONNECTIONS` (`net.h:73`).
+const DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
-const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = 8;
+const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = DEFAULT_OUTBOUND_FULL_RELAY_SLOTS;
+
+/// How often the connection manager looks for a full-relay connection that
+/// the stale-tip allowance made extra. Core's `EXTRA_PEER_CHECK_INTERVAL`
+/// (`net_processing.cpp:113`).
+const EXTRA_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(45);
 
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
 
@@ -53,10 +60,16 @@ pub struct P2pServiceConfig {
     pub dns_port: u16,
     /// Fixed connect endpoints. Non-empty disables DNS maintenance.
     pub fixed_peers: Vec<String>,
-    /// Maximum number of active outbound attempts.
-    pub outbound_active_limit: usize,
-    /// Desired number of live outbound peers in DNS mode.
-    pub outbound_peer_target: usize,
+    /// Outbound full-relay connection slots (transaction, address, block
+    /// relay, and announcements).
+    ///
+    /// Core: `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
+    pub outbound_full_relay_slots: usize,
+    /// Outbound block-relay-only connection slots (blocks only, no `tx` or
+    /// `addr`).
+    ///
+    /// Core: `MAX_BLOCK_RELAY_ONLY_CONNECTIONS` (`net.h:73`).
+    pub outbound_block_relay_slots: usize,
     /// Outbound request queue capacity.
     pub outbound_queue_limit: usize,
     /// Inbound block queue capacity.
@@ -72,11 +85,27 @@ impl Default for P2pServiceConfig {
             dns_seeds: Vec::new(),
             dns_port: 0,
             fixed_peers: Vec::new(),
-            outbound_active_limit: DEFAULT_OUTBOUND_ACTIVE_LIMIT,
-            outbound_peer_target: DEFAULT_OUTBOUND_TARGET,
+            outbound_full_relay_slots: DEFAULT_OUTBOUND_FULL_RELAY_SLOTS,
+            outbound_block_relay_slots: DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS,
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
         }
+    }
+}
+
+impl P2pServiceConfig {
+    /// Total outbound connection slots.
+    ///
+    /// PRE: none.
+    /// POST: returns the sum of the full-relay and block-relay slot counts,
+    ///   which is both the live-outbound target and the ceiling on
+    ///   simultaneous outbound attempts.
+    /// INVARIANT: no separate active limit or peer target exists; the two
+    ///   slot counts are the only outbound population knobs.
+    #[must_use]
+    pub fn total_outbound_active_limit(&self) -> usize {
+        self.outbound_full_relay_slots
+            .saturating_add(self.outbound_block_relay_slots)
     }
 }
 
@@ -131,6 +160,41 @@ struct Workers {
     bootstrap: Option<JoinHandle<()>>,
 }
 
+/// One queued request to dial an outbound address, with the origin that
+/// asked for it.
+///
+/// PRE: none.
+/// POST: `manual` records whether the operator named this address.
+/// INVARIANT: the origin travels with the request to the lease. Core's
+///   `ConnectionType::MANUAL` is exempt from the chain-sync timeout and the
+///   extra-peer retirement (`net_processing.cpp:5502`,
+///   `net_processing.cpp:5558-5604`), and the queue is the only place that
+///   still knows which dials were asked for by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutboundDial {
+    /// The address to dial.
+    pub addr: SocketAddr,
+    /// Whether the operator asked for this address by name.
+    pub manual: bool,
+}
+
+impl OutboundDial {
+    /// A dial the seed list or the address book produced.
+    #[must_use]
+    pub const fn auto(addr: SocketAddr) -> Self {
+        Self {
+            addr,
+            manual: false,
+        }
+    }
+
+    /// A dial the operator pinned with `--connect` or `addnode`.
+    #[must_use]
+    pub const fn pinned(addr: SocketAddr) -> Self {
+        Self { addr, manual: true }
+    }
+}
+
 /// The sole runtime owner of P2P control state and workers.
 pub struct P2pService {
     config: P2pServiceConfig,
@@ -140,8 +204,8 @@ pub struct P2pService {
     peer_table: Arc<crate::PeerTable>,
     banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
     added_nodes: Arc<RwLock<Vec<SocketAddr>>>,
-    outbound_tx: Sender<SocketAddr>,
-    outbound_rx: Arc<Mutex<Receiver<SocketAddr>>>,
+    outbound_tx: Sender<OutboundDial>,
+    outbound_rx: Arc<Mutex<Receiver<OutboundDial>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
     inbound_headers_rx: Arc<Mutex<Receiver<crate::InboundHeaders>>>,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
@@ -249,6 +313,7 @@ impl P2pService {
             listeners.push(handle);
         }
 
+        let dial_allowance = shared.block_sync.clone();
         let outbound = match self.spawn_outbound_worker(shared) {
             Ok(handle) => handle,
             Err(error) => {
@@ -256,7 +321,7 @@ impl P2pService {
                 return Err(error.into());
             }
         };
-        let bootstrap = match self.spawn_bootstrap_worker() {
+        let bootstrap = match self.spawn_bootstrap_worker(dial_allowance) {
             Ok(handle) => handle,
             Err(error) => {
                 self.rollback_startup(listeners, Some(outbound));
@@ -296,22 +361,47 @@ impl P2pService {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let peer_table = Arc::clone(&self.peer_table);
         let shutdown = Arc::clone(&self.worker_shutdown);
-        let active_limit = self.config.outbound_active_limit;
+        let full_relay_slots = self.config.outbound_full_relay_slots;
+        let block_relay_slots = self.config.outbound_block_relay_slots;
+        let active_limit = self.config.total_outbound_active_limit();
         thread::Builder::new()
             .name("bitcoin-rs-p2p-outbound-drain".to_owned())
             .spawn(move || {
-                let mut active = HashSet::new();
+                let mut active: HashMap<SocketAddr, crate::peer_info::PeerRole> = HashMap::new();
                 let mut handles = Vec::new();
+                let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
                 while !shutdown.load(Ordering::Acquire)
                     && !shared.session_cancel.load(Ordering::Acquire)
                 {
                     reap_finished_outbound_connections(&mut active, &mut handles);
-                    if !shared.activity.is_active() || active.len() >= active_limit {
+                    let now = Instant::now();
+                    if now >= next_extra_peer_check {
+                        next_extra_peer_check = now + EXTRA_PEER_CHECK_INTERVAL;
+                        retire_extra_full_relay_connection(
+                            &peer_table,
+                            shared.block_sync.as_deref(),
+                            full_relay_slots,
+                            now,
+                        );
+                    }
+                    if !shared.activity.is_active() {
+                        thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
+                    let extra_dial = shared
+                        .block_sync
+                        .as_ref()
+                        .is_some_and(|sync| sync.allow_extra_full_relay_dial());
+                    // A stale tip raises the total cap by one, so the extra
+                    // full-relay peer can form beside a full slot set: Core
+                    // opens it on top of both populations
+                    // (`net.cpp:2786-2806`).
+                    if active.len() >= active_limit + usize::from(extra_dial) {
                         thread::sleep(Duration::from_millis(100));
                         continue;
                     }
                     let received = outbound_rx.lock().recv_timeout(Duration::from_secs(1));
-                    let Ok(addr) = received else {
+                    let Ok(dial) = received else {
                         if matches!(
                             received,
                             Err(crossbeam_channel::RecvTimeoutError::Disconnected)
@@ -320,16 +410,32 @@ impl P2pService {
                         }
                         continue;
                     };
-                    if active.contains(&addr) || peer_table.is_connected(addr) {
+                    if active.contains_key(&dial.addr) || peer_table.is_connected(dial.addr) {
                         tracing::debug!(
-                            addr = %addr,
+                            addr = %dial.addr,
                             "p2p outbound request skipped: already active"
                         );
                         continue;
                     }
-                    let handle = crate::listener::spawn_outbound_connection(addr, shared.clone());
-                    active.insert(addr);
-                    handles.push((addr, handle));
+                    let role = dial_outbound_role(
+                        &dial,
+                        &peer_table,
+                        &active,
+                        full_relay_slots,
+                        block_relay_slots,
+                        extra_dial,
+                    );
+                    let handle = if dial.manual {
+                        crate::listener::spawn_pinned_outbound_connection(
+                            dial.addr,
+                            shared.clone(),
+                            role,
+                        )
+                    } else {
+                        crate::listener::spawn_outbound_connection(dial.addr, shared.clone(), role)
+                    };
+                    active.insert(dial.addr, role);
+                    handles.push((dial.addr, handle));
                 }
                 for (_, handle) in handles {
                     let _ = handle.join();
@@ -337,7 +443,10 @@ impl P2pService {
             })
     }
 
-    fn spawn_bootstrap_worker(&self) -> Result<Option<JoinHandle<()>>, io::Error> {
+    fn spawn_bootstrap_worker(
+        &self,
+        block_sync: Option<Arc<crate::sync::BlockSync>>,
+    ) -> Result<Option<JoinHandle<()>>, io::Error> {
         if !self.config.fixed_peers.is_empty() {
             let shutdown = Arc::clone(&self.worker_shutdown);
             let network_active = Arc::clone(&self.network_active);
@@ -367,7 +476,7 @@ impl P2pService {
         let outbound_tx = self.outbound_tx.clone();
         let port = self.config.dns_port;
         let seeds = self.config.dns_seeds.clone();
-        let target = self.config.outbound_peer_target;
+        let target = self.config.total_outbound_active_limit();
         thread::Builder::new()
             .name("bitcoin-rs-dns-maintenance".to_owned())
             .spawn(move || {
@@ -379,6 +488,7 @@ impl P2pService {
                     port,
                     seeds,
                     target,
+                    block_sync,
                 );
             })
             .map(Some)
@@ -506,15 +616,15 @@ impl P2pService {
         Arc::clone(&self.banned)
     }
 
-    /// Returns a sender for RPC addnode requests.
+    /// Returns a sender for outbound dial requests, manual or not.
     #[must_use]
-    pub fn outbound_sender(&self) -> Sender<SocketAddr> {
+    pub fn outbound_sender(&self) -> Sender<OutboundDial> {
         self.outbound_tx.clone()
     }
 
     /// Returns the service-owned outbound request receiver.
     #[must_use]
-    pub fn outbound_receiver(&self) -> Arc<Mutex<Receiver<SocketAddr>>> {
+    pub fn outbound_receiver(&self) -> Arc<Mutex<Receiver<OutboundDial>>> {
         Arc::clone(&self.outbound_rx)
     }
 
@@ -561,7 +671,7 @@ impl P2pService {
         if !self.network_active() {
             return Ok(());
         }
-        match self.outbound_tx.try_send(addr) {
+        match self.outbound_tx.try_send(OutboundDial::pinned(addr)) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => Ok(()),
             Err(TrySendError::Full(_)) => Err(P2pControlError::QueueFull),
@@ -625,7 +735,7 @@ pub fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active:
 }
 
 fn reap_finished_outbound_connections(
-    active: &mut HashSet<SocketAddr>,
+    active: &mut HashMap<SocketAddr, crate::peer_info::PeerRole>,
     handles: &mut Vec<(SocketAddr, JoinHandle<Result<(), crate::PeerError>>)>,
 ) {
     let mut index = 0;
@@ -663,7 +773,7 @@ fn run_fixed_peer_bootstrap(
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
-    outbound_tx: Sender<SocketAddr>,
+    outbound_tx: Sender<OutboundDial>,
     endpoints: Vec<String>,
 ) {
     while !shutdown.load(Ordering::Acquire) {
@@ -688,7 +798,7 @@ fn run_fixed_peer_bootstrap(
                 if peer_table.is_connected(addr) || !network_active.load(Ordering::Acquire) {
                     continue;
                 }
-                if outbound_tx.try_send(addr).is_err() {
+                if outbound_tx.try_send(OutboundDial::pinned(addr)).is_err() {
                     break 'endpoints;
                 }
             }
@@ -711,15 +821,208 @@ fn live_outbound_count(peer_table: &crate::PeerTable) -> usize {
         .count()
 }
 
+/// Chooses the role of one dial, pinned or automatic.
+///
+/// PRE: `dial` is a dequeued outbound request; the remaining arguments are
+///   the automatic chooser's, over the same table and pending set.
+/// POST: a pinned dial is answered with full relay whatever the classes
+///   hold; an automatic one is answered by [`next_outbound_role`].
+/// INVARIANT: an operator pin (`--connect`/`addnode`) asks for full relay
+///   because Core's `ConnectionType::MANUAL` peers relay transactions.
+///   Feeding the pin through the slot chooser could hand it
+///   `BlockRelayOnly`, which advertises `relay = false` and ends the
+///   connection on the first transaction the operator's peer sends; the
+///   chooser only orders the dials the scheduler started itself.
+fn dial_outbound_role(
+    dial: &OutboundDial,
+    peer_table: &crate::PeerTable,
+    pending: &HashMap<SocketAddr, crate::peer_info::PeerRole>,
+    full_relay_slots: usize,
+    block_relay_slots: usize,
+    extra_full_relay: bool,
+) -> crate::peer_info::PeerRole {
+    if dial.manual {
+        return crate::peer_info::PeerRole::FullRelay;
+    }
+    next_outbound_role(
+        peer_table,
+        pending,
+        full_relay_slots,
+        block_relay_slots,
+        extra_full_relay,
+    )
+}
+
+/// Chooses the relay role of the next outbound connection.
+///
+/// PRE: `peer_table` holds the live connections of the current epoch,
+///   `pending` holds every dial the caller has started whose thread is still
+///   running — connected ones included — keyed by address with the role each
+///   was dialed as, and `extra_full_relay` reports the scheduler's allowance.
+/// POST: return `BlockRelayOnly` only while the block-relay population is
+///   below its slots, which happens once the full-relay slots are filled.
+/// INVARIANT: a connection counts once, in its own class: the table's
+///   registered leases plus the dials that have not registered yet, both read
+///   from one `sessions` snapshot so a dial that registers mid-census is
+///   counted exactly once. A dial therefore holds its class from the moment
+///   it starts, so a burst of queued addresses fills both classes rather than
+///   every slot of the first one. Full-relay slots fill first, then
+///   block-relay slots, as Core orders its dial priorities
+///   (`net.cpp:2780-2799`). A stale tip raises the full-relay target by one,
+///   which is Core's `GetTryNewOutboundPeer` (`net.cpp:2471-2480`). When both
+///   classes are satisfied the dial is served as full relay. A pinned dial is
+///   assigned full relay by the caller and never reaches this chooser.
+fn next_outbound_role(
+    peer_table: &crate::PeerTable,
+    pending: &HashMap<SocketAddr, crate::peer_info::PeerRole>,
+    full_relay_slots: usize,
+    block_relay_slots: usize,
+    extra_full_relay: bool,
+) -> crate::peer_info::PeerRole {
+    use crate::peer_info::PeerRole;
+    // One snapshot classifies every dial exactly once: a dial the table has
+    // taken counts in its class here and not in flight, a dial it has not
+    // taken counts in flight and not here. Reading the counts and the
+    // liveness checks from separate table passes could drop a dial that
+    // registers in between into neither population and over-dial its class.
+    let sessions = peer_table.sessions();
+    let census: Vec<&crate::PeerSession> = sessions
+        .iter()
+        .filter(|session| !session.lease.is_inbound() && !session.lease.is_cancelled())
+        .collect();
+    let connected_full = census
+        .iter()
+        .filter(|session| session.lease.role() == PeerRole::FullRelay)
+        .count();
+    let connected_block = census
+        .iter()
+        .filter(|session| session.lease.role() == PeerRole::BlockRelayOnly)
+        .count();
+    // A live connection stays in `pending` until its thread exits, so only a
+    // dial the table has not taken yet adds to its class.
+    let in_flight = |want: PeerRole| {
+        pending
+            .iter()
+            .filter(|(addr, role)| {
+                **role == want && !census.iter().any(|session| session.addr == **addr)
+            })
+            .count()
+    };
+    let dialed_full = connected_full + in_flight(PeerRole::FullRelay);
+    let dialed_block = connected_block + in_flight(PeerRole::BlockRelayOnly);
+    if dialed_full < full_relay_slots + usize::from(extra_full_relay) {
+        PeerRole::FullRelay
+    } else if dialed_block < block_relay_slots {
+        PeerRole::BlockRelayOnly
+    } else {
+        PeerRole::FullRelay
+    }
+}
+
+/// Retires the newest full-relay outbound connection that the stale-tip
+/// allowance made extra, once the tip has moved again.
+///
+/// PRE: `slots` is the configured full-relay count; `sync`, when the node
+///   wired one, answers whether the tip still looks stale and who is
+///   mid-download.
+/// POST: at most one connection is disconnected, and none while the tip still
+///   looks stale, while no connection is above `slots`, or while every
+///   candidate is too young or mid-download.
+/// INVARIANT: the extra connection exists to find a better chain, so it leaves
+///   as soon as the chain moves. Core retires one per check
+///   (`EvictExtraOutboundPeers`, `net_processing.cpp:5604-5668`) and passes
+///   over a peer with blocks in flight or a peer below the minimum age.
+fn retire_extra_full_relay_connection(
+    peer_table: &crate::PeerTable,
+    sync: Option<&crate::sync::BlockSync>,
+    slots: usize,
+    now: Instant,
+) {
+    let Some(sync) = sync else {
+        return;
+    };
+    if sync.allow_extra_full_relay_dial() {
+        return;
+    }
+    let Some(session) = newest_excess_full_relay(peer_table, slots, now, |source| {
+        sync.is_downloading_bodies(source)
+    }) else {
+        return;
+    };
+    if peer_table.disconnect_connection(session.addr, session.lease.connection_id()) {
+        metrics::counter!("node.sync.extra_peer_disconnects").increment(1);
+        tracing::info!(
+            peer_addr = %session.addr,
+            "p2p retiring the extra full-relay connection: the tip is moving again"
+        );
+    }
+}
+
+/// The newest full-relay outbound connection beyond the configured slots.
+///
+/// PRE: `slots` is the configured full-relay count, and `is_downloading`
+///   answers whether a candidate's body download is in flight, read from the
+///   same window the scheduler fetches with.
+/// POST: return `None` while the table holds no more than `slots` such
+///   connections; otherwise return the newest automatic one in the excess
+///   slice past `slots` that is old enough to be judged and has no body
+///   download in flight.
+/// INVARIANT: a connection that never finished its handshake still holds a
+///   slot, so it counts, but a hand-pinned one is never the victim: Core's
+///   `EvictExtraOutboundPeers` looks only at `IsFullOutboundConn()` and
+///   `IsBlockOnlyConn()`, neither of which includes
+///   `ConnectionType::MANUAL` (`net_processing.cpp:5558-5604`). The victim
+///   comes only from the excess slice, so a young extra connection can
+///   never divert retirement onto an in-slot peer, and a candidate with
+///   blocks in flight is passed over, as Core's rule does
+///   (`net_processing.cpp:5604-5668`).
+///   `PeerTable::sessions` is ordered by connection identity, which is dial
+///   order, so the newest is last and the excess slice is the tail.
+fn newest_excess_full_relay(
+    peer_table: &crate::PeerTable,
+    slots: usize,
+    now: Instant,
+    is_downloading: impl Fn(crate::PeerSource) -> bool,
+) -> Option<crate::PeerSession> {
+    // The census counts every slot occupant — a hand-pinned connection
+    // holds a slot the same as an automatic one — but the victim selection
+    // keeps `is_manual` out, as Core's rule does.
+    let sessions: Vec<crate::PeerSession> = peer_table
+        .sessions()
+        .into_iter()
+        .filter(|session| {
+            !session.lease.is_inbound()
+                && !session.lease.is_cancelled()
+                && session.lease.role() == crate::peer_info::PeerRole::FullRelay
+        })
+        .collect();
+    let excess = sessions.len().saturating_sub(slots);
+    if excess == 0 {
+        return None;
+    }
+    sessions
+        .iter()
+        .rev()
+        .take(excess)
+        .find(|session| {
+            !session.lease.is_manual()
+                && now.saturating_duration_since(session.lease.connected_at())
+                    >= crate::download_window::MINIMUM_CONNECT_TIME
+                && !is_downloading(session.lease.source(session.addr))
+        })
+        .cloned()
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn run_dns_peer_maintenance(
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
-    outbound_tx: Sender<SocketAddr>,
+    outbound_tx: Sender<OutboundDial>,
     port: u16,
     seeds: Vec<String>,
     target: usize,
+    block_sync: Option<Arc<crate::sync::BlockSync>>,
 ) {
     let resolver = crate::SystemDnsResolver::new(port);
     let seeds: Vec<&str> = seeds.iter().map(String::as_str).collect();
@@ -763,11 +1066,19 @@ fn run_dns_peer_maintenance(
         if wait_for_shutdown(&shutdown, delay) {
             break;
         }
+        // A stale tip raises the target by one so the refill feeds the
+        // extra dial too, as Core opens it from its own address book
+        // (`net.cpp:2786-2806`).
+        let extra = usize::from(
+            block_sync
+                .as_ref()
+                .is_some_and(|sync| sync.allow_extra_full_relay_dial()),
+        );
         let live = live_outbound_count(&peer_table);
-        if live >= target {
+        if live >= target + extra {
             continue;
         }
-        let needed = target - live;
+        let needed = target + extra - live;
         queued = drain_dns_peer_deficit(
             &resolver,
             &seeds,
@@ -795,7 +1106,7 @@ fn drain_dns_peer_deficit<R>(
     seeds: &[&str],
     network_active: &AtomicBool,
     peer_table: &crate::PeerTable,
-    outbound_tx: &Sender<SocketAddr>,
+    outbound_tx: &Sender<OutboundDial>,
     recently_queued: &mut HashMap<SocketAddr, Instant>,
     cursor: usize,
     needed: usize,
@@ -830,7 +1141,7 @@ where
             {
                 continue;
             }
-            match outbound_tx.try_send(addr) {
+            match outbound_tx.try_send(OutboundDial::auto(addr)) {
                 Ok(()) => {
                     recently_queued.insert(addr, now);
                     queued += 1;
@@ -964,12 +1275,293 @@ mod tests {
             &outbound_tx,
             &mut recently_queued,
             0,
-            DEFAULT_OUTBOUND_TARGET,
+            DEFAULT_OUTBOUND_FULL_RELAY_SLOTS + DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS,
         );
         assert_eq!(queued, 1);
         assert_eq!(
             outbound_rx.try_recv().ok(),
-            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, REPLACEMENT_PORT))),
+            Some(OutboundDial::auto(SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                REPLACEMENT_PORT,
+            )))),
+        );
+    }
+
+    /// The dialer fills full-relay slots before block-relay slots, and serves
+    /// an explicit request as full relay once both classes are full.
+    #[test]
+    fn next_outbound_role_fills_full_relay_slots_first() {
+        use crate::connection::PeerLease;
+        let table = crate::PeerTable::new();
+        assert!(
+            matches!(
+                next_outbound_role(&table, &HashMap::new(), 1, 1, false),
+                crate::peer_info::PeerRole::FullRelay
+            ),
+            "an empty table takes the full-relay slot first"
+        );
+
+        let (full_tx, _full_rx) = crossbeam_channel::unbounded();
+        table.register(
+            SocketAddr::from(([127, 0, 0, 1], 1)),
+            PeerLease::new(full_tx),
+        );
+        assert!(
+            matches!(
+                next_outbound_role(&table, &HashMap::new(), 1, 1, false),
+                crate::peer_info::PeerRole::BlockRelayOnly
+            ),
+            "the full-relay slot is held, so the next dial is block-relay"
+        );
+        assert!(
+            matches!(
+                next_outbound_role(&table, &HashMap::new(), 1, 1, true),
+                crate::peer_info::PeerRole::FullRelay
+            ),
+            "a stale tip raises the full-relay target by one"
+        );
+
+        let (block_tx, _block_rx) = crossbeam_channel::unbounded();
+        table.register(
+            SocketAddr::from(([127, 0, 0, 1], 2)),
+            PeerLease::new_block_relay(block_tx),
+        );
+        assert!(
+            matches!(
+                next_outbound_role(&table, &HashMap::new(), 1, 1, false),
+                crate::peer_info::PeerRole::FullRelay
+            ),
+            "with both classes full, a requested dial stays full relay"
+        );
+    }
+
+    /// A dial that has not registered yet still counts against its class, so a
+    /// burst of queued addresses fills the block-relay slots instead of
+    /// stacking every connection in the first class.
+    #[test]
+    fn in_flight_dials_hold_their_class() {
+        use crate::peer_info::PeerRole;
+        let table = crate::PeerTable::new();
+        let mut pending: HashMap<SocketAddr, PeerRole> = HashMap::new();
+        for port in 1..=8_u16 {
+            pending.insert(
+                SocketAddr::from(([127, 0, 0, 1], port)),
+                PeerRole::FullRelay,
+            );
+        }
+        assert!(
+            matches!(
+                next_outbound_role(&table, &pending, 8, 2, false),
+                PeerRole::BlockRelayOnly
+            ),
+            "eight unregistered full-relay dials already fill the full-relay slots"
+        );
+        for port in 9..=10_u16 {
+            pending.insert(
+                SocketAddr::from(([127, 0, 0, 1], port)),
+                PeerRole::BlockRelayOnly,
+            );
+        }
+        assert!(
+            matches!(
+                next_outbound_role(&table, &pending, 8, 2, false),
+                PeerRole::FullRelay
+            ),
+            "with both classes dialled full, a requested dial stays full relay"
+        );
+    }
+
+    /// A live connection that is still on the caller's dial list counts once:
+    /// five connected full-relay peers hold five of eight slots, not ten, so
+    /// the next dial is still full relay rather than an early block-relay.
+    #[test]
+    fn a_registered_dial_counts_once() {
+        use crate::connection::PeerLease;
+        use crate::peer_info::PeerRole;
+        let table = crate::PeerTable::new();
+        let mut pending: HashMap<SocketAddr, PeerRole> = HashMap::new();
+        for port in 1..=5_u16 {
+            let addr = SocketAddr::from(([127, 0, 0, 1], port));
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            table.register(addr, PeerLease::new(tx));
+            pending.insert(addr, PeerRole::FullRelay);
+        }
+        assert!(
+            matches!(
+                next_outbound_role(&table, &pending, 8, 2, false),
+                PeerRole::FullRelay
+            ),
+            "five connected full-relay peers hold five of eight slots, not ten"
+        );
+    }
+
+    /// The connection retired for a moving tip is the newest full-relay
+    /// outbound one beyond the slots, and a connection too young to have had a
+    /// chance is passed over.
+    #[test]
+    fn newest_excess_full_relay_picks_the_newest_aged_connection() {
+        use crate::connection::PeerLease;
+        use crate::download_window::MINIMUM_CONNECT_TIME;
+        use crate::peer_info::PeerRole;
+
+        fn addr(port: u16) -> SocketAddr {
+            SocketAddr::from(([127, 0, 0, 1], port))
+        }
+
+        let now = Instant::now();
+        let aged = now
+            .checked_sub(MINIMUM_CONNECT_TIME)
+            .expect("test clock is past the minimum connect time");
+        let table = crate::PeerTable::new();
+        for port in 1..=2_u16 {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut lease = PeerLease::new(tx);
+            lease.backdate_for_test(aged);
+            table.register(addr(port), lease);
+        }
+        let (block_tx, _block_rx) = crossbeam_channel::unbounded();
+        let mut block_lease = PeerLease::new_block_relay(block_tx);
+        block_lease.backdate_for_test(aged);
+        table.register(addr(3), block_lease);
+        let (inbound_tx, _inbound_rx) = crossbeam_channel::unbounded();
+        let mut inbound_lease = PeerLease::new_inbound(inbound_tx);
+        inbound_lease.backdate_for_test(aged);
+        table.register(addr(4), inbound_lease);
+
+        assert!(
+            newest_excess_full_relay(&table, 2, now, |_| false).is_none(),
+            "two full-relay connections fill two slots, and neither a              block-relay nor an inbound connection counts as one"
+        );
+
+        // The newest connection overall is too young to judge; the one retired
+        // is the newest that is old enough. A hand-pinned connection is newer
+        // still and aged, and Core's `EvictExtraOutboundPeers` never looks at
+        // it (`net_processing.cpp:5558-5604`).
+        let (young_tx, _young_rx) = crossbeam_channel::unbounded();
+        let young_lease = PeerLease::new(young_tx);
+        table.register(addr(5), young_lease);
+        let (third_tx, _third_rx) = crossbeam_channel::unbounded();
+        let mut third_lease = PeerLease::new(third_tx);
+        third_lease.backdate_for_test(aged);
+        table.register(addr(6), third_lease);
+
+        let excess = newest_excess_full_relay(&table, 2, now, |_| false)
+            .expect("three full-relay peers are one extra");
+        assert_eq!(
+            excess.addr,
+            addr(6),
+            "the newest aged connection is the one"
+        );
+        assert_eq!(excess.lease.role(), PeerRole::FullRelay);
+
+        let (pinned_tx, _pinned_rx) = crossbeam_channel::unbounded();
+        let mut pinned_lease = PeerLease::new_manual(pinned_tx, PeerRole::FullRelay);
+        pinned_lease.backdate_for_test(aged);
+        table.register(addr(7), pinned_lease);
+        assert_eq!(
+            newest_excess_full_relay(&table, 2, now, |_| false)
+                .expect("the pinned connection is not a candidate")
+                .addr,
+            excess.addr,
+            "the newest automatic connection stays the victim while a pinned one is newer"
+        );
+    }
+
+    /// A pinned dial is answered with full relay even when the automatic
+    /// chooser would hand out a block-relay slot, so an operator's peer
+    /// always relays transactions.
+    #[test]
+    fn a_pinned_dial_takes_full_relay_whatever_the_slots_hold() {
+        use crate::connection::PeerLease;
+        use crate::peer_info::PeerRole;
+
+        let table = crate::PeerTable::new();
+        let addr = SocketAddr::from(([127, 0, 0, 1], 1));
+        let (tx, _rx) = crossbeam_channel::unbounded();
+        // A connected full-relay peer fills the one full-relay slot.
+        table.register(addr, PeerLease::new(tx));
+
+        assert!(
+            matches!(
+                next_outbound_role(&table, &HashMap::new(), 1, 1, false),
+                PeerRole::BlockRelayOnly
+            ),
+            "premise: the automatic chooser answers a full slot with block relay"
+        );
+        assert!(
+            matches!(
+                dial_outbound_role(
+                    &OutboundDial::pinned(SocketAddr::from(([127, 0, 0, 1], 2))),
+                    &table,
+                    &HashMap::new(),
+                    1,
+                    1,
+                    false,
+                ),
+                PeerRole::FullRelay
+            ),
+            "the operator's pin is answered with full relay regardless"
+        );
+    }
+
+    /// The retirement victim comes only from the excess slice: a young extra
+    /// connection beyond the slots cannot divert retirement onto an in-slot
+    /// peer, and a candidate with a body download in flight is passed over
+    /// for the next eligible excess peer.
+    #[test]
+    fn the_excess_victim_comes_from_the_excess_slice_only() {
+        use crate::connection::PeerLease;
+        use crate::download_window::MINIMUM_CONNECT_TIME;
+
+        fn addr(port: u16) -> SocketAddr {
+            SocketAddr::from(([127, 0, 0, 1], port))
+        }
+
+        let now = Instant::now();
+        let aged = now
+            .checked_sub(MINIMUM_CONNECT_TIME)
+            .expect("test clock is past the minimum connect time");
+        let table = crate::PeerTable::new();
+
+        // Two aged full-relay connections fill the two slots.
+        for port in 1..=2_u16 {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut lease = PeerLease::new(tx);
+            lease.backdate_for_test(aged);
+            table.register(addr(port), lease);
+        }
+        // A young extra connection sits beyond the slots. Under the old
+        // whole-list scan it is skipped for youth and the newest in-slot
+        // connection is retired in its place.
+        let (young_tx, _young_rx) = crossbeam_channel::unbounded();
+        table.register(addr(3), PeerLease::new(young_tx));
+
+        assert!(
+            newest_excess_full_relay(&table, 2, now, |_| false).is_none(),
+            "the only excess candidate is too young, so nobody in the slots is retired"
+        );
+
+        // The young excess connection ages, but holds a body download in
+        // flight: it is passed over rather than stalling retirement.
+        let (aged_tx, _aged_rx) = crossbeam_channel::unbounded();
+        let mut downloading = PeerLease::new(aged_tx);
+        downloading.backdate_for_test(aged);
+        table.register(addr(4), downloading);
+        let source = table
+            .lease(addr(4))
+            .map(|lease| lease.source(addr(4)))
+            .expect("the downloading excess peer is registered");
+
+        assert!(
+            newest_excess_full_relay(&table, 2, now, |candidate| candidate == source).is_none(),
+            "the downloading excess peer is passed over and nothing else is beyond the slots"
+        );
+        assert_eq!(
+            newest_excess_full_relay(&table, 2, now, |_| false)
+                .expect("the aged excess peer is eligible")
+                .addr,
+            addr(4),
+            "the same peer is the victim once its download completes"
         );
     }
 }

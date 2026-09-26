@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::io::Cursor;
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -23,13 +23,14 @@ use bitcoin::p2p::message::{CommandString, NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
+use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
     ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, dispatch_inbound,
     dispatch_inbound_with_chain,
 };
 use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
-use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve};
+use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::wire::{
     MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
     write_message,
@@ -304,7 +305,7 @@ fn ready_peer(magic: Magic) -> Result<Peer<Cursor<Vec<u8>>>, PeerError> {
 }
 
 fn version_for_handshake() -> Message {
-    Message::Version(version_message(1, 0))
+    Message::Version(version_message(1, 0, PeerRole::FullRelay))
 }
 
 fn get_headers(locator: Vec<NativeBlockHash>, stop: NativeBlockHash) -> Message {
@@ -511,7 +512,7 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
 #[test]
 fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result<(), Box<dyn Error>>
 {
-    let version = version_message(0xdead_beef, 777);
+    let version = version_message(0xdead_beef, 777, PeerRole::FullRelay);
     let inv = vec![Inventory::Transaction(Txid::from_byte_array([9u8; 32]))];
     let cases = [
         (Message::Ping(42), NetworkMessage::Ping(42)),
@@ -547,7 +548,7 @@ fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result
 
 #[test]
 fn version_message_pins_core_31_handshake_fields() {
-    let version = version_message(0xdead_beef, 777);
+    let version = version_message(0xdead_beef, 777, PeerRole::FullRelay);
 
     assert_eq!(version.version, PROTOCOL_VERSION);
     assert_eq!(
@@ -576,7 +577,7 @@ fn version_message_pins_core_31_handshake_fields() {
 #[test]
 fn outbound_handshake_sends_version_then_core_feature_set() {
     let mut peer = Peer::new(Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
-    let messages = start(&mut peer, 1, 0);
+    let messages = start(&mut peer, 1, 0, PeerRole::FullRelay);
 
     assert_eq!(peer.state, PeerState::VersionExchange);
     assert_eq!(messages.len(), 4);
@@ -884,6 +885,115 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Bo
         "inbound tx relay is decode-accepted, not processed yet"
     );
     assert_eq!(peer.state, PeerState::Ready);
+    Ok(())
+}
+
+/// A block-relay-only dial is prohibited from transaction relay on the real
+/// wire: it advertises `relay = false`, keeps taking blocks, drops address
+/// gossip unheard, and ends the connection on a transaction. Core
+/// disconnects a block-relay peer that pushes a transaction
+/// (`RejectIncomingTxs`, `net_processing.cpp:4706-4711`, and the `inv` branch
+/// at `net_processing.cpp:4385-4390`) and declines address relay instead of
+/// punishing it (`SetupAddressRelay`, `net_processing.cpp:5952-5970`).
+#[test]
+fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Box<dyn Error>> {
+    let magic = Magic::BITCOIN;
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
+    let addr = listener.local_addr()?;
+    let (headers_tx, headers_rx) = crossbeam_channel::unbounded::<InboundHeaders>();
+    let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded::<InboundBlock>();
+    let shared = ConnectionShared::new(
+        Arc::new(PeerTable::new()),
+        Arc::new(parking_lot::RwLock::new(Vec::<BannedSubnet>::new())),
+        Arc::new(NetworkActivity::from_shared(Arc::new(AtomicBool::new(
+            true,
+        )))),
+        Arc::new(AtomicBool::new(false)),
+        None,
+        magic,
+        headers_tx,
+        blocks_tx,
+        None,
+        None,
+        ListenerExtras::default(),
+    );
+    let dial = spawn_outbound_connection(addr, shared, PeerRole::BlockRelayOnly);
+
+    let (mut server, _) = listener.accept()?;
+    server.set_read_timeout(Some(Duration::from_secs(5)))?;
+    server.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+    let Ok((Message::Version(version), _)) = read_message(&mut server, magic) else {
+        return Err("the dial opens with a version message".into());
+    };
+    assert!(
+        !version.relay,
+        "a block-relay-only dial advertises no transaction relay"
+    );
+
+    write_message(&mut server, magic, &version_for_handshake())?;
+    write_message(&mut server, magic, &Message::Verack)?;
+    let mut completed = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !completed && Instant::now() < deadline {
+        let message = match read_message(&mut server, magic) {
+            Ok((message, _)) => message,
+            Err(PeerError::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        completed = matches!(message, Message::Verack);
+    }
+    assert!(completed, "the block-relay handshake completes");
+
+    // Address gossip is dropped unheard, and the next message still reaches
+    // the node: a live `block` proves the connection survived the `addr`.
+    let genesis = genesis_block()?;
+    write_message(&mut server, magic, &Message::Addr(Vec::new()))?;
+    write_message(&mut server, magic, &Message::Block(genesis.clone()))?;
+    let Ok(announced) = headers_rx.recv_timeout(Duration::from_secs(5)) else {
+        return Err("a block must reach the scheduler on a block-relay connection".into());
+    };
+    assert!(
+        !announced.headers.is_empty(),
+        "the block header is forwarded"
+    );
+
+    let Some(coinbase) = genesis.txs.first() else {
+        return Err("genesis carries a coinbase transaction".into());
+    };
+    write_message(&mut server, magic, &Message::Tx(coinbase.clone()))?;
+    // If transaction enforcement regresses, the peer loop keeps polling while
+    // this socket stays open and a bare `join` would wait forever. Give the
+    // disconnect a bounded window, and on timeout close the socket so the
+    // loop ends and the assertion below reports the regression instead of
+    // hanging CI.
+    let enforcement_deadline = Instant::now() + Duration::from_secs(5);
+    while !dial.is_finished() && Instant::now() < enforcement_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !dial.is_finished() {
+        let _ = server.shutdown(std::net::Shutdown::Both);
+        drop(server);
+    }
+    let Ok(outcome) = dial.join() else {
+        return Err("the dial thread panicked".into());
+    };
+    let Err(error) = outcome else {
+        return Err("a transaction on a block-relay connection must end it".into());
+    };
+    assert!(
+        matches!(&error, PeerError::Protocol(reason)
+            if *reason == "transaction sent in violation of protocol"),
+        "unexpected connection end: {error:?}"
+    );
     Ok(())
 }
 
@@ -1277,7 +1387,10 @@ fn drive_handshake_as_core(
         match message {
             Message::Version(version) => {
                 assert_eq!(version.version, PROTOCOL_VERSION);
-                assert_eq!(version.services, version_message(0, 0).services);
+                assert_eq!(
+                    version.services,
+                    version_message(0, 0, PeerRole::FullRelay).services
+                );
             }
             Message::WtxidRelay => saw_features[0] = true,
             Message::SendAddrV2 => saw_features[1] = true,

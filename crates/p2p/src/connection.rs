@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -238,25 +239,77 @@ pub struct PeerLease {
     /// Live unsolicited block forwards admitted by this connection.
     unsolicited_forwards: Arc<AtomicUsize>,
     inbound: bool,
+    role: crate::peer_info::PeerRole,
+    /// Whether the operator pinned this dial by hand (`--connect` or
+    /// `addnode`). Core: `ConnectionType::MANUAL`.
+    manual: bool,
+    /// Monotonic instant the connection was created.
+    connected: Instant,
 }
 
 impl PeerLease {
-    /// Creates an outbound-direction lease with a fresh process-unique identity.
+    /// Creates an outbound full-relay lease with a fresh process-unique identity.
     #[must_use]
     pub fn new(outbound: Sender<crate::Message>) -> Self {
-        Self::with_direction(outbound, false)
+        Self::with_direction(
+            outbound,
+            false,
+            crate::peer_info::PeerRole::FullRelay,
+            false,
+        )
     }
 
-    /// Creates an inbound-direction lease with a fresh process-unique identity.
+    /// Creates an outbound block-relay-only lease.
+    ///
+    /// PRE: none.
+    /// POST: the lease is outbound and its role is
+    ///   [`crate::peer_info::PeerRole::BlockRelayOnly`], so the connection
+    ///   carries blocks and headers only, in either direction.
+    /// INVARIANT: the role is fixed for the life of the lease.
+    #[must_use]
+    pub fn new_block_relay(outbound: Sender<crate::Message>) -> Self {
+        Self::with_direction(
+            outbound,
+            false,
+            crate::peer_info::PeerRole::BlockRelayOnly,
+            false,
+        )
+    }
+
+    /// Creates an outbound lease the operator asked for by name.
+    ///
+    /// PRE: none.
+    /// POST: the lease is outbound, carries `role`, and is manual.
+    /// INVARIANT: Core's `ConnectionType::MANUAL` is exempt from the
+    ///   chain-sync timeout and the extra-peer retirement
+    ///   (`net_processing.cpp:5502`, `net_processing.cpp:5558-5604`):
+    ///   replacing a hand-pinned connection would undo an explicit
+    ///   instruction, so the flag must outlive every policy check.
+    #[must_use]
+    pub fn new_manual(outbound: Sender<crate::Message>, role: crate::peer_info::PeerRole) -> Self {
+        Self::with_direction(outbound, false, role, true)
+    }
+
+    /// Creates an inbound lease with a fresh process-unique identity.
+    ///
+    /// Inbound connections always relay fully: the role split is a choice
+    /// about whom we dial.
     #[must_use]
     pub fn new_inbound(outbound: Sender<crate::Message>) -> Self {
-        Self::with_direction(outbound, true)
+        Self::with_direction(outbound, true, crate::peer_info::PeerRole::FullRelay, false)
     }
 
-    fn with_direction(outbound: Sender<crate::Message>, inbound: bool) -> Self {
+    fn with_direction(
+        outbound: Sender<crate::Message>,
+        inbound: bool,
+        role: crate::peer_info::PeerRole,
+        manual: bool,
+    ) -> Self {
         Self::with_budget(
             outbound,
             inbound,
+            role,
+            manual,
             OutboundBudget::new(OUTBOUND_QUEUE_MAX_MESSAGES, OUTBOUND_QUEUE_MAX_BYTES),
         )
     }
@@ -264,6 +317,8 @@ impl PeerLease {
     fn with_budget(
         outbound: Sender<crate::Message>,
         inbound: bool,
+        role: crate::peer_info::PeerRole,
+        manual: bool,
         budget: OutboundBudget,
     ) -> Self {
         let (close_tx, close_rx) = crossbeam_channel::bounded(1);
@@ -276,6 +331,9 @@ impl PeerLease {
             budget: Arc::new(budget),
             unsolicited_forwards: Arc::new(AtomicUsize::new(0)),
             inbound,
+            role,
+            manual,
+            connected: Instant::now(),
         }
     }
 
@@ -285,7 +343,13 @@ impl PeerLease {
         inbound: bool,
         budget: OutboundBudget,
     ) -> Self {
-        Self::with_budget(outbound, inbound, budget)
+        Self::with_budget(
+            outbound,
+            inbound,
+            crate::peer_info::PeerRole::FullRelay,
+            false,
+            budget,
+        )
     }
 
     /// Stable process-unique node id for this connection (Core `nodeid`).
@@ -304,6 +368,49 @@ impl PeerLease {
     #[must_use]
     pub const fn is_inbound(&self) -> bool {
         self.inbound
+    }
+
+    /// What this connection relays. See [`crate::peer_info::PeerRole`].
+    ///
+    /// PRE: none.
+    /// POST: the role assigned when the lease was created.
+    /// INVARIANT: never changes; a replacement connection gets its own lease
+    ///   and therefore its own role.
+    #[must_use]
+    pub const fn role(&self) -> crate::peer_info::PeerRole {
+        self.role
+    }
+
+    /// Whether the operator pinned this connection by hand.
+    ///
+    /// PRE: none.
+    /// POST: true exactly for a dial asked for by `--connect` or `addnode`.
+    /// INVARIANT: never changes, like the role: the exemption the flag
+    ///   carries is Core's `ConnectionType::MANUAL`
+    ///   (`net_processing.cpp:5502`), and a connection that could lose it
+    ///   mid-life could be evicted by a rule that never applied to it.
+    #[must_use]
+    pub const fn is_manual(&self) -> bool {
+        self.manual
+    }
+
+    /// When this connection was created, on the monotonic clock.
+    ///
+    /// PRE: none.
+    /// POST: the instant never moves, and it is never in the future
+    ///   relative to a later read.
+    /// INVARIANT: this holds the role Core's `nTimeConnected` holds
+    ///   (`net.h`): the age a connection must reach before policy may
+    ///   hold its silence against it.
+    #[must_use]
+    pub const fn connected_at(&self) -> Instant {
+        self.connected
+    }
+
+    /// Moves this lease's connection instant into the past.
+    #[cfg(test)]
+    pub(crate) fn backdate_for_test(&mut self, at: Instant) {
+        self.connected = at;
     }
 
     /// Receiver half of the close signal raised by [`PeerLease::cancel`].

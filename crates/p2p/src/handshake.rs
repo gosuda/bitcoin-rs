@@ -10,11 +10,18 @@ use bitcoin_rs_primitives::USER_AGENT;
 use crate::connection::PeerLease;
 use crate::dispatch::dispatch_inbound;
 use crate::peer::{COMPACT_BLOCK_VERSION, Peer, PeerState};
+use crate::peer_info::PeerRole;
 use crate::wire::{Message, PROTOCOL_VERSION, PeerError, read_message};
 use bitcoin::p2p::message_compact_blocks::SendCmpct;
 
 /// Build a local version message for handshake initiation.
-pub fn version_message(nonce: u64, start_height: i32) -> VersionMessage {
+///
+/// PRE: `role` is the role of the connection that will send the message.
+/// POST: the message advertises transaction relay only for a full-relay
+///   connection; a block-relay-only connection advertises `relay = false`,
+///   as Core's `PushNodeVersion` does (`net_processing.cpp:1651-1689`).
+/// INVARIANT: services, height, and nonce do not vary with the role.
+pub fn version_message(nonce: u64, start_height: i32, role: PeerRole) -> VersionMessage {
     let socket = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
     let mut services = ServiceFlags::NETWORK;
     services.add(ServiceFlags::WITNESS);
@@ -28,7 +35,7 @@ pub fn version_message(nonce: u64, start_height: i32) -> VersionMessage {
         nonce,
         user_agent: USER_AGENT.to_owned(),
         start_height,
-        relay: true,
+        relay: role.relays_transactions(),
     }
 }
 
@@ -73,10 +80,14 @@ pub(crate) fn send_post_verack_messages<S: Read + Write>(
 }
 
 /// Start an outbound handshake and return messages to send to the remote peer.
-pub fn start<S>(peer: &mut Peer<S>, nonce: u64, start_height: i32) -> Vec<Message> {
+///
+/// PRE: `role` is the dialing connection's role.
+/// POST: the first message advertises relay per `role`.
+/// INVARIANT: feature negotiation is identical for both roles.
+pub fn start<S>(peer: &mut Peer<S>, nonce: u64, start_height: i32, role: PeerRole) -> Vec<Message> {
     peer.state = PeerState::VersionExchange;
     let mut messages = Vec::with_capacity(4);
-    messages.push(Message::Version(version_message(nonce, start_height)));
+    messages.push(Message::Version(version_message(nonce, start_height, role)));
     messages.extend(feature_messages());
     messages
 }
@@ -86,9 +97,9 @@ pub fn handshake_cursors(
     left: &mut Peer<Cursor<Vec<u8>>>,
     right: &mut Peer<Cursor<Vec<u8>>>,
 ) -> Result<(), PeerError> {
-    let left_messages = start(left, 1, 0);
+    let left_messages = start(left, 1, 0, PeerRole::FullRelay);
     exchange(left, right, left_messages)?;
-    let right_messages = start(right, 2, 0);
+    let right_messages = start(right, 2, 0, PeerRole::FullRelay);
     exchange(right, left, right_messages)?;
     exchange(left, right, vec![Message::Verack])?;
     exchange(right, left, vec![Message::Verack])?;
@@ -138,6 +149,7 @@ pub fn run_inbound_handshake<S: Read + Write>(
     peer.send(&Message::Version(version_message(
         our_nonce,
         our_start_height,
+        PeerRole::FullRelay,
     )))?;
     for response in responses {
         peer.send(&response)?;
@@ -225,11 +237,10 @@ mod tests {
     use bitcoin::p2p::Magic;
 
     use super::{
-        COMPACT_BLOCK_VERSION, Peer, PeerError, PeerState, post_verack_messages,
-        run_inbound_handshake, version_message,
+        COMPACT_BLOCK_VERSION, Message, Peer, PeerError, PeerRole, PeerState, feature_messages,
+        post_verack_messages, read_message, run_inbound_handshake, start, version_message,
     };
-    use crate::handshake::feature_messages;
-    use crate::wire::{Message, read_message, write_message};
+    use crate::wire::write_message;
 
     struct ScriptedStream {
         inbound: Cursor<Vec<u8>>,
@@ -270,7 +281,7 @@ mod tests {
         write_message(
             &mut remote_outbound,
             magic,
-            &Message::Version(version_message(99, 0)),
+            &Message::Version(version_message(99, 0, PeerRole::FullRelay)),
         )?;
         write_message(&mut remote_outbound, magic, &Message::Verack)?;
 
@@ -327,5 +338,40 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// An outbound block-relay-only dial advertises no transaction relay, as
+    /// Core's `PushNodeVersion` does for a `BLOCK_RELAY` connection
+    /// (`net_processing.cpp:1651-1689`).
+    #[test]
+    fn version_message_advertises_relay_only_for_full_relay() {
+        assert!(
+            version_message(1, 0, PeerRole::FullRelay).relay,
+            "a full-relay handshake asks for transaction relay"
+        );
+        assert!(
+            !version_message(1, 0, PeerRole::BlockRelayOnly).relay,
+            "a block-relay-only handshake asks for none"
+        );
+    }
+
+    /// The role reaches the wire through the handshake start messages, and
+    /// nothing else about the advertisement changes.
+    #[test]
+    fn outbound_handshake_start_carries_the_connection_role() {
+        let stream: std::io::Cursor<Vec<u8>> = Cursor::new(Vec::new());
+        let mut peer = Peer::new(stream, Magic::BITCOIN);
+        let messages = start(&mut peer, 7, 42, PeerRole::BlockRelayOnly);
+        assert_eq!(
+            messages.len(),
+            4,
+            "one version plus the three feature messages"
+        );
+        assert!(
+            matches!(&messages[0], Message::Version(version)
+                if !version.relay && version.start_height == 42 && version.nonce == 7),
+            "the first message is the version the role advertises"
+        );
+        assert_eq!(peer.state, PeerState::VersionExchange);
     }
 }

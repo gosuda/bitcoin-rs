@@ -21,6 +21,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Bounded so the listener recovers quickly once the pressure clears.
 const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
+/// How often an otherwise quiet connection is probed with one `ping`: Core's
+/// `PING_INTERVAL` is 2 * 60 seconds (`net_processing.cpp:125`).
+const PING_INTERVAL: Duration = Duration::from_mins(2);
+
+/// How long send or receive silence may last before the connection ends:
+/// Core's `TIMEOUT_INTERVAL` is 20 * 60 seconds (`net.h:59`), enforced by its
+/// `InactivityCheck` (`net.cpp:2043-2090`).
+const TIMEOUT_INTERVAL: Duration = Duration::from_mins(20);
+
 type ChainQueryHandle = Option<Arc<dyn crate::dispatch::ChainQuery + 'static>>;
 
 type TxInventoryHandle = Option<Arc<dyn crate::dispatch::TxInventory + 'static>>;
@@ -394,10 +403,12 @@ pub fn bind_listener(addr: SocketAddr) -> Result<TcpListener, ListenerError> {
 /// handshake followed by a message-dispatch loop. Socket flags come from
 /// [`crate::socket::configure_peer_stream`]. The handshake uses
 /// [`crate::socket::HANDSHAKE_TIMEOUT`]; after handshake, the message loop
-/// polls inbound reads every [`crate::socket::STREAM_POLL_INTERVAL`] while
-/// enforcing a 60s inbound idle timeout.
+/// polls inbound reads every [`crate::socket::STREAM_POLL_INTERVAL`], probing
+/// a quiet peer with one `ping` per [`PING_INTERVAL`] and ending the
+/// connection once a direction is silent past [`TIMEOUT_INTERVAL`].
 /// The thread terminates on:
-///   - successful handshake then idle (60s of no inbound messages)
+///   - successful handshake then inactivity (no send or receive for
+///     [`TIMEOUT_INTERVAL`])
 ///   - wire / FSM error
 ///   - explicit FSM disconnect transition
 ///
@@ -479,24 +490,56 @@ fn accept_connections(
     }
 }
 
-/// Spawn one outbound connection.
+/// Spawn one automatic outbound connection dial of `role`.
 ///
-/// The thread connects to `addr`, performs the outbound P2P handshake, and
-/// enters the same message loop the inbound path uses. Errors during connect
-/// or handshake bubble up via the `JoinHandle`'s `Result`; a failed thread
-/// spawn yields a handle that reports the spawn I/O error.
+/// The thread connects to `addr`, performs the outbound P2P handshake with
+/// `role`, and enters the same message loop the inbound path uses. Errors
+/// during connect or handshake bubble up via the `JoinHandle`'s `Result`; a
+/// failed thread spawn yields a handle that reports the spawn I/O error.
 ///
-/// PRE: Wiring is complete for this start epoch.
+/// PRE: Wiring is complete for this start epoch, and `role` is the role the
+///   dialer chose for this connection.
 /// POST: The handle reports connection completion or its error.
-/// INVARIANT: Preserve registration, cancellation, and teardown order.
+/// INVARIANT: Preserve registration, cancellation, and teardown order. The
+///   role is fixed at spawn: the handshake advertises it and every relay
+///   decision reads it back from the lease.
+#[must_use]
 pub fn spawn_outbound_connection(
     addr: SocketAddr,
     shared: ConnectionShared,
+    role: crate::peer_info::PeerRole,
+) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    spawn_dial(addr, shared, role, false)
+}
+
+/// Spawn one operator-pinned outbound connection dial of `role`: an address
+/// the operator named, which Core marks `MANUAL` and spares from its
+/// chain-sync and excess-slot eviction rules.
+///
+/// PRE: Wiring is complete for this start epoch, and `role` is the role the
+///   dialer chose for this connection.
+/// POST: The handle reports connection completion or its error.
+/// INVARIANT: The lease records the pinned origin at spawn, and the eviction
+///   rules read it back from there.
+#[must_use]
+pub fn spawn_pinned_outbound_connection(
+    addr: SocketAddr,
+    shared: ConnectionShared,
+    role: crate::peer_info::PeerRole,
+) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
+    spawn_dial(addr, shared, role, true)
+}
+
+fn spawn_dial(
+    addr: SocketAddr,
+    shared: ConnectionShared,
+    role: crate::peer_info::PeerRole,
+    pinned: bool,
 ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>> {
     let thread_name = format!("bitcoin-rs-p2p-outbound-{addr}");
     let result = std::thread::Builder::new()
         .name(thread_name)
-        .spawn(move || run_outbound_connection(addr, &shared));
+        .spawn(move || run_outbound_connection(addr, &shared, role, pinned));
 
     match result {
         Ok(handle) => handle,
@@ -514,6 +557,8 @@ pub fn spawn_outbound_connection(
 fn run_outbound_connection(
     addr: SocketAddr,
     shared: &ConnectionShared,
+    role: crate::peer_info::PeerRole,
+    manual: bool,
 ) -> Result<(), crate::wire::PeerError> {
     if crate::subnet::is_banned(&shared.banned.read(), addr.ip(), SystemTime::now()) {
         return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
@@ -542,7 +587,13 @@ fn run_outbound_connection(
     // Register the connection before the handshake so live-connection
     // accounting covers handshaking peers exactly like Core's connman.
     let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
-    let lease = crate::PeerLease::new(outbound_tx);
+    let lease = match (role, manual) {
+        (crate::peer_info::PeerRole::FullRelay, false) => crate::PeerLease::new(outbound_tx),
+        (crate::peer_info::PeerRole::BlockRelayOnly, false) => {
+            crate::PeerLease::new_block_relay(outbound_tx)
+        }
+        (_, true) => crate::PeerLease::new_manual(outbound_tx, role),
+    };
     shared.peer_table.register(addr, lease.clone());
     if shared.is_session_cancelled() {
         shared.peer_table.remove_current(addr, &lease);
@@ -604,7 +655,7 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     lease: &crate::PeerLease,
     deadline: Instant,
 ) -> Result<(), crate::wire::PeerError> {
-    let outbound_messages = crate::handshake::start(peer, nonce, start_height);
+    let outbound_messages = crate::handshake::start(peer, nonce, start_height, lease.role());
     for message in outbound_messages {
         peer.send(&message)?;
     }
@@ -796,12 +847,237 @@ fn run_connected_session(
     loop_result
 }
 
+/// Applies a connection's relay role to one inbound message.
+///
+/// PRE: `role` is the connection's role and `message` arrived on it.
+/// POST: return the message for dispatch, `None` to drop it unheard, or the
+///   protocol error that ends the connection.
+/// INVARIANT: a block-relay-only connection carries blocks and headers and
+///   nothing else. A `tx` message or a transaction `inv` is a protocol
+///   violation and ends the connection, as Core's `RejectIncomingTxs`
+///   requires (`net_processing.cpp:4706-4711`, and the `inv` branch at
+///   `net_processing.cpp:4385-4390`). A `getdata` from such a connection is
+///   answered with block inventory alone: transaction inventory is stripped
+///   before dispatch, and a request that asked for nothing else is dropped
+///   unheard, so the role cannot obtain a transaction body through
+///   `getdata`. `addr` and `addrv2` are dropped
+///   without punishment, because Core declines address relay for such a
+///   peer rather than faulting it (`SetupAddressRelay`,
+///   `net_processing.cpp:5952-5970`). A full-relay connection is never
+///   restricted.
+fn enforce_relay_role(
+    role: crate::peer_info::PeerRole,
+    message: crate::Message,
+) -> Result<Option<crate::Message>, crate::wire::PeerError> {
+    use bitcoin::p2p::message_blockdata::Inventory;
+    if role.relays_transactions() {
+        return Ok(Some(message));
+    }
+    let is_transaction = |item: &Inventory| {
+        matches!(
+            item,
+            Inventory::Transaction(_) | Inventory::WitnessTransaction(_) | Inventory::WTx(_)
+        )
+    };
+    if matches!(message, crate::Message::Tx(_)) {
+        return Err(crate::wire::PeerError::Protocol(
+            "transaction sent in violation of protocol",
+        ));
+    }
+    if let crate::Message::Inv(items) = &message
+        && items.iter().any(&is_transaction)
+    {
+        return Err(crate::wire::PeerError::Protocol(
+            "transaction inv sent in violation of protocol",
+        ));
+    }
+    if let crate::Message::GetData(mut items) = message {
+        items.retain(|item| !is_transaction(item));
+        if items.is_empty() {
+            tracing::trace!("p2p dropping transaction getdata from block-relay-only peer");
+            return Ok(None);
+        }
+        return Ok(Some(crate::Message::GetData(items)));
+    }
+    if matches!(message, crate::Message::Addr(_) | crate::Message::AddrV2(_)) {
+        tracing::trace!("p2p dropping address message from block-relay-only peer");
+        return Ok(None);
+    }
+    Ok(Some(message))
+}
+
+/// What one connection's keepalive ledger asks the message loop to do.
+#[derive(Debug, PartialEq, Eq)]
+enum KeepaliveAction {
+    /// Nothing is due.
+    Idle,
+    /// Queue one `ping` for the peer.
+    Ping,
+    /// End the connection: one direction has been silent past
+    /// [`TIMEOUT_INTERVAL`].
+    Expired,
+}
+
+/// One connection's liveness ledger: when it last heard, last spoke, and
+/// last probed.
+///
+/// PRE: [`Keepalive::record_recv`] runs for every message the loop reads and
+///   [`Keepalive::record_send`] for every message the loop queues.
+/// POST: [`Keepalive::next_action`] orders a `ping` once [`PING_INTERVAL`]
+///   of quiet has passed since the previous probe, and an `Expired` end
+///   once either direction has been silent past [`TIMEOUT_INTERVAL`].
+/// INVARIANT: the decision is a pure function of the recorded instants and
+///   the caller's `now`, and one ledger belongs to one connection thread,
+///   so a peer is never judged on another connection's traffic. Durations
+///   come from the monotonic clock, so a wall-clock adjustment cannot
+///   shorten or lengthen a timeout.
+struct Keepalive {
+    /// The instant the loop last read a message from the peer.
+    last_recv: Instant,
+    /// The instant the loop last queued a message for the peer.
+    last_send: Instant,
+    /// The instant of the last probe this ledger ordered.
+    last_ping: Option<Instant>,
+}
+
+impl Keepalive {
+    /// Starts a ledger for a connection whose loop begins at `now`.
+    ///
+    /// PRE: `now` is the monotonic instant the session loop starts.
+    /// POST: both directions count as fresh at `now`, and the first probe is
+    ///   owed immediately.
+    fn starting(now: Instant) -> Self {
+        Self {
+            last_recv: now,
+            last_send: now,
+            last_ping: None,
+        }
+    }
+
+    /// Credits the peer with one message read at `now`.
+    fn record_recv(&mut self, now: Instant) {
+        self.last_recv = now;
+    }
+
+    /// Credits this node with one message queued at `now`.
+    fn record_send(&mut self, now: Instant) {
+        self.last_send = now;
+    }
+
+    /// Records a probe actually queued at `now`: the interval counts from
+    /// the send, not the decision, so a probe skipped for a saturated queue
+    /// stays owed instead of being consumed unsent.
+    fn record_probe(&mut self, now: Instant) {
+        self.last_ping = Some(now);
+        self.record_send(now);
+    }
+
+    /// Returns the action owed at `now`, ordering at most one probe per
+    /// [`PING_INTERVAL`] and an end once either direction is silent past
+    /// [`TIMEOUT_INTERVAL`].
+    ///
+    /// INVARIANT: Core's `InactivityCheck` (`net.cpp:2043-2090`) ends a
+    ///   connection when the send timeout or the receive timeout fires, so
+    ///   either direction alone expiring is enough here.
+    ///
+    /// A writer stuck on a full socket does not wait out the send silence:
+    /// [`crate::socket::HANDSHAKE_TIMEOUT`] bounds one blocking write at one
+    /// minute, so this branch only covers a peer that takes our writes and
+    /// never answers them.
+    fn next_action(&self, now: Instant) -> KeepaliveAction {
+        if now.saturating_duration_since(self.last_recv) > TIMEOUT_INTERVAL
+            || now.saturating_duration_since(self.last_send) > TIMEOUT_INTERVAL
+        {
+            return KeepaliveAction::Expired;
+        }
+        let probe_owed = self
+            .last_ping
+            .is_none_or(|last| now.saturating_duration_since(last) >= PING_INTERVAL);
+        if probe_owed {
+            KeepaliveAction::Ping
+        } else {
+            KeepaliveAction::Idle
+        }
+    }
+}
+
+#[cfg(test)]
+mod keepalive_tests {
+    use super::{Keepalive, KeepaliveAction, PING_INTERVAL, TIMEOUT_INTERVAL};
+    use std::time::{Duration, Instant};
+
+    /// A fresh connection is probed at once and then once per ping interval,
+    /// never twice inside one interval.
+    #[test]
+    fn probes_owe_one_ping_per_interval() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        assert_eq!(keepalive.next_action(t0), KeepaliveAction::Ping);
+        keepalive.record_probe(t0);
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL / 2),
+            KeepaliveAction::Idle
+        );
+        assert_eq!(
+            keepalive.next_action(t0 + PING_INTERVAL),
+            KeepaliveAction::Ping
+        );
+    }
+
+    /// Receive silence past the timeout interval ends the connection even
+    /// while pings keep the send direction fresh.
+    #[test]
+    fn receive_silence_expires_the_connection() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_send(t0 + TIMEOUT_INTERVAL);
+        assert_eq!(
+            keepalive.next_action(t0 + TIMEOUT_INTERVAL + Duration::from_secs(1)),
+            KeepaliveAction::Expired
+        );
+    }
+
+    /// Send silence alone ends it too: Core weighs each direction separately
+    /// (`InactivityCheck`, `net.cpp:2068-2080`).
+    #[test]
+    fn send_silence_expires_the_connection() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        keepalive.record_recv(t0 + TIMEOUT_INTERVAL);
+        assert_eq!(
+            keepalive.next_action(t0 + TIMEOUT_INTERVAL + Duration::from_secs(1)),
+            KeepaliveAction::Expired
+        );
+    }
+
+    /// A message in each direction inside the window clears the timeout, so a
+    /// live-but-quiet peer is kept and merely probed.
+    #[test]
+    fn fresh_activity_defers_the_timeout() {
+        let t0 = Instant::now();
+        let mut keepalive = Keepalive::starting(t0);
+        let fresh = t0 + TIMEOUT_INTERVAL / 2;
+        keepalive.record_recv(fresh);
+        keepalive.record_send(fresh);
+        assert_eq!(
+            keepalive.next_action(t0 + TIMEOUT_INTERVAL),
+            KeepaliveAction::Ping
+        );
+        keepalive.record_probe(t0 + TIMEOUT_INTERVAL);
+        assert_eq!(
+            keepalive.next_action(t0 + TIMEOUT_INTERVAL + PING_INTERVAL / 2),
+            KeepaliveAction::Idle
+        );
+    }
+}
+
 /// Dispatches one Ready connection's inbound messages until it ends.
 ///
 /// PRE: `lease` is the registered lease of the connection `peer` wraps, and
 /// `shared` is the wiring of the start epoch that accepted or dialed it.
-/// POST: Return `Ok` on disconnect, lease revocation, or 60 s of inbound
-/// silence; return the error that ended the connection otherwise.
+/// POST: Return `Ok` on disconnect, lease revocation, or an expired
+/// keepalive (one direction silent past [`TIMEOUT_INTERVAL`]); return the
+/// error that ended the connection otherwise.
 /// INVARIANT: Every sink write goes through `shared`, so sinks observe the
 /// start epoch's cancellation token.
 ///
@@ -823,12 +1099,10 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     use crate::peer::PeerState;
     use std::time::Instant;
 
-    const IDLE_DISCONNECT: Duration = Duration::from_mins(1);
-
     let tx_relay_open =
         || ibd.is_none_or(|(latch, network)| !latch.is_active(unix_time_secs(), *network));
 
-    let mut last_inbound = Instant::now();
+    let mut keepalive = Keepalive::starting(Instant::now());
     let budget = lease.budget_handle();
     let mut compact_reconstruction = crate::compact_blocks::Reconstruction::new();
     loop {
@@ -841,9 +1115,29 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             return Ok(());
         }
 
-        if last_inbound.elapsed() >= IDLE_DISCONNECT {
-            tracing::debug!(peer_addr = %peer_addr, "p2p peer idle 60s; closing");
-            return Ok(());
+        match keepalive.next_action(Instant::now()) {
+            KeepaliveAction::Idle => {}
+            KeepaliveAction::Ping => {
+                // A probe queued behind a saturated outbound queue would
+                // cancel the lease for our own queue state, not for the
+                // peer's silence; skip it while the queue has no production
+                // headroom and let the timeout rule judge the connection on
+                // its next due probe.
+                if budget.has_block_production_headroom() {
+                    let nonce = generate_nonce(peer_addr);
+                    lease.send(crate::Message::Ping(nonce)).map_err(|_| {
+                        crate::wire::PeerError::Protocol("outbound queue closed or saturated")
+                    })?;
+                    keepalive.record_probe(Instant::now());
+                }
+            }
+            KeepaliveAction::Expired => {
+                tracing::debug!(
+                    peer_addr = %peer_addr,
+                    "p2p peer silent past the timeout interval; closing",
+                );
+                return Ok(());
+            }
         }
 
         let read_result = crate::wire::read_message(&mut peer.stream, peer.magic);
@@ -853,7 +1147,10 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
         }
         match read_result {
             Ok((message, raw)) => {
-                last_inbound = Instant::now();
+                keepalive.record_recv(Instant::now());
+                let Some(message) = enforce_relay_role(lease.role(), message)? else {
+                    continue;
+                };
                 tracing::trace!(
                     peer_addr = %peer_addr,
                     command = ?std::mem::discriminant(&message),
@@ -867,9 +1164,14 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     &tx_relay_open,
                     &|| budget.has_block_production_headroom(),
                     &mut |response| {
-                        lease.send(response).map_err(|_| {
-                            crate::wire::PeerError::Protocol("outbound queue closed or saturated")
-                        })
+                        lease
+                            .send(response)
+                            .map(|()| keepalive.record_send(Instant::now()))
+                            .map_err(|_| {
+                                crate::wire::PeerError::Protocol(
+                                    "outbound queue closed or saturated",
+                                )
+                            })
                     },
                     &mut |hash| shared.announce_block(lease.source(peer_addr), hash),
                 )?;
@@ -1287,8 +1589,9 @@ mod outbound_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
     use std::sync::Arc;
 
-    use super::{spawn_outbound_connection, test_shared};
+    use super::{spawn_outbound_connection, spawn_pinned_outbound_connection, test_shared};
     use crate::PeerTable;
+    use crate::peer_info::PeerRole;
 
     #[test]
     fn spawn_outbound_connection_to_closed_port_fails_quickly()
@@ -1301,7 +1604,7 @@ mod outbound_tests {
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(PeerTable::new()), headers_tx, blocks_tx);
 
-        let handle = spawn_outbound_connection(addr, shared);
+        let handle = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
         let inner = match handle.join() {
             Ok(inner) => inner,
             Err(error) => std::panic::resume_unwind(error),
@@ -1313,6 +1616,119 @@ mod outbound_tests {
         );
 
         Ok(())
+    }
+
+    /// An outbound dial entry point: either origin the service can choose.
+    type Dial = fn(
+        SocketAddr,
+        crate::listener::ConnectionShared,
+        PeerRole,
+    ) -> std::thread::JoinHandle<Result<(), crate::wire::PeerError>>;
+
+    /// Register one outbound dial against a listener that accepts and then
+    /// hangs up, so the handshake stalls exactly where the lease is already
+    /// published, and return that session.
+    #[expect(
+        clippy::expect_used,
+        reason = "a helper that cannot build its fixture has nothing to report"
+    )]
+    fn registered_session(dial: Dial) -> crate::PeerSession {
+        use std::time::{Duration, Instant};
+
+        let listener =
+            TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let addr = listener.local_addr().expect("listener address");
+
+        let table = Arc::new(PeerTable::new());
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
+        let shared = test_shared(Arc::clone(&table), headers_tx, blocks_tx);
+        let handle = dial(addr, shared, PeerRole::FullRelay);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut accepted = None;
+        let session = loop {
+            accepted = accepted.or_else(|| listener.accept().ok().map(|(stream, _)| stream));
+            if let Some(session) = table.sessions().into_iter().find(|s| s.addr == addr) {
+                break session;
+            }
+            assert!(Instant::now() < deadline, "the dial never registered");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        drop(accepted.take());
+        let _ = handle.join();
+        session
+    }
+
+    /// The eviction rules read the dial origin off the lease, so it must
+    /// survive from the entry point that chose it: a pinned dial carries
+    /// Core's `ConnectionType::MANUAL`, an automatic dial does not.
+    #[test]
+    fn the_dial_origin_survives_to_the_lease() {
+        let pinned = registered_session(spawn_pinned_outbound_connection);
+        assert!(
+            pinned.lease.is_manual(),
+            "a dial the operator named must be marked manual"
+        );
+        assert_eq!(pinned.lease.role(), PeerRole::FullRelay);
+
+        let automatic = registered_session(spawn_outbound_connection);
+        assert!(
+            !automatic.lease.is_manual(),
+            "a dial the seed list produced is not the operator's"
+        );
+        assert_eq!(automatic.lease.role(), PeerRole::FullRelay);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod relay_role_tests {
+    use bitcoin::hashes::Hash as _;
+    use bitcoin::p2p::message_blockdata::Inventory;
+
+    use super::enforce_relay_role;
+    use crate::peer_info::PeerRole;
+    use crate::wire::{Message, PeerError};
+
+    fn tx_inv() -> Message {
+        Message::Inv(vec![Inventory::Transaction(
+            bitcoin::Txid::from_byte_array([7; 32]),
+        )])
+    }
+
+    /// The role gate disconnects a transaction announcement, keeps block
+    /// traffic, ignores address gossip, and never restricts a full-relay
+    /// connection.
+    #[test]
+    fn relay_role_gate_splits_transaction_and_block_traffic() {
+        let error = enforce_relay_role(PeerRole::BlockRelayOnly, tx_inv())
+            .expect_err("a transaction announcement is a protocol violation");
+        assert!(matches!(
+            error,
+            PeerError::Protocol("transaction inv sent in violation of protocol")
+        ));
+
+        let block_inv = Message::Inv(vec![Inventory::Block(bitcoin::BlockHash::from_byte_array(
+            [8; 32],
+        ))]);
+        let kept = enforce_relay_role(PeerRole::BlockRelayOnly, block_inv)
+            .expect("a block announcement is not a fault");
+        assert!(kept.is_some(), "block traffic reaches the scheduler");
+
+        let kept = enforce_relay_role(PeerRole::FullRelay, tx_inv())
+            .expect("a full-relay connection is unrestricted");
+        assert!(kept.is_some(), "transaction traffic is dispatched");
+
+        let dropped = enforce_relay_role(PeerRole::BlockRelayOnly, Message::Addr(Vec::new()))
+            .expect("address gossip is not a fault");
+        assert!(
+            dropped.is_none(),
+            "address gossip is dropped unheard on a block-relay connection"
+        );
     }
 }
 
@@ -1857,6 +2273,30 @@ mod writer_shutdown_tests {
         assert_eq!(reads.load(Ordering::Relaxed), 2);
     }
 
+    /// A quiet connection is probed with one `ping` before the peer is asked
+    /// to speak, so liveness never depends on inbound traffic.
+    #[test]
+    fn message_loop_probes_a_quiet_peer() {
+        let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
+        let lease = crate::PeerLease::new(outbound_tx);
+        let reads = Arc::new(AtomicUsize::new(0));
+        let mut peer = Peer::new(ContinuingStream(Arc::clone(&reads)), Magic::BITCOIN);
+        peer.state = PeerState::Ready;
+        let shared = test_shared(
+            Arc::new(crate::PeerTable::new()),
+            crossbeam_channel::unbounded().0,
+            crossbeam_channel::unbounded().0,
+        );
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_448));
+
+        assert!(run_message_loop(&mut peer, addr, &lease, &shared, None).is_err());
+        let probe = outbound_rx.try_recv();
+        assert!(
+            matches!(probe, Ok(crate::Message::Ping(_))),
+            "the loop must probe a quiet peer with one ping, got {probe:?}",
+        );
+    }
+
     #[test]
     fn registration_cancels_replaced_lease() {
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_447));
@@ -2219,8 +2659,11 @@ mod writer_shutdown_tests {
     #[test]
     fn message_loop_disconnects_saturated_peer() {
         let (outbound_tx, _outbound_rx) = crossbeam_channel::unbounded();
-        let lease =
-            crate::PeerLease::new_with_budget(outbound_tx, false, OutboundBudget::new(0, 0));
+        let lease = crate::PeerLease::new_with_budget(
+            outbound_tx,
+            false,
+            OutboundBudget::new(1, ping_len()),
+        );
 
         let mut wire = Vec::new();
         crate::wire::write_message(&mut wire, Magic::BITCOIN, &crate::Message::Ping(41))
@@ -2240,8 +2683,9 @@ mod writer_shutdown_tests {
         );
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_447));
 
-        // The Pong response cannot be admitted onto the zero budget, so the
-        // saturation policy cancels the lease and ends the loop.
+        // The loop's keepalive probe takes the one-frame budget, so the Pong
+        // response cannot be admitted and the saturation policy cancels the
+        // lease and ends the loop.
         let result = run_message_loop(&mut peer, addr, &lease, &shared, None);
         assert!(result.is_err(), "saturation must end the message loop");
         assert!(lease.is_cancelled());
