@@ -112,8 +112,11 @@ fn legacy_and_mixed_lazy_witness_ids_match_oracle_and_reuse_cache() {
         for (actual, expected) in ids.iter().zip(&oracle.txdata) {
             assert_eq!(actual.to_string(), expected.compute_wtxid().to_string());
         }
-        // A repeated call reads the stored matrix; its contents stay the
-        // oracle values instead of a rederivation from scratch.
+        // A repeated call must return the same stored matrix, not a fresh
+        // rederivation: the deterministic wtxids make contents identical
+        // either way, so only pointer identity proves cache reuse.
+        let cached = view.witness_ids().as_ptr();
+        assert_eq!(cached, view.witness_ids().as_ptr());
         assert_eq!(view.witness_ids(), ids.as_slice());
     }
 }

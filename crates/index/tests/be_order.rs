@@ -11,7 +11,7 @@ mod common;
 
 use std::sync::Arc;
 
-use bitcoin_rs_index::{BlockSource, Indexer, ScriptHash};
+use bitcoin_rs_index::{BlockSource, IndexError, Indexer, ScriptHash, ScriptHistoryEntry};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
@@ -28,6 +28,43 @@ impl BlockSource for MultiHeightSource {
     fn block_at_height(&self, height: u32) -> Option<Block> {
         self.blocks.get(&height).cloned()
     }
+}
+
+/// Independent full-scan oracle for `resolve_script_history`.
+///
+/// Decodes every candidate block and hashes every output script rather than
+/// trusting row-carried transaction positions, so a regression in positioned
+/// row encoding or range resolution cannot pass a comparison built from the
+/// same `TxPosition` representation.
+fn scan_script_history<B: BlockSource>(
+    indexer: &Indexer<MemoryStore>,
+    scripthash: ScriptHash,
+    source: &B,
+) -> Result<Vec<ScriptHistoryEntry>, IndexError> {
+    let mut entries = Vec::new();
+    let mut last_height: Option<u32> = None;
+    let mut cached_block: Option<Block> = None;
+    for row in indexer.iter_funding_rows(scripthash)? {
+        let height = row.height();
+        if last_height != Some(height) {
+            cached_block = source.block_at_height(height);
+            last_height = Some(height);
+        }
+        let Some(block) = cached_block.as_ref() else {
+            continue;
+        };
+        for tx in &block.txs {
+            if tx
+                .outputs
+                .iter()
+                .any(|output| ScriptHash::from_script_bytes(&output.script_pubkey) == scripthash)
+            {
+                entries.push(ScriptHistoryEntry::confirmed(tx.txid(), height));
+            }
+        }
+    }
+    entries.sort_by_key(|entry| entry.height);
+    Ok(entries)
 }
 
 fn header() -> Header {
@@ -160,6 +197,42 @@ fn unspent_outputs_with_height_sorts_by_numeric_height() -> Result<(), Box<dyn s
 }
 
 /// Spending rows share the same BE height order as funding rows.
+/// The scan oracle and the fast positioned resolver agree on entries and
+/// order.
+#[test]
+fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn std::error::Error>> {
+    let script = vec![0x51, 0x02];
+    let scripthash = ScriptHash::from_script_bytes(&script);
+    let store = Arc::new(MemoryStore::default());
+    put_funding_row(&store, scripthash, 1)?;
+    put_funding_row(&store, scripthash, 256)?;
+    let indexer = Indexer::new(store);
+
+    let block_at_1 = Block {
+        header: header(),
+        txs: vec![tx_with_script(spent_outpoint(3, 0), script.clone())],
+    };
+    let block_at_256 = Block {
+        header: header(),
+        txs: vec![tx_with_script(spent_outpoint(4, 0), script)],
+    };
+
+    let source = MultiHeightSource {
+        blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
+    };
+
+    let fast = indexer.resolve_script_history(scripthash, &source)?;
+    let scan = scan_script_history(&indexer, scripthash, &source)?;
+
+    assert_eq!(fast, scan, "fast and scan resolvers must agree on order");
+    assert_eq!(
+        fast.iter().map(|e| e.height).collect::<Vec<_>>(),
+        vec![1, 256],
+        "both resolvers sort by numeric height"
+    );
+    Ok(())
+}
+
 /// This test confirms the on-disk key for spending rows also uses BE height,
 /// so `iter_spending_rows` returns numeric order.
 #[test]
