@@ -913,6 +913,9 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         magic,
         headers_tx,
         blocks_tx,
+        None,
+        None,
+        ListenerExtras::default(),
     );
     let dial = spawn_outbound_connection(addr, shared, PeerRole::BlockRelayOnly);
 

@@ -335,7 +335,7 @@ fn a_frontier_owned_suppression_does_not_arm_the_response_window() {
     // A mined tree whose tip is one header past the last body: the frontier
     // owes a body, and genesis is applied so the probes below have tips and
     // a locator to build from.
-    let (tree, blocks) = mined_chain(1, 1).expect("fixture chain mines");
+    let (mut tree, blocks) = mined_chain(1, 1).expect("fixture chain mines");
     let chain_tip = tree.tip_handle();
     let sync = Arc::new(BlockSync::new(
         Arc::new(TestChain::new(
