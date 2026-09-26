@@ -999,6 +999,10 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         return Err("genesis carries a coinbase transaction".into());
     };
     write_message(&mut server, magic, &Message::Tx(coinbase.clone()))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dial.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let Ok(outcome) = dial.join() else {
         return Err("the dial thread panicked".into());
     };
