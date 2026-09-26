@@ -331,7 +331,7 @@ impl MempoolGateway {
                 }
                 let prepared = requests
                     .iter()
-                    .map(|request| Self::prepare_admission(&pool, request, mode))
+                    .map(|request| Self::prepare_admission(&pool, request, mode, AdmissionFence::Stable))
                     .collect::<Vec<_>>();
                 let checks = (mode == AdmissionMode::PackageTest
                     && prepared.iter().all(|job| job.fact.reject_reason.is_none()))
@@ -397,14 +397,15 @@ impl MempoolGateway {
     ///
     /// Every candidate is admitted with [`crate::LimitEnforcement::Deferred`],
     /// the equivalent of Core passing `bypassLimits = true` to
-    /// `AcceptToMemoryPool` from its disconnect walk. The mempool fee floor,
-    /// the ephemeral-parent rule, the TRUC topology rules, the cluster limits,
-    /// and the per-acceptance size trim are therefore not applied here: a
-    /// disconnected transaction satisfied all of them on the way in, and
-    /// trimming per admission would shed a parent before the child that spends
-    /// it is re-admitted. Consensus and script verification, duplicate and
-    /// evicted-parent rejection, ancestry accounting, and the replacement fee
-    /// rules still apply.
+    /// `AcceptToMemoryPool` from its disconnect walk — derived from the held
+    /// `ChainChangeGuard`, not the caller-declared origin. The mempool fee
+    /// floor and the per-acceptance size trim are therefore not applied here:
+    /// a disconnected transaction satisfied them on the way in, and trimming
+    /// per admission would shed a parent before the child that spends it is
+    /// re-admitted. Consensus and script verification, duplicate and
+    /// evicted-parent rejection, ancestry accounting, the replacement fee
+    /// rules, and the topology gates Core still runs under `bypassLimits` —
+    /// cluster limits, TRUC, and ephemeral-spend checks — all still apply.
     ///
     /// POST: the pool may exceed its `max_total_bytes` ceiling when this
     /// returns. The caller owns the one size trim over the settled pool; see
@@ -2479,14 +2480,13 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn reconsider_disconnected_admits_below_floor_then_trims_once() {
         // The ceiling falls between the parent's and the family's virtual
-        // size, so a per-acceptance trim would have to act on the child. One
-        // member per cluster refuses any child joining a resident parent, and
+        // size, so a per-acceptance trim would have to act on the child, and
         // a pool holding only the 106 sat/vB parent lifts the pressure floor
-        // far above the child's 11 sat/vB.
+        // far above the child's 11 sat/vB. The topology gates still run under
+        // the deferred fence, so the default cluster limits stand.
         const CEILING: u64 = 150;
         let limits = crate::MempoolLimits {
             max_total_bytes: CEILING,
-            cluster_count: 1,
             ..crate::MempoolLimits::default()
         };
         let log = Arc::new(ReorgBatchLog::default());

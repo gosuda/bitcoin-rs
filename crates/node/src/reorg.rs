@@ -124,6 +124,7 @@ fn settle_node_reorg(
                 .take()
                 .is_some_and(|change| change.finish().is_err());
         }
+        let mut settle_failed = false;
         if let (Some(change), Some(gateway)) = (
             mempool_change.as_ref(),
             observer.followers.mempool_gateway(),
@@ -145,16 +146,20 @@ fn settle_node_reorg(
                     observer.disconnected.drain(..),
                 );
             }
-            if gateway.remove_for_reorg(change, &chain).is_err() {
-                return true;
-            }
-            if reconsidered && trim_after_reorg(gateway).is_err() {
-                return true;
+            // A failed sweep or trim marks settlement incomplete — but the
+            // fence must still close below: leaving the guard's odd
+            // generation live would refuse every stable admission until
+            // restart recovery.
+            if gateway.remove_for_reorg(change, &chain).is_err()
+                || (reconsidered && trim_after_reorg(gateway).is_err())
+            {
+                settle_failed = true;
             }
         }
-        mempool_change
-            .take()
-            .is_some_and(|change| change.finish().is_err())
+        settle_failed
+            || mempool_change
+                .take()
+                .is_some_and(|change| change.finish().is_err())
     })();
     if settlement_failed {
         return Err(ReorgError::TransitionSettlement {
