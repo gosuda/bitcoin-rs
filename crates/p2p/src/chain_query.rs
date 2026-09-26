@@ -12,7 +12,8 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader};
-use bitcoin_rs_primitives::{Block, BlockHash, ConsensusEncode, Hash256, Header};
+use bitcoin_rs_primitives::layout::{ParsedBlock, ParsedTransaction};
+use bitcoin_rs_primitives::{BlockHash, Hash256, Header};
 #[cfg(test)]
 use parking_lot::RwLock;
 
@@ -82,31 +83,35 @@ impl ActiveChainQuery {
         hash: BlockHash,
         include_witness: bool,
     ) -> Option<(bytes::Bytes, u32)> {
-        let mut bytes = self.block_body_source.as_ref()?.block_body(height, hash)?;
+        let bytes = self.block_body_source.as_ref()?.block_body(height, hash)?;
         let header = bytes
             .get(..80)
             .and_then(|header| Header::consensus_decode(header).ok())?;
         if header.compute_hash() != hash {
             return None;
         }
-        // Validate the complete stored body before serving its raw bytes. This
-        // preserves the wire-byte optimization without forwarding corruption.
-        let mut block = Block::consensus_decode(&bytes).ok()?;
+        // Use the complete consensus layout parser without materializing
+        // scripts or witnesses. Both serving forms reject malformed bodies.
+        let block = ParsedBlock::parse_exact(&bytes).ok()?;
+        let mut stripped = None;
         if !include_witness
             && block
-                .txs
+                .transactions()
                 .iter()
-                .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()))
+                .any(ParsedTransaction::is_segwit)
         {
-            for tx in &mut block.txs {
-                for input in &mut tx.inputs {
-                    input.witness.clear();
+            let mut payload = Vec::with_capacity(bytes.len());
+            payload.extend_from_slice(block.span_bytes(block.header_span())?);
+            payload.extend_from_slice(block.span_bytes(block.tx_count_span())?);
+            for tx in block.transactions() {
+                for part in tx.stripped_parts() {
+                    payload.extend_from_slice(part);
                 }
             }
-            bytes.clear();
-            block.consensus_encode(&mut bytes);
+            stripped = Some(payload);
         }
         drop(block);
+        let bytes = stripped.unwrap_or(bytes);
         let tree = self.block_tree.read();
         let tip = tree.tip()?;
         (tree.active_height_of(tip.tip_id, hash.into()) == Some(height))
@@ -566,15 +571,22 @@ mod tests {
         use bitcoin::p2p::Magic;
         use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
 
-        for with_witness in [false, true] {
+        for (tx_count, witness_modulus) in [(2_u8, 0), (2, 1), (3, 2), (253, 2)] {
             let headers = seed_headers(2);
             let mut block = Block {
                 header: headers[1],
-                txs: vec![test_tx(1), test_tx(2)],
+                txs: (0..tx_count).map(test_tx).collect(),
             };
-            if with_witness {
-                for tx in &mut block.txs {
+            for (index, tx) in block.txs.iter_mut().enumerate() {
+                if witness_modulus != 0 && index % witness_modulus == 0 {
                     tx.inputs[0].witness = vec![vec![0x51; 32]].into();
+                }
+                // Exercise the base-body boundary with and without a final
+                // output, including its empty script CompactSize prefix.
+                if index % 2 == 0 {
+                    tx.outputs.clear();
+                } else {
+                    tx.outputs[0].script_pubkey.clear();
                 }
             }
             let body = consensus_bytes(&block);
@@ -663,7 +675,28 @@ mod tests {
             corrupt.pop();
             let mut wrong_header = body.clone();
             wrong_header[0] ^= 1;
-            for unavailable in [None, Some(corrupt), Some(wrong_header)] {
+            let mut trailing = body.clone();
+            trailing.push(0);
+            // One transaction follows the 80-byte header and one-byte count.
+            // Insert marker/flag after its four-byte version, and an empty
+            // witness stack for its single input before the lock time.
+            let mut superfluous_witness = body.clone();
+            superfluous_witness.splice(Header::LEN + 5..Header::LEN + 5, [0, 1]);
+            superfluous_witness.insert(superfluous_witness.len() - 4, 0);
+            let mut unknown_flag = superfluous_witness.clone();
+            unknown_flag[Header::LEN + 6] = 2;
+            for malformed in [&trailing, &superfluous_witness, &unknown_flag] {
+                assert!(Block::consensus_decode(malformed).is_err());
+                assert!(bitcoin::consensus::deserialize::<RegistryBlock>(malformed).is_err());
+            }
+            for unavailable in [
+                None,
+                Some(corrupt),
+                Some(wrong_header),
+                Some(trailing),
+                Some(superfluous_witness),
+                Some(unknown_flag),
+            ] {
                 let mut query = query_with(headers.clone())?;
                 if let Some(body) = unavailable {
                     query = query.with_block_body_source(Arc::new(SingleBlockSource {

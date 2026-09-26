@@ -581,6 +581,32 @@ impl<'a> ParsedTransaction<'a> {
         self.bytes.get(start..end)
     }
 
+    /// Borrowed parts of the canonical serialization without witness data.
+    ///
+    /// Concatenating these parts preserves the version, inputs, outputs, and
+    /// lock time while omitting the BIP144 marker/flag and witness section.
+    /// Legacy transactions occupy the first part; the other parts are empty.
+    #[must_use]
+    pub fn stripped_parts(&self) -> [&'a [u8]; 3] {
+        if !self.segwit {
+            return [slice_at(self.bytes, self.span), &[], &[]];
+        }
+        // An empty final script still ends after its CompactSize prefix.
+        // With no outputs, the output-count prefix ends the base body.
+        let body_end = self.outputs.last().map_or_else(
+            || self.output_count_span.end(),
+            |output| output.script_pubkey.end(),
+        );
+        let start = widen(self.input_count_span.start());
+        let end = usize::try_from(body_end)
+            .unwrap_or_else(|_| unreachable!("body end stays within the image"));
+        [
+            slice_at(self.bytes, self.version_span),
+            &self.bytes[start..end],
+            slice_at(self.bytes, self.lock_time_span),
+        ]
+    }
+
     /// Materializes the owned transaction from the validated spans.
     ///
     /// Infallible: every span was bounds-checked at parse time, so the scalar

@@ -24,8 +24,10 @@ This page assigns ownership and cites proof under the
   commands are byte-identical to rust-bitcoin's `RawNetworkMessage`.
   `getdata` block serving validates the stored body and answers
   `MSG_WITNESS_BLOCK` with its exact stored consensus payload bytes
-  (`Message::BlockPayload`). `MSG_BLOCK` strips witness data from that
-  decoded body before encoding its payload, following BIP144. Both forms
+  (`Message::BlockPayload`). `MSG_BLOCK` copies the checked header, transaction
+  count, and stripped transaction spans into its payload, following BIP144.
+  Both forms validate the complete borrowed layout without materializing
+  scripts or witnesses; malformed bodies are never forwarded. Both forms
   recheck active-chain identity after preparing the payload. The decoder
   still types inbound `block` as `Message::Block`.
 
