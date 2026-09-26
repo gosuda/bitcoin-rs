@@ -331,7 +331,9 @@ impl MempoolGateway {
                 }
                 let prepared = requests
                     .iter()
-                    .map(|request| Self::prepare_admission(&pool, request, mode, AdmissionFence::Stable))
+                    .map(|request| {
+                        Self::prepare_admission(&pool, request, mode, AdmissionFence::Stable)
+                    })
                     .collect::<Vec<_>>();
                 let checks = (mode == AdmissionMode::PackageTest
                     && prepared.iter().all(|job| job.fact.reject_reason.is_none()))
