@@ -3,7 +3,9 @@ use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use bitcoin_rs_chainstate::ValidationMode;
-use bitcoin_rs_node::{ChainstateJournalOverrides, NetworkSelection, ScriptIndexMode, UserConfig};
+use bitcoin_rs_node::{
+    ChainstateJournalOverrides, NetworkSelection, ScriptIndexMode, UserConfig, ValidationEngine,
+};
 use bitcoin_rs_storage::StorageBackend;
 
 use crate::cli::{parse_bool, parse_connect_list, parse_p2p_magic, parse_socket_list};
@@ -31,6 +33,7 @@ enum EnvSetting {
     MetricsBind,
     AssumeValidHeight,
     ValidationMode,
+    ValidationEngine,
     MiningPayoutAddress,
     ChainstateJournal,
     ChainstateJournalBlocks,
@@ -81,6 +84,7 @@ fn env_setting(key: &str) -> Option<EnvSetting> {
         "BITCOIN_RS_METRICS_BIND" => EnvSetting::MetricsBind,
         "BITCOIN_RS_ASSUME_VALID_HEIGHT" => EnvSetting::AssumeValidHeight,
         "BITCOIN_RS_VALIDATION_MODE" => EnvSetting::ValidationMode,
+        "BITCOIN_RS_VALIDATION_ENGINE" => EnvSetting::ValidationEngine,
         "BITCOIN_RS_MINING_PAYOUT_ADDRESS" => EnvSetting::MiningPayoutAddress,
         "BITCOIN_RS_CHAINSTATE_JOURNAL" => EnvSetting::ChainstateJournal,
         "BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS" => EnvSetting::ChainstateJournalBlocks,
@@ -148,6 +152,12 @@ fn apply(layer: &mut UserConfig, setting: EnvSetting, value: &str) -> Result<()>
             layer.validation.mode = Some(
                 ValidationMode::parse(value)
                     .ok_or_else(|| anyhow::anyhow!("invalid validation-mode value `{value}`"))?,
+            );
+        }
+        EnvSetting::ValidationEngine => {
+            layer.validation.engine = Some(
+                ValidationEngine::parse(value)
+                    .ok_or_else(|| anyhow::anyhow!("invalid validation-engine value `{value}`"))?,
             );
         }
         EnvSetting::MiningPayoutAddress => {

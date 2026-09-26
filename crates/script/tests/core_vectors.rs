@@ -1066,7 +1066,12 @@ fn run_script_tests_kernel(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<S
         let spend = build_spending_tx(&row.script_sig, &row.witness, &credit);
         let prevouts = [(OutPoint::new(credit.txid(), 0), credit.outputs[0].clone())];
 
-        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(&spend, &prevouts, row.flags);
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            &spend,
+            &prevouts,
+            row.flags,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        );
         let verdict = Verdict::from_kernel(&result);
 
         if verdict.matches_expected(row.expected) {
@@ -1309,8 +1314,12 @@ fn run_tx_vectors_kernel(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<Strin
 
     for row in rows {
         counts.executed += 1;
-        let result =
-            bitcoin_rs_consensus::kernel::verify_tx_scripts(&row.tx, &row.prevouts, row.flags);
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            &row.tx,
+            &row.prevouts,
+            row.flags,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        );
         let verdict = Verdict::from_kernel(&result);
 
         let matches = verdict.accepted() == row.expected.accepted();

@@ -11,9 +11,11 @@ spends go through local BIP341/BIP342 verification. Multi-input Taproot
 spends require the complete ordered prevout set. Around the interpreter sit
 `sigops` (signature-operation counting) and the signature checker. Failures
 surface as `ScriptError`. Core's `script_tests`, `tx_valid`, and `tx_invalid`
-vectors pin zero native mismatches in `tests/core_vectors.rs`. The `kernel`
-feature on `bitcoin-rs-consensus` remains the library production default;
-see [`docs/contracts/validation-default.md`](../../docs/contracts/validation-default.md).
+vectors pin zero native mismatches in `tests/core_vectors.rs`. This interpreter
+is the `native` engine — compiled in every build and the default
+`validation.engine`; the `kernel` feature on `bitcoin-rs-consensus` is an
+opt-in capability that compiles bitcoinkernel in alongside it (selection is
+runtime, see [`docs/contracts/validation-default.md`](../../docs/contracts/validation-default.md)).
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

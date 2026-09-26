@@ -316,7 +316,7 @@ impl MempoolGateway {
                 }
                 let prepared = requests
                     .iter()
-                    .map(|request| Self::prepare_admission(&pool, request, mode))
+                    .map(|request| Self::prepare_admission(&pool, request, mode, self.engine()))
                     .collect::<Vec<_>>();
                 let checks = (mode == AdmissionMode::PackageTest
                     && prepared.iter().all(|job| job.fact.reject_reason.is_none()))
@@ -684,6 +684,7 @@ impl MempoolGateway {
 mod tests {
     use super::*;
     use crate::{Mempool, MempoolEntry};
+    use bitcoin_rs_consensus::ValidationEngine;
     use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, TxIn, Witness};
     use parking_lot::{Mutex, RwLock};
     use sha2::{Digest, Sha256};
@@ -714,6 +715,7 @@ mod tests {
         Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
             None,
+            ValidationEngine::Native,
         ))
     }
 
@@ -1770,6 +1772,7 @@ mod tests {
         let preview_gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
             Some(observer.clone()),
+            ValidationEngine::Native,
         ));
         let (valid, chain) = witness_spend();
         let mut invalid = (*valid).clone();
@@ -2251,6 +2254,7 @@ mod tests {
         Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(crate::MempoolLimits::default()))),
             Some(leg),
+            ValidationEngine::Native,
         ))
     }
 

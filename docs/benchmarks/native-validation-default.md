@@ -2,6 +2,15 @@
 
 This document is the promotion record for the native strict-Rust validation default. The owner of the default is [`docs/contracts/validation-default.md`](../contracts/validation-default.md), proven by feature-matrix builds, Core vectors, and measured promotion evidence. The end-state decision is recorded here after T16 and T17 run; until then the recorded verdict stays `KeepKernel` and this page states the contract only.
 
+> **Policy superseded (issue #1117).** The manifest policy this page's recorded
+> verdict (`KeepKernel`) answered — "`kernel` is a library default" — no longer
+> exists: #1117 moved engine selection to the runtime `validation.engine`
+> setting (default `native`) and made `kernel` an opt-in capability feature in
+> every manifest. The verdict below is historical (it records which engine the
+> 2026-09-04 measurements preferred) and does not describe today's defaults.
+> The end-state cells now govern promotion of a **documented production default
+> engine** under `VAL-01`'s measured-decision clause, not a manifest edit.
+
 ## Decision it owns
 
 Whether `bitcoin-rs-consensus`, `bitcoin-rs-chainstate`, `bitcoin-rs-node`,
@@ -27,7 +36,7 @@ after promotion.
 | Core vector parity | Zero mismatches on runnable rows; pinned skip counts and skip reasons per corpus | `cargo test --locked -p bitcoin-rs-script --test core_vectors` | `planned_not_executed` |
 | Contextual and script matrix (T15) | Every §5.1 family, active and inactive boundaries, mandatory versus policy flags; zero unexplained mismatches; every exclusion counted and classified | `cargo test --locked -p bitcoin-rs-consensus --test overhaul_consensus_matrix -- --nocapture` | `planned_not_executed` |
 | Strict-Rust crypto lane (T16) | Valid and invalid ECDSA, Schnorr and tweak vectors; integer and point boundary cases; independent oracle agreement; audited dependency closure | `cargo test --locked -p bitcoin-rs-script --test overhaul_native_crypto -- --nocapture` | `planned_not_executed` |
-| Signed-spend apply (T16, T17) | Native median beats the pinned kernel median by the acceptance rule below, measured on the final strict artifact | Native: `CARGO_TARGET_DIR=target/signed-spend-native cargo bench --locked -p bitcoin-rs-node --bench sync_pipeline --no-default-features --features fjall -- signed_spend --sample-size 30 --warm-up-time 1 --measurement-time 8`<br>Kernel: `CARGO_TARGET_DIR=target/signed-spend-kernel cargo bench --locked -p bitcoin-rs-node --bench sync_pipeline --no-default-features --features fjall,kernel -- signed_spend --sample-size 30 --warm-up-time 1 --measurement-time 8` | `planned_not_executed` |
+| Signed-spend apply (T16, T17) | Native median beats the pinned kernel median by the acceptance rule below, measured on the final strict artifact. Each arm selects its engine explicitly — capability features compile the arm, `BITCOIN_RS_VALIDATION_ENGINE` selects it | Native: `BITCOIN_RS_VALIDATION_ENGINE=native CARGO_TARGET_DIR=target/signed-spend-native cargo bench --locked -p bitcoin-rs-node --bench sync_pipeline --no-default-features --features fjall -- signed_spend --sample-size 30 --warm-up-time 1 --measurement-time 8`<br>Kernel: `BITCOIN_RS_VALIDATION_ENGINE=kernel CARGO_TARGET_DIR=target/signed-spend-kernel cargo bench --locked -p bitcoin-rs-node --bench sync_pipeline --no-default-features --features fjall,kernel -- signed_spend --sample-size 30 --warm-up-time 1 --measurement-time 8` | `planned_not_executed` |
 | Full mainnet replay | Genesis to the pinned stop identity with sampled and exact coin comparison against Core `v31.1` | offline comparator, see [`offline-full-validation.md`](offline-full-validation.md) | `planned_not_executed` |
 | Invalid and contextual corpora | Rejection parity on invalid local corpora; a passing valid chain alone does not prove rejection | T15 matrix | `planned_not_executed` |
 | Kernel-free closure | `cargo tree --locked -p bitcoin-rs --no-default-features --features fjall -e features` shows no `bitcoinkernel` on any transitive path; native and oracle lanes built under separate `CARGO_TARGET_DIR` | `cargo tree --locked -p bitcoin-rs --no-default-features --features fjall -e features` plus the native and kernel `sync_pipeline` lanes above, each under its own `CARGO_TARGET_DIR` | `planned_not_executed` |

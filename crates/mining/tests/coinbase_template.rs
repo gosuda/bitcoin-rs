@@ -1,5 +1,6 @@
 //! Coinbase and witness-commitment candidate tests.
 
+use bitcoin_rs_consensus::ValidationEngine;
 use std::error::Error;
 use std::sync::Arc;
 
@@ -248,7 +249,11 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
         lock_time: LockTime::from_consensus(0),
     };
     let chain = ReorgCoins { funding, confirmed };
-    let gateway = MempoolGateway::shared(Arc::new(Mempool::new(MempoolLimits::default()).into()));
+    let gateway = MempoolGateway::shared(
+        Arc::new(Mempool::new(MempoolLimits::default()).into()),
+        ValidationEngine::Native,
+    )
+    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
     let transition = gateway.begin_chain_change()?;
     assert!(gateway.stable_generation().is_none());
     let changes = gateway.reconsider_disconnected(

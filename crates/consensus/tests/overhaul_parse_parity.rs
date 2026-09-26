@@ -11,11 +11,12 @@ use std::str::FromStr;
 
 use bitcoin::merkle_tree::calculate_root;
 use bitcoin_rs_consensus::block_view::BlockFacts;
+use bitcoin_rs_consensus::kernel::BlockParse;
 use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, block_witness_commitment_matches, verify_block_rules,
     verify_block_rules_precomputed,
 };
-use bitcoin_rs_consensus::{ConsensusError, kernel::KernelBlock};
+use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
 use bitcoin_rs_primitives::layout::ParsedBlock;
 use bitcoin_rs_primitives::{Block, Tx, Txid, Wtxid, consensus_bytes};
 
@@ -224,15 +225,14 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
     }
 }
 
-#[test]
-fn kernel_block_entry_matches_oracle_identities() {
-    let bytes = fixture_bytes(SEGWIT_HEIGHT);
-    let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes).expect("oracle decode");
-    let parsed = KernelBlock::parse(&bytes).expect("one-pass block parse");
-    // Both backends surface identities through the same `Result` shape.
+/// Asserts the engine-selected parse matches the independent oracle on
+/// identities and derived facts. Shared by both engine passes so one backend
+/// cannot drift out of parity behind a feature gate.
+fn assert_parse_matches_oracle(parsed: &BlockParse, oracle: &bitcoin::Block, materialized: &Block) {
+    // Every engine surfaces identities through the same `Result` shape.
     let parsed_txids: Vec<Txid> = parsed
         .txids()
-        .unwrap_or_else(|error| panic!("kernel txids failed: {error:?}"));
+        .unwrap_or_else(|error| panic!("parse txids failed: {error:?}"));
 
     assert_eq!(parsed.transaction_count(), oracle.txdata.len());
     assert_eq!(parsed_txids.len(), oracle.txdata.len());
@@ -242,9 +242,6 @@ fn kernel_block_entry_matches_oracle_identities() {
 
     // The derived facts agree with the independent reduction regardless of
     // which backend produced the identities.
-    let mut reader = bytes.as_slice();
-    let layout = ParsedBlock::parse(&mut reader).expect("layout parse");
-    let materialized: Block = layout.materialize();
     let facts = parsed.derive_facts(&materialized.txs, &parsed_txids);
     assert_eq!(facts.tx_count(), oracle.txdata.len());
     assert_eq!(facts.weight(), oracle.weight().to_wu());
@@ -261,25 +258,54 @@ fn kernel_block_entry_matches_oracle_identities() {
         .expect("oracle merkle root")
         .to_string(),
     );
+}
 
-    #[cfg(not(feature = "kernel"))]
-    {
-        // Native build: the parse entry IS the single layout pass, so it
-        // carries positions and pre-populated witness IDs, and rejects
-        // trailing bytes like the decoder it replaced.
-        assert_eq!(facts.transaction_spans().len(), facts.tx_count());
-        assert!(facts.wtxids().is_some());
-        assert_eq!(
-            parsed.facts().transaction_spans().len(),
-            parsed.transaction_count()
-        );
-        let mut padded = bytes.clone();
-        padded.push(0x00);
-        assert!(
-            KernelBlock::parse(&padded).is_err(),
-            "trailing bytes must be rejected"
-        );
-    }
+/// `engine = native`'s parse is the single layout pass: it carries positions
+/// and pre-populated witness IDs, and rejects trailing bytes like the decoder
+/// it replaced. The native engine is compiled in every build, so this parse
+/// stays available in kernel builds too.
+#[test]
+fn native_block_parse_matches_oracle_identities() {
+    let bytes = fixture_bytes(SEGWIT_HEIGHT);
+    let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes).expect("oracle decode");
+    let parsed =
+        BlockParse::parse(&bytes, ValidationEngine::Native).expect("one-pass native block parse");
+    let mut reader = bytes.as_slice();
+    let layout = ParsedBlock::parse(&mut reader).expect("layout parse");
+    let materialized: Block = layout.materialize();
+    assert_parse_matches_oracle(&parsed, &oracle, &materialized);
+
+    let facts = parsed.derive_facts(&materialized.txs, &parsed.txids().expect("native txids"));
+    assert_eq!(facts.transaction_spans().len(), facts.tx_count());
+    assert!(facts.wtxids().is_some());
+    let native_facts = parsed
+        .native_facts()
+        .expect("native parse carries its facts");
+    assert_eq!(
+        native_facts.transaction_spans().len(),
+        parsed.transaction_count()
+    );
+    let mut padded = bytes.clone();
+    padded.push(0x00);
+    assert!(
+        BlockParse::parse(&padded, ValidationEngine::Native).is_err(),
+        "trailing bytes must be rejected"
+    );
+}
+
+/// `engine = kernel`'s parse is the kernel's one-shot parse; its identities and
+/// derived facts must agree with the same oracle the native pass pins.
+#[test]
+#[cfg(feature = "kernel")]
+fn kernel_block_parse_matches_oracle_identities() {
+    let bytes = fixture_bytes(SEGWIT_HEIGHT);
+    let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes).expect("oracle decode");
+    let parsed =
+        BlockParse::parse(&bytes, ValidationEngine::Kernel).expect("one-pass kernel block parse");
+    let mut reader = bytes.as_slice();
+    let layout = ParsedBlock::parse(&mut reader).expect("layout parse");
+    let materialized: Block = layout.materialize();
+    assert_parse_matches_oracle(&parsed, &oracle, &materialized);
 }
 
 #[test]

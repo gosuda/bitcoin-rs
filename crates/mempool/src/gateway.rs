@@ -18,7 +18,9 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
-use bitcoin_rs_consensus::{ConsensusError, UtxoView, total_sigop_cost, verify_transaction};
+use bitcoin_rs_consensus::{
+    ConsensusError, UtxoView, ValidationEngine, total_sigop_cost, verify_transaction,
+};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::script::{is_p2sh, is_witness_program};
@@ -61,6 +63,36 @@ pub enum ChainChangeError {
     /// The guard was issued by a different gateway.
     #[error("chain change guard belongs to another gateway")]
     ForeignGuard,
+}
+
+/// Why a [`MempoolGateway::shared`] / [`MempoolGateway::shared_with`] lookup
+/// refused to return the gateway interned for a pool.
+///
+/// The registry keeps exactly one gateway per pool, so a caller asking for an
+/// engine the interned gateway does not run is a wiring bug — silently
+/// returning the other engine would substitute a different script verifier
+/// than the resolved `validation.engine` asked for. It is refused, loudly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SharedGatewayError {
+    /// The pool already has an interned gateway and it verifies scripts under
+    /// another validation engine.
+    #[error(
+        "mempool gateway for this pool is already interned with validation engine \
+         `{interned}`, not `{requested}`"
+    )]
+    EngineMismatch {
+        /// Engine the interned gateway was built with.
+        interned: ValidationEngine,
+        /// Engine the caller asked for.
+        requested: ValidationEngine,
+    },
+    /// The pool already has an interned gateway, so the supplied observer
+    /// would never be installed.
+    #[error(
+        "mempool gateway for this pool is already interned, so the supplied \
+         observer was not installed"
+    )]
+    ObserverNotInstalled,
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +193,9 @@ pub(crate) struct PreparedAdmission {
     rejection: Option<(AdmitError, RejectScope)>,
     stamp: crate::pool::fee_policy::PolicyStamp,
     replacement: ReplacementStage,
+    /// Engine for this attempt's script checks; set by the gateway that
+    /// prepared it, so the deferred `verify` phase cannot run under another.
+    engine: ValidationEngine,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -277,15 +312,9 @@ impl PreparedAdmission {
             height,
             request.locktime_cutoff,
             VerifyFlags::STANDARD,
+            self.engine,
         ) {
-            // Core's rejection cache must allow a different witness body for
-            // witness-sensitive or possibly witness-stripped script failures.
-            let possibly_stripped = matches!(
-                error,
-                ConsensusError::Script { .. } | ConsensusError::Kernel(_)
-            ) && self.prevouts.iter().any(|(_, output)| {
-                is_witness_program(&output.script_pubkey) || is_p2sh(&output.script_pubkey)
-            });
+            let possibly_stripped = witness_strippable_failure(&error, &self.prevouts);
             self.reject(
                 AdmitError::Consensus,
                 if possibly_stripped {
@@ -332,6 +361,23 @@ fn rejection_scope(tx: &Tx) -> RejectScope {
     } else {
         RejectScope::Transaction
     }
+}
+
+/// Whether a script-verification failure may be witness-strippable, i.e. a
+/// different witness body of the same txid must still be allowed past the
+/// rejection cache.
+///
+/// Only genuine script verdicts qualify (`ConsensusError::Script`, which is
+/// also how kernel per-input verdicts surface). Wiring and backend failures —
+/// `PrevoutCount` shape mismatches, `UnsupportedEngine` selections, kernel
+/// parse/precompute `Kernel(_)` errors — say nothing about this witness body,
+/// so caching them witness-scoped would let a mutated body of the same txid
+/// bypass the rejection. They keep the structural scope instead.
+fn witness_strippable_failure(error: &ConsensusError, prevouts: &[(OutPoint, TxOut)]) -> bool {
+    matches!(error, ConsensusError::Script { .. })
+        && prevouts.iter().any(|(_, output)| {
+            is_witness_program(&output.script_pubkey) || is_p2sh(&output.script_pubkey)
+        })
 }
 
 /// Interns one [`MempoolGateway`] per pool `Arc` identity.
@@ -509,6 +555,10 @@ pub struct MempoolGateway {
     /// in [`Self::shared`]. Compare only for exact equality — never order or
     /// subtract wrapping counters.
     chain_generation: AtomicU64,
+    /// The one script-verification engine this gateway's admission path runs,
+    /// resolved once from node configuration (`validation.engine`). The
+    /// admission pipeline is shared; only the script backend dispatches on it.
+    engine: ValidationEngine,
 }
 
 impl core::fmt::Debug for MempoolGateway {
@@ -526,7 +576,11 @@ impl MempoolGateway {
     /// Pass `None` — or use the node's no-op publisher behind its observer —
     /// when no `--zmq-pub-sequence` endpoint is configured.
     #[must_use]
-    pub fn new(pool: Arc<RwLock<Mempool>>, observer: Option<Arc<dyn MempoolObserver>>) -> Self {
+    pub fn new(
+        pool: Arc<RwLock<Mempool>>,
+        observer: Option<Arc<dyn MempoolObserver>>,
+        engine: ValidationEngine,
+    ) -> Self {
         let composite = observer.map(|observer| {
             let composite = CompositeObserver::new();
             composite.add_leg("primary", observer);
@@ -541,7 +595,14 @@ impl MempoolGateway {
                 draining: false,
             }),
             chain_generation: AtomicU64::new(0),
+            engine,
         }
+    }
+
+    /// The resolved script-verification engine this gateway verifies with.
+    #[must_use]
+    pub const fn engine(&self) -> ValidationEngine {
+        self.engine
     }
 
     /// Attaches another named leg to this gateway's observer slot.
@@ -570,46 +631,86 @@ impl MempoolGateway {
     /// pointers: a live gateway pins its pool alive, so two live `Arc`s
     /// comparing pointer-equal are the same allocation, which makes ABA
     /// (a freed pool's address reused by a new allocation) impossible.
-    pub fn shared(pool: Arc<RwLock<Mempool>>) -> Arc<Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SharedGatewayError::EngineMismatch`] when `pool` is already
+    /// interned with a different `engine`: the registry owns one gateway per
+    /// pool, so returning it would run this admission path under an engine
+    /// other than the resolved `validation.engine`.
+    pub fn shared(
+        pool: Arc<RwLock<Mempool>>,
+        engine: ValidationEngine,
+    ) -> Result<Arc<Self>, SharedGatewayError> {
         let mut gateways = REGISTRY.lock();
-        gateways.retain(|weak| weak.upgrade().is_some());
-        for weak in &*gateways {
-            if let Some(candidate) = weak.upgrade() {
-                if Arc::ptr_eq(&candidate.pool, &pool) {
-                    return candidate;
-                }
-            }
+        if let Some(candidate) = Self::interned(&mut gateways, &pool, engine)? {
+            return Ok(candidate);
         }
-        let gateway = Arc::new(Self::new(pool, None));
+        let gateway = Arc::new(Self::new(pool, None, engine));
         gateways.push(Arc::downgrade(&gateway));
-        gateway
+        Ok(gateway)
     }
 
     /// Returns the one gateway interned for `pool`, constructed with
     /// `observer`.
     ///
     /// Like [`Self::shared`] but the newly created gateway carries the
-    /// supplied observer. If a gateway is already interned for `pool`, it
-    /// is returned as-is (its observer is unchanged). The caller is
-    /// expected to be the first interner — production code constructs the
-    /// gateway through [`crate::state::NodeState`] before any `shared`
-    /// call — so the observer lands on the one interned instance.
+    /// supplied observer. The caller is expected to be the first interner —
+    /// production code constructs the gateway through [`crate::state::NodeState`]
+    /// before any `shared` call — so the observer lands on the one interned
+    /// instance. A second call can never install its observer (the interned
+    /// gateway's slot is already sealed), so silently returning the interned
+    /// gateway would silently drop the caller's observer and any mutation
+    /// mirror it was meant to receive. That wiring bug is refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SharedGatewayError::EngineMismatch`] exactly as [`Self::shared`]
+    /// does; the observer slot never justifies an engine substitution. Returns
+    /// [`SharedGatewayError::ObserverNotInstalled`] when a gateway is already
+    /// interned for `pool`, because the supplied observer cannot be installed
+    /// on it.
     pub fn shared_with(
         pool: Arc<RwLock<Mempool>>,
         observer: Arc<dyn MempoolObserver>,
-    ) -> Arc<Self> {
+        engine: ValidationEngine,
+    ) -> Result<Arc<Self>, SharedGatewayError> {
         let mut gateways = REGISTRY.lock();
+        if Self::interned(&mut gateways, &pool, engine)?.is_some() {
+            // The interned gateway's observer slot is sealed at construction,
+            // and one built without an observer has no composite slot to
+            // extend (`attach_observer_leg` refuses). Either way the supplied
+            // observer would be silently dropped here, so it is refused.
+            return Err(SharedGatewayError::ObserverNotInstalled);
+        }
+        let gateway = Arc::new(Self::new(pool, Some(observer), engine));
+        gateways.push(Arc::downgrade(&gateway));
+        Ok(gateway)
+    }
+
+    /// Returns the live gateway interned for `pool`, refusing one built under
+    /// another validation engine.
+    fn interned(
+        gateways: &mut alloc::vec::Vec<Weak<Self>>,
+        pool: &Arc<RwLock<Mempool>>,
+        engine: ValidationEngine,
+    ) -> Result<Option<Arc<Self>>, SharedGatewayError> {
         gateways.retain(|weak| weak.upgrade().is_some());
-        for weak in &*gateways {
+        for weak in gateways.iter() {
             if let Some(candidate) = weak.upgrade() {
-                if Arc::ptr_eq(&candidate.pool, &pool) {
-                    return candidate;
+                if Arc::ptr_eq(&candidate.pool, pool) {
+                    let interned = candidate.engine();
+                    if interned != engine {
+                        return Err(SharedGatewayError::EngineMismatch {
+                            interned,
+                            requested: engine,
+                        });
+                    }
+                    return Ok(Some(candidate));
                 }
             }
         }
-        let gateway = Arc::new(Self::new(pool, Some(observer)));
-        gateways.push(Arc::downgrade(&gateway));
-        gateway
+        Ok(None)
     }
 
     /// Returns `true` when the gateway was constructed with an observer.
@@ -766,7 +867,7 @@ impl MempoolGateway {
         let mut prepared = {
             let pool = self.pool.read();
             self.check_admission_state(&pool, request, fence)?;
-            Self::prepare_admission(&pool, request, AdmissionMode::Single)
+            Self::prepare_admission(&pool, request, AdmissionMode::Single, self.engine())
         };
         prepared.verify(request);
 
@@ -861,6 +962,7 @@ impl MempoolGateway {
         pool: &Mempool,
         request: &AdmissionRequest,
         mode: AdmissionMode,
+        engine: ValidationEngine,
     ) -> PreparedAdmission {
         let policy = pool.policy_snapshot();
         let chain = PrevoutMap(&request.prevouts);
@@ -929,6 +1031,7 @@ impl MempoolGateway {
             rejection,
             stamp: pool.policy_stamp(),
             replacement: ReplacementStage::Rejected,
+            engine,
         };
         // Preserve structural-check precedence and transaction-scoped rejects
         // before missing-input policy can retain a peer orphan.
@@ -1430,10 +1533,11 @@ pub fn reset_admission_park() {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError, CompositeObserver,
-        MempoolGateway, MempoolObserver,
+        AdmissionMode, AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError,
+        CompositeObserver, MempoolGateway, MempoolObserver, SharedGatewayError, ValidationEngine,
     };
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
+    use crate::orphan::RejectScope;
     use crate::standardness::PackageTxContext;
     use crate::{Mempool, MempoolEntry, MempoolLimits};
     use alloc::sync::Arc;
@@ -1499,6 +1603,7 @@ mod tests {
         Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             observer,
+            ValidationEngine::Native,
         ))
     }
 
@@ -1827,6 +1932,7 @@ mod tests {
                 ..MempoolLimits::default()
             }))),
             Some(dyn_observer(&observer)),
+            ValidationEngine::Native,
         );
 
         let low = MempoolEntry::new(Arc::new(tx(13)), 100, 100, 1, 7);
@@ -1954,6 +2060,7 @@ mod tests {
         let gateway = Arc::new(MempoolGateway::new(
             Arc::clone(&pool),
             Some(dyn_observer(&observer)),
+            ValidationEngine::Native,
         ));
 
         let first_txid = tx(20).txid();
@@ -2052,6 +2159,7 @@ mod tests {
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Some(dyn_observer(&observer)),
+            ValidationEngine::Native,
         ));
         *observer.gateway.lock() = Some(Arc::clone(&gateway));
 
@@ -2153,6 +2261,7 @@ mod tests {
         let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Some(dyn_observer(&observer)),
+            ValidationEngine::Native,
         ));
         *observer.gateway.lock() = Some(Arc::clone(&gateway));
 
@@ -2283,6 +2392,7 @@ mod tests {
                 ..MempoolLimits::default()
             }))),
             Some(dyn_observer(&observer)),
+            ValidationEngine::Native,
         );
 
         let filler = tx(70);
@@ -2327,6 +2437,7 @@ mod tests {
                 ..MempoolLimits::default()
             }))),
             Some(dyn_observer(&observer)),
+            ValidationEngine::Native,
         );
 
         // Shared prevout: original and replacement conflict.
@@ -2789,20 +2900,84 @@ mod tests {
     #[test]
     fn shared_interns_one_gateway_per_pool() {
         let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let first = MempoolGateway::shared(Arc::clone(&pool));
-        let second = MempoolGateway::shared(Arc::clone(&pool));
+        let first = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
+            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        let second = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
+            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
         assert!(
             Arc::ptr_eq(&first, &second),
             "one pool must intern exactly one gateway"
         );
 
-        let other = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
-            MempoolLimits::default(),
-        ))));
+        let other = MempoolGateway::shared(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            ValidationEngine::Native,
+        )
+        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
         assert!(
             !Arc::ptr_eq(&first, &other),
             "distinct pools must get distinct gateways"
         );
+    }
+
+    /// The registry keeps one gateway per pool, so a lookup asking for an
+    /// engine the interned gateway does not run must be refused loudly: a
+    /// silent return would verify this pool's admission path under a backend
+    /// other than the resolved `validation.engine`.
+    #[test]
+    fn shared_refuses_an_engine_the_interned_gateway_does_not_run() {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        let interned = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
+            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        assert_eq!(interned.engine(), ValidationEngine::Native);
+
+        // Same engine, no observer requested: the read-only re-intern is
+        // still one gateway (`shared` installs nothing, so nothing can be
+        // dropped).
+        let same = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
+            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        assert!(Arc::ptr_eq(&interned, &same));
+
+        // Requesting another engine for the same pool is a wiring bug, not a
+        // value to substitute: it is refused, and the interned gateway is
+        // left exactly as it was.
+        match MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Kernel) {
+            Ok(_) => panic!("an engine mismatch must be refused, not substituted"),
+            Err(SharedGatewayError::EngineMismatch {
+                interned: have,
+                requested: want,
+            }) => {
+                assert_eq!(have, ValidationEngine::Native);
+                assert_eq!(want, ValidationEngine::Kernel);
+            }
+            Err(other) => panic!("expected EngineMismatch, got {other:?}"),
+        }
+        // An engine mismatch is refused before the observer question.
+        match MempoolGateway::shared_with(
+            Arc::clone(&pool),
+            Arc::new(CompositeObserver::new()),
+            ValidationEngine::Kernel,
+        ) {
+            Ok(_) => panic!("shared_with must refuse an engine mismatch too"),
+            Err(SharedGatewayError::EngineMismatch { .. }) => {}
+            Err(other) => panic!("engine mismatch must win over the observer check: {other:?}"),
+        }
+        // Even the matching-engine case cannot install an observer on an
+        // already interned gateway: the slot is sealed at construction and a
+        // gateway built without one has no composite slot to extend. The
+        // old shape returned the interned gateway and dropped the caller's
+        // observer silently — the exact sibling wiring bug the engine
+        // mismatch refuses loudly.
+        match MempoolGateway::shared_with(
+            Arc::clone(&pool),
+            Arc::new(CompositeObserver::new()),
+            ValidationEngine::Native,
+        ) {
+            Ok(_) => panic!("an uninstalled observer must be refused, not dropped"),
+            Err(SharedGatewayError::ObserverNotInstalled) => {}
+            Err(other) => panic!("expected ObserverNotInstalled, got {other:?}"),
+        }
+        assert_eq!(interned.engine(), ValidationEngine::Native);
     }
 
     #[test]
@@ -3041,6 +3216,7 @@ mod tests {
                 ..MempoolLimits::default()
             }))),
             None,
+            ValidationEngine::Native,
         );
         // A standard transaction with one input, but the caller passes empty
         // prevouts — simulating a caller that did not resolve inputs. Policy
@@ -3089,6 +3265,7 @@ mod tests {
                 ..MempoolLimits::default()
             }))),
             None,
+            ValidationEngine::Native,
         );
         let mut tx = standard_tx(0x45);
         tx.inputs.push(tx.inputs[0].clone());
@@ -3180,5 +3357,85 @@ mod tests {
             assert!(gateway.read().is_empty());
             assert_eq!(gateway.read().sequence_number(), 0);
         }
+    }
+
+    /// A P2SH prevout script (`OP_HASH160 <20 bytes> OP_EQUAL`), the shape
+    /// that gives a script failure a witness-strippable variant.
+    fn p2sh_prevout() -> TxOut {
+        let mut script = Vec::with_capacity(23);
+        script.push(0xa9); // OP_HASH160
+        script.push(0x14); // push 20 bytes
+        script.extend_from_slice(&[0x2a; 20]);
+        script.push(0x87); // OP_EQUAL
+        TxOut {
+            value: Amount::from_sat(11_000),
+            script_pubkey: script.into(),
+        }
+    }
+
+    /// Runs one prepared admission's script stage against a P2SH prevout.
+    fn script_stage_rejection(engine: ValidationEngine) -> Option<(AdmitError, RejectScope)> {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: 0,
+            ..MempoolLimits::default()
+        })));
+        let gateway = MempoolGateway::new(Arc::clone(&pool), None, engine);
+        let candidate = standard_tx(0x51);
+        let mut request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+        request.prevouts = vec![(request.prevouts[0].0, p2sh_prevout())];
+        let guard = pool.read();
+        let mut prepared =
+            MempoolGateway::prepare_admission(&guard, &request, AdmissionMode::Single, engine);
+        prepared.verify(&request);
+        prepared.rejection
+    }
+
+    /// A genuine script verdict on a witness-strippable prevout keeps the
+    /// Core contract: a different witness body of the same txid must still
+    /// pass the rejection cache. This is the contrast case the scope fix
+    /// must not disturb.
+    #[test]
+    fn genuine_script_verdicts_on_strippable_prevouts_stay_witness_scoped() {
+        assert!(matches!(
+            script_stage_rejection(ValidationEngine::Native),
+            Some((AdmitError::Consensus, RejectScope::Witness))
+        ));
+    }
+
+    /// Wiring and backend failures are never witness-strippable, whatever the
+    /// build: a mutated witness body of the same txid must not bypass a
+    /// rejection cached from them. Genuine script verdicts — including the
+    /// kernel's per-input verdicts, which surface as `Script` — are.
+    #[test]
+    fn only_genuine_script_verdicts_are_witness_strippable() {
+        use bitcoin_rs_consensus::ConsensusError;
+        let prevouts = [(
+            OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5a; 32])), 0),
+            p2sh_prevout(),
+        )];
+        assert!(super::witness_strippable_failure(
+            &ConsensusError::Script {
+                input_index: 0,
+                reason: "script failed: false".to_owned(),
+            },
+            &prevouts,
+        ));
+        assert!(!super::witness_strippable_failure(
+            &ConsensusError::UnsupportedEngine {
+                engine: ValidationEngine::Kernel,
+            },
+            &prevouts,
+        ));
+        assert!(!super::witness_strippable_failure(
+            &ConsensusError::PrevoutCount {
+                input_count: 2,
+                prevout_count: 1,
+            },
+            &prevouts,
+        ));
+        assert!(!super::witness_strippable_failure(
+            &ConsensusError::Kernel("kernel parse failed".to_owned()),
+            &prevouts,
+        ));
     }
 }

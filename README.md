@@ -103,11 +103,12 @@ curl -s --user bitcoin-rs:bitcoin-rs \
 
 To route script verification through `libbitcoinkernel` instead of the native
 interpreter, install C++ dependencies (`cmake` and `libboost-dev` on
-Debian/Ubuntu), then pass `--features kernel`:
+Debian/Ubuntu), build with `--features kernel` (compiles kernel support in),
+and select the engine at runtime with `--validation-engine kernel`:
 
 ```sh
 cargo build --release -p bitcoin-rs --features kernel
-./target/release/bitcoin-rs --data-dir .bitcoin-rs
+./target/release/bitcoin-rs --data-dir .bitcoin-rs --validation-engine kernel
 ```
 
 ## Benchmark status
@@ -135,11 +136,14 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 
 - Validation: script execution runs in parallel across rayon workers, with
   sighash midstate reuse per transaction. The native interpreter covers every
-  consensus spend class. Under the `kernel` feature, `libbitcoinkernel` is the
-  verifier instead.
+  consensus spend class. With the `kernel` feature, `libbitcoinkernel` support
+  is compiled in and `validation.engine` selects the verifier at runtime
+  (`native` by default, `kernel` to route script checks through
+  `libbitcoinkernel`).
 - Kernel boundary: `crates/consensus/src/kernel.rs` contains all
   `libbitcoinkernel` types behind `#[cfg(feature = "kernel")]`. Kernel types
-  never leak into node state or apply logic.
+  never leak into node state or apply logic. The `kernel` feature is a
+  capability; `validation.engine` is the selection.
 - Storage: `crates/storage` provides backend abstraction. The active engine is
   configured at startup (`fjall`, `redb`, or `rocksdb`).
 - Indexing: `txindex` runs as an independent consumer, advancing its cursor and
@@ -150,8 +154,8 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 | Setting | Default |
 |---|---|
 | Storage backend | `fjall` |
-| Validation engine | Native Rust interpreter (default binary); `libbitcoinkernel` with `--features kernel` and as the consensus/chainstate/node library default |
-| Kernel feature | Off in default binary build; on in `crates/consensus`, `crates/chainstate`, and `crates/node` library defaults |
+| Validation engine | Native Rust interpreter (`validation.engine = "native"`, the default in every build); `libbitcoinkernel` only when selected at runtime with `validation.engine = "kernel"` on a `--features kernel` build |
+| Kernel feature | Off by default in every crate; `--features kernel` compiles in `libbitcoinkernel` support without selecting it |
 | Database cache | 450 MiB (`--dbcache-mb`, split 80/20 when txindex is enabled) |
 | Multi-peer download | On (8 outbound peers, 256-block window) |
 | Transaction index | Off |

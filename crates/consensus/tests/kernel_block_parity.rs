@@ -5,7 +5,8 @@
 //! transactions — one committed fixture per script class under
 //! `tests/vectors/scripts/` — through the kernel entry the production apply
 //! path uses (`bitcoin_rs_consensus::kernel::verify_tx_scripts`, the seam
-//! `verify_transaction` dispatches to under `feature = "kernel"`), and asserts:
+//! `verify_transaction` dispatches to when the resolved validation engine is
+//! `kernel`), and asserts:
 //!
 //! * every pristine fixture is **accepted**, and
 //! * every applicable in-code mutation (signature bit flip, scriptSig
@@ -15,12 +16,13 @@
 //! ## The differential is interpreter-vs-kernel, not kernel-vs-kernel (ADV-1)
 //!
 //! The Rust side of the differential calls `bitcoin_rs_script::Interpreter`
-//! **directly**. It must not route through `verify_transaction`: under
-//! `feature = "kernel"`, that function dispatches script verdicts to the same
+//! **directly**. It must not route through `verify_transaction`: with
+//! `validation.engine = "kernel"` selected, that function dispatches script
+//! verdicts to the same
 //! `kernel::verify_tx_scripts` path as the kernel side
 //! (by design, per R2/KTD5 of plan 2026-06-10-001), which would silently turn
 //! this differential into kernel-vs-kernel and make it unable to detect any
-//! interpreter divergence. That cfg structure is production-correct and is
+//! interpreter divergence. That dispatch structure is production-correct and is
 //! pinned elsewhere (`verify_tx.rs` kernel tests); this file deliberately
 //! bypasses it for the *test-only* Rust verdict. [`differential_is_non_vacuous`]
 //! proves the bypass holds: each engine is run twice on a committed taproot
@@ -121,7 +123,7 @@ impl Verdict {
 // ---------------------------------------------------------------------------
 
 /// Kernel verdict for every input of `tx`, through the same free function the
-/// production `verify_transaction` dispatches to under `feature = "kernel"`.
+/// production `verify_transaction` dispatches to for the `kernel` engine.
 fn kernel_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), ConsensusError> {
     let spent: Vec<(OutPoint, TxOut)> = tx
         .inputs
@@ -129,13 +131,18 @@ fn kernel_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), 
         .zip(prevouts)
         .map(|(input, prevout)| (input.previous_output, prevout.clone()))
         .collect();
-    bitcoin_rs_consensus::kernel::verify_tx_scripts(tx, &spent, flags)
+    bitcoin_rs_consensus::kernel::verify_tx_scripts(
+        tx,
+        &spent,
+        flags,
+        bitcoin_rs_consensus::ValidationEngine::Kernel,
+    )
 }
 
 /// Rust-interpreter verdict for every input of `tx`, calling
 /// `bitcoin_rs_script::Interpreter` directly. Deliberately does NOT go through
-/// `verify_transaction`: under the kernel feature that function routes script
-/// verdicts into the kernel (see module docs, ADV-1), which
+/// `verify_transaction`: with `validation.engine = "kernel"` that function
+/// routes script verdicts into the kernel (see module docs, ADV-1), which
 /// would make the differential kernel-vs-kernel. Returns the first failing
 /// input's error, `Ok` when all inputs pass.
 fn interpreter_result(tx: &Tx, prevouts: &[TxOut], flags: VerifyFlags) -> Result<(), String> {

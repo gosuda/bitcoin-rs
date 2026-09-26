@@ -194,12 +194,17 @@ pub(super) fn apply_block_admitted<'b>(
         }
         Some(ProvenApply::AssumeValidSkipped(prepared)) => (prepared, false),
         Some(ProvenApply::Proven(_)) | None => (
-            prepare_apply(block, provided_serialized.clone(), handles.utxo.as_ref())?,
+            prepare_apply(
+                block,
+                provided_serialized.clone(),
+                handles.utxo.as_ref(),
+                handles.validation_engine,
+            )?,
             false,
         ),
     };
     let PreparedApply {
-        kernel_block,
+        parsed,
         mut view,
         tx_plan,
         resolved,
@@ -304,7 +309,7 @@ pub(super) fn apply_block_admitted<'b>(
             Arc::clone(&resolved),
             &validation_context,
             provenance,
-            &kernel_block,
+            &parsed,
         )
     };
     let script_verify_dur = script_verify_started.elapsed();

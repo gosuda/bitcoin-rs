@@ -279,6 +279,7 @@ fn assume_valid_height_override_has_precedence() -> Result<()> {
         validation: ValidationOverrides {
             assume_valid_height: Some(10_000),
             mode: None,
+            engine: None,
         },
         ..Default::default()
     };
@@ -286,6 +287,7 @@ fn assume_valid_height_override_has_precedence() -> Result<()> {
         validation: ValidationOverrides {
             assume_valid_height: Some(30_000),
             mode: None,
+            engine: None,
         },
         ..Default::default()
     };

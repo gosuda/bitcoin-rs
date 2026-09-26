@@ -6,7 +6,7 @@ use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hashes::{Hash as _, sha256};
 use libfuzzer_sys::fuzz_target;
 use bitcoin_rs_consensus::{
-    rust_path::UtxoView, verify_transaction, verify_transaction_non_script,
+    ValidationEngine, rust_path::UtxoView, verify_transaction, verify_transaction_non_script,
 };
 use bitcoin_rs_mempool::{StandardnessPolicy, is_standard_tx};
 use bitcoin_rs_primitives::{
@@ -116,6 +116,7 @@ fn validate_native(tx: Tx) {
         HEIGHT.saturating_add(1),
         LOCKTIME_CUTOFF,
         VerifyFlags::STANDARD,
+        ValidationEngine::Native,
     );
     // Policy leg.
     let _ = is_standard_tx(&tx, &StandardnessPolicy::default());

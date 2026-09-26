@@ -3,8 +3,8 @@
 #![expect(clippy::expect_used, reason = "test assertions")]
 
 use bitcoin::hashes::Hash as _;
-use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_consensus::total_sigop_cost;
+use bitcoin_rs_consensus::{UtxoView, ValidationEngine};
 use bitcoin_rs_primitives::tx::{Tx, TxIn, TxOut};
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Txid, Witness,
@@ -67,7 +67,8 @@ fn missing_prevout_fails_closed() {
     let (mut tx, view) = two_input_tx();
     tx.inputs[1].previous_output = outpoint(0xEE);
     let flags = bitcoin_rs_script::VerifyFlags::MANDATORY;
-    let verdict = bitcoin_rs_consensus::verify_transaction(&tx, &view, 0, 0, flags);
+    let verdict =
+        bitcoin_rs_consensus::verify_transaction(&tx, &view, 0, 0, flags, ValidationEngine::Native);
     assert!(matches!(
         verdict,
         Err(bitcoin_rs_consensus::ConsensusError::MissingPrevout { input_index: 1 })
@@ -164,6 +165,7 @@ fn duplicate_inputs_are_rejected() {
         0,
         0,
         bitcoin_rs_script::VerifyFlags::MANDATORY,
+        ValidationEngine::Native,
     );
     assert!(matches!(
         verdict,

@@ -49,7 +49,7 @@ pub use fee_diagram::FeeDiagramError;
 pub use fee_estimator::{FeeEstimator, FeeRate, HistoryReject};
 pub use gateway::{
     AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError, ChainChangeGuard,
-    CompositeObserver, MempoolGateway, MempoolObserver,
+    CompositeObserver, MempoolGateway, MempoolObserver, SharedGatewayError,
 };
 #[cfg(any(test, feature = "test-seam"))]
 pub use gateway::{arm_admission_park, reset_admission_park};

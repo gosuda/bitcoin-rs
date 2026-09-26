@@ -14,6 +14,7 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
+use bitcoin_rs_consensus::ValidationEngine;
 use std::error::Error;
 
 use bitcoin_rs_mempool::eviction::mempool_min_fee_sat_per_kvb;
@@ -429,7 +430,7 @@ fn multiple_dust_outputs_are_not_standard() {
 #[test]
 fn missing_inputs_fact_is_reported_by_the_preview() -> Result<(), Box<dyn Error>> {
     let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
     let orphan = tx(outpoint(200, 0), 1_000, 0xFF_FF_FF_FF);
     let facts = gateway.preview_transactions(&[orphan], None, &EmptyChain)?;
     let fact = facts.results.first().ok_or("expected one fact row")?;
@@ -489,7 +490,7 @@ fn meta_chain(
 #[test]
 fn bip68_height_lock_boundary_enforces_at_admission() -> Result<(), Box<dyn Error>> {
     let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
     // The coin was created at height 10; the next block is 13. A relative
     // lock of 5 needs height 15 (non-final); a lock of 2 is satisfied.
     let spendable = TxOut {
@@ -538,7 +539,7 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
     );
     let parent_outpoint = OutPoint::new(parent.txid(), 0);
     pool.insert_entry(entry(parent, 250, 3_000))?;
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
     // The parent sits in the pool: the gateway layers it under the chain
     // facts, and any positive relative lock against an unconfirmed prevout
     // fails because it is encoded as the next block.
@@ -578,7 +579,7 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
 #[test]
 fn bip68_time_lock_uses_the_confirmed_median_time_past() -> Result<(), Box<dyn Error>> {
     let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
     let spendable = TxOut {
         value: Amount::from_sat(10_000),
         script_pubkey: Script::from_bytes(op_true_script()),
@@ -617,7 +618,7 @@ fn bip68_time_lock_uses_the_confirmed_median_time_past() -> Result<(), Box<dyn E
 #[test]
 fn bip68_check_is_inert_before_csv_activation() -> Result<(), Box<dyn Error>> {
     let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
     let spendable = TxOut {
         value: Amount::from_sat(10_000),
         script_pubkey: Script::from_bytes(op_true_script()),
@@ -646,7 +647,7 @@ fn bip68_check_is_inert_before_csv_activation() -> Result<(), Box<dyn Error>> {
 #[test]
 fn immature_coinbase_spend_rejects_before_100_confirmations() -> Result<(), Box<dyn Error>> {
     let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None);
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
     let spendable = TxOut {
         value: Amount::from_sat(10_000),
         script_pubkey: Script::from_bytes(op_true_script()),

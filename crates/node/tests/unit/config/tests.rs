@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::{
     Auth, ChainstateJournalOverrides, NetworkSelection, NodeConfig, P2pOverrides, RpcOverrides,
-    ScriptIndexMode, StorageOverrides, UserConfig, ValidationOverrides,
+    ScriptIndexMode, StorageOverrides, UserConfig, ValidationEngine, ValidationOverrides,
 };
 
 #[test]
@@ -87,6 +87,117 @@ fn resolve_keeps_absent_nested_fields_at_their_network_defaults() {
     assert_eq!(
         config.validation.assume_valid_height, 0,
         "regtest pins no assume-valid anchor"
+    );
+}
+
+// ---- #1117 unified validation engine -----------------------------------
+//
+// The `kernel` feature is capability ("bitcoinkernel support is compiled
+// in"), not selection. `validation.engine` is the one authoritative engine
+// setting: it resolves once here, defaults to `native` in every build, and a
+// build without kernel support must reject `kernel` before any node state,
+// chainstate, or worker exists.
+
+#[test]
+fn validation_engine_defaults_to_native_and_layers_field_by_field() {
+    let config = resolved(&[]);
+    assert_eq!(config.validation.engine, ValidationEngine::Native);
+
+    // An explicit `native` setting resolves in every build. The
+    // lower-layer-wins claim needs a non-default engine to be observable and
+    // lives in the kernel-gated layering test below.
+    let base = UserConfig {
+        network: Some(NetworkSelection::Regtest),
+        validation: ValidationOverrides {
+            engine: Some(ValidationEngine::Native),
+            ..ValidationOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let higher = UserConfig::default();
+    let config = resolved(&[&base, &higher]);
+    assert_eq!(
+        config.validation.engine,
+        ValidationEngine::Native,
+        "an explicit `native` setting resolves in every build"
+    );
+}
+
+#[test]
+fn validation_engine_is_supported_in_this_build_for_native() {
+    assert!(ValidationEngine::Native.is_supported());
+}
+
+#[test]
+#[cfg(feature = "kernel")]
+fn validation_engine_kernel_is_supported_when_compiled() {
+    let layer = UserConfig {
+        validation: ValidationOverrides {
+            engine: Some(ValidationEngine::Kernel),
+            ..ValidationOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let config = resolved(&[&layer]);
+    assert_eq!(config.validation.engine, ValidationEngine::Kernel);
+}
+
+/// The two-layer absent case, observable only where `kernel` is a usable
+/// non-default value: the lower layer's engine survives a higher layer that
+/// omits the field, and a higher layer that names one wins. The always-on
+/// test above cannot show this — both `native` and the fallback land on the
+/// default.
+#[test]
+#[cfg(feature = "kernel")]
+fn validation_engine_layering_keeps_the_lower_layer_value() {
+    let base = UserConfig {
+        validation: ValidationOverrides {
+            engine: Some(ValidationEngine::Kernel),
+            ..ValidationOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let higher = UserConfig::default();
+    let config = resolved(&[&base, &higher]);
+    assert_eq!(
+        config.validation.engine,
+        ValidationEngine::Kernel,
+        "an engine absent in the higher layer keeps the lower layer's value"
+    );
+
+    let higher = UserConfig {
+        validation: ValidationOverrides {
+            engine: Some(ValidationEngine::Native),
+            ..ValidationOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let config = resolved(&[&base, &higher]);
+    assert_eq!(
+        config.validation.engine,
+        ValidationEngine::Native,
+        "a higher layer that names an engine wins"
+    );
+}
+
+#[test]
+#[cfg(not(feature = "kernel"))]
+fn validation_engine_kernel_is_rejected_without_kernel_support() {
+    let layer = UserConfig {
+        validation: ValidationOverrides {
+            engine: Some(ValidationEngine::Kernel),
+            ..ValidationOverrides::default()
+        },
+        ..UserConfig::default()
+    };
+    let error = match super::resolve(&[&layer]) {
+        Ok(_) => panic!("a build without kernel support must reject engine = kernel"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("not compiled") && message.contains("kernel"),
+        "unsupported-build error must name the missing capability, got {message}"
     );
 }
 
@@ -279,6 +390,7 @@ fn later_network_selection_resets_earlier_p2p_overrides_atomically() {
         validation: ValidationOverrides {
             assume_valid_height: Some(7),
             mode: None,
+            engine: None,
         },
         ..UserConfig::default()
     };

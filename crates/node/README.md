@@ -48,15 +48,15 @@ Large corpus/replay/evidence harnesses are intentionally not shipped by this
 runtime crate.
 
 ## Features
-- `default` (enables `fjall`, `kernel`, and `zmq`): the performance-oriented fjall
-  storage backend plus the bitcoinkernel consensus verifier and ZMQ notifications,
-  so per-crate `cargo check` works out of the box. The `bitcoin-rs` binary's own
-  defaults are the pure-Rust `fjall,redb,zmq`; `kernel` stays opt-in there. Issue
-  #213 is the measurement gate for dropping `kernel` from this crate's defaults.
+- `default` (enables `fjall` and `zmq`): the performance-oriented fjall
+  storage backend plus ZMQ notifications, so per-crate `cargo check` works out
+  of the box. The default is kernel-free in every crate, so no build links a
+  C++ engine unless asked.
 - `rocksdb`, `fjall`, `redb`: forward the named storage backend to every subsystem
   crate.
-- `kernel`: route consensus verification through bitcoinkernel
-  (`bitcoin-rs-consensus/kernel`).
+- `kernel`: compiles bitcoinkernel support in (`bitcoin-rs-consensus/kernel`).
+  Selection is the runtime `validation.engine` setting (`native` by default);
+  the feature alone never routes consensus verification to the kernel.
 - `prometheus-http`: enables the `metrics-exporter-prometheus/http-listener` feature;
   the production listener itself is controlled by `metrics_bind`.
 

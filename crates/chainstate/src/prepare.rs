@@ -40,14 +40,15 @@ pub fn bytes_are_block(raw: &[u8], block: &Block) -> bool {
 pub(super) fn parse_block_for_apply(
     block: &Block,
     provided_serialized: Option<bytes::Bytes>,
-) -> core::result::Result<(bitcoin_rs_consensus::kernel::KernelBlock, Vec<Txid>), ApplyError> {
+    engine: bitcoin_rs_consensus::ValidationEngine,
+) -> core::result::Result<(bitcoin_rs_consensus::kernel::BlockParse, Vec<Txid>), ApplyError> {
     // Preserved bytes must BE this block, not merely agree with it on
-    // transaction count. In kernel builds the txids and the transactions that
-    // script verification runs come from these bytes, while the witness
-    // commitment check and the UTXO mutation use the decoded block. Changing a
-    // witness does not change a txid, so a count check lets a caller pair a
-    // block carrying an invalid witness with bytes carrying a valid one: the
-    // scripts verify against the bytes and the invalid block gets applied.
+    // transaction count. The parse below drives the txids and the transactions
+    // that script verification runs, while the witness commitment check and
+    // the UTXO mutation use the decoded block. Changing a witness does not
+    // change a txid, so a count check lets a caller pair a block carrying an
+    // invalid witness with bytes carrying a valid one: the scripts verify
+    // against the bytes and the invalid block gets applied.
     if let Some(raw) = provided_serialized.as_deref()
         && !bytes_are_block(raw, block)
     {
@@ -57,27 +58,28 @@ pub(super) fn parse_block_for_apply(
             ),
         ));
     }
-    // Both `KernelBlock` backends share one shape — parse once, count check,
-    // txids — so the caller stays uniform whichever feature resolved the type.
-    // In kernel builds the txids and the transactions that script verification
-    // runs come from the kernel parse; without it the checked borrowed layout
-    // derives txids, witness IDs, weight, byte positions, and Merkle verdicts
-    // in a single pass, with no second transaction tree decode.
+    // Every engine's parse shares one shape — parse once, count check,
+    // txids — so the caller stays uniform whichever selection resolved the
+    // value. The kernel parse hashes every transaction on the way past using
+    // Core's runtime-selected SHA-256; the native parse's checked borrowed
+    // layout derives txids, witness IDs, weight, byte positions, and Merkle
+    // verdicts in a single pass. Either way there is no second transaction
+    // tree decode.
     let raw_block: bytes::Bytes =
         provided_serialized.unwrap_or_else(|| bytes::Bytes::from(consensus_bytes(block)));
-    let kernel_block = bitcoin_rs_consensus::kernel::KernelBlock::parse(&raw_block)
+    let parsed = bitcoin_rs_consensus::kernel::BlockParse::parse(&raw_block, engine)
         .map_err(ApplyError::Consensus)?;
-    if kernel_block.transaction_count() != block.txs.len() {
+    if parsed.transaction_count() != block.txs.len() {
         return Err(ApplyError::Consensus(
             bitcoin_rs_consensus::ConsensusError::Kernel(format!(
                 "block parse produced {} transactions, decoder produced {}",
-                kernel_block.transaction_count(),
+                parsed.transaction_count(),
                 block.txs.len()
             )),
         ));
     }
-    let txids = kernel_block.txids().map_err(ApplyError::Consensus)?;
-    Ok((kernel_block, txids))
+    let txids = parsed.txids().map_err(ApplyError::Consensus)?;
+    Ok((parsed, txids))
 }
 
 /// Parses a block and resolves the outputs it spends.
@@ -89,14 +91,15 @@ pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::contract::OutputSource + ?Si
     block: &'b Block,
     provided_serialized: Option<bytes::Bytes>,
     source: &S,
+    engine: bitcoin_rs_consensus::ValidationEngine,
 ) -> core::result::Result<PreparedApply<'b>, ApplyError> {
-    let (kernel_block, txids) = parse_block_for_apply(block, provided_serialized)?;
+    let (parsed, txids) = parse_block_for_apply(block, provided_serialized, engine)?;
     let tx_plan = plan_block_transactions(block, &txids);
-    let facts = kernel_block.derive_facts(&block.txs, &txids);
+    let facts = parsed.derive_facts(&block.txs, &txids);
     let view = bitcoin_rs_consensus::BlockView::from_facts(&block.txs, facts);
     let resolved = Arc::new(ResolvedUtxoView::resolve(source, block, &tx_plan));
     Ok(PreparedApply {
-        kernel_block,
+        parsed,
         view,
         tx_plan,
         resolved,
@@ -107,9 +110,9 @@ pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::contract::OutputSource + ?Si
 ///
 /// Identities come from the parse-once view: the kernel parse hashes every
 /// transaction on the way past using the SHA-256 implementation Core picks at
-/// runtime, and the native build hashes each transaction once in
-/// [`block_txids`]. Either way the plan borrows them instead of re-hashing
-/// with a scalar implementation.
+/// runtime, and the native parse derives them in its single layout pass.
+/// Either way the plan borrows them instead of re-hashing with a scalar
+/// implementation.
 pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxPlan {
     let mut only_coinbase = true;
     let mut needs_local_utxo_overlay = false;
@@ -315,7 +318,7 @@ pub(super) fn verify_block_transactions(
     resolved: Arc<ResolvedUtxoView>,
     context: &BlockValidationContext,
     provenance: BlockProvenance,
-    kernel_block: &bitcoin_rs_consensus::kernel::KernelBlock,
+    parsed: &bitcoin_rs_consensus::kernel::BlockParse,
 ) -> core::result::Result<(), ApplyError> {
     debug_assert_eq!(block.txs.len(), view.txids().len());
     if tx_plan.only_coinbase {
@@ -363,7 +366,7 @@ pub(super) fn verify_block_transactions(
         context.locktime_cutoff,
         context.flags,
         &mut script_timings,
-        kernel_block,
+        parsed,
     );
     metrics::histogram!("node.apply_block.script_prepare_seconds")
         .record(script_timings.prepare_seconds);

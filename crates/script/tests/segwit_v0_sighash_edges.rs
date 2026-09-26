@@ -164,13 +164,23 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
             (input.previous_output, output)
         })
         .collect();
-    verify_tx_scripts(&signed, &spent, VerifyFlags::MANDATORY)
-        .expect("kernel accepts independently signed BIP143 input");
+    verify_tx_scripts(
+        &signed,
+        &spent,
+        VerifyFlags::MANDATORY,
+        bitcoin_rs_consensus::ValidationEngine::Kernel,
+    )
+    .expect("kernel accepts independently signed BIP143 input");
     // Every BIP143 mode commits to this amount. Ensure the oracle is not
     // vacuously accepting, and require a script rejection, not an engine error.
     spent[INPUT].1.value = spent[INPUT].1.value.saturating_add(1_u64.into());
     assert!(matches!(
-        verify_tx_scripts(&signed, &spent, VerifyFlags::MANDATORY),
+        verify_tx_scripts(
+            &signed,
+            &spent,
+            VerifyFlags::MANDATORY,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        ),
         Err(ConsensusError::Script {
             input_index: INPUT,
             ..

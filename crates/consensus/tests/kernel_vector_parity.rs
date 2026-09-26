@@ -6,7 +6,7 @@
 //! natively executes only taproot key-path spends, so that differential is
 //! interpreter-scoped. This file takes a different angle: it feeds Core's own
 //! known-good and known-bad transaction vectors through the kernel's
-//! `verify_tx_scripts` (the production seam under `feature = "kernel"`) and
+//! `verify_tx_scripts` (the production seam for the `kernel` engine) and
 //! asserts the kernel's verdict matches the vector's expected outcome.
 //!
 //! This is a **kernel oracle test**: the kernel is the authority, and the
@@ -77,10 +77,13 @@ impl Verdict {
 // ---------------------------------------------------------------------------
 
 /// Kernel verdict for every input of `tx`, through the same free function the
-/// production `verify_transaction` dispatches to under `feature = "kernel"`.
+/// production `verify_transaction` dispatches to for the `kernel` engine.
 fn kernel_verdict(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: VerifyFlags) -> Verdict {
     Verdict::of(&bitcoin_rs_consensus::kernel::verify_tx_scripts(
-        tx, prevouts, flags,
+        tx,
+        prevouts,
+        flags,
+        bitcoin_rs_consensus::ValidationEngine::Kernel,
     ))
 }
 

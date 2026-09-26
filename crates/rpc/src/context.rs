@@ -10,6 +10,7 @@ use bitcoin_rs_primitives::{
     BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, Txid, consensus_bytes,
 };
 
+use bitcoin_rs_consensus::ValidationEngine;
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, Script};
 use core::fmt;
@@ -505,9 +506,11 @@ impl Context {
         let mut utxo = bitcoin_rs_utxo::UtxoSet::new();
         utxo.track_coin_stats(coin_stats_listener.clone());
         let coin_stats = Arc::new(coin_stats_listener);
-        let mempool = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
-            MempoolLimits::default(),
-        ))));
+        let mempool = MempoolGateway::shared(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            ValidationEngine::Native,
+        )
+        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let block_tree = Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new()));
@@ -567,7 +570,9 @@ impl Context {
         let mempool = MempoolGateway::shared_with(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             observer,
-        );
+            ValidationEngine::Native,
+        )
+        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let block_tree = Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new()));
@@ -1418,9 +1423,11 @@ mod tests {
                 chain_network: Network::Mainnet,
             },
             mempool: MempoolHandles {
-                mempool: MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(
-                    MempoolLimits::default(),
-                )))),
+                mempool: MempoolGateway::shared(
+                    Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+                    ValidationEngine::Native,
+                )
+                .unwrap_or_else(|error| panic!("mempool gateway intern: {error}")),
             },
             indexes: IndexHandles {
                 derived_index: None,

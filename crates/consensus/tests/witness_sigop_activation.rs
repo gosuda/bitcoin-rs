@@ -8,13 +8,13 @@
 //! implications. The kernel must apply them before masking out policy bits.
 
 use bitcoin::hashes::{Hash as _, sha256};
-use bitcoin_rs_consensus::kernel::KernelBlock;
+use bitcoin_rs_consensus::kernel::BlockParse;
 use bitcoin_rs_consensus::verify_tx::{
     BlockScriptChecks, prepare_block_script_checks, verify_prepared_units,
 };
 use bitcoin_rs_consensus::{
-    BlockView, ConsensusError, MAX_BLOCK_SIGOPS_COST, UtxoView, transaction_sigop_cost,
-    verify_transaction, verify_transaction_non_script,
+    BlockView, ConsensusError, MAX_BLOCK_SIGOPS_COST, UtxoView, ValidationEngine,
+    transaction_sigop_cost, verify_transaction, verify_transaction_non_script,
 };
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
@@ -74,7 +74,9 @@ impl WitnessFixture {
         }
     }
 
-    fn block(&self) -> Result<KernelBlock, ConsensusError> {
+    /// Parses the fixture block under `engine`, the same selection the
+    /// verification entries below receive.
+    fn block(&self, engine: ValidationEngine) -> Result<BlockParse, ConsensusError> {
         let block = Block {
             header: Header {
                 version: 1,
@@ -86,13 +88,13 @@ impl WitnessFixture {
             },
             txs: vec![self.tx.clone()],
         };
-        KernelBlock::parse(&consensus_bytes(&block))
+        BlockParse::parse(&consensus_bytes(&block), engine)
     }
 
     fn prepare<'b>(
         &'b self,
         flags: VerifyFlags,
-        block: &'b KernelBlock,
+        block: &'b BlockParse,
     ) -> Result<BlockScriptChecks<'b>, ConsensusError> {
         let mut view = BlockView::new(core::slice::from_ref(&self.tx), vec![self.tx.txid()]);
         let resolved = self
@@ -114,45 +116,60 @@ impl UtxoView for WitnessFixture {
     }
 }
 
+/// Every validation engine this build can execute. Activation semantics are a
+/// consensus rule, not an engine property, so each contract runs under every
+/// compiled engine: `native` in every build, `kernel` where compiled. Derived
+/// from `ValidationEngine::ALL` so this and other engine-parameterized tests
+/// cannot drift apart.
+fn engines() -> Vec<ValidationEngine> {
+    ValidationEngine::ALL
+        .iter()
+        .copied()
+        .filter(|engine| engine.is_supported())
+        .collect()
+}
+
 #[test]
 fn implied_witness_flags_reach_standalone_and_prepared_scripts() -> Result<(), ConsensusError> {
-    let mut fixture = WitnessFixture::new(1);
-    // Keep the sigop count but invalidate the witness-program hash. Before
-    // normalization at the kernel boundary, CLEANSTACK alone became NONE and
-    // this spend incorrectly passed that backend's script checks.
-    fixture.tx.inputs[0].witness[0].push(opcode::OP_PUSHNUM_1);
-    let block = fixture.block()?;
-    for (flags, witness_active) in [
-        (VerifyFlags::NONE, false),
-        (VerifyFlags::P2SH, false),
-        (VerifyFlags::WITNESS, true),
-        (VerifyFlags::CLEANSTACK, true),
-        (VerifyFlags::MANDATORY, true),
-        (VerifyFlags::STANDARD, true),
-    ] {
-        assert_eq!(
-            transaction_sigop_cost(&fixture.tx, &fixture.prevouts, flags),
-            u32::from(witness_active),
-        );
-        let unit = fixture.prepare(flags, &block)?;
-        let single = verify_transaction(&fixture.tx, &fixture, 0, 0, flags);
-        let batched =
-            verify_prepared_units(core::slice::from_ref(&unit)).map_err(|failure| failure.error);
-        for verdict in [single, batched] {
-            if witness_active {
-                assert!(matches!(
-                    verdict,
-                    Err(ConsensusError::Script { input_index: 0, .. })
-                ));
-            } else {
-                assert_eq!(verdict, Ok(()));
+    for engine in engines() {
+        let mut fixture = WitnessFixture::new(1);
+        // Keep the sigop count but invalidate the witness-program hash. Before
+        // normalization at the kernel boundary, CLEANSTACK alone became NONE and
+        // this spend incorrectly passed that backend's script checks.
+        fixture.tx.inputs[0].witness[0].push(opcode::OP_PUSHNUM_1);
+        let block = fixture.block(engine)?;
+        for (flags, witness_active) in [
+            (VerifyFlags::NONE, false),
+            (VerifyFlags::P2SH, false),
+            (VerifyFlags::WITNESS, true),
+            (VerifyFlags::CLEANSTACK, true),
+            (VerifyFlags::MANDATORY, true),
+            (VerifyFlags::STANDARD, true),
+        ] {
+            assert_eq!(
+                transaction_sigop_cost(&fixture.tx, &fixture.prevouts, flags),
+                u32::from(witness_active),
+            );
+            let unit = fixture.prepare(flags, &block)?;
+            let single = verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine);
+            let batched = verify_prepared_units(core::slice::from_ref(&unit))
+                .map_err(|failure| failure.error);
+            for verdict in [single, batched] {
+                if witness_active {
+                    assert!(matches!(
+                        verdict,
+                        Err(ConsensusError::Script { input_index: 0, .. })
+                    ));
+                } else {
+                    assert_eq!(verdict, Ok(()));
+                }
             }
+            // Assume-valid skips witness execution, not flag-aware accounting.
+            assert_eq!(
+                verify_transaction_non_script(&fixture.tx, &fixture, 0, 0, flags),
+                Ok(()),
+            );
         }
-        // Assume-valid skips witness execution, not flag-aware accounting.
-        assert_eq!(
-            verify_transaction_non_script(&fixture.tx, &fixture, 0, 0, flags),
-            Ok(()),
-        );
     }
     Ok(())
 }
@@ -160,42 +177,44 @@ fn implied_witness_flags_reach_standalone_and_prepared_scripts() -> Result<(), C
 #[test]
 fn valid_witness_scripts_enforce_the_inclusive_sigop_limit() -> Result<(), ConsensusError> {
     assert_eq!(MAX_BLOCK_SIGOPS_COST, BIP141_SIGOP_LIMIT);
-    for cost in [BIP141_SIGOP_LIMIT, BIP141_SIGOP_LIMIT + 1] {
-        let fixture = WitnessFixture::new(cost);
-        let block = fixture.block()?;
-        for (flags, witness_active) in [
-            (VerifyFlags::P2SH, false),
-            (VerifyFlags::WITNESS, true),
-            (VerifyFlags::CLEANSTACK, true),
-            (VerifyFlags::MANDATORY, true),
-            (VerifyFlags::STANDARD, true),
-        ] {
-            let expected = if witness_active && cost > BIP141_SIGOP_LIMIT {
-                Err(ConsensusError::SigopsLimit {
-                    cost,
-                    max: BIP141_SIGOP_LIMIT,
-                })
-            } else {
-                Ok(())
-            };
-            assert_eq!(
-                transaction_sigop_cost(&fixture.tx, &fixture.prevouts, flags),
-                if witness_active { cost } else { 0 },
-            );
-            assert_eq!(
-                verify_transaction_non_script(&fixture.tx, &fixture, 0, 0, flags),
-                expected,
-            );
-            assert_eq!(
-                verify_transaction(&fixture.tx, &fixture, 0, 0, flags),
-                expected,
-            );
-            let unit = fixture.prepare(flags, &block)?;
-            assert_eq!(
-                verify_prepared_units(core::slice::from_ref(&unit))
-                    .map_err(|failure| failure.error),
-                expected,
-            );
+    for engine in engines() {
+        for cost in [BIP141_SIGOP_LIMIT, BIP141_SIGOP_LIMIT + 1] {
+            let fixture = WitnessFixture::new(cost);
+            let block = fixture.block(engine)?;
+            for (flags, witness_active) in [
+                (VerifyFlags::P2SH, false),
+                (VerifyFlags::WITNESS, true),
+                (VerifyFlags::CLEANSTACK, true),
+                (VerifyFlags::MANDATORY, true),
+                (VerifyFlags::STANDARD, true),
+            ] {
+                let expected = if witness_active && cost > BIP141_SIGOP_LIMIT {
+                    Err(ConsensusError::SigopsLimit {
+                        cost,
+                        max: BIP141_SIGOP_LIMIT,
+                    })
+                } else {
+                    Ok(())
+                };
+                assert_eq!(
+                    transaction_sigop_cost(&fixture.tx, &fixture.prevouts, flags),
+                    if witness_active { cost } else { 0 },
+                );
+                assert_eq!(
+                    verify_transaction_non_script(&fixture.tx, &fixture, 0, 0, flags),
+                    expected,
+                );
+                assert_eq!(
+                    verify_transaction(&fixture.tx, &fixture, 0, 0, flags, engine),
+                    expected,
+                );
+                let unit = fixture.prepare(flags, &block)?;
+                assert_eq!(
+                    verify_prepared_units(core::slice::from_ref(&unit))
+                        .map_err(|failure| failure.error),
+                    expected,
+                );
+            }
         }
     }
     Ok(())
@@ -204,27 +223,29 @@ fn valid_witness_scripts_enforce_the_inclusive_sigop_limit() -> Result<(), Conse
 #[test]
 fn mixed_activation_units_keep_their_own_sigop_context() -> Result<(), ConsensusError> {
     let cost = BIP141_SIGOP_LIMIT + 1;
-    let fixture = WitnessFixture::new(cost);
-    let block = fixture.block()?;
-    for active_index in [0, 1] {
-        let inactive = fixture.prepare(VerifyFlags::P2SH, &block)?;
-        let active = fixture.prepare(VerifyFlags::CLEANSTACK, &block)?;
-        let mut units = [inactive, active];
-        if active_index == 0 {
-            units.swap(0, 1);
-        }
-        match verify_prepared_units(&units) {
-            Err(failure) => {
-                assert_eq!(failure.unit, active_index);
-                assert_eq!(
-                    failure.error,
-                    ConsensusError::SigopsLimit {
-                        cost,
-                        max: BIP141_SIGOP_LIMIT,
-                    },
-                );
+    for engine in engines() {
+        let fixture = WitnessFixture::new(cost);
+        let block = fixture.block(engine)?;
+        for active_index in [0, 1] {
+            let inactive = fixture.prepare(VerifyFlags::P2SH, &block)?;
+            let active = fixture.prepare(VerifyFlags::CLEANSTACK, &block)?;
+            let mut units = [inactive, active];
+            if active_index == 0 {
+                units.swap(0, 1);
             }
-            Ok(()) => panic!("the witness-active unit must reject cost {cost}"),
+            match verify_prepared_units(&units) {
+                Err(failure) => {
+                    assert_eq!(failure.unit, active_index);
+                    assert_eq!(
+                        failure.error,
+                        ConsensusError::SigopsLimit {
+                            cost,
+                            max: BIP141_SIGOP_LIMIT,
+                        },
+                    );
+                }
+                Ok(()) => panic!("the witness-active unit must reject cost {cost}"),
+            }
         }
     }
     Ok(())

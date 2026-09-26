@@ -8,6 +8,7 @@ use crate::{
 };
 use alloc::sync::Arc;
 use bitcoin::hashes::{Hash as _, sha256};
+use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, Script, Sequence, TxIn, TxOut, Txid, Witness,
 };
@@ -68,6 +69,7 @@ fn gateway() -> MempoolGateway {
             ..MempoolLimits::default()
         }))),
         None,
+        ValidationEngine::Native,
     )
 }
 

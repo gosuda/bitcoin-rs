@@ -6,7 +6,8 @@ use anyhow::{Result, bail, ensure};
 use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_node::{
     IndexOverrides, MiningOverrides, NetworkSelection, ObservabilityOverrides, P2pOverrides,
-    RpcOverrides, ScriptIndexMode, StorageOverrides, UserConfig, ValidationOverrides,
+    RpcOverrides, ScriptIndexMode, StorageOverrides, UserConfig, ValidationEngine,
+    ValidationOverrides,
 };
 use bitcoin_rs_storage::StorageBackend;
 use clap::Parser;
@@ -67,6 +68,10 @@ pub(crate) struct CliArgs {
     pub(crate) assume_valid_height: Option<u32>,
     #[arg(long = "validation-mode", value_parser = parse_validation_mode)]
     pub(crate) validation_mode: Option<ValidationMode>,
+    /// Which script-verification engine runs: `native` (default) or `kernel`.
+    /// `kernel` requires a build with the `kernel` feature.
+    #[arg(long = "validation-engine", value_parser = parse_validation_engine)]
+    pub(crate) validation_engine: Option<ValidationEngine>,
     /// Watch-only coinbase payout address for solo mining templates.
     #[arg(long = "mining-payout-address")]
     pub(crate) mining_payout_address: Option<String>,
@@ -124,6 +129,7 @@ impl CliArgs {
             validation: ValidationOverrides {
                 assume_valid_height: self.assume_valid_height,
                 mode: self.validation_mode,
+                engine: self.validation_engine,
             },
             mining: MiningOverrides {
                 payout_address: self.mining_payout_address,
@@ -151,6 +157,12 @@ fn parse_validation_mode(value: &str) -> std::result::Result<ValidationMode, Str
         format!(
             "invalid validation-mode value `{value}`: expected `full`, `assume-valid`, or `fast`"
         )
+    })
+}
+
+fn parse_validation_engine(value: &str) -> std::result::Result<ValidationEngine, String> {
+    ValidationEngine::parse(value).ok_or_else(|| {
+        format!("invalid validation-engine value `{value}`: expected `native` or `kernel`")
     })
 }
 

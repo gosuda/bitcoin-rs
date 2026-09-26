@@ -107,19 +107,21 @@ jobs:
           toolchain: "1.95.0"
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      # The default feature set includes the C++ kernel engine, so every
-      # production lane installs the native prerequisites up front (mold is
-      # included for the linker).
+      # The full-node feature set compiles the C++ kernel engine as a
+      # capability (selection is `validation.engine` at runtime), so this lane
+      # installs the native prerequisites up front (mold is included for the
+      # linker).
       - name: Kernel prerequisites
         id: kernel_deps
         uses: ./.github/actions/native-deps
-      # Reuse this lane's C++ prerequisites for the focused kernel regression;
-      # the fast gate's rust job exercises the same target with the native
-      # backend.
-      - name: Witness activation kernel regression
+      # Reuse this lane's C++ prerequisites for the focused kernel
+      # regressions; the fast gate's rust job exercises the same targets with
+      # the native backend.
+      - name: Kernel-enabled consensus regressions
         run: |
           cargo test --locked -p bitcoin-rs-consensus \
-            --no-default-features --features kernel --test witness_sigop_activation
+            --no-default-features --features kernel \
+            --test witness_sigop_activation --test validation_engine
       # The `--no-run` passes below are compile-and-link gates only --
       # measured executions remain release evidence outside CI. They build
       # under the `quickstart` profile (opt-level 3, no fat LTO, 16

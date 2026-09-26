@@ -12,7 +12,12 @@ description = "bitcoin-rs :: consensus"
 workspace = true
 
 [features]
-default = ["kernel"]
+# `kernel` is capability ("bitcoinkernel support is compiled in"), not
+# selection: the engine a run uses is `validation.engine` at runtime. The
+# library default is kernel-free so a plain `cargo build` needs no C++
+# toolchain (`cmake`, `libboost`); enable `kernel` explicitly for the
+# bitcoinkernel backend. See docs/contracts/validation-default.md.
+default = []
 kernel = ["dep:bitcoinkernel"]
 
 [dependencies]

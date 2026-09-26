@@ -46,6 +46,8 @@ pub fn consensus_reject_reason(error: &ConsensusError) -> CompactString {
             });
         }
         ConsensusError::PrevoutMatrixSize { .. }
+        | ConsensusError::PrevoutCount { .. }
+        | ConsensusError::UnsupportedEngine { .. }
         | ConsensusError::Kernel(_)
         | ConsensusError::Encoding(_) => return CompactString::from(error.to_string()),
     })

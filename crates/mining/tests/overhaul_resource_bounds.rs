@@ -7,6 +7,7 @@
 //! bytes are the pool's capacity-based estimates at operation endpoints. A vsize limit is not an RSS
 //! limit. These samples do not certify unrelated resources or performance.
 
+use bitcoin_rs_consensus::ValidationEngine;
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,7 +78,7 @@ fn fixture(members: u32) -> TestResult<Fixture> {
     assert_eq!(pool.limits.max_replacement_clusters, CLUSTERS);
     assert_eq!(pool.tx_count(), usize::try_from(CLUSTERS * members)?);
     Ok(Fixture {
-        gateway: MempoolGateway::new(Arc::new(RwLock::new(pool)), None),
+        gateway: MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native),
         roots,
         tips,
     })
@@ -266,6 +267,7 @@ fn weight_fixture(extra: u8) -> TestResult<(MempoolGateway, Chain, Tx, u64)> {
     let gateway = MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         None,
+        ValidationEngine::Native,
     );
     let chain = Chain(coins);
     let parent_id = parent.txid();

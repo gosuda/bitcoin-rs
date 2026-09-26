@@ -508,7 +508,8 @@ fn print_proxy_summary(blocks: &[Block]) {
         .map(|record| record.body_size)
         .sum();
     println!(
-        "sync_pipeline_apply_proxy blocks={} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes}",
+        "sync_pipeline_apply_proxy engine={} blocks={} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes}",
+        bench_engine(),
         applied_height.saturating_add(1),
     );
 }
@@ -535,7 +536,8 @@ fn print_spend_proxy_summary(blocks: &[Block]) {
         .map(|record| record.body_size)
         .sum();
     println!(
-        "sync_pipeline_apply_spend_heavy_proxy blocks={} txs={transaction_count} elapsed={elapsed:?} recorded_body_bytes={recorded_body_bytes}",
+        "sync_pipeline_apply_spend_heavy_proxy engine={} blocks={} txs={transaction_count} elapsed={elapsed:?} recorded_body_bytes={recorded_body_bytes}",
+        bench_engine(),
         applied_height.saturating_add(1),
     );
 }
@@ -559,6 +561,7 @@ impl BlockSource for BenchBlockSource {
 fn open_regtest_state() -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.validation.engine = bench_engine();
     config.data_dir = dir.path().join("node");
     config.p2p.listen.clear();
     config.indexes.txindex = false;
@@ -571,6 +574,7 @@ fn open_regtest_state() -> (TempDir, NodeState) {
 fn open_pruned_regtest_state() -> (TempDir, NodeState) {
     let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir failed: {error}"));
     let mut config = NodeConfig::default_for_network(Network::Regtest);
+    config.validation.engine = bench_engine();
     config.data_dir = dir.path().join("node");
     config.p2p.listen.clear();
     config.storage.backend = bitcoin_rs_storage::StorageBackend::RocksDb;
@@ -1124,7 +1128,30 @@ fn production_state_config() -> NodeConfig {
     let mut config = NodeConfig::default_for_network(Network::Regtest);
     config.p2p.listen.clear();
     config.indexes.txindex = false;
+    config.validation.engine = bench_engine();
     config
+}
+
+/// The engine this bench run selects, exactly once.
+///
+/// Selection is runtime configuration, never a compiled-feature side effect:
+/// `BITCOIN_RS_VALIDATION_ENGINE` names the arm (`native` or `kernel`) and
+/// defaults to `native`. The kernel arm must both compile the capability
+/// (`--features fjall,kernel`) and select `kernel` here; selecting an engine
+/// this build cannot run panics loudly instead of silently benchmarking the
+/// other arm. Recorded in every summary line and covered by each evidence
+/// sample's resolved-configuration identity.
+fn bench_engine() -> bitcoin_rs_node::ValidationEngine {
+    let spelling =
+        std::env::var("BITCOIN_RS_VALIDATION_ENGINE").unwrap_or_else(|_| "native".into());
+    let engine = bitcoin_rs_node::ValidationEngine::parse(&spelling)
+        .unwrap_or_else(|| panic!("unknown BITCOIN_RS_VALIDATION_ENGINE {spelling:?}"));
+    assert!(
+        engine.is_supported(),
+        "BITCOIN_RS_VALIDATION_ENGINE={spelling:?} selects an engine this build \
+         cannot run: compile the capability feature (`kernel`) to benchmark that arm"
+    );
+    engine
 }
 
 fn populate_sync_header_chain(
@@ -1980,7 +2007,8 @@ fn print_signed_spend_proxy_summary(blocks: &[Block]) {
         .height;
     let transaction_count: usize = blocks.iter().map(|b| b.txs.len()).sum();
     println!(
-        "sync_pipeline_apply_signed_spend_proxy blocks={} txs={transaction_count} elapsed={elapsed:?}",
+        "sync_pipeline_apply_signed_spend_proxy engine={} blocks={} txs={transaction_count} elapsed={elapsed:?}",
+        bench_engine(),
         applied_height.saturating_add(1),
     );
 }

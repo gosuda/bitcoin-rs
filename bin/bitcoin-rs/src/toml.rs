@@ -6,7 +6,7 @@ use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_node::{
     ChainstateJournalOverrides, IndexOverrides, MiningOverrides, NetworkSelection,
     NotificationConfig, ObservabilityOverrides, P2pOverrides, RpcOverrides, ScriptIndexMode,
-    StorageOverrides, UserConfig, ValidationOverrides,
+    StorageOverrides, UserConfig, ValidationEngine, ValidationOverrides,
 };
 use bitcoin_rs_storage::StorageBackend;
 use serde::Deserialize;
@@ -39,6 +39,7 @@ struct TomlFile {
     chainstate_journal: Option<ChainstateJournalOverrides>,
     assume_valid_height: Option<u32>,
     validation_mode: Option<String>,
+    validation_engine: Option<String>,
     mining_payout_address: Option<String>,
 }
 
@@ -118,6 +119,17 @@ impl TomlFile {
                         ValidationMode::parse(value).ok_or_else(|| {
                             anyhow::anyhow!(
                                 "invalid validation_mode value `{value}`: expected `full`, `assume-valid`, or `fast`"
+                            )
+                        })
+                    })
+                    .transpose()?,
+                engine: self
+                    .validation_engine
+                    .as_deref()
+                    .map(|value| {
+                        ValidationEngine::parse(value).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "invalid validation_engine value `{value}`: expected `native` or `kernel`"
                             )
                         })
                     })

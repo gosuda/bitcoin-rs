@@ -1,3 +1,4 @@
+use bitcoin_rs_consensus::ValidationEngine;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,7 +51,9 @@ fn disabled_zmq_still_seals_the_observer_slot() {
     )));
     let observer: Arc<dyn bitcoin_rs_mempool::MempoolObserver> =
         Arc::new(bitcoin_rs_mempool::CompositeObserver::new());
-    let gateway = bitcoin_rs_mempool::MempoolGateway::shared_with(pool, observer);
+    let gateway =
+        bitcoin_rs_mempool::MempoolGateway::shared_with(pool, observer, ValidationEngine::Native)
+            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
     assert!(
         gateway.has_observer(),
         "startup must seal the observer slot even without a ZMQ endpoint"

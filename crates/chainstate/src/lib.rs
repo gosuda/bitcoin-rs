@@ -508,6 +508,10 @@ pub struct Chainstate {
     pub(crate) assume_valid_height: u32,
     pub(crate) assume_valid_gate: Arc<AssumeValidGate>,
     pub(crate) validation_mode: ValidationMode,
+    /// The one resolved script-verification engine selection. Owned by node
+    /// configuration (`validation.engine`); this handle passes it to the
+    /// engine-specific seams of the shared block/tx validation pipeline.
+    pub(crate) validation_engine: bitcoin_rs_consensus::ValidationEngine,
     /// Chainstate-journal writer, when the journal is enabled (issue #230).
     ///
     /// `None` = journal off: the apply path emits nothing and behaves exactly
@@ -566,6 +570,8 @@ pub struct ChainstateParts {
     pub assume_valid_height: u32,
     /// Historical script-verification policy.
     pub validation_mode: ValidationMode,
+    /// The one resolved script-verification engine selection.
+    pub validation_engine: bitcoin_rs_consensus::ValidationEngine,
     /// Chainstate journal writer, when journal recovery is enabled.
     pub journal: Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>,
     /// Whether connects retain raw transaction bytes for node-owned consumers.
@@ -734,6 +740,7 @@ impl Chainstate {
             assume_valid_height: parts.assume_valid_height,
             assume_valid_gate,
             validation_mode: parts.validation_mode,
+            validation_engine: parts.validation_engine,
             journal: parts.journal,
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
@@ -1070,6 +1077,7 @@ impl Chainstate {
             assume_valid_height: 0,
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
             validation_mode: ValidationMode::AssumeValid,
+            validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
             journal: None,
             checkpoint_publisher: None,
             capture_rawtx: false,
@@ -1332,7 +1340,7 @@ impl Drop for AppliedPublication<'_> {
 /// below the parallel threshold and wasted a further 11s above it. Sixty-four
 /// blocks turns roughly 21,000 dispatches into 330.
 ///
-/// Bounded by memory: the window holds every block's parsed kernel block and
+/// Bounded by memory: the window holds every block's engine-selected parse and
 /// resolved prevouts at once, which costs far more than the block bytes.
 /// Measured over `0..150_000`, pinned to 32 cores, medians of interleaved runs:
 ///
@@ -1522,9 +1530,10 @@ enum ProvenApply<'b> {
 /// Split out because a window of consecutive blocks can produce all of these
 /// at once, against one ordered overlay, and share a single script dispatch.
 /// The measured duplication that made an earlier batching attempt a wash was
-/// exactly the kernel parse and the prevout resolution below being done twice.
+/// exactly the one-shot block parse and the prevout resolution below being
+/// done twice.
 struct PreparedApply<'b> {
-    kernel_block: bitcoin_rs_consensus::kernel::KernelBlock,
+    parsed: bitcoin_rs_consensus::kernel::BlockParse,
     /// Parse-once transaction state: identities computed once in
     /// [`parse_block_for_apply`], witness IDs on demand, and the prevout
     /// matrix installed once right before script verification.
@@ -1795,6 +1804,10 @@ mod chain_tx_count_tests;
 #[cfg(test)]
 #[path = "../tests/unit/apply/persistence_tests.rs"]
 mod persistence_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/apply/window_disposition_tests.rs"]
+mod window_disposition_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/checkpoint_debt_tests.rs"]

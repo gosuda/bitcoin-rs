@@ -15,7 +15,11 @@ workspace = true
 # USDT tracepoints (Bitcoin Core-compatible probe ABI); empty unless enabled.
 usdt = ["bitcoin-rs-trace/usdt"]
 
-default = ["kernel"]
+# `kernel` is capability ("bitcoinkernel support is compiled in"), not
+# selection; the engine a run uses is `validation.engine` at runtime. The
+# library default stays kernel-free so a plain `cargo build` needs no C++
+# toolchain — see docs/contracts/validation-default.md.
+default = []
 # Cross-crate tests and benchmarks that deliberately exercise low-level
 # follower-free mutation. Any downstream can enable this feature; the
 # production-build guarantee is in-workspace, where only dev-dependencies

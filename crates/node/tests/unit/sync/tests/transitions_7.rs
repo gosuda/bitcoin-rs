@@ -1,4 +1,5 @@
 use super::*;
+use bitcoin_rs_consensus::ValidationEngine;
 
 #[test]
 fn mutated_connect_body_through_switch_to_branch_preserves_subtree()
@@ -161,6 +162,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
         Some(stream.clone()),
+        ValidationEngine::Native,
     ));
     let followers = crate::chain_effects::ChainFollowers::new(
         crate::chain_effects::ChainEffects::noop(),
@@ -260,6 +262,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             assume_valid_height: 0,
             validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
+            validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
             journal: None,
             capture_rawtx: false,
             capture_block_bytes: true,

@@ -356,6 +356,7 @@ fn replay_gap_chain(
                         &block,
                         Some(bytes.clone()),
                         &UndoRowSpends(&undo),
+                        handles.validation_engine,
                     )?,
                 )),
                 Err(UndoLoadError::Missing { .. }) => None,

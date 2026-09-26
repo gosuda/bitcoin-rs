@@ -237,6 +237,76 @@ mod tests {
         assert!(!config.p2p.fast_sync);
     }
 
+    /// #1117: the startup failure for `validation.engine = "kernel"` on a
+    /// build without bitcoinkernel support. The engine selection is resolved
+    /// and checked during configuration — before the data directory, chain
+    /// state, or any worker is created — and must name the missing capability.
+    #[test]
+    #[cfg(not(feature = "kernel"))]
+    fn validation_engine_kernel_is_rejected_without_kernel_support() {
+        let error = match super::load(
+            ["bitcoin-rs", "--validation-engine", "kernel"],
+            std::iter::empty::<(OsString, OsString)>(),
+        ) {
+            Ok(_) => panic!("unsupported engine must fail startup from the CLI"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("not compiled"),
+            "unsupported-build error must say so, got {error:#}"
+        );
+
+        let error = match super::load(
+            ["bitcoin-rs"],
+            std::iter::once(("BITCOIN_RS_VALIDATION_ENGINE", "kernel"))
+                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+        ) {
+            Ok(_) => panic!("unsupported engine must fail startup from the environment"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("not compiled"),
+            "unsupported-build error must say so, got {error:#}"
+        );
+
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let path = dir.path().join("node.toml");
+        std::fs::write(&path, "validation_engine = \"kernel\"\n")
+            .unwrap_or_else(|error| panic!("write toml: {error}"));
+        let error = match super::load(
+            [
+                "bitcoin-rs",
+                "--config",
+                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
+            ],
+            std::iter::empty::<(OsString, OsString)>(),
+        ) {
+            Ok(_) => panic!("unsupported engine must fail startup from TOML too"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("not compiled"),
+            "unsupported-build error must say so, got {error:#}"
+        );
+    }
+
+    #[test]
+    fn validation_engine_defaults_to_native_and_layers_flag_over_environment() {
+        use bitcoin_rs_node::ValidationEngine;
+
+        let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())
+            .unwrap_or_else(|error| panic!("valid default configuration: {error}"));
+        assert_eq!(config.validation.engine, ValidationEngine::Native);
+
+        let config = super::load(
+            ["bitcoin-rs", "--validation-engine", "native"],
+            std::iter::once(("BITCOIN_RS_VALIDATION_ENGINE", "kernel"))
+                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
+        )
+        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+        assert_eq!(config.validation.engine, ValidationEngine::Native);
+    }
+
     #[test]
     fn validation_mode_defaults_to_assume_valid_and_layers_flag_over_environment() {
         let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())

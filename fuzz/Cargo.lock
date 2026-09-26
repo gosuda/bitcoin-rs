@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-chain"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "arc-swap",
  "bitcoin-rs-consensus",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-consensus"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-mempool"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-p2p"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "arc-swap",
  "bitcoin",
@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-primitives"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bytemuck",
  "ruint",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-script"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin_hashes",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-storage"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "arc-swap",
  "bitcoin-rs-primitives",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "bitcoin-rs-utxo"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-storage",

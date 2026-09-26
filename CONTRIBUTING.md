@@ -13,8 +13,10 @@ workflow, coding standards, and verification commands used across the project.
   (`cmake` and `libboost-dev` on Debian/Ubuntu). Checks that build the
   `rocksdb` backend (notably the dependency-range minimal lane, which
   checks `--all-features`) additionally require libclang (`libclang-dev`
-  on Debian/Ubuntu). The consensus and node library crates enable `kernel`
-  by default; the binary does not. The exact defaults are owned by the
+  on Debian/Ubuntu). No manifest enables `kernel` by default: the feature is
+  an opt-in capability on the consensus, node, and binary crates, and engine
+  selection is the runtime `validation.engine` setting. The exact defaults are
+  owned by the
   [validation-default contract](docs/contracts/validation-default.md).
 - The PR comparator tests use Python 3.13. Fuzzing and dependency/feature
   matrix checks also need the tools described in the main workflow below.
@@ -66,8 +68,10 @@ installed the script falls back to `cargo test --no-fail-fast`, so local
 runs and hooks need no extra tooling.
 
 Plain `cargo test --workspace` and `cargo clippy --workspace` also enable the
-library defaults and therefore build the C++ kernel. The script passes the
-kernel-free feature selection. The binary and workspace test lanes expect the
+library defaults, which are now kernel-free (the `kernel` feature is an opt-in
+capability; the engine a run uses is `validation.engine` at runtime), so plain
+workspace commands need no C++ toolchain. The script passes the kernel-free
+feature selection. The binary and workspace test lanes expect the
 pinned Core fixture:
 `bash scripts/provision-ci-reference-fixtures.sh core`.
 

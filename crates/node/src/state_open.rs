@@ -267,6 +267,7 @@ impl NodeState {
             shutdown: Arc::clone(&shutdown),
             assume_valid_height: config.validation.assume_valid_height,
             validation_mode: config.validation.mode,
+            validation_engine: config.validation.engine,
             journal,
             capture_rawtx: false,
             capture_block_bytes: false,
@@ -371,8 +372,11 @@ impl NodeState {
             let publisher = Arc::clone(&zmq_publisher);
             let cloned_mining = Arc::clone(&mining_generation);
             let mining_leg: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = cloned_mining;
-            let gateway =
-                bitcoin_rs_mempool::MempoolGateway::shared_with(Arc::clone(&mempool), mining_leg);
+            let gateway = bitcoin_rs_mempool::MempoolGateway::shared_with(
+                Arc::clone(&mempool),
+                mining_leg,
+                config.validation.engine,
+            )?;
             if publisher.wants_notifications() {
                 gateway
                     .attach_observer_leg(

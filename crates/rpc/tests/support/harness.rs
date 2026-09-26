@@ -7,6 +7,7 @@
 //! shutdown flag are joined and released by `Drop`, and the temporary data
 //! directory is deleted after the node state closes.
 
+use bitcoin_rs_consensus::ValidationEngine;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -120,7 +121,8 @@ impl ServerHarness {
                 chain_network: state.config().network,
             },
             mempool: MempoolHandles {
-                mempool: MempoolGateway::shared(state.mempool()),
+                mempool: MempoolGateway::shared(state.mempool(), ValidationEngine::Native)
+                    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}")),
             },
             indexes: IndexHandles {
                 derived_index: state.derived_index_query(),
