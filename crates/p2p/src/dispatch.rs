@@ -61,19 +61,22 @@ pub trait ChainQuery: Send + Sync {
     ) -> Result<InventoryServing, PeerError>;
 
     /// PRE: `request` carries decoded absolute transaction indexes for one
-    /// block.
+    /// block. `compact_version` is the peer's servable BIP152 profile.
     /// POST: return the reply to send — a `blocktxn` for a block shallow
-    /// enough to reconstruct, or the whole witness-bearing `block` for one
-    /// too deep for a useful hint set (Core 31.1 answers both instead of
-    /// leaving a peer to time out); `Ok(None)` leaves the request unanswered
-    /// (unknown, stale, pruned, or headless block, or a saturated
-    /// `headroom` gate). `Err` reports an out-of-range transaction index —
-    /// a protocol disconnect per BIP152 (Core scores misbehavior).
+    /// enough to reconstruct, encoded for `compact_version` (v1 strips
+    /// witnesses, any other profile keeps them), or the whole
+    /// witness-bearing `block` for one too deep for a useful hint set
+    /// (Core 31.1 answers both instead of leaving a peer to time out);
+    /// `Ok(None)` leaves the request unanswered (unknown, stale, pruned,
+    /// or headless block, or a saturated `headroom` gate). `Err` reports
+    /// an out-of-range transaction index — a protocol disconnect per
+    /// BIP152 (Core scores misbehavior).
     /// INVARIANT: `headroom` is evaluated before any block body is loaded,
     /// so a saturated outbound gate materializes no body for this request.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
+        compact_version: Option<u64>,
         headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError>;
 }
@@ -279,7 +282,8 @@ pub fn dispatch_inbound_full<S>(
         Message::GetBlockTxn(request) => {
             ensure_block_txn_indexes_valid(&request.txs_request)?;
             step(peer, message)?;
-            serve_block_txn(chain, &request.txs_request, headroom, send)?;
+            let compact_version = peer.compact_blocks.servable_version();
+            serve_block_txn(chain, &request.txs_request, compact_version, headroom, send)?;
         }
         _ => step(peer, message)?,
     }
@@ -424,8 +428,10 @@ fn serve_getdata_blocks(
 }
 
 /// Answers one `getblocktxn` through the chain view and sends whatever reply
-/// it produces. PRE: the request's indexes are structurally valid. POST: a
-/// servable block gets its `blocktxn`, a block too deep for a compact answer
+/// it produces. PRE: the request's indexes are structurally valid.
+/// `compact_version` is the peer's servable BIP152 profile (`None` leaves
+/// witness encoding untouched). POST: a servable block gets its `blocktxn`
+/// in the peer's profile encoding, a block too deep for a compact answer
 /// gets the whole `block`, and an unknown, stale, headless, or
 /// production-gated block — or a node with no chain view — leaves the
 /// request unanswered. INVARIANT: the dispatch boundary never learns which
@@ -434,13 +440,14 @@ fn serve_getdata_blocks(
 fn serve_block_txn(
     chain: Option<&dyn ChainQuery>,
     request: &BlockTransactionsRequest,
+    compact_version: Option<u64>,
     headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
 ) -> Result<(), PeerError> {
     let Some(chain) = chain else {
         return Ok(());
     };
-    if let Some(response) = chain.block_transactions(request, headroom)? {
+    if let Some(response) = chain.block_transactions(request, compact_version, headroom)? {
         send(response)?;
     }
     Ok(())
@@ -582,6 +589,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _compact_version: Option<u64>,
             _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
@@ -629,6 +637,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _compact_version: Option<u64>,
             _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
@@ -814,6 +823,7 @@ mod tests {
             fn block_transactions(
                 &self,
                 request: &BlockTransactionsRequest,
+                _compact_version: Option<u64>,
                 _headroom: &dyn Fn() -> bool,
             ) -> Result<Option<Message>, PeerError> {
                 Ok(Some(Message::BlockTxn(BlockTxn {
@@ -907,6 +917,7 @@ mod tests {
             fn block_transactions(
                 &self,
                 request: &BlockTransactionsRequest,
+                _compact_version: Option<u64>,
                 headroom: &dyn Fn() -> bool,
             ) -> Result<Option<Message>, PeerError> {
                 self.observed.fetch_add(1, Ordering::Relaxed);
@@ -1020,6 +1031,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _compact_version: Option<u64>,
             _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
