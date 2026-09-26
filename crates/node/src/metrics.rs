@@ -296,7 +296,7 @@ impl MetricsServer {
     }
 
     /// Signals the scrape thread and waits for it to exit.
-    pub fn stop_and_join(&mut self) {
+    pub(crate) fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

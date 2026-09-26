@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitcoin_rs_index::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
@@ -152,9 +152,18 @@ fn shutdown_exits_the_listener_thread() {
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     let addr = server.local_addr();
     shutdown.store(true, Ordering::Release);
+    // The shutdown flag alone must end the scrape loop: `stop_and_join`'s
+    // own `stop` signal only fires afterwards, so binding before the
+    // deadline proves the shutdown-driven exit.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpListener::bind(addr).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "listener never exited on the shutdown flag"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     server.stop_and_join();
-    TcpListener::bind(addr)
-        .unwrap_or_else(|error| panic!("port released after listener join: {error}"));
 }
 
 /// One rendered readiness sample: `(state label, value)`.
@@ -266,5 +275,4 @@ fn published_gauge_flips_its_active_label_with_the_rpc_source() {
     assert_one_active(&samples, "Disabled");
 
     server.stop_and_join();
-    shutdown.store(true, Ordering::Release);
 }

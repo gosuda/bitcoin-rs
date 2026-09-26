@@ -1073,7 +1073,7 @@ fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
 }
 
 #[test]
-fn shutdown_wakes_long_poll() -> anyhow::Result<()> {
+fn shutdown_ends_long_poll_without_wake() -> anyhow::Result<()> {
     let state = open_regtest()?;
     apply_genesis(&state)?;
     let shutdown = state.shutdown();

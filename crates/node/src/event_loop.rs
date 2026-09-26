@@ -30,8 +30,8 @@ impl EventLoop {
     /// constructed.
     /// POST: the loop runs `spin` ticks for mempool, metrics, and sync work
     /// until the shutdown signal arrives.
-    /// INVARIANT: a caller that supplies no wake receiver is the embedded
-    /// node, which polls progress on the sync tick alone.
+    /// INVARIANT: every caller supplies a wake receiver, and sync work
+    /// progresses on both the wake and the one-second sync tick.
     #[must_use]
     pub fn with_sync_wake(
         shutdown_signal: Receiver<()>,
