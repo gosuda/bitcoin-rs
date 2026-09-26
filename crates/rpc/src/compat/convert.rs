@@ -216,7 +216,7 @@ pub(crate) struct VerboseTxChain {
     pub block_hash: String,
     /// Confirmations on the applied chain.
     pub confirmations: u64,
-    /// Confirming block time (reported as both `time` and `blocktime`).
+    /// Confirming block time (reported only with positive confirmations).
     pub time: u64,
     /// Whether the confirming block is on the applied chain.
     pub in_active_chain: Option<bool>,
@@ -244,11 +244,12 @@ pub(crate) fn raw_transaction_verbose(
         .collect::<Result<Vec<_>, _>>()?;
     let (block_hash, confirmations, transaction_time, block_time, in_active_chain) =
         chain.map_or((None, None, None, None, None), |chain| {
+            let time = (chain.confirmations > 0).then_some(chain.time);
             (
                 Some(chain.block_hash),
                 Some(chain.confirmations),
-                Some(chain.time),
-                Some(chain.time),
+                time,
+                time,
                 chain.in_active_chain,
             )
         });

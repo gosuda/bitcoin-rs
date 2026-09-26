@@ -1286,3 +1286,87 @@ fn reorg_returns_readiness_to_ready_on_the_forked_tip() {
     node.stop().expect("node stop");
     assert_reaped(pid);
 }
+
+/// API-02 / REF-07: an explicit retained block lookup follows Core's applied
+/// ancestry after disconnect and replacement, while its raw bytes stay readable.
+#[test]
+fn retained_transaction_confirmations_match_core_after_reorg() {
+    // Compare this contract's chain fields and byte identity. Script asm and
+    // descriptor rendering have their own compatibility evidence.
+    let compare_transaction = |core: &mut ProcessNode, node: &mut ProcessNode, params: &Value| {
+        let reference = core
+            .rpc("getrawtransaction", params)
+            .expect("reference transaction");
+        let candidate = node
+            .rpc("getrawtransaction", params)
+            .expect("candidate transaction");
+        for field in [
+            "blockhash",
+            "in_active_chain",
+            "confirmations",
+            "time",
+            "blocktime",
+            "hex",
+        ] {
+            assert_eq!(
+                candidate.get(field),
+                reference.get(field),
+                "transaction field {field}"
+            );
+        }
+        reference
+    };
+    let mut core = start(NodeBinary::ReferenceCore);
+    let mut node = start(NodeBinary::BitcoinRs);
+    mine_common_chain(&mut core, &mut node, 3).expect("common chain");
+    let hash =
+        compare_rpc(&mut core, &mut node, "getblockhash", &json!([1])).expect("height-one block");
+    let txid = first_block_txid(&mut core, 1);
+    let params = json!([txid, true, hash]);
+    let active = compare_transaction(&mut core, &mut node, &params);
+    assert_eq!(active["in_active_chain"], true);
+    assert_eq!(active["confirmations"], 3);
+    assert!(active.get("time").is_some());
+    assert!(active.get("blocktime").is_some());
+    let raw_params = json!([txid, false, hash]);
+    let original = compare_rpc(&mut core, &mut node, "getrawtransaction", &raw_params)
+        .expect("original raw bytes");
+
+    compare_rpc(&mut core, &mut node, "invalidateblock", &json!([hash]))
+        .expect("disconnect the containing block");
+    for replaced in [false, true] {
+        if replaced {
+            // The reference starts with fixed mocktime. Move it forward so
+            // mining with the same payout cannot recreate the invalidated
+            // block byte for byte.
+            let replacement_time = active["time"]
+                .as_u64()
+                .expect("original block time")
+                .checked_add(600)
+                .expect("replacement block time");
+            core.rpc("setmocktime", &json!([replacement_time]))
+                .expect("advance reference clock for a distinct branch");
+            mine_common_chain(&mut core, &mut node, 3).expect("replacement branch");
+            let replacement = compare_rpc(&mut core, &mut node, "getblockhash", &json!([1]))
+                .expect("replacement height-one block");
+            assert_ne!(replacement, hash, "replacement must be a distinct branch");
+        }
+        let stale = compare_transaction(&mut core, &mut node, &params);
+        assert_eq!(stale["blockhash"], hash);
+        assert_eq!(stale["in_active_chain"], false);
+        assert_eq!(stale["confirmations"], 0);
+        assert!(stale.get("time").is_none());
+        assert!(stale.get("blocktime").is_none());
+        assert_eq!(
+            compare_rpc(&mut core, &mut node, "getrawtransaction", &raw_params)
+                .expect("retained raw bytes"),
+            original
+        );
+    }
+    let core_pid = core.pid();
+    let node_pid = node.pid();
+    core.stop().expect("stop reference");
+    node.stop().expect("stop candidate");
+    assert_reaped(core_pid);
+    assert_reaped(node_pid);
+}

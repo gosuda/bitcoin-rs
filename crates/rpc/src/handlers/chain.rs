@@ -1347,8 +1347,11 @@ fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
 /// `m_chain` is the connected, fully-validated chain, and header-first sync
 /// keeps headers ahead of it; a block whose header is known but which has not
 /// been connected is not in it, so it is `-1` rather than `0`.
-fn confirmations(ctx: &Context, hash: Hash256, height: u32) -> i64 {
+pub(super) fn confirmations(ctx: &Context, hash: Hash256, height: u32) -> i64 {
     // Membership and depth must come from the same published applied-tip state.
+    // Take the tree guard before loading the tip, as in getchaintips, so a
+    // concurrent publication cannot name a node newer than this tree view.
+    let tree = ctx.block_tree.read();
     let Some(tip) = ctx.applied_tip.load_full() else {
         return -1;
     };
@@ -1358,7 +1361,6 @@ fn confirmations(ctx: &Context, hash: Hash256, height: u32) -> i64 {
     let active_hash = if height == tip.height {
         Some(tip.hash)
     } else {
-        let tree = ctx.block_tree.read();
         tree.node_at_height_from(tip.tip_id, height)
             .and_then(|id| tree.node(id).ok().map(|node| node.hash))
     };
