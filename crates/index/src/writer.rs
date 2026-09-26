@@ -71,13 +71,14 @@ pub trait TxIndexWriter: Send + Sync {
     }
     /// Stamps `watermark` on the selected capabilities so a rebuild starts at
     /// the first surviving height after a prune, without re-deriving deleted
-    /// rows.
+    /// rows. `floor` is the first covered height.
     fn anchor_watermark(
         &self,
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
+        floor: u32,
     ) -> Result<(), IndexError> {
-        let _ = (capabilities, watermark);
+        let _ = (capabilities, watermark, floor);
         Err(IndexError::UnsupportedAnchor)
     }
     /// Reads the opaque durable reconciliation cursor.
@@ -166,8 +167,10 @@ where
         &self,
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
+        floor: u32,
     ) -> Result<(), IndexError> {
-        self.write().anchor_watermark(capabilities, watermark)
+        self.write()
+            .anchor_watermark(capabilities, watermark, floor)
     }
 
     fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError> {

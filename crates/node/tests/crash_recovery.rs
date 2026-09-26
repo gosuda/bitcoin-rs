@@ -337,14 +337,20 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
     Ok(block)
 }
 
-/// The coinbase push that names `height`: one byte below 256, two bytes from
-/// there up, so a chain past the Core reorg margin mines without an
-/// overflowing narrowing conversion and without repeating a coinbase.
+/// The coinbase push that names `height` in the script-number encoding BIP34
+/// requires: little-endian magnitude, minimal length, with a leading `0x00`
+/// byte whenever the top magnitude bit is set so the value stays positive.
 fn coinbase_height_push(height: u32) -> Result<Vec<u8>> {
-    if height < 256 {
-        return Ok(vec![1, u8::try_from(height)?]);
+    let mut bytes = height.to_le_bytes().to_vec();
+    while bytes.len() > 1 && bytes.last() == Some(&0) {
+        bytes.pop();
     }
-    Ok([&[2_u8][..], &u16::try_from(height)?.to_le_bytes()].concat())
+    if bytes.last().is_some_and(|last| last & 0x80 != 0) {
+        bytes.push(0);
+    }
+    let mut push = vec![u8::try_from(bytes.len())?];
+    push.extend(bytes);
+    Ok(push)
 }
 
 fn merkle_root(txs: &[Tx]) -> Option<Hash256> {

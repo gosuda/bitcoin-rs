@@ -845,9 +845,9 @@ impl Chainstate {
     /// INVARIANT: callers outside this crate never store the header tip
     ///   directly.
     pub fn publish_genesis_tip(&self, tip: TipSnapshot) {
-        if self.chain_tip.load_full().is_none() {
-            self.chain_tip.store(Some(Arc::new(tip)));
-        }
+        let tip = Arc::new(tip);
+        self.chain_tip
+            .rcu(|current| current.clone().or_else(|| Some(Arc::clone(&tip))));
     }
 
     /// Loads the current best-work header tip.

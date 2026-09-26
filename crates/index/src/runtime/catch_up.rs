@@ -415,6 +415,7 @@ impl Worker {
                     height: anchor_height,
                     hash: identity.hash,
                 },
+                below,
             )
             .map_err(DerivedIndexWorkerError::Index)?;
         Ok(ReconcileAction::Progressed)

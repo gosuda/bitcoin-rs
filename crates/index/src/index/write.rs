@@ -236,6 +236,9 @@ impl<S: KvStore> IndexWriter<S> {
     /// The write is fenced like every ordinary commit, so a reset in flight
     /// or a moved revision reports `ResetInProgress`/`StaleIndexState`.
     ///
+    /// `floor` is the first covered height (`anchor.height + 1`): queries that
+    /// cannot prove absence below it answer `Unavailable` rather than `None`.
+    ///
     /// `capabilities` must name only history-derived indexes: `ScriptLive`
     /// reseeds from the authoritative UTXO view, so anchoring it would
     /// publish a live watermark with no rows behind it.
@@ -243,6 +246,7 @@ impl<S: KvStore> IndexWriter<S> {
         &self,
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
+        floor: u32,
     ) -> Result<(), IndexError> {
         if capabilities.is_empty() || capabilities.script_live {
             return Err(IndexError::AnchorUnsupportedSelection);
@@ -255,6 +259,7 @@ impl<S: KvStore> IndexWriter<S> {
             &FORMAT_VERSION_VALUE,
         );
         put_selected_watermarks(&mut batch, capabilities, Some(watermark));
+        crate::index::capability::put_selected_floors(&mut batch, capabilities, floor);
         commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)
     }
 

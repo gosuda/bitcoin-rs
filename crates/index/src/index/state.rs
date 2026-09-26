@@ -578,6 +578,7 @@ fn acquire_capability_reset<S: KvStore>(
         if capabilities.script_live {
             batch.delete(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY);
         }
+        crate::index::capability::delete_selected_floors(&mut batch, capabilities);
         batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
         if store.write_durable_if(&conditions, batch)? {
             return Ok(Some(work));

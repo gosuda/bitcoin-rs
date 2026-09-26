@@ -12,6 +12,12 @@ pub(super) const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 
 pub(super) const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 
+/// `TxLookup` coverage floor: first height with derived rows.
+pub(super) const TX_LOOKUP_FLOOR_KEY: &[u8] = &[0x00, b't'];
+
+/// `ScriptHistory` coverage floor: first height with derived rows.
+pub(super) const SCRIPT_HISTORY_FLOOR_KEY: &[u8] = &[0x00, b's'];
+
 pub(super) const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
 
 pub(super) const fn watermark_key(capability: IndexCapability) -> &'static [u8] {
@@ -19,6 +25,18 @@ pub(super) const fn watermark_key(capability: IndexCapability) -> &'static [u8] 
         IndexCapability::TxLookup => TX_LOOKUP_WATERMARK_KEY,
         IndexCapability::ScriptHistory => SCRIPT_HISTORY_WATERMARK_KEY,
         IndexCapability::ScriptLive => SCRIPT_LIVE_WATERMARK_KEY,
+    }
+}
+
+/// The durable floor key for a capability, when it carries one.
+///
+/// `ScriptLive` reseeds from the authoritative UTXO view and can never hold a
+/// pruned-prefix floor, so it has no key.
+pub(super) const fn floor_key(capability: IndexCapability) -> Option<&'static [u8]> {
+    match capability {
+        IndexCapability::TxLookup => Some(TX_LOOKUP_FLOOR_KEY),
+        IndexCapability::ScriptHistory => Some(SCRIPT_HISTORY_FLOOR_KEY),
+        IndexCapability::ScriptLive => None,
     }
 }
 
@@ -205,6 +223,59 @@ impl IndexWatermark {
             .as_deref()
             .map(Self::from_bytes)
             .transpose()
+    }
+}
+
+/// Reads one capability's coverage floor: the first height its committed rows
+/// cover. Missing keys mean complete coverage from genesis.
+pub(super) fn read_coverage_floor(
+    snapshot: &dyn KvSnapshot,
+    capability: IndexCapability,
+) -> Result<u32, IndexError> {
+    let Some(key) = floor_key(capability) else {
+        return Ok(0);
+    };
+    let Some(raw) = snapshot.get(ColumnFamily::UtxoMeta, key)? else {
+        return Ok(0);
+    };
+    let bytes: [u8; crate::types::HEIGHT_SIZE] = raw.as_slice().try_into().map_err(|_| {
+        IndexError::Storage(bitcoin_rs_storage::StorageError::IncompatibleData(
+            "coverage floor is not a height".into(),
+        ))
+    })?;
+    Ok(u32::from_le_bytes(bytes))
+}
+
+/// Stamps `floor` as the first covered height for each selected capability in
+/// `batch`. Only history-derived capabilities carry a floor.
+pub(super) fn put_selected_floors<B: WriteBatch>(
+    batch: &mut B,
+    capabilities: IndexCapabilities,
+    floor: u32,
+) {
+    for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
+        if !capabilities.contains(capability) {
+            continue;
+        }
+        if let Some(key) = floor_key(capability) {
+            batch.put(ColumnFamily::UtxoMeta, key, &floor.to_le_bytes());
+        }
+    }
+}
+
+/// Drops the coverage-floor records of the selected capabilities; a reset
+/// rebuilds from genesis, which covers everything.
+pub(super) fn delete_selected_floors<B: WriteBatch>(
+    batch: &mut B,
+    capabilities: IndexCapabilities,
+) {
+    for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
+        if !capabilities.contains(capability) {
+            continue;
+        }
+        if let Some(key) = floor_key(capability) {
+            batch.delete(ColumnFamily::UtxoMeta, key);
+        }
     }
 }
 

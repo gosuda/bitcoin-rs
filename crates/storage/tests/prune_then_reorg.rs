@@ -754,10 +754,11 @@ fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
 
     // The whole atomic batch is visible and durability completion then
     // fails: the record proves the deletions committed, so the claim must
-    // promote. Releasing it would let a lease pin rows that no longer
-    // exist.
+    // promote and the pass answers the staged result — callers run their
+    // in-memory follow-ups on the truth the receipt already proved.
+    // Releasing the claim would let a lease pin rows that no longer exist.
     store.arm_write_durable(WriteDurableOutcome::AppliedThenFailed);
-    let failed = prune_to_height(
+    let staged = prune_to_height(
         &*store,
         &block_files,
         &retention,
@@ -765,11 +766,7 @@ fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
         11 + CORE_REORG_SAFETY_MARGIN,
         11,
         |_| Ok(()),
-    );
-    assert!(
-        failed.is_err(),
-        "the pass still reports the durability error"
-    );
+    )?;
     assert_eq!(
         load_executed_frontier(&*store)?,
         Some(ExecutedFrontier::new(11)),
@@ -778,6 +775,10 @@ fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
         retention.pruned_below(),
         11,
         "a provably committed batch promotes the executed line"
+    );
+    assert_eq!(
+        staged.pruned_below, 11,
+        "the staged result carries the committed range"
     );
     assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
     Ok(())

@@ -54,6 +54,12 @@ pub trait TxIndexSnapshot: Send + Sync {
         let _ = capability;
         self.watermark()
     }
+    /// Loads one capability's coverage floor: the first height its committed
+    /// rows cover. `0` means complete coverage from genesis.
+    fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
+        let _ = capability;
+        Ok(0)
+    }
     /// Scans confirmed-transaction rows for `txid`.
     fn transaction_rows(
         &self,
@@ -125,6 +131,10 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
         capability: IndexCapability,
     ) -> Result<Option<IndexWatermark>, IndexError> {
         IndexWatermark::read_from_snapshot(self.snapshot.as_ref(), capability)
+    }
+
+    fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
+        crate::index::capability::read_coverage_floor(self.snapshot.as_ref(), capability)
     }
 
     fn transaction_rows(
