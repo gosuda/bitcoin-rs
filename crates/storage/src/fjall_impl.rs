@@ -1,4 +1,5 @@
 use crate::batch::{BatchOp, BufferedWriteBatch};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use fjall::config::CompressionPolicy;
@@ -107,7 +108,7 @@ impl FjallStore {
                 // boundary then faults: the never-committed batch leaves
                 // no family with a partial view.
                 let mut fjall_batch = self.db.batch();
-                self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops))?;
+                self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops).collect())?;
             }
             return Err(fault.injected_error());
         }
@@ -135,12 +136,25 @@ impl FjallStore {
     fn stage_ops(
         &self,
         fjall_batch: &mut fjall::OwnedWriteBatch,
-        ops: impl IntoIterator<Item = BatchOp>,
+        ops: Vec<BatchOp>,
     ) -> Result<(), StorageError> {
         let mut keyspaces = [None; ColumnFamily::ALL.len()];
-        for op in ops {
+        let mut last_range = [None; ColumnFamily::ALL.len()];
+        for (index, op) in ops.iter().enumerate() {
+            if let BatchOp::DeleteRange { cf, .. } = op {
+                last_range[cf.index()] = Some(index);
+            }
+        }
+        let mut staged_puts: [BTreeSet<Vec<u8>>; ColumnFamily::ALL.len()] =
+            std::array::from_fn(|_| BTreeSet::new());
+        for (index, op) in ops.into_iter().enumerate() {
             match op {
                 BatchOp::Put { cf, key, value } => {
+                    // Only retain keys that a later range in this family may
+                    // need: point-only batches require no tracking allocation.
+                    if last_range[cf.index()].is_some_and(|last| index < last) {
+                        staged_puts[cf.index()].insert(key.clone());
+                    }
                     fjall_batch.insert(
                         cached_keyspace(self, &mut keyspaces, cf)?,
                         key,
@@ -148,12 +162,13 @@ impl FjallStore {
                     );
                 }
                 BatchOp::Delete { cf, key } => {
+                    staged_puts[cf.index()].remove(&key);
                     fjall_batch.remove(cached_keyspace(self, &mut keyspaces, cf)?, key);
                 }
                 BatchOp::DeleteRange { cf, start, end } => {
                     let keyspace = cached_keyspace(self, &mut keyspaces, cf)?;
                     let keys = keyspace
-                        .range(start..end)
+                        .range(start.as_slice()..end.as_slice())
                         .map(|guard| {
                             guard
                                 .key()
@@ -164,6 +179,17 @@ impl FjallStore {
                     for key in keys {
                         fjall_batch.remove(keyspace, key);
                     }
+                    // The keyspace iterator sees committed rows only. Remove
+                    // earlier staged puts too, at this position in the batch,
+                    // so a subsequent put can still replace the tombstone.
+                    staged_puts[cf.index()].retain(|key| {
+                        if start <= *key && *key < end {
+                            fjall_batch.remove(keyspace, key.as_slice());
+                            false
+                        } else {
+                            true
+                        }
+                    });
                 }
             }
         }
