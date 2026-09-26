@@ -422,7 +422,6 @@ impl NodeState {
         self.derived_index.start(&self.chainstate)
     }
 
-
     /// Returns the live txindex status source for `getcapabilities`.
     #[must_use]
     pub fn derived_index_status(

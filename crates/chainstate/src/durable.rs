@@ -353,15 +353,18 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
     // rows.
     let needs_rewind = restored.as_deref().is_some_and(|tip| {
         let tree = handles.block_tree.read();
-        match tree.lookup(head.tip) {
+        if let Some(head_id) = tree.lookup(head.tip) {
             // The head tip is in the tree, so ancestry settles it: a tip
             // that is not an ancestor of the head must rewind through the
             // undo rows to the fork before replay can proceed.
-            Some(head_id) => tree.find_common_ancestor(head_id, tip.tip_id) != Some(tip.tip_id),
+            tree.find_common_ancestor(head_id, tip.tip_id) != Some(tip.tip_id)
+        } else {
             // The head tip is beyond the restored headers (a committed gap),
             // so the tree cannot prove a fork; a tip at or above the head
             // under another hash is still rewind work.
-            None => tip.hash != head.tip && tip.height >= head.height,
+            let diverged_from_head = tip.hash != head.tip;
+            let at_or_above_head = tip.height >= head.height;
+            diverged_from_head && at_or_above_head
         }
     });
     let mode = match restored {

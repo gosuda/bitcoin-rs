@@ -2220,11 +2220,7 @@ mod acceptance_tests {
             RpcError::INVALID_PARAMS,
             "max-fee-exceeded is a parameter error: {error:?}"
         );
-        assert_eq!(
-            ctx.mempool.read().len(),
-            0,
-            "and nothing was admitted"
-        );
+        assert_eq!(ctx.mempool.read().len(), 0, "and nothing was admitted");
     }
 
     /// The guard is the caller's to lift, and the ceiling is a *rate*.
@@ -2241,11 +2237,7 @@ mod acceptance_tests {
             seed_utxo(&ctx, 9, 100_000_000);
             let tx = spending_tx(9, 1_000_000);
             let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx), 0]));
-            assert_eq!(
-                ctx.mempool.read().len(),
-                1,
-                "zero sends it: {sent:?}"
-            );
+            assert_eq!(ctx.mempool.read().len(), 1, "zero sends it: {sent:?}");
             sent
         };
         assert!(disabled.is_ok(), "{disabled:?}");
@@ -2287,11 +2279,7 @@ mod acceptance_tests {
             .unwrap_or_else(|| panic!("1 BTC/kvB is not an accepted ceiling"));
 
         assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error:?}");
-        assert_eq!(
-            ctx.mempool.read().len(),
-            0,
-            "nothing admitted: {error:?}"
-        );
+        assert_eq!(ctx.mempool.read().len(), 0, "nothing admitted: {error:?}");
     }
 
     /// Missing inputs are Core's `RPC_VERIFY_ERROR` (-25), not the policy
@@ -2372,11 +2360,7 @@ mod acceptance_tests {
         };
 
         assert_eq!(first.as_str(), second.as_str());
-        assert_eq!(
-            ctx.mempool.read().len(),
-            1,
-            "it must not be inserted twice"
-        );
+        assert_eq!(ctx.mempool.read().len(), 1, "it must not be inserted twice");
     }
 
     /// An RBF-evicted transaction is no longer known.
@@ -2415,9 +2399,7 @@ mod acceptance_tests {
             "the original must be swept by the replacement"
         );
         assert!(
-            ctx.mempool
-                .read()
-                .contains_txid(&replacement.txid()),
+            ctx.mempool.read().contains_txid(&replacement.txid()),
             "the replacement must occupy the pool"
         );
 

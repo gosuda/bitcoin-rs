@@ -477,11 +477,7 @@ mod tests {
         // derivation must quote them on the next call, never a stale
         // composition-time copy.
         ctx.mempool.pool().write().limits.cluster_count = 7;
-        ctx.mempool
-            .pool()
-            .write()
-            .limits
-            .cluster_size_vbytes = 42_000;
+        ctx.mempool.pool().write().limits.cluster_size_vbytes = 42_000;
         let handler = crate::Handler::new(Arc::clone(&ctx));
         let result = handler
             .dispatch("getmempoolinfo", &json!([]))

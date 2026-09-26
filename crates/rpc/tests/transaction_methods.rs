@@ -188,10 +188,7 @@ fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
     let handler = Handler::new(Arc::clone(&ctx));
 
     handler.dispatch("sendrawtransaction", &json!([raw.as_str()]))?;
-    assert!(
-        ctx.mempool.read().contains_txid(&txid),
-        "first admission"
-    );
+    assert!(ctx.mempool.read().contains_txid(&txid), "first admission");
 
     // Policy eviction (fee-rate trim), not an RBF replacement: the
     // transaction is still valid and must be admitted again.

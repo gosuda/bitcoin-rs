@@ -20,10 +20,6 @@ pub(super) const SCRIPT_HISTORY_FLOOR_KEY: &[u8] = &[0x00, b's'];
 
 pub(super) const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
 
-pub(super) const fn watermark_key(capability: IndexCapability) -> &'static [u8] {
-    capability.watermark_key()
-}
-
 /// The durable floor key for a capability, when it carries one.
 ///
 /// `ScriptLive` reseeds from the authoritative UTXO view and can never hold a

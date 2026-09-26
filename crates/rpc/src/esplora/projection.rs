@@ -177,13 +177,7 @@ impl<'a> Projection<'a> {
 
     /// Resolves confirmation only against the current applied chain.
     pub(super) fn confirmation(&self, txid: &Txid) -> Result<Option<Confirmation>, Response> {
-        if self
-            .ctx
-            .mempool
-            .read()
-            .transaction_by_txid(txid)
-            .is_some()
-        {
+        if self.ctx.mempool.read().transaction_by_txid(txid).is_some() {
             return Ok(None);
         }
         if self.ctx.chain.transactions.read().contains_key(txid) {
@@ -307,12 +301,7 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) fn prevout(&self, outpoint: &OutPoint) -> Result<Option<TxOut>, Response> {
-        if let Some(transaction) = self
-            .ctx
-            .mempool
-            .read()
-            .transaction_by_txid(&outpoint.txid)
-        {
+        if let Some(transaction) = self.ctx.mempool.read().transaction_by_txid(&outpoint.txid) {
             return Ok(transaction
                 .outputs
                 .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))

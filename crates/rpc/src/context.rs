@@ -1077,10 +1077,9 @@ impl ChainHandles {
     /// header tree publishes its first tip — genesis is always that base.
     #[must_use]
     pub(crate) fn best_hash(&self) -> Hash256 {
-        self.chain_tip.load_full().map_or_else(
-            || self.chain_network.genesis_block_hash(),
-            |tip| tip.hash,
-        )
+        self.chain_tip
+            .load_full()
+            .map_or_else(|| self.chain_network.genesis_block_hash(), |tip| tip.hash)
     }
 
     /// Returns the current best-chain chainwork as a 64-character lowercase
@@ -1141,9 +1140,7 @@ impl ChainHandles {
             // The tree already gave us the height, so this is a binary search
             // over a height-ordered log rather than a walk of every record on
             // the chain. `getblock` and `getblockheader` both land here.
-            if let Some(cached) =
-                record_at_height_hash(&self.blocks.read(), record.height, hash)
-            {
+            if let Some(cached) = record_at_height_hash(&self.blocks.read(), record.height, hash) {
                 // The cached record supplies the payload facts — size and
                 // transaction count — and the tree supplies the header, because
                 // the log does not store one. Returning the cached record as it
@@ -1156,10 +1153,10 @@ impl ChainHandles {
                 cached.header = record.header.take();
                 return Some(cached);
             }
-            if let Some(metadata) =
-                self.block_body_source.as_ref().and_then(|source| {
-                    source.block_body_metadata(record.height, BlockHash::from(hash))
-                })
+            if let Some(metadata) = self
+                .block_body_source
+                .as_ref()
+                .and_then(|source| source.block_body_metadata(record.height, BlockHash::from(hash)))
             {
                 record.body_size = metadata.body_size;
                 record.tx_count = metadata.tx_count;
@@ -1183,8 +1180,7 @@ impl ChainHandles {
         if height == 0 {
             return Some(self.chain_network.genesis_block_hash());
         }
-        record_at_height(&self.blocks.read(), height)
-            .map(|candidate| Hash256::from(candidate.hash))
+        record_at_height(&self.blocks.read(), height).map(|candidate| Hash256::from(candidate.hash))
     }
 
     /// Returns a known block by hash.
@@ -2417,22 +2413,22 @@ mod admission_chain_tests {
         // Accepted: the embedded call and the RPC handler commit the same
         // funded transaction through the one operation.
         let embedded_ctx = Context::new();
-                    bitcoin_rs_utxo::contract::commit_block_changes(
-                &embedded_ctx.chain.utxo,
-                &changes,
-                &Hash256::default(),
-            )?;
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &embedded_ctx.chain.utxo,
+            &changes,
+            &Hash256::default(),
+        )?;
         let embedded = embedded_ctx
             .admit_transaction(spend.clone(), None)
             .map_err(anyhow::Error::msg)?;
         assert_eq!(embedded.changes.len(), 1);
         assert!(embedded_ctx.mempool.read().contains_txid(&spend.txid()));
         let rpc_ctx = Arc::new(Context::new());
-                    bitcoin_rs_utxo::contract::commit_block_changes(
-                &rpc_ctx.chain.utxo,
-                &changes,
-                &Hash256::default(),
-            )?;
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &rpc_ctx.chain.utxo,
+            &changes,
+            &Hash256::default(),
+        )?;
         let accepted = tx::sendrawtransaction(&rpc_ctx, &json!([raw]))?;
         assert_eq!(accepted.as_str(), Some(spend.txid().to_string()).as_deref());
         assert!(rpc_ctx.mempool.read().contains_txid(&spend.txid()));
@@ -2461,11 +2457,11 @@ mod admission_chain_tests {
         // Preview: testmempoolaccept answers for the funded transaction
         // without inserting it.
         let preview_ctx = Arc::new(Context::new());
-                    bitcoin_rs_utxo::contract::commit_block_changes(
-                &preview_ctx.chain.utxo,
-                &changes,
-                &Hash256::default(),
-            )?;
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &preview_ctx.chain.utxo,
+            &changes,
+            &Hash256::default(),
+        )?;
         let rows = tx::testmempoolaccept(&preview_ctx, &json!([[raw]]))?;
         assert_eq!(
             rows.get(0)

@@ -188,11 +188,7 @@ fn pool_holds(ctx: &Context, tx: &Tx) -> bool {
 
 /// Raises the pool's minimum relay fee floor to `sat_per_kvb`.
 fn set_relay_floor(ctx: &Context, sat_per_kvb: u64) {
-    ctx.mempool
-        .pool()
-        .write()
-        .limits
-        .min_relay_fee_sat_per_kvb = sat_per_kvb;
+    ctx.mempool.pool().write().limits.min_relay_fee_sat_per_kvb = sat_per_kvb;
 }
 
 #[test]
@@ -311,11 +307,7 @@ fn sendrawtransaction_and_testmempoolaccept_quote_the_floor_before_maxfeerate()
 #[test]
 fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
     let ctx = Arc::new(Context::new());
-    ctx.mempool
-        .pool()
-        .write()
-        .limits
-        .min_relay_fee_sat_per_kvb = 5_000;
+    ctx.mempool.pool().write().limits.min_relay_fee_sat_per_kvb = 5_000;
     let handler = Handler::new(Arc::clone(&ctx));
 
     // 164 sat over 82 vB is exactly 2 000 sat/kvB: below the configured floor.
@@ -347,9 +339,7 @@ fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
     let at_floor = tx(fund_utxo(&ctx, 0x84, 10_410), 10_000, 0xffff_ffff);
     handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&at_floor)]))?;
     assert!(
-        ctx.mempool
-            .read()
-            .contains_txid(&rpc_txid(&at_floor)),
+        ctx.mempool.read().contains_txid(&rpc_txid(&at_floor)),
         "exactly-at-floor tx must be pooled"
     );
 
@@ -451,9 +441,7 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
     Handler::new(Arc::clone(&idle))
         .dispatch("sendrawtransaction", &json!([raw_tx_hex(&control)]))?;
     assert!(
-        idle.mempool
-            .read()
-            .contains_txid(&rpc_txid(&control)),
+        idle.mempool.read().contains_txid(&rpc_txid(&control)),
         "unpressured control tx must be pooled"
     );
     Ok(())
@@ -549,16 +537,13 @@ fn insert_original(
     fee: u64,
 ) -> Result<Tx, Box<dyn Error>> {
     let original = tx(fund_utxo(ctx, label, 100_000), 92_000, sequence);
-    ctx.mempool
-        .pool()
-        .write()
-        .insert_entry(MempoolEntry::new(
-            Arc::new(original.clone()),
-            vsize,
-            fee,
-            0,
-            1,
-        ))?;
+    ctx.mempool.pool().write().insert_entry(MempoolEntry::new(
+        Arc::new(original.clone()),
+        vsize,
+        fee,
+        0,
+        1,
+    ))?;
     Ok(original)
 }
 
@@ -649,16 +634,13 @@ fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dy
     let original_txid = rpc_txid(&original);
     let child = tx(OutPoint::new(original_txid, 0), 91_000, 0xffff_fffd);
     let child_txid = rpc_txid(&child);
-    ctx.mempool
-        .pool()
-        .write()
-        .insert_entry(MempoolEntry::new(
-            Arc::new(child.clone()),
-            u32::try_from(child.vsize()).unwrap_or(u32::MAX),
-            1_000,
-            0,
-            1,
-        ))?;
+    ctx.mempool.pool().write().insert_entry(MempoolEntry::new(
+        Arc::new(child.clone()),
+        u32::try_from(child.vsize()).unwrap_or(u32::MAX),
+        1_000,
+        0,
+        1,
+    ))?;
     observer.changes.lock().clear();
 
     // Its 12 000 sat fee pays both evicted fees (9 000) plus the
@@ -698,16 +680,13 @@ fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), Box<dyn Error
     let original = insert_original(&ctx, 0x98, 0xffff_fffd, 4_000, 8_000)?;
     let mut unrelated = tx(fund_utxo(&ctx, 0x99, 10_000), 9_000, 0xffff_ffff);
     unrelated.outputs[0].script_pubkey = Script::from_bytes(op_true_script());
-    ctx.mempool
-        .pool()
-        .write()
-        .insert_entry(MempoolEntry::new(
-            Arc::new(unrelated.clone()),
-            100,
-            1_000,
-            0,
-            1,
-        ))?;
+    ctx.mempool.pool().write().insert_entry(MempoolEntry::new(
+        Arc::new(unrelated.clone()),
+        100,
+        1_000,
+        0,
+        1,
+    ))?;
     let replacement = tx_spending(
         &[
             (confirmed_outpoint(0x98), 0xffff_ffff),
@@ -767,9 +746,7 @@ fn sendrawtransaction_rejects_rule3_replacements_that_underpay_evicted_fees()
         Some("insufficient fee")
     );
     assert!(
-        ctx.mempool
-            .read()
-            .contains_txid(&rpc_txid(&original)),
+        ctx.mempool.read().contains_txid(&rpc_txid(&original)),
         "a rejected replacement leaves the original pooled"
     );
 
@@ -789,16 +766,13 @@ fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box
     // Original at 4 000 vsize / 8 000 sat fee = 2 000 sat/kvB stored rate,
     // funded at 200 000 so the replacement has fee headroom to tune.
     let original = tx(fund_utxo(&ctx, 0x9b, 200_000), 192_000, 0xffff_fffd);
-    ctx.mempool
-        .pool()
-        .write()
-        .insert_entry(MempoolEntry::new(
-            Arc::new(original.clone()),
-            4_000,
-            8_000,
-            0,
-            1,
-        ))?;
+    ctx.mempool.pool().write().insert_entry(MempoolEntry::new(
+        Arc::new(original.clone()),
+        4_000,
+        8_000,
+        0,
+        1,
+    ))?;
 
     // Search the output count (500 sat each, never dust) for a candidate
     // that pays rules 3 and 4 (fee >= 8 000 + vsize, the 1 sat/vB
@@ -842,9 +816,7 @@ fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box
         Some("replacement-failed")
     );
     assert!(
-        ctx.mempool
-            .read()
-            .contains_txid(&rpc_txid(&original)),
+        ctx.mempool.read().contains_txid(&rpc_txid(&original)),
         "a rejected replacement leaves the original pooled"
     );
 
@@ -949,11 +921,7 @@ fn nonsignaling_replacements_agree_on_both_rpcs() -> Result<(), Box<dyn Error>> 
         Some(true)
     );
     assert_eq!(ctx.mempool.read().sequence_number(), sequence);
-    assert!(
-        ctx.mempool
-            .read()
-            .contains_txid(&rpc_txid(&original))
-    );
+    assert!(ctx.mempool.read().contains_txid(&rpc_txid(&original)));
     let result = handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))?;
     assert_eq!(result, json!(rpc_txid(&replacement).to_string()));
     let pool = ctx.mempool.read();
@@ -1025,11 +993,7 @@ fn replacement_counts_conflicting_clusters_instead_of_descendants() -> Result<()
     assert_eq!(ctx.mempool.read().len(), 101);
     handler.dispatch("sendrawtransaction", &json!([raw_tx_hex(&replacement)]))?;
     assert_eq!(ctx.mempool.read().len(), 1);
-    assert!(
-        ctx.mempool
-            .read()
-            .contains_txid(&rpc_txid(&replacement))
-    );
+    assert!(ctx.mempool.read().contains_txid(&rpc_txid(&replacement)));
     Ok(())
 }
 

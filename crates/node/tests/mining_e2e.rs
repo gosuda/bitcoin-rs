@@ -701,7 +701,6 @@ fn mining_handler(state: &NodeState) -> Handler {
         mining: MiningHandles {
             mining_control: Some(mining_control),
         },
-        ..ContextHandles::default()
     });
     Handler::new(Arc::new(ctx))
 }
