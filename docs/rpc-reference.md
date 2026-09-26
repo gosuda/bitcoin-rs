@@ -7,7 +7,7 @@
 
 Surface contract of bitcoin-rs against Bitcoin Core 31.x.
 
-- **Supported** - differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `docs/api/core-compat.toml`.
+- **Supported** - differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `crates/rpc/core-compat.toml`.
 - **Deviation** - shipped with a recorded difference from Core; notes cite the source file.
 - **Implemented (unverified)** - shipped; not compared against the pinned reference.
 - **Extension** - bitcoin-rs-specific surface with no Core counterpart.
