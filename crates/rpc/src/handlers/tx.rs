@@ -203,7 +203,7 @@ fn txout_typed(
     coinbase: bool,
 ) -> Result<Value, RpcError> {
     typed_to_sonic(&v31::GetTxOut {
-        best_block: ctx.chain.best_hash().to_string(),
+        best_block: ctx.chain.applied_hash().to_string_be(),
         confirmations,
         value: sat_to_btc(output.value.to_sat()),
         script_pubkey: convert::script_pub_key_typed(
