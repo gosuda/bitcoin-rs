@@ -1475,7 +1475,7 @@ mod tests {
         orphan: bool,
         item: Inventory,
     ) {
-        let (local_requested, remote_requested) = match item {
+        let (_, remote_requested) = match item {
             Inventory::WTx(_) => (true, false),
             _ => (false, true),
         };
