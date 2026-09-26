@@ -1154,7 +1154,6 @@ impl Mempool {
         self.entries.iter().map(|(_id, entry)| entry.txid).collect()
     }
 
-
     /// Returns the relay-policy snapshot this pool enforces, for the RPC
     /// `getmempoolinfo` projection and the transaction-admission surface.
     ///
@@ -1459,7 +1458,6 @@ impl Mempool {
         let id = *self.derived.by_wtxid.get(wtxid)?;
         self.entry(id)
     }
-
 
     /// Returns the minimum `fee_rate` (sat/kvB) among all entries, or `None`
     /// for an empty pool.
