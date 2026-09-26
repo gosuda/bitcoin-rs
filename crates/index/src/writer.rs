@@ -69,6 +69,18 @@ pub trait TxIndexWriter: Send + Sync {
         let _ = capabilities;
         Err(IndexError::UnsupportedRollback)
     }
+    /// Stamps `watermark` on the selected capabilities so a rebuild starts at
+    /// the first surviving height after a prune, without re-deriving deleted
+    /// rows. `floor` is the first covered height.
+    fn anchor_watermark(
+        &self,
+        capabilities: IndexCapabilities,
+        watermark: IndexWatermark,
+        floor: u32,
+    ) -> Result<(), IndexError> {
+        let _ = (capabilities, watermark, floor);
+        Err(IndexError::UnsupportedAnchor)
+    }
     /// Reads the opaque durable reconciliation cursor.
     fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError>;
     /// Commits an opaque cursor without changing rows, subject to the write fence.
@@ -149,6 +161,16 @@ where
 
     fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
         self.write().reset_capabilities(capabilities)
+    }
+
+    fn anchor_watermark(
+        &self,
+        capabilities: IndexCapabilities,
+        watermark: IndexWatermark,
+        floor: u32,
+    ) -> Result<(), IndexError> {
+        self.write()
+            .anchor_watermark(capabilities, watermark, floor)
     }
 
     fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError> {

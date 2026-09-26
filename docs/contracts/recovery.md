@@ -361,6 +361,23 @@ state is harmless and keeps the node operating until replay closes the gap.
   cover `RCV-05` and bounded disconnect/reorg memory; `RCV-08`'s bounded
   stream windows and retention leases are exercised by the node sync/recovery
   scenarios together with the #655 boot-replay tests above.
+
+- Pruning and retained-history authority (#1151): `node:prune_executed` holds
+  the executed frontier — one past the highest row a committed pass deleted —
+  written in the same durable batch as its deletions, so a restart
+  reconstructs exactly the committed boundary and refuses a lease over
+  deleted history. A legacy datadir reconstructs the bound from its lowest
+  surviving rows; only a legacy datadir with no rows surviving in either
+  family falls back to the requested `node:pruneheight`, which is intent.
+  `RetentionRegistry::reserve` is the single prune/retention
+  linearization point, and `PruneReservation::commit` is the only path that
+  moves the executed line. `crates/storage/tests/prune_then_reorg.rs` proves
+  the race (`history_request_between_planning_and_commit_is_refused`), the
+  restart law (`executed_frontier_survives_restart_and_refuses_deleted_heights`),
+  monotonicity across passes and reorg-reintroduced rows
+  (`executed_frontier_is_monotonic_across_passes_and_reintroduced_rows`), and
+  the legacy migration (`legacy_datadir_reconstructs_from_surviving_rows_not_the_requested_line`,
+  `legacy_datadir_with_no_rows_falls_back_to_the_requested_line`).
 - Checkpoint publication and recovery:
   `crates/chainstate/tests/unit/checkpoint/tests/` covers consensus-valid active-chain
   replay, applied-ancestry selection, competing-fork rejection, and

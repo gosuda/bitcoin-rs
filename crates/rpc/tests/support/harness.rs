@@ -108,23 +108,27 @@ impl ServerHarness {
         let ibd = chainstate.ibd_latch();
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
-                chain_tip: chainstate.header_tip_reader(),
-                applied_tip: chainstate.applied_tip_reader(),
+                chain_tip: chainstate.chain_tip_handle(),
+                applied_tip: chainstate.applied_tip_handle(),
                 chain_tx_count: chainstate.chain_tx_count_handle(),
                 ibd,
                 blocks: state.blocks(),
                 transactions: state.transactions(),
                 utxo: chainstate.utxo_handle(),
                 coin_stats: chainstate.coin_stats_handle(),
-                block_tree: chainstate.block_tree_reader(),
+                block_tree: chainstate.block_tree_handle(),
                 chain_network: state.config().network,
+                chain_transition: chainstate.read_fence(),
+                ..ChainHandles::default()
             },
             mempool: MempoolHandles {
-                mempool: MempoolGateway::shared(state.mempool()),
+                gateway: MempoolGateway::shared(state.mempool()),
             },
             indexes: IndexHandles {
                 derived_index: state.derived_index_query(),
                 script_index: state.script_index_query(),
+                esplora_tx_index: None,
+                derived_index_status: Some(state.derived_index_status()),
             },
             network: NetworkHandles {
                 network: state.network(),
@@ -137,7 +141,7 @@ impl ServerHarness {
             mining: bitcoin_rs_rpc::context::MiningHandles {
                 mining_control: None,
             },
-            derived_index_status: Some(state.derived_index_status()),
+            ..ContextHandles::default()
         });
         let handler = Arc::new(Handler::new(Arc::new(ctx)));
         let auth = Arc::new(Auth::basic(REPLAY_USER, REPLAY_PASSWORD));

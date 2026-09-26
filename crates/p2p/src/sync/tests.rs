@@ -342,6 +342,73 @@ impl SyncChain for TestChain {
     }
 }
 
+/// Chain stub whose header admission is always refused, mirroring the
+/// production executor's paused admission: the chain transition lock is
+/// unavailable, so the batch is dropped before validation. Every other
+/// operation delegates to [`TestChain`], whose admission always validates.
+struct RefusingChain(Arc<TestChain>);
+
+impl SyncChain for RefusingChain {
+    fn network(&self) -> Network {
+        self.0.network()
+    }
+
+    fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, BlockTree> {
+        self.0.block_tree()
+    }
+
+    fn chain_tip(&self) -> Option<Arc<TipSnapshot>> {
+        self.0.chain_tip()
+    }
+
+    fn applied_tip(&self) -> Option<Arc<TipSnapshot>> {
+        self.0.applied_tip()
+    }
+
+    fn block_tree_mut(&self) -> parking_lot::RwLockWriteGuard<'_, BlockTree> {
+        self.0.block_tree_mut()
+    }
+
+    fn set_tips(&self, applied: TipSnapshot, header: TipSnapshot) {
+        self.0.set_tips(applied, header);
+    }
+
+    fn bootstrap_genesis(&self) {
+        self.0.bootstrap_genesis();
+    }
+
+    fn admit_headers(&self, _headers: &[Header]) -> HeaderAdmission {
+        HeaderAdmission::Refused(Box::new(std::io::Error::other(
+            "scripted admission refusal",
+        )))
+    }
+
+    fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
+        self.0.check_body_binding(block)
+    }
+
+    fn window_len(&self, serialized_sizes: &mut dyn Iterator<Item = usize>) -> usize {
+        self.0.window_len(serialized_sizes)
+    }
+
+    fn commit_window(
+        &self,
+        blocks: &[&Block],
+        bodies: &[bytes::Bytes],
+    ) -> Result<usize, WindowCommitError> {
+        self.0.commit_window(blocks, bodies)
+    }
+
+    fn switch_to_branch(
+        &self,
+        target: NodeId,
+        staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
+        connected_body: &mut dyn FnMut(Hash256),
+    ) -> Result<(), BranchSwitchError> {
+        self.0.switch_to_branch(target, staged_body, connected_body)
+    }
+}
+
 /// Script-int encoding used by the regtest fixture coinbases (duplicated
 /// rather than depending on `bitcoin-rs-script` from `p2p` tests).
 fn push_int(value: i64) -> Vec<u8> {
@@ -414,6 +481,91 @@ fn check_sync_frontier_pair(
     assert_eq!(requested, expected_hashes);
     assert!(!requested.is_empty());
     assert!(rx.try_recv().is_err());
+    Ok(())
+}
+
+/// A batch forwarded out of a delivered body (`wire_response = false`) is
+/// not an answer to the pending `getheaders`, whatever admission does with
+/// it: neither a rejected batch (`TimestampTooFarAhead`) nor a refused one
+/// (paused admission) may consume the gate. Unconditional consumption would
+/// free the gate at every body delivery, so a connection that silently
+/// ignored its wire request would never age the request out.
+///
+/// PRE: `a` owns the pending header request and `b` is a second usable
+///   peer, so expiry has a fallback; the batch from `a` is carried by a
+///   body delivery, not by the wire answer.
+/// POST: the gate keeps its owner and deadline through the body-forwarded
+///   batch; once the deadline lapses the probe rotates past `a` and `b` is
+///   asked on that tick.
+/// INVARIANT: only a wire answer may clear a pending header request.
+#[test]
+fn body_forwarded_batch_does_not_consume_the_pending_header_gate()
+-> Result<(), Box<dyn std::error::Error>> {
+    for build_fixture in [header_sync_with_genesis, header_sync_with_refusing_chain] {
+        let HeaderSyncFixture {
+            genesis,
+            sync,
+            inbound_headers_tx,
+            peers,
+        } = build_fixture()?;
+        let a = test_addr(9771, 0)?;
+        let b = test_addr(9771, 1)?;
+        let a_rx = connect_peer(&peers, synthetic_peer(a, 8));
+        let b_rx = connect_peer(&peers, synthetic_peer(b, 8));
+        let a_source = current_source(&peers, a);
+
+        sync.tick();
+        assert!(
+            a_rx.try_iter()
+                .any(|message| matches!(message, Message::GetHeaders(_))),
+            "the first tick must ask `a`",
+        );
+
+        inbound_headers_tx.send(InboundHeaders {
+            headers: vec![far_future_header(genesis.compute_hash(), 1)?],
+            source: Some(a_source),
+            wire_response: false,
+            body_fetch_owned: false,
+        })?;
+        sync.tick();
+
+        assert!(
+            sync.scheduler
+                .lock()
+                .header_request
+                .is_some_and(|request| request.source == a_source),
+            "a body-forwarded batch is not an answer: the gate stays with `a`",
+        );
+
+        let backdated = Instant::now()
+            .checked_sub(super::HEADER_REQUEST_TIMEOUT)
+            .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
+        sync.scheduler
+            .lock()
+            .header_request
+            .as_mut()
+            .ok_or("the request must still be registered")?
+            .requested_at = backdated;
+        sync.tick();
+
+        let reasked_a = a_rx
+            .try_iter()
+            .any(|message| matches!(message, Message::GetHeaders(_)));
+        let reasked_b = b_rx
+            .try_iter()
+            .any(|message| matches!(message, Message::GetHeaders(_)));
+        assert!(
+            reasked_a || reasked_b,
+            "an expired gate must re-issue a header request this tick",
+        );
+        assert!(
+            sync.scheduler
+                .lock()
+                .header_request
+                .is_some_and(|request| request.requested_at > backdated),
+            "the re-issued request must carry a fresh deadline",
+        );
+    }
     Ok(())
 }
 
@@ -2134,6 +2286,48 @@ fn genesis_header() -> Header {
     Network::Regtest.genesis_block().header
 }
 
+/// [`header_sync_with_genesis`] over a chain whose header admission is
+/// always refused: the fixture for the paused-admission path that
+/// [`TestChain`], whose admission always validates, cannot produce.
+fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, Box<dyn std::error::Error>> {
+    let mut tree = BlockTree::new();
+    let genesis = genesis_header();
+    tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+    let chain_tip = tree.tip_handle();
+    let block_tree = Arc::new(RwLock::new(tree));
+    let applied_tip = Arc::new(ArcSwapOption::empty());
+    let peers = Arc::new(PeerTable::new());
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded();
+    let sync = BlockSync::new(
+        Arc::new(RefusingChain(Arc::new(TestChain::new(
+            chain_tip,
+            Arc::clone(&applied_tip),
+            Arc::clone(&block_tree),
+        )))),
+        Arc::clone(&peers),
+        Arc::new(Mutex::new(inbound_headers_rx)),
+        Arc::new(Mutex::new(inbound_blocks_rx)),
+        crate::sync::syncing_ibd_latch(),
+    );
+    // Dropping the sender mirrors the header-only fixture: an inbound-blocks
+    // channel that never yields a block.
+    drop(inbound_blocks_tx);
+    install_budget(
+        &sync,
+        super::SyncBudget {
+            max_pending_blocks: 0,
+            ..super::default_sync_budget(Network::Regtest)
+        },
+    );
+    Ok(HeaderSyncFixture {
+        genesis,
+        sync,
+        inbound_headers_tx,
+        peers,
+    })
+}
+
 pub(crate) fn coinbase_transaction(height: u32) -> Tx {
     use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
     let mut script_sig = push_int(i64::from(height));
@@ -2364,6 +2558,7 @@ mod chain_sync;
 #[cfg(test)]
 mod frontier_model;
 mod head_sync;
+mod issue_1153;
 mod limited_peers;
 mod stale_tip;
 
@@ -2483,5 +2678,38 @@ fn binding_and_operational_failures_do_not_disconnect() -> Result<(), Box<dyn st
             "a {disposition:?} settlement failure must not disconnect the delivering connection"
         );
     }
+    Ok(())
+}
+
+/// Sync progress must publish the shared latch's initial-block-download
+/// answer, not a height heuristic (#1149 acceptance 1/12). The two fixtures
+/// below are the snapshots where the old `applied < header` rule disagreed
+/// with the latch: an active latch over an empty frontier, and a latched-off
+/// latch over headers ahead of an absent applied tip.
+#[test]
+fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> Result<(), Box<dyn std::error::Error>> {
+    let now = crate::counters::now_seconds();
+
+    let syncing = SyncHarness::new(BlockTree::new());
+    assert!(
+        syncing.sync.ibd.is_active(now, Network::Regtest),
+        "the fixture latch must be active for this snapshot"
+    );
+    assert!(
+        syncing.sync.in_initial_block_download(),
+        "telemetry must report initial block download while the latch is active"
+    );
+
+    let (tree, _blocks) = mined_chain(0, 3)?;
+    let synced = SyncHarness::with_ibd(tree, synced_ibd_latch());
+    assert!(
+        !synced.sync.ibd.is_active(now, Network::Regtest),
+        "the fixture latch must have left initial block download"
+    );
+    assert!(
+        !synced.sync.in_initial_block_download(),
+        "telemetry must stay out of initial block download once the latch \
+         has left it, even with headers ahead of the applied tip"
+    );
     Ok(())
 }

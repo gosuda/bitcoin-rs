@@ -16,6 +16,15 @@ pub enum IndexError {
     /// This indexer cannot undo a block, so a reorg cannot be made consistent.
     #[error("this indexer does not support block disconnect")]
     UnsupportedRollback,
+    /// The writer does not implement stamping a durable watermark anchor, so
+    /// a rebuild after pruning cannot be placed on it.
+    #[error("this indexer does not support watermark anchoring")]
+    UnsupportedAnchor,
+    /// `anchor_watermark` covers only capabilities derived from block
+    /// history: `ScriptLive` is reseeded from the authoritative UTXO view
+    /// rather than anchored, and an empty selection stamps nothing.
+    #[error("a watermark anchor cannot cover ScriptLive or an empty capability set")]
+    AnchorUnsupportedSelection,
     /// A block header did not have the consensus 80-byte length.
     #[error("invalid block header length {len}")]
     InvalidHeaderLength {

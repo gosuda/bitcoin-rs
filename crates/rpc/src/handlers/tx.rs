@@ -80,12 +80,12 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
     }
 
     {
-        let pool = ctx.mempool.read();
+        let pool = ctx.mempool.gateway.read();
         if let Some(entry) = pool.entry_by_txid(&txid) {
             return render_raw_transaction(ctx, entry.tx.as_ref(), verbose, None);
         }
     }
-    if let Some(derived_index) = ctx.derived_index.as_ref() {
+    if let Some(derived_index) = ctx.indexes.derived_index.as_ref() {
         let tx = derived_index.transaction(&txid).map_err(RpcError::from)?;
         if let Some(tx) = tx {
             let record = derived_index
@@ -97,7 +97,7 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
     }
 
     // Compatibility cache used by tests and early wiring; not confirmation proof.
-    if let Some(tx) = ctx.transactions.read().get(&txid) {
+    if let Some(tx) = ctx.chain.transactions.read().get(&txid) {
         return render_raw_transaction(ctx, tx, verbose, None);
     }
 
@@ -153,7 +153,7 @@ fn render_raw_transaction(
     });
     typed_to_sonic(&convert::raw_transaction_verbose(
         tx,
-        ctx.chain_network,
+        ctx.chain.chain_network,
         chain,
     )?)
 }
@@ -167,7 +167,7 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
     let outpoint = OutPoint::new(txid, vout_u32);
 
     if include_mempool {
-        let pool = ctx.mempool.read();
+        let pool = ctx.mempool.gateway.read();
         if pool.is_outpoint_spent(&outpoint) {
             return Ok(Value::new_null());
         }
@@ -179,7 +179,7 @@ pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
         }
     }
 
-    let Some(live) = ctx.utxo.get_entry(&outpoint) else {
+    let Some(live) = ctx.chain.utxo.get_entry(&outpoint) else {
         // Spent or never existed: Core-spec returns JSON null.
         return Ok(Value::new_null());
     };
@@ -200,7 +200,10 @@ fn txout_typed(
         best_block: ctx.best_hash().to_string(),
         confirmations,
         value: sat_to_btc(output.value.to_sat()),
-        script_pubkey: convert::script_pub_key_typed(&output.script_pubkey, ctx.chain_network)?,
+        script_pubkey: convert::script_pub_key_typed(
+            &output.script_pubkey,
+            ctx.chain.chain_network,
+        )?,
         coinbase,
     })
 }
@@ -266,7 +269,7 @@ pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 /// catching up, and a call the scan can answer today must not be refused
 /// because the index is behind.
 fn proof_via_index(ctx: &Arc<Context>, wanted: &hashbrown::HashSet<Txid>) -> Option<Value> {
-    let derived_index = ctx.derived_index.as_ref()?;
+    let derived_index = ctx.indexes.derived_index.as_ref()?;
     for probe in wanted {
         let height = match derived_index.transaction_height(probe) {
             Ok(Some(height)) => height,
@@ -325,10 +328,10 @@ fn proof_from_block_log(
     ctx: &Arc<Context>,
     wanted: &hashbrown::HashSet<Txid>,
 ) -> Result<Value, RpcError> {
-    let len = ctx.blocks.read().len();
+    let len = ctx.chain.blocks.read().len();
     let mut saw_pruned_block = false;
     for index in 0..len {
-        let Some(record) = ctx.blocks.read().get(index).cloned() else {
+        let Some(record) = ctx.chain.blocks.read().get(index).cloned() else {
             break;
         };
         let Some(bytes) = ctx.block_body_bytes(&record) else {
@@ -447,7 +450,7 @@ pub(crate) fn admit_transaction(
     tx: &Tx,
     max_feerate_sat_per_kvb: Option<u64>,
 ) -> Result<MutationResult, AdmissionFailure> {
-    match ctx.mempool.submit_transaction(
+    match ctx.mempool.gateway.submit_transaction(
         Arc::new(tx.clone()),
         AdmissionOrigin::Rpc,
         max_feerate_sat_per_kvb,
@@ -537,6 +540,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
 
     let facts = ctx
         .mempool
+        .gateway
         .preview_transactions(&txs, max_feerate, &ctx.admission_chain())
         .map_err(|error| match error {
             SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
@@ -585,7 +589,7 @@ pub(crate) fn decoderawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     let tx = decode_tx(raw, "TX decode failed".to_owned())?;
     typed_to_sonic(&v31::DecodeRawTransaction(convert::raw_transaction(
         &tx,
-        ctx.chain_network,
+        ctx.chain.chain_network,
     )?))
 }
 
@@ -657,7 +661,7 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     }
 
     // Address parsing requires bitcoin::Network (sanctioned seam).
-    let network = convert::bitcoin_network(ctx.chain_network);
+    let network = convert::bitcoin_network(ctx.chain.chain_network);
     let mut tx_outputs = Vec::with_capacity(outputs.len());
     for (key, value) in outputs {
         if key == "data" {
@@ -1065,7 +1069,7 @@ mod tests {
             .clone();
         let txid = coinbase.txid();
         {
-            let mut pool = ctx.mempool.pool().write();
+            let mut pool = ctx.mempool.gateway.pool().write();
             let vsize = u32::try_from(coinbase.vsize())?;
             let entry =
                 MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0);
@@ -1102,7 +1106,7 @@ mod tests {
         }
 
         let mut ctx = Context::new();
-        ctx.derived_index = Some(Arc::new(FailingQuery));
+        ctx.indexes.derived_index = Some(Arc::new(FailingQuery));
         let ctx = Arc::new(ctx);
         let genesis = fixture_genesis();
         let coinbase = genesis
@@ -1112,7 +1116,7 @@ mod tests {
             .clone();
         let txid = coinbase.txid();
         {
-            let mut pool = ctx.mempool.pool().write();
+            let mut pool = ctx.mempool.gateway.pool().write();
             let vsize = u32::try_from(coinbase.vsize())?;
             let entry =
                 MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0);
@@ -1136,7 +1140,8 @@ mod tests {
         let block_hash = genesis.block_hash();
         let mut ctx = Context::new();
         attach_body_for_block(&mut ctx, &genesis, 0);
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .insert_node(None, genesis.header, NodeStatus::Active)
             .expect("insert genesis header");
@@ -1181,13 +1186,13 @@ mod tests {
         };
         let txid = coinbase.txid();
         let mut ctx = Context::new();
-        ctx.derived_index = Some(Arc::new(StaticQuery {
+        ctx.indexes.derived_index = Some(Arc::new(StaticQuery {
             tx: coinbase.clone(),
         }));
         let ctx = Arc::new(ctx);
 
         assert!(
-            ctx.transactions.read().is_empty(),
+            ctx.chain.transactions.read().is_empty(),
             "confirmed transaction cache must stay empty"
         );
         let result = getrawtransaction(&ctx, &json!([txid.to_string()]))
@@ -1207,7 +1212,8 @@ mod tests {
         let txid = coinbase.txid();
         let record = BlockRecord::from_block(0, &genesis);
         let block_hash = record.hash;
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .insert_node(None, genesis.header, NodeStatus::Active)
             .expect("insert genesis header");
@@ -1232,7 +1238,8 @@ mod tests {
             panic!("genesis has no transactions");
         };
         let block_hash = genesis.block_hash();
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .insert_node(None, genesis.header, NodeStatus::HeaderValid)
             .expect("insert header-only block");
@@ -1297,7 +1304,7 @@ mod tests {
         };
         let txid = coinbase.txid();
         let mut ctx = Context::new();
-        ctx.block_body_source = Some(Arc::new(ScriptedBodySource {
+        ctx.chain.block_body_source = Some(Arc::new(ScriptedBodySource {
             responses: parking_lot::Mutex::new(std::collections::VecDeque::from([
                 None,
                 Some(consensus_bytes(&genesis)),
@@ -1318,14 +1325,6 @@ mod tests {
 
     #[test]
     fn gettxoutproof_with_blockhash_skips_unrelated_records() {
-        struct PanicBodySource;
-
-        impl bitcoin_rs_chain::BlockBodySource for PanicBodySource {
-            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-                panic!("specified blockhash proof should not load unrelated body {height}:{hash}");
-            }
-        }
-
         let genesis = fixture_genesis();
         let Some(coinbase) = genesis.txs.first() else {
             panic!("genesis has no transactions");
@@ -1334,11 +1333,14 @@ mod tests {
         let unrelated_hash = BlockHash::from(Hash256::from_le_bytes(&[7_u8; 32]));
         let record = BlockRecord::from_block(0, &genesis);
         let block_hash = record.hash;
-        let mut ctx = Context::new().with_block_body_source(Arc::new(PanicBodySource));
-        ctx.block_body_source = Some(Arc::new(SeededBodySource {
-            bodies: vec![(0, record.hash, consensus_bytes(&genesis))],
+        let mut ctx = Context::new();
+        ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
+            height: record.height,
+            hash: record.hash,
+            body: consensus_bytes(&genesis),
         }));
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .insert_node(None, genesis.header, NodeStatus::Active)
             .expect("insert genesis header");
@@ -1367,7 +1369,8 @@ mod tests {
         };
         let txid = coinbase.txid();
         let record = BlockRecord::from_block(0, &genesis);
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .insert_node(None, genesis.header, NodeStatus::Active)
             .expect("insert genesis header");
@@ -1394,7 +1397,8 @@ mod tests {
             panic!("genesis has no transactions");
         };
         let block_hash = genesis.block_hash();
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .insert_node(None, genesis.header, NodeStatus::HeaderValid)
             .expect("insert header-only block");
@@ -1505,7 +1509,7 @@ mod tests {
             if height == self.height && hash == self.hash {
                 Some(self.body.clone())
             } else {
-                panic!("index path should not load unrelated body {height}:{hash}");
+                panic!("should not load unrelated body {height}:{hash}");
             }
         }
     }
@@ -1545,7 +1549,7 @@ mod tests {
             bodies.push((record.height, record.hash, consensus_bytes(block)));
             records.push(record);
         }
-        ctx.block_body_source = Some(Arc::new(SeededBodySource { bodies }));
+        ctx.chain.block_body_source = Some(Arc::new(SeededBodySource { bodies }));
         for record in records {
             ctx.add_block(record);
         }
@@ -1559,7 +1563,7 @@ mod tests {
 
     fn attach_body_for_block(ctx: &mut Context, block: &Block, height: u32) {
         let record = BlockRecord::from_block(height, block);
-        ctx.block_body_source = Some(Arc::new(SeededBodySource {
+        ctx.chain.block_body_source = Some(Arc::new(SeededBodySource {
             bodies: vec![(record.height, record.hash, consensus_bytes(block))],
         }));
     }
@@ -1580,8 +1584,8 @@ mod tests {
         };
         let indexed = BlockRecord::from_block(2, &block);
         let mut ctx = Context::new();
-        ctx.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(2)))));
-        ctx.block_body_source = Some(Arc::new(PanicUnlessBodySource {
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(2)))));
+        ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
             height: indexed.height,
             hash: indexed.hash,
             body: consensus_bytes(&block),
@@ -1638,7 +1642,7 @@ mod tests {
             proof_for(&scan_ctx, &wanted).unwrap_or_else(|err| panic!("scan path failed: {err}"));
 
         let mut index_ctx = Context::new();
-        index_ctx.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+        index_ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
         install_blocks(&mut index_ctx, &blocks);
         let index_ctx = Arc::new(index_ctx);
         let fell_back = proof_for(&index_ctx, &wanted)
@@ -1660,7 +1664,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let mut index_ctx = Context::new();
-        index_ctx.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
+        index_ctx.indexes.derived_index = Some(Arc::new(HeightQuery(|_: &Txid| Ok(Some(0)))));
         install_blocks(&mut index_ctx, &blocks);
         let index_ctx = Arc::new(index_ctx);
 
@@ -1682,9 +1686,9 @@ mod tests {
         let resolvable = wanted.iter().map(|txid| (*txid, 1)).collect::<Vec<_>>();
 
         let mut ctx = Context::new();
-        ctx.derived_index = Some(Arc::new(HeightQuery(resolving(resolvable))));
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(resolvable))));
         let indexed = BlockRecord::from_block(1, &block);
-        ctx.block_body_source = Some(Arc::new(PanicUnlessBodySource {
+        ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
             height: indexed.height,
             hash: indexed.hash,
             body: consensus_bytes(&block),
@@ -1717,9 +1721,9 @@ mod tests {
         };
 
         let mut ctx = Context::new();
-        ctx.derived_index = Some(Arc::new(HeightQuery(resolving(vec![(only_one, 1)]))));
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(resolving(vec![(only_one, 1)]))));
         let indexed = BlockRecord::from_block(1, &block);
-        ctx.block_body_source = Some(Arc::new(PanicUnlessBodySource {
+        ctx.chain.block_body_source = Some(Arc::new(PanicUnlessBodySource {
             height: indexed.height,
             hash: indexed.hash,
             body: consensus_bytes(&block),
@@ -1765,7 +1769,8 @@ mod tests {
 
             let failure = error.clone();
             let mut ctx = Context::new();
-            ctx.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| Err(failure.clone()))));
+            ctx.indexes.derived_index =
+                Some(Arc::new(HeightQuery(move |_: &Txid| Err(failure.clone()))));
             install_blocks(&mut ctx, &blocks);
             let ctx = Arc::new(ctx);
 
@@ -1794,13 +1799,14 @@ mod tests {
         let record = BlockRecord::from_block(0, &block);
         let block_hash = record.hash;
         let mut ctx = Context::new();
-        ctx.derived_index = Some(Arc::new(HeightQuery(
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(
             |_: &Txid| -> Result<Option<u32>, TxQueryError> {
                 panic!("the explicit-blockhash path must not consult the index");
             },
         )));
         attach_body_for_block(&mut ctx, &block, 0);
-        ctx.block_tree
+        ctx.chain
+            .block_tree
             .write()
             .insert_node(None, block.header, NodeStatus::Active)
             .expect("insert block header");
@@ -1830,7 +1836,7 @@ mod tests {
 
         let counter = Arc::clone(&probes);
         let mut ctx = Context::new();
-        ctx.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
             counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Ok(None)
         })));
@@ -1869,7 +1875,7 @@ mod tests {
         // Every probe names height 0, whose block holds none of the wanted
         // txids, so every candidate fails verification.
         let mut ctx = Context::new();
-        ctx.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
+        ctx.indexes.derived_index = Some(Arc::new(HeightQuery(move |_: &Txid| {
             counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Ok(Some(0))
         })));
@@ -1922,8 +1928,8 @@ mod tests {
             panic!("block has no transactions");
         };
 
-        let ctx = Context::new();
-        let log = Arc::clone(&ctx.blocks);
+        let mut ctx = Context::new();
+        let log = Arc::clone(&ctx.chain.blocks);
         let bodies = blocks
             .iter()
             .enumerate()
@@ -1932,10 +1938,11 @@ mod tests {
                 (height, consensus_bytes(block))
             })
             .collect::<Vec<_>>();
-        let ctx = Arc::new(ctx.with_block_body_source(Arc::new(LockProbeSource {
+        ctx.chain.block_body_source = Some(Arc::new(LockProbeSource {
             blocks: log,
             bodies,
-        })));
+        }));
+        let ctx = Arc::new(ctx);
 
         // Body-less records, so every body must come from the source above.
         for (height, block) in blocks.iter().enumerate() {
@@ -1980,7 +1987,7 @@ mod tests {
             1,
         ));
         bitcoin_rs_utxo::contract::commit_block_changes(
-            &ctx.utxo,
+            &ctx.chain.utxo,
             &changes,
             &Hash256::from_le_bytes(&[0xaa; 32]),
         )
@@ -2042,7 +2049,7 @@ mod tests {
         // for `release`.
         let (parked_tx, parked_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
-        let target = Arc::as_ptr(&ctx.mempool).expose_provenance();
+        let target = Arc::as_ptr(&ctx.mempool.gateway).expose_provenance();
         arm_admission_park(target, parked_tx, release_rx);
 
         let ctx_clone = Arc::clone(&ctx);
@@ -2061,6 +2068,7 @@ mod tests {
         // mempool sequence bumps and the parent's output is available.
         let guard = ctx_clone
             .mempool
+            .gateway
             .begin_chain_change()
             .expect("begin chain change on even generation");
         guard
@@ -2070,6 +2078,7 @@ mod tests {
         let parent_vsize = u32::try_from(parent.vsize()).unwrap_or(u32::MAX);
         ctx_clone
             .mempool
+            .gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
                 MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1),
@@ -2105,12 +2114,12 @@ mod tests {
 
         // The child must be in the mempool.
         assert!(
-            ctx.mempool.read().contains_txid(&child_txid),
+            ctx.mempool.gateway.read().contains_txid(&child_txid),
             "the child must be pooled after successful retry"
         );
         // The parent must still be in the mempool.
         assert!(
-            ctx.mempool.read().contains_txid(&parent_txid),
+            ctx.mempool.gateway.read().contains_txid(&parent_txid),
             "the parent must remain pooled"
         );
     }
@@ -2192,8 +2201,12 @@ mod acceptance_tests {
             false,
             7,
         ));
-        bitcoin_rs_utxo::contract::commit_block_changes(&ctx.utxo, &changes, &Hash256::default())
-            .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &ctx.chain.utxo,
+            &changes,
+            &Hash256::default(),
+        )
+        .unwrap_or_else(|err| panic!("commit_block failed: {err}"));
     }
 
     fn spending_tx(tag: u8, output_value: u64) -> Tx {
@@ -2242,8 +2255,8 @@ mod acceptance_tests {
         };
 
         assert_eq!(value.as_str(), Some(tx.txid().to_string().as_str()));
-        assert_eq!(ctx.mempool.read().len(), 1, "the pool must hold it");
-        assert!(ctx.mempool.read().contains_txid(&tx.txid()));
+        assert_eq!(ctx.mempool.gateway.read().len(), 1, "the pool must hold it");
+        assert!(ctx.mempool.gateway.read().contains_txid(&tx.txid()));
     }
 
     /// The default fee guard stops a transaction that burns its change.
@@ -2269,7 +2282,11 @@ mod acceptance_tests {
             RpcError::INVALID_PARAMS,
             "max-fee-exceeded is a parameter error: {error:?}"
         );
-        assert_eq!(ctx.mempool.read().len(), 0, "and nothing was admitted");
+        assert_eq!(
+            ctx.mempool.gateway.read().len(),
+            0,
+            "and nothing was admitted"
+        );
     }
 
     /// The guard is the caller's to lift, and the ceiling is a *rate*.
@@ -2286,7 +2303,11 @@ mod acceptance_tests {
             seed_utxo(&ctx, 9, 100_000_000);
             let tx = spending_tx(9, 1_000_000);
             let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx), 0]));
-            assert_eq!(ctx.mempool.read().len(), 1, "zero sends it: {sent:?}");
+            assert_eq!(
+                ctx.mempool.gateway.read().len(),
+                1,
+                "zero sends it: {sent:?}"
+            );
             sent
         };
         assert!(disabled.is_ok(), "{disabled:?}");
@@ -2298,7 +2319,7 @@ mod acceptance_tests {
             .err()
             .unwrap_or_else(|| panic!("0.99 BTC/kvB is a ceiling, not a fee allowance"));
         assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error:?}");
-        assert_eq!(ctx.mempool.read().len(), 0);
+        assert_eq!(ctx.mempool.gateway.read().len(), 0);
     }
 
     /// A ceiling the transaction stays under changes nothing.
@@ -2312,7 +2333,7 @@ mod acceptance_tests {
         let sent = sendrawtransaction(&ctx, &json!([hex_of(&tx)]));
 
         assert!(sent.is_ok(), "an ordinary fee is not capped: {sent:?}");
-        assert_eq!(ctx.mempool.read().len(), 1);
+        assert_eq!(ctx.mempool.gateway.read().len(), 1);
     }
 
     /// Core's `ParseFeeRate` refuses ceilings at or above one whole coin per
@@ -2328,7 +2349,11 @@ mod acceptance_tests {
             .unwrap_or_else(|| panic!("1 BTC/kvB is not an accepted ceiling"));
 
         assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error:?}");
-        assert_eq!(ctx.mempool.read().len(), 0, "nothing admitted: {error:?}");
+        assert_eq!(
+            ctx.mempool.gateway.read().len(),
+            0,
+            "nothing admitted: {error:?}"
+        );
     }
 
     /// Missing inputs are Core's `RPC_VERIFY_ERROR` (-25), not the policy
@@ -2348,7 +2373,7 @@ mod acceptance_tests {
             "expected a verify error, got {error:?}"
         );
         assert_eq!(error.code(), RpcError::CORE_VERIFY_ERROR);
-        assert!(ctx.mempool.read().is_empty());
+        assert!(ctx.mempool.gateway.read().is_empty());
     }
 
     /// A transaction with duplicate inputs must be rejected by consensus
@@ -2390,7 +2415,7 @@ mod acceptance_tests {
             matches!(error, RpcError::TxRejected(_)),
             "expected a rejection, got {error:?}"
         );
-        assert!(ctx.mempool.read().is_empty());
+        assert!(ctx.mempool.gateway.read().is_empty());
     }
 
     /// Core rebroadcasts rather than failing, and callers retry on a dropped
@@ -2409,7 +2434,11 @@ mod acceptance_tests {
         };
 
         assert_eq!(first.as_str(), second.as_str());
-        assert_eq!(ctx.mempool.read().len(), 1, "it must not be inserted twice");
+        assert_eq!(
+            ctx.mempool.gateway.read().len(),
+            1,
+            "it must not be inserted twice"
+        );
     }
 
     /// An RBF-evicted transaction is no longer known.
@@ -2434,7 +2463,7 @@ mod acceptance_tests {
             panic!("the RBF-signaling original must be accepted");
         };
         assert!(
-            ctx.mempool.read().contains_txid(&original_txid),
+            ctx.mempool.gateway.read().contains_txid(&original_txid),
             "the original must enter the pool"
         );
 
@@ -2444,11 +2473,14 @@ mod acceptance_tests {
             panic!("the higher-fee replacement must be accepted");
         };
         assert!(
-            !ctx.mempool.read().contains_txid(&original_txid),
+            !ctx.mempool.gateway.read().contains_txid(&original_txid),
             "the original must be swept by the replacement"
         );
         assert!(
-            ctx.mempool.read().contains_txid(&replacement.txid()),
+            ctx.mempool
+                .gateway
+                .read()
+                .contains_txid(&replacement.txid()),
             "the replacement must occupy the pool"
         );
 
@@ -2458,7 +2490,7 @@ mod acceptance_tests {
             "resubmitting the evicted original must re-evaluate, not succeed as already-known: {resent:?}"
         );
         assert!(
-            !ctx.mempool.read().contains_txid(&original_txid),
+            !ctx.mempool.gateway.read().contains_txid(&original_txid),
             "the evicted original must still be absent after the failed retry"
         );
 
@@ -2518,7 +2550,7 @@ mod acceptance_tests {
             "vsize must be the transaction's, not a placeholder"
         );
         assert!(
-            ctx.mempool.read().is_empty(),
+            ctx.mempool.gateway.read().is_empty(),
             "testing acceptance must not accept"
         );
     }
@@ -2563,7 +2595,7 @@ mod acceptance_tests {
     fn standardness_is_enforced_on_mainnet() {
         let mainnet = Arc::new(Context::new());
         assert_eq!(
-            mainnet.chain_network,
+            mainnet.chain.chain_network,
             bitcoin_rs_primitives::Network::Mainnet,
             "the fixture assumes the default context is mainnet"
         );
@@ -2576,7 +2608,7 @@ mod acceptance_tests {
             "mainnet must enforce standardness"
         );
     }
-    /// Builds a 12-header chain in `ctx.block_tree`, with the applied tip 6
+    /// Builds a 12-header chain in `ctx.chain.block_tree`, with the applied tip 6
     /// blocks behind the header tip, and publishes both tips in `ctx`. Block
     /// times start above the lock-time threshold so the MTP values actually
     /// govern finality for the timestamp-locked transaction under test.
@@ -2586,7 +2618,7 @@ mod acceptance_tests {
 
         let mut ids = Vec::new();
         {
-            let mut tree = ctx.block_tree.write();
+            let mut tree = ctx.chain.block_tree.write();
             let mut prev_id: Option<NodeId> = None;
             for height in 0..=11_u32 {
                 let prev_hash = match prev_id {
@@ -2610,23 +2642,23 @@ mod acceptance_tests {
         }
 
         let (applied_hash, best_hash) = {
-            let tree = ctx.block_tree.read();
+            let tree = ctx.chain.block_tree.read();
             let applied_id = ids[10];
             let best_id = ids[11];
             let applied_node = tree.node(applied_id).expect("applied node exists");
             let best_node = tree.node(best_id).expect("best node exists");
-            ctx.applied_tip.store(Some(Arc::new(TipSnapshot {
+            ctx.set_applied_tip(TipSnapshot {
                 tip_id: applied_id,
                 height: applied_node.height,
                 chainwork: applied_node.chainwork,
                 hash: applied_node.hash,
-            })));
-            ctx.chain_tip.store(Some(Arc::new(TipSnapshot {
+            });
+            ctx.set_chain_tip(TipSnapshot {
                 tip_id: best_id,
                 height: best_node.height,
                 chainwork: best_node.chainwork,
                 hash: best_node.hash,
-            })));
+            });
             (applied_node.hash, best_node.hash)
         };
 
@@ -2670,12 +2702,12 @@ mod acceptance_tests {
             "a tx final only under the header-tip MTP must be rejected; got {result:?}"
         );
         assert_eq!(
-            ctx.mempool.read().len(),
+            ctx.mempool.gateway.read().len(),
             0,
             "rejected tx must not enter the pool"
         );
         assert_eq!(
-            ctx.transactions.read().len(),
+            ctx.chain.transactions.read().len(),
             0,
             "rejected tx must not be recorded as accepted"
         );

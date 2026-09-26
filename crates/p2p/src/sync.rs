@@ -452,7 +452,9 @@ impl BlockSync {
 
     /// Runs one orchestrator tick as a single canonical frontier
     /// reconciliation: observe, recover what is unowned, then schedule or
-    /// name why progress is impossible.
+    /// name why progress is impossible. Connections the sweep or the
+    /// header-request rotation retired are dropped from the observed
+    /// snapshot before planning or selection reads it.
     pub fn tick(&self) {
         self.drain_inbound_headers();
         self.chain.bootstrap_genesis();
@@ -469,11 +471,20 @@ impl BlockSync {
         // Convicted connections must release their work before selection so
         // the same tick can re-request it.
         self.reconcile_peer_sessions();
-        let frontier = self.observe_frontier(chain, now);
+        let mut frontier = self.observe_frontier(chain, now);
         // A connection that has had twenty minutes to bring a better chain and
         // two more to answer a probe is retired before this tick plans any
         // further work with it.
         self.sweep_chain_sync(&frontier, now);
+        // Both maintenance steps above can retire a connection after the
+        // observation. Drop the retired connections from the snapshot before
+        // planning or selection reads it, so the same tick's header fallback
+        // asks a live peer instead of replaying into the socket that just
+        // closed — the same conviction-before-selection rule
+        // `reconcile_peer_sessions` enforces above.
+        frontier
+            .usable_peers
+            .retain(|peer| self.peer_table.is_current(peer.source));
         self.follow_tip_progress(&frontier, now);
         let plan = frontier.plan();
 

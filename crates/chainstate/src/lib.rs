@@ -524,6 +524,10 @@ pub struct Chainstate {
     /// Retention authority shared with the pruning pass: chain transitions
     /// and required readers pin old-branch bodies here so pruning cannot
     /// delete data an active transition still re-reads (#655, `RCV-08`).
+    ///
+    /// It starts from the executed prune frontier the store reports, so a
+    /// restart grants no lease over history the previous process deleted
+    /// (#1151).
     pub(crate) retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     /// Process-wide initial-block-download latch owned by the chainstate.
     ///
@@ -572,6 +576,15 @@ pub struct ChainstateParts {
     pub capture_rawtx: bool,
     /// Whether connects retain canonical block bytes for node-owned consumers.
     pub capture_block_bytes: bool,
+    /// The executed prune frontier a previous process committed.
+    ///
+    /// The node reconstructs it from the store when it opens, so the
+    /// retention registry starts from the deletions that actually happened
+    /// rather than from the requested prune height.
+    /// [`bitcoin_rs_storage::pruning::ExecutedFrontier::NONE`] is correct for
+    /// a store that never pruned and for a facade with no durable prune
+    /// families.
+    pub executed_frontier: bitcoin_rs_storage::pruning::ExecutedFrontier,
 }
 
 /// Held while new chain mutations are blocked.
@@ -738,7 +751,9 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
-            retention: Arc::new(bitcoin_rs_storage::RetentionRegistry::new()),
+            retention: Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
+                parts.executed_frontier,
+            )),
             ibd,
         }
     }
@@ -750,6 +765,24 @@ impl Chainstate {
     pub fn fail_closed_for_recovery(&self) {
         self.admission.close_permanently();
         self.shutdown.store(true, Ordering::Release);
+    }
+
+    /// Reports whether chain mutation admission is closed.
+    ///
+    /// This is the "can the chain still mutate?" operational fact: true
+    /// once [`Self::fail_closed_for_recovery`] closed admission after a
+    /// fatal transition failure, or an orderly [`Self::close`] began
+    /// draining. Both close it because both refuse every later transition.
+    ///
+    /// PRE: none.
+    /// POST: reads the admission flag with acquire ordering, so a `true`
+    ///   answer follows the close that set it.
+    /// INVARIANT: this fact is separate from initial block download
+    ///   ([`bitcoin_rs_chain::InitialBlockDownload`]) and must never be
+    ///   folded into, or computed from, that boolean.
+    #[must_use]
+    pub fn is_closed_for_recovery(&self) -> bool {
+        self.admission.closed.load(Ordering::Acquire)
     }
 
     /// Permanently closes mutation admission and waits for in-flight mutations.
@@ -783,6 +816,40 @@ impl Chainstate {
         TipReader::new(Arc::clone(&self.applied_tip))
     }
 
+    /// Clones the best-work header-tip cell for the RPC capability bundle.
+    ///
+    /// The RPC context is a sibling capability boundary (ARCH-10): it holds
+    /// the cell itself so handlers can publish and observe the tip the chain
+    /// owner already moved, without routing every read through a reader.
+    #[must_use]
+    pub fn chain_tip_handle(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
+        Arc::clone(&self.chain_tip)
+    }
+
+    /// Clones the authoritative applied-tip cell for the RPC capability
+    /// bundle.
+    #[must_use]
+    pub fn applied_tip_handle(&self) -> Arc<ArcSwapOption<TipSnapshot>> {
+        Arc::clone(&self.applied_tip)
+    }
+
+    /// Publishes the genesis connect outcome as the best-work header tip.
+    ///
+    /// Header admission fills the header-tip cell through the tree; a
+    /// genesis connect is the one mutation that establishes the cell before
+    /// any batch was admitted, so the cell is published here.
+    ///
+    /// PRE: `tip` is the tip of a successful genesis connect.
+    /// POST: the header-tip cell names `tip` when it named nothing; an
+    ///   already-published tip is left untouched.
+    /// INVARIANT: callers outside this crate never store the header tip
+    ///   directly.
+    pub fn publish_genesis_tip(&self, tip: TipSnapshot) {
+        let tip = Arc::new(tip);
+        self.chain_tip
+            .rcu(|current| current.clone().or_else(|| Some(Arc::clone(&tip))));
+    }
+
     /// Loads the current best-work header tip.
     #[must_use]
     pub fn header_tip(&self) -> Option<Arc<TipSnapshot>> {
@@ -799,6 +866,12 @@ impl Chainstate {
     #[must_use]
     pub fn block_tree_reader(&self) -> BlockTreeReader {
         BlockTreeReader::new(Arc::clone(&self.block_tree))
+    }
+
+    /// Clones the block-tree cell for the RPC capability bundle.
+    #[must_use]
+    pub fn block_tree_handle(&self) -> Arc<RwLock<BlockTree>> {
+        Arc::clone(&self.block_tree)
     }
 
     /// Returns the chainstate-owned initial-block-download latch.

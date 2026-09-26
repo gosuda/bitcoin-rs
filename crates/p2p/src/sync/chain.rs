@@ -5,6 +5,10 @@
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
+
+// Header admission is decided by the authoritative tree writer, so its
+// outcome vocabulary belongs to the chain crate; the seam shares it.
+pub use bitcoin_rs_chain::HeaderAdmission;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
@@ -18,25 +22,6 @@ use std::sync::Arc;
 /// Boxed source for seam failures: the executor forwards them to logs and
 /// metrics without naming the implementation's error types.
 pub type SyncChainError = Box<dyn core::error::Error + Send + Sync>;
-
-/// Outcome of admitting one inbound headers batch into the block tree.
-pub enum HeaderAdmission {
-    /// Batch accepted into the block tree.
-    Accepted {
-        /// Headers accepted from the batch.
-        accepted: usize,
-        /// Hash of the last accepted header, when any were admitted.
-        announced_tip: Option<Hash256>,
-        /// Height of `announced_tip` on the active chain, when resolvable.
-        active_height: Option<i32>,
-    },
-    /// Header validation rejected the batch (peer-fault classification stays
-    /// with the executor).
-    Rejected(bitcoin_rs_chain::ChainError),
-    /// Admission refused before validation (chain transition lock
-    /// unavailable); batch dropped.
-    Refused(SyncChainError),
-}
 
 /// How the executor must treat a failed window commit or branch connect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

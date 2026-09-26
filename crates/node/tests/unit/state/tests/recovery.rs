@@ -83,8 +83,9 @@ fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::R
         .read()
         .lookup(Hash256::from(genesis.block_hash()))
         .ok_or_else(|| anyhow::anyhow!("missing genesis node"))?;
-    state.chainstate().block_tree().write().insert_node(
-        Some(genesis_id),
+    crate::sync::fixture_insert_header_node(
+        &state.chainstate(),
+        genesis_id,
         replacement.header,
         bitcoin_rs_chain::node::NodeStatus::HeaderValid,
     )?;
@@ -148,8 +149,9 @@ fn switch_to_branch_settles_disconnect_debt() -> anyhow::Result<()> {
     for height in 1..=2 {
         let block =
             mined_regtest_child_at(previous_hash, genesis.header.time + 10 + height, height)?;
-        let node_id = state.chainstate().block_tree().write().insert_node(
-            Some(parent),
+        let node_id = crate::sync::fixture_insert_header_node(
+            &state.chainstate(),
+            parent,
             block.header,
             bitcoin_rs_chain::node::NodeStatus::HeaderValid,
         )?;
@@ -305,8 +307,9 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
     for height in 1..=2 {
         let block =
             mined_regtest_child_at(previous_hash, genesis.header.time + 10 + height, height)?;
-        let node_id = state.chainstate().block_tree().write().insert_node(
-            Some(parent),
+        let node_id = crate::sync::fixture_insert_header_node(
+            &state.chainstate(),
+            parent,
             block.header,
             bitcoin_rs_chain::node::NodeStatus::HeaderValid,
         )?;
@@ -348,7 +351,8 @@ fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<(
     let (_dir, state, fork_tip, fork_bodies) = forked_regtest_state()?;
     let handles = state.chainstate();
     let tip_before = handles.applied_tip().load_full().map(|tip| tip.hash);
-    handles.retention_handle().record_pruned_below(5);
+    let reservation = handles.retention_handle().reserve(5);
+    reservation.commit(5);
 
     let outcome = crate::reorg::switch_to_branch(
         &handles,
@@ -493,8 +497,9 @@ fn plan_fork(
     for height in fork_height + 1..=fork_height + depth {
         let block = mined_regtest_child_at(previous, time_base.wrapping_add(height), height)?;
         let hash = Hash256::from(block.block_hash());
-        let node_id = state.chainstate().block_tree().write().insert_node(
-            Some(parent),
+        let node_id = crate::sync::fixture_insert_header_node(
+            &state.chainstate(),
+            parent,
             block.header,
             bitcoin_rs_chain::node::NodeStatus::HeaderValid,
         )?;

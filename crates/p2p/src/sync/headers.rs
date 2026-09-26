@@ -141,6 +141,18 @@ impl BlockSync {
                         error,
                         ChainError::MissingParent { .. } | ChainError::NoCommonAncestor { .. }
                     ) {
+                        if !wire_response {
+                            // A header carried by a delivered body is not a
+                            // response to the pending request, and the
+                            // delivery itself is the new evidence that this
+                            // connection holds the missing ancestry: retire
+                            // the stale gate so the recovery ask reaches the
+                            // wire with this delivery instead of waiting for
+                            // the deadline to clear first.
+                            if let Some(source) = source {
+                                self.clear_header_request_for(source);
+                            }
+                        }
                         self.request_headers_from(source);
                     }
                     tracing::warn!(

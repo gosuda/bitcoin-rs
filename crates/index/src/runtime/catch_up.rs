@@ -23,6 +23,7 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyReader;
+use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
 use crossbeam_channel::Receiver;
 use rayon::prelude::*;
 use std::time::{Duration, Instant};
@@ -96,8 +97,40 @@ impl Worker {
             || watermark.map_or(0, |w| w.height.saturating_add(1)),
             |endpoint| endpoint.height.saturating_add(1),
         );
+        // Ask the authority to hold this leg's history. While the grant
+        // lives no row at or above `start_height` is deleted, so a body that
+        // reads back absent is transient absence rather than lost history,
+        // and the pass never has to re-derive a prune line. A refusal is the
+        // owner's typed answer: `Pruned` is permanent and routes to a rebuild
+        // from what remains, while `Reserved` and the transient answers only
+        // wait — a reservation can abort and release its range, and a missing
+        // row can still arrive.
+        let pass_history = match self.history.request_history(start_height) {
+            Ok(lease) => lease,
+            Err(HistoryUnavailable::Pruned { below }) => {
+                tracing::warn!(
+                    below,
+                    start_height,
+                    "derived index needs history the pruning authority deleted"
+                );
+                // Prepared rows belong to the pre-reset position: the rebuild
+                // re-derives from the frontier, so they cannot be carried.
+                *pending = None;
+                return self.rebuild_from_pruned(capabilities, below, target);
+            }
+            Err(error) => {
+                // The grant is deferred, not denied: keep the prepared rows
+                // so the retry continues where this pass left off instead of
+                // re-deriving them.
+                if !state.batch.is_empty() {
+                    *pending = Some(state);
+                }
+                tracing::debug!(%error, "derived index history grant deferred");
+                return Ok(ReconcileAction::Stalled);
+            }
+        };
         if start_height > target.height {
-            return if self.sync_and_commit(state)?.is_some() {
+            return if self.commit_forward(state, &pass_history)?.is_some() {
                 Ok(ReconcileAction::CaughtUp)
             } else {
                 Ok(ReconcileAction::Stalled)
@@ -145,6 +178,7 @@ impl Worker {
                     &mut body_reader,
                     capabilities,
                     &mut state,
+                    &pass_history,
                     pending,
                 )? {
                     ChunkAction::Continue => {}
@@ -154,7 +188,7 @@ impl Worker {
             }
         }
 
-        self.finish_catch_up(state, chunk_end, target, pending)
+        self.finish_catch_up(state, chunk_end, target, &pass_history, pending)
     }
 
     /// Loads bodies serially until the count or byte cap, prepares that prefix
@@ -164,12 +198,14 @@ impl Worker {
     /// was requested, `Progressed` if the batch filled and was committed, or
     /// `Continue` to keep processing.
     #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_and_admit_chunk(
         &self,
         identities: &mut &[BlockIdentity],
         body_reader: &mut Box<dyn BlockBodyReader + '_>,
         capabilities: IndexCapabilities,
         state: &mut PendingForward,
+        history: &HistoryLease,
         pending: &mut Option<PendingForward>,
     ) -> Result<ChunkAction, DerivedIndexWorkerError> {
         if self.runtime.should_stop() {
@@ -251,7 +287,7 @@ impl Worker {
             }
             if state.batch.try_push(prepared).is_err() {
                 return if self
-                    .sync_and_commit(state.take(self.batch_limits))?
+                    .commit_forward(state.take(self.batch_limits), history)?
                     .is_some()
                 {
                     Ok(ChunkAction::Progressed)
@@ -261,7 +297,7 @@ impl Worker {
             }
             if state.batch.is_full() {
                 return if self
-                    .sync_and_commit(state.take(self.batch_limits))?
+                    .commit_forward(state.take(self.batch_limits), history)?
                     .is_some()
                 {
                     Ok(ChunkAction::Progressed)
@@ -279,6 +315,7 @@ impl Worker {
         state: PendingForward,
         chunk_end: u32,
         target: &TipSnapshot,
+        history: &HistoryLease,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         if chunk_end < target.height {
@@ -302,11 +339,86 @@ impl Worker {
             return Ok(ReconcileAction::Buffered);
         }
 
-        if self.sync_and_commit(state)?.is_some() {
+        if self.commit_forward(state, history)?.is_some() {
             Ok(ReconcileAction::Progressed)
         } else {
             Ok(ReconcileAction::Stalled)
         }
+    }
+
+    /// Commits one forward batch and moves the history pin to the position
+    /// that batch made durable.
+    ///
+    /// POST: the authority may then prune the history this consumer has
+    /// already indexed, so a long catch-up costs a bounded window instead of
+    /// every row above its starting watermark.
+    fn commit_forward(
+        &self,
+        state: PendingForward,
+        history: &HistoryLease,
+    ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
+        let durable = self.sync_and_commit(state)?;
+        if let Some(endpoint) = durable.as_ref() {
+            history.advance(endpoint.height.saturating_add(1));
+        }
+        Ok(durable)
+    }
+
+    /// The permanent `Pruned` answer: reset `capabilities` and anchor their
+    /// durable watermarks at the frontier so the rebuild starts at the first
+    /// surviving height instead of asking for deleted history forever.
+    ///
+    /// `ScriptLive` needs no anchor: it reseeds from the authoritative UTXO
+    /// view at the tip, so the reset alone sends it through that path.
+    fn rebuild_from_pruned(
+        &self,
+        capabilities: IndexCapabilities,
+        below: u32,
+        target: &TipSnapshot,
+    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
+        // `below` is at least 1: a refusal requires `floor < below` and no
+        // floor is negative.
+        let anchor_height = below - 1;
+        if anchor_height > target.height {
+            // The frontier has already passed the applied tip, so no
+            // surviving row is indexable: the consumer keeps its derived
+            // rows and waits rather than churning a reset every pass.
+            return Ok(ReconcileAction::Stalled);
+        }
+        let anchored = IndexCapabilities {
+            script_live: false,
+            ..capabilities
+        };
+        // Resolve the anchor identity before the durable reset: it is a pure
+        // read — the block tree keeps headers for pruned heights — so a
+        // missing node fails before any derived row is erased, not after.
+        let identity = if anchored.is_empty() {
+            None
+        } else {
+            Some(
+                self.collect_target_chain(target, anchor_height, anchor_height)?
+                    .into_iter()
+                    .next()
+                    .ok_or(DerivedIndexWorkerError::MissingTargetChain {
+                        height: anchor_height,
+                    })?,
+            )
+        };
+        self.reset_for_rebuild(capabilities)?;
+        let Some(identity) = identity else {
+            return Ok(ReconcileAction::Progressed);
+        };
+        self.writer
+            .anchor_watermark(
+                anchored,
+                IndexWatermark {
+                    height: anchor_height,
+                    hash: identity.hash,
+                },
+                below,
+            )
+            .map_err(DerivedIndexWorkerError::Index)?;
+        Ok(ReconcileAction::Progressed)
     }
 }
 

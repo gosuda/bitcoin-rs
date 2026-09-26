@@ -378,12 +378,10 @@ impl ChainFollowers {
                 if let (Some(change), Some(gateway)) =
                     (mempool_change.as_ref(), self.mempool_gateway())
                 {
-                    let applied_tip = handles.applied_tip_reader();
-                    let block_tree = handles.block_tree_reader();
                     let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
-                        handles.utxo(),
-                        &applied_tip,
-                        &block_tree,
+                        handles.utxo_handle(),
+                        handles.applied_tip_reader(),
+                        handles.block_tree_reader(),
                         handles.network(),
                     );
                     if gateway.remove_for_reorg(change, &chain).is_err() {

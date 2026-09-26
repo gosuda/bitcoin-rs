@@ -70,6 +70,7 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) ->
         ["mempool"] => mempool(&ctx),
         ["mempool", "txids"] => json_response(
             ctx.mempool
+                .gateway
                 .read()
                 .iter_txids()
                 .into_iter()
@@ -307,7 +308,7 @@ pub(super) fn outspend(
     outpoint: OutPoint,
 ) -> Result<Outspend, Response> {
     let ctx = projection.ctx;
-    let pool = ctx.mempool.read();
+    let pool = ctx.mempool.gateway.read();
     if let Some(spender) = pool
         .outpoint_spender(outpoint)
         .map_err(|_| internal("mempool spending index is inconsistent"))?
@@ -322,6 +323,7 @@ pub(super) fn outspend(
     drop(pool);
 
     let index = ctx
+        .indexes
         .script_index
         .as_ref()
         .ok_or_else(|| unavailable("script index is disabled"))?;
@@ -471,7 +473,7 @@ fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
     json_response(values)
 }
 fn mempool(ctx: &Context) -> Response {
-    let pool = ctx.mempool.read();
+    let pool = ctx.mempool.gateway.read();
     let stats = pool.stats();
     let mut bins = std::collections::BTreeMap::new();
     for entry in pool.iter_entries() {
@@ -489,7 +491,7 @@ fn mempool(ctx: &Context) -> Response {
     })
 }
 fn mempool_recent(ctx: &Context) -> Response {
-    let pool = ctx.mempool.read();
+    let pool = ctx.mempool.gateway.read();
     let mut entries = pool.iter_entries().collect::<Vec<_>>();
     entries.sort_by(|left, right| {
         right

@@ -53,7 +53,7 @@ fn spend(output_sats: u64) -> Tx {
 /// Admits two entries at `fee_sats` / `entry_height` through the pool seam
 /// that feeds `FeeEstimator::tx_entered`.
 fn admit_batch(ctx: &Context, fee_sats: u64, entry_height: u32) -> Vec<Tx> {
-    let pool = ctx.mempool.pool();
+    let pool = ctx.mempool.gateway.pool();
     let mut guard = pool.write();
     let mut txs = Vec::new();
     for index in 0_u64..2 {
@@ -78,7 +78,7 @@ fn admit_batch(ctx: &Context, fee_sats: u64, entry_height: u32) -> Vec<Tx> {
 /// Connects a block at `height` through the pool seam that feeds
 /// `FeeEstimator::block_connected` (and untracks whatever it confirms).
 fn connect_block(ctx: &Context, confirmed: &[&Tx], confirmed_txids: &[Txid], height: u32) {
-    let pool = ctx.mempool.pool();
+    let pool = ctx.mempool.gateway.pool();
     let mut guard = pool.write();
     let _ = guard.remove_for_block(confirmed, confirmed_txids, height);
 }
@@ -131,7 +131,7 @@ fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
     // RPC surface's own answer projected to sat/vB (BTC/kvB * 100 000), so a
     // wallet sees one rate everywhere; an omitted target would strand it and
     // a fabricated 1.0 would undersell the honest estimate.
-    let Some(estimate) = ctx.mempool.read().estimate_fee_rate(1) else {
+    let Some(estimate) = ctx.mempool.gateway.read().estimate_fee_rate(1) else {
         panic!("two confirmations against two sampled misses must qualify target 1");
     };
     let sat_per_kvb = estimate.as_sat_per_kvb();

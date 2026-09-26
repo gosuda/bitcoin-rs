@@ -23,6 +23,7 @@ use crate::IndexCapabilities;
 
 use bitcoin_rs_primitives::Hash256;
 
+use bitcoin_rs_storage::pruning::{HistoryAccess, RetentionBudget, RetentionRegistry};
 use bitcoin_rs_storage::{FjallStore, StorageError, block_body::BlockBodyStore};
 
 use hashbrown::HashMap;
@@ -171,6 +172,8 @@ struct Harness {
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     runtime: Arc<DerivedIndexRuntime>,
     evidence: Arc<RecordedIndexAhead>,
+    /// The pruning authority this worker reads through.
+    retention: Arc<RetentionRegistry>,
     worker: Worker,
 }
 
@@ -203,12 +206,14 @@ impl Harness {
             .script_live
             .then(|| Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
         let chain_transition = enabled.script_live.then(|| Arc::new(Mutex::new(())));
+        let retention = Arc::new(RetentionRegistry::new());
         let worker = Worker {
             runtime: Arc::clone(&runtime),
             writer: Arc::clone(&writer),
             applied_tip: bitcoin_rs_chain::TipReader::new(Arc::clone(&applied_tip)),
             block_tree: bitcoin_rs_chain::BlockTreeReader::new(Arc::clone(&fixture.tree)),
             body_store: Some(body_store),
+            history: HistoryAccess::new(Arc::clone(&retention), RetentionBudget::Unlimited),
             batch_limits: DEFAULT_BATCH_LIMITS,
             enabled,
             chain_events: Arc::new(TestChainCursor),
@@ -226,6 +231,7 @@ impl Harness {
             applied_tip,
             runtime,
             evidence,
+            retention,
             worker,
         }
     }
@@ -347,4 +353,81 @@ fn deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up() {
     h.settle(&mut pending);
     h.assert_at(&b3);
     assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
+}
+
+/// The pruning authority, not the worker, decides whether absent history is
+/// permanent. A height the frontier names as deleted routes to a rebuild
+/// anchored at the first surviving row; a height the authority granted and
+/// the store cannot yet show is a wait.
+#[test]
+fn pruned_history_rebuilds_from_the_frontier_and_absent_history_waits() {
+    // Pruned below the frontier: the owner says gone. The rollback hits the
+    // frontier, the capabilities reset, and the rebuild anchors at the first
+    // surviving height — then the forward leg actually converges on the new
+    // tip instead of stalling on rows that never return.
+    let f = ForkFixture::new(3);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    h.settle(&mut pending);
+    h.assert_at(&a3);
+
+    // Commit the frontier at 2: heights below it are permanently gone.
+    h.retention.reserve(2).commit(2);
+
+    // Move the tip to the rival branch. The rollback unwinds to height 1,
+    // where the frontier refuses the body read, so the owner routes the
+    // index to a rebuild anchored at height 1 on the B branch.
+    let b3 = f.tip(f.b[2]);
+    h.set_tip(&b3);
+    let action = h.worker.reconcile_once(&mut pending).expect("rebuild pass");
+    assert!(!matches!(action, ReconcileAction::CaughtUp));
+    assert_eq!(
+        h.runtime.phase(),
+        ReconcilePhase::FORWARD.with_leg(IndexCapabilities::HISTORICAL, ReconcileLeg::Rebuilding),
+        "the frontier answer must publish a rebuild, not a stall or a plain rollback"
+    );
+    let anchored = Some(IndexWatermark {
+        height: 1,
+        hash: f.b[0].1.to_le_bytes(),
+    });
+    let watermarks = h.watermarks();
+    assert_eq!(
+        watermarks.tx_lookup, anchored,
+        "the durable watermark is anchored at the first surviving height"
+    );
+    assert_eq!(watermarks.script_history, anchored);
+
+    // The leg converges: the rebuilt index covers the retained heights and
+    // reports the B tip, proving the anchor let it restart above the
+    // frontier rather than resetting forever.
+    h.settle(&mut pending);
+    h.assert_at(&b3);
+    assert!(h.index_ahead_call().is_none(), "equal height is not ahead");
+
+    // Granted but absent: the owner says the history is retained, so the
+    // worker waits and keeps the rows it already derived.
+    let f = ForkFixture::new(3);
+    let h = Harness::new(&f, u32::MAX);
+    let mut pending = None;
+    let a3 = f.tip(f.a[2]);
+    h.set_tip(&a3);
+    h.settle(&mut pending);
+    f.bodies.bodies.lock().remove(&(3, f.a[2].1.to_le_bytes()));
+    let a1 = f.tip(f.a[0]);
+    h.set_tip(&a1);
+    let action = h.worker.reconcile_once(&mut pending).expect("wait pass");
+    assert!(
+        matches!(action, ReconcileAction::Stalled),
+        "transient absence under a grant must not rebuild, got {action:?}"
+    );
+    assert_eq!(
+        h.watermarks().tx_lookup,
+        Some(IndexWatermark {
+            height: 3,
+            hash: a3.hash.to_le_bytes(),
+        }),
+        "the consumer keeps its derived rows while it waits"
+    );
 }

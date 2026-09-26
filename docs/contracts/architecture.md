@@ -111,9 +111,13 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 
 - `bitcoin-rs-rpc` must have zero non-test dependency edges on
   `bitcoin-rs-storage` and zero dependencies on storage engine crates.
-- RPC consumes node capabilities (chain, mempool, index, mining, p2p, utxo)
-  exclusively through capability query handles and domain context interfaces
-  (`Context`, `ContextHandles`), never through direct database access.
+- RPC consumes node capabilities (chain, mempool, index, network, mining, utxo)
+  exclusively through the capability groups `Context` stores (`ChainHandles`,
+  `MempoolHandles`, `IndexHandles`, `NetworkHandles`, `MiningHandles`), never
+  through direct database access. `Context::from_handles(ContextHandles)` is
+  the single composition point: one `ContextHandles` value carries every
+  capability, including the chain owner's transition barrier, and production
+  wiring attaches nothing to a built `Context`.
 - `bitcoin-rs-rpc` defines and forwards zero backend features. (The bench-only
   dev-dependency used for offline `txoutproof` fixtures is isolated to test
   scope and documented in `crates/rpc/Cargo.toml`).

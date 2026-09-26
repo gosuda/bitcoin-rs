@@ -141,16 +141,17 @@ impl<'a> Projection<'a> {
         &self,
         txid: &Txid,
     ) -> Result<Option<(Tx, Option<Confirmation>)>, Response> {
-        if let Some(transaction) = self.ctx.mempool.read().transaction_by_txid(txid) {
+        if let Some(transaction) = self.ctx.mempool.gateway.read().transaction_by_txid(txid) {
             return Ok(Some(((*transaction).clone(), None)));
         }
-        if let Some(transaction) = self.ctx.transactions.read().get(txid).cloned() {
+        if let Some(transaction) = self.ctx.chain.transactions.read().get(txid).cloned() {
             return self
                 .cached_confirmation(txid)
                 .map(|confirmation| Some((transaction, confirmation)));
         }
         let index = self
             .ctx
+            .indexes
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
@@ -167,6 +168,7 @@ impl<'a> Projection<'a> {
 
     pub(super) fn confirmed_transaction(&self, txid: &Txid) -> Result<Tx, Response> {
         self.ctx
+            .indexes
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| unavailable("transaction lookup index is disabled"))?
@@ -177,14 +179,22 @@ impl<'a> Projection<'a> {
 
     /// Resolves confirmation only against the current applied chain.
     pub(super) fn confirmation(&self, txid: &Txid) -> Result<Option<Confirmation>, Response> {
-        if self.ctx.mempool.read().transaction_by_txid(txid).is_some() {
+        if self
+            .ctx
+            .mempool
+            .gateway
+            .read()
+            .transaction_by_txid(txid)
+            .is_some()
+        {
             return Ok(None);
         }
-        if self.ctx.transactions.read().contains_key(txid) {
+        if self.ctx.chain.transactions.read().contains_key(txid) {
             return self.cached_confirmation(txid);
         }
         let index = self
             .ctx
+            .indexes
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
@@ -202,7 +212,7 @@ impl<'a> Projection<'a> {
     /// disabled this reports "unconfirmed", which is also the only reason
     /// `/tx/:id` works at all in that configuration.
     fn cached_confirmation(&self, txid: &Txid) -> Result<Option<Confirmation>, Response> {
-        let Some(index) = self.ctx.esplora_tx_index.as_ref() else {
+        let Some(index) = self.ctx.indexes.esplora_tx_index.as_ref() else {
             return Ok(None);
         };
         Ok(index
@@ -305,13 +315,19 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) fn prevout(&self, outpoint: &OutPoint) -> Result<Option<TxOut>, Response> {
-        if let Some(transaction) = self.ctx.mempool.read().transaction_by_txid(&outpoint.txid) {
+        if let Some(transaction) = self
+            .ctx
+            .mempool
+            .gateway
+            .read()
+            .transaction_by_txid(&outpoint.txid)
+        {
             return Ok(transaction
                 .outputs
                 .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))
                 .cloned());
         }
-        if let Some(transaction) = self.ctx.transactions.read().get(&outpoint.txid) {
+        if let Some(transaction) = self.ctx.chain.transactions.read().get(&outpoint.txid) {
             return Ok(transaction
                 .outputs
                 .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))
@@ -319,6 +335,7 @@ impl<'a> Projection<'a> {
         }
         let index = self
             .ctx
+            .indexes
             .esplora_tx_index
             .as_ref()
             .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
@@ -394,6 +411,7 @@ impl<'a> Projection<'a> {
     ) -> Result<ScriptActivity, Response> {
         let index = self
             .ctx
+            .indexes
             .script_index
             .as_ref()
             .ok_or_else(|| unavailable("script index is disabled"))?;
@@ -433,12 +451,13 @@ impl<'a> Projection<'a> {
     pub(super) fn script_utxos(&self, script_hash: ScriptHash) -> Result<Vec<UtxoValue>, Response> {
         let mut confirmed = self
             .ctx
+            .indexes
             .script_index
             .as_ref()
             .ok_or_else(|| unavailable("script index is disabled"))?
             .unspent_outputs(script_hash)
             .map_err(query_error)?;
-        let pool = self.ctx.mempool.read();
+        let pool = self.ctx.mempool.gateway.read();
         confirmed
             .retain(|record| !pool.is_outpoint_spent(&OutPoint::new(record.txid, record.vout)));
         let mut outputs = confirmed
@@ -479,14 +498,14 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) fn capture_chain_view(&self) -> Option<Arc<TipSnapshot>> {
-        self.ctx.applied_tip.load_full()
+        self.ctx.chain.applied_tip.load_full()
     }
 
     pub(super) fn ensure_chain_view(
         &self,
         expected: Option<&Arc<TipSnapshot>>,
     ) -> Result<(), Response> {
-        let current = self.ctx.applied_tip.load_full();
+        let current = self.ctx.chain.applied_tip.load_full();
         let unchanged = match (expected, current.as_ref()) {
             (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
             (None, None) => true,
@@ -504,7 +523,7 @@ impl<'a> Projection<'a> {
         script_hash: ScriptHash,
         confirmed_unspent: &[ScriptIndexRecord],
     ) -> Vec<Arc<Tx>> {
-        let pool = self.ctx.mempool.read();
+        let pool = self.ctx.mempool.gateway.read();
         let mempool_hash = MempoolScriptHash::from_byte_array(script_hash.to_byte_array());
         // Keyed by txid so a transaction reached through both the funding index
         // and the spend scan is selected once. The entry is captured here rather
@@ -548,7 +567,7 @@ impl<'a> Projection<'a> {
     }
 
     pub(super) const fn bitcoin_network(&self) -> BitcoinNetwork {
-        match self.ctx.chain_network {
+        match self.ctx.chain.chain_network {
             Network::Mainnet => BitcoinNetwork::Bitcoin,
             Network::Testnet3 => BitcoinNetwork::Testnet,
             Network::Testnet4 => BitcoinNetwork::Testnet4,

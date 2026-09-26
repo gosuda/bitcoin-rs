@@ -13,6 +13,7 @@ use crate::ScriptHash;
 use crate::reconcile::ReconcileLeg;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_storage::pruning::HistoryUnavailable;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
     let mut names = Vec::new();
@@ -136,11 +137,25 @@ impl Worker {
         watermark: IndexWatermark,
     ) -> Result<Option<IndexWatermark>, DerivedIndexWorkerError> {
         let watermark_hash = Hash256::from_le_bytes(&watermark.hash);
-        let body = self.load_body(watermark.height, watermark_hash)?;
+        // One grant covers every persistence read this rollback needs: a
+        // prune pass may not delete the undo row in the gap between the
+        // body load and the live-anchor lookup.
+        let lease = match self.history.request_history(watermark.height) {
+            Ok(lease) => lease,
+            Err(HistoryUnavailable::Pruned { .. }) => {
+                return Err(DerivedIndexWorkerError::MissingBody {
+                    height: watermark.height,
+                    hash: watermark_hash,
+                });
+            }
+            Err(error) => return Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
+        };
+        let body = self.load_body(watermark.height, watermark_hash, &lease)?;
         let anchor = capabilities
             .script_live
             .then(|| self.live_anchor(watermark.height, watermark.hash))
             .transpose()?;
+        lease.release();
 
         let spent: &dyn crate::SpentCoinScripts =
             anchor.as_ref().map_or(&NoSpentScripts, |anchor| anchor);
@@ -186,18 +201,33 @@ impl Worker {
         Ok(prev)
     }
 
+    /// Loads one body under a live history grant.
+    ///
+    /// PRE: `lease` pins `height`, so a body that reads back absent under it
+    /// is transient absence, never lost history.
+    ///
+    /// POST: `Ok` returns the body. `HistoryUnavailable::Missing` means the
+    /// authority granted the height and the row is absent for now: the
+    /// caller waits instead of rebuilding.
+    ///
+    /// INVARIANT: permanence comes from the grant. The worker never compares a
+    /// height against a copied prune frontier to decide it.
     pub(super) fn load_body(
         &self,
         height: u32,
         hash: Hash256,
+        lease: &bitcoin_rs_storage::pruning::HistoryLease,
     ) -> Result<Vec<u8>, DerivedIndexWorkerError> {
+        let _ = lease;
         let Some(store) = self.body_store.as_ref() else {
             return Err(DerivedIndexWorkerError::NoBodyStore);
         };
-        store
-            .load_block_body(height, hash)
-            .map_err(DerivedIndexWorkerError::Storage)?
-            .ok_or(DerivedIndexWorkerError::MissingBody { height, hash })
+        // The grant pins this height, so an absent body under it is transient
+        // absence, which the boundary types as `Missing`.
+        let body = store.load_block_body(height, hash)?;
+        body.ok_or(DerivedIndexWorkerError::HistoryUnavailable(
+            HistoryUnavailable::Missing,
+        ))
     }
 
     pub(super) fn live_anchor(

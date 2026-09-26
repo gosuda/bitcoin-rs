@@ -26,6 +26,7 @@ use arc_swap::ArcSwap;
 use bitcoin_rs_chain::BlockBodySource;
 use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::pruning::HistoryAccess;
 use crossbeam_channel::Receiver;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -49,6 +50,7 @@ impl DerivedIndexWorker {
         applied_tip: TipReader,
         block_tree: BlockTreeReader,
         body_store: Option<Arc<dyn BlockBodyStore>>,
+        history: HistoryAccess,
         batch_limits: PreparedBatchLimits,
         enabled: IndexCapabilities,
         chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
@@ -62,6 +64,7 @@ impl DerivedIndexWorker {
             applied_tip,
             block_tree,
             body_store,
+            history,
             batch_limits,
             enabled,
             rollback_rebuild_cutover,
@@ -123,6 +126,7 @@ impl DerivedIndexWorker {
         applied_tip: TipReader,
         block_tree: BlockTreeReader,
         body_store: Option<Arc<dyn BlockBodyStore>>,
+        history: HistoryAccess,
         block_source: IndexBlockSource,
         body_source: Option<Arc<dyn BlockBodySource>>,
         chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
@@ -148,6 +152,7 @@ impl DerivedIndexWorker {
                         applied_tip,
                         block_tree,
                         body_store,
+                        history,
                         block_source,
                         body_source,
                         &chain_events,

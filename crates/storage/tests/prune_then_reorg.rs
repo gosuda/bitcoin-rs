@@ -7,15 +7,17 @@ use std::collections::BTreeMap;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
-    BLOCK_DATA_CF, BlockPruner, PrunePolicy, RetentionRegistry, block_body_key, load_pruneheight,
-    prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
+    BLOCK_DATA_CF, BlockPruner, ExecutedFrontier, HistoryAccess, HistoryUnavailable, PrunePolicy,
+    RetentionBudget, RetentionRegistry, block_body_key, block_undo_key, load_executed_frontier,
+    load_pruneheight, prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
 };
 use bitcoin_rs_storage::{
     BlockFilePosition, ColumnFamily, FlatFileBlockStore, KvIter, KvSnapshot, KvStore, KvUndoStore,
     StorageError, UndoStore, WriteBatch, WriteCondition, block_file_max_height_key,
     encode_block_file_max_height,
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use tempfile::tempdir;
 
 /// Prune everything below the requested height; `retention_depth` still
@@ -83,7 +85,7 @@ fn undo_pruning_keeps_records_the_durable_tip_still_needs() -> Result<(), Box<dy
     for height in 10_u32..=12 {
         undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
     }
-    let retention = RetentionRegistry::new();
+    let retention = Arc::new(RetentionRegistry::new());
     let staged = prune_to_height(
         &*store,
         &block_files,
@@ -124,7 +126,7 @@ fn prune_to_height_deletes_rows_below_the_line_and_persists_pruneheight()
     for height in 10_u32..=12 {
         undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
     }
-    let retention = RetentionRegistry::new();
+    let retention = Arc::new(RetentionRegistry::new());
     let staged = prune_to_height(
         &*store,
         &block_files,
@@ -239,16 +241,10 @@ fn staged_flat_file_pruning_removes_all_selected_indexes_before_reclaim()
     let current_key = block_body_key(800, current.1);
 
     let retention = Arc::new(RetentionRegistry::new());
+    let reservation = retention.reserve(1_000_u32.saturating_sub(policy.retention_depth()));
     let mut prune_batch = store.new_batch();
-    let staged = stage_block_and_undo_prune(
-        &store,
-        &mut prune_batch,
-        &block_files,
-        1_000,
-        1_000,
-        policy,
-        &retention,
-    )?;
+    let staged =
+        stage_block_and_undo_prune(&store, &mut prune_batch, &block_files, policy, &reservation)?;
     assert_eq!(staged.blocks.blocks_removed, 2);
     assert_eq!(staged.blocks.bytes_freed, 32);
     assert!(staged.undo.is_empty());
@@ -300,15 +296,14 @@ fn target_pruning_deletes_old_indexes_in_the_current_flat_file()
     store.write(initial_batch)?;
 
     let retention = Arc::new(RetentionRegistry::new());
+    let reservation = retention.reserve(1_000_u32.saturating_sub(AGGRESSIVE.retention_depth()));
     let mut prune_batch = store.new_batch();
     let staged = stage_block_and_undo_prune(
         &store,
         &mut prune_batch,
         &block_files,
-        1_000,
-        1_000,
         AGGRESSIVE,
-        &retention,
+        &reservation,
     )?;
     assert!(staged.file_numbers.is_empty());
     assert_eq!(staged.blocks.blocks_removed, 1);
@@ -349,21 +344,24 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std
     let lease = retention.acquire(2)?;
     assert_eq!(retention.retention_floor(), Some(2));
 
+    let policy = PrunePolicy {
+        target_size_mb: 0,
+        keep_below_tip: 0,
+    };
     let mut leased_batch = store.new_batch();
+    let leased_pass = retention.reserve(1_000_u32.saturating_sub(policy.retention_depth()));
+    // The policy line (1000 - 288) folds down to the lease floor at the
+    // reservation, so the pass can only claim rows below it.
+    assert_eq!(leased_pass.line(), 2);
     let staged = stage_block_and_undo_prune(
         &store,
         &mut leased_batch,
         &block_files,
-        1_000,
-        1_000,
-        PrunePolicy {
-            target_size_mb: 0,
-            keep_below_tip: 0,
-        },
-        &retention,
+        policy,
+        &leased_pass,
     )?;
-    // The policy line (1000 - 288) folds down to the lease floor, and the
-    // row at the floor survives; only strictly-below rows delete.
+    // The row at the reserved floor survives; only strictly-below rows
+    // delete.
     assert_eq!(staged.pruned_below, 2);
     assert_eq!(staged.blocks.blocks_removed, 1);
     store.write(leased_batch)?;
@@ -374,29 +372,567 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std
     // deletes through the policy line again.
     lease.release();
     assert_eq!(retention.retention_floor(), None);
+    drop(leased_pass);
     let mut released_batch = store.new_batch();
+    let released_pass = retention.reserve(1_000_u32.saturating_sub(policy.retention_depth()));
     let staged = stage_block_and_undo_prune(
         &store,
         &mut released_batch,
         &block_files,
-        1_000,
-        1_000,
-        PrunePolicy {
-            target_size_mb: 0,
-            keep_below_tip: 0,
-        },
-        &retention,
+        policy,
+        &released_pass,
     )?;
     assert_eq!(staged.pruned_below, 3);
     store.write(released_batch)?;
     assert!(store.get(BLOCK_DATA_CF, &leased_key)?.is_none());
-    // The recorded line is what later lease requests are bounded by: a
+    // The committed line is what later lease requests are bounded by: a
     // floor the prune line already crossed is refused as gone.
-    retention.record_pruned_below(staged.pruned_below);
+    released_pass.commit(staged.pruned_below);
     assert!(matches!(
         retention.acquire(2),
         Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow { .. })
     ));
+    Ok(())
+}
+
+/// The reservation is the prune/retention linearization point: a lease
+/// request that arrives after a pass planned its deletions but before the
+/// batch commits is refused, so it can never pin rows the batch staged. A
+/// pass that fails before committing releases the claim again (#1151).
+#[test]
+fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let undo_store = KvUndoStore::new(Arc::clone(&store));
+    for height in 10_u32..=12 {
+        undo_store.persist_undo(height, fake_hash(height), b"undo-body")?;
+    }
+    let retention = Arc::new(RetentionRegistry::new());
+
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |pruned_below| {
+            // Mid-pass: the batch holds the deletions, nothing is committed
+            // yet, and the executed line is still 0. The reservation must
+            // already refuse the floor the pass is about to delete through.
+            assert_eq!(retention.pruned_below(), 0);
+            assert!(matches!(
+                retention.acquire(pruned_below - 1),
+                Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow {
+                    requested: 10,
+                    pruned_below: 11,
+                })
+            ));
+            // The reserved line itself stays grantable: the pass deletes
+            // strictly below it.
+            assert!(retention.acquire(pruned_below).is_ok());
+            Ok(())
+        },
+    )?;
+    assert_eq!(staged.pruned_below, 11);
+    assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert_eq!(retention.pruned_below(), 11);
+
+    // A pass that fails after staging releases its claim: the floor it
+    // refused is grantable again and nothing above the executed line went.
+    let failed = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12,
+        |pruned_below| {
+            assert!(retention.acquire(pruned_below - 1).is_err());
+            Err(StorageError::InvalidOperation(
+                "injected pre-commit failure",
+            ))
+        },
+    );
+    assert!(failed.is_err());
+    assert_eq!(retention.pruned_below(), 11);
+    assert!(row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    let reacquired = retention.acquire(11)?;
+    assert_eq!(reacquired.floor(), 11);
+    reacquired.release();
+    Ok(())
+}
+
+/// The executed frontier is a durable fact: it commits with its deletions,
+/// a restart reconstructs exactly that boundary, and the restarted authority
+/// refuses a lease over rows the previous process deleted (#1151).
+#[test]
+fn executed_frontier_survives_restart_and_refuses_deleted_heights()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    )?;
+    assert_eq!(staged.pruned_below, 11);
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(11)),
+        "the frontier commits in the same batch as the deletions"
+    );
+
+    // A restart derives its authority from the store, never from memory.
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(frontier, ExecutedFrontier::new(11));
+    let restarted = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(matches!(
+        restarted.acquire(10),
+        Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow {
+            requested: 10,
+            pruned_below: 11,
+        })
+    ));
+    assert_eq!(restarted.acquire(11)?.floor(), 11);
+    Ok(())
+}
+
+/// Repeated passes, and rows a reorg reintroduces below the line, never move
+/// the persisted frontier backwards, and the rows stay deleted (#1151).
+#[test]
+fn executed_frontier_is_monotonic_across_passes_and_reintroduced_rows()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+            (13, b"block-body"),
+        ],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    let first = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12,
+        |_| Ok(()),
+    )?;
+    assert_eq!(first.pruned_below, 12);
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(12))
+    );
+
+    // A reorg re-adds a body below the executed line. The frontier is the
+    // committed fact, so it does not retreat to the surviving row: a lease
+    // below it stays refused.
+    write_body_rows(&store, &block_files, &[(11, b"reintroduced body")])?;
+    assert!(row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    assert_eq!(
+        ExecutedFrontier::reconstruct(&*store)?,
+        ExecutedFrontier::new(12)
+    );
+    let restarted = Arc::new(RetentionRegistry::seeded(ExecutedFrontier::new(12)));
+    assert!(restarted.acquire(11).is_err());
+
+    // The next pass deletes the reintroduced row again and moves forward.
+    let second = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        13 + CORE_REORG_SAFETY_MARGIN,
+        13 + CORE_REORG_SAFETY_MARGIN,
+        13,
+        |_| Ok(()),
+    )?;
+    assert_eq!(second.pruned_below, 13);
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(13))
+    );
+    assert!(!row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    assert!(!row_stored(&store, &block_body_key(12, fake_hash(12)))?);
+    assert!(row_stored(&store, &block_body_key(13, fake_hash(13)))?);
+    Ok(())
+}
+
+/// A datadir pruned before the record existed reconstructs its boundary from
+/// the rows that survived, never from the requested line while rows remain,
+/// and the first pass pins the reconstruction (#1151).
+#[test]
+fn legacy_datadir_reconstructs_from_surviving_rows_not_the_requested_line()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    // The legacy shape: one row was deleted, the requested line was
+    // persisted, and no executed-frontier record exists.
+    let mut deleted = store.new_batch();
+    deleted.delete(BLOCK_DATA_CF, &block_body_key(10, fake_hash(10)));
+    store.write(deleted)?;
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"node:pruneheight",
+        &12_u32.to_be_bytes(),
+    )?;
+
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(
+        frontier,
+        ExecutedFrontier::new(11),
+        "the lowest surviving row is the provable bound, not the intent line"
+    );
+    let retention = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(retention.acquire(10).is_err());
+    assert_eq!(retention.acquire(11)?.floor(), 11);
+
+    // A pass that finds nothing left below its line still pins the
+    // reconstruction, so the next restart does not re-derive it from rows.
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    )?;
+    assert_eq!(staged.pruned_below, 0);
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(11)),
+        "an empty pass never lowers the frontier to zero"
+    );
+    Ok(())
+}
+
+/// With no rows left to prove deletion from, a legacy store falls back to its
+/// requested line; a fresh store starts at zero (#1151).
+#[test]
+fn legacy_datadir_with_no_rows_falls_back_to_the_requested_line()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    assert_eq!(
+        ExecutedFrontier::reconstruct(&*store)?,
+        ExecutedFrontier::NONE
+    );
+
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"node:pruneheight",
+        &50_u32.to_be_bytes(),
+    )?;
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(frontier, ExecutedFrontier::new(50));
+
+    let retention = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(
+        retention.acquire(49).is_err(),
+        "an emptied legacy datadir grants no lease below its recorded line"
+    );
+    assert_eq!(retention.acquire(50)?.floor(), 50);
+    Ok(())
+}
+
+/// The two families' survivor floors can diverge on a legacy datadir — an
+/// older undo-only pass, or body rows a reorg reintroduced, leaves one
+/// family's lowest survivor below the other's. The join must stay the
+/// `max`: it at worst refuses a lease over rows that still exist, and
+/// never grants one over rows the other family already lost (#1151).
+#[test]
+fn legacy_datadir_divergent_family_floors_join_on_the_safe_max()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    // Bodies survive from 30 up; undo rows survive from 20 up. Each
+    // family proves its own deletions below its floor, and the persisted
+    // requested line predates both.
+    write_body_rows(
+        &store,
+        &block_files,
+        &[(30, b"block-body"), (31, b"block-body")],
+    )?;
+    for height in [20_u32, 21] {
+        store.put(
+            ColumnFamily::UndoData,
+            &block_undo_key(height, fake_hash(height)),
+            b"undo-record",
+        )?;
+    }
+    store.put(
+        ColumnFamily::UtxoMeta,
+        b"node:pruneheight",
+        &5_u32.to_be_bytes(),
+    )?;
+
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(
+        frontier,
+        ExecutedFrontier::new(30),
+        "the join is the highest family floor, not the lower undo floor"
+    );
+    let retention = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(
+        retention.acquire(29).is_err(),
+        "a lease below the bodies floor would pin deleted bodies"
+    );
+    // Undo rows at 20 and 21 survive yet stay ungrantable: the
+    // over-refusal is the documented cost of the safe join.
+    assert!(retention.acquire(20).is_err());
+    assert_eq!(retention.acquire(30)?.floor(), 30);
+    Ok(())
+}
+
+/// A durability error is not a rollback receipt. Before the pass releases
+/// its claim it reconciles the persisted record: a provably-applied batch
+/// promotes the line, a provably-unapplied one releases the claim, and an
+/// unprovable one holds it until a restart reconciles record and deletions
+/// (#1151).
+#[test]
+fn ambiguous_durability_promotes_the_line_the_batch_already_persisted()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    // The whole atomic batch is visible and durability completion then
+    // fails: the record proves the deletions committed, so the claim must
+    // promote and the pass answers the staged result — callers run their
+    // in-memory follow-ups on the truth the receipt already proved.
+    // Releasing the claim would let a lease pin rows that no longer exist.
+    store.arm_write_durable(WriteDurableOutcome::AppliedThenFailed);
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    )?;
+    assert_eq!(
+        load_executed_frontier(&*store)?,
+        Some(ExecutedFrontier::new(11)),
+    );
+    assert_eq!(
+        retention.pruned_below(),
+        11,
+        "a provably committed batch promotes the executed line"
+    );
+    assert_eq!(
+        staged.pruned_below, 11,
+        "the staged result carries the committed range"
+    );
+    assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    Ok(())
+}
+
+#[test]
+fn ambiguous_durability_releases_the_claim_when_nothing_applied()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[(10, b"block-body"), (11, b"block-body")],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    // The batch never became visible: atomicity proves the deletions did
+    // not apply either, so the claim releases and the next pass — or a
+    // lease — grants again.
+    store.arm_write_durable(WriteDurableOutcome::FailedBeforeApply);
+    let failed = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    );
+    assert!(failed.is_err());
+    assert_eq!(retention.pruned_below(), 0);
+    assert!(row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert!(retention.acquire(10).is_ok(), "the claim is released");
+    Ok(())
+}
+
+#[test]
+fn ambiguous_durability_fails_closed_when_the_outcome_is_unprovable()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[(10, b"block-body"), (11, b"block-body")],
+    )?;
+    let retention = Arc::new(RetentionRegistry::new());
+
+    // The record read fails at the reconcile — one read is allowed for the
+    // pass's own reconstruct, then the record becomes unreadable — so the
+    // outcome can be neither proven applied nor proven unapplied. The claim
+    // must hold: releasing it could open leases over rows already gone.
+    store.arm_executed_reads(1);
+    store.arm_write_durable(WriteDurableOutcome::AppliedThenFailed);
+    let failed = prune_to_height(
+        &*store,
+        &block_files,
+        &retention,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11 + CORE_REORG_SAFETY_MARGIN,
+        11,
+        |_| Ok(()),
+    );
+    assert!(failed.is_err());
+    assert_eq!(
+        retention.pruned_below(),
+        0,
+        "an unprovable outcome never promotes the line"
+    );
+    assert!(
+        retention.acquire(10).is_err(),
+        "the claim refuses leases below its line until restart recovery"
+    );
+
+    // A restart reconciles record and deletions from the store: the batch
+    // did apply, so the reconstructed boundary is the committed one.
+    store.arm_executed_reads(usize::MAX);
+    let frontier = ExecutedFrontier::reconstruct(&*store)?;
+    assert_eq!(
+        frontier,
+        ExecutedFrontier::new(11),
+        "the restart reconciles the committed boundary"
+    );
+    let restarted = Arc::new(RetentionRegistry::seeded(frontier));
+    assert!(restarted.acquire(10).is_err());
+    Ok(())
+}
+
+/// An optional consumer inside its budget still clamps the line; one that
+/// lags beyond it stops blocking pruning, and the owner tells it the
+/// capability is gone instead of the consumer guessing from a read that
+/// returns nothing (#1151).
+#[test]
+fn optional_consumer_budget_exhaustion_unblocks_pruning() -> Result<(), Box<dyn std::error::Error>>
+{
+    let store = Arc::new(MemoryStore::default());
+    let data_dir = tempdir()?;
+    let block_files = FlatFileBlockStore::open(data_dir.path())?;
+    write_body_rows(
+        &store,
+        &block_files,
+        &[
+            (10, b"block-body"),
+            (11, b"block-body"),
+            (12, b"block-body"),
+        ],
+    )?;
+
+    // Inside the budget: the pin binds the line, so nothing goes.
+    let bounded = Arc::new(RetentionRegistry::new());
+    let roomy = HistoryAccess::new(Arc::clone(&bounded), RetentionBudget::Depth(5));
+    let held = roomy.request_history(10)?;
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &bounded,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12,
+        |_| Ok(()),
+    )?;
+    assert_eq!(staged.pruned_below, 0);
+    assert_eq!(bounded.pruned_below(), 0);
+    assert!(row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    held.release();
+
+    // Beyond the budget: the pass expires the pin, deletes through its line,
+    // and the consumer's next request carries the owner's permanent answer.
+    let lagging = Arc::new(RetentionRegistry::new());
+    let tight = HistoryAccess::new(Arc::clone(&lagging), RetentionBudget::Depth(1));
+    let stale = tight.request_history(10)?;
+    let staged = prune_to_height(
+        &*store,
+        &block_files,
+        &lagging,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12 + CORE_REORG_SAFETY_MARGIN,
+        12,
+        |_| Ok(()),
+    )?;
+    assert_eq!(staged.pruned_below, 12);
+    assert_eq!(lagging.active_leases(), 0, "the expired pin is gone");
+    assert_eq!(stale.floor(), None);
+    assert!(!row_stored(&store, &block_body_key(10, fake_hash(10)))?);
+    assert!(!row_stored(&store, &block_body_key(11, fake_hash(11)))?);
+    assert!(matches!(
+        tight.request_history(10),
+        Err(HistoryUnavailable::Pruned { below: 12 })
+    ));
+    // The consumer can still ask for history that exists.
+    assert_eq!(tight.request_history(12)?.floor(), Some(12));
     Ok(())
 }
 
@@ -474,15 +1010,73 @@ fn fake_body(height: u32) -> [u8; 32] {
     body
 }
 
-#[derive(Default)]
+/// One-shot outcomes for the next `write_durable`, simulating the ambiguous
+/// durability error the `KvStore` contract documents: `Err` is not a
+/// rollback receipt.
+#[derive(Clone, Copy)]
+enum WriteDurableOutcome {
+    /// The atomic batch applied and durability completion then failed.
+    AppliedThenFailed,
+    /// The batch never became visible.
+    FailedBeforeApply,
+}
+
+/// The executed-frontier record key, mirrored here so the store can fault
+/// its reads; the pruning module keeps the constant private.
+const EXECUTED_FRONTIER_KEY: &[u8] = b"node:prune_executed";
+
 struct MemoryStore {
     cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
+    /// Armed outcome for the next `write_durable`.
+    write_durable_outcome: Mutex<Option<WriteDurableOutcome>>,
+    /// Reads of `node:prune_executed` fail once this many have succeeded,
+    /// making a pass's write outcome unprovable at the reconcile.
+    executed_reads_allowed: AtomicUsize,
+}
+
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self {
+            cfs: RwLock::new(Default::default()),
+            write_durable_outcome: Mutex::new(None),
+            executed_reads_allowed: AtomicUsize::new(usize::MAX),
+        }
+    }
+}
+
+impl MemoryStore {
+    /// Arms the outcome of the next `write_durable` call.
+    fn arm_write_durable(&self, outcome: WriteDurableOutcome) {
+        *self.write_durable_outcome.lock() = Some(outcome);
+    }
+
+    /// Allows `allowed` reads of the executed-frontier record before its
+    /// reads start failing.
+    fn arm_executed_reads(&self, allowed: usize) {
+        self.executed_reads_allowed
+            .store(allowed, AtomicOrdering::Relaxed);
+    }
 }
 
 impl KvStore for MemoryStore {
     type WriteBatch = MemoryBatch;
 
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
+        if cf == ColumnFamily::UtxoMeta && key == EXECUTED_FRONTIER_KEY {
+            let remaining = self
+                .executed_reads_allowed
+                .fetch_update(
+                    AtomicOrdering::Relaxed,
+                    AtomicOrdering::Relaxed,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_err();
+            if remaining {
+                return Err(StorageError::InvalidOperation(
+                    "injected executed-frontier read failure",
+                ));
+            }
+        }
         let guard = self.cfs.read();
         Ok(guard[cf.index()].get(key).cloned())
     }
@@ -535,6 +1129,24 @@ impl KvStore for MemoryStore {
             }
         }
         Ok(())
+    }
+
+    fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+        let armed = self.write_durable_outcome.lock().take();
+        match armed {
+            // The ambiguous post-application case: the whole atomic batch is
+            // visible, and durability completion then fails.
+            Some(WriteDurableOutcome::AppliedThenFailed) => {
+                self.write(batch)?;
+                Err(StorageError::InvalidOperation(
+                    "injected post-apply durability failure",
+                ))
+            }
+            Some(WriteDurableOutcome::FailedBeforeApply) => Err(StorageError::InvalidOperation(
+                "injected pre-apply durability failure",
+            )),
+            None => self.write(batch),
+        }
     }
 
     fn write_durable_if(

@@ -192,6 +192,18 @@ pub struct QueryEngineLive {
     pub enabled: IndexCapabilities,
 }
 
+/// First covered height per history-derived capability, loaded from the
+/// snapshot's durable floor records. `0` means coverage from genesis; a
+/// positive value means the prefix below it was pruned, so a row's absence
+/// there is unproven and queries answer `Unavailable` instead of `None`.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CapabilityFloors {
+    /// `TxLookup` first covered height.
+    pub(crate) tx_lookup: u32,
+    /// `ScriptHistory` first covered height.
+    pub(crate) script_history: u32,
+}
+
 /// Node-owned, snapshot-gated transaction-index query engine.
 ///
 /// Implements `crate::query_api::DerivedIndexQuery` and [`ScriptIndexQuery`] as the
@@ -279,6 +291,7 @@ impl DerivedIndexQueryEngine {
             &'s dyn TxIndexSnapshot,
             &TipSnapshot,
             &mut QueryBudget,
+            CapabilityFloors,
         ) -> Result<T, TxQueryError>,
     {
         self.query_health()?;
@@ -312,6 +325,21 @@ impl DerivedIndexQueryEngine {
             .snapshot()
             .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
 
+        let mut floors = CapabilityFloors::default();
+        for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
+            if !required.contains(capability) {
+                continue;
+            }
+            let floor = snapshot
+                .capability_floor(capability)
+                .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
+            match capability {
+                IndexCapability::TxLookup => floors.tx_lookup = floor,
+                IndexCapability::ScriptHistory => floors.script_history = floor,
+                IndexCapability::ScriptLive => {}
+            }
+        }
+
         for capability in [
             IndexCapability::TxLookup,
             IndexCapability::ScriptHistory,
@@ -334,7 +362,7 @@ impl DerivedIndexQueryEngine {
         }
 
         let mut budget = QueryBudget::new();
-        let result = f(snapshot.as_ref(), &tip_before, &mut budget);
+        let result = f(snapshot.as_ref(), &tip_before, &mut budget, floors);
 
         self.query_health()?;
         let tip_after = self.applied_tip.load_full();
@@ -438,23 +466,32 @@ pub(crate) struct IndexProgress {
 
 impl DerivedIndexQuery for DerivedIndexQueryEngine {
     fn transaction(&self, txid: &Txid) -> Result<Option<Tx>, TxQueryError> {
-        self.with_snapshot(IndexCapabilities::TX_LOOKUP, |snapshot, tip, budget| {
-            self.transaction_for(snapshot, tip, budget, txid)
-        })
+        self.with_snapshot(
+            IndexCapabilities::TX_LOOKUP,
+            |snapshot, tip, budget, floors| {
+                self.transaction_for(snapshot, tip, budget, txid, floors.tx_lookup)
+            },
+        )
     }
 
     fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
-        self.with_snapshot(IndexCapabilities::TX_LOOKUP, |snapshot, tip, budget| {
-            self.outpoint_value_for(snapshot, tip, budget, outpoint)
-        })
+        self.with_snapshot(
+            IndexCapabilities::TX_LOOKUP,
+            |snapshot, tip, budget, floors| {
+                self.outpoint_value_for(snapshot, tip, budget, outpoint, floors.tx_lookup)
+            },
+        )
     }
 
     fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
-        self.with_snapshot(IndexCapabilities::TX_LOOKUP, |snapshot, tip, budget| {
-            Ok(self
-                .locate_transaction_for(snapshot, tip, budget, txid)?
-                .map(|(height, _)| height))
-        })
+        self.with_snapshot(
+            IndexCapabilities::TX_LOOKUP,
+            |snapshot, tip, budget, floors| {
+                Ok(self
+                    .locate_transaction_for(snapshot, tip, budget, txid, floors.tx_lookup)?
+                    .map(|(height, _)| height))
+            },
+        )
     }
 
     fn index_info(&self) -> Result<DerivedIndexInfo, TxQueryError> {
@@ -473,7 +510,9 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
     ) -> Result<ScriptIndexSnapshot, TxQueryError> {
         self.with_snapshot(
             IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, tip, budget| self.history_snapshot_for(snapshot, tip, budget, scripthash),
+            |snapshot, tip, budget, floors| {
+                self.history_snapshot_for(snapshot, tip, budget, scripthash, floors.script_history)
+            },
         )
     }
 
@@ -481,15 +520,20 @@ impl ScriptIndexQuery for DerivedIndexQueryEngine {
         &self,
         scripthash: ScriptHash,
     ) -> Result<Vec<ScriptIndexRecord>, TxQueryError> {
-        self.with_snapshot(IndexCapabilities::SCRIPT_LIVE, |snapshot, tip, budget| {
-            self.unspent_outputs_for(snapshot, tip, budget, scripthash)
-        })
+        self.with_snapshot(
+            IndexCapabilities::SCRIPT_LIVE,
+            |snapshot, tip, budget, _floors| {
+                self.unspent_outputs_for(snapshot, tip, budget, scripthash)
+            },
+        )
     }
 
     fn spender(&self, outpoint: OutPoint) -> Result<Option<SpendingRecord>, TxQueryError> {
         self.with_snapshot(
             IndexCapabilities::SCRIPT_HISTORY,
-            |snapshot, tip, budget| self.spender_for(snapshot, tip, budget, &outpoint),
+            |snapshot, tip, budget, floors| {
+                self.spender_for(snapshot, tip, budget, &outpoint, floors.script_history)
+            },
         )
     }
 }
