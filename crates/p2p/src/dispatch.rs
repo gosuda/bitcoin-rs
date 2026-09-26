@@ -48,9 +48,9 @@ pub trait ChainQuery: Send + Sync {
     /// [`Message::BlockPayload`]; `MSG_CMPCT_BLOCK` items as
     /// [`Message::CmpctBlock`] built at the given BIP152 version — `None`
     /// (peer never negotiated) leaves compact items in `not_found`. Each
-    /// loaded body is the stored consensus payload, delivered through
-    /// `serve` without a full-block decode/re-encode round trip. A `serve`
-    /// error aborts production and propagates. Non-block / unservable items
+    /// `MSG_WITNESS_BLOCK` body preserves the stored consensus payload;
+    /// `MSG_BLOCK` strips witness data from the validated body (BIP144).
+    /// A `serve` error aborts production and propagates. Non-block / unservable items
     /// are collected into `not_found` and never loaded.
     fn serve_inventory_blocks(
         &self,

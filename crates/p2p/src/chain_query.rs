@@ -12,7 +12,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
+use bitcoin_rs_primitives::{Block, BlockHash, ConsensusEncode, Hash256, Header};
 #[cfg(test)]
 use parking_lot::RwLock;
 
@@ -71,12 +71,18 @@ impl ActiveChainQuery {
     /// PRE: `height` is the block's active height as first observed.
     /// POST: return the raw consensus payload and the observing tip height
     /// only while the block is still active at `height`; `None` leaves the
-    /// request unanswered.
+    /// request unanswered. With `include_witness` false, transaction
+    /// witnesses are stripped from the returned payload.
     /// INVARIANT: no body is served for a block that left the active chain,
     /// and the tip height comes from the same guard as that proof, so a
     /// depth decision is never made from two different tree states.
-    fn load_active_block(&self, height: u32, hash: BlockHash) -> Option<(bytes::Bytes, u32)> {
-        let bytes = self.block_body_source.as_ref()?.block_body(height, hash)?;
+    fn load_active_block(
+        &self,
+        height: u32,
+        hash: BlockHash,
+        include_witness: bool,
+    ) -> Option<(bytes::Bytes, u32)> {
+        let mut bytes = self.block_body_source.as_ref()?.block_body(height, hash)?;
         let header = bytes
             .get(..80)
             .and_then(|header| Header::consensus_decode(header).ok())?;
@@ -85,7 +91,22 @@ impl ActiveChainQuery {
         }
         // Validate the complete stored body before serving its raw bytes. This
         // preserves the wire-byte optimization without forwarding corruption.
-        Block::consensus_decode(&bytes).ok()?;
+        let mut block = Block::consensus_decode(&bytes).ok()?;
+        if !include_witness
+            && block
+                .txs
+                .iter()
+                .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()))
+        {
+            for tx in &mut block.txs {
+                for input in &mut tx.inputs {
+                    input.witness.clear();
+                }
+            }
+            bytes.clear();
+            block.consensus_encode(&mut bytes);
+        }
+        drop(block);
         let tree = self.block_tree.read();
         let tip = tree.tip()?;
         (tree.active_height_of(tip.tip_id, hash.into()) == Some(height))
@@ -93,8 +114,13 @@ impl ActiveChainQuery {
     }
 
     /// The stored body as a `block` payload, witnesses retained.
-    fn full_block_response(&self, height: u32, hash: BlockHash) -> Option<Message> {
-        self.load_active_block(height, hash)
+    fn full_block_response(
+        &self,
+        height: u32,
+        hash: BlockHash,
+        include_witness: bool,
+    ) -> Option<Message> {
+        self.load_active_block(height, hash, include_witness)
             .map(|(body, _)| Message::BlockPayload(body))
     }
 }
@@ -209,7 +235,7 @@ impl ChainQuery for ActiveChainQuery {
         if !headroom() {
             return Ok(None);
         }
-        let Some((payload, tip_height)) = self.load_active_block(height, hash) else {
+        let Some((payload, tip_height)) = self.load_active_block(height, hash, true) else {
             return Ok(None);
         };
         // The tip may have moved while the body was read; the re-observed
@@ -242,7 +268,7 @@ impl ActiveChainQuery {
         if version != 1 && version != 2 {
             return None;
         }
-        let (payload, tip_height) = self.load_active_block(height, hash)?;
+        let (payload, tip_height) = self.load_active_block(height, hash, true)?;
         if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) {
             return Some(Message::BlockPayload(payload));
         }
@@ -264,14 +290,17 @@ impl ActiveChainQuery {
         compact_version: Option<u64>,
     ) -> Option<Message> {
         match request {
-            BlockRequest::Full(hash) => self.full_block_response(height, hash),
+            BlockRequest::Full {
+                hash,
+                include_witness,
+            } => self.full_block_response(height, hash, include_witness),
             // A peer asking for an old block almost certainly cannot match it
             // against a useful mempool, so the compact request is served as
             // the whole body, whatever it negotiated.
             BlockRequest::Compact(hash)
                 if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) =>
             {
-                self.full_block_response(height, hash)
+                self.full_block_response(height, hash, true)
             }
             BlockRequest::Compact(hash) => self.compact_block_for(height, hash, compact_version),
         }
@@ -286,14 +315,17 @@ const fn beyond_depth(tip_height: u32, height: u32, limit: u32) -> bool {
 /// Which active-chain body one block-typed inventory item asks for.
 #[derive(Clone, Copy, Debug)]
 enum BlockRequest {
-    Full(BlockHash),
+    Full {
+        hash: BlockHash,
+        include_witness: bool,
+    },
     Compact(BlockHash),
 }
 
 impl BlockRequest {
     const fn hash(self) -> BlockHash {
         match self {
-            Self::Full(hash) | Self::Compact(hash) => hash,
+            Self::Full { hash, .. } | Self::Compact(hash) => hash,
         }
     }
 }
@@ -304,9 +336,10 @@ fn native_block_hash(hash: bitcoin::BlockHash) -> BlockHash {
 
 fn inventory_block_request(item: &Inventory) -> Option<BlockRequest> {
     match *item {
-        Inventory::Block(hash) | Inventory::WitnessBlock(hash) => {
-            Some(BlockRequest::Full(native_block_hash(hash)))
-        }
+        Inventory::Block(hash) | Inventory::WitnessBlock(hash) => Some(BlockRequest::Full {
+            hash: native_block_hash(hash),
+            include_witness: matches!(item, Inventory::WitnessBlock(_)),
+        }),
         Inventory::CompactBlock(hash) => Some(BlockRequest::Compact(native_block_hash(hash))),
         Inventory::Error
         | Inventory::Transaction(_)
@@ -521,6 +554,171 @@ mod tests {
             vec![Inventory::Transaction(txid), missing]
         );
         assert!(!outcome.halted);
+        Ok(())
+    }
+
+    // BIP144 and Core 31.1 ProcessGetBlockData use TX_NO_WITNESS for
+    // MSG_BLOCK and TX_WITH_WITNESS for MSG_WITNESS_BLOCK. The independent
+    // rust-bitcoin envelope/serializer below checks the actual emitted bytes.
+    #[test]
+    fn getdata_block_encoding_matches_requested_inventory_on_wire()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use bitcoin::p2p::Magic;
+        use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
+
+        for with_witness in [false, true] {
+            let headers = seed_headers(2);
+            let mut block = Block {
+                header: headers[1],
+                txs: vec![test_tx(1), test_tx(2)],
+            };
+            if with_witness {
+                for tx in &mut block.txs {
+                    tx.inputs[0].witness = vec![vec![0x51; 32]].into();
+                }
+            }
+            let body = consensus_bytes(&block);
+            let source = Arc::new(SingleBlockSource {
+                height: 1,
+                hash: block.block_hash(),
+                body: body.clone(),
+            });
+            let query = query_with(headers)?.with_block_body_source(source.clone());
+            let full: RegistryBlock = bitcoin::consensus::deserialize(&body)?;
+            let mut stripped = full.clone();
+            for tx in &mut stripped.txdata {
+                for input in &mut tx.input {
+                    input.witness.clear();
+                }
+            }
+            let legacy = Inventory::Block(wire_hash(block.block_hash()));
+            let witness = Inventory::WitnessBlock(wire_hash(block.block_hash()));
+            let missing = Inventory::Block(WireBlockHash::from_byte_array([9; 32]));
+            for items in [[legacy, witness, legacy], [witness, legacy, witness]] {
+                let mut served = Vec::new();
+                let mut batch = items.to_vec();
+                batch.insert(1, missing);
+                let outcome =
+                    query.serve_inventory_blocks(&batch, None, &|| true, &mut |message| {
+                        let mut bytes = Vec::new();
+                        crate::wire::write_message(&mut bytes, Magic::REGTEST, &message)?;
+                        served.push(bytes);
+                        Ok(())
+                    })?;
+                assert_eq!(outcome.not_found, vec![missing]);
+                assert!(!outcome.halted);
+                assert_eq!(served.len(), items.len());
+                for (item, actual) in items.iter().zip(served) {
+                    let expected = if matches!(item, Inventory::Block(_)) {
+                        &stripped
+                    } else {
+                        &full
+                    };
+                    let envelope = RawNetworkMessage::new(
+                        Magic::REGTEST,
+                        NetworkMessage::Block(expected.clone()),
+                    );
+                    assert_eq!(actual, bitcoin::consensus::serialize(&envelope));
+                    assert_eq!(expected.block_hash(), full.block_hash());
+                    for (tx, original) in expected.txdata.iter().zip(&full.txdata) {
+                        assert_eq!(tx.compute_txid(), original.compute_txid());
+                    }
+                }
+                assert_eq!(
+                    source.body, body,
+                    "serving never rewrites retained witness data"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn getdata_block_encodings_keep_headroom_and_body_failure_rules()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(2);
+        let block = Block {
+            header: headers[1],
+            txs: vec![test_tx(1)],
+        };
+        let body = consensus_bytes(&block);
+        for item in [
+            Inventory::Block(wire_hash(block.block_hash())),
+            Inventory::WitnessBlock(wire_hash(block.block_hash())),
+        ] {
+            let source = Arc::new(CountingBodySource {
+                bodies: vec![(1, block.block_hash(), body.clone())],
+                loads: AtomicUsize::new(0),
+                tripwire: Some(0),
+            });
+            let query = query_with(headers.clone())?.with_block_body_source(source.clone());
+            let outcome = query.serve_inventory_blocks(&[item], None, &|| false, &mut |_| {
+                panic!("denied headroom cannot serve")
+            })?;
+            assert!(outcome.halted);
+            assert!(outcome.not_found.is_empty());
+            assert_eq!(source.loads.load(Ordering::Relaxed), 0);
+
+            let mut corrupt = body.clone();
+            corrupt.pop();
+            let mut wrong_header = body.clone();
+            wrong_header[0] ^= 1;
+            for unavailable in [None, Some(corrupt), Some(wrong_header)] {
+                let mut query = query_with(headers.clone())?;
+                if let Some(body) = unavailable {
+                    query = query.with_block_body_source(Arc::new(SingleBlockSource {
+                        height: 1,
+                        hash: block.block_hash(),
+                        body,
+                    }));
+                }
+                let outcome = query.serve_inventory_blocks(&[item], None, &|| true, &mut |_| {
+                    panic!("unavailable body cannot serve")
+                })?;
+                assert_eq!(outcome.not_found, vec![item]);
+                assert!(!outcome.halted);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn getdata_block_encodings_recheck_active_chain_after_body_load()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct SwitchingSource {
+            tree: Arc<RwLock<BlockTree>>,
+            body: Vec<u8>,
+        }
+        impl BlockBodySource for SwitchingSource {
+            fn block_body(&self, _height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
+                *self.tree.write() = BlockTree::new();
+                Some(self.body.clone())
+            }
+        }
+        let header = seed_headers(1)[0];
+        let mut block = Block {
+            header,
+            txs: vec![test_tx(1)],
+        };
+        block.txs[0].inputs[0].witness = vec![vec![0x51; 32]].into();
+        for item in [
+            Inventory::Block(wire_hash(block.block_hash())),
+            Inventory::WitnessBlock(wire_hash(block.block_hash())),
+        ] {
+            let mut tree = BlockTree::new();
+            tree.insert_node(None, header, NodeStatus::Active)?;
+            let tree = Arc::new(RwLock::new(tree));
+            let query = ActiveChainQuery::new(BlockTreeReader::new(tree.clone()))
+                .with_block_body_source(Arc::new(SwitchingSource {
+                    tree,
+                    body: consensus_bytes(&block),
+                }));
+            let outcome = query.serve_inventory_blocks(&[item], None, &|| true, &mut |_| {
+                panic!("stale body cannot serve")
+            })?;
+            assert_eq!(outcome.not_found, vec![item]);
+            assert!(!outcome.halted);
+        }
         Ok(())
     }
 
