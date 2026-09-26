@@ -24,7 +24,7 @@ When code and a contract disagree, fix the drift in the same change. Do not dupl
 | [mempool-policy.md](mempool-policy.md) | `POL-01`–`POL-06` | Admission owner, policy pins, preview/finality, replacement and package rules | policy/RBF suites plus planned admission/finality/cluster suites |
 | [external-api.md](external-api.md) | `API-01`–`API-31` | RPC/REST/ZMQ behavior, mining requests, errors, and reference provenance | Manifest coverage, Core parity, mining and request-validation tests |
 | [wallet-facing.md](wallet-facing.md) | `WF-01`–`WF-03` | Public wallet-facing surface and isolation from node internals | wallet-facing and Esplora tests; `listener_directory_table_is_closed_over_http` |
-| [p2p-wire.md](p2p-wire.md) | `P2P-01`–`P2P-06` | Wire compatibility, peer leases, demonstrated capability, canonical frontier recovery, connected-socket posture, body-carried header admission | P2P compatibility/live interop, peer-table and sync tests |
+| [p2p-wire.md](p2p-wire.md) | `P2P-01`–`P2P-07` | Wire compatibility, peer leases, demonstrated capability, canonical frontier recovery, connected-socket posture, body-carried header admission, block announcements | P2P compatibility/live interop, peer-table and sync tests |
 | [qa-corpus.md](qa-corpus.md) | `QAC-01` | Fuzz corpus provenance | corpus provenance and fuzz targets |
 | [campaign-corpora.md](campaign-corpora.md) | `CORP-01`–`CORP-05` | C150/Cmodern custody and Core-framed corpus format | `tools/campaign-corpus/test_corpus.py` |
 | [muhash-rpc.md](muhash-rpc.md) | `MRPC-01`–`MRPC-03` | MuHash RPC arity and benchmark custody | RPC arity and benchmark-campaign tests |

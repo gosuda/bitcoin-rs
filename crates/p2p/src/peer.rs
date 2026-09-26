@@ -223,8 +223,8 @@ impl NetworkActivity {
     /// Shares the node-owned activity flag.
     /// PRE: `active` is the flag the RPC `setnetworkactive` handler stores.
     /// POST: Return a switch reading exactly that flag.
-    /// INVARIANT: Flag changes happen only through the node's
-    /// `apply_network_active`; this type never writes the flag.
+    /// INVARIANT: Flag changes happen only through
+    /// [`crate::apply_network_active`]; this type never writes the flag.
     #[must_use]
     pub const fn from_shared(active: Arc<AtomicBool>) -> Self {
         Self { active }

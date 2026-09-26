@@ -55,7 +55,7 @@ pub const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIM
 pub const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
 /// Consensus-maximum serialized block size in bytes: a witness-serialized
 /// block cannot exceed its 4,000,000 weight, so no valid block is larger.
-pub const MAX_SERIALIZED_BLOCK_SIZE: usize = 4_000_000;
+pub const MAX_SERIALIZED_BLOCK_SIZE: usize = crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
 // Staller-arming reachability invariant (Phase 1 of the staller arming
 // redesign): the stall episode arms on a staged-count fraction
 // (`received >= max_received_blocks / 2`, `window_blocked_on` term 3), so the
