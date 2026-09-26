@@ -249,6 +249,7 @@ fn outweighed_branch_target_accepts_shorter_higher_work_branch()
 /// pending timeout.
 #[test]
 fn retarget_runs_before_the_peer_budget_truncates() -> Result<(), Box<dyn std::error::Error>> {
+    const LOSING_LEN: usize = 4;
     let genesis = genesis_header();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -263,7 +264,6 @@ fn retarget_runs_before_the_peer_budget_truncates() -> Result<(), Box<dyn std::e
     };
     let genesis_tip = snapshot(&tree, genesis_id)?;
 
-    const LOSING_LEN: usize = 4;
     let mut losing_tip_id = genesis_id;
     let mut prev_hash = genesis.compute_hash();
     for index in 0..LOSING_LEN {
