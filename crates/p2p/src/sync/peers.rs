@@ -378,6 +378,11 @@ impl BlockSync {
             });
         }
         let (request_peer_limit, fanout_active, cold_preferred) = {
+            // The tree guard comes before the scheduler lock, matching the
+            // tree -> scheduler order the request path follows.
+            let tree = (frontier.chain.chain_tip.is_some()
+                && frontier.chain.next_required.is_some())
+            .then(|| self.chain.block_tree());
             let mut scheduler = self.scheduler.lock();
             let SchedulerState { window, stager, .. } = &mut *scheduler;
             // Purge state the old request branch left behind before the peer
@@ -386,12 +391,12 @@ impl BlockSync {
             // window would truncate `request_peers` to zero and never reach
             // it, leaving the winning branch unwired until the pending
             // timeout fires.
-            if let (Some(chain_tip), Some(required)) = (
+            if let (Some(tree), Some(chain_tip), Some(required)) = (
+                tree.as_deref(),
                 frontier.chain.chain_tip.as_ref(),
-                frontier.chain.next_required,
+                frontier.chain.next_required.as_ref(),
             ) {
-                let tree = self.chain.block_tree();
-                window.retarget_request_branch(stager, chain_tip, required.height, &tree, now);
+                window.retarget_request_branch(stager, chain_tip, required.height, tree, now);
             }
             for candidate in &mut candidates {
                 candidate.soft_blocked = window
