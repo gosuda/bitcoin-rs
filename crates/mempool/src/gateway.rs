@@ -160,7 +160,7 @@ pub(crate) struct PreparedAdmission {
     pub(crate) fact: crate::standardness::TxAcceptanceFact,
     prevouts: Vec<(OutPoint, TxOut)>,
     rejection: Option<(AdmitError, RejectScope)>,
-    stamp: crate::pool::fee_policy::PolicyStamp,
+    pub(crate) stamp: crate::pool::fee_policy::PolicyStamp,
     replacement: ReplacementStage,
 }
 
@@ -178,10 +178,6 @@ enum ReplacementStage {
 }
 
 impl PreparedAdmission {
-    pub(crate) fn matches_pool(&self, pool: &Mempool) -> bool {
-        self.stamp.matches(pool)
-    }
-
     fn reject(&mut self, error: AdmitError, scope: RejectScope) {
         self.replacement = ReplacementStage::Rejected;
         self.fact.allowed = Some(false);
@@ -715,6 +711,7 @@ impl MempoolGateway {
 
     /// Verifies replacement outside the writer, then commits and publishes
     /// only while the captured pool and fee state is still current.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn replace_transaction(
         &self,
         origin: AdmissionOrigin,
@@ -764,7 +761,13 @@ impl MempoolGateway {
     ) -> Result<AdmitOutcome, AdmitError> {
         let mut prepared = {
             let pool = self.pool.read();
-            self.check_admission_state(&pool, request, fence)?;
+            self.check_admission_state(
+                &pool,
+                request.expected_generation,
+                request.expected_sequence,
+                fence,
+                None,
+            )?;
             Self::prepare_admission(&pool, request, AdmissionMode::Single)
         };
         prepared.verify(request);
@@ -776,10 +779,13 @@ impl MempoolGateway {
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
         let mut pool = self.pool.write();
-        self.check_admission_state(&pool, request, fence)?;
-        if !prepared.matches_pool(&pool) {
-            return Err(AdmitError::MempoolChanged);
-        }
+        self.check_admission_state(
+            &pool,
+            request.expected_generation,
+            request.expected_sequence,
+            fence,
+            Some(prepared.stamp),
+        )?;
         if claim.is_some_and(|claim| !self.lifecycle.lock().orphans.is_current(claim)) {
             return Ok(AdmitOutcome::AlreadyKnown);
         }
@@ -828,23 +834,38 @@ impl MempoolGateway {
         Ok(AdmitOutcome::Committed(result))
     }
 
-    /// Rejects a request whose captured generation no longer matches.
+    /// Rejects an attempt whose captured admittance facts no longer hold.
     ///
-    /// Authority to admit comes from the fence, not from a caller-supplied
-    /// integer: the stable fence admits only the even value returned by
-    /// [`Self::stable_generation`], and the chain-change fence admits only
-    /// the odd value reserved by its own [`ChainChangeGuard`]. A request
-    /// carrying the right number under the wrong fence is refused.
+    /// PRE: `pool` is borrowed under a guard the caller holds on this gateway's
+    /// pool; `expected_generation` came from `fence` on this gateway during this
+    /// attempt; `expected_sequence` and `stamp`, when present, were captured
+    /// under that same fence-held generation.
+    ///
+    /// POST: `Ok(())` means the fence currently admits `expected_generation`,
+    /// the pool membership sequence still equals `expected_sequence`, and
+    /// `stamp`, when present, still matches the pool. `Err(GenerationChanged)`
+    /// or `Err(MempoolChanged)` means the caller must rebuild the attempt; no
+    /// pool or lifecycle state changed.
+    ///
+    /// INVARIANT: every commit path validates its write through this one check
+    /// under its lock immediately before mutating; no other function compares
+    /// admission tokens; generation gating reads go through
+    /// `AdmissionFence::current` or `stable_generation` only.
     pub(crate) fn check_admission_state(
         &self,
         pool: &Mempool,
-        request: &AdmissionRequest,
+        expected_generation: u64,
+        expected_sequence: u64,
         fence: crate::admission::AdmissionFence,
+        stamp: Option<crate::pool::fee_policy::PolicyStamp>,
     ) -> Result<(), AdmitError> {
-        if fence.current(self) != Some(request.expected_generation) {
+        if fence.current(self) != Some(expected_generation) {
             return Err(AdmitError::GenerationChanged);
         }
-        if pool.sequence_number() != request.expected_sequence {
+        if pool.sequence_number() != expected_sequence {
+            return Err(AdmitError::MempoolChanged);
+        }
+        if stamp.is_some_and(|stamp| !stamp.matches(pool)) {
             return Err(AdmitError::MempoolChanged);
         }
         Ok(())
@@ -1095,7 +1116,8 @@ impl MempoolGateway {
             }
         }
         self.commit(AdmissionOrigin::Reorg, |pool| {
-            if self.chain_generation.load(Ordering::Acquire) != change.odd_generation() {
+            let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
+            if fence.current(self) != Some(change.odd_generation()) {
                 return Err(ChainChangeError::GenerationMoved);
             }
             Ok(pool.remove_for_reorg(&failing))
@@ -1448,8 +1470,8 @@ pub fn reset_admission_park() {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::{
-        AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError, CompositeObserver,
-        MempoolGateway, MempoolObserver,
+        AdmissionMode, AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError,
+        CompositeObserver, MempoolGateway, MempoolObserver,
     };
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
     use crate::standardness::PackageTxContext;
@@ -2616,6 +2638,70 @@ mod tests {
             1,
             "only the removal publication, no extra observer call from admission"
         );
+    }
+
+    /// The writer recheck's fee-delta leg. An overlay applied after
+    /// preparation moves the fee-delta sequence alone, so only the stamp can
+    /// reject the attempt: the fence and the membership sequence still hold.
+    /// A rebuilt attempt commits.
+    #[test]
+    fn admit_write_gate_retries_when_the_stamp_moved_after_prepare()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let observer = Arc::new(RecordingObserver::default());
+        let gateway = gateway_with(Some(dyn_observer(&observer)));
+        let resident = tx(60);
+        let resident_txid = resident.txid();
+        gateway.insert_entry(AdmissionOrigin::Rpc, entry(&resident))?;
+        observer.seen.lock().clear();
+
+        let candidate = standard_tx(61);
+        let candidate_txid = candidate.txid();
+        let request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+        let prepared = {
+            let pool = gateway.read();
+            MempoolGateway::prepare_admission(&pool, &request, AdmissionMode::Single)
+        };
+
+        // The overlay moves the fee-delta sequence alone.
+        gateway.prioritise(resident_txid, 500)?;
+        assert_eq!(
+            gateway.read().sequence_number(),
+            request.expected_sequence,
+            "prioritisation must leave the membership sequence alone"
+        );
+
+        // Under the writer's own guard, the one gate call is the only leg
+        // that can see the moved overlay.
+        let pool = gateway.pool.write();
+        assert_eq!(
+            gateway.check_admission_state(
+                &pool,
+                request.expected_generation,
+                request.expected_sequence,
+                crate::admission::AdmissionFence::Stable,
+                Some(prepared.stamp),
+            ),
+            Err(AdmitError::MempoolChanged),
+            "a moved fee-delta stamp must reject the writer recheck"
+        );
+        drop(pool);
+        assert!(
+            !gateway.read().contains_txid(&candidate_txid),
+            "the rejected attempt mutates nothing"
+        );
+        assert!(
+            observer.seen.lock().is_empty(),
+            "the rejected attempt publishes nothing"
+        );
+
+        // Rebuilt under the moved stamp, the same transaction commits.
+        let retry = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
+        assert!(matches!(
+            gateway.admit_transaction(retry),
+            Ok(AdmitOutcome::Committed(_))
+        ));
+        assert!(gateway.read().contains_txid(&candidate_txid));
+        Ok(())
     }
 
     #[test]

@@ -245,15 +245,25 @@ impl MempoolGateway {
             let Some(generation) = self.stable_generation() else {
                 continue;
             };
-            let (sequence, limits, policy, mempool_inputs) = {
+            let (sequence, stamp, mempool_inputs) = {
                 let pool = self.pool.read();
-                if self.stable_generation() != Some(generation) {
+                let sequence = pool.sequence_number();
+                if self
+                    .check_admission_state(
+                        &pool,
+                        generation,
+                        sequence,
+                        AdmissionFence::Stable,
+                        None,
+                    )
+                    .is_err()
+                {
                     continue;
                 }
+                let stamp = pool.policy_stamp();
                 (
-                    pool.sequence_number(),
-                    pool.limits,
-                    pool.policy_snapshot(),
+                    sequence,
+                    stamp,
                     txs.iter()
                         .map(|tx| resolve_mempool_inputs(&pool, tx))
                         .collect::<Vec<_>>(),
@@ -307,10 +317,15 @@ impl MempoolGateway {
             }
             let (mut prepared, package_checks) = {
                 let pool = self.pool.read();
-                if self.stable_generation() != Some(generation)
-                    || pool.sequence_number() != sequence
-                    || pool.limits != limits
-                    || pool.policy_snapshot() != policy
+                if self
+                    .check_admission_state(
+                        &pool,
+                        generation,
+                        sequence,
+                        AdmissionFence::Stable,
+                        Some(stamp),
+                    )
+                    .is_err()
                 {
                     continue;
                 }
@@ -326,15 +341,25 @@ impl MempoolGateway {
             let facts =
                 crate::package::finish_preview(txs, &requests, &mut prepared, package_checks);
             let pool = self.pool.read();
-            if self.stable_generation() != Some(generation)
-                || pool.sequence_number() != sequence
-                || pool.limits != limits
-                || pool.policy_snapshot() != policy
-                || prepared
-                    .iter()
-                    .any(|prepared| !prepared.matches_pool(&pool))
+            if self
+                .check_admission_state(&pool, generation, sequence, AdmissionFence::Stable, None)
+                .is_err()
             {
                 continue;
+            }
+            for row in &prepared {
+                if self
+                    .check_admission_state(
+                        &pool,
+                        generation,
+                        sequence,
+                        AdmissionFence::Stable,
+                        Some(row.stamp),
+                    )
+                    .is_err()
+                {
+                    continue 'attempt;
+                }
             }
             return Ok(facts);
         }
@@ -436,7 +461,11 @@ impl MempoolGateway {
             };
             let (sequence, mempool_prevouts, holdable) = {
                 let pool = self.pool.read();
-                if fence.current(self) != Some(generation) {
+                let sequence = pool.sequence_number();
+                if self
+                    .check_admission_state(&pool, generation, sequence, fence, None)
+                    .is_err()
+                {
                     continue;
                 }
                 if pool.contains_txid(&txid) {
@@ -447,7 +476,7 @@ impl MempoolGateway {
                 }
                 let prevouts = resolve_mempool_inputs(&pool, &tx);
                 (
-                    pool.sequence_number(),
+                    sequence,
                     prevouts,
                     peer && can_hold_orphan(&pool, &tx, &pool.policy_snapshot().standardness),
                 )
@@ -465,7 +494,10 @@ impl MempoolGateway {
             };
             if peer && snapshot.as_ref().is_some_and(|snapshot| snapshot.confirmed) {
                 let pool = self.pool.read();
-                if fence.current(self) != Some(generation) || pool.sequence_number() != sequence {
+                if self
+                    .check_admission_state(&pool, generation, sequence, fence, None)
+                    .is_err()
+                {
                     continue;
                 }
                 let mut lifecycle = self.lifecycle.lock();
@@ -2519,22 +2551,36 @@ mod tests {
         };
         let pool = gateway.read();
         assert_eq!(
-            gateway.check_admission_state(&pool, &request, AdmissionFence::Stable),
+            gateway.check_admission_state(
+                &pool,
+                request.expected_generation,
+                request.expected_sequence,
+                AdmissionFence::Stable,
+                None,
+            ),
             Err(AdmitError::GenerationChanged),
             "an even token cannot admit while the change fence is held"
         );
         let mut odd_request = request;
         odd_request.expected_generation = change.odd_generation();
         assert_eq!(
-            gateway.check_admission_state(&pool, &odd_request, AdmissionFence::Stable),
+            gateway.check_admission_state(
+                &pool,
+                odd_request.expected_generation,
+                odd_request.expected_sequence,
+                AdmissionFence::Stable,
+                None,
+            ),
             Err(AdmitError::GenerationChanged),
             "the odd integer without the guard's fence is refused"
         );
         assert_eq!(
             gateway.check_admission_state(
                 &pool,
-                &odd_request,
+                odd_request.expected_generation,
+                odd_request.expected_sequence,
                 AdmissionFence::ChainChange(change.odd_generation()),
+                None,
             ),
             Ok(()),
             "the guard's exact odd value admits under its own fence"
