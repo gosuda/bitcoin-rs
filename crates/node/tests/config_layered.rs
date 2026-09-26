@@ -323,18 +323,18 @@ fn chainstate_journal_defaults_resolve() -> Result<()> {
 #[test]
 fn chainstate_journal_higher_layer_overrides_blocks() -> Result<()> {
     let lower = UserConfig {
-        chainstate_journal: Some(bitcoin_rs_node::ChainstateJournalOverrides {
+        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
             enabled: Some(true),
             blocks: Some(100),
             ..Default::default()
-        }),
+        },
         ..Default::default()
     };
     let higher = UserConfig {
-        chainstate_journal: Some(bitcoin_rs_node::ChainstateJournalOverrides {
+        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
             blocks: Some(200),
             ..Default::default()
-        }),
+        },
         ..Default::default()
     };
     let config = resolve(&[&lower, &higher])?;
@@ -347,10 +347,10 @@ fn chainstate_journal_higher_layer_overrides_blocks() -> Result<()> {
 #[test]
 fn chainstate_journal_off_keeps_other_defaults() -> Result<()> {
     let layer = UserConfig {
-        chainstate_journal: Some(bitcoin_rs_node::ChainstateJournalOverrides {
+        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
             enabled: Some(false),
             ..Default::default()
-        }),
+        },
         ..Default::default()
     };
     let config = resolve(&[&layer])?;
@@ -362,30 +362,30 @@ fn chainstate_journal_off_keeps_other_defaults() -> Result<()> {
 #[test]
 fn chainstate_journal_rejects_invalid_values() {
     let zero_blocks = UserConfig {
-        chainstate_journal: Some(bitcoin_rs_node::ChainstateJournalOverrides {
+        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
             blocks: Some(0),
             ..Default::default()
-        }),
+        },
         ..Default::default()
     };
     assert!(resolve(&[&zero_blocks]).is_err());
 
     let lag_below_batch = UserConfig {
-        chainstate_journal: Some(bitcoin_rs_node::ChainstateJournalOverrides {
+        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
             max_lag_blocks: Some(10),
             blocks: Some(500),
             ..Default::default()
-        }),
+        },
         ..Default::default()
     };
     assert!(resolve(&[&lag_below_batch]).is_err());
 
     let retention_below_rotation = UserConfig {
-        chainstate_journal: Some(bitcoin_rs_node::ChainstateJournalOverrides {
+        chainstate_journal: bitcoin_rs_node::ChainstateJournalOverrides {
             rotate_mib: Some(512),
             max_journal_mib: Some(256),
             ..Default::default()
-        }),
+        },
         ..Default::default()
     };
     assert!(resolve(&[&retention_below_rotation]).is_err());

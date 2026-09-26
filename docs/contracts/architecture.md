@@ -157,8 +157,11 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   submits solved blocks, and admits headers),
   watch-only coinbase payout configuration (`MiningConfig::payout_script`), and
   process-level cache budgeting (`dbcache` distribution across chainstate and
-  txindex namespaces). The `bitcoin-rs` binary owns argv, environment, and
-  TOML parsing. Applied-tip mutation, recovery, checkpoint publication,
+  txindex namespaces). The node option table (`crates/node/src/options.rs`)
+  declares every operator option once, with its value grammar and its spelling
+  on each process-input surface; the `bitcoin-rs` binary expands that table into
+  its argv, environment, TOML, and `bitcoin.conf` readers. Applied-tip mutation,
+  recovery, checkpoint publication,
   retention, and branch switching are owned by `bitcoin-rs-chainstate`
   (`ARCH-07`), not by a public field bag of subsystem handles.
 - `bitcoin-rs-rpc::zmq` owns ZMQ topics, framing, HWM validation, socket
@@ -169,11 +172,24 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   The `g17_dependency_direction` gate pins the external `zmq` dependency to the
   surface crate and permits node only to forward `bitcoin-rs-rpc/zmq`.
 - `ARCH-07` owns transition reservation and post-commit follower dispatch.
-- `UserConfig::overlay` applies a later layer field-wise: a set field replaces
-  the earlier value; an unset field leaves it. Nested override structs merge
-  the same way, including `ChainstateJournalOverrides` and `MiningOverrides`. Proof:
-  `crates/node/src/config.rs` tests `user_config_overlay_lets_set_fields_win` and
-  `mining_payout_overlay_lets_the_later_address_win`.
+- The option table is the one declaration of an operator option. A row names
+  its configuration slot, its text grammar, and its spelling on the command
+  line, in the environment, in the TOML file, and in `bitcoin.conf`. The
+  `bitcoin-rs` binary holds no option name or grammar of its own beyond the two
+  configuration-file selectors and the storage-measurement flags.
+- `resolve` folds every layer through `UserConfig::overlay` in precedence order,
+  lowest first: a set field replaces the earlier value, an unset field leaves
+  it, and nested override structs merge the same way, including
+  `ChainstateJournalOverrides` and `MiningOverrides`. `overlay` also applies the
+  RPC credential style rule within the layer being folded, so a later password
+  clears an inherited cookie path and a later cookie path clears inherited
+  user and password. After the fold, the winning `network` value fills the
+  profile-owned fields once through `NetworkProfile::for_selection`, and
+  `rpc_auth` chooses the final credential style from the winning values.
+  Proofs: `crates/node/tests/unit/config/tests.rs`
+  `resolve_prefers_higher_layers_field_by_field`,
+  `rpc_cookie_and_credential_layers_keep_one_auth_source`, and
+  `earlier_set_fields_survive_a_later_bare_network_selection`.
 
 ### `ARCH-06`: Hierarchy change and exception process
 
@@ -277,10 +293,18 @@ composition seam.
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
   owned by `ChainFollowers`, not by apply; the connect/disconnect test also
   proves that the configured ZMQ publisher receives the committed effects.
-- `crates/node/src/config.rs` test `user_config_overlay_lets_set_fields_win`:
-  later `UserConfig` layers win on set fields, including nested
-  `ChainstateJournalOverrides` (`ARCH-05`).
-- `crates/node/src/config.rs` test `mining_payout_overlay_lets_the_later_address_win`
-  and `crates/node/tests/config_layered.rs` test
+- `crates/node/tests/unit/config/tests.rs` tests
+  `resolve_prefers_higher_layers_field_by_field` and
+  `rpc_cookie_and_credential_layers_keep_one_auth_source`: later `UserConfig`
+  layers win on set fields, including nested `ChainstateJournalOverrides`, and
+  the RPC credential style is settled per layer and again after the fold
+  (`ARCH-05`).
+- `crates/node/tests/unit/config/tests.rs` test
+  `earlier_set_fields_survive_a_later_bare_network_selection`: the network
+  profile fills unset fields only (`ARCH-05`).
+- `crates/node/tests/config_layered.rs` test
   `mining_payout_address_decodes_after_all_layers`: watch-only mining payout is
-  decoded once after overlay, against the resolved network (`ARCH-05`).
+  decoded once after every layer, against the resolved network (`ARCH-05`).
+- `bin/bitcoin-rs/src/bitcoin_conf.rs` test
+  `every_table_core_key_reaches_its_slot`: each `bitcoin.conf` key the option
+  table names writes the slot the table names.
