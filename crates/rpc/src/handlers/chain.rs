@@ -4930,7 +4930,7 @@ mod verification_progress_wiring_tests {
     use super::*;
 
     fn half_applied_ctx(chain_tx_count: Option<u64>) -> Arc<Context> {
-        let mut ctx = Context::new();
+        let ctx = Context::new();
         let header = Header {
             version: 1,
             prev_blockhash: BlockHash::default(),
