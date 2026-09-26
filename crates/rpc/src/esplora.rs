@@ -1015,12 +1015,14 @@ mod tests {
         }));
         let handler = Handler::new(Arc::new(context));
 
-        let response = route(
-            &handler,
-            "/scripthash/0000000000000000000000000000000000000000000000000000000000000000",
-            "",
-        );
-        assert_eq!(response.status, 503);
+        for suffix in ["", "/txs/chain/not-a-txid"] {
+            let response = route(
+                &handler,
+                &format!("/scripthash/{0}{suffix}", "00".repeat(32)),
+                "",
+            );
+            assert_eq!(response.status, 503);
+        }
     }
 
     #[test]
@@ -1102,6 +1104,96 @@ mod tests {
     }
 
     #[test]
+    fn history_cursors_follow_api_09_on_both_esplora_surfaces()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // API-09 and WF-02 own exact textual cursor equality and restart
+        // behavior. The expected page comes from the cursor-free public route.
+        let (handler, transaction, _, address) = contract_fixture()?;
+        let txid = transaction.txid().to_string();
+        let script_hash = ScriptHash::new(&transaction.outputs[0].script_pubkey)
+            .to_byte_array()
+            .to_lower_hex_string();
+        let mut unavailable = Context::new();
+        unavailable.chain_network = bitcoin_rs_primitives::Network::Regtest;
+        let unavailable = Handler::new(Arc::new(unavailable));
+        for prefix in ["/api", "/esplora"] {
+            for target in [
+                format!("address/{address}"),
+                format!("scripthash/{script_hash}"),
+            ] {
+                let path = format!("{prefix}/{target}/txs/chain");
+                let first = dispatch(&handler, &path, "");
+                assert_eq!(first.status, 200);
+                let first_page: Value = serde_json::from_slice(&first.body)?;
+                assert_eq!(first_page.as_array().map(Vec::len), Some(1));
+                for cursor in [
+                    "00".repeat(32),
+                    "not-a-txid".to_owned(),
+                    txid.to_uppercase(),
+                    format!("0x{txid}"),
+                ] {
+                    let cursor_path = format!("{path}/{cursor}");
+                    let response = dispatch(&handler, &cursor_path, "");
+                    assert_eq!(response.status, 200, "{cursor_path}");
+                    assert_eq!(response.body, first.body, "{cursor_path}");
+                    assert_eq!(dispatch(&unavailable, &cursor_path, "").status, 503);
+                }
+                let end = dispatch(&handler, &format!("{path}/{txid}"), "");
+                assert_eq!(end.status, 200);
+                assert_eq!(serde_json::from_slice::<Value>(&end.body)?, json!([]));
+                let mempool = dispatch(&handler, &format!("{prefix}/{target}/txs/mempool"), "");
+                assert_eq!(mempool.status, 200);
+                assert_eq!(serde_json::from_slice::<Value>(&mempool.body)?, json!([]));
+                assert_eq!(
+                    dispatch(&handler, &format!("{path}/{txid}/extra"), "").status,
+                    404
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn history_mempool_sentinel_keeps_the_fifty_transaction_bound() {
+        let target = vec![0x51];
+        let mut ctx = Context::new();
+        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+            history: Vec::new(),
+            funding: Vec::new(),
+            unspent: Vec::new(),
+        }));
+        for value in 1..=60 {
+            let tx = Arc::new(transaction(
+                None,
+                TxOut {
+                    value: Amount::from_sat(value),
+                    script_pubkey: target.clone().into(),
+                },
+            ));
+            ctx.mempool
+                .pool()
+                .write()
+                .insert_entry(MempoolEntry::new(tx, 100, 100, 0, 0))
+                .expect("insert mempool fixture");
+        }
+        // API-09: the router's empty sentinel selects only the mempool page.
+        let mempool = history(&ctx, ScriptHash::new(&target), Some(""), false);
+        assert_eq!(mempool.status, 200);
+        let values: Value = serde_json::from_slice(&mempool.body).expect("mempool page json");
+        assert_eq!(values.as_array().map(Vec::len), Some(50));
+        assert!(
+            values
+                .as_array()
+                .expect("page")
+                .iter()
+                .all(|tx| tx["status"]["confirmed"] == false)
+        );
+        let chain = history(&ctx, ScriptHash::new(&target), Some("not-a-txid"), false);
+        assert_eq!(chain.status, 200);
+        assert_eq!(chain.body, b"[]");
+    }
+
+    #[test]
     fn history_hydrates_only_the_requested_chain_page() {
         let target = vec![0x51];
         let transactions = (1_u64..=30)
@@ -1132,7 +1224,7 @@ mod tests {
             ));
         }
         ctx.script_index = Some(Arc::new(StaticScriptIndex {
-            history: records,
+            history: records.clone(),
             funding: Vec::new(),
             unspent: Vec::new(),
         }));
@@ -1145,6 +1237,43 @@ mod tests {
         assert_eq!(response.status, 200);
         let values: Value = serde_json::from_slice(&response.body).expect("history response json");
         assert_eq!(values.as_array().map(Vec::len), Some(CHAIN_PAGE));
+        assert_eq!(calls.load(Ordering::Relaxed), CHAIN_PAGE);
+
+        // API-09 fixes the chain page at 25 rows and excludes the known cursor.
+        // Heights 30..6 are page one, 5..1 page two, independent of txid order.
+        let cursor = records[5].txid.to_string();
+        let second = history(&ctx, ScriptHash::new(&target), Some(&cursor), false);
+        assert_eq!(second.status, 200);
+        let second: Value = serde_json::from_slice(&second.body).expect("second page json");
+        assert_eq!(second.as_array().map(Vec::len), Some(5));
+        assert_eq!(second[0]["txid"], records[4].txid.to_string());
+        assert_eq!(second[4]["txid"], records[0].txid.to_string());
+        assert_eq!(calls.load(Ordering::Relaxed), 30);
+        let end = history(
+            &ctx,
+            ScriptHash::new(&target),
+            Some(&records[0].txid.to_string()),
+            false,
+        );
+        assert_eq!(end.status, 200);
+        assert_eq!(end.body, b"[]");
+        assert_eq!(calls.load(Ordering::Relaxed), 30);
+
+        // A ready post-reorg index no longer contains this previously valid
+        // cursor. Its history must restart using the same bounded renderer.
+        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+            history: records
+                .into_iter()
+                .filter(|row| row.txid.to_string() != cursor)
+                .collect(),
+            funding: Vec::new(),
+            unspent: Vec::new(),
+        }));
+        let first = history(&ctx, ScriptHash::new(&target), None, false);
+        calls.store(0, Ordering::Relaxed);
+        let restarted = history(&ctx, ScriptHash::new(&target), Some(&cursor), false);
+        assert_eq!(restarted.status, 200);
+        assert_eq!(restarted.body, first.body);
         assert_eq!(calls.load(Ordering::Relaxed), CHAIN_PAGE);
     }
 
