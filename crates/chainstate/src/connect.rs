@@ -927,8 +927,19 @@ pub(super) fn applied_header_tip(
             },
         ));
     }
+    let parent_known = node
+        .parent
+        .and_then(|parent| tree.node(parent).ok())
+        .is_some_and(|parent| parent.chain_tx_count.get().is_some());
     tree.record_applied_tx_count(node_id, tx_count_delta_for(block))?;
     let node = tree.node(node_id)?;
+    if parent_known && node.chain_tx_count.get().is_none() {
+        tracing::warn!(
+            height,
+            hash = %block_hash,
+            "cumulative chain transaction count overflowed; marking it unknown"
+        );
+    }
     Ok(TipSnapshot {
         tip_id: node_id,
         height: node.height,

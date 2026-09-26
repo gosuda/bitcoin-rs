@@ -48,9 +48,12 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
         .chainstate()
         .applied_tip_handle()
         .load_full()
-        .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| {
-            tip.chain_tx_count
-        });
+        .expect("applied tip must exist after apply_block")
+        .chain_tx_count;
+    assert!(
+        expected_tx_count.get().is_some(),
+        "a fixture without a known count cannot catch a count lost in replay"
+    );
     drop(initial);
 
     // No checkpoint was published for `child`: only the journal can recover it.

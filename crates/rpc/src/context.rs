@@ -614,7 +614,13 @@ impl Context {
     }
 
     fn applied_progress_snapshot(&self) -> (Option<Arc<TipSnapshot>>, Option<u64>) {
-        self.with_stable_chainstate(|| (self.chain.applied_tip.load_full(), self.chain_tx_count()))
+        // One tip load: a second read could observe the next publication's
+        // count beside this tip's height.
+        self.with_stable_chainstate(|| {
+            let tip = self.chain.applied_tip.load_full();
+            let count = tip.as_ref().and_then(|tip| tip.chain_tx_count.get());
+            (tip, count)
+        })
     }
 
     /// Acquires a bounded full-block REST render slot, if one is available.

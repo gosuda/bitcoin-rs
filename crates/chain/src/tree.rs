@@ -2004,4 +2004,55 @@ mod tests {
         assert_eq!(tree.node(genesis_id)?.chain_tx_count.to_wire(), 0);
         Ok(())
     }
+
+    #[test]
+    fn recording_a_count_refreshes_only_the_published_tip() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut tree = BlockTree::new();
+        let genesis = test_header(BlockHash::default(), 0);
+        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
+        let genesis_hash = tree.node(genesis_id)?.hash;
+
+        let main_header = test_header(BlockHash(genesis_hash), 1);
+        let main_id = tree.insert_node(Some(genesis_id), main_header, NodeStatus::HeaderValid)?;
+        // Equal work means insertion order keeps `main` the published tip;
+        // `side` never is.
+        let side_header = test_header(BlockHash(genesis_hash), 101);
+        let side_id = tree.insert_node(Some(genesis_id), side_header, NodeStatus::HeaderValid)?;
+        assert_eq!(tree.tip_id(), Some(main_id));
+        assert_eq!(
+            tree.tip().map(|tip| tip.chain_tx_count),
+            Some(ChainTxCount::UNKNOWN)
+        );
+
+        // Recording on a non-tip ancestor first: the publication must stay
+        // pinned to the published tip's node, unknown count and all.
+        tree.record_applied_tx_count(genesis_id, 1)?;
+        assert_eq!(
+            tree.tip().map(|tip| (tip.tip_id, tip.chain_tx_count)),
+            Some((main_id, ChainTxCount::UNKNOWN))
+        );
+
+        tree.record_applied_tx_count(main_id, 2)?;
+        assert_eq!(
+            tree.tip().map(|tip| (tip.tip_id, tip.chain_tx_count)),
+            Some((main_id, ChainTxCount::established(3)))
+        );
+
+        // A count recorded on a non-tip node must not touch the published
+        // snapshot.
+        tree.restore_chain_tx_count(side_id, ChainTxCount::established(9))?;
+        assert_eq!(
+            tree.tip().map(|tip| (tip.tip_id, tip.chain_tx_count)),
+            Some((main_id, ChainTxCount::established(3)))
+        );
+
+        // And an authenticated restore on the tip itself refreshes it.
+        tree.restore_chain_tx_count(main_id, ChainTxCount::established(5))?;
+        assert_eq!(
+            tree.tip().map(|tip| tip.chain_tx_count),
+            Some(ChainTxCount::established(5))
+        );
+        Ok(())
+    }
 }
