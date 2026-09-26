@@ -228,7 +228,11 @@ impl BlockSync {
         if !deferred.is_empty() {
             let mut announcements = self.block_announcements.lock();
             for (source, hash) in deferred {
-                announcements.entry(source).or_insert(hash);
+                // The captured announcement predates anything the listener
+                // queued while this drain ran — the first unprocessed
+                // announcement wins, so it must overwrite, not defer to, a
+                // hash enqueued mid-drain.
+                announcements.insert(source, hash);
             }
         }
         if credit_refresh_needed {

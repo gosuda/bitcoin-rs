@@ -279,8 +279,8 @@ impl BlockSync {
     ///
     /// PRE: `source` identifies the current connection and `hash` is a
     /// `MSG_BLOCK` or `MSG_WITNESS_BLOCK` inventory hash.
-    /// POST: the announcement is queued and the sync loop is woken; no block
-    /// body request is emitted here.
+    /// POST: the announcement is queued; the caller wakes the sync loop. No
+    /// block body request is emitted here.
     /// INVARIANT: one entry per connection — the first unprocessed
     /// announcement wins, so a later vector cannot replace an unknown tip
     /// before header sync drains it — and a flooding peer cannot grow the
