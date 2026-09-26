@@ -161,18 +161,7 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
         return Err(RpcError::InvalidParams("params must be an array or object"));
     };
     let txid_str = txid_str.ok_or(RpcError::InvalidParams("txid is required"))?;
-    let txid = if txid_str.len() == 64 {
-        Txid::from_str(txid_str).map_err(|_| {
-            RpcError::InvalidParameter(format!(
-                "txid must be hexadecimal string (not '{txid_str}')"
-            ))
-        })?
-    } else {
-        return Err(RpcError::InvalidParameter(format!(
-            "txid must be of length 64 (not {}, for '{txid_str}')",
-            txid_str.len()
-        )));
-    };
+    let txid = super::parse_txid(txid_str, "txid")?;
     if let Some(dummy) = dummy
         && !dummy.is_null()
     {

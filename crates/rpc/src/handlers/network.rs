@@ -14,7 +14,9 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 use crate::compat::convert::{i64_saturated, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
 use crate::error::RpcError;
-use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str};
+use crate::handlers::{
+    ensure_no_params, optional_bool, params_array, required_str, wrong_type_plain,
+};
 use corepc_types::v31::{self, ConnectionType, GetNetworkInfoNetwork, TransportProtocolType};
 
 // Local service flags this node advertises:
@@ -97,9 +99,12 @@ fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcEr
     if value.is_null() {
         return Ok(default);
     }
+    if !value.is_number() {
+        return Err(wrong_type_plain(value, "number"));
+    }
     value
         .as_u64()
-        .ok_or_else(|| RpcError::InvalidType("parameter must be unsigned integer".to_owned()))
+        .ok_or_else(|| RpcError::InvalidParameter("value is out of range".to_owned()))
 }
 
 /// Maps an IP address to Bitcoin Core's `network` field label.

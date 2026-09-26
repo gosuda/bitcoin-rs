@@ -294,9 +294,12 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         let tip_hash = match array.get(1).filter(|value| !value.is_null()) {
             None => ctx.chain.applied_hash(),
             Some(value) => {
-                let hash = parse_hash(value.as_str().ok_or_else(|| {
-                    RpcError::InvalidType("blockhash must be a string".to_owned())
-                })?)?;
+                let hash = parse_hash(
+                    value.as_str().ok_or_else(|| {
+                        RpcError::InvalidType("blockhash must be a string".to_owned())
+                    })?,
+                    "blockhash",
+                )?;
                 let Some(height) = ctx.chain.height_for_hash(hash) else {
                     return Err(RpcError::NotFound("block not found"));
                 };
@@ -526,7 +529,10 @@ pub(crate) fn getbestblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Val
 }
 
 pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
+    let hash = parse_hash(
+        required_str(params, 0, "block hash is required")?,
+        "blockhash",
+    )?;
     let verbosity = getblock_verbosity(params)?;
     let record = ctx
         .chain
@@ -542,7 +548,10 @@ pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
 }
 
 pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
+    let hash = parse_hash(
+        required_str(params, 0, "block hash is required")?,
+        "blockhash",
+    )?;
     let verbose = optional_bool(params, 1, true)?;
     let record = ctx
         .chain
@@ -564,7 +573,7 @@ fn blockstats_record(ctx: &Context, params: &Value) -> Result<BlockRecord, RpcEr
             u32::try_from(height).map_err(|_| RpcError::InvalidParams("height exceeds u32"))?;
         ctx.chain.block_by_height(height)
     } else if let Some(hash) = target.as_str() {
-        let hash = parse_hash(hash)?;
+        let hash = parse_hash(hash, "hash_or_height")?;
         let record = ctx.chain.block_by_hash(hash);
         if let Some(record) = &record
             && ctx.chain.block_hash_at_height(record.height) != Some(hash)
@@ -900,7 +909,10 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 }
 
 pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
+    let hash = parse_hash(
+        required_str(params, 0, "block hash is required")?,
+        "blockhash",
+    )?;
     let control = ctx
         .chain
         .chain_control
@@ -1365,16 +1377,16 @@ fn getblock_verbosity(params: &Value) -> Result<u64, RpcError> {
     ))
 }
 
-fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
+fn parse_hash(value: &str, label: &str) -> Result<Hash256, RpcError> {
     if value.len() != 64 {
         return Err(RpcError::InvalidParameter(format!(
-            "blockhash must be of length 64 (not {}, for '{value}')",
+            "{label} must be of length 64 (not {}, for '{value}')",
             value.len()
         )));
     }
     Hash256::from_str(value).map_err(|_| {
         RpcError::InvalidParameter(format!(
-            "blockhash must be hexadecimal string (not '{value}')"
+            "{label} must be hexadecimal string (not '{value}')"
         ))
     })
 }
