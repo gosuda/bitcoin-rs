@@ -6,10 +6,11 @@
 //! matching inbound staging set. The node sync coordinator drives these
 //! types; it does not own the policy.
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
+use bitcoin_rs_chain::{BlockTree, InitialBlockDownload, TipSnapshot};
 use bitcoin_rs_primitives::{Hash256, Network};
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
@@ -30,6 +31,12 @@ const BLOCK_DOWNLOAD_TIMEOUT_BASE: u32 = 2;
 /// Core's `BLOCK_DOWNLOAD_TIMEOUT_PER_PEER` in half-target-spacing units:
 /// each additional active downloader adds half a spacing to the budget.
 const BLOCK_DOWNLOAD_TIMEOUT_PER_PEER: u32 = 1;
+/// How far below a pruned peer's own tip this node may still ask it for
+/// blocks: Core's `NODE_NETWORK_LIMITED_MIN_BLOCKS`
+/// (`net_processing.cpp:159`), the 288 blocks a `NODE_NETWORK_LIMITED` peer
+/// keeps past its pruning horizon. Core holds a two-block race buffer at
+/// `:1637`; this node keeps the plain 288.
+const NODE_NETWORK_LIMITED_MIN_BLOCKS: u32 = 288;
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 ///
 /// 256 is the measured single-peer IBD depth: a bounded 0–150,000 daemon
@@ -200,37 +207,136 @@ pub struct SyncPeerSelection {
     pub probe_peers: Vec<SyncPeer>,
 }
 
-/// A height-eligible sync candidate annotated with its fan-out eligibility
-/// and soft-block status.
+/// A height-eligible sync candidate annotated with its block-service
+/// eligibility, fan-out eligibility, and soft-block status.
 ///
-/// The fan-out eligibility is the KTD6 predicate, finalized across
-/// `statically_fanout_eligible` and the window's soft-demotion check; the
-/// soft-block flag indicates whether the window currently soft-blocks the
-/// candidate for block requests (expired pendings or staller cooldown).
+/// The clauses stay separate because the selection paths combine them
+/// differently: fan-out, probes, and hedges require an eligible outbound
+/// peer, while the deep request set and the single-peer fallback ask any
+/// peer whose advertised services can serve the range — an inbound-only
+/// node must still sync. A soft-blocked peer still serves as the last
+/// resort when nothing better exists.
 #[derive(Clone, Copy, Debug)]
 pub struct FanoutCandidate {
     /// The peer this candidate refers to.
     pub peer: SyncPeer,
-    /// Whether the peer satisfies the KTD6 fan-out eligibility predicate.
+    /// Whether [`serves_requested_height`] accepted this peer: the one
+    /// block-body service clause every body-selection path reads.
+    pub serves_bodies: bool,
+    /// Whether [`statically_fanout_eligible`] accepted this peer: the body
+    /// service clause plus the outbound requirement, for the paths that
+    /// stripe or hedge across self-chosen connections.
     pub fanout_eligible: bool,
     /// Whether the window currently soft-blocks this peer for requests.
     pub soft_blocked: bool,
 }
 
-/// Connection-level clauses of the fan-out eligibility predicate (KTD6).
+/// The chain facts one block-body peer choice reads.
 ///
-/// Outbound and witness-serving (`NODE_WITNESS`), per Bitcoin Core's
-/// block-download peer criteria in `net_processing.cpp` (Core requests blocks
-/// only from witness peers post-segwit, and inbound peers are
-/// attacker-chosen — counting them toward fan-out is the recorded under-fill
-/// regression). The height clause lives in the candidate filter and the
-/// soft-demotion clause in [`DownloadWindow::peer_has_expired_pending`].
-pub fn statically_fanout_eligible(peer: &PeerInfo) -> bool {
+/// PRE: `requested_height` is the height of the block the selection fills,
+///   taken from the same frontier snapshot as the candidates; `ibd` is the
+///   node's one latch.
+/// POST: [`serves_requested_height`] answers for that height.
+/// INVARIANT: one shared latch decides initial block download for every
+///   selection path; no path caches or re-derives the answer.
+pub struct BlockDownloadPolicy {
+    /// The node's chain-owned initial-block-download latch.
+    pub ibd: Arc<InitialBlockDownload>,
+    /// The height of the block body this selection fills.
+    pub requested_height: u32,
+    /// The network the latch judges: the work floor is network-dependent.
+    pub network: Network,
+}
+
+/// Whether a peer's advertised services can serve the policy's height.
+///
+/// This is the one block-body service clause: the request, fan-out, probe,
+/// and hedge paths all read it, and none re-derives a witness-only rule. It
+/// runs before the window's dynamic clauses (KTD6).
+///
+/// PRE: `policy` names the requested height and the node's sync phase.
+/// POST: true only for a witness peer whose advertised services cover that
+///   height. During initial block download the peer must advertise
+///   `NODE_NETWORK`, so a pruned peer is never asked for old blocks (Core
+///   `net_processing.cpp:6521`). Afterwards a peer without `NODE_NETWORK`
+///   serves only the last [`NODE_NETWORK_LIMITED_MIN_BLOCKS`] blocks of its
+///   own demonstrated chain (`net_processing.cpp:1637`); one below the
+///   requested height is ineligible.
+/// INVARIANT: every body-selection path applies this clause; a peer that
+///   cannot serve the range is never asked for it.
+pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
+    let network = ServiceFlags::NETWORK.to_u64();
     let witness = ServiceFlags::WITNESS.to_u64();
-    !peer.inbound && peer.services & witness != 0
+    if peer.services & witness == 0 {
+        return false;
+    }
+    if peer.services & network != 0 {
+        return true;
+    }
+    // Core applies the retained window only to `NODE_NETWORK_LIMITED`
+    // (`net_processing.cpp:1637`): a peer without it serves no blocks.
+    if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
+        return false;
+    }
+    if policy
+        .ibd
+        .is_active(crate::counters::now_seconds(), policy.network)
+    {
+        return false;
+    }
+    u32::try_from(peer.best_known_height).is_ok_and(|demonstrated| {
+        demonstrated
+            .checked_sub(policy.requested_height)
+            .is_some_and(|left_tip| left_tip < NODE_NETWORK_LIMITED_MIN_BLOCKS)
+    })
+}
+
+/// The lowest height a peer's advertised services may serve.
+///
+/// `0` for a `NODE_NETWORK` peer or while initial block download already
+/// excludes limited peers outright, else the retained-window floor of the
+/// peer's demonstrated chain (`NODE_NETWORK_LIMITED_MIN_BLOCKS`,
+/// `net_processing.cpp:159-161`). Request schedulers clamp batches to
+/// `floor..=best` so a limited peer is never sent a height outside the
+/// window [`serves_requested_height`] certified at selection time.
+#[must_use]
+pub fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u32 {
+    let network = ServiceFlags::NETWORK.to_u64();
+    if peer.services & network != 0
+        || policy
+            .ibd
+            .is_active(crate::counters::now_seconds(), policy.network)
+    {
+        return 0;
+    }
+    u32::try_from(peer.best_known_height)
+        .unwrap_or(0)
+        .saturating_sub(NODE_NETWORK_LIMITED_MIN_BLOCKS.saturating_sub(1))
+}
+
+/// Whether a connection may take part in fan-out striping, prefix probes,
+/// and cold-front hedges: the [`serves_requested_height`] clause plus the
+/// pre-existing outbound requirement.
+///
+/// PRE: `policy` names the requested height and the node's sync phase.
+/// POST: true only for an outbound peer that may serve that height. Inbound
+///   peers never qualify here: they are attacker-chosen, and counting them
+///   toward fan-out is the recorded under-fill regression. The deep request
+///   set and the single-peer fallback are not fan-out paths and read the
+///   service clause alone, so an inbound-only node still syncs.
+/// INVARIANT: this is the only fan-out service clause.
+pub fn statically_fanout_eligible(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
+    !peer.inbound && serves_requested_height(peer, policy)
 }
 
 /// Set the fan-out/request mode on the window from the current candidate set.
+///
+/// PRE: each candidate carries the service clause and the window clause
+///   separately.
+/// POST: the counted fan-out set and the returned cold-front peer satisfy both
+///   clauses.
+/// INVARIANT: a candidate soft-blocked by the window never counts toward
+///   fan-out.
 pub fn configure_request_mode(
     window: &mut DownloadWindow,
     candidates: &[FanoutCandidate],
@@ -238,7 +344,7 @@ pub fn configure_request_mode(
 ) -> Option<SyncPeer> {
     let eligible = candidates
         .iter()
-        .filter(|candidate| candidate.fanout_eligible)
+        .filter(|candidate| candidate.fanout_eligible && !candidate.soft_blocked)
         .count();
     let preferred_source = window.preferred_peer();
     let preferred_candidate = preferred_source.and_then(|source| {
@@ -247,7 +353,7 @@ pub fn configure_request_mode(
             .find(|candidate| candidate.peer.source == source)
     });
     let preferred = preferred_candidate
-        .filter(|candidate| !candidate.soft_blocked)
+        .filter(|candidate| candidate.fanout_eligible && !candidate.soft_blocked)
         .map(|candidate| candidate.peer);
     if eligible < window.min_peers_for_fanout() && preferred_candidate.is_some() {
         window.set_fanout_eligible_peers(0, now);
@@ -1928,6 +2034,7 @@ impl DownloadWindow {
         chain_tip: &TipSnapshot,
         request_start_height: u32,
         peer_best_height: u32,
+        servable_floor: u32,
         tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerRequest> {
@@ -1967,8 +2074,13 @@ impl DownloadWindow {
             return None;
         }
 
-        let mut entries =
-            self.expired_request_entries(stager, expired, batch_limit, &mut byte_capacity);
+        let mut entries = self.expired_request_entries(
+            stager,
+            expired,
+            batch_limit,
+            servable_floor,
+            &mut byte_capacity,
+        );
         let selected_hashes = SelectedHashes::from_entries(&entries);
 
         // The current chain frontier outranks the forward-scan hint. A
@@ -1985,7 +2097,12 @@ impl DownloadWindow {
             self.next_request_height = request_start_height;
             metrics::counter!("node.sync.frontier_rewinds").increment(1);
         }
-        let height = request_start_height.max(self.next_request_height);
+        // `servable_floor` keeps a limited peer's batch inside its retained
+        // window: `serves_requested_height` certified only the first height
+        // at selection time.
+        let height = request_start_height
+            .max(self.next_request_height)
+            .max(servable_floor);
         let mut next_request_height = self.next_request_height;
         let request_tip_height = chain_tip.height.min(peer_best_height);
         let remaining_limit = batch_limit
@@ -2161,6 +2278,7 @@ impl DownloadWindow {
         stager: &BlockStager,
         expired: Vec<PeerRequestEntry>,
         batch_limit: usize,
+        servable_floor: u32,
         byte_capacity: &mut usize,
     ) -> Vec<PeerRequestEntry> {
         let mut entries = Vec::with_capacity(batch_limit);
@@ -2168,7 +2286,12 @@ impl DownloadWindow {
             if entries.len() >= batch_limit || *byte_capacity < self.ewma_block_bytes {
                 break;
             }
-            if stager.contains(&entry.hash) || self.pending.contains_key(&entry.hash) {
+            // Below the peer's retained window the entry is unservable for
+            // it: leave it unowned so another peer's scan picks it up.
+            if entry.height < servable_floor
+                || stager.contains(&entry.hash)
+                || self.pending.contains_key(&entry.hash)
+            {
                 continue;
             }
             *byte_capacity = byte_capacity.saturating_sub(self.ewma_block_bytes);

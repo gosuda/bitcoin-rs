@@ -129,6 +129,10 @@ pub struct NodeState {
     /// Derived consumers of committed chain events. Not held by `Chainstate`.
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
+    /// The one initial-block-download latch: chain-owned state shared by the
+    /// block-download executor, the RPC context, and the P2P listener, so no
+    /// two surfaces can disagree about whether this node is still syncing.
+    ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     /// Process-wide rollback-evidence reporter (warning snapshot + marker).
     recovery_reporter: Arc<crate::recovery_reporter::RecoveryReporter>,
 }
@@ -298,6 +302,12 @@ impl NodeState {
     #[must_use]
     pub fn sync(&self) -> Arc<crate::BlockSync> {
         Arc::clone(&self.sync)
+    }
+
+    /// Returns the node's one initial-block-download latch.
+    #[must_use]
+    pub fn ibd(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
+        Arc::clone(&self.ibd)
     }
 
     /// Returns the process-wide shutdown signal shared by all runtime workers.

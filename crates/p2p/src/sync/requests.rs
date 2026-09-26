@@ -10,12 +10,16 @@ use super::peers::active_demonstrated_height;
 use super::telemetry::metric_count;
 use crate::Message;
 use crate::connection::PeerSource;
+use crate::download_window::BlockDownloadPolicy;
 use crate::download_window::SyncPeer;
+use crate::download_window::servable_floor;
+use crate::download_window::serves_requested_height;
 use crate::download_window::statically_fanout_eligible;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_primitives::Hash256;
 use smallvec::SmallVec;
+use std::sync::Arc;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -150,6 +154,22 @@ impl BlockSync {
             return GetdataRequestOutcome::default();
         };
 
+        // The service clause that gates tick-time selection applies here
+        // too: header-drain fetches and stripe retries reach this function
+        // without passing the selector, so the gate is enforced at the one
+        // path every body request takes (net_processing.cpp:6521-6525).
+        let Some(info) = self.peer_table.info_of(source.addr) else {
+            return GetdataRequestOutcome::default();
+        };
+        let policy = BlockDownloadPolicy {
+            ibd: Arc::clone(&self.ibd),
+            network: self.chain.network(),
+            requested_height: required.height,
+        };
+        if !serves_requested_height(&info, &policy) {
+            return GetdataRequestOutcome::default();
+        }
+        let servable_floor = servable_floor(&info, &policy);
         let tree = self.chain.block_tree();
         let request = {
             let mut scheduler = self.scheduler.lock();
@@ -161,6 +181,7 @@ impl BlockSync {
                 chain_tip,
                 required.height,
                 peer_best_height,
+                servable_floor,
                 &tree,
                 now,
             )
@@ -243,6 +264,11 @@ impl BlockSync {
         let tree = self.chain.block_tree();
         let active_tip = self.chain.chain_tip()?.tip_id;
         let active_front_height = tree.active_height_of(active_tip, front_hash)?;
+        let policy = BlockDownloadPolicy {
+            ibd: Arc::clone(&self.ibd),
+            network: self.chain.network(),
+            requested_height: active_front_height,
+        };
         let mut eligible = SmallVec::<[PeerSource; 8]>::new();
         for session in sessions {
             let Some(peer) = session.info else {
@@ -257,10 +283,10 @@ impl BlockSync {
             } else {
                 active_demonstrated_height(&tree, active_tip, &session.demonstrated_tips)
             };
-            if source != owner
-                && statically_fanout_eligible(&peer)
-                && capability.is_some_and(|height| height >= active_front_height)
-            {
+            if source == owner || !statically_fanout_eligible(&peer, &policy) {
+                continue;
+            }
+            if capability.is_some_and(|height| height >= active_front_height) {
                 eligible.push(source);
             }
         }

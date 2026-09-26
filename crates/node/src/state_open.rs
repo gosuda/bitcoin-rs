@@ -350,6 +350,17 @@ impl NodeState {
                 outbound_block_relay_slots: P2P_OUTBOUND_BLOCK_RELAY_SLOTS,
                 outbound_queue_limit: outbound_full_relay_slots,
                 inbound_block_queue_limit: INBOUND_BLOCK_CHANNEL_LIMIT,
+                // A pruned node cannot serve the full block history, so it
+                // advertises `NODE_NETWORK_LIMITED` instead of
+                // `NODE_NETWORK` (Core `init.cpp:2022-2026`); witness relay
+                // is unaffected.
+                local_services: if config.storage.prune_target_mb > 0 {
+                    bitcoin::p2p::ServiceFlags::WITNESS
+                        | bitcoin::p2p::ServiceFlags::NETWORK_LIMITED
+                } else {
+                    bitcoin::p2p::ServiceFlags::WITNESS | bitcoin::p2p::ServiceFlags::NETWORK
+                },
+                ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
             Arc::clone(&shutdown),
         ));
@@ -416,12 +427,21 @@ impl NodeState {
         ));
         chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
         let chainstate = Arc::new(chainstate);
+        // One chain-owned latch for the whole process: the block-download
+        // executor, the RPC context, and the P2P listener all hold this same
+        // `Arc`, so `initialblockdownload`, the transaction-relay gate, and
+        // block-peer eligibility can never disagree.
+        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+            chainstate.applied_tip_reader(),
+            chainstate.block_tree_reader(),
+        ));
         let sync = Arc::new(crate::sync::block_sync(
             Arc::clone(&chainstate),
             followers.clone(),
             Arc::clone(&peer_table),
             Arc::clone(&inbound_headers_rx),
             Arc::clone(&inbound_blocks_rx),
+            Arc::clone(&ibd),
         ));
         if config.p2p.fast_sync {
             sync.install_budget(fast_sync_budget(config.network));
@@ -477,6 +497,7 @@ impl NodeState {
             chainstate,
             followers,
             sync,
+            ibd,
             recovery_reporter,
         })
     }

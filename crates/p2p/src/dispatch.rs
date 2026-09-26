@@ -76,6 +76,19 @@ pub trait ChainQuery: Send + Sync {
         request: &BlockTransactionsRequest,
         headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError>;
+
+    /// Header time of the active tip, `None` when no active tip is known.
+    ///
+    /// PRE: none.
+    /// POST: returns UNIX seconds of the tip header Core would read as
+    ///   `m_best_block_time` (`net_processing.cpp:1445-1448`); `None` means
+    ///   nothing is applied, which the outbound service policy reads as the
+    ///   deepest possible local chain.
+    /// INVARIANT: the only local tip-age source for peer admission; no
+    ///   caller walks the block tree per handshake for it.
+    fn best_block_time(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Read-only transaction inventory view used by the Inv filter and the
@@ -1316,8 +1329,12 @@ mod tests {
         for witness in [false, true] {
             for filtered in [false, true] {
                 let mut peer = ready_peer();
-                let mut version =
-                    crate::handshake::version_message(1, 0, crate::peer_info::PeerRole::FullRelay);
+                let mut version = crate::handshake::version_message(
+                    1,
+                    0,
+                    crate::peer_info::PeerRole::FullRelay,
+                    bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+                );
                 version.services = if witness {
                     bitcoin::p2p::ServiceFlags::WITNESS
                 } else {
@@ -1430,8 +1447,12 @@ mod tests {
         for relay_open in [false, true] {
             for witness in [false, true] {
                 let mut peer = ready_peer();
-                let mut version =
-                    crate::handshake::version_message(1, 0, crate::peer_info::PeerRole::FullRelay);
+                let mut version = crate::handshake::version_message(
+                    1,
+                    0,
+                    crate::peer_info::PeerRole::FullRelay,
+                    bitcoin::p2p::ServiceFlags::NETWORK | bitcoin::p2p::ServiceFlags::WITNESS,
+                );
                 version.services = if witness {
                     bitcoin::p2p::ServiceFlags::WITNESS
                 } else {

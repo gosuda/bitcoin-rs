@@ -180,6 +180,11 @@ pub struct BlockSync {
     #[doc(hidden)]
     pub chain: Arc<dyn SyncChain>,
     peer_table: Arc<PeerTable>,
+    /// The node's one chain-owned initial-block-download latch, shared with
+    /// RPC and the listener. Block-body peer choice reads it through
+    /// [`crate::download_window::BlockDownloadPolicy`]; nothing else decides
+    /// whether this node is still syncing.
+    ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
     inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
     /// One lock owns the coupled download, staged-body, header-request, and
@@ -330,17 +335,25 @@ struct GetdataRequestOutcome {
 
 impl BlockSync {
     /// Constructs a new orchestrator over the supplied shared handles.
+    ///
+    /// PRE: `ibd` is the node's chain-owned latch that RPC and the listener
+    ///   also hold.
+    /// POST: the orchestrator starts no download until a tick runs.
+    /// INVARIANT: the latch is never replaced and never copied into a cached
+    ///   boolean.
     #[must_use]
     pub fn new(
         chain: Arc<dyn SyncChain>,
         peer_table: Arc<PeerTable>,
         inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
         inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+        ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     ) -> Self {
         let budget = default_sync_budget(chain.network());
         Self {
             chain,
             peer_table,
+            ibd,
             inbound_headers_rx,
             inbound_blocks_rx,
             scheduler: Mutex::new(SchedulerState {
@@ -723,3 +736,22 @@ impl std::fmt::Display for NoProgressReason {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// A latch that stays in initial block download: nothing is ever applied
+/// behind it, so [`bitcoin_rs_chain::InitialBlockDownload::is_active`] answers
+/// active for every time.
+///
+/// PRE: none.
+/// POST: the returned latch is shared and never leaves initial block download.
+/// INVARIANT: test-only. Production wires the node's chain-owned latch; a test
+///   that exercises the block-service clause builds its own fixture.
+#[cfg(test)]
+#[must_use]
+pub(crate) fn syncing_ibd_latch() -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
+    Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+        bitcoin_rs_chain::TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty())),
+        bitcoin_rs_chain::BlockTreeReader::new(Arc::new(
+            parking_lot::RwLock::new(BlockTree::new()),
+        )),
+    ))
+}

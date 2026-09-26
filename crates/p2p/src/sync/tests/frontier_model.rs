@@ -69,7 +69,7 @@ fn addr_of(port: u16) -> SocketAddr {
 fn usable(port: u16, best_known: i32, active_height: Option<u32>) -> UsablePeer {
     UsablePeer {
         source: PeerSource::for_test(addr_of(port)),
-        info: eligible_peer(addr_of(port), best_known),
+        info: synthetic_peer(addr_of(port), best_known),
         demonstrated_tips: Vec::new(),
         active_height,
         role: crate::peer_info::PeerRole::FullRelay,
@@ -489,7 +489,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     let (tx, rx) = unbounded::<Message>();
     let conn1 = PeerLease::new(tx);
     peers.register(staller, conn1.clone());
-    peers.publish_info(staller, &conn1, eligible_peer(staller, 200));
+    peers.publish_info(staller, &conn1, synthetic_peer(staller, 200));
 
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
@@ -552,7 +552,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     let (tx2, rx2) = unbounded::<Message>();
     let conn2 = PeerLease::new(tx2);
     peers.register(staller, conn2.clone());
-    peers.publish_info(staller, &conn2, eligible_peer(staller, 200));
+    peers.publish_info(staller, &conn2, synthetic_peer(staller, 200));
 
     // Conviction is exact: the convicted source is conn1, already replaced,
     // so the disconnect lands on nobody — and specifically not on conn2.
@@ -590,7 +590,7 @@ fn release_sweep_is_connection_exact_at_the_same_address() -> Result<(), Box<dyn
 {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
     let addr = test_addr(9820, 0)?;
-    let rx = connect_peer(&peers, eligible_peer(addr, 200));
+    let rx = connect_peer(&peers, synthetic_peer(addr, 200));
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
     let Message::GetData(inventory) = rx.try_recv()? else {

@@ -13,6 +13,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::p2p::Magic;
+use bitcoin::p2p::ServiceFlags;
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
@@ -35,6 +36,10 @@ const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = DEFAULT_OUTBOUND_FULL_RELAY_SLOTS;
 const EXTRA_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(45);
 
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
+
+/// Core's automatic-connection maximum, `-maxconnections`
+/// (`DEFAULT_MAX_PEER_CONNECTIONS`, `net.h:81`).
+const DEFAULT_MAX_PEER_CONNECTIONS: usize = 200;
 
 const FAILED_ADDR_BACKOFF: Duration = Duration::from_mins(1);
 
@@ -60,11 +65,20 @@ pub struct P2pServiceConfig {
     pub dns_port: u16,
     /// Fixed connect endpoints. Non-empty disables DNS maintenance.
     pub fixed_peers: Vec<String>,
+    /// Total automatic peer connections, the Core maximum inbound and
+    /// outbound admission is derived from.
+    ///
+    /// Core: `m_max_automatic_connections` (`net.h:1091`).
+    pub max_peer_connections: usize,
     /// Outbound full-relay connection slots (transaction, address, block
     /// relay, and announcements).
     ///
     /// Core: `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
     pub outbound_full_relay_slots: usize,
+    /// The services this node advertises in every `version`. A pruned node
+    /// supplies `WITNESS | NETWORK_LIMITED`; the default is the full-history
+    /// advertisement (Core `init.cpp:2022-2026`).
+    pub local_services: ServiceFlags,
     /// Outbound block-relay-only connection slots (blocks only, no `tx` or
     /// `addr`).
     ///
@@ -85,10 +99,12 @@ impl Default for P2pServiceConfig {
             dns_seeds: Vec::new(),
             dns_port: 0,
             fixed_peers: Vec::new(),
+            max_peer_connections: DEFAULT_MAX_PEER_CONNECTIONS,
             outbound_full_relay_slots: DEFAULT_OUTBOUND_FULL_RELAY_SLOTS,
             outbound_block_relay_slots: DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS,
             outbound_queue_limit: DEFAULT_OUTBOUND_QUEUE_LIMIT,
             inbound_block_queue_limit: DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT,
+            local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
         }
     }
 }
@@ -106,6 +122,21 @@ impl P2pServiceConfig {
     pub fn total_outbound_active_limit(&self) -> usize {
         self.outbound_full_relay_slots
             .saturating_add(self.outbound_block_relay_slots)
+    }
+
+    /// Inbound connection capacity: what the automatic-connection maximum
+    /// leaves after the outbound slot counts.
+    ///
+    /// PRE: none.
+    /// POST: returns `max_peer_connections` minus both outbound slot counts,
+    ///   clamped at zero.
+    /// INVARIANT: this is the only inbound capacity derivation; the listener
+    ///   refuses admission at the result, it never evicts.
+    #[must_use]
+    pub fn max_inbound(&self) -> usize {
+        self.max_peer_connections
+            .saturating_sub(self.outbound_full_relay_slots)
+            .saturating_sub(self.outbound_block_relay_slots)
     }
 }
 
@@ -280,7 +311,7 @@ impl P2pService {
             bound_listeners.push((*addr, listener));
         }
 
-        let shared = crate::listener::ConnectionShared::new(
+        let mut shared = crate::listener::ConnectionShared::new(
             Arc::clone(&self.peer_table),
             Arc::clone(&self.banned),
             Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
@@ -295,6 +326,8 @@ impl P2pService {
             sync_wake_tx.cloned(),
             extras,
         );
+        shared.max_inbound = self.config.max_inbound();
+        shared.local_services = self.config.local_services;
 
         let mut listeners = Vec::with_capacity(bound_listeners.len());
         for (listener_addr, listener) in bound_listeners {
