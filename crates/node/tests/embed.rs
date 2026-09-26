@@ -93,6 +93,33 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     Ok(())
 }
 
+/// RCV-09: a normal shutdown cannot authorize replacing rejected owner data.
+#[test]
+fn clean_shutdown_and_reopen_preserve_rejected_fee_history() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let data_dir = dir.path().join("node");
+    {
+        let state = NodeState::open(seed_config(&data_dir), None)?;
+        state.apply_block(&Network::Regtest.genesis_block())?;
+        state.publish_checkpoint()?;
+    }
+    let history_path = data_dir.join("fee-estimator-history.dat");
+    let rejected = [0xff; 128];
+    std::fs::write(&history_path, rejected)?;
+
+    for _ in 0..2 {
+        let node = block_on(Node::start(
+            embedded_config(&data_dir)?,
+            bitcoin_rs_node::RuntimeInputs::default(),
+        ))?;
+        assert_eq!(node.fee_estimate(1), None);
+        block_on(node.shutdown())?;
+        assert_eq!(std::fs::read(&history_path)?, rejected);
+        assert!(!data_dir.join("fee-estimator-history.dat.tmp").exists());
+    }
+    Ok(())
+}
+
 /// Readiness, sync progress, capability snapshot, and the typed block
 /// read-back for the first seeded block — the observational half of the
 /// embedded lifecycle that must hold the moment `Node::start` returns.
