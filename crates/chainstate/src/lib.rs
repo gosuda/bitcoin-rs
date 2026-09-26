@@ -1239,7 +1239,7 @@ impl Chainstate {
     /// INVARIANT: a missing publisher or a skipped tip is a recovery failure,
     /// never a silent skip: the marker must not survive without the
     /// checkpoint that makes the repaired state durable.
-    pub fn publish_recovery_checkpoint(&self) -> core::result::Result<(), CheckpointError> {
+    pub(crate) fn publish_recovery_checkpoint(&self) -> core::result::Result<(), CheckpointError> {
         let invalid = |reason: &str| {
             CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
                 reason.to_owned(),

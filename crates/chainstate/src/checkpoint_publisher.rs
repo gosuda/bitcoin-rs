@@ -178,6 +178,19 @@ impl CheckpointPublisher {
                 tracing::error!(%error, "failed to resume chainstate journal after publication error");
             }
         }
+        // The disconnect marker is the recovery latch: it retires only once
+        // the checkpoint, the journal compaction, and the journal resume all
+        // succeeded. Recovery retires unconditionally — reconstruction
+        // already made the state coherent — while an ordinary publish merely
+        // disarms an `InFlight`-free marker.
+        if result.is_ok()
+            && let Err(error) = match retirement {
+                DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
+                DisconnectRetirement::Recovered => self.undo_store.retire_disconnect_marker(),
+            }
+        {
+            result = Err(CheckpointError::from(error));
+        }
         result
     }
 
@@ -296,14 +309,8 @@ impl CheckpointPublisher {
                 ))
             })?;
         }
-        // Remove the disconnect marker only after this checkpoint publishes
-        // the matching UTXO set and applied tip. Recovery retires
-        // unconditionally: reconstruction already made the state coherent.
-        match retirement {
-            DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
-            DisconnectRetirement::Recovered => self.undo_store.retire_disconnect_marker(),
-        }
-        .map_err(CheckpointError::from)?;
+        // The disconnect marker retires in `publish_transaction`, after the
+        // journal steps that can still fail the publication.
         // Marker retirement is a second durability step after `CURRENT`.
         // Propagate failure so the worker retries next tick; the published
         // checkpoint stays, and the marker stays until unlink+dirsync commits.

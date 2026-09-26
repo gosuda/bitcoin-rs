@@ -48,7 +48,7 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
         .chainstate()
         .applied_tip_handle()
         .load_full()
-        .expect("applied tip must exist after apply_block")
+        .ok_or_else(|| anyhow::anyhow!("applied tip must exist after apply_block"))?
         .chain_tx_count;
     assert!(
         expected_tx_count.get().is_some(),

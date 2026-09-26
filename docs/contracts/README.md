@@ -18,7 +18,7 @@ When code and a contract disagree, fix the drift in the same change. Do not dupl
 | [architecture.md](architecture.md) | `ARCH-01`–`ARCH-08` | Layering, storage confinement, composition, chainstate authority, single mutation owners | `g17_dependency_direction`; node apply/effects tests |
 | [validation-default.md](validation-default.md) | `VAL-01`–`VAL-03` | Kernel/native default decision and portable validation | feature-matrix builds; Core vectors; measured promotion evidence |
 | [indexing.md](indexing.md) | `IDX-01`–`IDX-08` | Capability gating, coherent reads, reset/rebuild, reorg reconciliation, worker scheduling | txindex worker recovery/query/lifecycle/scheduling suites; RPC capability tests |
-| [recovery.md](recovery.md) | `RCV-01`–`RCV-14` | Durable root, ordered commits, crash outcomes, reorgs, schema refusal | storage durability tests; chainstate checkpoint/journal/replay suites; node crash/reorg suites; txindex recovery tests |
+| [recovery.md](recovery.md) | `RCV-01`–`RCV-15` | Durable root, ordered commits, crash outcomes, reorgs, schema refusal | storage durability tests; chainstate checkpoint/journal/replay suites; node crash/reorg suites; txindex recovery tests |
 | [chain-events.md](chain-events.md) | `EVT-01`–`EVT-05` | Applied-chain event seam and consumer cursors | state/apply/txindex recovery tests |
 | [mempool-mutations.md](mempool-mutations.md) | `MPL-01`–`MPL-04` | Mutation ordering, sequence events, chain-change fencing | mempool gateway, RPC ZMQ, and node apply tests |
 | [mempool-policy.md](mempool-policy.md) | `POL-01`–`POL-06` | Admission owner, policy pins, preview/finality, replacement and package rules | policy/RBF suites plus planned admission/finality/cluster suites |

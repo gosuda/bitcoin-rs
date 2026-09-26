@@ -314,13 +314,15 @@ restored state allows, and the warning names it:
 
 - `cold-replay` — nothing was restored. The certified head chain is the
   whole state, and `reconcile_at_boot` replays it from genesis.
-- `gap-replay` — the restored tip sits below the head. The ordinary gap walk
-  closes the committed-but-unpublished lag onto it.
-- `checkpoint-rewind` — the restored tip leads the head, or meets its height
-  with another hash. The checkpoint outran the rewind, so recovery rolls the
-  restored coins back block by block against the undo rows the head batch
-  certified — to the head, or to the fork below it, where reconciliation
-  takes over — and never re-commits the head.
+- `gap-replay` — the restored tip lies on the certified head's ancestor
+  chain (the head itself included). The ordinary gap walk closes the
+  committed-but-unpublished lag onto it.
+- `checkpoint-rewind` — the restored tip is not on the head's ancestor
+  chain: it leads the head, meets its height with another hash, or sits
+  below it on a branch a reorg already left. Recovery rolls the restored
+  coins back block by block against the undo rows the head batch
+  certified — to the head, or to the fork it descends from, where
+  reconciliation takes over — and never re-commits the head.
 
 Every mode warns with the marker identity and the mode chosen, publishes a
 clean checkpoint, and retires the marker only after that publication is

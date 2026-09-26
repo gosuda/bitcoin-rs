@@ -345,9 +345,28 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
     // roll back to the head the batch already certified. Every other shape
     // reconciles exactly as an ordinary boot would.
     let restored = handles.applied_tip.load_full();
-    let mode = match restored.as_ref().map(|tip| (tip.height, tip.hash)) {
+    // Gap replay is valid only when the restored tip already lies on the
+    // certified head's ancestor chain. Height alone cannot answer that: a
+    // checkpointed tip can sit below the head on a branch a reorg already
+    // left, and replaying the head chain onto it is refused divergence.
+    // Anything else must first rewind to the fork through the stored undo
+    // rows.
+    let needs_rewind = restored.as_deref().is_some_and(|tip| {
+        let tree = handles.block_tree.read();
+        match tree.lookup(head.tip) {
+            // The head tip is in the tree, so ancestry settles it: a tip
+            // that is not an ancestor of the head must rewind through the
+            // undo rows to the fork before replay can proceed.
+            Some(head_id) => tree.find_common_ancestor(head_id, tip.tip_id) != Some(tip.tip_id),
+            // The head tip is beyond the restored headers (a committed gap),
+            // so the tree cannot prove a fork; a tip at or above the head
+            // under another hash is still rewind work.
+            None => tip.hash != head.tip && tip.height >= head.height,
+        }
+    });
+    let mode = match restored {
         None => "cold-replay",
-        Some((height, hash)) if hash != head.tip && height >= head.height => {
+        Some(_) if needs_rewind => {
             rewind_restored_to_head(handles, &head)?;
             "checkpoint-rewind"
         }
@@ -362,22 +381,13 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
         mode,
         "automatic disconnect recovery replayed the certified head chain"
     );
-    // Publication is the durability fence: the marker retires only after the
-    // repaired state lands in a clean checkpoint. A failure retains it.
+    // Publication is the durability fence: the recovery checkpoint retires
+    // the marker only after the repaired state, the journal compaction, and
+    // the resume all land. A failure retains it.
     if let Err(error) = handles.publish_recovery_checkpoint() {
         return Err(ApplyError::RecoveryPublication(Box::new(error)));
     }
-    handles
-        .undo_store
-        .retire_disconnect_marker()
-        .map_err(|error| {
-            tracing::error!(%error, "disconnect marker retirement failed after publication");
-            fail_closed(
-                head.tip,
-                head.height,
-                "the disconnect marker did not retire after recovery publication",
-            )
-        })
+    Ok(())
 }
 
 /// The fail-closed refusal one rewind step reports.
@@ -426,11 +436,17 @@ fn rewind_walk(handles: &Chainstate, head: &DurableHead) -> Result<(), ApplyErro
             .applied_tip
             .load_full()
             .ok_or_else(|| rewind_refused(handles, head, "the applied tip vanished mid-rewind"))?;
-        // Landed on the head, or stepped below it onto the fork the head
+        // Landed on the head or on an ancestor of it — the fork the head
         // chain descends from: reconciliation replays the rest forward.
-        let landed_on_head = applied.hash == head.tip;
-        let onto_fork = applied.height < head.height;
-        if landed_on_head || onto_fork {
+        // Anything below the head's height on a branch the head does not
+        // descend from is not the fork and keeps rewinding.
+        let on_head_chain = {
+            let tree = handles.block_tree.read();
+            tree.lookup(head.tip).is_some_and(|head_id| {
+                tree.find_common_ancestor(head_id, applied.tip_id) == Some(applied.tip_id)
+            })
+        };
+        if on_head_chain {
             return Ok(());
         }
         rewind_one_step(handles, head, &applied)?;
@@ -464,6 +480,21 @@ fn rewind_one_step(
             handles,
             head,
             "a rewound block body does not hash to the applied tip",
+        ));
+    }
+    // A header-matching body can still carry altered transactions; the
+    // txid-level merkle check the ordinary disconnect path runs applies
+    // here for the same reason.
+    let txids: Vec<bitcoin_rs_primitives::Txid> = block
+        .txs
+        .iter()
+        .map(bitcoin_rs_primitives::Tx::txid)
+        .collect();
+    if bitcoin_rs_consensus::verify_merkle_root_with_txids(&block, &txids).is_err() {
+        return Err(rewind_refused(
+            handles,
+            head,
+            "a rewound block body does not match its header's merkle root",
         ));
     }
     let undo = load_block_undo(handles.undo_store.as_ref(), height, hash).map_err(|_| {
