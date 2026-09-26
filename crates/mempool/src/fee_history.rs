@@ -2,34 +2,55 @@
 //!
 //! CONTRACT: docs/policies/db-migration.md.
 
+use std::io::{self, Read};
 use std::path::Path;
 
 use parking_lot::RwLock;
 
-use crate::Mempool;
+use crate::{FeeEstimator, Mempool};
 
 const HISTORY_FILE: &str = "fee-estimator-history.dat";
 const HISTORY_TEMP: &str = "fee-estimator-history.dat.tmp";
 /// Version-1 payloads larger than this bound are treated as corrupt.
 const MAX_HISTORY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Reads only bounded, ordinary files. Only a genuinely missing path permits
+/// creating a new history; all other failures must preserve the live entry.
+fn read_history(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let metadata = std::fs::metadata(path)?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("history is not a regular file"));
+    }
+    if metadata.len() > MAX_HISTORY_FILE_BYTES {
+        return Err(io::Error::other("exceeds the version-1 size bound"));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_HISTORY_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_HISTORY_FILE_BYTES {
+        return Err(io::Error::other("exceeds the version-1 size bound"));
+    }
+    Ok(Some(bytes))
+}
+
 /// Adopts persisted estimator history at node open, if any.
 pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
     let path = data_dir.join(HISTORY_FILE);
-    let Ok(metadata) = std::fs::metadata(&path) else {
-        tracing::debug!(
-            path = %path.display(),
-            "no fee-estimator history: starting with insufficient data"
-        );
-        return;
-    };
-    let bytes = if metadata.len() > MAX_HISTORY_FILE_BYTES {
-        Err(std::io::Error::other("exceeds the version-1 size bound"))
-    } else {
-        std::fs::read(&path)
-    };
-    let bytes = match bytes {
-        Ok(bytes) => bytes,
+    let bytes = match read_history(&path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            tracing::debug!(
+                path = %path.display(),
+                "no fee-estimator history: starting with insufficient data"
+            );
+            return;
+        }
         Err(error) => {
             tracing::warn!(
                 path = %path.display(),
@@ -39,13 +60,15 @@ pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
             return;
         }
     };
-    let value = mempool.write().restore_estimator_history(&bytes);
-    match value {
-        Ok(()) => tracing::info!(
-            path = %path.display(),
-            bytes = bytes.len(),
-            "restored fee-estimator history"
-        ),
+    match FeeEstimator::from_history_bytes(&bytes) {
+        Ok(history) => {
+            mempool.write().adopt_estimator_history(history);
+            tracing::info!(
+                path = %path.display(),
+                bytes = bytes.len(),
+                "restored fee-estimator history"
+            );
+        }
         Err(reject) => tracing::warn!(
             path = %path.display(),
             ?reject,
@@ -54,13 +77,41 @@ pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
     }
 }
 
-/// Persists the estimator history at shutdown. Publish: stage with `create_new`,
-/// `sync_all`, rename over the live file, best-effort dir sync; any failure is a
-/// warning, never a failed shutdown.
+/// Persists the estimator history at shutdown while preserving rejected files.
+///
+/// Publish: stage with `create_new`, `sync_all`, rename over the live file,
+/// best-effort dir sync; any failure is a
+/// warning, never a failed shutdown. A live file this build cannot adopt is
+/// preserved until an explicitly authorized rebuild, including after shutdown.
 pub fn save(data_dir: &Path, mempool: &RwLock<Mempool>) {
-    let bytes = mempool.read().estimator_history();
     let temp_path = data_dir.join(HISTORY_TEMP);
     let live_path = data_dir.join(HISTORY_FILE);
+    // Recheck the live file, not a remembered startup result: it may have
+    // changed since load. Disk I/O and decoding occur outside the pool lock
+    // and before touching even the staging path. Publication retains the
+    // existing assumption that no external writer changes this datadir.
+    match read_history(&live_path) {
+        Ok(Some(bytes)) => {
+            if let Err(reject) = FeeEstimator::from_history_bytes(&bytes) {
+                tracing::warn!(
+                    path = %live_path.display(),
+                    ?reject,
+                    "fee-estimator history rejected; leaving the file in place without saving"
+                );
+                return;
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                path = %live_path.display(),
+                %error,
+                "fee-estimator history is unreadable; leaving the file in place without saving"
+            );
+            return;
+        }
+    }
+    let bytes = mempool.read().estimator_history();
     let result = (|| -> std::io::Result<()> {
         match std::fs::remove_file(&temp_path) {
             Ok(()) => {}
@@ -162,6 +213,28 @@ mod tests {
             seeded_rate,
             "the saved history must survive the datadir round trip"
         );
+        assert!(!dir.path().join(HISTORY_TEMP).exists());
+    }
+
+    #[test]
+    fn save_updates_supported_history() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fresh = open_pool();
+        save(dir.path(), &fresh);
+        let empty_history = std::fs::read(dir.path().join(HISTORY_FILE)).expect("empty history");
+
+        let seeded = seeded_pool();
+        save(dir.path(), &seeded);
+        assert_ne!(
+            std::fs::read(dir.path().join(HISTORY_FILE)).expect("updated history"),
+            empty_history,
+            "a supported file must remain writable as new history is learned"
+        );
+        load(dir.path(), &fresh);
+        assert_eq!(
+            fresh.read().estimate_fee_rate(1),
+            seeded.read().estimate_fee_rate(1)
+        );
     }
 
     #[test]
@@ -173,26 +246,152 @@ mod tests {
     }
 
     #[test]
-    fn load_of_a_corrupt_file_degrades_and_keeps_the_file() {
+    fn rejected_history_survives_load_save_and_reopen() {
+        let valid = seeded_pool().read().estimator_history();
+        let mut bad_magic = valid.clone();
+        bad_magic[3] ^= 0xff;
+        let mut unknown_version = valid.clone();
+        unknown_version[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut trailing_bytes = valid.clone();
+        trailing_bytes.push(0xff);
+
+        for bytes in [
+            bad_magic,
+            valid[..valid.len() - 1].to_vec(),
+            unknown_version,
+            trailing_bytes,
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join(HISTORY_FILE);
+            std::fs::write(&path, &bytes).expect("rejected fixture");
+
+            let fresh = open_pool();
+            load(dir.path(), &fresh);
+            assert_eq!(fresh.read().estimate_fee_rate(1), None);
+            save(dir.path(), &fresh);
+            // Even learned observations do not authorize replacing a file
+            // the owner could not adopt.
+            save(dir.path(), &seeded_pool());
+            let reopened = open_pool();
+            load(dir.path(), &reopened);
+            assert_eq!(reopened.read().estimate_fee_rate(1), None);
+            assert_eq!(
+                std::fs::read(&path).expect("file must survive"),
+                bytes,
+                "a rejected file survives shutdown and reopen byte for byte"
+            );
+            assert!(!dir.path().join(HISTORY_TEMP).exists());
+        }
+    }
+
+    #[test]
+    fn oversized_history_survives_load_save_and_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(HISTORY_FILE);
+        let marker = [0xff; 128];
+        std::fs::write(&path, marker).expect("oversize marker");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("history file")
+            .set_len(MAX_HISTORY_FILE_BYTES + 1)
+            .expect("sparse oversized history");
+
+        let fresh = open_pool();
+        load(dir.path(), &fresh);
+        assert_eq!(fresh.read().estimate_fee_rate(1), None);
+        save(dir.path(), &fresh);
+        let reopened = open_pool();
+        load(dir.path(), &reopened);
+        assert_eq!(reopened.read().estimate_fee_rate(1), None);
+        assert_eq!(
+            std::fs::metadata(&path).expect("history metadata").len(),
+            MAX_HISTORY_FILE_BYTES + 1
+        );
+        let mut file = std::fs::File::open(&path).expect("preserved oversized file");
+        let mut actual_marker = [0; 128];
+        file.read_exact(&mut actual_marker)
+            .expect("preserved marker");
+        assert_eq!(actual_marker, marker);
+        let mut chunk = [0; 8192];
+        loop {
+            let count = file.read(&mut chunk).expect("preserved sparse tail");
+            if count == 0 {
+                break;
+            }
+            assert!(chunk[..count].iter().all(|byte| *byte == 0));
+        }
+        assert!(!dir.path().join(HISTORY_TEMP).exists());
+    }
+
+    #[test]
+    fn save_rechecks_a_history_replaced_after_load() {
         let dir = tempfile::tempdir().expect("tempdir");
         let seeded = seeded_pool();
         save(dir.path(), &seeded);
         let path = dir.path().join(HISTORY_FILE);
-        let mut bytes = std::fs::read(&path).expect("the saved file");
-        bytes[3] ^= 0xff;
-        std::fs::write(&path, &bytes).expect("rewrite");
+        let fresh = open_pool();
+        load(dir.path(), &fresh);
+        assert!(fresh.read().estimate_fee_rate(1).is_some());
+
+        let replacement = [0xff; 128];
+        std::fs::write(&path, replacement).expect("replacement after successful load");
+        save(dir.path(), &fresh);
+        assert_eq!(
+            std::fs::read(&path).expect("file must survive"),
+            replacement
+        );
+        assert!(!dir.path().join(HISTORY_TEMP).exists());
+    }
+
+    #[test]
+    fn unreadable_history_is_preserved_without_staging() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(HISTORY_FILE);
+        std::fs::create_dir(&path).expect("unreadable history directory");
+        let marker_path = path.join("operator-data");
+        std::fs::write(&marker_path, b"preserve me").expect("operator marker");
 
         let fresh = open_pool();
         load(dir.path(), &fresh);
+        assert_eq!(fresh.read().estimate_fee_rate(1), None);
+        save(dir.path(), &fresh);
         assert_eq!(
-            fresh.read().estimate_fee_rate(1),
-            None,
-            "a corrupt payload degrades to insufficient data"
+            std::fs::read(marker_path).expect("marker survives"),
+            b"preserve me"
         );
+        assert!(!dir.path().join(HISTORY_TEMP).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_failure_is_not_treated_as_missing_history() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(HISTORY_FILE);
+        // Following this self-referential symlink fails regardless of the
+        // test process's permissions, unlike a mode-000 permission fixture.
+        std::os::unix::fs::symlink(HISTORY_FILE, &path).expect("unreadable history link");
+        let fresh = open_pool();
+        load(dir.path(), &fresh);
+        save(dir.path(), &fresh);
         assert_eq!(
-            std::fs::read(&path).expect("file must survive"),
-            bytes,
-            "a rejected file stays in place, byte for byte"
+            std::fs::read_link(&path).expect("link survives"),
+            Path::new(HISTORY_FILE)
         );
+        assert!(!dir.path().join(HISTORY_TEMP).exists());
+    }
+
+    #[test]
+    fn staging_failure_keeps_supported_live_history() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        save(dir.path(), &open_pool());
+        let path = dir.path().join(HISTORY_FILE);
+        let before = std::fs::read(&path).expect("supported history");
+        let temp_path = dir.path().join(HISTORY_TEMP);
+        std::fs::create_dir(&temp_path).expect("blocked staging path");
+
+        save(dir.path(), &seeded_pool());
+        assert_eq!(std::fs::read(&path).expect("history survives"), before);
+        assert!(temp_path.is_dir());
     }
 }

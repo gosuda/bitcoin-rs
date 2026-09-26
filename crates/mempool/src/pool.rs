@@ -1289,9 +1289,16 @@ impl Mempool {
     /// rejected and the estimator stays exactly as it was, which for a pool
     /// that just opened is the empty, insufficient-data state.
     pub fn restore_estimator_history(&mut self, bytes: &[u8]) -> Result<(), HistoryReject> {
-        self.estimator = FeeEstimator::from_history_bytes(bytes)?;
+        self.adopt_estimator_history(FeeEstimator::from_history_bytes(bytes)?);
         Ok(())
     }
+
+    /// Publishes already decoded history so datadir loading can validate it
+    /// before acquiring the mempool write lock.
+    pub(crate) fn adopt_estimator_history(&mut self, history: FeeEstimator) {
+        self.estimator = history;
+    }
+
     /// Copies the pool's mining state into one immutable snapshot.
     /// Everything block-template selection needs is read in this single
     /// coherent pass — shared transaction payloads, per-entry fee, sigop,
