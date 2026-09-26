@@ -20,20 +20,18 @@ use std::time::Instant;
 use hashbrown::HashMap;
 
 use bitcoin::Network;
-use bitcoin::bip152::BlockTransactions;
 use bitcoin::bip152::HeaderAndShortIds;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
-use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
+use bitcoin::p2p::message_compact_blocks::CmpctBlock;
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Sequence, Tx,
     TxIn, TxOut, Txid, Witness, Wtxid, consensus_bytes,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use bitcoin_rs_p2p::compact_blocks::Outcome;
 use bitcoin_rs_p2p::peer::COMPACT_BLOCK_VERSION;
 use bitcoin_rs_p2p::wire::{Message, write_message};
 use bitcoin_rs_p2p::{CompactBlockHints, Reconstruction};
