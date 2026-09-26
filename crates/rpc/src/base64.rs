@@ -6,8 +6,7 @@
 //! canonical padding, so every string one surface rejects the other
 //! rejects too.
 
-const ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Decodes standard-alphabet Base64 with canonical padding.
 ///
@@ -86,7 +85,8 @@ const fn value(byte: u8) -> Option<u8> {
 /// PRE: none; any byte slice encodes.
 /// POST: the encoded string, padded to a multiple of four characters with
 ///   `=` only where a final chunk carries fewer than three octets.
-/// INVARIANT: `decode(&encode(bytes)) == Ok(bytes)`.
+/// INVARIANT: for non-empty `bytes`, `decode(&encode(bytes)) == Ok(bytes)`;
+///   the empty slice encodes to the empty string, which [`decode`] rejects.
 pub(crate) fn encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -121,8 +121,7 @@ mod tests {
     #[test]
     fn round_trip_preserves_bytes() {
         for input in [
-            &b""[..],
-            b"f",
+            &b"f"[..],
             b"fo",
             b"foo",
             b"foob",

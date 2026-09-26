@@ -99,7 +99,7 @@ fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcEr
     }
     value
         .as_u64()
-        .ok_or(RpcError::InvalidType("parameter must be unsigned integer".to_owned()))
+        .ok_or_else(|| RpcError::InvalidType("parameter must be unsigned integer".to_owned()))
 }
 
 /// Maps an IP address to Bitcoin Core's `network` field label.
@@ -592,7 +592,6 @@ mod tests {
         assert!(names.contains(&"WITNESS".to_owned()));
         assert!(!names.contains(&"COMPACT_FILTERS".to_owned()));
     }
-
 }
 #[cfg(test)]
 mod ping_tests {

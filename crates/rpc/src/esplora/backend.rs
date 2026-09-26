@@ -10,7 +10,6 @@ use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{OutPoint, Txid};
 
 use super::http::{dispatch_error, query_limit};
-use crate::rest::{bad_request, json_ok};
 use super::model::{Outspend, TransactionValue};
 use super::projection::Projection;
 use super::public::{block_transaction_values, outspend, outspends_for_transaction};
@@ -18,6 +17,7 @@ use crate::context::Context;
 use crate::handlers::Handler;
 use crate::handlers::mining::required_gbt_rules;
 use crate::rest::Response;
+use crate::rest::{bad_request, json_ok};
 use sonic_rs::json as sonic_json;
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
@@ -55,7 +55,7 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
 fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
     let max_txs = query_limit(query, "max_txs").unwrap_or(usize::MAX);
     if max_txs == 0 {
-        return json_ok(&Vec::<TransactionValue>::new());
+        return json_ok(Vec::<TransactionValue>::new());
     }
     // A cursor previously matched the exact lowercase Display text. Parse
     // once, but keep malformed, noncanonical, and absent cursors restarting

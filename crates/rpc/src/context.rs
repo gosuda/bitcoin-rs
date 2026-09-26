@@ -1310,10 +1310,7 @@ mod tests {
 
     impl bitcoin_rs_index::DerivedIndexCapabilitySource for ReadySource {
         fn capability(&self) -> bitcoin_rs_index::CapabilityStatus {
-            bitcoin_rs_index::derived_index_status(
-                true,
-                bitcoin_rs_index::CapabilityState::Ready,
-            )
+            bitcoin_rs_index::derived_index_status(true, bitcoin_rs_index::CapabilityState::Ready)
         }
     }
 
@@ -1505,8 +1502,7 @@ mod tests {
         let banned = Arc::new(RwLock::new(Vec::<bitcoin_rs_p2p::BannedSubnet>::new()));
         let added_nodes = Arc::new(RwLock::new(Vec::new()));
         let network_active = Arc::new(core::sync::atomic::AtomicBool::new(true));
-        let status: Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> =
-            Arc::new(ReadySource);
+        let status: Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> = Arc::new(ReadySource);
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles::new(
                 Arc::clone(&chain_tip),

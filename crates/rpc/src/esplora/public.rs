@@ -16,17 +16,17 @@ use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, consensus_bytes,
 use serde_json::json;
 use sonic_rs::{JsonValueTrait as _, json as sonic_json};
 
-use crate::context::Context;
-use crate::handlers::Handler;
-use crate::rest::{
-    Response, bad_request, internal_error, json_ok, not_found, service_unavailable, text_response,
-};
 use super::http::{dispatch_error, query_error};
 use super::model::{
     AddressTransactionSummary, BlockStatus, MempoolSummary, MerkleProof, Outspend,
     RecentTransaction, ScriptSummary, TransactionValue,
 };
 use super::projection::{Confirmation, Projection};
+use crate::context::Context;
+use crate::handlers::Handler;
+use crate::rest::{
+    Response, bad_request, internal_error, json_ok, not_found, service_unavailable, text_response,
+};
 
 pub(super) const CHAIN_PAGE: usize = 25;
 const MEMPOOL_PAGE: usize = 50;
@@ -34,12 +34,14 @@ const MEMPOOL_PAGE: usize = 50;
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) -> Response {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
     match parts.as_slice() {
-        ["blocks", "tip", "height"] => {
-            text_response("text/plain", ctx.chain.applied_height().to_string().into_bytes())
-        }
-        ["blocks", "tip", "hash"] => {
-            text_response("text/plain", ctx.chain.applied_hash().to_string_be().into_bytes())
-        }
+        ["blocks", "tip", "height"] => text_response(
+            "text/plain",
+            ctx.chain.applied_height().to_string().into_bytes(),
+        ),
+        ["blocks", "tip", "hash"] => text_response(
+            "text/plain",
+            ctx.chain.applied_hash().to_string_be().into_bytes(),
+        ),
         ["tx", id, "hex"] => tx_hex(&ctx, id),
         ["tx", id, "raw"] => tx_raw(&ctx, id),
         ["tx", id, "status"] => tx_status(&ctx, id),
@@ -75,7 +77,7 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) ->
             |h| blocks(&ctx, Some(h)),
         ),
         ["mempool"] => mempool(&ctx),
-        ["mempool", "txids"] => json_ok(&
+        ["mempool", "txids"] => json_ok(
             ctx.mempool
                 .read()
                 .iter_txids()
@@ -123,7 +125,9 @@ pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) ->
         ["address", address, "txs", "chain", last] => {
             address_hash(&ctx, address).map_or_else(|r| r, |h| history(&ctx, h, Some(last), false))
         }
-        ["address-prefix", _] => service_unavailable("address prefix search requires an address index"),
+        ["address-prefix", _] => {
+            service_unavailable("address prefix search requires an address index")
+        }
         _ => not_found(),
     }
 }
@@ -165,7 +169,10 @@ fn tx_hex(ctx: &Context, id: &str) -> Response {
     Projection::new(ctx).required_transaction(id).map_or_else(
         |r| r,
         |(tx, _)| {
-            text_response("text/plain", consensus_bytes(&tx).to_lower_hex_string().into_bytes())
+            text_response(
+                "text/plain",
+                consensus_bytes(&tx).to_lower_hex_string().into_bytes(),
+            )
         },
     )
 }
@@ -183,7 +190,7 @@ fn tx_raw(ctx: &Context, id: &str) -> Response {
 fn tx_status(ctx: &Context, id: &str) -> Response {
     Projection::new(ctx).required_transaction(id).map_or_else(
         |r| r,
-        |(_, status)| json_ok(&Projection::status_value(status)),
+        |(_, status)| json_ok(Projection::status_value(status)),
     )
 }
 
@@ -200,7 +207,10 @@ fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
                 candidate.as_byte_array() == txid.as_bytes()
             });
             let _ = record;
-            text_response("text/plain", serialize(&proof).to_lower_hex_string().into_bytes())
+            text_response(
+                "text/plain",
+                serialize(&proof).to_lower_hex_string().into_bytes(),
+            )
         },
     )
 }
@@ -307,7 +317,8 @@ pub(super) fn outspends_for_transaction(
         .iter()
         .enumerate()
         .map(|(vout, _)| {
-            let vout = u32::try_from(vout).map_err(|_| internal_error("output index is too large"))?;
+            let vout =
+                u32::try_from(vout).map_err(|_| internal_error("output index is too large"))?;
             outspend(projection, OutPoint::new(transaction.txid(), vout))
         })
         .collect()
@@ -357,9 +368,7 @@ fn block(ctx: &Context, text_hash: &str) -> Response {
         Ok(record) => record,
         Err(response) => return response,
     };
-    projection
-        .block_value(&record)
-        .map_or_else(|r| r, json_ok)
+    projection.block_value(&record).map_or_else(|r| r, json_ok)
 }
 fn block_header(ctx: &Context, h: &str) -> Response {
     let record = match Projection::new(ctx).required_block_record(h) {
@@ -448,7 +457,7 @@ fn block_txids(ctx: &Context, h: &str) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    json_ok(&
+    json_ok(
         block
             .txs
             .iter()
@@ -464,12 +473,9 @@ fn block_txid(ctx: &Context, h: &str, index: &str) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    block
-        .txs
-        .get(index)
-        .map_or_else(not_found, |tx| {
-            text_response("text/plain", tx.txid().to_string().into_bytes())
-        })
+    block.txs.get(index).map_or_else(not_found, |tx| {
+        text_response("text/plain", tx.txid().to_string().into_bytes())
+    })
 }
 fn blocks(ctx: &Context, start_height: Option<u32>) -> Response {
     // One publication decides the default start and every height lookup, so the
@@ -554,7 +560,7 @@ fn mempool_recent(ctx: &Context) -> Response {
         }
         latest
     };
-    json_ok(&
+    json_ok(
         latest
             .into_iter()
             .map(|(_, txid, fee, vsize, transaction)| RecentTransaction {
@@ -693,7 +699,7 @@ pub(super) fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Respo
         let total = funded.entry(row.txid).or_default();
         *total = total.saturating_add(row.value);
     }
-    json_ok(&
+    json_ok(
         activity
             .confirmed
             .into_iter()
