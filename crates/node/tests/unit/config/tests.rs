@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use super::{
-    Auth, ChainstateJournalOverrides, NetworkSelection, NodeConfig, P2pOverrides, RpcOverrides,
-    ScriptIndexMode, StorageOverrides, UserConfig, ValidationOverrides,
+use super::{Auth, NetworkSelection, NodeConfig, ScriptIndexMode};
+use crate::options::{
+    ChainstateJournalOverrides, P2pOverrides, RpcOverrides, StorageOverrides, UserConfig,
+    ValidationOverrides,
 };
 
 #[test]
@@ -29,6 +30,14 @@ fn auth_debug_redacts_secrets() {
 
 fn resolved(layers: &[&UserConfig]) -> NodeConfig {
     super::resolve(layers).unwrap_or_else(|error| panic!("valid layered configuration: {error}"))
+}
+
+/// Reads the two halves of Basic authentication, failing on cookie auth.
+fn basic_auth(auth: &Auth) -> (String, String) {
+    match auth {
+        Auth::Basic { user, password } => (user.clone(), password.clone()),
+        Auth::Cookie { .. } => panic!("expected basic auth"),
+    }
 }
 
 #[test]
@@ -62,7 +71,7 @@ fn resolve_prefers_higher_layers_field_by_field() {
         config.storage.dbcache_mb, 300,
         "a field absent in the higher layer keeps the lower layer's value"
     );
-    let (user, password) = config.rpc.auth.basic_parts();
+    let (user, password) = basic_auth(&config.rpc.auth);
     assert_eq!(user, "lower-user");
     assert_eq!(password, "higher-password");
 }
@@ -93,17 +102,17 @@ fn resolve_keeps_absent_nested_fields_at_their_network_defaults() {
 #[test]
 fn journal_nested_overrides_apply_field_by_field_across_layers() {
     let base = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             blocks: Some(200),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let higher = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             seconds: Some(45),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let config = resolved(&[&base, &higher]);
@@ -139,7 +148,7 @@ fn rpc_cookie_and_credential_layers_keep_one_auth_source() {
         "a higher cookie layer wins over lower credentials"
     );
     let config = resolved(&[&cookie, &credentials]);
-    let (user, password) = config.rpc.auth.basic_parts();
+    let (user, password) = basic_auth(&config.rpc.auth);
     assert_eq!(user, "later-user");
     assert_eq!(password, "later-password");
 }
@@ -216,11 +225,11 @@ fn p2p_magic_override_is_cross_field_validated() {
 #[test]
 fn journal_retention_and_lag_bounds_are_cross_field_validated() {
     let inverted_retention = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             rotate_mib: Some(4096),
             max_journal_mib: Some(2048),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let Err(error) = super::resolve(&[&inverted_retention]) else {
@@ -234,11 +243,11 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
     );
 
     let inverted_lag = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             blocks: Some(500),
             max_lag_blocks: Some(100),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let Err(error) = super::resolve(&[&inverted_lag]) else {
@@ -252,10 +261,10 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
     );
 
     let zero_period = UserConfig {
-        chainstate_journal: Some(ChainstateJournalOverrides {
+        chainstate_journal: ChainstateJournalOverrides {
             seconds: Some(0),
             ..ChainstateJournalOverrides::default()
-        }),
+        },
         ..UserConfig::default()
     };
     let Err(error) = super::resolve(&[&zero_period]) else {
@@ -268,10 +277,9 @@ fn journal_retention_and_lag_bounds_are_cross_field_validated() {
 }
 
 #[test]
-fn later_network_selection_resets_earlier_p2p_overrides_atomically() {
+fn earlier_set_fields_survive_a_later_bare_network_selection() {
     let overrides = UserConfig {
         p2p: P2pOverrides {
-            magic: Some([1, 2, 3, 4]),
             connect: Some(vec!["127.0.0.1:8333".to_owned()]),
             dns_seeds: Some(false),
             ..P2pOverrides::default()
@@ -287,17 +295,23 @@ fn later_network_selection_resets_earlier_p2p_overrides_atomically() {
         ..UserConfig::default()
     };
     let config = resolved(&[&overrides, &selection]);
+    assert_eq!(config.network, bitcoin_rs_primitives::Network::Regtest);
     assert_eq!(
-        config.p2p.magic,
-        bitcoin_rs_primitives::Network::Regtest.magic()
+        config.p2p.connect,
+        vec!["127.0.0.1:8333"],
+        "a later bare network selection keeps the peer list an operator set"
     );
     assert!(
-        config.p2p.connect.is_empty(),
-        "the network profile owns the connect list"
+        !config.p2p.dns_seeds_enabled,
+        "a later bare network selection keeps the seed choice an operator set"
     );
-    assert!(config.p2p.dns_seeds_enabled);
     assert_eq!(
-        config.validation.assume_valid_height, 0,
-        "the network anchor replaces the pinned height"
+        config.validation.assume_valid_height, 7,
+        "a later bare network selection keeps the height an operator pinned"
+    );
+    assert_eq!(
+        config.p2p.magic,
+        bitcoin_rs_primitives::Network::Regtest.magic(),
+        "a field no layer set still fills from the winning profile"
     );
 }

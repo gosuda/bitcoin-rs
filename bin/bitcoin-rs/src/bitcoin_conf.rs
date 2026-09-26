@@ -45,28 +45,115 @@ fn parse_for_network(text: &str, network: Network) -> Vec<UserConfig> {
     vec![global, selected]
 }
 
-fn apply_core_key(layer: &mut UserConfig, key: &str, value: &str) {
-    match key {
-        "prune" => {
-            if let Ok(prune_target_mb) = value.parse() {
-                layer.storage.prune_target_mb = Some(prune_target_mb);
+/// Expands the option table into the `bitcoin.conf` key map: one arm per row
+/// that names a Core key.
+///
+/// PRE: a row's `conf` column holds its Core key name.
+/// POST: `apply_core_key` writes a recognized key into its row's slot.
+/// INVARIANT: the file's key names and target slots come from the table, so a
+/// key cannot drift from the option it sets. A Core key whose meaning has no
+/// row stays in `apply_core_exception`.
+macro_rules! emit_core_conf {
+    (
+        fields {
+            $(
+                $(#[$fdoc:meta])*
+                $fid:ident : $fty:ty {
+                    cli[ $($fcli:tt)* ]
+                    $( env[ $ekey:literal, $egram:expr ] )?
+                    $( toml $tmode:ident ( $tkey:literal $(, $tgram:expr )? ) )?
+                    $( conf[ $fckey:literal ] )?
+                }
+            )*
+        }
+        groups {
+            $(
+                $(#[$gdoc:meta])*
+                group $gid:ident : $gty:ident $(table($gkey:literal))? $(#[$gattr:meta])*
+                {
+                    $(
+                        $(#[$rdoc:meta])*
+                        $rfield:ident as $rid:ident : $rty:ty {
+                            cli[ $($gcli:tt)* ]
+                            $( env[ $gekey:literal, $gegram:expr ] )?
+                            $( toml $gtmode:ident ( $gtkey:literal $(, $gtgram:expr )? ) )?
+                            $( conf[ $gckey:literal ] )?
+                        }
+                    )*
+                }
+            )*
+        }
+    ) => {
+        fn apply_core_key(layer: &mut UserConfig, key: &str, value: &str) {
+            if apply_core_exception(layer, key, value) {
+                return;
+            }
+            match key {
+                $(
+                    $( $fckey => CoreValue::apply(value, &mut layer.$fid), )?
+                )*
+                $(
+                    $(
+                        $( $gckey => CoreValue::apply(value, &mut layer.$gid.$rfield), )?
+                    )*
+                )*
+                _ => {}
             }
         }
-        "rpcuser" => layer.rpc.user = Some(value.to_owned()),
-        "rpcpassword" => layer.rpc.password = Some(value.to_owned()),
-        "rpccookiefile" => layer.rpc.cookie = Some(PathBuf::from(value)),
-        "rest" => layer.rpc.rest = parse_core_bool(value),
-        "listen" if parse_core_bool(value).is_some_and(|listen| !listen) => {
-            layer.p2p.listen = Some(Vec::new());
-        }
-        "txindex" => layer.indexes.txindex = parse_core_bool(value),
-        "dbcache" => {
-            if let Ok(dbcache_mb) = value.parse() {
-                layer.storage.dbcache_mb = Some(dbcache_mb);
-            }
-        }
-        _ => {}
+    };
+}
+
+bitcoin_rs_node::option_rows!(emit_core_conf);
+
+/// Applies one `bitcoin.conf` value to an option-table slot.
+///
+/// PRE: `value` is the text after the key's equals sign.
+/// POST: the slot holds the value, or holds nothing where a numeric or
+/// boolean key carries no parseable value.
+/// INVARIANT: each impl matches Bitcoin Core's reading of its key type: a
+/// string or path is taken verbatim, a number is taken only when it parses,
+/// and a boolean takes Core's truth words and false words.
+trait CoreValue {
+    fn apply(value: &str, slot: &mut Self);
+}
+
+impl CoreValue for Option<bool> {
+    fn apply(value: &str, slot: &mut Self) {
+        *slot = parse_core_bool(value);
     }
+}
+
+impl CoreValue for Option<u64> {
+    fn apply(value: &str, slot: &mut Self) {
+        if let Ok(number) = value.parse() {
+            *slot = Some(number);
+        }
+    }
+}
+
+impl CoreValue for Option<String> {
+    fn apply(value: &str, slot: &mut Self) {
+        *slot = Some(value.to_owned());
+    }
+}
+
+impl CoreValue for Option<PathBuf> {
+    fn apply(value: &str, slot: &mut Self) {
+        *slot = Some(PathBuf::from(value));
+    }
+}
+
+/// Sets the one Core key that no table row can express: `listen` is a boolean
+/// switch over the bind list, not an address, and only its false value is an
+/// override. Returns whether it consumed `key`.
+fn apply_core_exception(layer: &mut UserConfig, key: &str, value: &str) -> bool {
+    if key != "listen" {
+        return false;
+    }
+    if parse_core_bool(value).is_some_and(|listen| !listen) {
+        layer.p2p.listen = Some(Vec::new());
+    }
+    true
 }
 
 fn parse_core_bool(value: &str) -> Option<bool> {
@@ -104,6 +191,8 @@ fn strip_inline_comment(line: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::parse_for_network;
     use bitcoin_rs_node::{Network, resolve};
 
@@ -122,5 +211,43 @@ mod tests {
         let layer_refs: Vec<_> = layers.iter().collect();
         let config = resolve(&layer_refs).unwrap_or_else(|error| panic!("layer resolves: {error}"));
         assert_eq!(config.storage.prune_target_mb, 900);
+    }
+
+    /// Every Core key the option table names reaches the slot the table names.
+    #[test]
+    fn every_table_core_key_reaches_its_slot() {
+        let layers = parse_for_network(
+            "
+dbcache=450
+prune=550
+rest=1
+txindex=true
+rpcuser=someuser
+rpcpassword=somepass
+rpccookiefile=/tmp/.cookie
+listen=0
+",
+            Network::Regtest,
+        );
+        let global = &layers[0];
+        assert_eq!(global.storage.dbcache_mb, Some(450));
+        assert_eq!(global.storage.prune_target_mb, Some(550));
+        assert_eq!(global.rpc.rest, Some(true));
+        assert_eq!(global.indexes.txindex, Some(true));
+        assert_eq!(global.rpc.user.as_deref(), Some("someuser"));
+        assert_eq!(global.rpc.password.as_deref(), Some("somepass"));
+        assert_eq!(
+            global.rpc.cookie.as_deref(),
+            Some(Path::new("/tmp/.cookie"))
+        );
+        assert_eq!(global.p2p.listen, Some(Vec::new()));
+    }
+
+    /// A number the file states in a form Core cannot read sets nothing.
+    #[test]
+    fn an_unparseable_core_number_sets_nothing() {
+        let layers = parse_for_network("dbcache=large\nrest=maybe\n", Network::Regtest);
+        assert_eq!(layers[0].storage.dbcache_mb, None);
+        assert_eq!(layers[0].rpc.rest, None);
     }
 }
