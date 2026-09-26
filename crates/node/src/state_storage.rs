@@ -10,6 +10,7 @@ use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::Txid;
 use bitcoin_rs_rpc::context::PruneService;
+use bitcoin_rs_storage::DurableHeadStore as _;
 use bitcoin_rs_storage::FlatFileBlockStore;
 use bitcoin_rs_storage::KvStore;
 use bitcoin_rs_storage::StorageBackend;
@@ -27,13 +28,13 @@ pub(super) struct NodeStorage {
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
 }
 
-struct ChainstateComposer {
+struct ChainstateComposer<'a> {
     backend: StorageBackend,
-    block_files: Arc<FlatFileBlockStore>,
+    data_dir: &'a std::path::Path,
 }
 
-impl crate::storage_backend::StoreConsumer for ChainstateComposer {
-    type Output = NodeStorage;
+impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
+    type Output = (NodeStorage, Arc<FlatFileBlockStore>);
     type Error = bitcoin_rs_storage::StorageError;
 
     fn consume<S>(
@@ -43,21 +44,30 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer {
     where
         S: KvStore,
     {
+        let durable_head = Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
+            &store,
+        )));
+        // Load the commit point before block-file recovery can change bytes.
+        // A clean checkpoint does not make a damaged committed frame an orphan.
+        let committed = durable_head.load()?.and_then(|head| head.body_extent);
+        let block_files = Arc::new(match committed {
+            Some(extent) => FlatFileBlockStore::open_with_committed_extent(self.data_dir, extent)?,
+            None => FlatFileBlockStore::open(self.data_dir)?,
+        });
         let deferred: Arc<dyn DeferredChainstateServices> = Arc::new(ChainstateStoreServices {
             store: Arc::clone(&store),
         });
-        Ok(NodeStorage {
+        let storage = NodeStorage {
             backend: self.backend,
             undo_store: Arc::new(bitcoin_rs_chainstate::KvUndoStore::new(Arc::clone(&store))),
-            durable_head: Arc::new(bitcoin_rs_storage::KvDurableHeadStore::new(Arc::clone(
-                &store,
-            ))),
+            durable_head,
             block_body_store: Arc::new(bitcoin_rs_storage::block_body::IndexedBlockBodyStore::new(
                 Arc::clone(&store),
-                self.block_files,
+                Arc::clone(&block_files),
             )),
             deferred,
-        })
+        };
+        Ok((storage, block_files))
     }
 }
 
@@ -67,8 +77,7 @@ impl NodeStorage {
     pub(super) fn open(
         config: &NodeConfig,
         chainstate_cache_bytes: u64,
-        block_files: Arc<FlatFileBlockStore>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Arc<FlatFileBlockStore>)> {
         let chainstate_dir = config.data_dir.join("chainstate");
         std::fs::create_dir_all(&chainstate_dir)
             .with_context(|| format!("create chainstate_dir {}", chainstate_dir.display()))?;
@@ -80,7 +89,7 @@ impl NodeStorage {
             Some(chainstate_cache_bytes),
             ChainstateComposer {
                 backend,
-                block_files,
+                data_dir: &config.data_dir,
             },
         )
         .map_err(anyhow::Error::new)

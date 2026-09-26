@@ -431,6 +431,74 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> anyhow::Result<
 }
 
 #[test]
+fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyhow::Result<()> {
+    for keep_checkpoint in [false, true] {
+        for corrupt_length in [false, true] {
+            let (_dir, state, config) = applied_regtest_chain(2, 2)?;
+            drop(state);
+            if !keep_checkpoint {
+                std::fs::remove_dir_all(config.data_dir.join("chainstate-checkpoints"))?;
+            }
+            let path = config.data_dir.join("blocks/blk00000.dat");
+            let mut damaged = std::fs::read(&path)?;
+            // Keep the complete genesis frame and damage only the middle frame.
+            // Both it and the untouched successor are below the durable extent.
+            // The record header is magic(4) + body length(4) + height(4) +
+            // block hash(32) = 44 bytes; the length occupies bytes 4..8.
+            let genesis_len = u32::from_le_bytes(damaged[4..8].try_into()?);
+            let middle = 44 + usize::try_from(genesis_len)?;
+            assert_eq!(&damaged[middle..middle + 4], b"BRSB");
+            if corrupt_length {
+                damaged[middle + 4..middle + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+            } else {
+                damaged[middle] ^= 0xff;
+            }
+            std::fs::write(&path, &damaged)?;
+            let error = NodeState::open(config, None)
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("committed corruption was accepted"))?;
+            assert!(
+                matches!(
+                    error.downcast_ref::<bitcoin_rs_storage::StorageError>(),
+                    Some(bitcoin_rs_storage::StorageError::IncompatibleData(_))
+                ),
+                "unexpected refusal: {error:#}"
+            );
+            assert_eq!(std::fs::read(path)?, damaged);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn checkpoint_resume_discards_only_incomplete_uncommitted_tail() -> anyhow::Result<()> {
+    use std::io::Write as _;
+
+    let (_dir, state, config) = applied_regtest_chain(2, 2)?;
+    let tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("missing fixture tip"))?;
+    drop(state);
+    let path = config.data_dir.join("blocks/blk00000.dat");
+    let committed = std::fs::read(&path)?;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)?
+        .write_all(b"BR")?;
+    let reopened = NodeState::open(config, None)?;
+    assert_eq!(std::fs::read(&path)?, committed);
+    assert_eq!(
+        reopened
+            .chainstate()
+            .applied_tip_snapshot()
+            .map(|tip| tip.hash),
+        Some(tip.hash)
+    );
+    Ok(())
+}
+
+#[test]
 fn full_revalidation_marker_resumes_on_durable_head() -> anyhow::Result<()> {
     let (_dir, state, config) = applied_regtest_chain(2, 1)?;
     let remembered_tip = state

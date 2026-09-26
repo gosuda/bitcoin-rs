@@ -141,6 +141,14 @@ recovery contract.
   The root is installed only after the required file and directory syncs and
   the atomic batch finish.
 - A partial append after the head is not a valid connect or disconnect.
+- Startup loads the durable head before opening block files for tail recovery.
+  The head's extent file must contain complete frames through its committed
+  offset; a missing file, short prefix, or malformed frame refuses open with
+  `StorageError::IncompatibleData`, preserving every block file. Only a torn
+  append beyond that extent may be discarded, even if the restored checkpoint
+  already matches the head. This framing admission scans the extent file and
+  current append tail, not the historical archive; earlier pruned file gaps
+  remain valid and locator/body integrity checks keep their existing owners.
 - On disconnect, `DurableHead.commit_id` advances to a new value that is
   greater than the previous value. Monotonicity holds for both connect and
   disconnect.
@@ -351,6 +359,11 @@ state is harmless and keeps the node operating until replay closes the gap.
   points — SIGKILL restart across journal, reorg, and publication scenarios,
   partial-write handling, and upgrade-matrix fallback.
 - `crates/node/tests/unit/state/tests/recovery.rs`:
+  `committed_frame_corruption_refuses_startup_and_preserves_all_bytes` covers
+  damaged committed magic/length with and without a checkpoint;
+  `checkpoint_resume_discards_only_incomplete_uncommitted_tail` preserves
+  the valid orphan-tail recovery path. Storage's extent tests cover missing
+  or truncated committed files, newer orphan files, and pruned older gaps.
   `torn_disconnect_refusal_names_authoritative_stores_to_remove` proves an
   armed disconnect marker refuses startup while naming the `chainstate`,
   `chainstate-checkpoints`, and `txindex` paths the operator must remove;
