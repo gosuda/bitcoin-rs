@@ -964,38 +964,37 @@ fn process_compact_wire_message(
     // A compact announcement is itself a tip announcement: when the outcome
     // emits no body (`Complete` already forwards its header via `send_block`),
     // this forward is the only path the embedded header takes to admission.
-    if let crate::Message::CmpctBlock(cmpct) = message
+    let announced_header = if let crate::Message::CmpctBlock(cmpct) = message
         && !matches!(outcome, crate::compact_blocks::Outcome::Complete(_))
-        && let Some(header) = crate::compact_blocks::native_header(&cmpct.compact_block.header)
     {
-        // When the outcome itself fetches the body (`RequestMissing` issues
-        // a `getblocktxn`, `Fallback` a full-block `getdata`), the window
-        // must record that in-flight fetch instead of scheduling a
-        // duplicate request for the freshly admitted tip.
-        let body_fetch_owned = matches!(
-            outcome,
-            crate::compact_blocks::Outcome::RequestMissing(_)
-                | crate::compact_blocks::Outcome::Fallback(_)
-        );
-        shared.send_headers(
-            lease.source(peer_addr),
-            vec![header],
-            false,
-            body_fetch_owned,
-        );
-    }
-    // The fetch is marked owned only once its request actually left on the
-    // connection: a send that fails enqueues nothing, and recording the
-    // mark anyway would suppress recovery of that block from another peer.
-    if handle_compact_outcome(outcome, lease, peer_addr, shared)
-        && let crate::Message::CmpctBlock(cmpct) = message
-        && let Some(header) = crate::compact_blocks::native_header(&cmpct.compact_block.header)
-        && let Some(sync) = shared.block_sync.as_ref()
-    {
-        sync.record_owned_body_fetch(
-            lease.source(peer_addr),
-            bitcoin_rs_primitives::Hash256::from(header.compute_hash()),
-        );
+        crate::compact_blocks::native_header(&cmpct.compact_block.header)
+    } else {
+        None
+    };
+    // When the outcome itself fetches the body (`RequestMissing` issues
+    // a `getblocktxn`, `Fallback` a full-block `getdata`), the window
+    // must record that in-flight fetch instead of scheduling a
+    // duplicate request for the freshly admitted tip.
+    let body_fetch_owned = matches!(
+        outcome,
+        crate::compact_blocks::Outcome::RequestMissing(_)
+            | crate::compact_blocks::Outcome::Fallback(_)
+    );
+    // Ownership — the header's `body_fetch_owned` flag and the scheduler
+    // mark alike — is recorded only once the follow-up request actually
+    // left on the connection: a failed send enqueues nothing, and marking
+    // either path anyway would suppress recovery of that block from
+    // another peer.
+    let fetch_issued = handle_compact_outcome(outcome, lease, peer_addr, shared);
+    if let Some(header) = announced_header {
+        let fetch_owned = body_fetch_owned && fetch_issued;
+        shared.send_headers(lease.source(peer_addr), vec![header], false, fetch_owned);
+        if fetch_owned && let Some(sync) = shared.block_sync.as_ref() {
+            sync.record_owned_body_fetch(
+                lease.source(peer_addr),
+                bitcoin_rs_primitives::Hash256::from(header.compute_hash()),
+            );
+        }
     }
 }
 

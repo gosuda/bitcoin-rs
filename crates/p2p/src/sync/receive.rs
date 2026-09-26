@@ -436,10 +436,6 @@ impl BlockSync {
             let scheduler = self.scheduler.lock();
             let offered = blocks.len();
             let mut admission_plan = Vec::with_capacity(offered);
-            // Quota for header-unknown bodies is charged during planning, not
-            // only at insert: otherwise one chunk could stage a full burst of
-            // unresolved bodies past `MAX_UNRESOLVED_STAGED_BODIES`.
-            let mut planned_gate_pending = 0_usize;
             blocks.retain(|inbound| {
                 let hash = Hash256::from(inbound.block.block_hash());
                 if scheduler.stager.contains(&hash) {
@@ -459,19 +455,6 @@ impl BlockSync {
                     return false;
                 }
                 let header_unknown = tree.lookup(hash).is_none();
-                if !requested
-                    && header_unknown
-                    && scheduler.stager.gate_pending_count() + planned_gate_pending
-                        >= MAX_UNRESOLVED_STAGED_BODIES
-                {
-                    // The shared orphan-body quota is full: drop this
-                    // unresolvable body rather than let a flood evict staged
-                    // progress.
-                    return false;
-                }
-                if !requested && header_unknown {
-                    planned_gate_pending += 1;
-                }
                 // A body staged while its header is unknown passed the
                 // gate's missing-header arm without facing the clauses —
                 // flag it so `recheck_staged_gates` re-gates it once the
@@ -516,6 +499,7 @@ impl BlockSync {
         let mut staged_blocks = Vec::with_capacity(blocks.len());
         let mut reject_deliveries = Vec::new();
         let mut refused_at_budget = 0_usize;
+        let mut refused_at_quota = 0_usize;
         let now = Instant::now();
         {
             let mut scheduler = self.scheduler.lock();
@@ -573,6 +557,18 @@ impl BlockSync {
                     refused_at_budget = refused_at_budget.saturating_add(1);
                     continue;
                 }
+                // The unresolved-body quota is enforced here too — after
+                // binding and the same-chunk recheck, on the entry that will
+                // actually occupy staging — so dropped predecessors cannot
+                // burn the chunk's quota, and one chunk still cannot stage a
+                // burst past `MAX_UNRESOLVED_STAGED_BODIES`: each insert
+                // raises `gate_pending_count` before the next body is seen.
+                if matches!(admission, BodyAdmission::Unrequested { gate_pending: true })
+                    && stager.gate_pending_count() >= MAX_UNRESOLVED_STAGED_BODIES
+                {
+                    refused_at_quota = refused_at_quota.saturating_add(1);
+                    continue;
+                }
                 let staged = stager.insert(
                     hash,
                     next_expected_hash,
@@ -593,6 +589,12 @@ impl BlockSync {
             tracing::debug!(
                 refused_at_budget,
                 "block sync: refused unrequested bodies at the staging count budget"
+            );
+        }
+        if refused_at_quota > 0 {
+            tracing::debug!(
+                refused_at_quota,
+                "block sync: refused unresolved bodies at the gate-pending quota"
             );
         }
 
