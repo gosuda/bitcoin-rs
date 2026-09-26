@@ -24,7 +24,7 @@ pub enum RpcError {
     /// Bitcoin Core's `RPC_TYPE_ERROR` (-3). Display is the Core message text
     /// with no wrapper prefix.
     #[error("{0}")]
-    InvalidType(&'static str),
+    InvalidType(String),
     /// Requested object was not found.
     #[error("not found: {0}")]
     NotFound(&'static str),
@@ -92,12 +92,6 @@ impl RpcError {
     pub(crate) const CORE_CLIENT_NOT_CONNECTED: i64 = -9;
     /// Bitcoin Core `RPC_CLIENT_IN_INITIAL_DOWNLOAD`.
     pub(crate) const CORE_CLIENT_IN_INITIAL_DOWNLOAD: i64 = -10;
-
-    /// Builds the policy-disabled error for methods unavailable by configuration.
-    #[must_use]
-    pub const fn method_disabled(message: &'static str) -> Self {
-        Self::MethodDisabled(message)
-    }
 
     /// Returns the JSON-RPC numeric error code.
     #[must_use]

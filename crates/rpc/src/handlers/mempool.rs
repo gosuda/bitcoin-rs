@@ -52,7 +52,7 @@ pub(crate) fn getmempoolinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
 }
 
 pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
+    let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
     let pool = ctx.mempool.read();
     let entry = pool
         .entry_by_txid(&txid)
@@ -96,7 +96,7 @@ pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value,
 }
 
 pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
+    let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
     let verbose = optional_bool(params, 1, false)?;
     let pool = ctx.mempool.read();
     let Some(id) = pool.entry_id_by_txid(&txid) else {
@@ -107,7 +107,7 @@ pub(crate) fn getmempoolancestors(ctx: &Arc<Context>, params: &Value) -> Result<
 }
 
 pub(crate) fn getmempooldescendants(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
+    let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
     let verbose = optional_bool(params, 1, false)?;
     let pool = ctx.mempool.read();
     let Some(id) = pool.entry_id_by_txid(&txid) else {
