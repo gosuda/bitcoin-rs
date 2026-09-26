@@ -292,39 +292,17 @@ fn merkle_root_and_mutation(txids: &[Txid]) -> (Option<Txid>, bool) {
 /// The same borrowed ranges own the stripped-size calculation, so there is no
 /// second traversal of input/output metadata and no transaction-sized scratch.
 fn txid_and_base_size(tx: &ParsedTransaction<'_>) -> (Txid, u64) {
-    let bytes = tx
-        .span_bytes(tx.span())
-        .unwrap_or_else(|| unreachable!("span belongs to the parsed image"));
+    let parts = tx.stripped_parts();
     if !tx.is_segwit() {
-        return (Txid(double_sha256(bytes)), u64::from(tx.span().len()));
+        return (Txid(double_sha256(parts[0])), u64::from(tx.span().len()));
     }
 
-    // An empty final script still ends after its CompactSize prefix. With no
-    // outputs, the output-count prefix itself is the end of the base body.
-    let body_end = tx.outputs().last().map_or_else(
-        || tx.output_count_span().end(),
-        |output| output.script_pubkey().end(),
-    );
-    // Layout offsets are image-relative, not transaction-relative. Subtract
-    // the transaction origin before indexing its borrowed byte slice.
-    let origin = u64::from(tx.span().start());
-    let start = usize::try_from(u64::from(tx.input_count_span().start()) - origin)
-        .unwrap_or_else(|_| unreachable!("body start is inside the transaction"));
-    let end = usize::try_from(body_end - origin)
-        .unwrap_or_else(|_| unreachable!("body end is inside the transaction"));
-    let body = &bytes[start..end];
-    let version = tx
-        .span_bytes(tx.version_span())
-        .unwrap_or_else(|| unreachable!("version belongs to the parsed image"));
-    let lock_time = tx
-        .span_bytes(tx.lock_time_span())
-        .unwrap_or_else(|| unreachable!("lock time belongs to the parsed image"));
-
     let mut engine = Sha256::new();
-    engine.update(version);
-    engine.update(body);
-    engine.update(lock_time);
-    let base_size = len_u64(version.len()) + len_u64(body.len()) + len_u64(lock_time.len());
+    let mut base_size = 0;
+    for part in parts {
+        engine.update(part);
+        base_size += len_u64(part.len());
+    }
     (Txid(finalize_double_sha256(engine)), base_size)
 }
 

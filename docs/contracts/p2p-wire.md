@@ -22,9 +22,14 @@ This page assigns ownership and cites proof under the
 - Message framing, envelope decoder, service flags, and network magic follow
   the inventory and the policy document. v1 frames for handshake and inventory
   commands are byte-identical to rust-bitcoin's `RawNetworkMessage`.
-  `getdata` block serving writes stored consensus payload bytes
-  (`Message::BlockPayload`) without a decode/re-encode round trip. The
-  decoder still types inbound `block` as `Message::Block`.
+  `getdata` block serving validates the stored body and answers
+  `MSG_WITNESS_BLOCK` with its exact stored consensus payload bytes
+  (`Message::BlockPayload`). `MSG_BLOCK` copies the checked header, transaction
+  count, and stripped transaction spans into its payload, following BIP144.
+  Both forms validate the complete borrowed layout without materializing
+  scripts or witnesses; malformed bodies are never forwarded. Both forms
+  recheck active-chain identity after preparing the payload. The decoder
+  still types inbound `block` as `Message::Block`.
 
 ### `P2P-02`: Connection lifecycle and peer lease ownership
 
@@ -93,6 +98,13 @@ This page assigns ownership and cites proof under the
 
 ## Proven by
 
+- `crates/p2p/src/chain_query.rs` tests
+  `getdata_block_encoding_matches_requested_inventory_on_wire`,
+  `getdata_block_encodings_keep_headroom_and_body_failure_rules`, and
+  `getdata_block_encodings_recheck_active_chain_after_body_load` cover BIP144
+  block encodings against the independent rust-bitcoin envelope, request
+  order, retained body immutability, headroom, corruption, and stale reads
+  (P2P-01).
 - `crates/p2p/src/inv.rs` test
   `cancelled_missing_parent_source_does_not_enqueue_a_request` and
   `crates/p2p/src/peer_table.rs` test
