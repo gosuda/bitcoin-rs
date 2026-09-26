@@ -422,9 +422,18 @@ impl NodeState {
     /// to `deadline` for a clean join, and detaches on
     /// expiry. On detach, revokes the generation token and publishes
     /// `ShutdownAbandoned` so queries return typed `Unavailable` instead of
-    /// hitting a torn reader.
-    pub(crate) fn bounded_index_shutdown(&mut self, deadline: Duration) {
-        self.derived_index.shutdown(deadline);
+    /// hitting a torn reader. An abandoned join is an error: the caller's
+    /// teardown records it and suppresses the clean checkpoint.
+    pub(crate) fn bounded_index_shutdown(&mut self, deadline: Duration) -> Result<()> {
+        self.derived_index.shutdown(deadline)
+    }
+
+    /// `true` once the owned index worker's join returned; stays `false` when
+    /// the bounded join was abandoned. The lifecycle tests read it at the
+    /// checkpoint seam to prove join-before-checkpoint.
+    #[cfg(test)]
+    pub(crate) fn index_worker_joined(&self) -> Arc<AtomicBool> {
+        self.derived_index.worker_joined()
     }
 }
 

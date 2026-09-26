@@ -215,13 +215,16 @@ impl NodeServices {
     /// Raises shutdown, wakes and joins the event loop, joins core services,
     /// joins bootstrap/maintenance/signal workers, and only
     /// then publishes a clean checkpoint. The derived-index worker is
-    /// stopped and joined by the caller before this teardown runs. The first
-    /// error is returned after all remaining cleanup stages run; any error
-    /// suppresses the checkpoint.
+    /// stopped and joined by the caller before this teardown runs; a
+    /// caller-supplied `first_error` — e.g. an index join abandoned at the
+    /// deadline — seeds the remembered error and suppresses the checkpoint
+    /// just like a cleanup-stage failure. The first
+    /// error is returned after all remaining cleanup stages run.
     pub(crate) fn teardown(
         &mut self,
         state: Option<&NodeState>,
         mode: TeardownMode,
+        mut first_error: Option<anyhow::Error>,
     ) -> anyhow::Result<()> {
         if self.teardown_started {
             return Ok(());
@@ -238,7 +241,6 @@ impl NodeServices {
             let _ = tx.try_send(());
         }
 
-        let mut first_error = None;
         self.join_core_services(state, &mut first_error);
         self.join_bootstrap_and_signal_workers(state, &mut first_error);
         publish_clean_checkpoint_if_eligible(state, mode, &mut first_error);
@@ -416,7 +418,7 @@ fn set_first_error(slot: &mut Option<anyhow::Error>, error: anyhow::Error) {
 impl Drop for NodeServices {
     fn drop(&mut self) {
         // Abandoned services still run the shared teardown.
-        if let Err(error) = self.teardown(None, TeardownMode::StartupAbort) {
+        if let Err(error) = self.teardown(None, TeardownMode::StartupAbort, None) {
             tracing::warn!(%error, "dropped node services; teardown reported an error");
         }
     }
@@ -446,10 +448,17 @@ impl StartupGuard {
 
 impl Drop for StartupGuard {
     fn drop(&mut self) {
-        // Startup failure rolls the partially built graph back.
-        if let Err(error) = self
-            .services
-            .teardown(self.state.as_ref(), TeardownMode::StartupAbort)
+        // Startup failure rolls the partially built graph back. The index
+        // worker stops through the same bounded path as explicit shutdown, so
+        // a worker stuck in open or storage I/O cannot block rollback
+        // indefinitely inside `DerivedIndexHost::drop`.
+        let index_error = self
+            .state
+            .as_mut()
+            .and_then(|state| state.bounded_index_shutdown(DRAIN_DEADLINE).err());
+        if let Err(error) =
+            self.services
+                .teardown(self.state.as_ref(), TeardownMode::StartupAbort, index_error)
         {
             tracing::warn!(%error, "startup rollback reported a cleanup failure");
         }
