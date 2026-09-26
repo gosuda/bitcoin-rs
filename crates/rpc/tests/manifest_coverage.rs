@@ -233,19 +233,15 @@ fn the_pinned_core_reference_matches_the_locked_kernel() {
         // Every `[[package]]` block naming the crate contributes its version;
         // a crate locked at two versions must agree at both, not just at the
         // first substring hit.
-        let locked: Vec<&str> = CARGO_LOCK
-            .split("\n[[package]]\n")
-            .filter_map(|block| {
-                let mut lines = block.lines();
-                let declared = lines.next()?.strip_prefix("name = \"")?.strip_suffix('"')?;
-                if declared != name {
-                    return None;
-                }
-                lines.find_map(|line| {
-                    line.strip_prefix("version = \"")
-                        .and_then(|rest| rest.strip_suffix('"'))
-                })
-            })
+        let lock: toml::Table = toml::from_str(CARGO_LOCK)
+            .unwrap_or_else(|err| panic!("Cargo.lock must parse as TOML: {err}"));
+        let locked: Vec<&str> = lock
+            .get("package")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|package| package.get("name").and_then(toml::Value::as_str) == Some(name))
+            .filter_map(|package| package.get("version").and_then(toml::Value::as_str))
             .collect();
         assert!(
             !locked.is_empty(),

@@ -106,7 +106,7 @@ fn strip_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 #[allow(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::cell::RefCell;
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::time::Duration;
@@ -1042,8 +1042,6 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     fn block_status_and_block_list_never_straddle_two_applied_branches()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::sync::atomic::AtomicBool;
-
         use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
         use bitcoin_rs_primitives::Header;
 
@@ -1143,6 +1141,10 @@ mod tests {
                 cell.store(Some(Arc::clone(tip)));
             }
         });
+        let mut swapper = SwapperGuard {
+            stop: Arc::clone(&stop),
+            handle: Some(swapper),
+        };
 
         let status_path = format!("/block/{a1_hash}/status");
         let (a1_text, b1_text) = (a1_hash.to_string(), b1_hash.to_string());
@@ -1218,7 +1220,12 @@ mod tests {
             std::thread::yield_now();
         }
         stop.store(true, Ordering::Relaxed);
-        swapper.join().expect("swapper thread panicked");
+        swapper
+            .handle
+            .take()
+            .expect("swapper handle")
+            .join()
+            .expect("swapper thread panicked");
         assert!(
             seen_a && seen_b,
             "a publication was never observed, so coherence proved nothing"
@@ -1644,6 +1651,22 @@ mod tests {
     /// the binning loop and wait to leave it. Call on the serving thread.
     fn arm_binning_gate(entered: Sender<()>, release: Receiver<()>) {
         BINNING_GATE.with(|slot| *slot.borrow_mut() = Some((entered, release)));
+    }
+
+    /// Stops and joins a busy helper thread even when an assertion unwinds, so
+    /// a failed check never leaves a spinning thread for later tests.
+    struct SwapperGuard {
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Drop for SwapperGuard {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
     }
 
     /// Test-only observation of the histogram-binning call site: announce that

@@ -919,7 +919,14 @@ impl ChainHandles {
     /// RPC JSON. Chainwork is the applied tip's when one exists.
     #[must_use]
     pub fn sync_progress(&self) -> SyncProgress {
-        let applied_tip = self.applied_progress_snapshot();
+        self.sync_progress_in(&self.applied_progress_snapshot())
+    }
+
+    /// [`sync_progress`] against a tip the caller already captured under the
+    /// transition barrier, so a response built from several progress fields
+    /// and additional tip reads stays on one publication.
+    #[must_use]
+    pub(crate) fn sync_progress_in(&self, applied_tip: &AppliedView) -> SyncProgress {
         let applied = applied_tip.height();
         let headers = self.height();
         let (difficulty, time, median_time) =
@@ -1592,6 +1599,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "wiring one Context through every handle group reads clearest as one fixture"
+    )]
     fn from_handles_shares_chain_handles_with_caller() {
         use alloc::sync::Arc;
 
@@ -1647,7 +1658,6 @@ mod tests {
             mining: MiningHandles {
                 mining_control: None,
             },
-            ..ContextHandles::default()
         });
         assert!(
             Arc::ptr_eq(&ctx.chain.chain_transition, &chain_transition),

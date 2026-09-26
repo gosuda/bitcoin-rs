@@ -27,19 +27,20 @@ use bitcoin_rs_index::block_log::{BlockRecord, cumulative_tx_count_through};
 
 pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let progress = ctx.chain.sync_progress();
     // `sync_progress` owns the shared facts; only the wire-only bits/target
-    // pair, the chain string, and warnings are added on top here.
-    let tip_bits = ctx.chain.applied_tip.load_full().as_deref().map_or(
-        CompactTarget::from_consensus(0),
-        |tip| {
+    // pair, the chain string, and warnings are added on top here. The barrier
+    // keeps `bits` on the same applied tip `progress` was derived from.
+    let (progress, tip_bits) = ctx.chain.with_stable_chainstate(|| {
+        let view = ctx.chain.applied_view();
+        let tip_bits = view.tip().map_or(CompactTarget::from_consensus(0), |tip| {
             ctx.chain
                 .block_tree
                 .read()
                 .node(tip.tip_id)
                 .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
-        },
-    );
+        });
+        (ctx.chain.sync_progress_in(&view), tip_bits)
+    });
     let chain = match progress.network {
         Network::Mainnet => "main",
         Network::Testnet3 => "test",
@@ -1008,34 +1009,43 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         ));
     }
     let want_muhash = hash_type == "muhash";
-    // One capture serves the scan height and the reported height/hash, so the
-    // response cannot describe a block that was applied after the scan began.
-    let view = ctx.chain.applied_view();
-    let applied_height = view.height();
-    let (stats, txouts, transactions, set_hash) = ctx.chain.utxo.with_stable_view(|stable| {
-        let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, applied_height, want_muhash)
-            .map_err(|err| RpcError::Internal(err.to_string()))?;
-        let set_hash = match hash_type {
-            "hash_serialized_3" => Some((
-                "hash_serialized_3",
-                stable
-                    .hash_serialized_3()
-                    .map_err(|err| RpcError::Internal(err.to_string()))?
-                    .to_string_be(),
-            )),
-            "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
-            "none" => None,
-            _ => {
-                return Err(RpcError::InvalidParams(
-                    "hash_type must be one of: hash_serialized_3, muhash, none",
-                ));
-            }
-        };
-        Ok::<_, RpcError>((stats, stable.len(), stable.record_count(), set_hash))
-    })?;
-    let disk_size = ctx.chain.utxo.with_stable_view(|stable| {
-        u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
-    });
+    // The transition barrier pins the tip capture and the whole UTXO scan to
+    // one chain state, so the reported height/hash cannot describe a block
+    // applied after the scan began.
+    let (applied_height, best_block, stats, txouts, transactions, set_hash, disk_size) =
+        ctx.chain.with_stable_chainstate(|| {
+            let view = ctx.chain.applied_view();
+            ctx.chain.utxo.with_stable_view(|stable| {
+                let stats =
+                    bitcoin_rs_utxo::stats::scan_coin_stats(stable, view.height(), want_muhash)
+                        .map_err(|err| RpcError::Internal(err.to_string()))?;
+                let set_hash = match hash_type {
+                    "hash_serialized_3" => Some((
+                        "hash_serialized_3",
+                        stable
+                            .hash_serialized_3()
+                            .map_err(|err| RpcError::Internal(err.to_string()))?
+                            .to_string_be(),
+                    )),
+                    "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
+                    "none" => None,
+                    _ => {
+                        return Err(RpcError::InvalidParams(
+                            "hash_type must be one of: hash_serialized_3, muhash, none",
+                        ));
+                    }
+                };
+                Ok::<_, RpcError>((
+                    view.height(),
+                    view.hash(ctx.chain.chain_network),
+                    stats,
+                    stable.len(),
+                    stable.record_count(),
+                    set_hash,
+                    u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX),
+                ))
+            })
+        })?;
     let (hash_serialized_3, muhash) = set_hash.map_or((None, None), |(name, hash)| {
         if name == "hash_serialized_3" {
             (Some(hash), None)
@@ -1045,7 +1055,7 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     });
     typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
         height: i64::from(applied_height),
-        best_block: view.hash(ctx.chain.chain_network).to_string_be(),
+        best_block: best_block.to_string_be(),
         transactions: Some(i64_saturated_len(transactions)),
         tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
         bogo_size: i64_saturated(stats.bogo_size),

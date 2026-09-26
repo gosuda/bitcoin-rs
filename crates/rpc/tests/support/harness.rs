@@ -138,7 +138,6 @@ impl ServerHarness {
             mining: bitcoin_rs_rpc::context::MiningHandles {
                 mining_control: None,
             },
-            ..ContextHandles::default()
         });
         let handler = Arc::new(Handler::new(Arc::new(ctx)));
         let auth = Arc::new(Auth::basic(REPLAY_USER, REPLAY_PASSWORD));

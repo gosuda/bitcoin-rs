@@ -390,8 +390,8 @@ pub(crate) fn arm_capture_hook(hook: impl FnOnce() + 'static) {
 /// POST: the `checkmempool` branch answers only while the gateway's chain
 /// generation is stable across the whole read; an unstable or moved
 /// generation returns the retry response instead of a body.
-/// INVARIANT: the plain branch never reads the generation and acquires no
-/// new lock.
+/// INVARIANT: the plain branch never reads the generation; the tip capture
+/// and UTXO reads run under the chain-transition barrier instead.
 fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     let (path, format) = split_format(suffix);
     let (check_mempool, outpoints) = match parse_getutxos_outpoints(path) {
@@ -412,31 +412,36 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     } else {
         None
     };
-    // Height and hash describe one publication, so a response cannot pair one
-    // block's height with another block's hash.
-    let view = ctx.chain.applied_view();
-    release_applied_capture();
-    let active_height = view.height();
-    let active_hash = view.hash(ctx.chain.chain_network);
+    // The transition barrier pins the tip capture and every UTXO read to one
+    // chain state: without it a connect between the capture and the reads
+    // could pair an old chainHeight/chaintipHash with new-chain UTXOs.
+    let fenced = ctx.chain.with_stable_chainstate(|| {
+        let view = ctx.chain.applied_view();
+        release_applied_capture();
+        let active_height = view.height();
+        let active_hash = view.hash(ctx.chain.chain_network);
 
-    let mut bitmap = vec![0_u8; outpoints.len().div_ceil(8)];
-    let mut outs = Vec::with_capacity(outpoints.len());
-    let mut hits = Vec::with_capacity(outpoints.len());
-    let pool = ctx.mempool.read();
-    for (txid, vout) in &outpoints {
-        let outpoint = bitcoin_rs_primitives::OutPoint::new(*txid, *vout);
-        let mempool_spent = check_mempool && pool.is_outpoint_spent(&outpoint);
-        let live = if mempool_spent {
-            None
-        } else {
-            ctx.chain.utxo.get_entry(&outpoint)
-        };
-        hits.push(live.is_some());
-        if let Some(entry) = live {
-            outs.push((entry.height, entry.txout));
+        let mut outs = Vec::with_capacity(outpoints.len());
+        let mut hits = Vec::with_capacity(outpoints.len());
+        let pool = ctx.mempool.read();
+        for (txid, vout) in &outpoints {
+            let outpoint = bitcoin_rs_primitives::OutPoint::new(*txid, *vout);
+            let mempool_spent = check_mempool && pool.is_outpoint_spent(&outpoint);
+            let live = if mempool_spent {
+                None
+            } else {
+                ctx.chain.utxo.get_entry(&outpoint)
+            };
+            hits.push(live.is_some());
+            if let Some(entry) = live {
+                outs.push((entry.height, entry.txout));
+            }
         }
-    }
-    drop(pool);
+        drop(pool);
+        (active_height, active_hash, hits, outs)
+    });
+    let (active_height, active_hash, hits, outs) = fenced;
+    let mut bitmap = vec![0_u8; outpoints.len().div_ceil(8)];
     // The end check compares for exact equality only; a generation that
     // moved while the reads ran discards the assembled results and asks the
     // client to retry.

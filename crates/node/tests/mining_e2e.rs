@@ -675,7 +675,7 @@ fn mining_handler(state: &NodeState) -> Handler {
             state.chainstate().applied_tip_handle(),
             state.blocks(),
             state.transactions(),
-            Arc::new(UtxoSet::new()),
+            state.chainstate().utxo_handle(),
             state.chainstate().coin_stats_handle(),
             state.chainstate().block_tree_handle(),
             state.config().network,

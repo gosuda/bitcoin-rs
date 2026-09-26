@@ -311,10 +311,11 @@ pub fn is_multisig(script: &[u8]) -> bool {
         match instruction {
             Instruction::PushBytes(_) => num_pubkeys = num_pubkeys.saturating_add(1),
             Instruction::Op(op) => {
-                if let Some(pushnum) = opcode::decode_pushnum(op) {
-                    if pushnum != num_pubkeys {
-                        return false;
-                    }
+                // The opcode after the key pushes must be the OP_n key count;
+                // any other opcode makes the script malformed, not multisig.
+                match opcode::decode_pushnum(op) {
+                    Some(pushnum) if pushnum == num_pubkeys => {}
+                    _ => return false,
                 }
                 break;
             }

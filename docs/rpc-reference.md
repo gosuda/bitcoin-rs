@@ -33,6 +33,7 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getrpcinfo` | 0.4.0 | active_commands is always an empty array; this node does not track in-flight RPC calls. logpath reports the configured debug log path (crates/rpc/src/handlers/util.rs). |
 | `getmemoryinfo` | 0.4.0 | mode=mallocinfo is rejected with an invalid-parameter error instead of returning allocator XML (crates/rpc/src/handlers/util.rs). The figures are resident set size read from the OS, not Core's locked-pool allocator accounting. |
 | `estimaterawfee` | 0.4.0 | local_shape: the fee estimator does not expose Core decay/scale/pass/fail internals, so horizon objects carry feerate only and the no-estimate branch stays {} (crates/rpc/src/handlers/util.rs). All three horizons carry the same feerate where Core computes three independent estimates. |
+| `validateaddress` | 0.4.0 | local_shape (invalid branch): a malformed or wrong-network address is hand-built as Core's sparse {isvalid:false} object because corepc-types models the valid-only fields (address, scriptPubKey, isscript, iswitness) as required and cannot represent that wire shape; valid addresses round-trip the typed v31 contract (crates/rpc/src/handlers/util.rs). |
 | `getnetworkinfo` | 0.4.0 | Core declares warnings as a string; this node emits an array. Tracked in #160. |
 | `ping` | 0.4.0 | Answers immediately; Core schedules a P2P ping and reports the seen pong (crates/rpc/src/handlers/network.rs). |
 | `getmininginfo` | 0.4.0 | Pinned v30 shape including bits/target and next-block facts. Unset currentblocktx, currentblockweight, and signet_challenge are omitted like Core. warnings is an array here and a string in Core's declaration. Tracked in #160. |
@@ -69,7 +70,6 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `getmempooldescendants` | 0.4.0 |  |
 | `uptime` | 0.4.0 |  |
 | `getzmqnotifications` | 0.4.0 | Requires the zmq feature and --enablezmq* startup flags. |
-| `validateaddress` | 0.4.0 | local_shape (invalid branch): a malformed or wrong-network address is hand-built as Core's sparse {isvalid:false} object because corepc-types models the valid-only fields (address, scriptPubKey, isscript, iswitness) as required and cannot represent that wire shape; valid addresses round-trip the typed v31 contract (crates/rpc/src/handlers/util.rs). |
 | `getdescriptorinfo` | 0.4.0 |  |
 | `deriveaddresses` | 0.4.0 |  |
 | `getpeerinfo` | 0.4.0 | Pinned v31 shape; telemetry this node does not measure (byte counters, pingwait, addr relay stats) reports Core's zero-value defaults. |
@@ -238,4 +238,4 @@ Unimplemented-set derivation: audited against the Bitcoin Core v31.0 source comm
 | `rawtx` | 0.4.0 | Requires the zmq feature and a --zmqpubrawtx endpoint. |
 | `sequence` | 0.4.0 | Requires the zmq feature and a --zmqpubsequence endpoint. Publishes C/D block events and A/R mempool events; A/R carry reversed txid, the label byte, and the mempool sequence as u64 LE (crates/rpc/src/zmq.rs). |
 
-Row counts: Supported 0, Deviation 15, Implemented (unverified) 64, Extension 2, Disabled 0, Unimplemented 93 - total 174.
+Row counts: Supported 0, Deviation 16, Implemented (unverified) 63, Extension 2, Disabled 0, Unimplemented 93 - total 174.

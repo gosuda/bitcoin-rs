@@ -38,7 +38,7 @@ the first embedder — there is one lifecycle implementation, not two.
 - **EMB-04 — Typed reads mirror the RPC facts.** `snapshot()` returns the
   coherent `ChainSnapshot`; `sync_progress()` derives the
   `getblockchaininfo` fields from the same handles without RPC JSON. The
-  calculation is `Context::sync_progress` in `crates/rpc/src/context.rs`, the
+  calculation is `ChainHandles::sync_progress` in `crates/rpc/src/context.rs`, the
   identical computation `getblockchaininfo` runs. `capabilities()` returns
   the node's concrete-service `CapabilitySnapshot`. Owners:
   `crates/node/src/embed.rs` and `crates/rpc/src/context.rs`; wire types:
