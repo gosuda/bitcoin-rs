@@ -98,6 +98,7 @@ fn bind_rpc(
             p2p_outbound_sender: Some(state.p2p_outbound_sender()),
             banned: state.banned_subnets(),
             added_nodes: state.added_nodes(),
+            local_services: state.p2p().local_services().to_u64(),
         },
         mining: MiningHandles {
             mining_control: Some(Arc::clone(mining_control)),

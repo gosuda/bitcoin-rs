@@ -139,9 +139,7 @@ impl BlockSync {
         for hash in hashes {
             scheduler.stager.retire_applied(hash);
             // Invalidated hashes are never re-requested: no cursor rewind.
-            scheduler
-                .window
-                .requeue_for_retry(hash, None, Instant::now());
+            scheduler.window.release_pending(hash, Instant::now());
         }
     }
 

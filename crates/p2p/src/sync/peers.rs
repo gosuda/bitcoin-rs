@@ -709,14 +709,26 @@ impl BlockSync {
     /// is now outstanding.
     ///
     /// PRE: `source` names a live subject connection.
-    /// POST: return true when a `getheaders` was sent or already pending for
-    ///   this locator, false when nothing could be sent.
-    /// INVARIANT: a suppressed probe still counts, because the pending request
-    ///   it suppressed is the very question the response window waits on.
+    /// POST: return true when a `getheaders` was sent or is already pending
+    ///   on this connection, false when nothing could be sent.
+    /// INVARIANT: a suppressed probe counts only when the suppression names
+    ///   a pending `getheaders` on this connection — that request is the very
+    ///   question the response window waits on. A suppression for a
+    ///   body-owned frontier sent nothing, so it starts no window.
     fn probe_chain_sync(&self, source: PeerSource, frontier: &SyncFrontier, now: Instant) -> bool {
-        let outcome = self.probe_frontier_peer(frontier, source, now);
-        if outcome == GetheadersOutcome::Failed {
-            return false;
+        match self.probe_frontier_peer(frontier, source, now) {
+            GetheadersOutcome::Sent => {}
+            GetheadersOutcome::Failed => return false,
+            GetheadersOutcome::Suppressed => {
+                let pending = self
+                    .scheduler
+                    .lock()
+                    .header_request
+                    .is_some_and(|request| request.source == source);
+                if !pending {
+                    return false;
+                }
+            }
         }
         metrics::counter!("node.sync.chain_sync_probes").increment(1);
         true

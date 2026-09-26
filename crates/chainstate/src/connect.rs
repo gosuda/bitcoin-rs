@@ -134,8 +134,15 @@ pub(super) fn apply_block_admitted<'b>(
     // header sync cannot be connected and a direct `submitblock` cannot skip a
     // rule by relying on header-sync history. Runs before the first mutation.
     let contextual_header_started = quanta::Instant::now();
-    let contextual_header_result =
-        validate_contextual_block_header(handles, block, height, prior.as_deref());
+    // A replayed block passed this gate when its durable batch committed and
+    // the stored receipt certifies that admission; re-running the wall-clock
+    // future-drift bound could refuse a previously committed block solely
+    // because the clock moved.
+    let contextual_header_result = if matches!(publication, PublishMode::Replay { .. }) {
+        Ok(())
+    } else {
+        validate_contextual_block_header(handles, block, height, prior.as_deref())
+    };
     let contextual_header_dur = contextual_header_started.elapsed();
     metrics::histogram!("node.apply_block.contextual_header_seconds")
         .record(contextual_header_dur.as_secs_f64());
@@ -508,8 +515,13 @@ pub(super) fn apply_block_admitted<'b>(
         // The gap block's durable batch committed before the crash: the
         // stored head receipt covers its body, undo, and locator rows.
         // Replay redoes only what publication owed — the journal tail
-        // and the coherent tip — and carries the receipt's commit id.
-        PublishMode::Replay { receipt } => receipt.commit_id,
+        // and the coherent tip — and carries the receipt's commit id, and
+        // the published tip carries the count the durable head certified.
+        PublishMode::Replay { receipt } => {
+            let commit_id = receipt.commit_id;
+            outcome.tip = receipt.certify(outcome.tip);
+            commit_id
+        }
         PublishMode::Grouped(group) => {
             // The window buffers the durable work: facts ride in the group
             // until its boundary, where one sync and one head batch commit

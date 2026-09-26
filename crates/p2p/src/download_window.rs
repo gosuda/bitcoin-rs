@@ -2378,6 +2378,13 @@ impl DownloadWindow {
         self.next_request_height
     }
 
+    /// Releases a pending entry that must never be re-requested, without
+    /// rewinding the request cursor (`requeue_for_retry` would rewind it,
+    /// offering the invalidated height again).
+    pub fn release_pending(&mut self, hash: &Hash256, now: Instant) {
+        let _ = self.remove_pending(hash, now);
+    }
+
     /// The source-attributed share of a staged delivery: pending-timeout,
     /// cold-front, and prefix-probe resolution plus stall-episode progress,
     /// all under the delivering connection's exact identity. `pending_height`

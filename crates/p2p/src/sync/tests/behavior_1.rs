@@ -133,7 +133,8 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
             current_source(&sync.peer_table, peer),
             false,
             100,
-            &test_frontier(&sync)
+            &test_frontier(&sync),
+            Instant::now(),
         )
         .sent
     );
@@ -211,6 +212,7 @@ fn apply_buffered_blocks_waits_for_pending_reorg() -> Result<(), Box<dyn std::er
     sync.buffer_received_block_chunk(
         &mut vec![crate::InboundBlock::from_decoded(head.clone())],
         Some(head_hash),
+        Instant::now(),
     );
     assert!(sync.scheduler.lock().stager.contains(&head_hash));
 

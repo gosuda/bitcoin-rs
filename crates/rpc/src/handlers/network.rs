@@ -17,14 +17,6 @@ use crate::error::RpcError;
 use crate::handlers::{ensure_no_params, optional_bool, params_array, required_str};
 use corepc_types::v31::{self, ConnectionType, GetNetworkInfoNetwork, TransportProtocolType};
 
-// Local service flags this node advertises:
-// - NODE_NETWORK (1 << 0) = 1 — full block serving.
-// - NODE_WITNESS (1 << 3) = 8 — segwit data.
-// Sum = 9 = 0x09.
-const LOCAL_SERVICES_FLAGS: u64 = (1_u64 << 0) | (1_u64 << 3);
-const LOCAL_SERVICES_HEX: &str = "0000000000000009";
-
-const _: () = assert!(LOCAL_SERVICES_FLAGS == 0x09);
 /// Decodes a Bitcoin service-flags bitmask into a list of name strings.
 ///
 /// Order follows Bitcoin Core's bit assignment. Unrecognized bits are dropped.
@@ -160,8 +152,8 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
         version: usize::try_from(bitcoin_rs_primitives::client_version()).unwrap_or(usize::MAX),
         subversion: USER_AGENT.to_owned(),
         protocol_version: 70016,
-        local_services: LOCAL_SERVICES_HEX.to_owned(),
-        local_services_names: services_names_from_flags(LOCAL_SERVICES_FLAGS),
+        local_services: format!("{:016x}", ctx.network.local_services),
+        local_services_names: services_names_from_flags(ctx.network.local_services),
         local_relay: true,
         time_offset: isize::try_from(median_time_offset(&peers)).unwrap_or(0),
         connections: total,
@@ -227,11 +219,15 @@ fn median_time_offset(peers: &[bitcoin_rs_p2p::PeerInfo]) -> i64 {
 
 pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let peers = ctx.network.peer_table.infos();
-    let rows = peers
+    // `sessions` carries the lease — role and manual flag — that `infos`
+    // strips, so `connection_type` and `relaytxes` can report the connection
+    // kind the operator actually opened.
+    let sessions = ctx.network.peer_table.sessions();
+    let rows = sessions
         .iter()
+        .filter_map(|session| session.info.as_ref().map(|info| (session, info)))
         .enumerate()
-        .map(|(id, peer)| v31::PeerInfo {
+        .map(|(id, (session, peer))| v31::PeerInfo {
             id: u32::try_from(id).unwrap_or(u32::MAX),
             address: peer.addr.to_string(),
             address_bind: Some(peer.addr_bind.to_string()),
@@ -244,7 +240,10 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            relay_transactions: true,
+            // Only full-relay connections carry the transaction relay
+            // stream; block-relay-only and inbound-nonrelay leases do not.
+            relay_transactions: session.lease.is_inbound()
+                || session.lease.role() == bitcoin_rs_p2p::PeerRole::FullRelay,
             last_send: i64::try_from(peer.counters.last_send()).unwrap_or(i64::MAX),
             last_received: i64::try_from(peer.counters.last_recv()).unwrap_or(i64::MAX),
             last_transaction: 0,
@@ -283,10 +282,15 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             bytes_received_per_message: std::collections::BTreeMap::new(),
             inv_to_send: 0,
             last_inv_sequence: 0,
-            connection_type: Some(if peer.inbound {
+            connection_type: Some(if session.lease.is_inbound() {
                 ConnectionType::Inbound
+            } else if session.lease.is_manual() {
+                ConnectionType::Manual
             } else {
-                ConnectionType::OutboundFullRelay
+                match session.lease.role() {
+                    bitcoin_rs_p2p::PeerRole::BlockRelayOnly => ConnectionType::BlockRelayOnly,
+                    bitcoin_rs_p2p::PeerRole::FullRelay => ConnectionType::OutboundFullRelay,
+                }
             }),
             transport_protocol_type: TransportProtocolType::V1,
             session_id: String::new(),

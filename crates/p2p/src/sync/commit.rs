@@ -50,10 +50,13 @@ impl BlockSync {
         let Some(source) = blocker.source() else {
             return;
         };
+        // Release the `getheaders` gate before the disconnect attempt: a
+        // pending request keyed to this connection must not outlive it even
+        // when the connection is already gone (or already replaced).
+        self.clear_header_request_for(source);
         if !self.peer_table.disconnect_source(source) {
             return;
         }
-        self.clear_header_request_for(source);
         self.scheduler
             .lock()
             .window

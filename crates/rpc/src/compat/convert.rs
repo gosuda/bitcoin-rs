@@ -172,6 +172,11 @@ pub(crate) fn classify(script: &[u8]) -> ScriptShape {
     if script.is_empty() {
         return ScriptShape::Empty;
     }
+    // Core's `Solver` returns `UNSPENDABLE` for any script longer than
+    // `MAX_SCRIPT_SIZE`, and `UNSPENDABLE` renders as `nulldata`.
+    if script.len() > 10_000 {
+        return ScriptShape::NullData;
+    }
     if is_p2sh(script) {
         return ScriptShape::ScriptHash;
     }

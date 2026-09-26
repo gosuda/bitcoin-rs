@@ -602,12 +602,15 @@ fn replay_committed_gap(
         }
         None => 0,
     };
-    // Width bounds the descriptor allocation only. Recoverability is decided
-    // by the body-identity and ancestry checks below, never by how wide the
-    // gap is: any authenticated ancestor chain above the restored tip
-    // replays, however many commit groups it spans.
+    // Width bounds the speculative descriptor preallocation only — a head
+    // whose checksum is valid but whose height is inconsistent must not
+    // abort the process on a giant `with_capacity`. The vector still grows
+    // to whatever the authenticated chain needs, so wide replay is
+    // preserved; recoverability is decided by the body-identity and
+    // ancestry checks below, never by how wide the gap is.
     let gap_width = usize::try_from(head.height - base_height + 1)
-        .map_err(|_| unrecoverable("gap width exceeds the address space"))?;
+        .map_err(|_| unrecoverable("gap width exceeds the address space"))?
+        .min(1 << 16);
 
     let Some(store) = handles.block_body_store.as_ref() else {
         return Err(unrecoverable("no block body store is attached"));

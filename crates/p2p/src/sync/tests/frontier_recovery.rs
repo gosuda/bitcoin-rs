@@ -592,7 +592,10 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> Result<(), Box<dyn 
     );
     let orphan_hash = Hash256::from(orphan.block_hash());
     let mut inbound = vec![crate::InboundBlock::from_decoded(orphan)];
-    assert_eq!(sync.buffer_received_block_chunk(&mut inbound, None), 1);
+    assert_eq!(
+        sync.buffer_received_block_chunk(&mut inbound, None, Instant::now()),
+        1
+    );
     assert!(sync.scheduler.lock().stager.contains(&orphan_hash));
 
     sync.tick();

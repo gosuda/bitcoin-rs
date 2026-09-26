@@ -28,18 +28,10 @@ use bitcoin_rs_index::block_log::{BlockRecord, cumulative_tx_count_through};
 pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let progress = ctx.chain.sync_progress();
-    // `sync_progress` owns the shared facts; only the wire-only bits/target
-    // pair, the chain string, and warnings are added on top here.
-    let tip_bits = ctx.chain.applied_tip.load_full().as_deref().map_or(
-        CompactTarget::from_consensus(0),
-        |tip| {
-            ctx.chain
-                .block_tree
-                .read()
-                .node(tip.tip_id)
-                .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
-        },
-    );
+    // `sync_progress` owns the shared facts — including the tip's compact
+    // target captured under the same snapshot — so bits and target cannot
+    // drift to a different tip than blocks and chainwork.
+    let tip_bits = progress.tip_bits;
     let chain = match progress.network {
         Network::Mainnet => "main",
         Network::Testnet3 => "test",
@@ -1005,31 +997,35 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         ));
     }
     let want_muhash = hash_type == "muhash";
-    // One capture serves the scan height and the reported height/hash, so the
-    // response cannot describe a block that was applied after the scan began.
-    let view = ctx.chain.applied_view();
+    // The applied capture runs inside the stable-view barrier: a block
+    // apply takes the matching write authority, so the tip observed here
+    // and the UTXO set being scanned cannot come from different commits.
+    let (view, stats, txouts, transactions, set_hash) =
+        ctx.chain.utxo.with_stable_view(|stable| {
+            let view = ctx.chain.applied_view();
+            let applied_height = view.height();
+            let stats =
+                bitcoin_rs_utxo::stats::scan_coin_stats(stable, applied_height, want_muhash)
+                    .map_err(|err| RpcError::Internal(err.to_string()))?;
+            let set_hash = match hash_type {
+                "hash_serialized_3" => Some((
+                    "hash_serialized_3",
+                    stable
+                        .hash_serialized_3()
+                        .map_err(|err| RpcError::Internal(err.to_string()))?
+                        .to_string_be(),
+                )),
+                "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
+                "none" => None,
+                _ => {
+                    return Err(RpcError::InvalidParams(
+                        "hash_type must be one of: hash_serialized_3, muhash, none",
+                    ));
+                }
+            };
+            Ok::<_, RpcError>((view, stats, stable.len(), stable.record_count(), set_hash))
+        })?;
     let applied_height = view.height();
-    let (stats, txouts, transactions, set_hash) = ctx.chain.utxo.with_stable_view(|stable| {
-        let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, applied_height, want_muhash)
-            .map_err(|err| RpcError::Internal(err.to_string()))?;
-        let set_hash = match hash_type {
-            "hash_serialized_3" => Some((
-                "hash_serialized_3",
-                stable
-                    .hash_serialized_3()
-                    .map_err(|err| RpcError::Internal(err.to_string()))?
-                    .to_string_be(),
-            )),
-            "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
-            "none" => None,
-            _ => {
-                return Err(RpcError::InvalidParams(
-                    "hash_type must be one of: hash_serialized_3, muhash, none",
-                ));
-            }
-        };
-        Ok::<_, RpcError>((stats, stable.len(), stable.record_count(), set_hash))
-    })?;
     let disk_size = ctx.chain.utxo.with_stable_view(|stable| {
         u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
     });

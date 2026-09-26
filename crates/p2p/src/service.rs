@@ -454,13 +454,21 @@ impl P2pService {
                         );
                         continue;
                     }
-                    let role = next_outbound_role(
-                        &peer_table,
-                        &active,
-                        full_relay_slots,
-                        block_relay_slots,
-                        extra_dial,
-                    );
+                    // A pinned `addnode`/`connect` dial always asks for the
+                    // transaction and address relay a full-relay connection
+                    // carries (Core `ConnectionType::MANUAL`); automatic role
+                    // allocation applies only to automatic dials.
+                    let role = if dial.manual {
+                        crate::peer_info::PeerRole::FullRelay
+                    } else {
+                        next_outbound_role(
+                            &peer_table,
+                            &active,
+                            full_relay_slots,
+                            block_relay_slots,
+                            extra_dial,
+                        )
+                    };
                     let handle = if dial.manual {
                         crate::listener::spawn_pinned_outbound_connection(
                             dial.addr,
@@ -620,6 +628,15 @@ impl P2pService {
     #[must_use]
     pub fn table(&self) -> Arc<crate::PeerTable> {
         Arc::clone(&self.peer_table)
+    }
+
+    /// The service flags this node advertises to peers.
+    ///
+    /// POST: the configured set — `NETWORK` on an unpruned node,
+    ///   `NETWORK_LIMITED` on a pruned one, `WITNESS` always.
+    #[must_use]
+    pub fn local_services(&self) -> bitcoin::p2p::ServiceFlags {
+        self.config.local_services
     }
 
     /// Returns whether P2P network activity is enabled.
@@ -850,7 +867,9 @@ fn live_outbound_count(peer_table: &crate::PeerTable) -> usize {
     peer_table
         .sessions()
         .iter()
-        .filter(|session| !session.lease.is_inbound())
+        // A cancelled lease is a teardown remnant, not a live outbound
+        // connection: counting it would mask a refill deficit.
+        .filter(|session| !session.lease.is_inbound() && !session.lease.is_cancelled())
         .count()
 }
 

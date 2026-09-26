@@ -22,7 +22,7 @@
 use std::collections::VecDeque;
 
 use bitcoin_rs_chain::{
-    ChainWork, block_work, compact_is_met_by, current_unix_seconds, permitted_difficulty_transition,
+    ChainWork, block_work, current_unix_seconds, permitted_difficulty_transition, validate_pow,
 };
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Header, HeadersSyncParams, Network};
 use sha2::{Digest as _, Sha256};
@@ -450,7 +450,10 @@ impl HeadersSyncState {
             });
         }
         let hash = Hash256::from(header.compute_hash());
-        if !compact_is_met_by(header.bits, hash) {
+        // `validate_pow` also rejects zero and above-limit targets, which
+        // `compact_is_met_by` alone lets through — a test-network header
+        // could otherwise pass this gate with an inadmissible `bits`.
+        if validate_pow(header, hash, self.chain_start.network).is_err() {
             return Err(HeaderSyncError::InvalidPow {
                 phase: HeadersSyncPhase::Presync,
                 height,
@@ -545,7 +548,7 @@ impl HeadersSyncState {
                 height,
             });
         }
-        if !compact_is_met_by(header.bits, hash) {
+        if validate_pow(header, hash, self.chain_start.network).is_err() {
             return Err(HeaderSyncError::InvalidPow {
                 phase: HeadersSyncPhase::Redownload,
                 height,

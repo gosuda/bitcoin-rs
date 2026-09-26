@@ -45,10 +45,15 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
     ));
     {
         let mut scheduler = sync.scheduler.lock();
-        scheduler.stale_tip.follow(100, 0, SPACING, t0);
         scheduler
             .stale_tip
-            .follow(100, 0, SPACING, t0 + Duration::from_mins(35));
+            .follow((100, Hash256::from_le_bytes(&[100; 32])), 0, SPACING, t0);
+        scheduler.stale_tip.follow(
+            (100, Hash256::from_le_bytes(&[100; 32])),
+            0,
+            SPACING,
+            t0 + Duration::from_mins(35),
+        );
     }
     assert!(
         sync.allow_extra_full_relay_dial(),
@@ -139,25 +144,40 @@ fn still_tip_buys_one_extra_dial_and_an_advance_withdraws_it() {
     let t0 = Instant::now();
     let mut state = StaleTipState::default();
 
-    state.follow(100, 0, SPACING, t0);
+    state.follow((100, Hash256::from_le_bytes(&[100; 32])), 0, SPACING, t0);
     assert!(
         !state.extra_dial_allowed,
         "the first sight of a tip is progress, not staleness"
     );
 
-    state.follow(100, 0, SPACING, t0 + Duration::from_mins(29));
+    state.follow(
+        (100, Hash256::from_le_bytes(&[100; 32])),
+        0,
+        SPACING,
+        t0 + Duration::from_mins(29),
+    );
     assert!(
         !state.extra_dial_allowed,
         "twenty-nine minutes of standing still is inside the bound"
     );
 
-    state.follow(100, 0, SPACING, t0 + Duration::from_mins(40));
+    state.follow(
+        (100, Hash256::from_le_bytes(&[100; 32])),
+        0,
+        SPACING,
+        t0 + Duration::from_mins(40),
+    );
     assert!(
         state.extra_dial_allowed,
         "three intervals without a tip move is a stale tip"
     );
 
-    state.follow(101, 0, SPACING, t0 + Duration::from_mins(41));
+    state.follow(
+        (101, Hash256::from_le_bytes(&[101; 32])),
+        0,
+        SPACING,
+        t0 + Duration::from_mins(41),
+    );
     assert!(
         !state.extra_dial_allowed,
         "an advancing tip withdraws the allowance without waiting for the next check"
@@ -171,18 +191,33 @@ fn still_tip_buys_one_extra_dial_and_an_advance_withdraws_it() {
 fn the_staleness_question_is_paced() {
     let t0 = Instant::now();
     let mut state = StaleTipState::default();
-    state.follow(100, 0, SPACING, t0);
+    state.follow((100, Hash256::from_le_bytes(&[100; 32])), 0, SPACING, t0);
 
     // Twenty-five minutes: the question is asked and answered "not yet", and
     // the next answer is not due until ten minutes later.
-    state.follow(100, 0, SPACING, t0 + Duration::from_mins(25));
+    state.follow(
+        (100, Hash256::from_le_bytes(&[100; 32])),
+        0,
+        SPACING,
+        t0 + Duration::from_mins(25),
+    );
     assert!(!state.extra_dial_allowed, "inside the bound");
-    state.follow(100, 0, SPACING, t0 + Duration::from_mins(31));
+    state.follow(
+        (100, Hash256::from_le_bytes(&[100; 32])),
+        0,
+        SPACING,
+        t0 + Duration::from_mins(31),
+    );
     assert!(
         !state.extra_dial_allowed,
         "past the bound but not yet due for a check"
     );
-    state.follow(100, 0, SPACING, t0 + Duration::from_mins(35));
+    state.follow(
+        (100, Hash256::from_le_bytes(&[100; 32])),
+        0,
+        SPACING,
+        t0 + Duration::from_mins(35),
+    );
     assert!(
         state.extra_dial_allowed,
         "the check that is due finds the tip stale"

@@ -136,14 +136,16 @@ impl BlockSync {
     /// Requests the next window batch from `source`, a usable peer from the
     /// frontier snapshot. The request start is the canonical next-required
     /// height — recovery and scheduling never disagree about the frontier.
+    /// PRE: `now` is the instant of the tick or drain driving this request,
+    ///   so the pending stamp shares the caller's clock.
     pub(super) fn send_getdata_for_pending_blocks(
         &self,
         source: PeerSource,
         allow_expired_retry_from_peer: bool,
         peer_best_height: u32,
         frontier: &ChainFrontier,
+        now: Instant,
     ) -> GetdataRequestOutcome {
-        let now = Instant::now();
         let (Some(chain_tip), Some(applied_tip), Some(required)) = (
             frontier.chain_tip.as_ref(),
             frontier.applied_tip.as_ref(),

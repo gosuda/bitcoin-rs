@@ -279,13 +279,17 @@ impl RelaySink for PeerRelaySink {
 /// Returns whether the queued transaction is still relayable.
 ///
 /// PRE: `gateway` is the shared gateway for the node's live mempool.
-/// POST: returns true exactly when `txid` is present in the mempool read at
-/// this call.
+/// POST: returns true exactly when `txid` is resident and the resident
+///   entry still carries `wtxid` — a txid re-admitted under a different
+///   witness is a different body, which this request must not announce.
 /// INVARIANT: the check does not mutate the mempool, relay queue, or
 /// observer state. The read guard is released before this function
 /// returns, so no caller holds it while it sends to peers.
-fn transaction_is_live(gateway: &MempoolGateway, txid: &Txid) -> bool {
-    gateway.read().contains_txid(txid)
+fn transaction_is_live(gateway: &MempoolGateway, txid: &Txid, wtxid: &Wtxid) -> bool {
+    gateway
+        .read()
+        .entry_by_txid(txid)
+        .is_some_and(|entry| entry.wtxid == *wtxid)
 }
 
 /// Synchronously drains every currently-queued relay request into `sink`,
@@ -309,7 +313,7 @@ pub fn drain_relay_queue(
 ) -> usize {
     let mut processed = 0;
     while let Ok(request) = rx.try_recv() {
-        if transaction_is_live(gateway, &request.txid) {
+        if transaction_is_live(gateway, &request.txid, &request.wtxid) {
             sink.announce_inv(request.txid, request.wtxid, request.source);
         }
         processed += 1;
@@ -342,7 +346,7 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
             while !shutdown.load(Ordering::Relaxed) {
                 match rx.recv_timeout(RELAY_POLL) {
                     Ok(request) => {
-                        if transaction_is_live(&gateway, &request.txid) {
+                        if transaction_is_live(&gateway, &request.txid, &request.wtxid) {
                             sink.announce_inv(request.txid, request.wtxid, request.source);
                         }
                     }

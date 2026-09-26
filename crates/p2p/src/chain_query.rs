@@ -220,12 +220,18 @@ impl ChainQuery for ActiveChainQuery {
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
+        headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError> {
         let hash = native_block_hash(request.block_hash);
         let Some((tip_height, height)) = self.active_position(hash) else {
             return Ok(None);
         };
         let deep = beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH);
+        // The deep answer loads the whole body; the same headroom gate that
+        // bounds `serve_inventory_blocks` materialization applies here too.
+        if deep && !headroom() {
+            return Ok(None);
+        }
         let Some((payload, tip_height)) = self.load_active_block(height, hash) else {
             return Ok(None);
         };
@@ -832,7 +838,7 @@ mod tests {
             indexes: vec![1],
         };
         Ok(query
-            .block_transactions(&request)?
+            .block_transactions(&request, &|| true)?
             .ok_or("an active body is always answered")?)
     }
 
@@ -871,29 +877,38 @@ mod tests {
         let query = chain_at(&headers, 1, &block)?;
         let wire = wire_hash(block.block_hash());
 
-        let reply = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire,
-            indexes: vec![1],
-        })?;
+        let reply = query.block_transactions(
+            &bitcoin::bip152::BlockTransactionsRequest {
+                block_hash: wire,
+                indexes: vec![1],
+            },
+            &|| true,
+        )?;
         let Some(Message::BlockTxn(txn)) = &reply else {
             panic!("a shallow request is answered with blocktxn, got {reply:?}");
         };
         assert_eq!(txn.transactions.block_hash, wire);
         assert_eq!(txn.transactions.transactions.len(), 1);
 
-        let out_of_range = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire,
-            indexes: vec![7],
-        });
+        let out_of_range = query.block_transactions(
+            &bitcoin::bip152::BlockTransactionsRequest {
+                block_hash: wire,
+                indexes: vec![7],
+            },
+            &|| true,
+        );
         assert!(
             matches!(out_of_range, Err(PeerError::Protocol(_))),
             "an out-of-range index is a protocol disconnect"
         );
 
-        let unknown = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: bitcoin::BlockHash::from_byte_array([9; 32]),
-            indexes: vec![0],
-        })?;
+        let unknown = query.block_transactions(
+            &bitcoin::bip152::BlockTransactionsRequest {
+                block_hash: bitcoin::BlockHash::from_byte_array([9; 32]),
+                indexes: vec![0],
+            },
+            &|| true,
+        )?;
         assert!(unknown.is_none(), "an unservable block stays unanswered");
         Ok(())
     }

@@ -115,6 +115,8 @@ pub struct SyncProgress {
     pub time: u64,
     /// Median time past of the last eleven applied blocks.
     pub median_time: u64,
+    /// Compact target of the applied tip header (zero before the first tip).
+    pub tip_bits: CompactTarget,
     /// Core `GuessVerificationProgress` in the inclusive range `[0, 1]`.
     pub verification_progress: f64,
     /// Whether the node is still in initial block download.
@@ -444,6 +446,9 @@ pub struct NetworkHandles {
     pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
     /// Persisted `addnode add` entries.
     pub added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
+    /// Service flags the node advertises, as resolved at P2P startup —
+    /// `NETWORK` on an unpruned node, `NETWORK_LIMITED` on a pruned one.
+    pub local_services: u64,
 }
 
 /// Mining capability handles.
@@ -566,6 +571,8 @@ impl Context {
                 p2p_outbound_sender: None,
                 banned: Arc::new(RwLock::new(Vec::new())),
                 added_nodes: Arc::new(RwLock::new(Vec::new())),
+                // The unpruned default: `NETWORK | WITNESS`.
+                local_services: 0x09,
             },
             mining_control: None,
             server_bound_at: Mutex::new(None),
@@ -837,17 +844,23 @@ impl ChainHandles {
         let applied_tip = self.applied_progress_snapshot();
         let applied = applied_tip.height();
         let headers = self.height();
-        let (difficulty, time, median_time) =
-            applied_tip.tip().map_or((0.0, 0_u64, 0_u64), |tip| {
+        let (difficulty, time, median_time, tip_bits) = applied_tip.tip().map_or(
+            (0.0, 0_u64, 0_u64, CompactTarget::from_consensus(0)),
+            |tip| {
                 let tree = self.block_tree.read();
-                tree.node(tip.tip_id).map_or((0.0, 0, 0), |node| {
-                    (
-                        self.difficulty_for_bits(node.header.bits),
-                        u64::from(node.header.time),
-                        u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
-                    )
-                })
-            });
+                tree.node(tip.tip_id).map_or(
+                    (0.0, 0, 0, CompactTarget::from_consensus(0)),
+                    |node| {
+                        (
+                            self.difficulty_for_bits(node.header.bits),
+                            u64::from(node.header.time),
+                            u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
+                            node.header.bits,
+                        )
+                    },
+                )
+            },
+        );
         let now = crate::handlers::chain::unix_now();
         // Core's estimate when the verified-transaction count is known, the
         // height ratio when it is not; `None` is a pre-tracking datadir and
@@ -880,6 +893,7 @@ impl ChainHandles {
             difficulty,
             time,
             median_time,
+            tip_bits,
             verification_progress,
             initial_block_download: self.ibd.is_active(now),
             // The applied chain's work once one block is connected; before the
@@ -1546,6 +1560,7 @@ mod tests {
                 p2p_outbound_sender: None,
                 banned: Arc::clone(&banned),
                 added_nodes: Arc::clone(&added_nodes),
+                local_services: 0x09,
             },
             mining: MiningHandles {
                 mining_control: None,

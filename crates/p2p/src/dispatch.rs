@@ -69,9 +69,14 @@ pub trait ChainQuery: Send + Sync {
     /// (unknown, stale, pruned, or headless block). `Err` reports an
     /// out-of-range transaction index — a protocol disconnect per BIP152
     /// (Core scores misbehavior).
+    ///
+    /// `headroom` gates materialization of the fallback body like it does in
+    /// `serve_inventory_blocks`: when it reports the outbound queue exhausted,
+    /// the request is left unanswered rather than loading a full block.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
+        headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError>;
 
     /// Header time of the active tip, `None` when no active tip is known.
@@ -284,7 +289,7 @@ pub fn dispatch_inbound_full<S>(
         Message::GetBlockTxn(request) => {
             ensure_block_txn_indexes_valid(&request.txs_request)?;
             step(peer, message)?;
-            serve_block_txn(chain, &request.txs_request, send)?;
+            serve_block_txn(chain, &request.txs_request, headroom, send)?;
         }
         _ => step(peer, message)?,
     }
@@ -437,12 +442,13 @@ fn serve_getdata_blocks(
 fn serve_block_txn(
     chain: Option<&dyn ChainQuery>,
     request: &BlockTransactionsRequest,
+    headroom: &dyn Fn() -> bool,
     send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
 ) -> Result<(), PeerError> {
     let Some(chain) = chain else {
         return Ok(());
     };
-    if let Some(response) = chain.block_transactions(request)? {
+    if let Some(response) = chain.block_transactions(request, headroom)? {
         send(response)?;
     }
     Ok(())
@@ -584,6 +590,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
@@ -630,6 +637,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
@@ -814,6 +822,7 @@ mod tests {
             fn block_transactions(
                 &self,
                 request: &BlockTransactionsRequest,
+                _headroom: &dyn Fn() -> bool,
             ) -> Result<Option<Message>, PeerError> {
                 Ok(Some(Message::BlockTxn(BlockTxn {
                     transactions: BlockTransactions {
@@ -930,6 +939,7 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
+            _headroom: &dyn Fn() -> bool,
         ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }

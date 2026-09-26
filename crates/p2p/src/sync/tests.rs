@@ -465,6 +465,7 @@ fn check_sync_frontier_pair(
         true,
         100,
         &test_frontier(sync),
+        Instant::now(),
     );
     let expected_ids = expected
         .as_ref()
@@ -1514,6 +1515,7 @@ fn apply_fixture_block(sync: &BlockSync, block: Block) -> Result<(), Box<dyn std
     sync.buffer_received_block_chunk(
         &mut vec![crate::InboundBlock::from_decoded(block)],
         Some(hash),
+        Instant::now(),
     );
     assert_eq!(sync.apply_buffered_blocks(Some(hash)), (1, 0));
     assert_eq!(
@@ -1569,7 +1571,7 @@ fn unrequested_body_admission_matches_core_acceptance() -> Result<(), Box<dyn st
         crate::InboundBlock::from_decoded(far_body),
         crate::InboundBlock::from_decoded(fork_body),
     ];
-    sync.buffer_received_block_chunk(&mut delivery, None);
+    sync.buffer_received_block_chunk(&mut delivery, None, Instant::now());
 
     let scheduler = sync.scheduler.lock();
     assert!(

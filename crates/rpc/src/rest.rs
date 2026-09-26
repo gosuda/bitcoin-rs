@@ -412,6 +412,10 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     } else {
         None
     };
+    // The pool read fence is taken first: a chain transition between the
+    // tip capture and the UTXO reads could otherwise pair UTXOs committed
+    // under tip B with the height and hash of tip A.
+    let pool = ctx.mempool.read();
     // Height and hash describe one publication, so a response cannot pair one
     // block's height with another block's hash.
     let view = ctx.chain.applied_view();
@@ -422,7 +426,6 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
     let mut bitmap = vec![0_u8; outpoints.len().div_ceil(8)];
     let mut outs = Vec::with_capacity(outpoints.len());
     let mut hits = Vec::with_capacity(outpoints.len());
-    let pool = ctx.mempool.read();
     for (txid, vout) in &outpoints {
         let outpoint = bitcoin_rs_primitives::OutPoint::new(*txid, *vout);
         let mempool_spent = check_mempool && pool.is_outpoint_spent(&outpoint);

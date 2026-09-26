@@ -291,6 +291,20 @@ pub(super) fn apply_window_admitted(
                 } else {
                     (Box::default(), disposition)
                 };
+                // An invalidation that escalates to Fatal may have left the
+                // tree partially mutated: flushing the staged prefix on top
+                // of it would publish state recovery cannot certify. Abandon
+                // the group and let restart-time recovery reconcile.
+                if disposition == WindowApplyDisposition::Fatal {
+                    group.abandon();
+                    return Err(WindowApplyError {
+                        applied: committed.len(),
+                        committed,
+                        source,
+                        disposition: WindowApplyDisposition::Fatal,
+                        invalidated,
+                    });
+                }
                 // The prefix that committed in memory stays committed: flush
                 // its durable group before reporting, so the durable head
                 // and the published tip keep moving together. A flush
@@ -416,7 +430,12 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
             | ConsensusError::WitnessNonceSize
             | ConsensusError::WitnessCommitment
             | ConsensusError::UnexpectedWitness => BodyMutated,
-            ConsensusError::PrevoutMatrixSize { .. }
+            // An encoding refusal names the delivered bytes, not the
+            // header's validity: the body is dropped and may be
+            // re-fetched from another peer, so it does not invalidate the
+            // subtree the way a consensus failure does.
+            ConsensusError::Encoding(_)
+            | ConsensusError::PrevoutMatrixSize { .. }
             | ConsensusError::Kernel(_)
             | ConsensusError::Script {
                 engine: ScriptEngine::Kernel,

@@ -89,8 +89,14 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
     let source = current_source(&sync.peer_table, peer);
 
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
-            .sent
+        sync.send_getdata_for_pending_blocks(
+            source,
+            false,
+            100,
+            &test_frontier(&sync),
+            Instant::now()
+        )
+        .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, losing_hashes);
     Ok(TwoBranches {
@@ -121,8 +127,14 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
 
     chain_tip.store(Some(Arc::new(winning_tip)));
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
-            .sent
+        sync.send_getdata_for_pending_blocks(
+            source,
+            false,
+            100,
+            &test_frontier(&sync),
+            Instant::now()
+        )
+        .sent
     );
     let requested = witness_block_inventory(next_getdata(&rx)?)?;
     assert_eq!(requested, winning_hashes);
@@ -157,13 +169,22 @@ fn retarget_purges_staged_off_branch_bodies() -> Result<(), Box<dyn std::error::
         .try_into()
         .map_err(|_| "the fixture has two losing bodies")?;
     let mut delivery = vec![crate::InboundBlock::from_decoded(losing1)];
-    assert_eq!(sync.buffer_received_block_chunk(&mut delivery, None), 1);
+    assert_eq!(
+        sync.buffer_received_block_chunk(&mut delivery, None, Instant::now()),
+        1
+    );
     assert_eq!(sync.scheduler.lock().stager.received_len(), 1);
 
     chain_tip.store(Some(Arc::new(winning_tip)));
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
-            .sent
+        sync.send_getdata_for_pending_blocks(
+            source,
+            false,
+            100,
+            &test_frontier(&sync),
+            Instant::now()
+        )
+        .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, winning_hashes);
     assert_eq!(
@@ -173,7 +194,7 @@ fn retarget_purges_staged_off_branch_bodies() -> Result<(), Box<dyn std::error::
     );
 
     let mut late = vec![crate::InboundBlock::from_decoded(losing2)];
-    sync.buffer_received_block_chunk(&mut late, None);
+    sync.buffer_received_block_chunk(&mut late, None, Instant::now());
     let scheduler = sync.scheduler.lock();
     assert_eq!(
         scheduler.stager.received_len(),

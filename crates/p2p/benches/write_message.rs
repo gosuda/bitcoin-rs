@@ -20,19 +20,20 @@ use std::time::Instant;
 use hashbrown::HashMap;
 
 use bitcoin::Network;
+use bitcoin::bip152::BlockTransactions;
 use bitcoin::bip152::HeaderAndShortIds;
 use bitcoin::blockdata::constants::genesis_block;
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
-use bitcoin::p2p::message_compact_blocks::CmpctBlock;
+use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Sequence, Tx,
     TxIn, TxOut, Txid, Witness, Wtxid, consensus_bytes,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use bitcoin_rs_p2p::compact_blocks::COMPACT_BLOCK_VERSION;
+use bitcoin_rs_p2p::compact_blocks::{COMPACT_BLOCK_VERSION, Outcome};
 use bitcoin_rs_p2p::wire::{Message, write_message};
 use bitcoin_rs_p2p::{CompactBlockHints, Reconstruction};
 
@@ -193,7 +194,9 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
             .map(|seed| bench_tx(seed + 1_000_000))
             .collect();
         // The first `missing` block transactions stay out of the pool, so the
-        // reconstruction has to ask for them by absolute index.
+        // reconstruction has to ask for them by absolute index. The coinbase
+        // is always prefilled, so `missing = 5` puts a 4-transaction
+        // `blocktxn` on the wire.
         pool.extend(body.iter().skip(missing).cloned());
         let hints = BenchHints::new(pool);
         let cmpct = bench_cmpctblock(&body, 0x1234);
@@ -201,12 +204,42 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
         group.bench_function(label, |b| {
             b.iter(|| {
                 let mut reconstruction = Reconstruction::new();
-                reconstruction.receive_cmpctblock(
+                let outcome = reconstruction.receive_cmpctblock(
                     black_box(&cmpct),
                     COMPACT_BLOCK_VERSION,
                     black_box(&hints),
                     Instant::now(),
                 );
+                // The missing case keeps going through the `blocktxn`
+                // response, so the timed path covers the whole round trip.
+                let outcome = match outcome {
+                    Outcome::RequestMissing(request) => {
+                        let transactions: Vec<bitcoin::Transaction> = request
+                            .txs_request
+                            .indexes
+                            .iter()
+                            .map(|index| {
+                                bitcoin::consensus::encode::deserialize(&consensus_bytes(
+                                    body.get(
+                                        usize::try_from(*index)
+                                            .expect("requested index fits usize"),
+                                    )
+                                    .expect("requested index is in the block"),
+                                ))
+                                .expect("fixture tx bridges to the registry type")
+                            })
+                            .collect();
+                        let txn = BlockTxn {
+                            transactions: BlockTransactions {
+                                block_hash: request.txs_request.block_hash,
+                                transactions,
+                            },
+                        };
+                        reconstruction.receive_blocktxn(&txn, Instant::now())
+                    }
+                    outcome => outcome,
+                };
+                black_box(outcome);
             });
         });
     }
