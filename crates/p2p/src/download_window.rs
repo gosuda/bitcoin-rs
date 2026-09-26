@@ -513,9 +513,6 @@ pub struct BlockedContext {
     pub frontier_hash: Option<Hash256>,
     /// Whether the stager holds the next-expected body (apply lag).
     pub apply_side_busy: bool,
-    /// Distinct exact connections owning validated in-flight blocks this
-    /// tick, from [`DownloadWindow::active_downloading_peers`].
-    pub active_downloading_peers: usize,
 }
 
 /// Why the unified blockage observation convicted an owner.
@@ -2033,23 +2030,6 @@ impl DownloadWindow {
             .collect();
         for hash in stale_pending {
             self.remove_pending(&hash, now);
-        }
-        // The stager is the single staged-body store: bodies the request
-        // branch left behind are released here, so freed capacity is real
-        // and a late old-branch delivery cannot re-acquire purged state.
-        // A hash the tree cannot resolve is off-branch by definition.
-        let stale_staged: Vec<Hash256> = stager
-            .staged_hashes()
-            .filter(|hash| {
-                let on_branch = tree
-                    .lookup(*hash)
-                    .and_then(|node_id| tree.node(node_id).ok())
-                    .map(|node| is_on_request_branch(node.hash, node.height));
-                on_branch != Some(true)
-            })
-            .collect();
-        for hash in stale_staged {
-            stager.discard(&hash);
         }
         // The stager is the single staged-body store: bodies the request
         // branch left behind are released here, so freed capacity is real
@@ -4756,7 +4736,6 @@ mod tests {
             next_apply_height: Some(1),
             frontier_hash: None,
             apply_side_busy: false,
-            active_downloading_peers: window.active_downloading_peers(),
         };
         // First tick: the episode and the cold-front timer both start.
         assert_eq!(

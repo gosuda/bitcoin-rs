@@ -436,6 +436,10 @@ impl BlockSync {
             let scheduler = self.scheduler.lock();
             let offered = blocks.len();
             let mut admission_plan = Vec::with_capacity(offered);
+            // Quota for header-unknown bodies is charged during planning, not
+            // only at insert: otherwise one chunk could stage a full burst of
+            // unresolved bodies past `MAX_UNRESOLVED_STAGED_BODIES`.
+            let mut planned_gate_pending = 0_usize;
             blocks.retain(|inbound| {
                 let hash = Hash256::from(inbound.block.block_hash());
                 if scheduler.stager.contains(&hash) {
@@ -457,12 +461,16 @@ impl BlockSync {
                 let header_unknown = tree.lookup(hash).is_none();
                 if !requested
                     && header_unknown
-                    && scheduler.stager.gate_pending_count() >= MAX_UNRESOLVED_STAGED_BODIES
+                    && scheduler.stager.gate_pending_count() + planned_gate_pending
+                        >= MAX_UNRESOLVED_STAGED_BODIES
                 {
                     // The shared orphan-body quota is full: drop this
                     // unresolvable body rather than let a flood evict staged
                     // progress.
                     return false;
+                }
+                if !requested && header_unknown {
+                    planned_gate_pending += 1;
                 }
                 // A body staged while its header is unknown passed the
                 // gate's missing-header arm without facing the clauses —

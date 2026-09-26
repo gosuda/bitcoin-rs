@@ -370,6 +370,7 @@ impl BlockStager {
 
         let mut dropped = Vec::new();
         let mut received_bytes = self.received_bytes;
+        let mut gate_pending_dropped = 0_usize;
         let mut next_received_deadline = None;
         let timeout = self.budget.received_timeout;
         self.received.retain(|hash, entry| {
@@ -382,9 +383,11 @@ impl BlockStager {
                 return true;
             }
             received_bytes = received_bytes.saturating_sub(entry.bytes);
+            gate_pending_dropped += usize::from(entry.gate_pending);
             dropped.push(DroppedBlock { hash: *hash });
             false
         });
+        self.gate_pending_count = self.gate_pending_count.saturating_sub(gate_pending_dropped);
         self.received_bytes = received_bytes;
         self.next_received_deadline = next_received_deadline;
         self.maybe_compact_received_order();

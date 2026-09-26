@@ -4,11 +4,11 @@ use super::GetdataRequestOutcome;
 use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
 use super::LOCATOR_MAX_ENTRIES;
-use super::MAX_DEFERRED_OWNED_FETCHES;
 use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
+use super::defer_owned_body_fetch;
 use super::frontier::ChainFrontier;
 use super::frontier::SyncFrontier;
 use super::peers::is_peer_fault;
@@ -386,21 +386,12 @@ impl BlockSync {
         };
         let mut scheduler = self.scheduler.lock();
         let Some(height) = height else {
-            if !scheduler
-                .owned_body_fetches
-                .iter()
-                .any(|(_, known)| *known == hash)
-            {
-                if scheduler.owned_body_fetches.len() >= MAX_DEFERRED_OWNED_FETCHES {
-                    scheduler.owned_body_fetches.remove(0);
-                }
-                scheduler.owned_body_fetches.push((source, hash));
-            }
+            defer_owned_body_fetch(&mut scheduler, source, hash);
             return;
         };
         let SchedulerState { window, stager, .. } = &mut *scheduler;
         if !window.mark_owned_fetch(stager, source, hash, height, Instant::now()) {
-            scheduler.owned_body_fetches.push((source, hash));
+            defer_owned_body_fetch(&mut scheduler, source, hash);
         }
     }
 
@@ -446,7 +437,9 @@ impl BlockSync {
                 unresolved.push((source, hash));
             }
         }
-        scheduler.owned_body_fetches.extend(unresolved);
+        for (source, hash) in unresolved {
+            defer_owned_body_fetch(&mut scheduler, source, hash);
+        }
     }
 
     /// `(announced_tip, active_height)` when every header in `headers` is

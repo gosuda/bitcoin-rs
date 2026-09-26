@@ -33,7 +33,6 @@ fn stall_blame(
             next_apply_height: Some(next_apply),
             frontier_hash: None,
             apply_side_busy: false,
-            active_downloading_peers: window.active_downloading_peers(),
         },
         stager,
         tree,
