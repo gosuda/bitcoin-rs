@@ -22,7 +22,8 @@
 use std::collections::VecDeque;
 
 use bitcoin_rs_chain::{
-    ChainWork, block_work, compact_is_met_by, current_unix_seconds, permitted_difficulty_transition,
+    ChainWork, block_work, compact_is_met_by, compact_within_pow_limit, current_unix_seconds,
+    permitted_difficulty_transition,
 };
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Header, HeadersSyncParams, Network};
 use sha2::{Digest as _, Sha256};
@@ -292,7 +293,7 @@ impl HeadersSyncState {
         params: HeadersSyncParams,
         salt: [u8; 16],
     ) -> Self {
-        debug_assert!(
+        assert!(
             params.commitment_period > 0,
             "commitment period must be nonzero"
         );
@@ -450,7 +451,12 @@ impl HeadersSyncState {
             });
         }
         let hash = Hash256::from(header.compute_hash());
-        if !compact_is_met_by(header.bits, hash) {
+        // CheckProofOfWork's negative/overflow/pow-limit bound runs before
+        // the hash comparison — min-difficulty networks can accept any bits
+        // through the transition rule, so the network cap is checked alone.
+        if !compact_within_pow_limit(self.chain_start.network, header.bits)
+            || !compact_is_met_by(header.bits, hash)
+        {
             return Err(HeaderSyncError::InvalidPow {
                 phase: HeadersSyncPhase::Presync,
                 height,
@@ -545,7 +551,9 @@ impl HeadersSyncState {
                 height,
             });
         }
-        if !compact_is_met_by(header.bits, hash) {
+        if !compact_within_pow_limit(self.chain_start.network, header.bits)
+            || !compact_is_met_by(header.bits, hash)
+        {
             return Err(HeaderSyncError::InvalidPow {
                 phase: HeadersSyncPhase::Redownload,
                 height,

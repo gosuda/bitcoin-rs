@@ -125,7 +125,7 @@ fn presync_collect(c: &mut Criterion) {
                     let result = state
                         .process(page, page.len() == PAGE)
                         .expect("a valid chain must collect without error");
-                    black_box(result.phase);
+                    black_box((&state, result.phase));
                 }
             },
             BatchSize::SmallInput,
@@ -216,7 +216,7 @@ fn serve_headers_page(c: &mut Criterion) {
     c.bench_function("serve_headers_page", |b| {
         b.iter(|| {
             let served = query.headers_after(&locator, BlockHash::default(), PAGE);
-            black_box(served.len())
+            black_box(served)
         });
     });
 }

@@ -993,15 +993,21 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
             .as_str()
             .ok_or(RpcError::InvalidType("hash_type must be a string"))?,
     };
-    let specific_block = match array.and_then(|values| values.get(1)) {
-        None => false,
-        Some(value) if value.is_null() => false,
-        Some(_) => true,
-    };
+    let specific_block = matches!(
+        array.and_then(|values| values.get(1)),
+        Some(value) if !value.is_null()
+    );
     let _use_index = optional_bool(params, 2, true)?;
     if specific_block {
         return Err(RpcError::InvalidParameter(
             "Querying specific block heights requires coinstatsindex".to_owned(),
+        ));
+    }
+    // Reject an unknown hash type before the barrier: the scan inside the
+    // stable view otherwise stalls block transitions for a doomed request.
+    if !matches!(hash_type, "hash_serialized_3" | "muhash" | "none") {
+        return Err(RpcError::InvalidParams(
+            "hash_type must be one of: hash_serialized_3, muhash, none",
         ));
     }
     let want_muhash = hash_type == "muhash";

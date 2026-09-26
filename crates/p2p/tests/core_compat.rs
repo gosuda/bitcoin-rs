@@ -1003,6 +1003,9 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
     while !dial.is_finished() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
+    if !dial.is_finished() {
+        return Err("the connection did not terminate within 5s".into());
+    }
     let Ok(outcome) = dial.join() else {
         return Err("the dial thread panicked".into());
     };
@@ -1554,6 +1557,13 @@ fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error
         &remote_version(ServiceFlags::NETWORK_LIMITED),
     )?;
 
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dial.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !dial.is_finished() {
+        return Err("the connection was not refused within 5s".into());
+    }
     let inner = match dial.join() {
         Ok(inner) => inner,
         Err(panic) => std::panic::resume_unwind(panic),

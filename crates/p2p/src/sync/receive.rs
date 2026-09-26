@@ -262,7 +262,7 @@ impl BlockSync {
         }
         // A staged retry that just admitted may have attached the ancestry
         // a deferred owned fetch was waiting on — resolve it now.
-        self.resolve_owned_body_fetches();
+        self.resolve_owned_body_fetches(now);
         if missing_parent {
             self.request_headers_from_eligible(now);
         }

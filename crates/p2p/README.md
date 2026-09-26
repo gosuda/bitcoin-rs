@@ -35,8 +35,9 @@ through `PeerTable`.
 
 The `listener` module has one entry point per role: `bind_listener` binds a local
 address, `serve` runs the accept loop on that bound listener until shutdown, and
-`spawn_outbound_connection` dials one peer. All three read one cloneable
-`ConnectionShared` wiring value per start epoch, which also owns the header, block,
+`spawn_outbound_connection` dials one peer. `serve` and
+`spawn_outbound_connection` read one cloneable `ConnectionShared` wiring value
+per start epoch (`bind_listener` only binds the address), which also owns the header, block,
 and transaction sinks. `P2pService` seeds outbound addresses by resolving the
 configured DNS seeds through `SystemDnsResolver` behind the `DnsResolver` injection
 point and queueing dials through the bounded outbound request queue.

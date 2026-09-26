@@ -299,11 +299,15 @@ impl CheckpointPublisher {
         // Remove the disconnect marker only after this checkpoint publishes
         // the matching UTXO set and applied tip. Recovery retires
         // unconditionally: reconstruction already made the state coherent.
-        match retirement {
-            DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
-            DisconnectRetirement::Recovered => self.undo_store.retire_disconnect_marker(),
+        // A skipped write (`SkippedNoAppliedTip`) published nothing, so the
+        // marker stays armed for the next checkpoint (recovery.md RCV-15).
+        if matches!(written, CheckpointWrite::Published { .. }) {
+            match retirement {
+                DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
+                DisconnectRetirement::Recovered => self.undo_store.retire_disconnect_marker(),
+            }
+            .map_err(CheckpointError::from)?;
         }
-        .map_err(CheckpointError::from)?;
         // Marker retirement is a second durability step after `CURRENT`.
         // Propagate failure so the worker retries next tick; the published
         // checkpoint stays, and the marker stays until unlink+dirsync commits.

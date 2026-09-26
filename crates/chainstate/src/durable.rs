@@ -361,22 +361,13 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
         mode,
         "automatic disconnect recovery replayed the certified head chain"
     );
-    // Publication is the durability fence: the marker retires only after the
-    // repaired state lands in a clean checkpoint. A failure retains it.
+    // Publication is the durability fence: `publish_recovery_checkpoint`
+    // retires the marker itself after the repaired state lands in a clean
+    // checkpoint, and a failure retains it.
     if let Err(error) = handles.publish_recovery_checkpoint() {
         return Err(ApplyError::RecoveryPublication(Box::new(error)));
     }
-    handles
-        .undo_store
-        .retire_disconnect_marker()
-        .map_err(|error| {
-            tracing::error!(%error, "disconnect marker retirement failed after publication");
-            fail_closed(
-                head.tip,
-                head.height,
-                "the disconnect marker did not retire after recovery publication",
-            )
-        })
+    Ok(())
 }
 
 /// The fail-closed refusal one rewind step reports.
@@ -465,6 +456,22 @@ fn rewind_one_step(
             "a rewound block body does not hash to the applied tip",
         ));
     }
+    // The header hash binds the header, not the transaction list: an altered
+    // body under a matching header would rewind the wrong coins, so the
+    // stored body's merkle root must answer the header's before the count
+    // delta and undo are derived from it.
+    let txids: Vec<bitcoin_rs_primitives::Txid> = block
+        .txs
+        .iter()
+        .map(bitcoin_rs_primitives::Tx::txid)
+        .collect();
+    bitcoin_rs_consensus::verify_merkle_root_with_txids(&block, &txids).map_err(|_| {
+        rewind_refused(
+            handles,
+            head,
+            "a rewound block body does not match its header merkle root",
+        )
+    })?;
     let undo = load_block_undo(handles.undo_store.as_ref(), height, hash).map_err(|_| {
         rewind_refused(handles, head, "a rewound block's undo record does not load")
     })?;

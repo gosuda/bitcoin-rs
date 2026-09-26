@@ -133,7 +133,8 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
             current_source(&sync.peer_table, peer),
             false,
             100,
-            &test_frontier(&sync)
+            &test_frontier(&sync),
+            Instant::now()
         )
         .sent
     );
