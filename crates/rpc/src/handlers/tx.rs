@@ -26,19 +26,39 @@ use bitcoin_rs_index::block_log::BlockRecord;
 use corepc_types::v31;
 
 /// Decodes a lowercase or uppercase hexadecimal string into bytes.
+///
+/// A non-hex string is a correctly typed but unacceptable value, so it
+/// answers Bitcoin Core's `RPC_INVALID_PARAMETER` (-8) class.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
     Vec::<u8>::from_hex(hex).map_err(|error| match error {
         bitcoin::hex::HexToBytesError::OddLengthString(_) => {
-            RpcError::InvalidParams("hex string must have even length")
+            RpcError::InvalidParameter("hex string must have even length".to_owned())
         }
         bitcoin::hex::HexToBytesError::InvalidChar(_) => {
-            RpcError::InvalidParams("invalid hex character")
+            RpcError::InvalidParameter("invalid hex character".to_owned())
         }
     })
 }
 
+/// Builds Bitcoin Core 31.1's `-8` message for a malformed block-hash
+/// parameter.
+///
+/// PRE: `value` is the parameter string as supplied.
+/// POST: the `InvalidParameter` error naming a wrong length or non-hex
+///   content exactly as Core 31.1 spells it for `label`.
+/// INVARIANT: built only from the call's inputs; no state is read.
+fn block_hash_param_error(value: &str, label: &str) -> RpcError {
+    if value.len() != 64 {
+        return RpcError::InvalidParameter(format!(
+            "{label} must be of length 64 (not {}, for '{value}')",
+            value.len()
+        ));
+    }
+    RpcError::InvalidParameter(format!("{label} must be hexadecimal string (not '{value}')"))
+}
+
 pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
+    let txid = parse_txid(required_str(params, 0, "txid is required")?, "parameter 1")?;
     let verbose = raw_transaction_verbosity(params)?;
     let blockhash = params_array(params)?
         .get(2)
@@ -46,10 +66,10 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
         .map(|value| {
             value
                 .as_str()
-                .ok_or(RpcError::InvalidType("blockhash must be a string"))
+                .ok_or(RpcError::InvalidType("blockhash must be a string".to_owned()))
                 .and_then(|hash| {
                     Hash256::from_str(hash)
-                        .map_err(|_| RpcError::InvalidParams("blockhash must be 64 hex characters"))
+                        .map_err(|_| block_hash_param_error(hash, "parameter 3"))
                 })
         })
         .transpose()?;
@@ -108,7 +128,7 @@ fn raw_transaction_verbosity(params: &Value) -> Result<bool, RpcError> {
         Some(1 | 2) => Ok(true),
         Some(_) => Err(RpcError::InvalidParams("verbosity must be 0, 1, or 2")),
         None => Err(RpcError::InvalidType(
-            "verbosity must be a boolean or integer",
+            "verbosity must be a boolean or integer".to_owned(),
         )),
     }
 }
@@ -150,7 +170,7 @@ fn render_raw_transaction(
 }
 
 pub(crate) fn gettxout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let txid = parse_txid(required_str(params, 0, "txid is required")?)?;
+    let txid = parse_txid(required_str(params, 0, "txid is required")?, "txid")?;
     let vout = required_u64(params, 1, "vout is required")?;
     let vout_u32 = u32::try_from(vout).map_err(|_| RpcError::InvalidParams("vout exceeds u32"))?;
     let include_mempool = optional_bool(params, 2, true)?;
@@ -216,14 +236,14 @@ pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut wanted = hashbrown::HashSet::new();
     for value in txids_value {
         let Some(txid) = value.as_str() else {
-            return Err(RpcError::InvalidType("each txid must be a string"));
+            return Err(RpcError::InvalidType("each txid must be a string".to_owned()));
         };
-        wanted.insert(parse_txid(txid)?);
+        wanted.insert(parse_txid(txid, "txid")?);
     }
 
     if let Some(hash_str) = array.get(1).and_then(JsonValueTrait::as_str) {
         let hash = Hash256::from_str(hash_str)
-            .map_err(|_| RpcError::InvalidParams("blockhash must be 64 hex characters"))?;
+            .map_err(|_| block_hash_param_error(hash_str, "blockhash"))?;
         let Some(record) = ctx.chain.block_by_hash(hash) else {
             return Err(RpcError::NotFound("block not found"));
         };
@@ -465,7 +485,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let mut txs = Vec::with_capacity(raw_txs.len());
     for raw in raw_txs {
         let Some(raw) = raw.as_str() else {
-            return Err(RpcError::InvalidType("raw transaction must be a string"));
+            return Err(RpcError::InvalidType("raw transaction must be a string".to_owned()));
         };
         txs.push(decode_tx(
             raw,
@@ -543,7 +563,7 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         Some(value) => {
             let locktime = value
                 .as_u64()
-                .ok_or(RpcError::InvalidType("locktime must be an integer"))?;
+                .ok_or(RpcError::InvalidType("locktime must be an integer".to_owned()))?;
             u32::try_from(locktime).map_err(|_| RpcError::InvalidParams("locktime exceeds u32"))?
         }
     };
@@ -561,12 +581,13 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     for input in inputs {
         let object = input
             .as_object()
-            .ok_or(RpcError::InvalidType("input must be an object"))?;
+            .ok_or(RpcError::InvalidType("input must be an object".to_owned()))?;
         let txid = parse_txid(
             object
                 .get(&"txid")
                 .and_then(JsonValueTrait::as_str)
                 .ok_or(RpcError::InvalidParams("input txid is required"))?,
+            "txid",
         )?;
         let vout = object
             .get(&"vout")
@@ -581,7 +602,7 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
             Some(value) => {
                 let sequence = value
                     .as_u64()
-                    .ok_or(RpcError::InvalidType("sequence must be an integer"))?;
+                    .ok_or(RpcError::InvalidType("sequence must be an integer".to_owned()))?;
                 u32::try_from(sequence)
                     .map_err(|_| RpcError::InvalidParams("sequence exceeds u32"))?
             }
@@ -601,7 +622,7 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         if key == "data" {
             let data_hex = value
                 .as_str()
-                .ok_or(RpcError::InvalidType("data output must be a hex string"))?;
+                .ok_or(RpcError::InvalidType("data output must be a hex string".to_owned()))?;
             let data = hex_decode(data_hex)?;
             let mut script = vec![opcode::OP_RETURN];
             script.extend_from_slice(&push_data(&data));
@@ -673,9 +694,9 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
         number
     } else if let Some(text) = value.as_str() {
         text.parse::<f64>()
-            .map_err(|_| RpcError::InvalidType("maxfeerate must be a number"))?
+            .map_err(|_| RpcError::InvalidType("maxfeerate must be a number".to_owned()))?
     } else {
-        return Err(RpcError::InvalidType("maxfeerate must be a number"));
+        return Err(RpcError::InvalidType("maxfeerate must be a number".to_owned()));
     };
     if !btc_per_kvb.is_finite() || btc_per_kvb < 0.0 {
         return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
@@ -705,7 +726,7 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
             .map_err(|_| RpcError::InvalidParams("Invalid amount"))?;
         return sats_from_btc(number, "Invalid amount");
     }
-    Err(RpcError::InvalidType("amount must be a number or string"))
+    Err(RpcError::InvalidType("amount must be a number or string".to_owned()))
 }
 
 // ---------------------------------------------------------------------------
@@ -792,7 +813,7 @@ pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         return Err(RpcError::InvalidParams("psbts array must not be empty"));
     };
     let Some(first_str) = first_val.as_str() else {
-        return Err(RpcError::InvalidType("each psbt must be a string"));
+        return Err(RpcError::InvalidType("each psbt must be a string".to_owned()));
     };
     let mut psbt = bitcoin::psbt::Psbt::deserialize(
         &crate::base64::decode(first_str)
@@ -802,7 +823,7 @@ pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 
     for value in iter {
         let Some(s) = value.as_str() else {
-            return Err(RpcError::InvalidType("each psbt must be a string"));
+            return Err(RpcError::InvalidType("each psbt must be a string".to_owned()));
         };
         let other = bitcoin::psbt::Psbt::deserialize(
             &crate::base64::decode(s).map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?,

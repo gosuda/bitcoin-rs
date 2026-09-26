@@ -99,7 +99,7 @@ fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcEr
     }
     value
         .as_u64()
-        .ok_or(RpcError::InvalidType("parameter must be unsigned integer"))
+        .ok_or(RpcError::InvalidType("parameter must be unsigned integer".to_owned()))
 }
 
 /// Maps an IP address to Bitcoin Core's `network` field label.

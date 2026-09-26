@@ -43,7 +43,7 @@ pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let control = ctx
         .mining_control
         .as_ref()
-        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+        .ok_or(RpcError::MethodNotFound("getblocktemplate".to_owned()))?;
     let request = parse_block_template_request(params)?;
     if matches!(request.mode, BlockTemplateMode::Template) {
         ensure_template_ready(ctx)?;
@@ -65,7 +65,7 @@ pub(crate) fn getmininginfo(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let control = ctx
         .mining_control
         .as_ref()
-        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+        .ok_or(RpcError::MethodNotFound("getmininginfo".to_owned()))?;
     let info = control.mining_info().map_err(map_mining_control_error)?;
     render_mining_info(&info)
 }
@@ -74,11 +74,11 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
     let control = ctx
         .mining_control
         .as_ref()
-        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+        .ok_or(RpcError::MethodNotFound("submitblock".to_owned()))?;
     ensure_at_most_params(params, 2)?;
     if let Some(dummy) = params_array(params)?.get(1) {
         if !dummy.is_null() && dummy.as_str().is_none() {
-            return Err(RpcError::InvalidType("parameter must be string"));
+            return Err(RpcError::InvalidType("parameter must be string".to_owned()));
         }
     }
     let hex = required_str(params, 0, "block hex is required")?;
@@ -124,7 +124,7 @@ pub(crate) fn submitheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
     let control = ctx
         .mining_control
         .as_ref()
-        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+        .ok_or(RpcError::MethodNotFound("submitheader".to_owned()))?;
     ensure_at_most_params(params, 1)?;
     let hex = required_str(params, 0, "header hex is required")?;
     let header = decode_block_header(hex)?;
@@ -142,7 +142,7 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
         let fee_delta = array
             .get(2)
             .and_then(JsonValueTrait::as_i64)
-            .ok_or(RpcError::InvalidType("parameter must be an integer"))?;
+            .ok_or(RpcError::InvalidType("parameter must be an integer".to_owned()))?;
         (
             array.first().and_then(JsonValueTrait::as_str),
             fee_delta,
@@ -154,15 +154,25 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
             params
                 .get("fee_delta")
                 .and_then(JsonValueTrait::as_i64)
-                .ok_or(RpcError::InvalidType("parameter must be an integer"))?,
+                .ok_or(RpcError::InvalidType("parameter must be an integer".to_owned()))?,
             params.get("dummy"),
         )
     } else {
         return Err(RpcError::InvalidParams("params must be an array or object"));
     };
     let txid_str = txid_str.ok_or(RpcError::InvalidParams("txid is required"))?;
-    let txid = Txid::from_str(txid_str)
-        .map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))?;
+    let txid = if txid_str.len() != 64 {
+        return Err(RpcError::InvalidParameter(format!(
+            "txid must be of length 64 (not {}, for '{txid_str}')",
+            txid_str.len()
+        )));
+    } else {
+        Txid::from_str(txid_str).map_err(|_| {
+            RpcError::InvalidParameter(format!(
+                "txid must be hexadecimal string (not '{txid_str}')"
+            ))
+        })?
+    };
     if let Some(dummy) = dummy
         && !dummy.is_null()
     {
@@ -172,7 +182,7 @@ pub(crate) fn prioritisetransaction(ctx: &Arc<Context>, params: &Value) -> Resul
             .map(|n| n != 0)
             .or_else(|| dummy.as_u64().map(|n| n != 0))
             .or_else(|| dummy.as_f64().map(|n| n != 0.0))
-            .ok_or(RpcError::InvalidType("dummy must be a number"))?;
+            .ok_or(RpcError::InvalidType("dummy must be a number".to_owned()))?;
         if nonzero {
             return Err(RpcError::InvalidParameter(
                 PRIORITISE_DUMMY_ERROR.to_owned(),
@@ -206,7 +216,7 @@ pub(crate) fn generatetoaddress(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let control = ctx
         .mining_control
         .as_ref()
-        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+        .ok_or(RpcError::MethodNotFound("generatetoaddress".to_owned()))?;
     let nblocks = required_u32(params, 0, "nblocks is required")?;
     let address = required_str(params, 1, "address is required")?;
     let max_tries = optional_u64(params, 2, GenerateRequest::DEFAULT_MAX_TRIES)?;
@@ -237,7 +247,7 @@ pub(crate) fn generateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let control = ctx
         .mining_control
         .as_ref()
-        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+        .ok_or(RpcError::MethodNotFound("generateblock".to_owned()))?;
     let output = required_str(params, 0, "output is required")?;
     let payout =
         generateblock_payout_script(output, convert::bitcoin_network(ctx.chain.chain_network))?;
@@ -271,7 +281,7 @@ pub(crate) fn getnetworkhashps(ctx: &Arc<Context>, params: &Value) -> Result<Val
     let control = ctx
         .mining_control
         .as_ref()
-        .ok_or(RpcError::MethodDisabled("mining is unavailable"))?;
+        .ok_or(RpcError::MethodNotFound("getnetworkhashps".to_owned()))?;
     let (lookup, height) = parse_network_hash_ps_args(params)?;
     match control.network_hash_ps(lookup, height) {
         Ok(rate) => Ok(json!(rate)),
@@ -336,7 +346,7 @@ fn optional_i64(params: &Value, index: usize, default: i64) -> Result<i64, RpcEr
     }
     value
         .as_i64()
-        .ok_or(RpcError::InvalidType("parameter must be an integer"))
+        .ok_or(RpcError::InvalidType("parameter must be an integer".to_owned()))
 }
 
 fn required_u32(params: &Value, index: usize, name: &'static str) -> Result<u32, RpcError> {
@@ -357,7 +367,7 @@ fn optional_u64(params: &Value, index: usize, default: u64) -> Result<u64, RpcEr
     }
     value
         .as_u64()
-        .ok_or(RpcError::InvalidType("parameter must be an integer"))
+        .ok_or(RpcError::InvalidType("parameter must be an integer".to_owned()))
 }
 
 fn parse_generateblock_transactions(
@@ -372,7 +382,7 @@ fn parse_generateblock_transactions(
         return Err(RpcError::InvalidParams("transactions must be an array"));
     }
     let Some(entries) = value.as_array() else {
-        return Err(RpcError::InvalidType("transactions must be an array"));
+        return Err(RpcError::InvalidType("transactions must be an array".to_owned()));
     };
     let mut transactions = Vec::with_capacity(entries.len());
     // One lazy mining snapshot serves every pooled-txid argument; raw-tx
@@ -381,8 +391,8 @@ fn parse_generateblock_transactions(
     for entry in entries {
         let Some(text) = entry.as_str() else {
             return Err(RpcError::InvalidType(
-                "transactions must be an array of hex strings",
-            ));
+                    "transactions must be an array of hex strings".to_owned(),
+                ));
         };
         if let Ok(txid) = Txid::from_str(text) {
             let snapshot = snapshot
@@ -441,7 +451,7 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
         });
     }
     if !request.is_object() {
-        return Err(RpcError::InvalidType("template request must be an object"));
+        return Err(RpcError::InvalidType("template request must be an object".to_owned()));
     }
 
     let mode_text = match request.get("mode") {
@@ -459,7 +469,7 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
                 .get("data")
                 .and_then(JsonValueTrait::as_str)
                 .ok_or(RpcError::InvalidType(
-                    "Missing data String key for proposal",
+                    "Missing data String key for proposal".to_owned(),
                 ))?;
         let (block, _) = decode_submitted_block(data)?;
         return Ok(BlockTemplateRequest {
@@ -480,7 +490,7 @@ fn parse_block_template_request(params: &Value) -> Result<BlockTemplateRequest, 
         Some(value) if value.is_null() => None,
         Some(value) => {
             let Some(text) = value.as_str() else {
-                return Err(RpcError::InvalidType("longpollid must be a string"));
+                return Err(RpcError::InvalidType("longpollid must be a string".to_owned()));
             };
             Some(CompactString::from(text))
         }
@@ -507,18 +517,18 @@ fn parse_string_list(
         Some(value) => {
             let Some(array) = value.as_array() else {
                 return Err(RpcError::InvalidType(match field {
-                    "capabilities" => "capabilities must be an array of strings",
-                    "rules" => "rules must be an array of strings",
-                    _ => "field must be an array of strings",
+                    "capabilities" => "capabilities must be an array of strings".to_owned(),
+                    "rules" => "rules must be an array of strings".to_owned(),
+                    _ => "field must be an array of strings".to_owned(),
                 }));
             };
             let mut out = Vec::with_capacity(array.len());
             for entry in array {
                 let Some(text) = entry.as_str() else {
                     return Err(RpcError::InvalidType(match field {
-                        "capabilities" => "capabilities must be an array of strings",
-                        "rules" => "rules must be an array of strings",
-                        _ => "field must be an array of strings",
+                        "capabilities" => "capabilities must be an array of strings".to_owned(),
+                        "rules" => "rules must be an array of strings".to_owned(),
+                        _ => "field must be an array of strings".to_owned(),
                     }));
                 };
                 out.push(CompactString::from(text));
@@ -886,10 +896,8 @@ mod tests {
         let ctx = Arc::new(Context::new());
         let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
             .expect_err("missing control must fail");
-        assert!(matches!(
-            error,
-            RpcError::MethodDisabled("mining is unavailable")
-        ));
+        assert!(matches!(&error, RpcError::MethodNotFound(name) if name == "getblocktemplate"));
+        assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
     }
 
     fn register_dummy_peer(ctx: &Context) {
@@ -1142,10 +1150,7 @@ mod tests {
         let ctx = ctx_with_control(control.clone());
         let missing = getblocktemplate(&ctx, &json!([{"mode": "proposal"}]))
             .expect_err("proposal without data must fail");
-        assert!(matches!(
-            missing,
-            RpcError::InvalidType("Missing data String key for proposal")
-        ));
+        assert!(matches!(missing, RpcError::InvalidType(_)));
         assert_eq!(missing.code(), RpcError::CORE_INVALID_TYPE);
         assert_eq!(missing.to_string(), "Missing data String key for proposal");
         for hex in ["", "00", "zz", "deadbeef"] {
@@ -1220,10 +1225,8 @@ mod tests {
         let missing = Arc::new(Context::new());
         let error = submitblock(&missing, &json!(["00"]))
             .expect_err("submitblock without control must fail");
-        assert!(matches!(
-            error,
-            RpcError::MethodDisabled("mining is unavailable")
-        ));
+        assert!(matches!(&error, RpcError::MethodNotFound(name) if name == "submitblock"));
+        assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
 
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         let ctx = ctx_with_control(control);
@@ -1400,10 +1403,8 @@ mod tests {
     fn getmininginfo_requires_mining_control() {
         let ctx = Arc::new(Context::new());
         let error = getmininginfo(&ctx, &json!([])).expect_err("missing control must fail");
-        assert!(matches!(
-            error,
-            RpcError::MethodDisabled("mining is unavailable")
-        ));
+        assert!(matches!(&error, RpcError::MethodNotFound(name) if name == "getmininginfo"));
+        assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
     }
 
     #[test]
@@ -1673,10 +1674,8 @@ mod tests {
     fn getnetworkhashps_requires_mining_control() {
         let ctx = Arc::new(Context::new());
         let error = getnetworkhashps(&ctx, &json!([])).expect_err("missing control must fail");
-        assert!(matches!(
-            error,
-            RpcError::MethodDisabled("mining is unavailable")
-        ));
+        assert!(matches!(&error, RpcError::MethodNotFound(name) if name == "getnetworkhashps"));
+        assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
     }
 
     #[test]
