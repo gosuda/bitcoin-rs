@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, compact_is_met_by};
+use bitcoin_rs_chain::{BlockTree, compact_is_met_by, current_unix_seconds};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
@@ -135,6 +135,44 @@ fn committed_gap_replays_to_head_without_recommitting_it() -> Result<(), Box<dyn
         Some(7),
         "replay must consume the durable receipt rather than creating a new one"
     );
+    Ok(())
+}
+
+// A crash-recovery replay must not re-run the live future-drift recheck: the
+// gap block passed the contextual gate at first connect and its durable head
+// receipt certifies it, so an operator clock rollback beyond the future
+// window after the commit must not turn the replay into a
+// `TimestampTooFarAhead` refusal that strands the node on the older state at
+// every boot.
+#[test]
+fn replay_gap_skips_the_live_future_drift_recheck() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut handles, mut child) = restored_chainstate()?;
+    // Simulate the rollback: the header time is pushed far beyond the real
+    // clock plus the two-hour future window, so the real clock plays the part
+    // of a clock that moved back after the block committed legally.
+    child.header.time = current_unix_seconds().saturating_add(4 * 60 * 60);
+    while !compact_is_met_by(child.header.bits, child.header.compute_hash().0) {
+        child.header.nonce = child
+            .header
+            .nonce
+            .checked_add(1)
+            .ok_or("test nonce exhausted")?;
+    }
+    let bodies = Arc::new(MemoryBodies::default());
+    bodies.persist_block_body(
+        1,
+        Hash256::from(child.block_hash()),
+        &consensus_bytes(&child),
+    )?;
+    let head = install_head(&mut handles, &child, bodies)?;
+
+    super::reconcile_at_boot(&handles)?;
+
+    let landed = handles
+        .applied_tip
+        .load_full()
+        .ok_or("replay did not publish an applied tip")?;
+    assert_eq!((landed.height, landed.hash), (head.height, head.tip));
     Ok(())
 }
 

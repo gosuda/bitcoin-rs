@@ -37,21 +37,34 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
         | ChainError::ChainworkOverflow { .. }
         | ChainError::HeightOverflow { .. }
         // A median-time-past violation is decided entirely by the chain the peer
-        // itself sent, so it is unambiguously the peer's fault.
+        // itself sent, so it is unambiguously the peer's fault. The same holds
+        // for the version floors and the BIP94 timewarp bound: each compares
+        // the candidate against the chain the peer itself announced, so
+        // blaming the sender cannot ban an honest peer.
         | ChainError::TimestampTooEarly { .. }
-        // Re-announcing a header we already know is invalid or extending a
-        // known-invalid parent is unambiguously peer-invalid data.
-        | ChainError::KnownInvalidHeader { .. }
-        | ChainError::InvalidParent { .. } => true,
+        | ChainError::BadVersion { .. }
+        | ChainError::TimewarpAttack { .. }
+        // Re-announcing a header already marked invalid is unambiguously
+        // peer-invalid data.
+        | ChainError::KnownInvalidHeader { .. } => true,
         // Future drift is judged against OUR clock, so a wrong local clock
         // would otherwise let us ban every honest peer and partition
         // ourselves. The header is rejected without blaming the sender.
+        //
+        // The invalid-parent refusal joins them: the parent is marked invalid
+        // both by a block this node rejected on peer-relayed data and by a
+        // local `invalidateblock`, and the refusal carries no origin, so
+        // blaming the sender would disconnect honest peers relaying
+        // descendants of an operator-invalidated block. Until the tree
+        // records the invalidation origin, the sender punishment for
+        // relaying a peer-invalidated subtree is given up.
         ChainError::TimestampTooFarAhead { .. }
         | ChainError::DuplicateHeader { .. }
         | ChainError::MissingParent { .. }
         | ChainError::NodeIdOverflow { .. }
         | ChainError::UnknownNode { .. }
-        | ChainError::NoCommonAncestor { .. } => false,
+        | ChainError::NoCommonAncestor { .. }
+        | ChainError::InvalidParent { .. } => false,
     }
 }
 
@@ -694,5 +707,116 @@ impl BlockSync {
             GetheadersOutcome::Sent | GetheadersOutcome::Suppressed => true,
             GetheadersOutcome::FrontierOwned | GetheadersOutcome::Failed => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_peer_fault;
+    use bitcoin_rs_chain::{
+        BlockTree, ChainError, NodeId, NodeStatus, accept_headers, compact_is_met_by,
+    };
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, Network};
+
+    #[test]
+    fn header_contextual_refusals_blame_the_sender() {
+        let hash = Hash256::default();
+        for error in [
+            ChainError::BadVersion {
+                version: 1,
+                required: 2,
+                height: 500,
+            },
+            ChainError::TimewarpAttack {
+                height: 2016,
+                timestamp: 1,
+                minimum: 601,
+            },
+            ChainError::TimestampTooEarly {
+                hash,
+                timestamp: 1,
+                median: 2,
+            },
+            ChainError::NbitsMismatch {
+                actual: 1,
+                expected: 2,
+                height: 3,
+            },
+        ] {
+            assert!(is_peer_fault(&error), "{error:?} must retire the peer");
+        }
+    }
+
+    #[test]
+    fn clock_and_bookkeeping_refusals_spare_the_sender() {
+        let hash = Hash256::default();
+        for error in [
+            // Future drift is judged against OUR clock, so a slow local clock
+            // must not ban every honest peer and partition the node.
+            ChainError::TimestampTooFarAhead {
+                hash,
+                timestamp: 9,
+                max_allowed: 1,
+            },
+            // The invalid parent may be the operator's `invalidateblock`
+            // choice: the refusal names no origin, so the sender is spared.
+            ChainError::InvalidParent {
+                parent: NodeId::new(3),
+            },
+            // A missing parent is a sync-ordering fact, not misconduct: the
+            // same headers may arrive from a peer that already has them.
+            ChainError::MissingParent { prev_hash: hash },
+            ChainError::UnknownNode { id: NodeId::new(1) },
+        ] {
+            assert!(!is_peer_fault(&error), "{error:?} must spare the peer");
+        }
+    }
+
+    /// Builds a header extending `prev_blockhash`, mined to the regtest
+    /// proof-of-work limit so `accept_headers` passes its `PoW` gate.
+    fn mined_header(prev_blockhash: BlockHash, time: u32) -> Header {
+        let mut header = Header {
+            version: 4,
+            prev_blockhash,
+            merkle_root: Hash256::default(),
+            time,
+            bits: CompactTarget::from_consensus(0x207f_ffff),
+            nonce: 0,
+        };
+        while !compact_is_met_by(header.bits, header.compute_hash().0) {
+            header.nonce = header
+                .nonce
+                .checked_add(1)
+                .unwrap_or_else(|| panic!("test nonce exhausted"));
+        }
+        header
+    }
+
+    // An operator invalidation must not disconnect the honest peers that keep
+    // relaying the retired branch: the invalid-parent refusal they hit
+    // carries no origin, so the sender is spared.
+    #[test]
+    fn descendant_of_an_invalidated_block_spares_the_sender()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let genesis = mined_header(BlockHash::default(), 900_000);
+        let genesis_id = tree.insert_header(genesis, NodeStatus::HeaderValid)?;
+        let child = mined_header(BlockHash::from(tree.node(genesis_id)?.hash), 900_600);
+        let child_id = tree.insert_header(child, NodeStatus::HeaderValid)?;
+
+        // The operator retires the block; the `invalidateblock` RPC drives
+        // exactly this entry point (chainstate `reorg::invalidate_block`).
+        tree.invalidate_subtree(child_id)?;
+
+        let grandchild = mined_header(BlockHash::from(tree.node(child_id)?.hash), 901_200);
+        let error = accept_headers(&mut tree, &[grandchild], Network::Regtest, 901_800)
+            .err()
+            .ok_or("a descendant of an invalidated block must be refused")?;
+        assert_eq!(error, ChainError::InvalidParent { parent: child_id });
+        assert!(
+            !is_peer_fault(&error),
+            "an operator invalidation must not retire the peer relaying a descendant"
+        );
+        Ok(())
     }
 }

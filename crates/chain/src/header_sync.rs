@@ -1,4 +1,4 @@
-use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
+use bitcoin_rs_consensus::{MAX_TIMEWARP, MEDIAN_TIME_PAST_WINDOW};
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 pub use pow::compact_is_met_by;
@@ -22,12 +22,9 @@ const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 /// the existing [`NodeId`] is appended and the header is skipped, preserving a 1:1
 /// correspondence between input headers and returned ids (including duplicate
 /// Genesis on a non-empty tree) without relaxing validation or error
-/// propagation for unknown headers, which continue through proof-of-work and
-/// contextual nBits validation before insertion.
-/// A header whose parent exists but is already marked invalid is rejected
-/// with [`ChainError::InvalidParent`]: descendants of an invalidated subtree
-/// must never enter the tree through this admission path.
-///
+/// propagation for unknown headers, which continue through proof-of-work,
+/// parent resolution, the invalid-parent refusal, and the shared contextual
+/// header validation ([`validate_contextual_header`]) before insertion.
 /// `now_secs` is the reference time for the future-drift bound, supplied by
 /// the caller rather than read here.
 ///
@@ -56,9 +53,26 @@ pub fn accept_headers(
         }
         validate_pow(header, hash, network)?;
         validate_empty_tree_root(tree, header, hash, network)?;
-        validate_parent_status(tree, header)?;
-        validate_candidate_nbits(tree, header, network)?;
-        validate_header_timestamp(tree, header, hash, now_secs)?;
+        let prev_hash = prev_hash_from_header(header);
+        let parent_id = match tree.lookup(prev_hash) {
+            Some(parent_id) => parent_id,
+            None if tree.is_empty() => {
+                // The validated genesis root: the tree is empty, so the
+                // header has no parent and no contextual rule applies.
+                let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
+                accepted.push(id);
+                continue;
+            }
+            None => return Err(ChainError::MissingParent { prev_hash }),
+        };
+        if tree.node(parent_id)?.status == NodeStatus::Invalid {
+            // Core refuses a child of a failed block with `bad-prevblk`
+            // before any contextual rule runs
+            // (`src/validation.cpp:4228-4231`), so the header never grows
+            // the invalid subtree.
+            return Err(ChainError::InvalidParent { parent: parent_id });
+        }
+        validate_contextual_header(tree, parent_id, header, network, now_secs)?;
         let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
         accepted.push(id);
     }
@@ -80,53 +94,114 @@ fn unix_seconds_at(now: std::time::SystemTime) -> u32 {
         })
 }
 
-/// Enforces the two consensus timestamp rules against `now_secs`.
+/// Validates the contextual rules for a header extending `parent_id`.
 ///
-/// The median is taken over the candidate's parent and up to ten of its
-/// ancestors. Batch parents are already in the tree because `accept_headers`
-/// inserts each header before moving to the next, so a header whose parent
-/// arrived in the same batch is validated against it.
+/// PRE: `parent_id` identifies the header named by `header.prev_blockhash`;
+/// `now_secs` is UNIX time supplied by the caller, which keeps the
+/// future-drift bound a pure function of the inputs and testable at its
+/// boundaries.
 ///
-/// `now_secs` is passed in rather than read here so the drift bound is a pure
-/// function of its inputs and testable at its boundaries.
-/// Checks a header's timestamp against median-time-past and the future bound.
+/// POST: returns `Ok(())` only when Core's contextual nBits,
+/// median-time-past, BIP94 timewarp, future-time, and version-floor rules
+/// pass, checked in Core's order (`src/validation.cpp:4092-4126`). The median
+/// is taken over the candidate's parent and up to ten of its ancestors; batch
+/// parents are already in the tree because `accept_headers` inserts each
+/// header before moving to the next, so a header whose parent arrived in the
+/// same batch is validated against it.
 ///
-/// Public because header sync is not the only path that admits a header: the
-/// apply path inserts one directly when a block arrives whose header was never
-/// seen, and without this it could make a block with an invalid timestamp the
-/// applied consensus tip.
-pub fn validate_header_timestamp(
+/// INVARIANT: header admission and direct block connection use this
+/// operation; no caller implements a second version, timewarp, or nBits
+/// predicate. The BIP94 boundary predicate and floor live in
+/// [`minimum_candidate_time`], which the mining candidate context shares.
+pub fn validate_contextual_header(
     tree: &BlockTree,
+    parent_id: NodeId,
     header: &BlockHeader,
-    hash: bitcoin_rs_primitives::Hash256,
+    network: Network,
     now_secs: u32,
 ) -> Result<(), ChainError> {
-    let Some(parent_id) = tree.lookup(prev_hash_from_header(header)) else {
-        // No parent in the tree: the root path is validated by
-        // `validate_empty_tree_root`, and a genuinely unknown parent is
-        // rejected by insertion. Neither case has ancestors to take a median
-        // over, so there is no timestamp rule to apply.
-        return Ok(());
-    };
+    let parent = tree.node(parent_id)?;
+    let height = parent
+        .height
+        .checked_add(1)
+        .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
+
+    // Contextual difficulty: the compact target the parent requires.
+    validate_header_nbits(tree, parent_id, header, network)?;
+
+    // Median-time-past floor: the candidate must beat the median of its
+    // eleven most recent ancestors.
     let median = tree
         .median_time_past_at(parent_id, MEDIAN_TIME_PAST_WINDOW)
         .ok_or(ChainError::UnknownNode { id: parent_id })?;
     if header.time <= median {
         return Err(ChainError::TimestampTooEarly {
-            hash,
+            hash: hash_from_header(header),
             timestamp: header.time,
             median,
         });
     }
+
+    // BIP94 timewarp floor at a difficulty-adjustment boundary: the
+    // candidate may not fall more than `MAX_TIMEWARP` below its parent
+    // (`src/validation.cpp:4100-4110`).
+    if let Some(minimum) = minimum_candidate_time(parent.header.time, height, network)
+        && header.time < minimum
+    {
+        return Err(ChainError::TimewarpAttack {
+            height,
+            timestamp: header.time,
+            minimum,
+        });
+    }
+
+    // Future-drift ceiling.
     let max_allowed = now_secs.saturating_add(MAX_FUTURE_TIME_SECONDS);
     if header.time > max_allowed {
         return Err(ChainError::TimestampTooFarAhead {
-            hash,
+            hash: hash_from_header(header),
             timestamp: header.time,
             max_allowed,
         });
     }
+
+    // Version floors for the buried deployments, in Core's order
+    // (`src/validation.cpp:4112-4126`).
+    for (required, active) in [
+        (2, network.is_bip34_active(height)),
+        (3, network.is_bip66_active(height)),
+        (4, network.is_bip65_active(height)),
+    ] {
+        if active && header.version < required {
+            return Err(ChainError::BadVersion {
+                version: header.version,
+                required,
+                height,
+            });
+        }
+    }
     Ok(())
+}
+
+/// The BIP94 timewarp floor a candidate at `height` inherits from a parent
+/// that carried `parent_time`.
+///
+/// PRE: `height` is the candidate's height, one above its parent.
+///
+/// POST: returns `Some(minimum)` only at a difficulty-adjustment boundary of
+/// a network that enforces BIP94, where `minimum` is `parent_time` minus
+/// [`MAX_TIMEWARP`]; `None` when the floor does not apply to this height or
+/// network.
+///
+/// INVARIANT: this operation is the one BIP94 boundary predicate and floor.
+/// Header admission refuses a candidate under it
+/// (`src/validation.cpp:4100-4110`), and the mining candidate context raises
+/// a template's minimum time to it, so no caller carries its own copy of the
+/// predicate (Core's `GetMinimumTime`, `src/node/miner.cpp:42-49`).
+pub fn minimum_candidate_time(parent_time: u32, height: u32, network: Network) -> Option<u32> {
+    let retarget_interval = network.retarget_interval();
+    (network.enforce_bip94() && retarget_interval != 0 && height.is_multiple_of(retarget_interval))
+        .then(|| parent_time.saturating_sub(MAX_TIMEWARP))
 }
 
 fn validate_empty_tree_root(
@@ -193,38 +268,6 @@ pub fn validate_header_nbits(
         .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
     let expected = next_work_required(tree, parent_id, header.time, network)?;
     compare_expected_bits(header, height, expected)
-}
-
-/// Rejects a candidate whose parent exists and is already marked invalid.
-///
-/// Insertion would silently inherit `NodeStatus::Invalid` and still report
-/// the header as accepted; the admission path refuses it up front instead.
-/// Unknown parents are left to `validate_candidate_nbits` and insertion.
-fn validate_parent_status(tree: &BlockTree, header: &BlockHeader) -> Result<(), ChainError> {
-    let prev_hash = prev_hash_from_header(header);
-    let Some(parent_id) = tree.lookup(prev_hash) else {
-        return Ok(());
-    };
-    if matches!(tree.node(parent_id)?.status, NodeStatus::Invalid) {
-        return Err(ChainError::InvalidParent { prev_hash });
-    }
-    Ok(())
-}
-
-fn validate_candidate_nbits(
-    tree: &BlockTree,
-    header: &BlockHeader,
-    network: Network,
-) -> Result<(), ChainError> {
-    if tree.is_empty() {
-        return Ok(());
-    }
-
-    let prev_hash = prev_hash_from_header(header);
-    let parent_id = tree
-        .lookup(prev_hash)
-        .ok_or(ChainError::MissingParent { prev_hash })?;
-    validate_header_nbits(tree, parent_id, header, network)
 }
 
 /// Validates a header's proof-of-work target and hash.
@@ -467,13 +510,13 @@ pub(crate) mod pow {
 
 #[cfg(test)]
 mod timestamp_tests {
-    use super::{MAX_FUTURE_TIME_SECONDS, compact_is_met_by, validate_header_timestamp};
+    use super::{MAX_FUTURE_TIME_SECONDS, compact_is_met_by, validate_contextual_header};
     use crate::{
         ChainError,
         node::{BlockHeader, NodeStatus},
         tree::{BlockTree, hash_from_header},
     };
-    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
 
     const REGTEST_BITS: u32 = 0x207f_ffff;
 
@@ -509,14 +552,13 @@ mod timestamp_tests {
             11,
             network_now + MAX_FUTURE_TIME_SECONDS,
         );
-        let hash = hash_from_header(&header);
 
         assert!(
             super::current_unix_seconds() + MAX_FUTURE_TIME_SECONDS < header.time,
             "the host clock must reject this header, or the test proves nothing"
         );
         assert!(
-            validate_header_timestamp(&tree, &header, hash, network_now).is_ok(),
+            check(&tree, &header, network_now).is_ok(),
             "a header exactly at the bound relative to the supplied time is valid"
         );
 
@@ -526,10 +568,10 @@ mod timestamp_tests {
             12,
             network_now + MAX_FUTURE_TIME_SECONDS + 1,
         );
-        let beyond_hash = hash_from_header(&beyond);
+
         assert!(
             matches!(
-                validate_header_timestamp(&tree, &beyond, beyond_hash, network_now),
+                check(&tree, &beyond, network_now),
                 Err(ChainError::TimestampTooFarAhead { .. })
             ),
             "one second past the bound must still be rejected"
@@ -558,7 +600,12 @@ mod timestamp_tests {
     }
 
     fn check(tree: &BlockTree, header: &BlockHeader, now: u32) -> Result<(), ChainError> {
-        validate_header_timestamp(tree, header, hash_from_header(header), now)
+        let parent_id = tree
+            .lookup(header.prev_blockhash.0)
+            .ok_or(ChainError::MissingParent {
+                prev_hash: header.prev_blockhash.0,
+            })?;
+        validate_contextual_header(tree, parent_id, header, Network::Regtest, now)
     }
 
     #[test]
@@ -598,13 +645,6 @@ mod timestamp_tests {
     }
 
     #[test]
-    fn header_without_a_parent_in_the_tree_is_not_timestamp_checked() {
-        let tree = BlockTree::new();
-        let orphan = mine(BlockHash::default(), 0, 0);
-        assert!(check(&tree, &orphan, 1_000_000).is_ok());
-    }
-
-    #[test]
     fn wall_clock_conversion_saturates_after_u32_seconds() {
         let after_u32 =
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(u64::from(u32::MAX) + 1);
@@ -615,5 +655,215 @@ mod timestamp_tests {
     fn wall_clock_conversion_maps_pre_epoch_to_zero() {
         let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
         assert_eq!(super::unix_seconds_at(before_epoch), 0);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod contextual_header_tests {
+    use super::{
+        MAX_FUTURE_TIME_SECONDS, accept_headers, compact_is_met_by, next_work_required,
+        validate_contextual_header,
+    };
+    use crate::{
+        ChainError,
+        node::{BlockHeader, NodeStatus},
+        tree::{BlockTree, hash_from_header},
+    };
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+
+    const REGTEST_BITS: u32 = 0x207f_ffff;
+    const TESTNET4_POW_LIMIT: u32 = 0x1d00_ffff;
+
+    fn mine_regtest(
+        prev_blockhash: BlockHash,
+        height: u32,
+        time: u32,
+        version: i32,
+    ) -> BlockHeader {
+        let mut merkle = [0_u8; 32];
+        merkle[..4].copy_from_slice(&height.to_le_bytes());
+        let mut header = BlockHeader {
+            version,
+            prev_blockhash,
+            merkle_root: Hash256::from_le_bytes(&merkle),
+            time,
+            bits: CompactTarget::from_consensus(REGTEST_BITS),
+            nonce: 0,
+        };
+        while !compact_is_met_by(header.bits, header.compute_hash().0) {
+            header.nonce = header.nonce.wrapping_add(1);
+        }
+        header
+    }
+
+    fn extend_regtest(
+        tree: &mut BlockTree,
+        prev: &mut BlockHash,
+        height: u32,
+        version: i32,
+        base_time: u32,
+    ) {
+        let network = Network::Regtest;
+        let time = base_time + height * 600;
+        let header = mine_regtest(*prev, height, time, version);
+        accept_headers(tree, &[header], network, time)
+            .unwrap_or_else(|e| panic!("fixture header at height {height} rejected: {e:?}"));
+        *prev = header.compute_hash();
+    }
+
+    #[test]
+    fn rejects_outdated_versions_after_activation() -> Result<(), Box<dyn std::error::Error>> {
+        let network = Network::Regtest;
+        let genesis = network.genesis_block();
+        let base_time = genesis.header.time;
+        let mut prev = genesis.block_hash();
+        let mut tree = BlockTree::new();
+        accept_headers(&mut tree, &[genesis.header], network, base_time)?;
+
+        // Heights 1..=499 sit below every regtest activation height.
+        for height in 1..=499_u32 {
+            extend_regtest(&mut tree, &mut prev, height, 4, base_time);
+        }
+
+        // BIP34: version 1 is rejected once the candidate reaches height 500.
+        let now = base_time + 500 * 600;
+        let rejected = mine_regtest(prev, 500, now, 1);
+        assert_eq!(
+            accept_headers(&mut tree, &[rejected], network, now),
+            Err(ChainError::BadVersion {
+                version: 1,
+                required: 2,
+                height: 500
+            })
+        );
+        assert_eq!(
+            tree.lookup(hash_from_header(&rejected)),
+            None,
+            "a rejected header must not enter the tree"
+        );
+        let accepted = mine_regtest(prev, 500, now, 2);
+        accept_headers(&mut tree, &[accepted], network, now)
+            .map_err(|error| format!("version 2 is legal at height 500: {error:?}"))?;
+        prev = accepted.compute_hash();
+
+        // BIP66: version 2 is rejected at height 1251.
+        for height in 501..=1250_u32 {
+            extend_regtest(&mut tree, &mut prev, height, 2, base_time);
+        }
+        let now = base_time + 1251 * 600;
+        let rejected = mine_regtest(prev, 1251, now, 2);
+        assert_eq!(
+            accept_headers(&mut tree, &[rejected], network, now),
+            Err(ChainError::BadVersion {
+                version: 2,
+                required: 3,
+                height: 1251
+            })
+        );
+        let accepted = mine_regtest(prev, 1251, now, 3);
+        accept_headers(&mut tree, &[accepted], network, now)
+            .map_err(|error| format!("version 3 is legal at height 1251: {error:?}"))?;
+        prev = accepted.compute_hash();
+
+        // BIP65: version 3 is rejected at height 1351.
+        for height in 1252..=1350_u32 {
+            extend_regtest(&mut tree, &mut prev, height, 3, base_time);
+        }
+        let now = base_time + 1351 * 600;
+        let rejected = mine_regtest(prev, 1351, now, 3);
+        assert_eq!(
+            accept_headers(&mut tree, &[rejected], network, now),
+            Err(ChainError::BadVersion {
+                version: 3,
+                required: 4,
+                height: 1351
+            })
+        );
+        let accepted = mine_regtest(prev, 1351, now, 4);
+        accept_headers(&mut tree, &[accepted], network, now)
+            .map_err(|error| format!("version 4 is legal at height 1351: {error:?}"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_testnet4_bip94_timewarp_candidate() -> Result<(), Box<dyn std::error::Error>> {
+        let network = Network::Testnet4;
+        let mut tree = BlockTree::new();
+        let mut prev = BlockHash::default();
+        let mut tip_time = 0;
+        for height in 0..2016_u32 {
+            let header = BlockHeader {
+                version: 4,
+                prev_blockhash: prev,
+                merkle_root: Hash256::default(),
+                time: 1_600_000_000 + height * 600,
+                bits: CompactTarget::from_consensus(TESTNET4_POW_LIMIT),
+                nonce: height,
+            };
+            prev = header.compute_hash();
+            tree.insert_header_with_hash(
+                header,
+                hash_from_header(&header),
+                NodeStatus::HeaderValid,
+            )?;
+            tip_time = header.time;
+        }
+        let parent_id = tree.lookup(prev.0).ok_or("fixture tip present")?;
+        // Height 2016 is a difficulty-adjustment boundary on Testnet4, so the
+        // candidate must carry the retargeted bits.
+        let bits = next_work_required(&tree, parent_id, tip_time, network)?;
+        let now = tip_time + MAX_FUTURE_TIME_SECONDS;
+        let candidate = |time: u32| BlockHeader {
+            version: 4,
+            prev_blockhash: prev,
+            merkle_root: Hash256::default(),
+            time,
+            bits,
+            nonce: 0,
+        };
+
+        // More than `MAX_TIMEWARP` below the parent: rejected.
+        assert_eq!(
+            validate_contextual_header(&tree, parent_id, &candidate(tip_time - 601), network, now),
+            Err(ChainError::TimewarpAttack {
+                height: 2016,
+                timestamp: tip_time - 601,
+                minimum: tip_time - 600,
+            })
+        );
+        // Exactly `MAX_TIMEWARP` below the parent: still valid.
+        validate_contextual_header(&tree, parent_id, &candidate(tip_time - 600), network, now)
+            .map_err(|error| {
+                format!("a timestamp exactly at the timewarp floor is legal: {error:?}")
+            })?;
+        Ok(())
+    }
+
+    #[test]
+    fn child_of_invalid_parent_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let network = Network::Regtest;
+        let genesis = network.genesis_block();
+        let base_time = genesis.header.time;
+        let mut prev = genesis.block_hash();
+        let mut tree = BlockTree::new();
+        accept_headers(&mut tree, &[genesis.header], network, base_time)?;
+        extend_regtest(&mut tree, &mut prev, 1, 4, base_time);
+        let block_one = tree.lookup(prev.0).ok_or("block one is in the tree")?;
+        tree.invalidate_subtree(block_one)?;
+
+        let now = base_time + 2 * 600;
+        let child = mine_regtest(prev, 2, now, 4);
+        assert_eq!(
+            accept_headers(&mut tree, &[child], network, now),
+            Err(ChainError::InvalidParent { parent: block_one }),
+            "a child of an invalidated header is refused, not accepted as invalid"
+        );
+        assert_eq!(
+            tree.lookup(hash_from_header(&child)),
+            None,
+            "the refused child must not extend the invalid subtree"
+        );
+        Ok(())
     }
 }
