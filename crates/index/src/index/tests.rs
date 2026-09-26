@@ -612,6 +612,49 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
     Ok(())
 }
 
+/// `anchor_watermark` must stamp both the watermark cursor and the coverage
+/// floor: a rebuilt index knows rows below `floor` were pruned, so queries
+/// answer `Unavailable` instead of `None`. Resetting the capability clears
+/// the floor with it.
+#[test]
+fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
+-> Result<(), Box<dyn std::error::Error>> {
+    use super::{IndexCapability, IndexReader, IndexWatermark, TxIndexSnapshot};
+
+    let (_dir, writer) = writer()?;
+    let anchor = IndexWatermark {
+        height: 41,
+        hash: [7u8; 32],
+    };
+    writer.anchor_watermark(crate::IndexCapabilities::TX_LOOKUP, anchor, 42)?;
+
+    let snapshot = writer.indexer().snapshot()?;
+    assert_eq!(
+        snapshot.capability_floor(IndexCapability::TxLookup)?,
+        42,
+        "anchor records the first covered height"
+    );
+    assert_eq!(
+        snapshot.capability_watermark(IndexCapability::TxLookup)?,
+        Some(anchor)
+    );
+    assert_eq!(
+        snapshot.capability_floor(IndexCapability::ScriptHistory)?,
+        0,
+        "unselected capabilities keep complete coverage"
+    );
+    drop(snapshot);
+
+    writer.reset_capabilities(crate::IndexCapabilities::TX_LOOKUP)?;
+    let snapshot = writer.indexer().snapshot()?;
+    assert_eq!(
+        snapshot.capability_floor(IndexCapability::TxLookup)?,
+        0,
+        "a reset rebuilds from genesis, so the floor clears"
+    );
+    Ok(())
+}
+
 fn writer() -> Result<(tempfile::TempDir, IndexWriter<RocksDbStore>), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(RocksDbStore::open(dir.path())?);

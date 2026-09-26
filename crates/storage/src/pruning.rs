@@ -301,11 +301,16 @@ pub fn prune_to_height<S: crate::KvStore>(
         // The frontier record shares the deletions' atomic boundary, so its
         // presence proves the outcome.
         return match load_executed_frontier(store) {
-            // The receipt persisted, so the deletions did too: promote the
-            // line so readers learn the truth this pass already wrote.
+            // The receipt persisted, so the deletions did too: the batch
+            // proved itself durable despite the reported error, so run the
+            // same in-memory follow-ups the success path would — the line
+            // promotion and the flat-file reclaim — and hand the caller the
+            // staged result. Answering `Err` here would strand claimable
+            // files and leave every caller-side follow-up unapplied.
             Ok(Some(persisted)) if persisted.get() >= executed.get() => {
                 reservation.commit(persisted.get());
-                Err(error.into())
+                reclaim_staged_flat_block_files(store, block_files, &staged.file_numbers)?;
+                Ok(staged)
             }
             // No new receipt persisted, so the atomic batch applied nothing:
             // dropping the reservation safely reopens lease grants.
