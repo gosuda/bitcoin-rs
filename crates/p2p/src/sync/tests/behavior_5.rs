@@ -400,35 +400,6 @@ fn tick_bounded_request_peer_selection_preserves_equal_height_order()
     Ok(())
 }
 
-
-/// Mines `count` regtest headers chained from `start_prev`, heights starting
-/// at `first_height`.
-pub(crate) fn chained_headers(
-    start_prev: BlockHash,
-    first_height: u32,
-    count: usize,
-) -> Result<Vec<Header>, Box<dyn std::error::Error>> {
-    let mut out = Vec::with_capacity(count);
-    let mut prev = start_prev;
-    for index in 0..count {
-        let height = first_height.saturating_add(u32::try_from(index)?);
-        let mut header = test_header(prev, height);
-        // `test_header` mines version 1, which regtest rejects from height 500
-        // (BIP 34) and again from height 1251 (BIP 66 requires version 3), so a
-        // full page has to carry a modern version throughout.
-        header.version = if height >= 1251 { 4 } else { 3 };
-        while !pow_met(
-            header.bits.to_consensus(),
-            Hash256::from(header.compute_hash()),
-        ) {
-            header.nonce = header.nonce.wrapping_add(1);
-        }
-        prev = header.compute_hash();
-        out.push(header);
-    }
-    Ok(out)
-}
-
 /// Delivers `headers` to `sync` as a wire answer from `source`.
 pub(crate) fn deliver_headers(
     tx: &crossbeam_channel::Sender<InboundHeaders>,
@@ -460,13 +431,6 @@ pub(crate) fn locator_of(message: &Message) -> Option<Vec<[u8; 32]>> {
 }
 
 /// The first `getheaders` locator on `rx`, or `None` if none is queued.
-pub(crate) fn next_locator(
-    rx: &crossbeam_channel::Receiver<Message>,
-) -> Option<Vec<[u8; 32]>> {
+pub(crate) fn next_locator(rx: &crossbeam_channel::Receiver<Message>) -> Option<Vec<[u8; 32]>> {
     rx.try_iter().find_map(|message| locator_of(&message))
-}
-
-/// The wire encoding of a fixture block hash, for locator comparisons.
-pub(crate) fn wire_hash(hash: BlockHash) -> [u8; 32] {
-    *Hash256::from(hash).as_byte_array()
 }

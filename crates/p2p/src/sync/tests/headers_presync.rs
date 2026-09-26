@@ -21,12 +21,12 @@ use super::behavior_5::deliver_headers;
 use super::behavior_5::next_locator;
 use bitcoin_rs_primitives::Hash256;
 
-use crate::dispatch::MAX_HEADERS_RESPONSE;
 use super::super::SyncBudget;
 use super::super::default_sync_budget;
 use super::super::headers_presync::HeadersSyncPhase;
 use super::super::headers_presync::HeadersSyncState;
 use super::*;
+use crate::dispatch::MAX_HEADERS_RESPONSE;
 
 /// The wire page size a full `headers` message must fill to keep a
 /// download-twice sync in its collection phase.

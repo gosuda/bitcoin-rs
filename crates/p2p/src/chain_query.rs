@@ -548,11 +548,10 @@ mod tests {
         };
         // Mainnet's floor is far above three regtest-easy headers: the
         // serving path must go quiet below it.
-        let mainnet =
-            ActiveChainQuery::new(
-                BlockTreeReader::new(Arc::new(RwLock::new(low_work_tree()?))),
-                Network::Mainnet,
-            );
+        let mainnet = ActiveChainQuery::new(
+            BlockTreeReader::new(Arc::new(RwLock::new(low_work_tree()?))),
+            Network::Mainnet,
+        );
         assert!(
             mainnet
                 .headers_after(&[genesis.compute_hash()], BlockHash::default(), 10)
@@ -566,11 +565,10 @@ mod tests {
             "the stop-hash-only path must refuse too"
         );
 
-        let regtest =
-            ActiveChainQuery::new(
-                BlockTreeReader::new(Arc::new(RwLock::new(low_work_tree()?))),
-                Network::Regtest,
-            );
+        let regtest = ActiveChainQuery::new(
+            BlockTreeReader::new(Arc::new(RwLock::new(low_work_tree()?))),
+            Network::Regtest,
+        );
         assert_eq!(
             header_hashes(&regtest.headers_after(
                 &[genesis.compute_hash()],

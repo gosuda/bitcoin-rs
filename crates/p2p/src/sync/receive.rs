@@ -254,9 +254,7 @@ impl BlockSync {
         let mut credit_refresh_needed = false;
         let mut invalid: Vec<(Hash256, Option<crate::PeerSource>)> = Vec::new();
         for (hash, header, source) in unadmitted {
-            let Some(admission) =
-                self.route_headers_batch(&[header], source, false, 1)
-            else {
+            let Some(admission) = self.route_headers_batch(&[header], source, false, 1) else {
                 continue;
             };
             match admission {

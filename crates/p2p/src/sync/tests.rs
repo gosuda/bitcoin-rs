@@ -553,7 +553,9 @@ fn body_forwarded_batch_does_not_consume_the_pending_header_gate()
             "a body-forwarded batch is not an answer: the gate stays with `a`",
         );
 
-        let backdated = Instant::now() - super::HEADER_REQUEST_TIMEOUT;
+        let backdated = Instant::now()
+            .checked_sub(super::HEADER_REQUEST_TIMEOUT)
+            .unwrap_or_else(Instant::now);
         sync.scheduler
             .lock()
             .header_request
