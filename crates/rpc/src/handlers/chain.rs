@@ -1005,34 +1005,58 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         ));
     }
     let want_muhash = hash_type == "muhash";
-    // One capture serves the scan height and the reported height/hash, so the
-    // response cannot describe a block that was applied after the scan began.
-    let view = ctx.chain.applied_view();
-    let applied_height = view.height();
-    let (stats, txouts, transactions, set_hash) = ctx.chain.utxo.with_stable_view(|stable| {
-        let stats = bitcoin_rs_utxo::stats::scan_coin_stats(stable, applied_height, want_muhash)
-            .map_err(|err| RpcError::Internal(err.to_string()))?;
-        let set_hash = match hash_type {
-            "hash_serialized_3" => Some((
-                "hash_serialized_3",
-                stable
-                    .hash_serialized_3()
-                    .map_err(|err| RpcError::Internal(err.to_string()))?
-                    .to_string_be(),
-            )),
-            "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
-            "none" => None,
-            _ => {
-                return Err(RpcError::InvalidParams(
-                    "hash_type must be one of: hash_serialized_3, muhash, none",
-                ));
-            }
-        };
-        Ok::<_, RpcError>((stats, stable.len(), stable.record_count(), set_hash))
-    })?;
-    let disk_size = ctx.chain.utxo.with_stable_view(|stable| {
-        u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
-    });
+    // The transition barrier fences the tip capture and the UTXO scan into
+    // one state, so the response cannot describe a block that was applied
+    // after the scan began. This is Core's own non-index contract: the scan
+    // runs under `cs_main` (`src/rpc/blockchain.cpp:GetUTXOStats`).
+    let (view, applied_height, stats, txouts, transactions, set_hash, disk_size) =
+        ctx.chain.with_stable_chainstate(|| {
+            let view = ctx.chain.applied_view();
+            let applied_height = view.height();
+            let (stats, txouts, transactions, set_hash, disk_size) =
+                ctx.chain.utxo.with_stable_view(|stable| {
+                    let stats = bitcoin_rs_utxo::stats::scan_coin_stats(
+                        stable,
+                        applied_height,
+                        want_muhash,
+                    )
+                    .map_err(|err| RpcError::Internal(err.to_string()))?;
+                    let set_hash = match hash_type {
+                        "hash_serialized_3" => Some((
+                            "hash_serialized_3",
+                            stable
+                                .hash_serialized_3()
+                                .map_err(|err| RpcError::Internal(err.to_string()))?
+                                .to_string_be(),
+                        )),
+                        "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
+                        "none" => None,
+                        _ => {
+                            return Err(RpcError::InvalidParams(
+                                "hash_type must be one of: hash_serialized_3, muhash, none",
+                            ));
+                        }
+                    };
+                    let disk_size =
+                        u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX);
+                    Ok::<_, RpcError>((
+                        stats,
+                        stable.len(),
+                        stable.record_count(),
+                        set_hash,
+                        disk_size,
+                    ))
+                })?;
+            Ok::<_, RpcError>((
+                view,
+                applied_height,
+                stats,
+                txouts,
+                transactions,
+                set_hash,
+                disk_size,
+            ))
+        })?;
     let (hash_serialized_3, muhash) = set_hash.map_or((None, None), |(name, hash)| {
         if name == "hash_serialized_3" {
             (Some(hash), None)
