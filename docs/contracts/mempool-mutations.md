@@ -221,11 +221,13 @@ state (`crates/mempool/src/orphan.rs`).
   matching Core's `validForFeeEstimation=false` re-acceptance. Each
   re-admission runs with `LimitEnforcement::Deferred`, the equivalent of
   Core passing `bypassLimits=true` to `AcceptToMemoryPool` from the same
-  call: the mempool fee floor, the ephemeral-parent rule, the BIP431
-  topology rules, the cluster limits and the per-acceptance size trim do
-  not apply to it. Consensus and script verification, duplicate and
-  evicted-parent rejection, ancestry accounting and the replacement fee
-  rules still apply. After `remove_for_reorg` the node trims the settled
+  call: the mempool fee floor and the per-acceptance size trim do not
+  apply to it. Consensus and script verification, duplicate and
+  evicted-parent rejection, ancestry accounting, the replacement fee
+  rules, the BIP431/TRUC topology gates, the ephemeral-spend rule, and
+  the projected cluster limits still apply — Core's `bypassLimits` path
+  never skips `CalculateMemPoolAncestors`. After `remove_for_reorg` the
+  node trims the settled
   pool once with `enforce_size_limit(AdmissionOrigin::Reorg,
   max_total_bytes)`; that is the only size trim one reorg performs, and
   it runs last so the walk cannot shed a parent before its child lands.
