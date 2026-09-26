@@ -190,6 +190,15 @@ pub(super) fn disconnect_block_admitted(
     )
     .map_err(fatal)?;
     let parent_tip = receipt.certify(parent_tip);
+    // A checkpoint-restored parent node still carries an unknown count even
+    // though the committed head just certified it; store the value on the
+    // tree node too so a later reorg reconnect derives the child's cumulative
+    // count instead of propagating unknown.
+    handles
+        .block_tree
+        .write()
+        .restore_chain_tx_count(parent_tip.tip_id, parent_tip.chain_tx_count)
+        .map_err(|error| fatal(ApplyError::Chain(error)))?;
     publish_applied(handles, &parent_tip, crate::events::HintKind::Disconnected);
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {

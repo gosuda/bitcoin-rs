@@ -17,7 +17,8 @@ use crate::{
 
 /// Per-shard hash table of compact, inline UTXO record owners.
 pub(crate) struct ShardTable {
-    /// Hash table of pointer-sized compact `UtxoRecord` owners stored inline (8 bytes on `x86_64`).
+    /// Hash table of boxed `UtxoRecord` owners stored inline (16 bytes on
+    /// 64-bit targets).
     pub table: HashTable<UtxoRecord>,
 }
 
@@ -36,29 +37,22 @@ impl ShardTable {
         self.table.iter().map(UtxoRecord::output_count).sum()
     }
 
-    /// Sums every record's heap allocation and live payload.
+    /// Sums the complete boxed payload length of every record in this shard.
     ///
-    /// The allocation is what the process actually holds — `AllocHeader` plus
-    /// the buffer's capacity — while the payload is the encoded bytes inside it.
-    /// The two differ wherever a record was grown and kept slack, and the gap
-    /// between the allocation total and process RSS is what allocator size
-    /// classes and fragmentation cost.
-    pub(crate) fn allocation_and_payload_bytes(&self) -> (usize, usize) {
-        self.table.iter().fold((0, 0), |(alloc, payload), record| {
-            (
-                alloc + record.allocation_bytes(),
-                payload + record.payload_bytes(),
-            )
-        })
+    /// The boxed slice owns exactly its length, so this is the complete
+    /// requested record-owner bytes; allocator metadata and fragmentation are
+    /// the residual against process RSS.
+    pub(crate) fn record_payload_bytes(&self) -> usize {
+        self.table.iter().map(UtxoRecord::payload_bytes).sum()
     }
 
     /// Estimated bytes held by the hash table itself, excluding record payloads.
     ///
     /// `hashbrown` exposes usable capacity, not bucket count, so this
     /// reconstructs the layout: buckets are a power of two above
-    /// `capacity / 0.875`, and each carries one `UtxoRecord` (a pointer) plus one
-    /// control byte. An estimate by construction — treat it as the right order of
-    /// magnitude, not an exact figure.
+    /// `capacity / 0.875`, and each carries one `UtxoRecord` (two words on
+    /// 64-bit targets) plus one control byte. An estimate by construction —
+    /// treat it as the right order of magnitude, not an exact figure.
     pub(crate) fn table_bytes(&self) -> usize {
         let capacity = self.table.capacity();
         if capacity == 0 {
@@ -257,9 +251,9 @@ impl Shard {
         table.output_count()
     }
 
-    pub(crate) fn allocation_and_payload_bytes(&self) -> (usize, usize) {
+    pub(crate) fn record_payload_bytes(&self) -> usize {
         let table = self.inner.read();
-        table.allocation_and_payload_bytes()
+        table.record_payload_bytes()
     }
 
     pub(crate) fn table_bytes(&self) -> usize {
@@ -619,7 +613,7 @@ fn apply_remove_by_vouts(
     vouts: &[u32],
 ) -> Result<(), UtxoError> {
     let mutation = match find_record(table, key, txid) {
-        Some(record) => match record.remove_replacement(vouts)? {
+        Some(record) => match record.remove_run_replacement(vouts, None)? {
             RemovedRecord::Unchanged => RecordMutation::NoChange,
             RemovedRecord::Emptied => RecordMutation::Delete,
             RemovedRecord::Replaced(replacement) => RecordMutation::Replace(replacement),
@@ -638,7 +632,7 @@ fn apply_remove_run_with_listener(
     let Some(first) = removes.first() else {
         return Ok(());
     };
-    let staged = stage_remove_run(table, first.key, first.txid, removes)?;
+    let staged = stage_remove(table, first.key, first.txid, removes)?;
     let removed = removed_events(removes, staged.removed);
     apply_record_mutation(table, first.key, first.txid, staged.mutation);
     if staged.found_record {
@@ -655,7 +649,7 @@ fn apply_remove_run_collect_events(
     let Some(first) = removes.first() else {
         return Ok(());
     };
-    let staged = stage_remove_run(table, first.key, first.txid, removes)?;
+    let staged = stage_remove(table, first.key, first.txid, removes)?;
     let removed = removed_events(removes, staged.removed);
     apply_record_mutation(table, first.key, first.txid, staged.mutation);
     if staged.found_record {
@@ -672,10 +666,7 @@ fn apply_add_by_parts(
 ) -> Result<(), UtxoError> {
     let existing = find_record(table, key, txid);
     let add_unique = parts_are_increasing_unique(existing, parts);
-    let replacement = match existing {
-        Some(record) => record.add_replacement(parts, add_unique)?,
-        None => UtxoRecord::new_add_replacement(txid, parts, add_unique)?,
-    };
+    let replacement = UtxoRecord::add_run_replacement(existing, txid, parts, add_unique, None)?;
     replace_record(table, key, txid, replacement);
     Ok(())
 }
@@ -699,7 +690,7 @@ fn apply_combined_run(
         }
     } else {
         let add_unique = parts_are_increasing_unique(None, parts);
-        let fresh = UtxoRecord::new_add_replacement(txid, parts, add_unique)?;
+        let fresh = UtxoRecord::add_run_replacement(None, txid, parts, add_unique, None)?;
         // A remove against a record born in this same run nets against the
         // additions: the output dies at birth instead of staying live. An
         // ephemeral same-block output never becomes a live record.
@@ -736,7 +727,7 @@ fn apply_add_payload_run_with_listener(
         replacement,
         overwritten,
         add_unique: _,
-    } = stage_add_run(table, key, txid, payloads)?;
+    } = stage_add(table, key, txid, payloads)?;
     replace_record(table, key, txid, replacement);
     replay_add_listener(listener, payloads, &overwritten);
     Ok(())
@@ -755,13 +746,13 @@ fn apply_add_run_collect_events<'add>(
         replacement,
         overwritten,
         add_unique,
-    } = stage_add_run(table, key, txid, &payloads)?;
+    } = stage_add(table, key, txid, &payloads)?;
     replace_record(table, key, txid, replacement);
     collect_add_events(events, &payloads, &overwritten, add_unique);
     Ok(())
 }
 
-fn stage_remove_run(
+fn stage_remove(
     table: &ShardTable,
     key: UtxoKey,
     txid: Hash256,
@@ -775,19 +766,11 @@ fn stage_remove_run(
         });
     };
     let vouts: SmallVec<[u32; 8]> = removes.iter().map(|remove| remove.vout).collect();
-    if let Some(removed) = record.full_removals_by_vout(&vouts) {
-        return Ok(StagedRemove {
-            found_record: true,
-            mutation: RecordMutation::Delete,
-            removed: removed.into_iter().map(Some).collect(),
-        });
-    }
-
-    let (replacement, removed) = record.stage_remove_run(&vouts)?;
-    let mutation = match replacement {
-        None => RecordMutation::NoChange,
-        Some(record) if record.is_empty() => RecordMutation::Delete,
-        Some(record) => RecordMutation::Replace(record),
+    let mut removed = Vec::with_capacity(vouts.len());
+    let mutation = match record.remove_run_replacement(&vouts, Some(&mut removed))? {
+        RemovedRecord::Unchanged => RecordMutation::NoChange,
+        RemovedRecord::Emptied => RecordMutation::Delete,
+        RemovedRecord::Replaced(replacement) => RecordMutation::Replace(replacement),
     };
     Ok(StagedRemove {
         found_record: true,
@@ -796,7 +779,7 @@ fn stage_remove_run(
     })
 }
 
-fn stage_add_run(
+fn stage_add(
     table: &ShardTable,
     key: UtxoKey,
     txid: Hash256,
@@ -805,10 +788,14 @@ fn stage_add_run(
     let parts: SmallVec<[OutputParts<'_>; 8]> = payloads.iter().map(payload_parts).collect();
     let existing = find_record(table, key, txid);
     let add_unique = adds_are_increasing_unique(existing, payloads);
-    let (replacement, overwritten) = match existing {
-        Some(record) => record.add_replacement_tracked(&parts, add_unique)?,
-        None => UtxoRecord::new_add_replacement_tracked(txid, &parts, add_unique)?,
-    };
+    let mut overwritten = Vec::with_capacity(payloads.len());
+    let replacement = UtxoRecord::add_run_replacement(
+        existing,
+        txid,
+        &parts,
+        add_unique,
+        Some(&mut overwritten),
+    )?;
     Ok(StagedAdd {
         replacement,
         overwritten,

@@ -85,9 +85,22 @@ impl InitialBlockDownload {
     pub fn is_active(&self, now: u64) -> bool {
         use core::sync::atomic::Ordering;
 
-        if self.left.load(Ordering::Relaxed) {
+        if self.left.load(Ordering::Acquire) {
             return false;
         }
+        if self.still_in_initial_block_download(now) {
+            // A concurrent caller may have latched "left IBD" while the
+            // predicate's unlocked reads ran; the latch wins so that once a
+            // caller observes false, no caller ever answers true again.
+            return !self.left.load(Ordering::Acquire);
+        }
+        self.left.store(true, Ordering::Release);
+        false
+    }
+
+    /// The unlocked IBD predicate behind [`Self::is_active`]: minimum work,
+    /// then tip freshness against the caller's clock.
+    fn still_in_initial_block_download(&self, now: u64) -> bool {
         let Some(tip) = self.applied_tip.load_full() else {
             return true;
         };
@@ -107,11 +120,7 @@ impl InitialBlockDownload {
         else {
             return true;
         };
-        if u64::from(tip_time) < now.saturating_sub(MAX_TIP_AGE_SECONDS) {
-            return true;
-        }
-        self.left.store(true, Ordering::Relaxed);
-        false
+        u64::from(tip_time) < now.saturating_sub(MAX_TIP_AGE_SECONDS)
     }
 }
 

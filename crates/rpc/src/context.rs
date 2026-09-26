@@ -988,15 +988,6 @@ impl ChainHandles {
         self.applied_view().hash(self.chain_network)
     }
 
-    /// Returns the current best block hash, or the genesis hash before the
-    /// header tree publishes its first tip — genesis is always that base.
-    #[must_use]
-    pub(crate) fn best_hash(&self) -> Hash256 {
-        self.chain_tip
-            .load_full()
-            .map_or_else(|| self.chain_network.genesis_block_hash(), |tip| tip.hash)
-    }
-
     /// Returns the current best-chain chainwork as a 64-character lowercase
     /// big-endian hex string. Returns "00" when no tip is published yet (a
     /// 2-char placeholder matching `bitcoind`'s pre-genesis behavior).
