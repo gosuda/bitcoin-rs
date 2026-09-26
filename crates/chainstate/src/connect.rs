@@ -209,9 +209,13 @@ pub(super) fn apply_block_admitted<'b>(
     // fallible preparation phase and still precedes the first write.
     // Unseen headers bypass header-sync timestamp checks, so validate them before mutation.
     // Headers already in the tree were checked by header sync and need no second walk.
+    // Receipt-covered replay is exempt: the journal already committed this
+    // block, so a host-clock rollback must not refuse the node's own durable
+    // history and block recovery.
+    let replayed = matches!(&publication, PublishMode::Replay { .. });
     {
         let tree = handles.block_tree.read();
-        if tree.lookup(block_hash).is_none() {
+        if !replayed && tree.lookup(block_hash).is_none() {
             bitcoin_rs_chain::validate_header_timestamp(
                 &tree,
                 &block.header,

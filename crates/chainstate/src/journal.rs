@@ -151,11 +151,6 @@ impl ReplayAccumulator {
         base_tip: bitcoin_rs_chain::TipSnapshot,
         base_chain_tx_count: u64,
     ) -> Result<Self, JournalReplayError> {
-        if base_chain_tx_count == 0 {
-            return Err(JournalReplayError::CommittedRangeInvalid(
-                "checkpoint chain_tx_count is unknown".to_owned(),
-            ));
-        }
         let base_node = tree.node(base_tip.tip_id).map_err(|error| {
             JournalReplayError::HeaderRebuildRejected(format!(
                 "checkpoint tip node is unavailable: {error}"
@@ -181,14 +176,20 @@ impl ReplayAccumulator {
     }
 
     fn apply(&mut self, record: &JournalRecord) -> Result<(), JournalReplayError> {
-        self.chain_tx_count = self
-            .chain_tx_count
-            .checked_add(record.block_tx_count)
-            .ok_or_else(|| {
-                JournalReplayError::CommittedRangeInvalid(
-                    "chain transaction count overflow".to_owned(),
-                )
-            })?;
+        // `0` is the codebase's unknown-count sentinel: a checkpoint whose
+        // count is legacy/overflow-unknown keeps replaying the durable suffix
+        // with the count still unknown rather than being refused outright.
+        self.chain_tx_count = if self.chain_tx_count == 0 {
+            0
+        } else {
+            self.chain_tx_count
+                .checked_add(record.block_tx_count)
+                .ok_or_else(|| {
+                    JournalReplayError::CommittedRangeInvalid(
+                        "chain transaction count overflow".to_owned(),
+                    )
+                })?
+        };
         self.applied_tip = insert_replayed_header(
             &mut self.tree,
             record,

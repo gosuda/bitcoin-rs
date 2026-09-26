@@ -1003,9 +1003,23 @@ impl Context {
     pub fn is_initial_block_download(&self, now: u64) -> bool {
         use core::sync::atomic::Ordering;
 
-        if self.left_initial_block_download.load(Ordering::Relaxed) {
+        if self.left_initial_block_download.load(Ordering::Acquire) {
             return false;
         }
+        if self.still_in_initial_block_download(now) {
+            // A concurrent caller may have latched "left IBD" while the
+            // predicate's unlocked reads ran; the latch wins so that once a
+            // caller observes false, no caller ever answers true again.
+            return !self.left_initial_block_download.load(Ordering::Acquire);
+        }
+        self.left_initial_block_download
+            .store(true, Ordering::Release);
+        false
+    }
+
+    /// The unlocked IBD predicate behind [`Self::is_initial_block_download`]:
+    /// minimum work, then tip freshness against the caller's clock.
+    fn still_in_initial_block_download(&self, now: u64) -> bool {
         let Some(tip) = self.applied_tip.load_full() else {
             return true;
         };
@@ -1025,12 +1039,7 @@ impl Context {
         else {
             return true;
         };
-        if u64::from(tip_time) < now.saturating_sub(MAX_TIP_AGE_SECONDS) {
-            return true;
-        }
-        self.left_initial_block_download
-            .store(true, Ordering::Relaxed);
-        false
+        u64::from(tip_time) < now.saturating_sub(MAX_TIP_AGE_SECONDS)
     }
 
     /// Returns the current best-applied-block hash.
@@ -1042,15 +1051,6 @@ impl Context {
     #[must_use]
     pub fn applied_hash(&self) -> Hash256 {
         self.applied_tip
-            .load_full()
-            .map_or_else(|| self.chain_network.genesis_block_hash(), |tip| tip.hash)
-    }
-
-    /// Returns the current best block hash, or the genesis hash before the
-    /// header tree publishes its first tip — genesis is always that base.
-    #[must_use]
-    pub(crate) fn best_hash(&self) -> Hash256 {
-        self.chain_tip
             .load_full()
             .map_or_else(|| self.chain_network.genesis_block_hash(), |tip| tip.hash)
     }

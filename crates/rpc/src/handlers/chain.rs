@@ -994,27 +994,41 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         ));
     }
     let want_muhash = hash_type == "muhash";
-    let (stats, txouts, transactions, set_hash) = ctx.utxo.with_stable_view(|view| {
-        let stats =
-            bitcoin_rs_utxo::stats::scan_coin_stats(view, ctx.applied_height(), want_muhash)
+    let (stats, txouts, transactions, set_hash, scan_height, scan_hash) =
+        ctx.utxo.with_stable_view(|view| {
+            // The tip read happens inside the stable view: a connect commits
+            // its UTXOs before publishing the tip, so a tip captured here can
+            // never describe a block the scan has not seen.
+            let tip = ctx.applied_tip.load_full();
+            let scan_height = tip.as_ref().map_or(0, |tip| tip.height);
+            let scan_hash =
+                tip.map_or_else(|| ctx.chain_network.genesis_block_hash(), |tip| tip.hash);
+            let stats = bitcoin_rs_utxo::stats::scan_coin_stats(view, scan_height, want_muhash)
                 .map_err(|err| RpcError::Internal(err.to_string()))?;
-        let set_hash = match hash_type {
-            "hash_serialized_3" => Some((
-                "hash_serialized_3",
-                view.hash_serialized_3()
-                    .map_err(|err| RpcError::Internal(err.to_string()))?
-                    .to_string_be(),
-            )),
-            "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
-            "none" => None,
-            _ => {
-                return Err(RpcError::InvalidParams(
-                    "hash_type must be one of: hash_serialized_3, muhash, none",
-                ));
-            }
-        };
-        Ok::<_, RpcError>((stats, view.len(), view.record_count(), set_hash))
-    })?;
+            let set_hash = match hash_type {
+                "hash_serialized_3" => Some((
+                    "hash_serialized_3",
+                    view.hash_serialized_3()
+                        .map_err(|err| RpcError::Internal(err.to_string()))?
+                        .to_string_be(),
+                )),
+                "muhash" => Some(("muhash", stats.muhash.finalize_hash().to_string_be())),
+                "none" => None,
+                _ => {
+                    return Err(RpcError::InvalidParams(
+                        "hash_type must be one of: hash_serialized_3, muhash, none",
+                    ));
+                }
+            };
+            Ok::<_, RpcError>((
+                stats,
+                view.len(),
+                view.record_count(),
+                set_hash,
+                scan_height,
+                scan_hash,
+            ))
+        })?;
     let disk_size = ctx.utxo.with_stable_view(|view| {
         u64::try_from(view.memory_report().accounted_bytes()).unwrap_or(u64::MAX)
     });
@@ -1026,8 +1040,8 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         }
     });
     typed_to_sonic_omitting_nulls(&v31::GetTxOutSetInfo {
-        height: i64::from(ctx.applied_height()),
-        best_block: ctx.applied_hash().to_string_be(),
+        height: i64::from(scan_height),
+        best_block: scan_hash.to_string_be(),
         transactions: Some(i64_saturated_len(transactions)),
         tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
         bogo_size: i64_saturated(stats.bogo_size),

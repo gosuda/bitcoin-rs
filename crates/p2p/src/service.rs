@@ -749,7 +749,7 @@ fn live_outbound_count(lifecycle: &PeerLifecycle) -> usize {
     lifecycle
         .live_leases()
         .iter()
-        .filter(|(_, lease)| !lease.is_inbound())
+        .filter(|(_, lease)| !lease.is_inbound() && !lease.is_cancelled())
         .count()
 }
 

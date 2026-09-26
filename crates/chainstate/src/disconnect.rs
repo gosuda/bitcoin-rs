@@ -17,6 +17,7 @@ use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::Txid;
 use bitcoin_rs_utxo::{BlockRollback, RollbackError, load_block_undo, rollback_block};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 pub(super) fn plan_disconnect(
     handles: &Chainstate,
@@ -156,25 +157,12 @@ pub(super) fn disconnect_block_admitted(
     })?;
     // Journal rewinds before the head advances so a kill between the two
     // leaves the head as high-water mark.
-    let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
-        let rewound = journal.lock().rewind_to(
-            parent_tip.height,
-            parent_tip.hash.to_le_bytes(),
-            parent_prev_hash.to_le_bytes(),
-            parent_chain_tx_count,
-        );
-        rewound
-            .map_err(|error| {
-                metrics::counter!("node.chainstate_journal.reorg_failures").increment(1);
-                tracing::warn!(
-                    height = parent_tip.height,
-                    hash = %parent_tip.hash,
-                    %error,
-                    "chainstate journal fork-head rewrite failed; retaining disconnect marker"
-                );
-            })
-            .is_ok()
-    });
+    let journal_rewound = rewind_journal_to_parent(
+        handles,
+        &parent_tip,
+        parent_prev_hash,
+        parent_chain_tx_count,
+    );
     commit_disconnect_head(
         handles,
         &parent_tip,
@@ -194,6 +182,18 @@ pub(super) fn disconnect_block_admitted(
             parent_tip.hash,
         );
         rewind_chain_tx_count(handles, tx_count_delta);
+        // A checkpoint-restored parent node still carries an unknown count
+        // even though the rewind just re-derived it; store the value on the
+        // node too so a later reorg reconnect derives the child's cumulative
+        // count from it instead of propagating unknown.
+        handles
+            .block_tree
+            .write()
+            .restore_chain_tx_count(
+                parent_tip.tip_id,
+                handles.chain_tx_count.load(Ordering::Relaxed),
+            )
+            .map_err(|error| fatal(ApplyError::Chain(error)))?;
     }
     if journal_rewound {
         handles.undo_store.disarm_disconnect().map_err(|error| {
@@ -217,4 +217,35 @@ pub(super) fn disconnect_block_admitted(
             .map(|restored| restored.outpoint.txid)
             .collect(),
     })
+}
+
+/// Rewinds the journal fork head to the disconnect's parent. A failed rewind
+/// keeps the disconnect marker for recovery and reports `false`.
+fn rewind_journal_to_parent(
+    handles: &Chainstate,
+    parent_tip: &TipSnapshot,
+    parent_prev_hash: Hash256,
+    parent_chain_tx_count: u64,
+) -> bool {
+    let Some(journal) = handles.journal.as_ref() else {
+        return false;
+    };
+    journal
+        .lock()
+        .rewind_to(
+            parent_tip.height,
+            parent_tip.hash.to_le_bytes(),
+            parent_prev_hash.to_le_bytes(),
+            parent_chain_tx_count,
+        )
+        .map_err(|error| {
+            metrics::counter!("node.chainstate_journal.reorg_failures").increment(1);
+            tracing::warn!(
+                height = parent_tip.height,
+                hash = %parent_tip.hash,
+                %error,
+                "chainstate journal fork-head rewrite failed; retaining disconnect marker"
+            );
+        })
+        .is_ok()
 }

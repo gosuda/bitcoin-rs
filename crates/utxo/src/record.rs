@@ -487,11 +487,10 @@ impl UtxoRecord {
         vouts: &[u32],
         mut removed: Option<&mut Vec<Option<OwnedUtxoOut>>>,
     ) -> Result<RemovedRecord, UtxoError> {
-        if self.is_full_removal(vouts) {
+        if let Some(outputs) = self.full_removal_outputs(vouts) {
             if let Some(sink) = removed.as_deref_mut() {
-                for &vout in vouts {
-                    let output = self.find_output(vout).ok_or(UtxoError::CorruptRecord)?;
-                    sink.push(Some(OutputParts::from_view(&output).into_owned()));
+                for output in &outputs {
+                    sink.push(Some(OutputParts::from_view(output).into_owned()));
                 }
             }
             return Ok(RemovedRecord::Emptied);
@@ -582,6 +581,22 @@ impl UtxoRecord {
             }
         }
         true
+    }
+
+    /// The exact-cover check plus the located outputs in request order, so the
+    /// caller's materialization does not repeat the per-vout lookup.
+    fn full_removal_outputs(&self, vouts: &[u32]) -> Option<Vec<OneUtxoOut<'_>>> {
+        if self.output_count() != vouts.len() {
+            return None;
+        }
+        let mut outputs = Vec::with_capacity(vouts.len());
+        for (index, &vout) in vouts.iter().enumerate() {
+            if vouts[..index].contains(&vout) {
+                return None;
+            }
+            outputs.push(self.find_output(vout)?);
+        }
+        Some(outputs)
     }
 
     /// Returns the encoded length, which is the complete requested owner
