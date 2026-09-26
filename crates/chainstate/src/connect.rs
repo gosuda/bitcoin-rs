@@ -564,7 +564,6 @@ pub(super) fn apply_block_admitted<'b>(
             group.stage(PendingBlockCommit {
                 outcome: outcome.clone(),
                 undo_record,
-                tx_count_delta,
                 prev_hash,
                 journal_record,
             });

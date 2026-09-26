@@ -2768,7 +2768,7 @@ mod tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
-                chain_tx_count: node.chain_tx_count,
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
             }
         };
         ctx.set_applied_tip(tip);
@@ -2782,7 +2782,7 @@ mod tests {
     }
 
     #[test]
-    fn getchaintxstats_uses_applied_atomic_when_per_node_count_is_unset() {
+    fn getchaintxstats_uses_the_applied_tip_count_when_per_node_count_is_unset() {
         use alloc::sync::Arc;
 
         let ctx = Arc::new(Context::new());
@@ -2800,7 +2800,7 @@ mod tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
-                chain_tx_count: node.chain_tx_count,
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
             }
         };
         ctx.set_applied_tip(tip);
@@ -2830,7 +2830,7 @@ mod tests {
                 height: node.height,
                 chainwork: node.chainwork,
                 hash: node.hash,
-                chain_tx_count: node.chain_tx_count,
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(42),
             }
         };
         ctx.set_applied_tip(tip);

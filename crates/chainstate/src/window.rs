@@ -72,7 +72,6 @@ pub(super) struct PendingBlockCommit {
     pub outcome: ConnectOutcome,
     /// The block's encoded undo record, landed in the group's receipt.
     pub undo_record: bitcoin_rs_utxo::contract::UndoRecord,
-    pub tx_count_delta: u64,
     /// This block's parent; the group's first entry anchors the lineage
     /// fence.
     pub prev_hash: Hash256,

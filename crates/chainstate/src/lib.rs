@@ -7,7 +7,9 @@
 
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot};
+use bitcoin_rs_chain::{
+    BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
+};
 use bitcoin_rs_consensus::rust_path::UtxoView;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Network;
@@ -1228,7 +1230,6 @@ impl Chainstate {
     /// lazily, and both share one commit and publication order.
     ///
     /// PRE: present bytes encode `block`.
-
     ///
     /// POST: `Ok` is a durable commit followed by publication.
     ///
