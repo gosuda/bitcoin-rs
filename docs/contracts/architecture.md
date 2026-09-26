@@ -188,7 +188,7 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   `rpc_auth` chooses the final credential style from the winning values.
   Proofs: `crates/node/tests/unit/config/tests.rs`
   `resolve_prefers_higher_layers_field_by_field`,
-  `overlay_clears_the_superseded_rpc_credential_style`, and
+  `rpc_cookie_and_credential_layers_keep_one_auth_source`, and
   `earlier_set_fields_survive_a_later_bare_network_selection`.
 
 ### `ARCH-06`: Hierarchy change and exception process
@@ -295,7 +295,7 @@ composition seam.
   proves that the configured ZMQ publisher receives the committed effects.
 - `crates/node/tests/unit/config/tests.rs` tests
   `resolve_prefers_higher_layers_field_by_field` and
-  `overlay_clears_the_superseded_rpc_credential_style`: later `UserConfig`
+  `rpc_cookie_and_credential_layers_keep_one_auth_source`: later `UserConfig`
   layers win on set fields, including nested `ChainstateJournalOverrides`, and
   the RPC credential style is settled per layer and again after the fold
   (`ARCH-05`).

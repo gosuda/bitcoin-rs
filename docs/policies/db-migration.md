@@ -114,10 +114,11 @@ How each input layer treats an entry it no longer knows:
 - `BITCOIN_RS_*` environment: unknown variables are skipped, not rejected. A
   stale variable left in a service unit stays silently inert; the operator
   removes it.
-- `bitcoin.conf` (`--bitcoin-conf`): only the Core keys the option table names
-  are read (`dbcache`, `prune`, `rest`, `txindex`, `rpcuser`, `rpcpassword`,
-  `rpccookiefile`, and the `listen` switch); every other line is ignored.
-  Removed bitcoin-rs settings never had Core-key spellings.
+- `bitcoin.conf` (`--bitcoin-conf`): the only Core keys read are the ones the
+  option table names (`dbcache`, `prune`, `rest`, `txindex`, `rpcuser`,
+  `rpcpassword`, `rpccookiefile`) plus `listen`, a fixed exception that no
+  table row can express; every other line is ignored. Removed bitcoin-rs
+  settings never had Core-key spellings.
 
 ### Removed without an alias
 
