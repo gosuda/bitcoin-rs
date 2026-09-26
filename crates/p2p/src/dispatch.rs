@@ -1464,14 +1464,11 @@ mod tests {
         orphan: bool,
         item: Inventory,
     ) {
-        let (local_requested, remote_requested) = match item {
+        let (_, remote_requested) = match item {
             Inventory::WTx(_) => (true, false),
             _ => (false, true),
         };
         let mut peer = ready_peer();
-        if local_requested {
-            peer.wtxid_relay.mark_local_advertised();
-        }
         if remote_requested {
             peer.wtxid_relay.mark_peer_supported();
         }

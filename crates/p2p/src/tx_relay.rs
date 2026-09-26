@@ -642,7 +642,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::clone(&original), 100, 10_000, 1, 0),
+                MempoolEntry::new(Arc::clone(&original), 100, 10_000, 1, 0, 0),
             )
             .unwrap_or_else(|error| panic!("admit original fixture: {error}"));
         queue.announce(original.txid(), original.wtxid(), None);
@@ -654,7 +654,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::clone(&malleated), 100, 10_000, 1, 0),
+                MempoolEntry::new(Arc::clone(&malleated), 100, 10_000, 1, 0, 0),
             )
             .unwrap_or_else(|error| panic!("admit malleated fixture: {error}"));
 
