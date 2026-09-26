@@ -93,8 +93,7 @@ impl ActiveChainQuery {
         // Use the complete consensus layout parser without materializing
         // scripts or witnesses. Both serving forms reject malformed bodies.
         let block = ParsedBlock::parse_exact(&bytes).ok()?;
-        let mut stripped = None;
-        if !include_witness
+        let stripped = if !include_witness
             && block
                 .transactions()
                 .iter()
@@ -108,8 +107,10 @@ impl ActiveChainQuery {
                     payload.extend_from_slice(part);
                 }
             }
-            stripped = Some(payload);
-        }
+            Some(payload)
+        } else {
+            None
+        };
         drop(block);
         let bytes = stripped.unwrap_or(bytes);
         let tree = self.block_tree.read();
