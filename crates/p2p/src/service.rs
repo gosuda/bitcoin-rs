@@ -850,7 +850,7 @@ fn live_outbound_count(peer_table: &crate::PeerTable) -> usize {
     peer_table
         .sessions()
         .iter()
-        .filter(|session| !session.lease.is_inbound())
+        .filter(|session| !session.lease.is_inbound() && !session.lease.is_cancelled())
         .count()
 }
 

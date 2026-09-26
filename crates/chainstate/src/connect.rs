@@ -134,8 +134,16 @@ pub(super) fn apply_block_admitted<'b>(
     // header sync cannot be connected and a direct `submitblock` cannot skip a
     // rule by relying on header-sync history. Runs before the first mutation.
     let contextual_header_started = quanta::Instant::now();
-    let contextual_header_result =
-        validate_contextual_block_header(handles, block, height, prior.as_deref());
+    // Receipt-covered replay is exempt from the wall-clock future-drift gate:
+    // the journal already committed this block, so a host-clock rollback must
+    // not refuse the node's own durable history and block recovery.
+    let contextual_header_result = validate_contextual_block_header(
+        handles,
+        block,
+        height,
+        prior.as_deref(),
+        matches!(&publication, PublishMode::Replay { .. }),
+    );
     let contextual_header_dur = contextual_header_started.elapsed();
     metrics::histogram!("node.apply_block.contextual_header_seconds")
         .record(contextual_header_dur.as_secs_f64());
@@ -744,6 +752,7 @@ fn validate_contextual_block_header(
     block: &Block,
     height: u32,
     prior: Option<&TipSnapshot>,
+    replayed: bool,
 ) -> Result<(), ApplyError> {
     if height == 0 {
         // Genesis has no parent, so no contextual rule applies to it.
@@ -762,7 +771,13 @@ fn validate_contextual_block_header(
         prior.tip_id,
         &block.header,
         handles.network,
-        bitcoin_rs_chain::current_unix_seconds(),
+        // The wall clock feeds only the future-drift bound; replayed blocks
+        // read their own timestamp as now so the check trivially holds.
+        if replayed {
+            block.header.time
+        } else {
+            bitcoin_rs_chain::current_unix_seconds()
+        },
     )
     .map_err(|error| match error {
         bitcoin_rs_chain::ChainError::NbitsMismatch {
