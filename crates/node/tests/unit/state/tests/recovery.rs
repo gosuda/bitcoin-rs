@@ -443,6 +443,8 @@ fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyho
             let mut damaged = std::fs::read(&path)?;
             // Keep the complete genesis frame and damage only the middle frame.
             // Both it and the untouched successor are below the durable extent.
+            // The record header is magic(4) + body length(4) + height(4) +
+            // block hash(32) = 44 bytes; the length occupies bytes 4..8.
             let genesis_len = u32::from_le_bytes(damaged[4..8].try_into()?);
             let middle = 44 + usize::try_from(genesis_len)?;
             assert_eq!(&damaged[middle..middle + 4], b"BRSB");
