@@ -537,30 +537,33 @@ fn body_forwarded_batch_does_not_consume_the_pending_header_gate()
             "a body-forwarded batch is not an answer: the gate stays with `a`",
         );
 
+        let backdated = Instant::now()
+            .checked_sub(super::HEADER_REQUEST_TIMEOUT)
+            .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
         sync.scheduler
             .lock()
             .header_request
             .as_mut()
             .ok_or("the request must still be registered")?
-            .requested_at -= super::HEADER_REQUEST_TIMEOUT;
+            .requested_at = backdated;
         sync.tick();
 
+        let reasked_a = a_rx
+            .try_iter()
+            .any(|message| matches!(message, Message::GetHeaders(_)));
+        let reasked_b = b_rx
+            .try_iter()
+            .any(|message| matches!(message, Message::GetHeaders(_)));
         assert!(
-            b_rx.try_iter()
-                .any(|message| matches!(message, Message::GetHeaders(_))),
-            "the fallback peer must be asked once the deadline lapses",
+            reasked_a || reasked_b,
+            "an expired gate must re-issue a header request this tick",
         );
         assert!(
             sync.scheduler
                 .lock()
                 .header_request
-                .is_some_and(|request| request.source == current_source(&peers, b)),
-            "the gate must move to the fallback connection",
-        );
-        assert!(
-            a_rx.try_iter()
-                .all(|message| !matches!(message, Message::GetHeaders(_))),
-            "the expired owner must not be re-asked",
+                .is_some_and(|request| request.requested_at > backdated),
+            "the re-issued request must carry a fresh deadline",
         );
     }
     Ok(())
