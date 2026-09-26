@@ -23,11 +23,14 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use bitcoin::hashes::{Hash as _, sha256};
-use serde_json::{Value, json};
-use support::process_node::{
-    ClockControl, HarnessError, NodeBinary, ProcessNode, START_TIMEOUT, compare_reply, compare_rpc,
-    exchange, mine_common_chain, verify_reference_binary,
+use bitcoin_rs_e2e::differential::{
+    compare_reply, compare_rpc, mine_common_chain, verify_reference_binary,
 };
+use bitcoin_rs_e2e::node::START_TIMEOUT;
+use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::rpc::exchange;
+use bitcoin_rs_e2e::{ClockControl, Error, Kind, ProcessNode, SpawnOptions};
+use serde_json::{Value, json};
 use support::reference_set::reference_set;
 
 // A height-1 coinbase is mature for admission after 101 common blocks.
@@ -43,8 +46,19 @@ fn assert_reaped(pid: u32) {
     }
 }
 
-fn start(binary: NodeBinary) -> ProcessNode {
-    ProcessNode::start(binary).expect("public process must start")
+/// The exact binary this test package is compiled against — not the
+/// newest-file heuristic the e2e crate uses for cross-package callers.
+const SELF_BINARY: &Path = Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"));
+
+fn start(binary: Kind) -> ProcessNode {
+    ProcessNode::spawn_with(
+        binary,
+        &SpawnOptions {
+            binary: Some(SELF_BINARY),
+            ..Default::default()
+        },
+    )
+    .expect("public process must start")
 }
 
 /// REF-07/P2P-01: compatibility must reach the binary's public P2P listener.
@@ -52,16 +66,13 @@ fn start(binary: NodeBinary) -> ProcessNode {
 fn normal_startup_exposes_an_isolated_loopback_p2p_listener() {
     // Each binary's startup, listener probe, and shutdown are independent.
     std::thread::scope(|scope| {
-        for binary in [NodeBinary::BitcoinRs, NodeBinary::ReferenceCore] {
+        for binary in [Kind::BitcoinRs, Kind::Core] {
             scope.spawn(move || {
                 let node = start(binary);
                 let pid = node.pid();
                 assert!(node.p2p_addr.ip().is_loopback());
-                let peer = support::process_peer::connect_loopback(
-                    node.p2p_addr,
-                    Instant::now() + Duration::from_secs(1),
-                )
-                .expect("normal startup must expose its configured P2P listener");
+                let peer = connect_loopback(node.p2p_addr, Instant::now() + Duration::from_secs(1))
+                    .expect("normal startup must expose its configured P2P listener");
                 drop(peer);
                 node.stop().expect("stop after public P2P connection");
                 assert_reaped(pid);
@@ -92,8 +103,8 @@ fn replacement_signaling_case(signals: bool) {
 
     {
         let (mut core, mut node) = std::thread::scope(|scope| {
-            let core = scope.spawn(|| start(NodeBinary::ReferenceCore));
-            let node = scope.spawn(|| start(NodeBinary::BitcoinRs));
+            let core = scope.spawn(|| start(Kind::Core));
+            let node = scope.spawn(|| start(Kind::BitcoinRs));
             (
                 core.join().expect("reference launch panicked"),
                 node.join().expect("candidate launch panicked"),
@@ -169,7 +180,7 @@ fn replacement_signaling_case(signals: bool) {
             );
             let submitted = process.rpc("sendrawtransaction", &json!([underpaying_raw]));
             assert!(
-                matches!(submitted, Err(HarnessError::Rpc { code: -26, ref message, .. }) if message.contains(rejection)),
+                matches!(submitted, Err(Error::Rpc { code: -26, ref message, .. }) if message.contains(rejection)),
                 "a fee-policy rejection must not be a transport failure: {submitted:?}",
             );
             assert_eq!(
@@ -230,8 +241,8 @@ fn replacement_signaling_case(signals: bool) {
 )]
 fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
     let (mut core, mut node) = std::thread::scope(|scope| {
-        let core = scope.spawn(|| start(NodeBinary::ReferenceCore));
-        let node = scope.spawn(|| start(NodeBinary::BitcoinRs));
+        let core = scope.spawn(|| start(Kind::Core));
+        let node = scope.spawn(|| start(Kind::BitcoinRs));
         (
             core.join().expect("reference launch panicked"),
             node.join().expect("candidate launch panicked"),
@@ -292,7 +303,7 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
         let rejection = process
             .rpc("sendrawtransaction", &json!([invalid_raw]))
             .expect_err("invalid signature cannot be admitted");
-        let HarnessError::Rpc { code, .. } = rejection else {
+        let Error::Rpc { code, .. } = rejection else {
             panic!("transport or setup failure is not an admission rejection: {rejection}");
         };
         (valid_allowed, invalid_allowed, json!(code))
@@ -446,7 +457,7 @@ fn signed_transaction_reaches_both_mempools_confirmation_and_public_queries() {
 
 #[test]
 fn dropped_process_is_reaped_without_stop() {
-    let node = start(NodeBinary::BitcoinRs);
+    let node = start(Kind::BitcoinRs);
     let pid = node.pid();
     drop(node);
     assert_reaped(pid);
@@ -462,7 +473,7 @@ fn missing_reference_binary_names_the_pinned_digest() {
     let pinned = sha256::Hash::from_byte_array(pinned).to_string();
 
     let error = verify_reference_binary(path).expect_err("absent binary must fail");
-    let HarnessError::Reference {
+    let Error::Reference {
         path: reported,
         expected,
         ..
@@ -484,22 +495,26 @@ fn deliberately_different_reply_is_a_behavior_failure() {
     assert!(compare_reply("getrawmempool", &reference, &reference).is_ok());
     assert!(matches!(
         compare_reply("getrawmempool", &reference, &candidate),
-        Err(HarnessError::Difference { .. }),
+        Err(Error::Difference { .. }),
     ));
 }
 
 /// REF-07b: rejected startup must report and reap the exact child process.
 #[test]
 fn rejected_startup_options_leave_no_child() {
-    let error = match ProcessNode::start_with_options(
-        NodeBinary::BitcoinRs,
-        &["--process-harness-invalid-option"],
-        Duration::from_secs(5),
+    let error = match ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(SELF_BINARY),
+            extra_args: &["--process-harness-invalid-option"],
+            timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        },
     ) {
         Ok(_) => panic!("invalid startup option succeeded"),
         Err(error) => error,
     };
-    let HarnessError::ChildExit {
+    let Error::ChildExit {
         pid,
         evidence,
         status,
@@ -519,15 +534,19 @@ fn rejected_startup_options_leave_no_child() {
 /// REF-07b: an early successful exit is not readiness and leaves no child.
 #[test]
 fn successful_child_exit_before_readiness_is_not_startup_success() {
-    let error = match ProcessNode::start_with_options(
-        NodeBinary::BitcoinRs,
-        &["--help"],
-        Duration::from_secs(5),
+    let error = match ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(SELF_BINARY),
+            extra_args: &["--help"],
+            timeout: Some(Duration::from_secs(5)),
+            ..Default::default()
+        },
     ) {
         Ok(_) => panic!("help exit was mistaken for a ready node"),
         Err(error) => error,
     };
-    let HarnessError::ChildExit { pid, status, .. } = error else {
+    let Error::ChildExit { pid, status, .. } = error else {
         panic!("early successful exit must report child exit: {error}");
     };
     assert!(status.success());
@@ -537,11 +556,18 @@ fn successful_child_exit_before_readiness_is_not_startup_success() {
 /// REF-07c: readiness is deadline-bounded and expiration reaps the child.
 #[test]
 fn readiness_deadline_reaps_the_child() {
-    let error = match ProcessNode::start_with_options(NodeBinary::BitcoinRs, &[], Duration::ZERO) {
+    let error = match ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(SELF_BINARY),
+            timeout: Some(Duration::ZERO),
+            ..Default::default()
+        },
+    ) {
         Ok(_) => panic!("expired startup deadline succeeded"),
         Err(error) => error,
     };
-    let HarnessError::Deadline { pid, operation, .. } = error else {
+    let Error::Timeout { pid, operation, .. } = error else {
         panic!("readiness must report its deadline: {error}");
     };
     assert_eq!(operation, "readiness");
@@ -618,10 +644,7 @@ fn malformed_http_and_json_replies_are_transport_failures() {
             Instant::now() + Duration::from_secs(1),
         );
         server.join().expect("responder exits");
-        assert!(matches!(
-            result,
-            Err(HarnessError::Protocol(_) | HarnessError::Json(_))
-        ));
+        assert!(matches!(result, Err(Error::Protocol(_) | Error::Json(_))));
     }
 }
 
@@ -769,8 +792,16 @@ fn readiness_deadline() -> Instant {
 
 /// Starts the node with its derived index enabled.
 fn start_txindex_node() -> ProcessNode {
-    ProcessNode::start_with_options(NodeBinary::BitcoinRs, &["--txindex=true"], START_TIMEOUT)
-        .expect("txindex node must start")
+    ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(SELF_BINARY),
+            extra_args: &["--txindex=true"],
+            timeout: Some(START_TIMEOUT),
+            ..Default::default()
+        },
+    )
+    .expect("txindex node must start")
 }
 
 /// Extracts the txindex readiness outcome from a `getcapabilities` row.
@@ -799,10 +830,7 @@ fn readiness_outcome(row: &Value) -> String {
 
 /// Polls until the txindex row reports Ready, returning the distinct
 /// outcomes observed on the way.
-fn wait_until_ready(
-    node: &mut ProcessNode,
-    deadline: Instant,
-) -> Result<Vec<String>, HarnessError> {
+fn wait_until_ready(node: &mut ProcessNode, deadline: Instant) -> Result<Vec<String>, Error> {
     let mut observed = Vec::new();
     loop {
         let row = node.rpc("getcapabilities", &json!([]))?;
@@ -818,7 +846,7 @@ fn wait_until_ready(
             return Ok(observed);
         }
         if Instant::now() >= deadline {
-            return Err(HarnessError::Deadline {
+            return Err(Error::Timeout {
                 pid: node.pid(),
                 operation: "readiness",
                 evidence: node.evidence.clone(),
@@ -830,14 +858,14 @@ fn wait_until_ready(
 }
 
 /// Polls until `getindexinfo` reports the txindex watermark synced.
-fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), HarnessError> {
+fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), Error> {
     loop {
         let info = node.rpc("getindexinfo", &json!(["txindex"]))?;
         if info.pointer("/txindex/synced") == Some(&json!(true)) {
             return Ok(());
         }
         if Instant::now() >= deadline {
-            return Err(HarnessError::Deadline {
+            return Err(Error::Timeout {
                 pid: node.pid(),
                 operation: "txindex sync",
                 evidence: node.evidence.clone(),
@@ -853,14 +881,12 @@ fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), 
 /// Startup anchors the tip at genesis but applies that block on the first
 /// one-second sync tick, so an immediate mine races the applied tip. The
 /// retry is bounded and only tolerates that one startup message.
-fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, HarnessError> {
+fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Error> {
     let deadline = readiness_deadline();
     let mined = loop {
         match node.rpc("generatetoaddress", &json!([blocks, MINING_ADDRESS])) {
             Ok(mined) => break mined,
-            Err(HarnessError::Rpc { message, .. })
-                if message.contains("applied tip is not available") =>
-            {
+            Err(Error::Rpc { message, .. }) if message.contains("applied tip is not available") => {
                 assert!(
                     Instant::now() < deadline,
                     "the applied tip never became available"
@@ -872,13 +898,13 @@ fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Harn
     };
     let hashes = mined
         .as_array()
-        .ok_or_else(|| HarnessError::Protocol("mining result is not an array".into()))?;
+        .ok_or_else(|| Error::Protocol("mining result is not an array".into()))?;
     hashes
         .iter()
         .map(|hash| {
             hash.as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| HarnessError::Protocol("mining result hash is not a string".into()))
+                .ok_or_else(|| Error::Protocol("mining result hash is not a string".into()))
         })
         .collect()
 }
@@ -999,13 +1025,23 @@ fn wait_gauge_active(addr: SocketAddr, expected: &str, deadline: Instant) -> Vec
 fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
     let metrics_addr = reserved_metrics_addr();
     let metrics_flag = format!("--metrics-bind={metrics_addr}");
-    let mut core =
-        ProcessNode::start_with_options(NodeBinary::ReferenceCore, &["-txindex=1"], START_TIMEOUT)
-            .expect("core with txindex must start");
-    let mut node = ProcessNode::start_with_options(
-        NodeBinary::BitcoinRs,
-        &["--txindex=true", metrics_flag.as_str()],
-        START_TIMEOUT,
+    let mut core = ProcessNode::spawn_with(
+        Kind::Core,
+        &SpawnOptions {
+            extra_args: &["-txindex=1"],
+            timeout: Some(START_TIMEOUT),
+            ..Default::default()
+        },
+    )
+    .expect("core with txindex must start");
+    let mut node = ProcessNode::spawn_with(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(SELF_BINARY),
+            extra_args: &["--txindex=true", metrics_flag.as_str()],
+            timeout: Some(START_TIMEOUT),
+            ..Default::default()
+        },
     )
     .expect("node with txindex must start");
     let (core_pid, node_pid) = (core.pid(), node.pid());
@@ -1057,8 +1093,8 @@ fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
 /// not silence, and the absence is identical to Core's.
 #[test]
 fn disabled_index_reports_its_documented_disabled_row() {
-    let mut core = start(NodeBinary::ReferenceCore);
-    let mut node = start(NodeBinary::BitcoinRs);
+    let mut core = start(Kind::Core);
+    let mut node = start(Kind::BitcoinRs);
     let (core_pid, node_pid) = (core.pid(), node.pid());
 
     mine_common_chain(&mut core, &mut node, COMMON_BLOCKS).expect("common chain");
@@ -1089,7 +1125,7 @@ fn disabled_index_reports_its_documented_disabled_row() {
             .rpc("getrawtransaction", &json!([txid, true]))
             .expect_err("verbose history needs an index");
         assert!(
-            matches!(error, HarnessError::Rpc { .. }),
+            matches!(error, Error::Rpc { .. }),
             "verbose lookup without an index is a typed RPC failure: {error}"
         );
     }
@@ -1165,10 +1201,14 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     );
     std::fs::remove_dir_all(&derived_store).expect("destroy the disposable derived store");
 
-    let mut rebuilt = ProcessNode::start_with_datadir(
-        NodeBinary::BitcoinRs,
-        &["--txindex=true"],
-        START_TIMEOUT,
+    let mut rebuilt = ProcessNode::spawn_in_datadir(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(SELF_BINARY),
+            extra_args: &["--txindex=true"],
+            timeout: Some(START_TIMEOUT),
+            ..Default::default()
+        },
         datadir,
     )
     .expect("restart over the retained chainstate");
@@ -1226,10 +1266,14 @@ fn clean_restart_restores_ready_readiness_at_the_pinned_tip() {
 
     let datadir = node.take_datadir().expect("datadir custody");
     node.stop().expect("clean stop");
-    let mut restarted = ProcessNode::start_with_datadir(
-        NodeBinary::BitcoinRs,
-        &["--txindex=true"],
-        START_TIMEOUT,
+    let mut restarted = ProcessNode::spawn_in_datadir(
+        Kind::BitcoinRs,
+        &SpawnOptions {
+            binary: Some(SELF_BINARY),
+            extra_args: &["--txindex=true"],
+            timeout: Some(START_TIMEOUT),
+            ..Default::default()
+        },
         datadir,
     )
     .expect("restart over the same datadir");

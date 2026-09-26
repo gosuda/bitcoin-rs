@@ -9,7 +9,9 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use bitcoin_rs_primitives::{Amount, Script, Sighash, SighashCache, Tx, TxOut, Witness};
+use bitcoin_rs_primitives::{
+    Amount, Script, Sighash, SighashCache, Tx, TxOut, Witness, varint::encoded_len,
+};
 use secp256k1::{Message, XOnlyPublicKey, schnorr::Signature};
 use thiserror::Error;
 
@@ -96,12 +98,6 @@ impl VerifyFlags {
             | Self::DISCOURAGE_UPGRADABLE_PUBKEYTYPE.0,
     );
 
-    /// Builds flags from raw Core-compatible bits.
-    #[must_use]
-    pub const fn from_bits(bits: u32) -> Self {
-        Self(bits)
-    }
-
     /// Returns raw Core-compatible flag bits.
     #[must_use]
     pub const fn bits(self) -> u32 {
@@ -112,17 +108,6 @@ impl VerifyFlags {
     #[must_use]
     pub const fn kernel_bits(self) -> u32 {
         self.0 & Self::MANDATORY.0
-    }
-
-    /// Every flag bit this crate defines, the mask Core calls
-    /// `MAX_SCRIPT_VERIFY_FLAGS` minus the bits it has not assigned.
-    pub const ALL: Self =
-        Self(Self::STANDARD.0 | Self::SIGPUSHONLY.0 | Self::CONST_SCRIPTCODE.0 | Self::MINIMALIF.0);
-
-    /// Returns the bits of `self` that `other` does not set.
-    #[must_use]
-    pub const fn excluding(self, other: Self) -> Self {
-        Self(self.0 & !other.0)
     }
 
     /// Applies Core's flag implications: `CLEANSTACK` implies `WITNESS`, and
@@ -402,9 +387,6 @@ pub enum ScriptError {
         /// Unknown flag name.
         name: String,
     },
-    /// The transaction could not be serialized for the delegated verifier.
-    #[error("transaction serialization failed: {0}")]
-    Serialization(String),
     /// The delegated consensus verifier rejected the script.
     #[error("script verification failed: {0}")]
     Verification(String),
@@ -428,46 +410,16 @@ pub enum ScriptError {
 pub struct Interpreter;
 
 impl Interpreter {
-    /// Executes a script spend through the enabled script backend.
-    ///
-    /// When `script_sig` and `witness` already match the bytes stored on
-    /// `tx.inputs[input_idx]` — true for every block/mempool validation caller,
-    /// which reads them straight off the transaction — `tx` is used as-is with
-    /// no clone. Only callers that pass substitute bytes (e.g. vector tests
-    /// grafting a foreign witness) pay for a clone to splice them in.
-    ///
-    /// Taproot key-path verification needs every spent output. Callers that only
-    /// have the current input's prevout should prefer
-    /// [`Self::execute_with_prevouts`] when the full ordered set is available;
-    /// this wrapper forwards a one-element slice and therefore still rejects
-    /// multi-input taproot key-path spends with
-    /// [`ScriptError::TaprootPrevoutsUnavailable`].
-    pub fn execute(
-        &self,
-        script_pubkey: &[u8],
-        script_sig: &[u8],
-        witness: &[Vec<u8>],
-        flags: VerifyFlags,
-        prevout: &TxOut,
-        tx: &Tx,
-        input_idx: usize,
-    ) -> Result<bool, ScriptError> {
-        self.execute_with_prevouts(
-            script_pubkey,
-            script_sig,
-            witness,
-            flags,
-            std::slice::from_ref(prevout),
-            tx,
-            input_idx,
-        )
-    }
-
     /// Executes a script spend with the complete ordered prevout set.
     ///
-    /// `prevouts` must be aligned with `tx.inputs` (same length, input order).
-    /// BIP341 key-path sighashes commit to every spent output, so multi-input
-    /// taproot spends require the full slice.
+    /// PRE: `prevouts.len() == tx.inputs.len()`, in input order.
+    /// POST: returns the spend verdict for input `input_idx`; a prevout
+    ///       slice whose length differs from the input count is refused
+    ///       with [`ScriptError::TaprootPrevoutsUnavailable`] before any
+    ///       evaluation.
+    /// INVARIANT: every accepted call evaluates against the prevout of the
+    ///       input being spent; no length-mismatched slice is ever
+    ///       re-indexed.
     pub fn execute_with_prevouts(
         &self,
         script_pubkey: &[u8],
@@ -486,13 +438,10 @@ impl Interpreter {
                 index: input_idx,
                 inputs,
             })?;
-        // `execute` forwards a one-element slice for the current input. Full-set
-        // callers pass `prevouts.len() == tx.inputs.len()` in input order.
         let prevout = if prevouts.len() == inputs {
-            prevouts
-                .get(input_idx)
-                .ok_or(ScriptError::TaprootPrevoutsUnavailable)?
+            &prevouts[input_idx]
         } else if prevouts.len() == 1 {
+            // `execute` forwards a one-element slice for the current input.
             prevouts
                 .first()
                 .ok_or(ScriptError::TaprootPrevoutsUnavailable)?
@@ -943,11 +892,12 @@ fn verify_taproot_scriptpath(
     // `witness.stack` is the *original* full witness (including annex,
     // control, and script). The serialization is a CompactSize count
     // prefix followed by each element as CompactSize(len) + bytes.
-    let witness_serialized_size: usize = varint_len(witness.len())
-        + witness
-            .iter()
-            .map(|elem| varint_len(elem.len()) + elem.len())
-            .sum::<usize>();
+    let witness_serialized_size: usize =
+        encoded_len(u64::try_from(witness.len()).unwrap_or(u64::MAX))
+            + witness
+                .iter()
+                .map(|elem| encoded_len(u64::try_from(elem.len()).unwrap_or(u64::MAX)) + elem.len())
+                .sum::<usize>();
     let mut validation_weight_left = Some(
         i64::try_from(witness_serialized_size).unwrap_or(i64::MAX) + eval::VALIDATION_WEIGHT_OFFSET,
     );
@@ -972,19 +922,6 @@ fn verify_taproot_scriptpath(
     Ok(true)
 }
 
-/// Returns the varint-encoded length prefix size for `data_len` bytes.
-fn varint_len(data_len: usize) -> usize {
-    if data_len < 0xfd {
-        1
-    } else if data_len <= 0xffff {
-        3
-    } else if data_len <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{
@@ -1003,12 +940,12 @@ mod tests {
         };
 
         assert_eq!(
-            interpreter.execute(
+            interpreter.execute_with_prevouts(
                 &prevout.script_pubkey,
                 &[],
                 &[],
                 VerifyFlags::MANDATORY,
-                &prevout,
+                std::slice::from_ref(&prevout),
                 &tx,
                 0,
             ),
@@ -1017,22 +954,73 @@ mod tests {
 
         // OP_0 leaves one empty element, which CastToBool reads as false.
         assert!(matches!(
-            interpreter.execute(&[0x00], &[], &[], VerifyFlags::MANDATORY, &prevout, &tx, 0,),
+            interpreter.execute_with_prevouts(
+                &[0x00],
+                &[],
+                &[],
+                VerifyFlags::MANDATORY,
+                std::slice::from_ref(&prevout),
+                &tx,
+                0,
+            ),
             Err(ScriptError::Invalid {
                 code: ScriptErrCode::EvalFalse
             })
         ));
     }
 
+    /// The [`Interpreter::execute_with_prevouts`] POST contract: a prevout
+    /// slice that is neither the full input set nor the single current-input
+    /// convention is refused before any evaluation.
+    #[test]
+    fn execute_with_prevouts_rejects_a_mismatched_prevout_slice() {
+        let interpreter = Interpreter;
+        let tx = two_input_spend();
+        let prevout = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: vec![0x51].into(),
+        };
+
+        let three = [prevout.clone(), prevout.clone(), prevout.clone()];
+        assert_eq!(
+            interpreter.execute_with_prevouts(
+                &prevout.script_pubkey,
+                &[],
+                &[],
+                VerifyFlags::MANDATORY,
+                &three,
+                &tx,
+                0,
+            ),
+            Err(ScriptError::TaprootPrevoutsUnavailable)
+        );
+    }
+
+    fn two_input_spend() -> Tx {
+        Tx {
+            version: 2,
+            inputs: vec![unsigned_input(), unsigned_input()],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(98_000),
+                script_pubkey: Script::new(),
+            }],
+            lock_time: LockTime::ZERO,
+        }
+    }
+
+    fn unsigned_input() -> TxIn {
+        TxIn {
+            previous_output: OutPoint::new(Txid::default(), 0),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xffff_fffe),
+            witness: Witness::new(),
+        }
+    }
+
     fn unsigned_spend() -> Tx {
         Tx {
             version: 2,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0xffff_fffe),
-                witness: Witness::new(),
-            }],
+            inputs: vec![unsigned_input()],
             outputs: vec![TxOut {
                 value: Amount::from_sat(49_000),
                 script_pubkey: Script::new(),

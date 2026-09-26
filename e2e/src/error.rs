@@ -30,10 +30,34 @@ pub enum Error {
     },
     /// A deadline expired while waiting for a condition.
     Timeout {
+        /// Process id of the node whose wait expired.
+        pid: u32,
         /// What was being awaited.
         operation: &'static str,
+        /// Directory holding captured output.
+        evidence: PathBuf,
         /// Last observed state, for debugging.
         detail: String,
+    },
+    /// A wire-contract violation on a harness HTTP or P2P exchange.
+    Protocol(String),
+    /// The pinned reference binary does not match the manifest digest.
+    Reference {
+        /// Path of the binary that was checked.
+        path: PathBuf,
+        /// Digest the manifest pins.
+        expected: String,
+        /// Why the binary failed the check.
+        detail: String,
+    },
+    /// A behavior difference between the reference and candidate replies.
+    Difference {
+        /// The observation that diverged.
+        observation: String,
+        /// The reply from the pinned reference process.
+        reference: serde_json::Value,
+        /// The reply from the candidate process.
+        candidate: serde_json::Value,
     },
     /// A test-level assertion or protocol assumption failed.
     Assertion(String),
@@ -58,9 +82,34 @@ impl fmt::Display for Error {
                 "child {pid} exited early ({status}); evidence {}",
                 evidence.display()
             ),
-            Self::Timeout { operation, detail } => {
-                write!(f, "timeout waiting for {operation}: {detail}")
-            }
+            Self::Timeout {
+                pid,
+                operation,
+                evidence,
+                detail,
+            } => write!(
+                f,
+                "timeout waiting for {operation} on child {pid} (evidence {}): {detail}",
+                evidence.display()
+            ),
+            Self::Protocol(detail) => write!(f, "protocol: {detail}"),
+            Self::Reference {
+                path,
+                expected,
+                detail,
+            } => write!(
+                f,
+                "reference binary {} must have SHA256 {expected}: {detail}",
+                path.display()
+            ),
+            Self::Difference {
+                observation,
+                reference,
+                candidate,
+            } => write!(
+                f,
+                "behavior difference for {observation}: reference={reference}; candidate={candidate}"
+            ),
             Self::Assertion(detail) => write!(f, "assertion: {detail}"),
         }
     }

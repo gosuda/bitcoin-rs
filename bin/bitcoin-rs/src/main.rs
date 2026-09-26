@@ -11,11 +11,11 @@
 use std::process::ExitCode;
 
 use anyhow::Context;
-use bitcoin_rs::bitcoin_conf;
 use bitcoin_rs_node::{
     MeasureStorageRequest, Network, UserConfig, measure_storage_footprint, storage_footprint_json,
 };
 
+mod bitcoin_conf;
 mod cli;
 mod env;
 mod toml;

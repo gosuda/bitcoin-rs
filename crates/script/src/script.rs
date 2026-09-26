@@ -5,6 +5,8 @@
 //! with rust-bitcoin 0.32's `Script` helpers (and Core's `GetOp` loop behind
 //! them); differential tests pin the parity where the two overlap.
 
+use bitcoin_rs_primitives::varint::encoded_len;
+
 /// Opcode byte constants the workspace builds and inspects scripts with.
 pub mod opcode {
     /// `OP_0`: pushes an empty byte string.
@@ -223,21 +225,12 @@ pub fn is_p2sh(script: &[u8]) -> bool {
         && script[22] == opcode::OP_EQUAL
 }
 
-/// Returns the public-key bytes of a bare P2PK script
-/// (`<33 or 65 bytes> OP_CHECKSIG`), or `None` for any other shape.
-#[must_use]
-pub fn p2pk_pubkey_bytes(script: &[u8]) -> Option<&[u8]> {
-    match script.len() {
-        67 if script[0] == 0x41 && script[66] == opcode::OP_CHECKSIG => Some(&script[1..66]),
-        35 if script[0] == 0x21 && script[34] == opcode::OP_CHECKSIG => Some(&script[1..34]),
-        _ => None,
-    }
-}
-
-/// Returns `true` for a bare P2PK script.
+/// Returns `true` for a bare P2PK script (`<33 or 65 bytes> OP_CHECKSIG`).
 #[must_use]
 pub fn is_p2pk(script: &[u8]) -> bool {
-    p2pk_pubkey_bytes(script).is_some()
+    matches!(script.len(), 67 | 35)
+        && ((script.len() == 67 && script[0] == 0x41 && script[66] == opcode::OP_CHECKSIG)
+            || (script.len() == 35 && script[0] == 0x21 && script[34] == opcode::OP_CHECKSIG))
 }
 
 /// Returns `true` for a v0 witness program: `OP_0 <20 bytes>`.
@@ -343,7 +336,8 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     if script.len() > 10_000 {
         return 0;
     }
-    let script_size = varint_size(script.len()).saturating_add(script.len());
+    let script_len = u64::try_from(script.len()).unwrap_or(u64::MAX);
+    let script_size = encoded_len(script_len).saturating_add(script.len());
     let size = if is_op_return(script) {
         0
     } else if is_witness_program(script) {
@@ -413,19 +407,6 @@ pub fn push_int(value: i64) -> Vec<u8> {
         _ => {}
     }
     push_data(&bytes)
-}
-
-/// Compact-size (Bitcoin varint) encoding length in bytes.
-const fn varint_size(value: usize) -> usize {
-    if value < 0xfd {
-        1
-    } else if value <= 0xffff {
-        3
-    } else if value <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 #[cfg(test)]

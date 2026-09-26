@@ -8,10 +8,6 @@ authors.workspace = true
 repository.workspace = true
 description = "bitcoin-rs node binary"
 
-[lib]
-name = "bitcoin_rs"
-path = "src/lib.rs"
-
 [[bin]]
 name = "bitcoin-rs"
 path = "src/main.rs"
@@ -36,6 +32,7 @@ serde_json.workspace = true
 tempfile = ">=3.20.0, <4"
 bitcoin.workspace = true
 bitcoin-rs-rpc = { workspace = true }
+bitcoin-rs-e2e.workspace = true
 
 [features]
 default = ["fjall", "redb", "zmq"]

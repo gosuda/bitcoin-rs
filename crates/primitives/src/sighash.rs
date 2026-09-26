@@ -710,10 +710,7 @@ fn tagged_hash(tag: &[u8], msg: &[u8]) -> Hash256 {
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
 
-    use super::{
-        CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, TAPSCRIPT_LEAF_VERSION,
-        tapleaf_hash,
-    };
+    use super::{Sighash, SighashCache, SighashError, TAPSCRIPT_LEAF_VERSION, tapleaf_hash};
     use crate::{Hash256, OutPoint, Tx, Txid};
 
     fn pin(hex: &str) -> Hash256 {
@@ -832,7 +829,6 @@ mod tests {
                 "4cc7918733b1c9abd997206fac92d03183ec712d059dd5da5bd099e39b66a1d6"
             ))
         );
-        let _ = CODESEPARATOR_POSITION;
     }
 
     #[test]

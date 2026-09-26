@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{Read, Write as _};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use crate::error::{Error, Result};
+use crate::rpc::Connection;
 
 /// Cold storage initialization needs more time than a single loopback request.
 pub const START_TIMEOUT: Duration = Duration::from_mins(1);
@@ -22,10 +23,10 @@ pub const START_TIMEOUT: Duration = Duration::from_mins(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Single request deadline.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-/// Bound on an HTTP body the harness reads or writes.
-const MAX_BODY: usize = 64 * 1024 * 1024;
 /// Bound on retained child output.
 const MAX_OUTPUT: u64 = 4 * 1024 * 1024;
+/// Bound on the journaled RPC and HTTP transcript.
+const MAX_TRANSCRIPT: u64 = 64 * 1024 * 1024;
 /// Fixed test credentials; both node kinds share them.
 const AUTH_USER: &str = "parity";
 const AUTH_PASSWORD: &str = "parity";
@@ -52,6 +53,16 @@ pub enum Kind {
     Core,
 }
 
+/// The clock a spawned node's blocks are stamped with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClockControl {
+    /// Core runs under `-mocktime` pinned to this epoch second.
+    Mock(u64),
+    /// The daemon clocks blocks from the host wall clock; its CLI exposes
+    /// no mock-time input.
+    None,
+}
+
 /// Options applied on top of the default launch profile.
 #[derive(Clone, Debug, Default)]
 pub struct SpawnOptions<'a> {
@@ -68,6 +79,10 @@ pub struct SpawnOptions<'a> {
     /// reserved loopback port so bind-failure scenarios exercise a real
     /// `bind()` error rather than a duplicate CLI flag.
     pub rpc_bind: Option<SocketAddr>,
+    /// Exact binary to launch (bitcoin-rs only). Tests living in the binary
+    /// package pass `env!("CARGO_BIN_EXE_bitcoin-rs")` so cargo's build pins
+    /// the artifact instead of the newest-file heuristic.
+    pub binary: Option<&'a Path>,
 }
 
 /// A decoded HTTP response from the node's RPC/REST/Esplora listener.
@@ -112,11 +127,15 @@ pub struct ProcessNode {
     pub rpc_addr: SocketAddr,
     /// P2P loopback address the child is bound to.
     pub p2p_addr: SocketAddr,
+    /// The clock this node's blocks are stamped with.
+    pub clock: ClockControl,
     /// Directory that receives launch.json, stdout.log, stderr.log, transcript.
     pub evidence: PathBuf,
     journal: File,
+    journal_bytes: u64,
     started: Instant,
     output: Vec<JoinHandle<()>>,
+    conn: Connection,
 }
 
 /// Workspace root, derived from this crate's manifest location.
@@ -185,34 +204,20 @@ fn core_binary() -> PathBuf {
     workspace().join("target/reference-core-31.1/bitcoin-31.1/bin/bitcoind")
 }
 
-/// Verify the resolved bitcoind matches the pinned digest in
-/// `docs/api/core-compat.toml`. Returns the binary path on success.
+/// Verify the resolved bitcoind matches the pinned digest in the compiled
+/// `core-compat.toml` manifest. Returns the binary path on success.
 pub fn verified_core_binary() -> Result<PathBuf> {
     if let Some(path) = VERIFIED_CORE.get() {
         return Ok(path.clone());
     }
     let path = core_binary();
-    let compat = fs::read_to_string(workspace().join("docs/api/core-compat.toml"))
-        .map_err(|e| Error::Assertion(format!("cannot read core-compat.toml: {e}")))?;
-    let table: toml::Table = compat
-        .parse()
-        .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
-    let expected = table
-        .get("reference")
-        .and_then(|r| r.get("release"))
-        .and_then(|r| r.get("bitcoind_sha256"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))?
-        .to_owned();
-    let mut file = File::open(&path).map_err(|e| {
+    let expected = manifest_reference_sha256()?;
+    let actual = file_sha256(&path).map_err(|e| {
         Error::Assertion(format!(
             "pinned bitcoind {} not readable (install via scripts/install-bitcoind.sh): {e}",
             path.display()
         ))
     })?;
-    let mut engine = sha256::Hash::engine();
-    std::io::copy(&mut file, &mut engine)?;
-    let actual = sha256::Hash::from_engine(engine).to_string();
     if actual != expected {
         return Err(Error::Assertion(format!(
             "bitcoind sha256 mismatch: expected {expected}, got {actual}"
@@ -220,6 +225,28 @@ pub fn verified_core_binary() -> Result<PathBuf> {
     }
     let _ = VERIFIED_CORE.set(path.clone());
     Ok(path)
+}
+
+/// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins.
+pub(crate) fn manifest_reference_sha256() -> Result<String> {
+    let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
+        .parse()
+        .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
+    table
+        .get("reference")
+        .and_then(|r| r.get("release"))
+        .and_then(|r| r.get("bitcoind_sha256"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))
+}
+
+/// Hash one file with SHA256; callers shape the error vocabulary.
+pub(crate) fn file_sha256(path: &Path) -> std::io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut engine = sha256::Hash::engine();
+    std::io::copy(&mut file, &mut engine)?;
+    Ok(sha256::Hash::from_engine(engine).to_string())
 }
 
 /// Reserve two loopback ports; callers drop the listeners right before spawn.
@@ -235,10 +262,11 @@ fn launch_command(
     rpc_addr: SocketAddr,
     p2p_addr: SocketAddr,
     options: &SpawnOptions<'_>,
-) -> Result<Command> {
-    let mut command = match kind {
-        Kind::BitcoinRs => Command::new(bitcoin_rs_binary()?),
-        Kind::Core => Command::new(verified_core_binary()?),
+) -> Result<(Command, ClockControl)> {
+    let mut command = match (kind, options.binary) {
+        (Kind::BitcoinRs, Some(binary)) => Command::new(binary),
+        (Kind::BitcoinRs, None) => Command::new(bitcoin_rs_binary()?),
+        (Kind::Core, _) => Command::new(verified_core_binary()?),
     };
     // Host configuration must not leak into the isolated regtest profile.
     for (key, _) in std::env::vars_os() {
@@ -246,8 +274,9 @@ fn launch_command(
             command.env_remove(key);
         }
     }
-    match kind {
+    let clock = match kind {
         Kind::Core => {
+            let mock = mock_time();
             command
                 .args([
                     "-regtest",
@@ -263,7 +292,8 @@ fn launch_command(
                 .arg(format!("-datadir={}", datadir.display()))
                 .arg(format!("-bind={p2p_addr}"))
                 .arg(format!("-rpcport={}", rpc_addr.port()))
-                .arg(format!("-mocktime={}", mock_time()));
+                .arg(format!("-mocktime={mock}"));
+            ClockControl::Mock(mock)
         }
         Kind::BitcoinRs => {
             let config_path = datadir.join("node.toml");
@@ -293,13 +323,27 @@ fn launch_command(
                 .arg(datadir.join("node"))
                 .arg("--rpc-bind")
                 .arg(rpc_addr.to_string());
+            ClockControl::None
         }
-    }
+    };
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    Ok(command)
+    Ok((command, clock))
+}
+
+/// Whether a dead child's stderr reports losing the port-bind race (either
+/// daemon's phrasing), and nothing else — any other startup failure returns
+/// its `ChildExit` untouched.
+fn exited_on_busy_port(evidence: &Path) -> bool {
+    let Ok(stderr) = fs::read_to_string(evidence.join("stderr.log")) else {
+        return false;
+    };
+    stderr.contains("Address already in use")
+        || stderr.contains("os error 98")
+        || stderr.contains("Unable to bind")
+        || stderr.contains("Failed to bind")
 }
 
 impl ProcessNode {
@@ -316,9 +360,10 @@ impl ProcessNode {
 
     /// Spawn over an existing datadir (restart scenarios).
     ///
-    /// A reserved port can still be stolen between `loopback_addresses`
-    /// dropping its listeners and the child binding, so an immediate child
-    /// exit is retried with fresh ports a bounded number of times.
+    /// Launches are retried only on the reserve-release port race: the
+    /// loopback port bound for selection can be grabbed by a parallel
+    /// runner in the release-to-bind window, which fd-less spawning
+    /// cannot close. Any other immediate child exit surfaces untouched.
     pub fn spawn_in_datadir(
         kind: Kind,
         options: &SpawnOptions<'_>,
@@ -331,10 +376,17 @@ impl ProcessNode {
                     node.datadir = Some(datadir);
                     return Ok(node);
                 }
-                Err(error @ Error::ChildExit { .. }) if attempt + 1 < MAX_SPAWN_ATTEMPTS => {
-                    last_error = Some(error);
+                Err(error) => {
+                    let port_race = matches!(
+                        &error,
+                        Error::ChildExit { evidence, .. } if exited_on_busy_port(evidence)
+                    );
+                    if attempt + 1 < MAX_SPAWN_ATTEMPTS && port_race {
+                        last_error = Some(error);
+                    } else {
+                        return Err(error);
+                    }
                 }
-                Err(error) => return Err(error),
             }
         }
         Err(last_error.unwrap_or_else(|| Error::Assertion("spawn attempts exhausted".into())))
@@ -355,17 +407,36 @@ impl ProcessNode {
         let (rpc_addr, p2p_addr, rpc_listener, p2p_listener) = loopback_addresses()?;
         let rpc_addr = options.rpc_bind.unwrap_or(rpc_addr);
         let journal = File::create(evidence.join("transcript.jsonl"))?;
-        let mut command = launch_command(kind, datadir.path(), rpc_addr, p2p_addr, options)?;
+        let (mut command, clock) =
+            launch_command(kind, datadir.path(), rpc_addr, p2p_addr, options)?;
         command.args(options.extra_args);
+        let executable = Path::new(command.get_program());
+        let mut engine = sha256::Hash::engine();
+        std::io::copy(&mut File::open(executable)?, &mut engine)?;
+        let digest = sha256::Hash::from_engine(engine);
+        let config = match kind {
+            Kind::BitcoinRs => Some(fs::read_to_string(datadir.path().join("node.toml"))?),
+            Kind::Core => None,
+        };
         fs::write(
             evidence.join("launch.json"),
             serde_json::to_vec_pretty(&json!({
-                "kind": format!("{kind:?}"),
-                "program": command.get_program(),
+                "binary": format!("{kind:?}"),
+                "executable": executable,
+                "executable_sha256": digest.to_string(),
                 "argv": command.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>(),
+                "config": config,
                 "datadir": datadir.path(),
                 "rpc_address": rpc_addr.to_string(),
                 "p2p_address": p2p_addr.to_string(),
+                "clock": format!("{clock:?}"),
+                "startup_timeout_ms": options.timeout.unwrap_or(START_TIMEOUT).as_millis(),
+                "request_timeout_ms": REQUEST_TIMEOUT.as_millis(),
+                "output_limit_bytes": MAX_OUTPUT,
+                "transcript_limit_bytes": MAX_TRANSCRIPT,
+                "ci_commit": std::env::var("GITHUB_SHA").ok(),
+                "ci_run_id": std::env::var("GITHUB_RUN_ID").ok(),
+                "ci_run_attempt": std::env::var("GITHUB_RUN_ATTEMPT").ok(),
             }))?,
         )?;
         drop((rpc_listener, p2p_listener));
@@ -376,10 +447,13 @@ impl ProcessNode {
             datadir: None,
             rpc_addr,
             p2p_addr,
+            clock,
             evidence,
             journal,
+            journal_bytes: 0,
             started: Instant::now(),
             output: Vec::new(),
+            conn: Connection::new(rpc_addr),
         };
         let stdout = node
             .child
@@ -428,11 +502,17 @@ impl ProcessNode {
                     evidence: self.evidence.clone(),
                 });
             }
-            match self.rpc("getblockchaininfo", &json!([])) {
+            match self.rpc_until(
+                "getblockchaininfo",
+                &json!([]),
+                deadline.min(Instant::now() + REQUEST_TIMEOUT),
+            ) {
                 Ok(_) => return Ok(()),
                 Err(error) if Instant::now() >= deadline => {
                     return Err(Error::Timeout {
+                        pid: self.pid(),
                         operation: "readiness",
+                        evidence: self.evidence.clone(),
                         detail: error.to_string(),
                     });
                 }
@@ -444,14 +524,43 @@ impl ProcessNode {
     /// JSON-RPC call; the reply's `result` is returned, an `error` becomes
     /// [`Error::Rpc`].
     pub fn rpc(&mut self, method: &str, params: &Value) -> Result<Value> {
+        self.rpc_until(method, params, Instant::now() + REQUEST_TIMEOUT)
+    }
+
+    /// JSON-RPC call bounded by `deadline`: the transport obeys the same
+    /// deadline as the polling loop, so a startup wait cannot be renewed
+    /// by a per-request budget.
+    pub fn rpc_until(&mut self, method: &str, params: &Value, deadline: Instant) -> Result<Value> {
         let request = json!({"jsonrpc": "1.0", "id": "e2e", "method": method, "params": params});
-        self.record(&request)?;
-        let reply = rpc_call(self.rpc_addr, &request, REQUEST_TIMEOUT);
-        self.record(&match &reply {
-            Ok(value) => value.clone(),
-            Err(error) => json!({"transport_error": error.to_string()}),
-        })?;
+        let response = self
+            .conn
+            .rpc(&request, (AUTH_USER, AUTH_PASSWORD), deadline);
+        self.record(
+            &request,
+            &match &response {
+                Ok(value) => value.clone(),
+                Err(error) => json!({"transport_error": error.to_string()}),
+            },
+        )?;
+        let reply = response?;
+        if let Some(error) = reply.get("error").filter(|error| !error.is_null()) {
+            return Err(Error::Rpc {
+                method: method.to_owned(),
+                code: error
+                    .get("code")
+                    .and_then(Value::as_i64)
+                    .ok_or_else(|| Error::Protocol("RPC error lacks a numeric code".into()))?,
+                message: error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| Error::Protocol("RPC error lacks a message".into()))?
+                    .to_owned(),
+            });
+        }
         reply
+            .get("result")
+            .cloned()
+            .ok_or_else(|| Error::Protocol("missing RPC result".into()))
     }
 
     /// Low-level JSON-RPC call returning the full parsed envelope (or the
@@ -493,26 +602,34 @@ impl ProcessNode {
         body: &[u8],
         auth: Option<(&str, &str)>,
     ) -> Result<HttpResponse> {
-        self.record(&json!({
+        let request = json!({
             "http_request": {
                 "method": method,
                 "path": path,
                 "body_bytes": body.len(),
                 "auth_user": auth.map(|(user, _)| user),
             }
-        }))?;
-        let response = http_exchange(self.rpc_addr, method, path, body, auth, REQUEST_TIMEOUT)?;
-        self.record(&json!({
-            "http_response": {
-                "status": response.status,
-                "body_bytes": response.body.len(),
-                "body_head": String::from_utf8_lossy(
-                    &response.body[..response.body.len().min(512)]
-                )
-                .into_owned(),
-            }
-        }))?;
-        Ok(response)
+        });
+        let response = self
+            .conn
+            .http(method, path, body, auth, Instant::now() + REQUEST_TIMEOUT);
+        self.record(
+            &request,
+            &match &response {
+                Ok(response) => json!({
+                    "http_response": {
+                        "status": response.status,
+                        "body_bytes": response.body.len(),
+                        "body_head": String::from_utf8_lossy(
+                            &response.body[..response.body.len().min(512)]
+                        )
+                        .into_owned(),
+                    }
+                }),
+                Err(error) => json!({"transport_error": error.to_string()}),
+            },
+        )?;
+        response
     }
 
     /// GET helper for REST/Esplora surfaces.
@@ -520,14 +637,47 @@ impl ProcessNode {
         self.http("GET", path, &[], false)
     }
 
-    fn record(&mut self, entry: &Value) -> Result<()> {
-        let line = serde_json::to_vec(&json!({
+    /// GET one `/api/` explorer path and return its parsed JSON body.
+    ///
+    /// PRE: `path` names a resource under the `/api/` namespace.
+    /// POST: the reply carried status 200 and a JSON body.
+    pub fn http_get_json(&mut self, path: &str) -> Result<Value> {
+        if !path.starts_with("/api/") || path.bytes().any(|byte| byte <= b' ' || byte == 127) {
+            return Err(Error::Protocol("invalid explorer HTTP path".into()));
+        }
+        let response = self.http_get(path)?;
+        if response.status != 200 {
+            return Err(Error::Protocol("explorer HTTP response was not 200".into()));
+        }
+        response.json()
+    }
+
+    /// Common monotonic clock for RPC and P2P evidence.
+    #[must_use]
+    pub const fn evidence_clock(&self) -> Instant {
+        self.started
+    }
+
+    /// Journal one request/reply pair against the shared monotonic clock.
+    fn record(&mut self, request: &Value, reply: &Value) -> Result<()> {
+        let encoded = serde_json::to_vec(&json!({
+            "request": request,
+            "reply": reply,
             "at_micros": self.started.elapsed().as_micros(),
-            "entry": entry,
         }))?;
-        self.journal.write_all(&line)?;
+        let next_size = self
+            .journal_bytes
+            .saturating_add(
+                u64::try_from(encoded.len()).map_err(|error| Error::Protocol(error.to_string()))?,
+            )
+            .saturating_add(1);
+        if next_size > MAX_TRANSCRIPT {
+            return Err(Error::Protocol("transcript capacity exceeded".into()));
+        }
+        self.journal.write_all(&encoded)?;
         self.journal.write_all(b"\n")?;
         self.journal.flush()?;
+        self.journal_bytes = next_size;
         Ok(())
     }
 
@@ -547,7 +697,12 @@ impl ProcessNode {
                 Err(error) => detail = error.to_string(),
             }
             if Instant::now() >= deadline {
-                return Err(Error::Timeout { operation, detail });
+                return Err(Error::Timeout {
+                    pid: self.pid(),
+                    operation,
+                    evidence: self.evidence.clone(),
+                    detail,
+                });
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -663,146 +818,56 @@ fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> Join
     })
 }
 
-fn rpc_call(addr: SocketAddr, request: &Value, timeout: Duration) -> Result<Value> {
-    let body = serde_json::to_vec(request)?;
-    let response = http_exchange(
-        addr,
-        "POST",
-        "/",
-        &body,
-        Some((AUTH_USER, AUTH_PASSWORD)),
-        timeout,
-    )?;
-    let reply = response.json()?;
-    if let Some(error) = reply.get("error").filter(|e| !e.is_null()) {
-        let code = error
-            .get("code")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| Error::Assertion("rpc error lacks numeric code".into()))?;
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned();
-        let method = request
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or("?")
-            .to_owned();
-        return Err(Error::Rpc {
-            method,
-            code,
-            message,
-        });
-    }
-    reply
-        .get("result")
-        .cloned()
-        .ok_or_else(|| Error::Assertion(format!("missing rpc result in {reply}")))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn http_exchange(
-    addr: SocketAddr,
-    method: &str,
-    path: &str,
-    body: &[u8],
-    auth: Option<(&str, &str)>,
-    timeout: Duration,
-) -> Result<HttpResponse> {
-    let mut wire = Vec::new();
-    write!(wire, "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n")?;
-    if let Some((user, password)) = auth {
-        let token = base64(&format!("{user}:{password}").into_bytes());
-        write!(wire, "Authorization: Basic {token}\r\n")?;
-    }
-    if !body.is_empty() {
-        write!(wire, "Content-Type: application/json\r\n")?;
-    }
-    write!(
-        wire,
-        "Content-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    )?;
-    wire.extend_from_slice(body);
-    if wire.len() > MAX_BODY {
-        return Err(Error::Assertion("request exceeds body bound".into()));
-    }
-    let mut stream = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(2)))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    stream.write_all(&wire)?;
-    let mut bytes = Vec::new();
-    let mut chunk = [0_u8; 8192];
-    loop {
-        let count = stream.read(&mut chunk)?;
-        if count == 0 {
-            break;
-        }
-        if bytes.len().saturating_add(count) > MAX_BODY {
-            return Err(Error::Assertion("response exceeds body bound".into()));
-        }
-        bytes.extend_from_slice(&chunk[..count]);
-    }
-    parse_http_reply(&bytes)
-}
-
-fn parse_http_reply(bytes: &[u8]) -> Result<HttpResponse> {
-    let split = bytes
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| Error::Assertion("missing HTTP header terminator".into()))?;
-    let head = std::str::from_utf8(&bytes[..split])
-        .map_err(|e| Error::Assertion(format!("invalid HTTP head: {e}")))?;
-    let mut lines = head.split("\r\n");
-    let status_line = lines.next().unwrap_or_default();
-    let mut parts = status_line.split_whitespace();
-    let _version = parts.next();
-    let status = parts
-        .next()
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| Error::Assertion(format!("invalid status line: {status_line}")))?;
-    let mut headers = Vec::new();
-    let mut content_length = None;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
+    /// Evidence runs that recorded this invalid startup flag as their argv.
+    fn invalid_flag_runs() -> usize {
+        let root = workspace().join("target/process-harness/e2e");
+        let Ok(entries) = fs::read_dir(&root) else {
+            return 0;
         };
-        let name = name.trim().to_lowercase();
-        let value = value.trim().to_owned();
-        if name == "content-length" {
-            content_length = value.parse::<usize>().ok();
-        }
-        headers.push((name, value));
+        entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("run-"))
+            .filter(|entry| {
+                // A marker distinct from the flag the sibling test binary uses,
+                // so concurrent harness binaries never collide on this count.
+                fs::read_to_string(entry.path().join("launch.json"))
+                    .is_ok_and(|text| text.contains("--process-harness-invalid-option-retry-audit"))
+            })
+            .count()
     }
-    let body = bytes[split + 4..].to_vec();
-    if let Some(length) = content_length {
-        if length != body.len() {
-            return Err(Error::Assertion(format!(
-                "content-length {length} != body {}",
-                body.len()
-            )));
-        }
-    }
-    Ok(HttpResponse {
-        status,
-        headers,
-        body,
-    })
-}
 
-fn base64(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::new();
-    for chunk in input.chunks(3) {
-        let b0 = u32::from(chunk[0]);
-        let b1 = u32::from(*chunk.get(1).unwrap_or(&0));
-        let b2 = u32::from(*chunk.get(2).unwrap_or(&0));
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        let pick = |bits: u32| char::from(TABLE[usize::try_from(bits & 63).unwrap_or(0)]);
-        out.push(pick(n >> 18));
-        out.push(pick(n >> 12));
-        out.push(if chunk.len() > 1 { pick(n >> 6) } else { '=' });
-        out.push(if chunk.len() > 2 { pick(n) } else { '=' });
+    /// The spawn retry exists for the reserve-release port race only: a
+    /// child that died for any other reason must surface after exactly one
+    /// attempt, not after the whole bounded budget.
+    #[test]
+    fn spawn_retry_does_not_fire_on_a_non_port_bind_startup_failure() -> Result<()> {
+        let datadir = tempfile::tempdir()?;
+        let before = invalid_flag_runs();
+        let error = ProcessNode::spawn_in_datadir(
+            Kind::BitcoinRs,
+            &SpawnOptions {
+                extra_args: &["--process-harness-invalid-option-retry-audit"],
+                ..Default::default()
+            },
+            datadir,
+        )
+        .err()
+        .ok_or_else(|| {
+            Error::Assertion("an unknown startup flag must not produce a ready node".into())
+        })?;
+        assert!(
+            matches!(error, Error::ChildExit { .. }),
+            "startup must report child exit: {error}"
+        );
+        assert_eq!(
+            invalid_flag_runs() - before,
+            1,
+            "a non-bind startup failure must consume exactly one spawn attempt"
+        );
+        Ok(())
     }
-    out
 }

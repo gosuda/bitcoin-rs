@@ -1,4 +1,8 @@
 //! Tests for failure records (REF-07d).
+#![expect(
+    clippy::expect_used,
+    reason = "test fixtures abort on their first unmet setup invariant"
+)]
 
 use std::fs::File;
 use std::io::Write as _;
@@ -34,7 +38,7 @@ fn fixture() -> (ProcessPeer, TcpStream, TempDir) {
     (peer, remote, dir)
 }
 
-fn assert_failure(dir: &TempDir, first_direction: &str, error: &super::HarnessError) {
+fn assert_failure(dir: &TempDir, first_direction: &str, error: &super::Error) {
     let records: Vec<Value> = std::fs::read_to_string(dir.path().join("p2p.jsonl"))
         .expect("record text")
         .lines()
@@ -76,7 +80,7 @@ fn write_failure_keeps_the_attempt_and_error() {
             Instant::now() + Duration::from_secs(1),
         )
         .expect_err("write failure");
-    assert!(matches!(error, super::HarnessError::Io(_)));
+    assert!(matches!(error, super::Error::Io(_)));
     assert_failure(&dir, "sending", &error);
 }
 
@@ -90,7 +94,7 @@ fn record_write_failure_does_not_replace_the_network_error() {
     let error = peer
         .receive(Instant::now() + Duration::from_secs(1))
         .expect_err("closed reader");
-    assert!(matches!(error, super::HarnessError::Protocol(_)));
+    assert!(matches!(error, super::Error::Protocol(_)));
 }
 
 #[test]

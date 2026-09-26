@@ -230,6 +230,7 @@ dependencies = [
  "anyhow",
  "bitcoin",
  "bitcoin-rs-chainstate",
+ "bitcoin-rs-e2e",
  "bitcoin-rs-node",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
@@ -312,6 +313,7 @@ name = "bitcoin-rs-e2e"
 version = "0.9.0"
 dependencies = [
  "bitcoin",
+ "bitcoin-rs-rpc",
  "serde_json",
  "tempfile",
  "toml 1.1.6+spec-1.1.0",

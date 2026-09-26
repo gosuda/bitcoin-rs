@@ -11,8 +11,8 @@
 
 use std::cell::RefCell;
 use std::error::Error;
-use std::io::{BufRead as _, BufReader, Read, Write as _};
-use std::net::{SocketAddr, TcpStream};
+use std::io::{BufRead as _, BufReader, Read};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -20,9 +20,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use bitcoin_rs_e2e::helpers::assemble_block_from_template;
+use bitcoin_rs_e2e::node::HttpResponse;
+use bitcoin_rs_e2e::rpc::Connection;
+
 use bitcoin::absolute::LockTime;
-use bitcoin::block::{Header, Version as BlockVersion};
-use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
+
+use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::constants::{COINBASE_MATURITY, genesis_block};
 use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256;
@@ -30,8 +34,8 @@ use bitcoin::opcodes::all::OP_PUSHNUM_1;
 use bitcoin::script::Builder;
 use bitcoin::transaction::Version as TxVersion;
 use bitcoin::{
-    Address, Amount, Block, CompactTarget, Network, OutPoint, ScriptBuf, Sequence, Target,
-    Transaction, TxIn, TxMerkleNode, TxOut, Txid, WPubkeyHash, Witness,
+    Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid,
+    WPubkeyHash, Witness,
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -40,28 +44,41 @@ const RPC_USER: &str = "bitcoin-rs";
 const RPC_PASSWORD: &str = "bitcoin-rs";
 const FEE_SATS: u64 = 10_000;
 const REGTEST_SUBSIDY_SATS: u64 = 5_000_000_000;
-const WITNESS_RESERVED: [u8; 32] = [0_u8; 32];
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const INDEX_TIMEOUT: Duration = Duration::from_mins(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+/// Lossy body text of a shared HTTP response, for diagnostics.
+trait BodyText {
+    fn body_text(&self) -> String;
+}
+
+impl BodyText for HttpResponse {
+    fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+}
+
 #[test]
 fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     let workspace = tempfile::tempdir()?;
     let node = NodeProcess::spawn(workspace.path())?;
     let client = Client {
-        addr: node.addr,
         logs: Arc::clone(&node.logs),
-        conn: RefCell::new(None),
+        conn: RefCell::new(Connection::new(node.addr)),
     };
     let p2wpkh = p2wpkh_script();
     let address = Address::from_script(&p2wpkh, Network::Regtest)
         .map_err(|error| format!("p2wpkh fixture must be a standard address: {error}"))?
         .to_string();
 
-    client.submit_genesis()?;
+    let genesis_hex = serialize_hex(&genesis_block(Network::Regtest));
+    let genesis = client.rpc("submitblock", &json!([genesis_hex]))?;
+    if !genesis.is_null() {
+        return Err(format!("submitblock(genesis) rejected: {genesis}").into());
+    }
     for _ in 0..COINBASE_MATURITY {
         client.mine(Coinbase::AnyoneCanSpend)?;
     }
@@ -101,8 +118,13 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
 
     let spend_hex = spend_anyone_can_spend(&client, 1, &p2wpkh)?;
     let broadcast = client.esplora_post("/api/tx", spend_hex.as_bytes())?;
-    assert_eq!(broadcast.status, 200, "POST /api/tx: {}", broadcast.text());
-    let txid = broadcast.text();
+    assert_eq!(
+        broadcast.status,
+        200,
+        "POST /api/tx: {}",
+        broadcast.body_text()
+    );
+    let txid = broadcast.body_text();
     assert_eq!(
         txid.trim().len(),
         64,
@@ -136,10 +158,10 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         second_broadcast.status,
         200,
         "POST /api/tx: {}",
-        second_broadcast.text()
+        second_broadcast.body_text()
     );
     client.mine(Coinbase::AnyoneCanSpend)?;
-    wait_for_confirmation(&client, second_broadcast.text().trim())?;
+    wait_for_confirmation(&client, second_broadcast.body_text().trim())?;
     let fees = client.esplora_json("/api/fee-estimates")?;
     assert!(
         fees.get("6").and_then(Value::as_f64).is_some(),
@@ -211,10 +233,13 @@ fn wait_until_dead(pid: u32) -> bool {
 fn source_does_not_import_node_internals() {
     let source = include_str!("wallet_facing.rs");
     let code = uncommented_except_guard(source);
-    // Executable tokens for WF-01. This function is removed from `code`
-    // before the scan, so the list can name the identifiers it forbids.
-    // `bitcoin_rs` also covers `use bitcoin_rs as …` aliases of the package
-    // lib; the `_node` / `_storage` / … tokens are the other workspace crates.
+    // Executable identifier tokens for WF-01. Both proof functions are
+    // removed from `code` before the scan, so their lists can name the
+    // identifiers they forbid. Matching is at whole-identifier
+    // granularity: the shared test-support crate `bitcoin_rs_e2e` is a
+    // distinct name, not an occurrence of `bitcoin_rs`; the `_node` /
+    // `_storage` / … tokens are the other workspace crates.
+    let names = identifiers(&code);
     for banned in [
         "bitcoin_rs",
         "bitcoin_rs_node",
@@ -226,18 +251,42 @@ fn source_does_not_import_node_internals() {
         "UtxoSet",
     ] {
         assert!(
-            !code.contains(banned),
+            !names.contains(banned),
             "wallet-facing proof must not name {banned} (WF-01)"
         );
     }
 }
 
+/// The WF-01 check matches whole identifier tokens: the shared harness
+/// crate name passes, and every banned identifier still trips at word
+/// granularity.
+#[test]
+fn wf_01_check_tolerates_the_shared_test_support_crate_name() {
+    let permitted = identifiers(&strip_rust_comments("use bitcoin_rs_e2e::ProcessNode;\n"));
+    assert!(permitted.contains("bitcoin_rs_e2e"));
+    assert!(!permitted.contains("bitcoin_rs"));
+    let tripped = identifiers(&strip_rust_comments("use bitcoin_rs::node::NodeState;\n"));
+    assert!(tripped.contains("bitcoin_rs"));
+    assert!(tripped.contains("NodeState"));
+}
+
+/// Split stripped source into maximal identifier tokens.
+fn identifiers(code: &str) -> std::collections::HashSet<String> {
+    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Drop `//` and `/* */` comments, then drop this file's WF-01 guard
-/// function so its token list is not scored as a consumer import.
+/// functions so their token lists are not scored as consumer imports.
 fn uncommented_except_guard(source: &str) -> String {
     strip_fn(
-        &strip_rust_comments(source),
-        "fn source_does_not_import_node_internals() {",
+        &strip_fn(
+            &strip_rust_comments(source),
+            "fn source_does_not_import_node_internals() {",
+        ),
+        "fn wf_01_check_tolerates_the_shared_test_support_crate_name() {",
     )
 }
 
@@ -480,49 +529,17 @@ fn locked_string(logs: &Mutex<String>) -> String {
 }
 
 struct Client {
-    addr: SocketAddr,
     logs: Arc<Mutex<String>>,
-    // Keep-alive HTTP connection. The node's accept loop polls on a 100ms
-    // cadence, so a fresh socket per request costs ~100ms of accept
-    // latency; reusing one connection removes that floor.
-    conn: RefCell<Option<BufReader<TcpStream>>>,
-}
-
-struct HttpResponse {
-    status: u16,
-    body: Vec<u8>,
-}
-
-impl HttpResponse {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
-
-    fn json(&self) -> TestResult<Value> {
-        serde_json::from_slice(&self.body).map_err(|error| {
-            format!(
-                "invalid JSON (status {}): {error}: {}",
-                self.status,
-                self.text()
-            )
-            .into()
-        })
-    }
+    // The shared keep-alive transport from the harness crate: a request
+    // that reached the server is never resent, which matters because the
+    // POST /api/tx broadcast is not idempotent.
+    conn: RefCell<Connection>,
 }
 
 impl Client {
-    fn submit_genesis(&self) -> TestResult {
-        let hex = serialize_hex(&genesis_block(Network::Regtest));
-        let result = self.rpc("submitblock", &json!([hex]))?;
-        if !result.is_null() {
-            return Err(format!("submitblock(genesis) rejected: {result}").into());
-        }
-        Ok(())
-    }
-
     fn mine(&self, coinbase: Coinbase<'_>) -> TestResult {
         let template = self.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
-        let block = assemble_from_template(&template, coinbase)?;
+        let block = assemble_block_from_template(&template, &coinbase.script_pubkey())?;
         let hex = serialize_hex(&block);
         let result = self.rpc("submitblock", &json!([hex]))?;
         if !result.is_null() {
@@ -544,7 +561,7 @@ impl Client {
                     "scriptindex did not answer {path} within {:?}: {} {}\n{}",
                     INDEX_TIMEOUT,
                     response.status,
-                    response.text(),
+                    response.body_text(),
                     locked_string(&self.logs)
                 )
                 .into());
@@ -556,17 +573,21 @@ impl Client {
     fn esplora_text(&self, path: &str) -> TestResult<String> {
         let response = self.esplora_get(path)?;
         if response.status != 200 {
-            return Err(format!("GET {path} -> {} {}", response.status, response.text()).into());
+            return Err(
+                format!("GET {path} -> {} {}", response.status, response.body_text()).into(),
+            );
         }
-        Ok(response.text())
+        Ok(response.body_text())
     }
 
     fn esplora_json(&self, path: &str) -> TestResult<Value> {
         let response = self.esplora_get(path)?;
         if response.status != 200 {
-            return Err(format!("GET {path} -> {} {}", response.status, response.text()).into());
+            return Err(
+                format!("GET {path} -> {} {}", response.status, response.body_text()).into(),
+            );
         }
-        response.json()
+        Ok(response.json()?)
     }
 
     /// Esplora surfaces 503 while the transaction index crosses a snapshot
@@ -576,7 +597,7 @@ impl Client {
     fn esplora_get(&self, path: &str) -> TestResult<HttpResponse> {
         let deadline = Instant::now() + INDEX_TIMEOUT;
         loop {
-            let response = self.exchange("GET", path, None, b"")?;
+            let response = self.exchange("GET", path, false, b"")?;
             if response.status != 503 || Instant::now() >= deadline {
                 return Ok(response);
             }
@@ -585,168 +606,47 @@ impl Client {
     }
 
     fn esplora_post(&self, path: &str, body: &[u8]) -> TestResult<HttpResponse> {
-        self.exchange("POST", path, None, body)
+        self.exchange("POST", path, false, body)
     }
 
     fn rpc(&self, method: &str, params: &Value) -> TestResult<Value> {
-        let body = serde_json::to_vec(&json!({
+        let request = json!({
             "jsonrpc": "1.0",
             "id": "wallet-facing",
             "method": method,
             "params": params,
-        }))?;
-        let token = basic_token();
-        let response = self.exchange("POST", "/", Some(token.as_str()), &body)?;
-        let value = response.json()?;
+        });
+        let value = self.conn.borrow_mut().rpc(
+            &request,
+            (RPC_USER, RPC_PASSWORD),
+            Instant::now() + REQUEST_TIMEOUT,
+        )?;
         if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
             return Err(format!("{method} RPC error: {error}").into());
         }
         Ok(value.get("result").cloned().unwrap_or(Value::Null))
     }
 
-    /// Sends one request on the cached keep-alive connection, reconnecting
-    /// once when the socket is stale. A request that reached the server is
-    /// never resent: POST /api/tx broadcast is not idempotent.
+    /// Sends one request through the shared keep-alive connection.
     fn exchange(
         &self,
         method: &str,
         path: &str,
-        authorization: Option<&str>,
+        auth: bool,
         body: &[u8],
     ) -> TestResult<HttpResponse> {
-        let mut slot = self.conn.borrow_mut();
-        match self.exchange_once(&mut slot, method, path, authorization, body) {
-            Ok(response) => Ok(response),
-            Err((first, retryable)) => {
-                // A hard failure may leave an in-flight request or a
-                // desynced response on the socket: drop it so a later call
-                // cannot be pipelined or answered with the wrong response.
-                *slot = None;
-                if !retryable {
-                    return Err(first);
-                }
-                self.exchange_once(&mut slot, method, path, authorization, body)
-                    .map_err(|(error, _)| error)
-            }
-        }
+        Ok(self.conn.borrow_mut().http(
+            method,
+            path,
+            body,
+            if auth {
+                Some((RPC_USER, RPC_PASSWORD))
+            } else {
+                None
+            },
+            Instant::now() + REQUEST_TIMEOUT,
+        )?)
     }
-
-    /// One request/response round trip. The error flag marks failures the
-    /// retry wrapper may resend: the socket never delivered the request to
-    /// dispatch (connect refused, broken write, idle close, or a close
-    /// before any response byte — `serve_connection` always writes a response
-    /// before it closes, so zero response bytes prove non-dispatch).
-    fn exchange_once(
-        &self,
-        slot: &mut Option<BufReader<TcpStream>>,
-        method: &str,
-        path: &str,
-        authorization: Option<&str>,
-        body: &[u8],
-    ) -> Result<HttpResponse, (Box<dyn Error>, bool)> {
-        let fresh = if slot.is_none() {
-            let stream = TcpStream::connect_timeout(&self.addr, REQUEST_TIMEOUT)
-                .map_err(|error| (error.into(), true))?;
-            stream
-                .set_read_timeout(Some(REQUEST_TIMEOUT))
-                .map_err(|error| (error.into(), true))?;
-            stream
-                .set_write_timeout(Some(REQUEST_TIMEOUT))
-                .map_err(|error| (error.into(), true))?;
-            *slot = Some(BufReader::new(stream));
-            true
-        } else {
-            false
-        };
-        let reader = slot
-            .as_mut()
-            .ok_or_else(|| ("missing http connection".into(), true))?;
-        // Probe a reused socket for a peer close before any request bytes
-        // leave the client; an idle close caught here is provably safe to
-        // reconnect, unlike EOF discovered after a write.
-        if !fresh && conn_stale(reader.get_ref()) {
-            return Err(("peer closed the kept-alive connection".into(), true));
-        }
-        let auth_line = authorization
-            .map(|token| format!("Authorization: Basic {token}\r\n"))
-            .unwrap_or_default();
-        let content_type = if authorization.is_some() {
-            "application/json"
-        } else {
-            "text/plain"
-        };
-        let mut wire = Vec::new();
-        write!(
-            wire,
-            "{method} {path} HTTP/1.1\r\nHost: {}\r\n{auth_line}Content-Type: {content_type}\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-            self.addr,
-            body.len()
-        )
-        .map_err(|error| (error.into(), false))?;
-        wire.extend_from_slice(body);
-        // A failed write() transferred zero bytes, so resending is safe.
-        // Any partial send is not: the peer may hold a request prefix.
-        let sent = reader
-            .get_mut()
-            .write(&wire)
-            .map_err(|error| (error.into(), true))?;
-        if sent == 0 {
-            return Err(("socket closed before any bytes sent".into(), true));
-        }
-        reader
-            .get_mut()
-            .write_all(&wire[sent..])
-            .and_then(|()| reader.get_mut().flush())
-            .map_err(|error| (error.into(), false))?;
-        let mut status_line = String::new();
-        let count = match reader.read_line(&mut status_line) {
-            Ok(count) => count,
-            Err(error) => {
-                let closed = is_conn_closed(&error);
-                return Err((error.into(), closed));
-            }
-        };
-        if count == 0 {
-            // serve_connection writes a response before every close it
-            // initiates, so zero response bytes prove this request never
-            // reached dispatch: re-sending once is safe (a dead daemon
-            // fails the reconnect instead).
-            return Err(("connection closed before response".into(), true));
-        }
-        read_http_response(reader, &status_line).map_err(|error| (error, false))
-    }
-}
-
-/// Reports whether a kept-alive socket was already closed (or desynced) on
-/// the peer side. A non-blocking peek sees the close before any request
-/// bytes are sent, which makes reconnecting unambiguously safe — unlike an
-/// EOF discovered after a write, which cannot rule out a processed request.
-fn conn_stale(stream: &TcpStream) -> bool {
-    if stream.set_nonblocking(true).is_err() {
-        return true;
-    }
-    let stale = !matches!(
-        stream.peek(&mut [0_u8; 1]),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
-    );
-    if stream.set_nonblocking(false).is_err() {
-        return true;
-    }
-    stale
-}
-
-/// Socket-close errors proving the peer tore the connection down.
-/// WouldBlock/TimedOut are absent: an alive-but-slow peer means the request
-/// may still be in flight server-side, so those stay non-retryable.
-fn is_conn_closed(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::BrokenPipe
-            | std::io::ErrorKind::UnexpectedEof
-            | std::io::ErrorKind::NotConnected
-    )
 }
 
 fn p2wpkh_script() -> ScriptBuf {
@@ -764,14 +664,14 @@ fn assert_esplora_namespace(
         unprefixed.status,
         404,
         "unprefixed GET /blocks/tip/height must 404: {}",
-        unprefixed.text()
+        unprefixed.body_text()
     );
     let mempool_v1 = client.esplora_get("/api/v1/block-height/0")?;
     assert_eq!(
         mempool_v1.status,
         404,
         "GET /api/v1/block-height/0 is Mempool's prefix, not Esplora: {}",
-        mempool_v1.text()
+        mempool_v1.body_text()
     );
     assert_eq!(
         client.esplora_text("/api/blocks/tip/hash")?.trim(),
@@ -804,35 +704,35 @@ fn assert_esplora_namespace(
         leaked.status,
         404,
         "POST under /api must stay Esplora (404), not fall through to JSON-RPC (401): {}",
-        leaked.text()
+        leaked.body_text()
     );
     let unprefixed_tx = client.esplora_post("/tx", b"00")?;
     assert_eq!(
         unprefixed_tx.status,
         401,
         "unprefixed POST /tx must be JSON-RPC (401 without auth), not Esplora: {}",
-        unprefixed_tx.text()
+        unprefixed_tx.body_text()
     );
     let backend = client.esplora_get("/api/internal/mempool/txs")?;
     assert_eq!(
         backend.status,
         404,
         "GET /api/internal/* is not wallet-facing: {}",
-        backend.text()
+        backend.body_text()
     );
-    let head_tx = client.exchange("HEAD", "/api/tx", None, b"")?;
+    let head_tx = client.exchange("HEAD", "/api/tx", false, b"")?;
     assert_eq!(
         head_tx.status,
         404,
         "HEAD /api/tx must not run POST /tx: {}",
-        head_tx.text()
+        head_tx.body_text()
     );
-    let put_root = client.exchange("PUT", "/", None, b"")?;
+    let put_root = client.exchange("PUT", "/", false, b"")?;
     assert_eq!(
         put_root.status,
         404,
         "PUT / is not JSON-RPC: {}",
-        put_root.text()
+        put_root.body_text()
     );
     assert_eq!(
         client.esplora_text("/esplora/blocks/tip/height")?.trim(),
@@ -844,7 +744,7 @@ fn assert_esplora_namespace(
         backend_internal.status,
         200,
         "GET /esplora/internal/* is the mempool-backend path: {}",
-        backend_internal.text()
+        backend_internal.body_text()
     );
     Ok(())
 }
@@ -938,166 +838,4 @@ fn wait_for_confirmation(client: &Client, txid: &str) -> TestResult<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-}
-
-fn assemble_from_template(template: &Value, coinbase: Coinbase<'_>) -> TestResult<Block> {
-    let prev_hex = required_str(template, "previousblockhash")?;
-    let height = u32::try_from(required_u64(template, "height")?)?;
-    let coinbase_value = required_u64(template, "coinbasevalue")?;
-    let bits = CompactTarget::from_unprefixed_hex(required_str(template, "bits")?)?;
-    let curtime = u32::try_from(required_u64(template, "curtime")?)?;
-    let version = i32::try_from(required_u64(template, "version")?)?;
-    let commitment = ScriptBuf::from_hex(required_str(template, "default_witness_commitment")?)?;
-
-    let mut txs = Vec::new();
-    if let Some(entries) = template.get("transactions").and_then(Value::as_array) {
-        for entry in entries {
-            let data = entry
-                .get("data")
-                .and_then(Value::as_str)
-                .ok_or("template transaction missing data hex")?;
-            txs.push(deserialize_hex::<Transaction>(data)?);
-        }
-    }
-
-    let coinbase_tx = Transaction {
-        version: TxVersion::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: coinbase_script_sig(height),
-            sequence: Sequence::MAX,
-            witness: Witness::from_slice(&[&WITNESS_RESERVED]),
-        }],
-        output: vec![
-            TxOut {
-                value: Amount::from_sat(coinbase_value),
-                script_pubkey: coinbase.script_pubkey(),
-            },
-            TxOut {
-                value: Amount::from_sat(0),
-                script_pubkey: commitment,
-            },
-        ],
-    };
-
-    let mut txdata = Vec::with_capacity(txs.len().saturating_add(1));
-    txdata.push(coinbase_tx);
-    txdata.extend(txs);
-    let mut block = Block {
-        header: Header {
-            version: BlockVersion::from_consensus(version),
-            prev_blockhash: prev_hex.parse()?,
-            merkle_root: TxMerkleNode::all_zeros(),
-            time: curtime,
-            bits,
-            nonce: 0,
-        },
-        txdata,
-    };
-    block.header.merkle_root = block
-        .compute_merkle_root()
-        .ok_or("block must have a merkle root")?;
-    grind_pow(&mut block.header)?;
-    Ok(block)
-}
-
-fn coinbase_script_sig(height: u32) -> ScriptBuf {
-    let mut builder = Builder::new().push_int(i64::from(height));
-    // Coinbase scriptSig must be at least two bytes (Core bad-cb-length).
-    // Heights 1..=16 encode as a single OP_N.
-    if builder.len() < 2 {
-        builder = builder.push_int(0);
-    }
-    builder.into_script()
-}
-
-fn grind_pow(header: &mut Header) -> TestResult {
-    let target = Target::from(header.bits);
-    loop {
-        if target.is_met_by(header.block_hash()) {
-            return Ok(());
-        }
-        header.nonce = header
-            .nonce
-            .checked_add(1)
-            .ok_or("nonce exhausted while grinding block")?;
-    }
-}
-
-fn required_str<'a>(value: &'a Value, key: &str) -> TestResult<&'a str> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("template missing string {key}").into())
-}
-
-fn required_u64(value: &Value, key: &str) -> TestResult<u64> {
-    let entry = value
-        .get(key)
-        .ok_or_else(|| format!("template missing {key}"))?;
-    entry
-        .as_u64()
-        .or_else(|| entry.as_i64().and_then(|n| u64::try_from(n).ok()))
-        .ok_or_else(|| format!("template field {key} is not an integer: {entry}").into())
-}
-
-fn basic_token() -> String {
-    encode_base64(format!("{RPC_USER}:{RPC_PASSWORD}").as_bytes())
-}
-
-fn encode_base64(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3).saturating_mul(4));
-    for chunk in input.chunks(3) {
-        let byte0 = chunk[0];
-        let byte1 = chunk.get(1).copied().unwrap_or(0);
-        let byte2 = chunk.get(2).copied().unwrap_or(0);
-        out.push(char::from(ALPHABET[usize::from(byte0 >> 2)]));
-        out.push(char::from(
-            ALPHABET[usize::from(((byte0 & 0x03) << 4) | (byte1 >> 4))],
-        ));
-        if chunk.len() > 1 {
-            out.push(char::from(
-                ALPHABET[usize::from(((byte1 & 0x0f) << 2) | (byte2 >> 6))],
-            ));
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(char::from(ALPHABET[usize::from(byte2 & 0x3f)]));
-        } else {
-            out.push('=');
-        }
-    }
-    out
-}
-
-fn read_http_response(
-    reader: &mut BufReader<TcpStream>,
-    status_line: &str,
-) -> TestResult<HttpResponse> {
-    let status = status_line
-        .split_whitespace()
-        .nth(1)
-        .ok_or_else(|| format!("invalid HTTP status line: {status_line}"))?
-        .parse::<u16>()?;
-    let mut content_length = None;
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        if line == "\r\n" || line == "\n" || line.is_empty() {
-            break;
-        }
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("content-length") {
-            content_length = Some(value.trim().parse::<usize>()?);
-        }
-    }
-    let length = content_length.ok_or("response missing Content-Length")?;
-    let mut body = vec![0_u8; length];
-    reader.read_exact(&mut body)?;
-    Ok(HttpResponse { status, body })
 }

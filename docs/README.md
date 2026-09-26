@@ -26,7 +26,7 @@ owns format changes. Detailed admission and peer matrices live in
 [mempool policy](policies/mempool-policy.md) and
 [P2P compatibility](policies/p2p-compatibility.md).
 
-[core-compat.toml](api/core-compat.toml) is a machine-consumed *reference*
+[core-compat.toml](../crates/rpc/core-compat.toml) is a machine-consumed *reference*
 input: it pins the Core identities the gates validate and records
 admission-profile evidence. The compatibility claim for every RPC, REST,
 and ZMQ surface lives in `crates/rpc/src/registry.rs`, the single owner.

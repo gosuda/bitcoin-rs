@@ -30,8 +30,8 @@ Owners:
 
 ### `VAL-02`: Native interpreter is the complete portable engine
 
-- With `kernel` off, `Interpreter::execute` / `execute_with_prevouts` in
-  `crates/script/src/interpreter.rs` verify every consensus spend class:
+- With `kernel` off, `Interpreter::execute_with_prevouts` in
+  `crates/script/src/interpreter.rs` verifies every consensus spend class:
   legacy and P2SH through `eval::eval_script`, SegWit v0 through BIP143,
   Taproot key-path and script-path through local BIP341/BIP342.
 - `crates/consensus/src/verify_tx.rs` routes that path through
