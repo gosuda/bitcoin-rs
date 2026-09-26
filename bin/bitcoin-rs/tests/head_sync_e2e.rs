@@ -82,7 +82,7 @@ impl LivePeer {
             stripped_served: 0,
             dropped: false,
         };
-        let services = ServiceFlags::WITNESS;
+        let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
         let mut version = VersionMessage::new(
             services,
             i64::try_from(
