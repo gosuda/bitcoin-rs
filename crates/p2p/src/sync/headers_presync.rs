@@ -292,7 +292,7 @@ impl HeadersSyncState {
         params: HeadersSyncParams,
         salt: [u8; 16],
     ) -> Self {
-        debug_assert!(
+        assert!(
             params.commitment_period > 0,
             "commitment period must be nonzero"
         );
