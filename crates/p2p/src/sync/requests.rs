@@ -12,6 +12,8 @@ use crate::Message;
 use crate::connection::PeerSource;
 use crate::download_window::BlockDownloadPolicy;
 use crate::download_window::SyncPeer;
+use crate::download_window::servable_floor;
+use crate::download_window::serves_requested_height;
 use crate::download_window::statically_fanout_eligible;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
@@ -152,6 +154,22 @@ impl BlockSync {
             return GetdataRequestOutcome::default();
         };
 
+        // The service clause that gates tick-time selection applies here
+        // too: header-drain fetches and stripe retries reach this function
+        // without passing the selector, so the gate is enforced at the one
+        // path every body request takes (net_processing.cpp:6521-6525).
+        let Some(info) = self.peer_table.info_of(source.addr) else {
+            return GetdataRequestOutcome::default();
+        };
+        let policy = BlockDownloadPolicy {
+            ibd: Arc::clone(&self.ibd),
+            network: self.chain.network(),
+            requested_height: required.height,
+        };
+        if !serves_requested_height(&info, &policy) {
+            return GetdataRequestOutcome::default();
+        }
+        let servable_floor = servable_floor(&info, &policy);
         let tree = self.chain.block_tree();
         let request = {
             let mut scheduler = self.scheduler.lock();
@@ -163,6 +181,7 @@ impl BlockSync {
                 chain_tip,
                 required.height,
                 peer_best_height,
+                servable_floor,
                 &tree,
                 now,
             )
