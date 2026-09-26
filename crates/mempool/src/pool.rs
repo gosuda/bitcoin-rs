@@ -717,9 +717,10 @@ impl Mempool {
     /// against the current chain; `excluded` is the set an in-flight
     /// replacement removes before this entry lands.
     /// POST: the returned prepared insert commits without further limit work.
-    /// INVARIANT: under [`crate::LimitEnforcement::Deferred`] the cluster limits are
-    /// skipped. A reorg re-admission restores a cluster the pool already held,
-    /// so re-measuring it is not a policy decision about this transaction.
+    /// INVARIANT: the cluster limits run under every enforcement mode — Core
+    /// does not let `bypassLimits` skip `CalculateMemPoolAncestors`; what a
+    /// deferred re-admission skips is the min-relay floor below, because Core
+    /// skips `GetMinFee` on the same path.
     pub(crate) fn validate_insert(
         &self,
         mut entry: MempoolEntry,
@@ -734,7 +735,7 @@ impl Mempool {
         }
         let required = crate::rbf::required_fee(min_rate, entry.vsize)
             .map_err(|_| PolicyError::FeeArithmetic)?;
-        if entry.modified_fee() < required {
+        if enforcement == crate::rbf::LimitEnforcement::Full && entry.modified_fee() < required {
             let modified_rate = entry.modified_fee() * 1_000 / i128::from(entry.vsize);
             return Err(PolicyError::BelowMinRelayFee {
                 tx_rate: u64::try_from(modified_rate).unwrap_or(0),
@@ -757,9 +758,7 @@ impl Mempool {
         }
 
         let ancestors = self.ancestor_ids_for_tx(&entry.tx);
-        if enforcement == crate::rbf::LimitEnforcement::Full {
-            self.check_cluster_limits(&entry.tx, entry.policy_weight(), excluded)?;
-        }
+        self.check_cluster_limits(&entry.tx, entry.policy_weight(), excluded)?;
 
         if excluded.is_empty() && u32::try_from(self.entries.vacant_key()).is_err() {
             return Err(MempoolError::TooManyEntries);

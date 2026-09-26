@@ -216,12 +216,12 @@ impl ReplacementInputs {
     /// The potentially expensive graph solver runs over owned facts, with
     /// no pool guard held. The returned plan can only commit at its stamp.
     ///
-    /// INVARIANT: under [`LimitEnforcement::Deferred`] neither the projected
-    /// cluster limits nor the per-acceptance size trim is applied. Core's
-    /// `bypassLimits` re-acceptance runs the same skip: a disconnected
-    /// transaction's cluster is the one the pool already held, and trimming
-    /// per admission would shed the very family the walk is rebuilding. The
-    /// trim runs once over the settled pool instead.
+    /// INVARIANT: under [`LimitEnforcement::Deferred`] the per-acceptance
+    /// size trim is not applied — a trim during the walk would shed a parent
+    /// before the child that spends it is re-admitted, and one trim runs
+    /// over the settled pool instead (Core bounds the pool once the new
+    /// branch is active). The projected cluster limits still apply: Core's
+    /// `bypassLimits` path never skips `CalculateMemPoolAncestors`.
     pub(crate) fn verify(self) -> Result<PreparedPoolChange, RbfError> {
         let Some((before_graph, after_graph)) = self.graphs else {
             return Ok(PreparedPoolChange {
@@ -232,9 +232,7 @@ impl ReplacementInputs {
                 fee_estimation: self.fee_estimation,
             });
         };
-        if self.enforcement == LimitEnforcement::Full {
-            after_graph.check_limits(self.limits)?;
-        }
+        after_graph.check_limits(self.limits)?;
         let needs_trim = self.enforcement == LimitEnforcement::Full
             && self.max_vsize > 0
             && self.projected_vsize > self.max_vsize;
@@ -426,8 +424,12 @@ impl Mempool {
             .checked_sub(removed_vsize)
             .and_then(|size| size.checked_add(u64::from(entry.vsize)))
             .ok_or(RbfError::ArithmeticOverflow)?;
-        let include_all =
-            self.limits.max_total_bytes > 0 && projected_vsize > self.limits.max_total_bytes;
+        // The whole-pool projection exists to feed the size trim; a deferred
+        // admission defers that trim to settlement, so it only ever needs the
+        // affected-cluster graph that `check_limits` reads.
+        let include_all = enforcement == LimitEnforcement::Full
+            && self.limits.max_total_bytes > 0
+            && projected_vsize > self.limits.max_total_bytes;
         let graphs = if conflicts.is_empty() && !include_all {
             None
         } else {

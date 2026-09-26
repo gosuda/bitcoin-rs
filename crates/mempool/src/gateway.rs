@@ -772,7 +772,7 @@ impl MempoolGateway {
                 fence,
                 None,
             )?;
-            Self::prepare_admission(&pool, request, AdmissionMode::Single)
+            Self::prepare_admission(&pool, request, AdmissionMode::Single, fence)
         };
         prepared.verify(request);
 
@@ -885,6 +885,7 @@ impl MempoolGateway {
         pool: &Mempool,
         request: &AdmissionRequest,
         mode: AdmissionMode,
+        fence: crate::admission::AdmissionFence,
     ) -> PreparedAdmission {
         let policy = pool.policy_snapshot();
         let chain = PrevoutMap(&request.prevouts);
@@ -920,18 +921,19 @@ impl MempoolGateway {
         }
         // Core re-admits a disconnected transaction with `bypassLimits = true`
         // on `AcceptToMemoryPool` (validation.cpp), which skips the
-        // `GetMinFee()` floor and the mempool size limit. The transaction
-        // already passed every one of those gates on the way in; re-running
-        // them against a pool the reorg itself just changed rejects relay for
-        // reasons that have nothing to do with the transaction. `Deferred` is
-        // that bypass: the fee floor and the ephemeral-parent rule are skipped
-        // here, the cluster and per-acceptance trim gates are skipped
-        // downstream, and one size trim runs at settlement.
-        let enforcement = match request.origin {
-            AdmissionOrigin::Reorg => LimitEnforcement::Deferred,
-            AdmissionOrigin::Rpc | AdmissionOrigin::Peer(_) | AdmissionOrigin::Block => {
-                LimitEnforcement::Full
+        // `GetMinFee()` floor and the mempool size limit while ancestor
+        // topology, TRUC, and ephemeral-spend checks still run. `Deferred` is
+        // that bypass: the fee floor is skipped here and the per-acceptance
+        // size trim downstream, with one size trim at settlement instead.
+        // It derives from the chain-change fence, not the caller-declared
+        // origin: `AdmissionOrigin::Reorg` is public metadata, so only a
+        // submission that actually runs under `AdmissionFence::ChainChange`
+        // may defer — anything else enforces in full.
+        let enforcement = match (request.origin, fence) {
+            (AdmissionOrigin::Reorg, crate::admission::AdmissionFence::ChainChange(_)) => {
+                LimitEnforcement::Deferred
             }
+            _ => LimitEnforcement::Full,
         };
         let deferred = enforcement == LimitEnforcement::Deferred;
         let floor = if deferred {
@@ -1014,16 +1016,12 @@ impl MempoolGateway {
             // Reorg re-admissions must not double-count the estimator: the
             // transaction already spent time in the pool before disconnect.
             let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
-            // Under Deferred the TRUC topology rules are not re-run: the
-            // transaction already satisfied them before the disconnect, so
-            // only its direct conflicts are collected, the way Core's
-            // `bypassLimits` re-acceptance never re-runs policy the
-            // transaction did not cause.
-            let conflict_set = if deferred {
-                Ok((pool.conflicts_for(&request.tx), false))
-            } else {
-                pool.truc_conflicts(&request.tx, prepared.fact.vsize, true)
-            };
+            // Core's `bypassLimits` re-acceptance still runs
+            // `SingleTRUCChecks` (validation.cpp): the pool the disconnect
+            // changed decides the topology now, so the TRUC conflict walk —
+            // which also returns the direct conflicts the BIP125 fee rules
+            // need — applies under Deferred exactly as under Full.
+            let conflict_set = pool.truc_conflicts(&request.tx, prepared.fact.vsize, true);
             let captured = conflict_set.and_then(|(conflicts, sibling_eviction)| {
                 let entry = MempoolEntry::new(
                     Arc::clone(&request.tx),
@@ -1055,12 +1053,11 @@ impl MempoolGateway {
                     prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
                 }
             }
-            // Core's `bypassLimits` re-acceptance never revisits the
-            // ephemeral-parent rule: the parent was in the pool when this
-            // transaction was first accepted, so the relationship is already
-            // established and the disconnect walk re-admits parents first.
-            if !deferred
-                && prepared.rejection.is_none()
+            // Core's `CheckEphemeralSpends` is not gated on `bypassLimits`:
+            // a disconnected spend of ephemeral dust that no longer has its
+            // parent in the pool is refused on re-acceptance as on first
+            // admission.
+            if prepared.rejection.is_none()
                 && crate::package::missing_ephemeral_spends(
                     pool,
                     core::slice::from_ref(request.tx.as_ref()),
@@ -2709,7 +2706,12 @@ mod tests {
         let request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
         let prepared = {
             let pool = gateway.read();
-            MempoolGateway::prepare_admission(&pool, &request, AdmissionMode::Single)
+            MempoolGateway::prepare_admission(
+                &pool,
+                &request,
+                AdmissionMode::Single,
+                crate::admission::AdmissionFence::Stable,
+            )
         };
 
         // The overlay moves the fee-delta sequence alone.
