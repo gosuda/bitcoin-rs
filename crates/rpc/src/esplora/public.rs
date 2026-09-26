@@ -589,9 +589,8 @@ pub(super) fn history(
             .position(|entry| entry.record.txid.to_string() == x)
             .map(|n| n + 1)
     });
-    if last.is_some() && start.is_none() {
-        return not_found();
-    }
+    // API-09: only an exact known lowercase txid advances the page. Unknown
+    // or noncanonical cursors restart, including links made stale by a reorg.
     let out = if include_mempool {
         activity
             .mempool
