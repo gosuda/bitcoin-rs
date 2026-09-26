@@ -1470,9 +1470,6 @@ mod tests {
             _ => (false, true),
         };
         let mut peer = ready_peer();
-        if local_requested {
-            peer.wtxid_relay.mark_local_advertised();
-        }
         if remote_requested {
             peer.wtxid_relay.mark_peer_supported();
         }
