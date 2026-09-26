@@ -186,6 +186,10 @@ fn bench_cmpctblock(txs: &[Tx], nonce: u64) -> CmpctBlock {
 /// a resident mempool and the verified completion that delivers the block.
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_compact_reconstruction(c: &mut Criterion) {
+    use bitcoin::bip152::BlockTransactions;
+    use bitcoin::p2p::message_compact_blocks::BlockTxn;
+    use bitcoin_rs_p2p::compact_blocks::Outcome;
+
     let mut group = c.benchmark_group("compact_reconstruction");
     for (block_txs, pool_txs, missing) in [(100_usize, 5_000_usize, 0_usize), (100, 5_000, 5)] {
         let body: Vec<Tx> = (1..=u32::try_from(block_txs).expect("block size fits u32"))
@@ -201,15 +205,39 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
         pool.extend(body.iter().skip(missing).cloned());
         let hints = BenchHints::new(pool);
         let cmpct = bench_cmpctblock(&body, 0x1234);
-        // Fixture bridging is untimed: the timed closure only selects the
-        // transactions the request names.
-        let bridged_body: Vec<bitcoin::Transaction> = body
-            .iter()
-            .map(|tx| {
-                bitcoin::consensus::encode::deserialize(&consensus_bytes(tx))
-                    .expect("fixture tx bridges to the registry type")
-            })
-            .collect();
+        // The completion half of the round trip: run the reconstruction once
+        // outside the timed loop and answer the `RequestMissing` reply it
+        // asks for, so `missing` cases measure the verified completion too.
+        let reply = match Reconstruction::new().receive_cmpctblock(
+            &cmpct,
+            COMPACT_BLOCK_VERSION,
+            &hints,
+            Instant::now(),
+        ) {
+            Outcome::RequestMissing(reply) => Some(reply),
+            outcome => {
+                assert!(missing == 0, "a missing fixture must request: {outcome:?}");
+                None
+            }
+        };
+        let blocktxn = reply.map(|reply| BlockTxn {
+            transactions: BlockTransactions {
+                block_hash: reply.txs_request.block_hash,
+                transactions: reply
+                    .txs_request
+                    .indexes
+                    .iter()
+                    .map(|index| {
+                        let index = usize::try_from(*index).expect("index fits usize");
+                        let native = &body[index];
+                        bitcoin::consensus::encode::deserialize::<bitcoin::Transaction>(
+                            &consensus_bytes(native),
+                        )
+                        .expect("fixture transaction bridges")
+                    })
+                    .collect(),
+            },
+        });
         let label = format!("block_{block_txs}_pool_{pool_txs}_missing_{missing}");
         group.bench_function(label, |b| {
             b.iter(|| {
@@ -220,32 +248,12 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
                     black_box(&hints),
                     Instant::now(),
                 );
-                // The missing case keeps going through the `blocktxn`
-                // response, so the timed path covers the whole round trip.
-                let outcome = match outcome {
-                    Outcome::RequestMissing(request) => {
-                        let transactions: Vec<bitcoin::Transaction> = request
-                            .txs_request
-                            .indexes
-                            .iter()
-                            .map(|index| {
-                                bridged_body
-                                    .get(usize::try_from(*index).expect("index fits usize"))
-                                    .expect("requested index is in the block")
-                                    .clone()
-                            })
-                            .collect();
-                        let txn = BlockTxn {
-                            transactions: BlockTransactions {
-                                block_hash: request.txs_request.block_hash,
-                                transactions,
-                            },
-                        };
-                        reconstruction.receive_blocktxn(&txn, Instant::now())
+                match (outcome, &blocktxn) {
+                    (Outcome::RequestMissing(_), Some(response)) => {
+                        black_box(reconstruction.receive_blocktxn(response, Instant::now()))
                     }
-                    outcome => outcome,
-                };
-                black_box(outcome);
+                    (outcome, _) => black_box(outcome),
+                }
             });
         });
     }

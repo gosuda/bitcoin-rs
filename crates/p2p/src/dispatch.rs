@@ -853,6 +853,7 @@ mod tests {
             fn block_transactions(
                 &self,
                 _request: &BlockTransactionsRequest,
+                _headroom: &dyn Fn() -> bool,
             ) -> Result<Option<Message>, PeerError> {
                 // A deep block would be answered with the whole payload; a
                 // shallow malformed list would be refused inside the real

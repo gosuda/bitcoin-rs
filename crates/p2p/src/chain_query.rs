@@ -970,10 +970,13 @@ mod tests {
         let deep_block = block_at(&headers, 0)?;
         let query = chain_at(&headers, 0, &deep_block)?;
 
-        let deep = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
-            block_hash: wire_hash(deep_block.block_hash()),
-            indexes: vec![3, 2],
-        })?;
+        let deep = query.block_transactions(
+            &bitcoin::bip152::BlockTransactionsRequest {
+                block_hash: wire_hash(deep_block.block_hash()),
+                indexes: vec![3, 2],
+            },
+            &|| true,
+        )?;
         let Some(Message::BlockPayload(payload)) = &deep else {
             panic!("a deep malformed request is answered with the whole block, got {deep:?}");
         };
@@ -983,10 +986,13 @@ mod tests {
         let shallow_query = chain_at(&headers, 11, &shallow_block)?;
         for indexes in [Vec::new(), vec![1, 1]] {
             let refused =
-                shallow_query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
-                    block_hash: wire_hash(shallow_block.block_hash()),
-                    indexes,
-                });
+                shallow_query.block_transactions(
+                    &bitcoin::bip152::BlockTransactionsRequest {
+                        block_hash: wire_hash(shallow_block.block_hash()),
+                        indexes,
+                    },
+                    &|| true,
+                );
             assert!(
                 matches!(refused, Err(PeerError::Protocol(_))),
                 "a shallow malformed list is a protocol disconnect, got {refused:?}"
