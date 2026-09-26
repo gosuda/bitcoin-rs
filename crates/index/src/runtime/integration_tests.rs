@@ -167,15 +167,12 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
 
     let (open_tx, open_rx) = crossbeam_channel::bounded::<()>(0);
     let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(0);
-    let (opened_tx, opened_rx) = crossbeam_channel::bounded::<()>(0);
     let mut inputs = build_worker_inputs(dir.path(), 43);
     let open_store = Arc::clone(&inputs.spec.open_store);
     inputs.spec.open_store = Arc::new(move |dir| {
         let _ = entered_tx.send(());
         let _ = open_rx.recv();
-        let result = open_store(dir);
-        let _ = opened_tx.send(());
-        result
+        open_store(dir)
     });
 
     let worker = DerivedIndexWorker::spawn_with_open(
@@ -221,12 +218,11 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
     assert!(NAMESPACE_REGISTRY.is_poisoned(&dir.path().join("txindex")));
     worker.join();
 
-    // Release the parked opener and wait for the detached thread to leave
-    // the tempdir before test scope removes it.
-    drop(open_tx);
-    opened_rx
-        .recv_timeout(std::time::Duration::from_secs(30))
-        .expect("detached open thread finished with the store");
+    // The detached opener's completion is not observable (its handle is
+    // dropped at detach), so it is never released: leaking the sender parks
+    // it on `open_rx` forever, which keeps it from reaching the real
+    // `open_store` on a tempdir the test scope is about to remove.
+    std::mem::forget(open_tx);
 }
 
 #[test]
