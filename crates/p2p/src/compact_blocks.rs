@@ -94,9 +94,6 @@ struct Pending {
     filled: Vec<Option<Tx>>,
     /// Absolute slot indexes still missing, ascending.
     missing: Vec<u64>,
-    /// Number of short IDs the message declared for the non-prefilled slots;
-    /// the accounting [`complete_block`] re-checks before delivery.
-    short_id_count: usize,
     /// Approximate retained bytes (prefill bodies + short IDs + filled bodies).
     retained_bytes: usize,
     deadline: Instant,
@@ -176,7 +173,7 @@ impl Reconstruction {
             .map(|(index, _)| u64::try_from(index).unwrap_or(u64::MAX))
             .collect();
         if missing.is_empty() {
-            return match complete_block(header, filled, compact.short_ids.len()) {
+            return match complete_block(header, filled) {
                 Ok(block) => Outcome::Complete(block),
                 Err(()) => Outcome::Fallback(hash),
             };
@@ -190,7 +187,6 @@ impl Reconstruction {
                 header,
                 filled,
                 missing: missing.clone(),
-                short_id_count: compact.short_ids.len(),
                 retained_bytes,
                 deadline: now + PENDING_DEADLINE,
                 fallback: false,
@@ -239,7 +235,7 @@ impl Reconstruction {
             entry.filled[slot] = Some(body);
         }
         let filled = std::mem::take(&mut entry.filled);
-        let Ok(block) = complete_block(entry.header, filled, entry.short_id_count) else {
+        let Ok(block) = complete_block(entry.header, filled) else {
             entry.fallback = true;
             return Outcome::Fallback(hash);
         };
@@ -263,10 +259,13 @@ impl Reconstruction {
 /// PRE: `filled` holds the declared prefill plus one slot per declared short
 /// ID for one reconstruction whose transaction request, if any, has been
 /// answered.
-/// POST: return a block only when every slot exists, no more slots than
-/// `short_id_count` plus the prefills were declared, the transaction-ID
-/// merkle root of the assembled body equals `header.merkle_root`, and the
-/// transaction-ID tree is not mutated; otherwise return `Err`.
+/// POST: return a block only when every slot holds a body, the
+/// transaction-ID merkle root of the assembled body equals
+/// `header.merkle_root`, and the transaction-ID tree is not mutated;
+/// otherwise return `Err`. The slot count needs no re-check here: the vector
+/// is sized from the declared short IDs and prefills, `place_prefills`
+/// rejects a prefill outside the declared slots, and `fill_from_hints`
+/// rejects a short-ID count that does not match the unfilled slots.
 /// INVARIANT: no unverified compact reconstruction reaches
 /// [`Outcome::Complete`]. The root check alone cannot detect the
 /// duplicate-final-transaction collision (CVE-2012-2459): `[a, b, c]` and
@@ -274,12 +273,8 @@ impl Reconstruction {
 /// mutated tree and the caller answers with the same-peer full-block
 /// fallback (Core 31.1 `READ_STATUS_FAILED` before delivery,
 /// `blockencodings.cpp:207-219`).
-fn complete_block(
-    header: Header,
-    filled: Vec<Option<Tx>>,
-    short_id_count: usize,
-) -> Result<Block, ()> {
-    if filled.iter().any(Option::is_none) || filled.len() < short_id_count {
+fn complete_block(header: Header, filled: Vec<Option<Tx>>) -> Result<Block, ()> {
+    if filled.iter().any(Option::is_none) {
         return Err(());
     }
     let txs: Vec<Tx> = filled.into_iter().flatten().collect();
