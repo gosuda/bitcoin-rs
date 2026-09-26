@@ -1653,7 +1653,7 @@ mod tests {
         // the route emits, so the oldest pair drops out. The first four fillers
         // join the funder and spender in the 10 sat/vB bin, so six entries merge
         // into one histogram bucket.
-        for index in 0..8_u8 {
+        for index in 0..10_u8 {
             let vsize = 100 + u32::from(index) * 10;
             seeds.push(Seed {
                 transaction: paying_transaction(
