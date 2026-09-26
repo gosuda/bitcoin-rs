@@ -47,11 +47,15 @@ pub(crate) struct OrphanRetryClaim {
 }
 
 /// Per-peer consumption of orphan residency, charged once per announcement.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct PeerUsage {
     announcements: usize,
     weight: u64,
     latency: u64,
+    /// This peer's announcements in the order it made them. A body's global
+    /// FIFO slot predates every later announcer, so per-peer eviction order
+    /// cannot ride on shared insertion order.
+    announced: VecDeque<Wtxid>,
 }
 
 /// One peer's allowance for each resource an announcement consumes. A peer at
@@ -95,7 +99,6 @@ impl PeerUsage {
 #[derive(Debug)]
 pub(crate) struct OrphanPool {
     entries: HashMap<Wtxid, HeldOrphan>,
-    order: VecDeque<Wtxid>,
     by_parent: HashMap<Txid, HashSet<Wtxid>>,
     ready: VecDeque<OrphanRetryClaim>,
     ready_ids: HashSet<Wtxid>,
@@ -126,7 +129,6 @@ impl OrphanPool {
     ) -> Self {
         Self {
             entries: HashMap::new(),
-            order: VecDeque::new(),
             by_parent: HashMap::new(),
             ready: VecDeque::new(),
             ready_ids: HashSet::new(),
@@ -180,7 +182,7 @@ impl OrphanPool {
             }
             (held.tx.weight(), Self::latency_score(&held.tx))
         };
-        self.charge(&announcer, charge.0, charge.1);
+        self.charge(&announcer, wtxid, charge.0, charge.1);
         true
     }
 
@@ -200,7 +202,6 @@ impl OrphanPool {
         if self.entries.contains_key(&wtxid) {
             self.add_announcer(wtxid, announcer);
         } else {
-            self.order.push_back(wtxid);
             for input in &tx.inputs {
                 let prevout = input.previous_output;
                 if !prevout.is_null() {
@@ -221,7 +222,7 @@ impl OrphanPool {
                     arrival_time: time,
                 },
             );
-            self.charge(&announcer, weight, latency);
+            self.charge(&announcer, wtxid, weight, latency);
         }
         self.evict_to_limits();
     }
@@ -231,7 +232,6 @@ impl OrphanPool {
     pub(crate) fn remove(&mut self, wtxid: Wtxid) -> Option<HeldOrphan> {
         let entry = self.entries.remove(&wtxid)?;
         self.total_weight = self.total_weight.saturating_sub(entry.tx.weight());
-        self.order.retain(|id| *id != wtxid);
         self.unindex_parents(wtxid, &entry.tx);
         let weight = entry.tx.weight();
         let latency = Self::latency_score(&entry.tx);
@@ -432,13 +432,18 @@ impl OrphanPool {
             .map(|(peer, _)| *peer)
     }
 
-    /// Drops the victim's oldest announcement, preferring work that is not
-    /// ready for reconsideration.
+    /// Drops the victim's oldest announcement in the order the victim made
+    /// it, preferring work that is not ready for reconsideration. Entries the
+    /// victim no longer announces are pruned here, so the scan stays
+    /// proportional to the victim's live announcements.
     fn trim_oldest_announcement(&mut self, victim: PeerToken) -> bool {
         let target = {
             let mut ready_candidate: Option<Wtxid> = None;
             let mut found = None;
-            for wtxid in &self.order {
+            let Some(usage) = self.peer_usage.get(&victim) else {
+                return false;
+            };
+            for wtxid in &usage.announced {
                 let Some(held) = self.entries.get(wtxid) else {
                     continue;
                 };
@@ -458,14 +463,21 @@ impl OrphanPool {
             return false;
         };
         self.remove_announcer(wtxid, victim);
+        if let Some(usage) = self.peer_usage.get_mut(&victim) {
+            let entries = &self.entries;
+            usage
+                .announced
+                .retain(|id| entries.get(id).is_some_and(|h| h.announcers.contains(&victim)));
+        }
         true
     }
 
-    fn charge(&mut self, announcer: &PeerToken, weight: u64, latency: u64) {
+    fn charge(&mut self, announcer: &PeerToken, wtxid: Wtxid, weight: u64, latency: u64) {
         let usage = self.peer_usage.entry(*announcer).or_default();
         usage.announcements += 1;
         usage.weight = usage.weight.saturating_add(weight);
         usage.latency = usage.latency.saturating_add(latency);
+        usage.announced.push_back(wtxid);
     }
 
     fn refund(&mut self, announcer: &PeerToken, weight: u64, latency: u64) {
@@ -646,11 +658,10 @@ mod tests {
         pool.parent_ready(tx.inputs[0].previous_output.txid);
         assert!(pool.take_ready().is_empty());
         assert!(pool.by_parent.is_empty());
-        assert!(pool.order.is_empty());
         assert!(pool.peer_usage.is_empty());
     }
     #[test]
-    fn witness_refresh_keeps_fifo_position_and_announcer_set() {
+    fn witness_refresh_keeps_announce_order_and_announcer_set() {
         let parent = tx(9, Txid::default()).txid();
         let mut pool = OrphanPool::new(3);
         let first = tx(1, parent);
@@ -666,7 +677,7 @@ mod tests {
         assert!(pool.get(first.wtxid()).is_some());
         assert!(pool.get(changed.wtxid()).is_some());
         // Re-announcing the same body adds an announcer and changes nothing
-        // else: the FIFO position and the first-seen time stay put.
+        // else: each peer's announce order and the first-seen time stay put.
         pool.insert(Arc::clone(&first), source(3), 4);
         assert_eq!(pool.len(), 3);
         assert_eq!(pool.total_weight(), changed.weight() + base_weight * 2);
@@ -791,7 +802,6 @@ mod tests {
         assert_eq!(pool.total_weight(), 0);
         assert!(pool.entries.is_empty());
         assert!(pool.by_parent.is_empty());
-        assert!(pool.order.is_empty());
         assert!(pool.peer_usage.is_empty());
     }
 

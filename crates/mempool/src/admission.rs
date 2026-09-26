@@ -635,8 +635,15 @@ impl MempoolGateway {
         for (held, announcer) in ready {
             let txid = held.tx.txid();
             let wtxid = held.tx.wtxid();
-            // An intervening eviction or a lost announcer retires this claim.
+            // An intervening eviction retires this claim; a lost announcer
+            // does not. While the body is still resident under another live
+            // announcer it remains eligible — the drained ready set fired
+            // once, so re-queue it now or it would idle until expiry.
             if !self.lifecycle.lock().orphans.is_current(&held, &announcer) {
+                let mut lifecycle = self.lifecycle.lock();
+                if lifecycle.orphans.get(wtxid).is_some() {
+                    lifecycle.orphans.mark_ready(wtxid, announcer);
+                }
                 continue;
             }
             let result = self.submit_transaction_claimed(
