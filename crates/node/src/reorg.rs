@@ -77,6 +77,32 @@ impl ReorgObserver for NodeReorgObserver<'_> {
     }
 }
 
+/// Trims the pool back to its configured ceiling after a reorg settled.
+///
+/// PRE: the disconnect walk has committed and the resident sweep has run, so
+/// the pool holds exactly the settled resident set.
+/// POST: the pool is at or below its `max_total_bytes` ceiling, or the trim
+/// failed and settlement must be treated as incomplete. A pool already inside
+/// the ceiling is left untouched: no write lock, no empty mutation batch.
+/// INVARIANT: this is the only size trim one reorg performs. Each individual
+/// re-admission defers its own, so the walk cannot shed a transaction whose
+/// parent it has not committed yet. Core skips the size limit on the same
+/// re-acceptance path — `bypassLimits = true` on `AcceptToMemoryPool` — and
+/// bounds the pool once the new branch is active. Running the trim after the
+/// resident sweep keeps a transaction confirmed by that branch out of the
+/// eviction candidate set.
+fn trim_after_reorg(
+    gateway: &bitcoin_rs_mempool::MempoolGateway,
+) -> Result<(), bitcoin_rs_mempool::MempoolError> {
+    let max_bytes = gateway.max_total_bytes();
+    if max_bytes == 0 || gateway.read().total_vsize() <= max_bytes {
+        return Ok(());
+    }
+    gateway
+        .enforce_size_limit(bitcoin_rs_mempool::AdmissionOrigin::Reorg, max_bytes)
+        .map(|_| ())
+}
+
 /// Settles one reorg outcome while the mempool fence is held. A settle that
 /// disconnected nothing leaves the pool untouched: `switch_to_branch` is
 /// polled while a heavier branch is still downloading, and the resident
@@ -98,6 +124,7 @@ fn settle_node_reorg(
                 .take()
                 .is_some_and(|change| change.finish().is_err());
         }
+        let mut settle_failed = false;
         if let (Some(change), Some(gateway)) = (
             mempool_change.as_ref(),
             observer.followers.mempool_gateway(),
@@ -108,10 +135,10 @@ fn settle_node_reorg(
                 handles.block_tree(),
                 handles.network(),
             );
-            if !outcome
+            let reconsidered = !outcome
                 .as_ref()
-                .is_err_and(ReorgError::reconsideration_failed)
-            {
+                .is_err_and(ReorgError::reconsideration_failed);
+            if reconsidered {
                 let _ = gateway.reconsider_disconnected(
                     change,
                     &chain,
@@ -119,13 +146,20 @@ fn settle_node_reorg(
                     observer.disconnected.drain(..),
                 );
             }
-            if gateway.remove_for_reorg(change, &chain).is_err() {
-                return true;
+            // A failed sweep or trim marks settlement incomplete — but the
+            // fence must still close below: leaving the guard's odd
+            // generation live would refuse every stable admission until
+            // restart recovery.
+            if gateway.remove_for_reorg(change, &chain).is_err()
+                || (reconsidered && trim_after_reorg(gateway).is_err())
+            {
+                settle_failed = true;
             }
         }
-        mempool_change
-            .take()
-            .is_some_and(|change| change.finish().is_err())
+        settle_failed
+            || mempool_change
+                .take()
+                .is_some_and(|change| change.finish().is_err())
     })();
     if settlement_failed {
         return Err(ReorgError::TransitionSettlement {

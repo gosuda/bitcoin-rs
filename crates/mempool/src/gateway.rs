@@ -344,7 +344,7 @@ fn rejection_scope(tx: &Tx) -> RejectScope {
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::orphan::RejectScope;
 use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
-use crate::rbf::{RbfError, ReplacementCandidate};
+use crate::rbf::{LimitEnforcement, RbfError, ReplacementCandidate};
 
 static REGISTRY: LazyLock<Mutex<Vec<Weak<MempoolGateway>>>> =
     LazyLock::new(|| Mutex::new(alloc::vec::Vec::new()));
@@ -695,7 +695,11 @@ impl MempoolGateway {
             let inputs = self
                 .pool
                 .read()
-                .capture_insertion(entry.clone(), crate::rbf::FeeEstimation::Estimate)
+                .capture_insertion(
+                    entry.clone(),
+                    crate::rbf::FeeEstimation::Estimate,
+                    crate::rbf::LimitEnforcement::Full,
+                )
                 .map_err(RbfError::into_pool_error)?;
             let plan = inputs.verify().map_err(RbfError::into_pool_error)?;
             let result = self.commit(origin, move |pool| {
@@ -768,7 +772,7 @@ impl MempoolGateway {
                 fence,
                 None,
             )?;
-            Self::prepare_admission(&pool, request, AdmissionMode::Single)
+            Self::prepare_admission(&pool, request, AdmissionMode::Single, fence)
         };
         prepared.verify(request);
 
@@ -881,6 +885,7 @@ impl MempoolGateway {
         pool: &Mempool,
         request: &AdmissionRequest,
         mode: AdmissionMode,
+        fence: crate::admission::AdmissionFence,
     ) -> PreparedAdmission {
         let policy = pool.policy_snapshot();
         let chain = PrevoutMap(&request.prevouts);
@@ -914,10 +919,31 @@ impl MempoolGateway {
                 context.sigop_cost,
             ));
         }
-        let floor = crate::eviction::mempool_min_fee_sat_per_kvb(
-            pool,
-            policy.incremental_relay_fee_sat_per_kvb,
-        );
+        // Core re-admits a disconnected transaction with `bypassLimits = true`
+        // on `AcceptToMemoryPool` (validation.cpp), which skips the
+        // `GetMinFee()` floor and the mempool size limit while ancestor
+        // topology, TRUC, and ephemeral-spend checks still run. `Deferred` is
+        // that bypass: the fee floor is skipped here and the per-acceptance
+        // size trim downstream, with one size trim at settlement instead.
+        // It derives from the chain-change fence, not the caller-declared
+        // origin: `AdmissionOrigin::Reorg` is public metadata, so only a
+        // submission that actually runs under `AdmissionFence::ChainChange`
+        // may defer — anything else enforces in full.
+        let enforcement = match (request.origin, fence) {
+            (AdmissionOrigin::Reorg, crate::admission::AdmissionFence::ChainChange(_)) => {
+                LimitEnforcement::Deferred
+            }
+            _ => LimitEnforcement::Full,
+        };
+        let deferred = enforcement == LimitEnforcement::Deferred;
+        let floor = if deferred {
+            0
+        } else {
+            crate::eviction::mempool_min_fee_sat_per_kvb(
+                pool,
+                policy.incremental_relay_fee_sat_per_kvb,
+            )
+        };
         // BIP68 is evaluated at the next block. A resolved input that is not
         // present in the confirmed metadata is an unconfirmed (mempool/package)
         // parent and is encoded as the next block.
@@ -990,38 +1016,47 @@ impl MempoolGateway {
             // Reorg re-admissions must not double-count the estimator: the
             // transaction already spent time in the pool before disconnect.
             let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
-            let captured = pool
-                .truc_conflicts(&request.tx, prepared.fact.vsize, true)
-                .and_then(|(conflicts, sibling_eviction)| {
-                    let entry = MempoolEntry::new(
-                        Arc::clone(&request.tx),
-                        prepared.fact.vsize,
-                        prepared.fact.base_fee.unwrap_or(0),
-                        request.time,
-                        request.height,
-                        prepared.fact.sigop_cost,
-                    );
-                    // The conflicts `truc_conflicts` returned decide the door,
-                    // not a second direct lookup: a v3 sibling eviction has an
-                    // empty direct set yet must pay the replacement rules.
-                    if conflicts.is_empty() {
-                        pool.capture_insertion(entry, fee_estimation)
-                    } else {
-                        pool.capture_admission(
-                            entry,
-                            conflicts,
-                            policy.incremental_relay_fee_sat_per_kvb,
-                            sibling_eviction,
-                            fee_estimation,
-                        )
-                    }
-                });
+            // Core's `bypassLimits` re-acceptance still runs
+            // `SingleTRUCChecks` (validation.cpp): the pool the disconnect
+            // changed decides the topology now, so the TRUC conflict walk —
+            // which also returns the direct conflicts the BIP125 fee rules
+            // need — applies under Deferred exactly as under Full.
+            let conflict_set = pool.truc_conflicts(&request.tx, prepared.fact.vsize, true);
+            let captured = conflict_set.and_then(|(conflicts, sibling_eviction)| {
+                let entry = MempoolEntry::new(
+                    Arc::clone(&request.tx),
+                    prepared.fact.vsize,
+                    prepared.fact.base_fee.unwrap_or(0),
+                    request.time,
+                    request.height,
+                    prepared.fact.sigop_cost,
+                );
+                // The conflict set returned above decides the door, not a
+                // second direct lookup: a v3 sibling eviction has an
+                // empty direct set yet must pay the replacement rules.
+                if conflicts.is_empty() {
+                    pool.capture_insertion(entry, fee_estimation, enforcement)
+                } else {
+                    pool.capture_admission(
+                        entry,
+                        conflicts,
+                        policy.incremental_relay_fee_sat_per_kvb,
+                        sibling_eviction,
+                        fee_estimation,
+                        enforcement,
+                    )
+                }
+            });
             match captured {
                 Ok(inputs) => prepared.replacement = ReplacementStage::Captured(inputs),
                 Err(error) => {
                     prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
                 }
             }
+            // Core's `CheckEphemeralSpends` is not gated on `bypassLimits`:
+            // a disconnected spend of ephemeral dust that no longer has its
+            // parent in the pool is refused on re-acceptance as on first
+            // admission.
             if prepared.rejection.is_none()
                 && crate::package::missing_ephemeral_spends(
                     pool,
@@ -1146,6 +1181,18 @@ impl MempoolGateway {
         self.commit_infallible(origin, |pool| {
             pool.evict_below_fee_rate(threshold_sat_per_kvb)
         })
+    }
+
+    /// The configured total-size ceiling of the underlying pool, in vbytes.
+    ///
+    /// PRE: none.
+    /// POST: the value is the pool's `max_total_bytes` at the moment of the
+    /// read; zero means unlimited. Callers pass it to
+    /// [`MempoolGateway::enforce_size_limit`] to trim to the configured limit
+    /// rather than a caller-invented target.
+    #[must_use]
+    pub fn max_total_bytes(&self) -> u64 {
+        self.pool.read().limits.max_total_bytes
     }
 
     /// Commits `pool.enforce_size_limit` and publishes its result.
@@ -2659,7 +2706,12 @@ mod tests {
         let request = admit_request(&gateway, &candidate, AdmissionOrigin::Rpc);
         let prepared = {
             let pool = gateway.read();
-            MempoolGateway::prepare_admission(&pool, &request, AdmissionMode::Single)
+            MempoolGateway::prepare_admission(
+                &pool,
+                &request,
+                AdmissionMode::Single,
+                crate::admission::AdmissionFence::Stable,
+            )
         };
 
         // The overlay moves the fee-delta sequence alone.

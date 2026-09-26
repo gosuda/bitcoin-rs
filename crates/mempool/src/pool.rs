@@ -700,17 +700,32 @@ impl Mempool {
         entry: MempoolEntry,
     ) -> Result<crate::mutation::MutationResult, MempoolError> {
         let inputs = self
-            .capture_insertion(entry, crate::rbf::FeeEstimation::Estimate)
+            .capture_insertion(
+                entry,
+                crate::rbf::FeeEstimation::Estimate,
+                crate::rbf::LimitEnforcement::Full,
+            )
             .map_err(crate::RbfError::into_pool_error)?;
         let plan = inputs.verify().map_err(crate::RbfError::into_pool_error)?;
         self.commit_pool_change(plan)
             .map_err(crate::RbfError::into_pool_error)
     }
 
+    /// Preflights one entry against the pool's structural and cluster limits.
+    ///
+    /// PRE: `entry` carries fee, vsize, and sigop accounting already resolved
+    /// against the current chain; `excluded` is the set an in-flight
+    /// replacement removes before this entry lands.
+    /// POST: the returned prepared insert commits without further limit work.
+    /// INVARIANT: the cluster limits run under every enforcement mode — Core
+    /// does not let `bypassLimits` skip `CalculateMemPoolAncestors`; what a
+    /// deferred re-admission skips is the min-relay floor below, because Core
+    /// skips `GetMinFee` on the same path.
     pub(crate) fn validate_insert(
         &self,
         mut entry: MempoolEntry,
         excluded: &HashSet<EntryId>,
+        enforcement: crate::rbf::LimitEnforcement,
     ) -> Result<PreparedInsert, MempoolError> {
         let txid = entry.txid;
         let min_rate = self.limits.min_relay_fee_sat_per_kvb;
@@ -720,7 +735,7 @@ impl Mempool {
         }
         let required = crate::rbf::required_fee(min_rate, entry.vsize)
             .map_err(|_| PolicyError::FeeArithmetic)?;
-        if entry.modified_fee() < required {
+        if enforcement == crate::rbf::LimitEnforcement::Full && entry.modified_fee() < required {
             let modified_rate = entry.modified_fee() * 1_000 / i128::from(entry.vsize);
             return Err(PolicyError::BelowMinRelayFee {
                 tx_rate: u64::try_from(modified_rate).unwrap_or(0),
@@ -6040,7 +6055,11 @@ mod graph_tests {
                             HEIGHT,
                             0,
                         );
-                        let Ok(prepared) = pool.validate_insert(entry, &excluded) else {
+                        let Ok(prepared) = pool.validate_insert(
+                            entry,
+                            &excluded,
+                            crate::rbf::LimitEnforcement::Full,
+                        ) else {
                             continue;
                         };
                         let removals = evicted
