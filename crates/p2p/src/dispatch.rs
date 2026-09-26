@@ -262,7 +262,6 @@ pub fn dispatch_inbound_full<S>(
             serve_getdata(chain, tx_inventory, compact_version, items, headroom, send)?;
         }
         Message::GetBlockTxn(request) => {
-            ensure_block_txn_indexes_valid(&request.txs_request)?;
             step(peer, message)?;
             serve_block_txn(chain, &request.txs_request, send)?;
         }
@@ -409,11 +408,14 @@ fn serve_getdata_blocks(
 }
 
 /// Answers one `getblocktxn` through the chain view and sends whatever reply
-/// it produces. PRE: the request's indexes are structurally valid. POST: a
-/// servable block gets its `blocktxn`, a block too deep for a compact answer
-/// gets the whole `block`, and an unknown, stale, or headless block — or a
-/// node with no chain view — leaves the request unanswered. INVARIANT: the
-/// dispatch boundary never learns which reply shape the chain chose.
+/// it produces. PRE: none — the chain validates shallow requests itself.
+/// POST: a servable shallow block gets its `blocktxn`, a block too deep for
+/// a compact answer gets the whole `block` whatever its index list looks
+/// like, and an unknown, stale, or headless block — or a node with no chain
+/// view — leaves the request unanswered. INVARIANT: the dispatch boundary
+/// never learns which reply shape the chain chose, so a deep request with a
+/// malformed index list still receives the block (Core 31.1
+/// `net_processing.cpp:4590-4624`).
 fn serve_block_txn(
     chain: Option<&dyn ChainQuery>,
     request: &BlockTransactionsRequest,
@@ -424,26 +426,6 @@ fn serve_block_txn(
     };
     if let Some(response) = chain.block_transactions(request)? {
         send(response)?;
-    }
-    Ok(())
-}
-
-/// Rejects a `getblocktxn` whose index list cannot name transactions: empty,
-/// or not strictly increasing.
-///
-/// PRE: the request carries decoded absolute indexes. POST: a malformed list
-/// returns `PeerError::Protocol` and the connection drops through the
-/// listener's error path. INVARIANT: a malformed list never reaches a chain
-/// query, including on a node with no chain at all — one decision at the
-/// inbound boundary (Core 31.1 `net_processing.cpp:4560-4574`).
-fn ensure_block_txn_indexes_valid(request: &BlockTransactionsRequest) -> Result<(), PeerError> {
-    if request.indexes.is_empty() {
-        return Err(PeerError::Protocol("getblocktxn with empty index list"));
-    }
-    if request.indexes.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(PeerError::Protocol(
-            "getblocktxn indexes not strictly increasing",
-        ));
     }
     Ok(())
 }
@@ -829,36 +811,63 @@ mod tests {
         Ok(())
     }
 
-    /// Refuses one `getblocktxn` index list both with a chain attached and
-    /// with none, so the boundary decision cannot depend on chain state.
-    fn assert_getblocktxn_refused(indexes: Vec<u64>) {
-        let chain = FakeChain::with_headers(2);
-        let message = Message::GetBlockTxn(bitcoin::p2p::message_compact_blocks::GetBlockTxn {
-            txs_request: BlockTransactionsRequest {
-                block_hash: bitcoin::BlockHash::from_byte_array([7; 32]),
-                indexes,
-            },
-        });
-        let view: &dyn ChainQuery = &chain;
-        for case in [Some(view), None] {
+    /// A malformed `getblocktxn` index list is refused only where the chain
+    /// decides the request is shallow: the dispatch boundary no longer
+    /// inspects it, so the serving chain below receives the request either
+    /// way.
+    #[test]
+    fn malformed_getblocktxn_reaches_the_chain_decision() -> Result<(), PeerError> {
+        struct ServingChain;
+        impl ChainQuery for ServingChain {
+            fn headers_after(
+                &self,
+                _locator_hashes: &[BlockHash],
+                _stop_hash: BlockHash,
+                _limit: usize,
+            ) -> Vec<Header> {
+                Vec::new()
+            }
+
+            fn serve_inventory_blocks(
+                &self,
+                _items: &[Inventory],
+                _compact_version: Option<u64>,
+                _headroom: &dyn Fn() -> bool,
+                _serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+            ) -> Result<InventoryServing, PeerError> {
+                Ok(InventoryServing::default())
+            }
+
+            fn block_transactions(
+                &self,
+                _request: &BlockTransactionsRequest,
+            ) -> Result<Option<Message>, PeerError> {
+                // A deep block would be answered with the whole payload; a
+                // shallow malformed list would be refused inside the real
+                // query. The boundary itself sends neither disconnect nor
+                // reply of its own.
+                Ok(None)
+            }
+        }
+
+        for indexes in [Vec::new(), vec![1, 1], vec![3, 2]] {
             let mut peer = ready_peer();
-            let outcome = dispatch_collect(&mut peer, &message, case);
+            let responses = dispatch_collect(
+                &mut peer,
+                &Message::GetBlockTxn(bitcoin::p2p::message_compact_blocks::GetBlockTxn {
+                    txs_request: BlockTransactionsRequest {
+                        block_hash: bitcoin::BlockHash::from_byte_array([7; 32]),
+                        indexes,
+                    },
+                }),
+                Some(&ServingChain),
+            )?;
             assert!(
-                matches!(outcome, Err(PeerError::Protocol(_))),
-                "a malformed getblocktxn must disconnect, got {outcome:?}",
+                responses.is_empty(),
+                "the boundary must leave the reply to the chain, got {responses:?}"
             );
         }
-    }
-
-    /// An empty or non-increasing `getblocktxn` index list is refused at the
-    /// inbound boundary, so a malformed request never reaches a chain query
-    /// and the peer is dropped through the listener's error path (Core 31.1
-    /// `net_processing.cpp:4560-4574`).
-    #[test]
-    fn invalid_getblocktxn_indexes_disconnect() {
-        assert_getblocktxn_refused(Vec::new());
-        assert_getblocktxn_refused(vec![1, 1]);
-        assert_getblocktxn_refused(vec![3, 2]);
+        Ok(())
     }
 
     /// Streaming chain fake mirroring `ActiveChainQuery`: block-typed items
