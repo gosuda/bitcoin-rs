@@ -552,6 +552,17 @@ impl PeerTable {
         infos.into_iter().map(|(_, info)| info.clone()).collect()
     }
 
+    /// Metadata of the one connection at `addr`, if it completed its
+    /// handshake. The lookup reads the table once — unlike [`Self::infos`],
+    /// it does not snapshot every peer to answer for one.
+    #[must_use]
+    pub fn info_of(&self, addr: SocketAddr) -> Option<PeerInfo> {
+        self.entries
+            .read()
+            .get(&addr)
+            .and_then(|entry| entry.info.clone())
+    }
+
     /// Snapshot of every live connection, ordered by connection identity.
     #[must_use]
     pub fn sessions(&self) -> Vec<PeerSession> {

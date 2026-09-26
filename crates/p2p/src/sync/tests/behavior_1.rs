@@ -123,8 +123,7 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
     } = SyncHarness::new(tree);
     applied_tip.store(Some(Arc::new(applied)));
     let peer = SocketAddr::from(([127, 0, 0, 1], 18_460));
-    let (tx, rx) = unbounded::<Message>();
-    peers.register(peer, PeerLease::new(tx));
+    let rx = connect_peer(&peers, synthetic_peer(peer, 100));
 
     assert!(
         sync.send_getdata_for_pending_blocks(

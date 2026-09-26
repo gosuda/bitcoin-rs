@@ -832,13 +832,34 @@ fn run_handshake(
     lease: crate::PeerLease,
     outbound_rx: crossbeam_channel::Receiver<crate::Message>,
 ) -> Result<(), crate::wire::PeerError> {
-    configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io)?;
+    // The accept loop reserved this lease: every exit from here on must
+    // release it, or a failed setup would consume an admission slot forever.
+    if let Err(error) = configure_peer_stream(&stream).map_err(crate::wire::PeerError::Io) {
+        shared.peer_table.remove_current(peer_addr, &lease);
+        lease.cancel();
+        return Err(error);
+    }
 
     // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
-    let stream = crate::CountingStream::from_connected(stream, counters)
-        .map_err(crate::wire::PeerError::Io)?;
-    let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
+    let stream = match crate::CountingStream::from_connected(stream, counters)
+        .map_err(crate::wire::PeerError::Io)
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            shared.peer_table.remove_current(peer_addr, &lease);
+            lease.cancel();
+            return Err(error);
+        }
+    };
+    let addr_bind = match stream.local_addr().map_err(crate::wire::PeerError::Io) {
+        Ok(addr) => addr,
+        Err(error) => {
+            shared.peer_table.remove_current(peer_addr, &lease);
+            lease.cancel();
+            return Err(error);
+        }
+    };
     let counters = std::sync::Arc::clone(stream.counters());
 
     // The accept loop already reserved this lease in the table — live

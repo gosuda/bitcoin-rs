@@ -286,6 +286,29 @@ pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) ->
     })
 }
 
+/// The lowest height a peer's advertised services may serve.
+///
+/// `0` for a `NODE_NETWORK` peer or while initial block download already
+/// excludes limited peers outright, else the retained-window floor of the
+/// peer's demonstrated chain (`NODE_NETWORK_LIMITED_MIN_BLOCKS`,
+/// `net_processing.cpp:159-161`). Request schedulers clamp batches to
+/// `floor..=best` so a limited peer is never sent a height outside the
+/// window [`serves_requested_height`] certified at selection time.
+#[must_use]
+pub fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u32 {
+    let network = ServiceFlags::NETWORK.to_u64();
+    if peer.services & network != 0
+        || policy
+            .ibd
+            .is_active(crate::counters::now_seconds(), policy.network)
+    {
+        return 0;
+    }
+    u32::try_from(peer.best_known_height)
+        .unwrap_or(0)
+        .saturating_sub(NODE_NETWORK_LIMITED_MIN_BLOCKS.saturating_sub(1))
+}
+
 /// Whether a connection may take part in fan-out striping, prefix probes,
 /// and cold-front hedges: the [`serves_requested_height`] clause plus the
 /// pre-existing outbound requirement.
@@ -2006,6 +2029,7 @@ impl DownloadWindow {
         chain_tip: &TipSnapshot,
         request_start_height: u32,
         peer_best_height: u32,
+        servable_floor: u32,
         tree: &BlockTree,
         now: Instant,
     ) -> Option<PeerRequest> {
@@ -2045,8 +2069,13 @@ impl DownloadWindow {
             return None;
         }
 
-        let mut entries =
-            self.expired_request_entries(stager, expired, batch_limit, &mut byte_capacity);
+        let mut entries = self.expired_request_entries(
+            stager,
+            expired,
+            batch_limit,
+            servable_floor,
+            &mut byte_capacity,
+        );
         let selected_hashes = SelectedHashes::from_entries(&entries);
 
         // The current chain frontier outranks the forward-scan hint. A
@@ -2063,7 +2092,12 @@ impl DownloadWindow {
             self.next_request_height = request_start_height;
             metrics::counter!("node.sync.frontier_rewinds").increment(1);
         }
-        let height = request_start_height.max(self.next_request_height);
+        // `servable_floor` keeps a limited peer's batch inside its retained
+        // window: `serves_requested_height` certified only the first height
+        // at selection time.
+        let height = request_start_height
+            .max(self.next_request_height)
+            .max(servable_floor);
         let mut next_request_height = self.next_request_height;
         let request_tip_height = chain_tip.height.min(peer_best_height);
         let remaining_limit = batch_limit
@@ -2273,6 +2307,7 @@ impl DownloadWindow {
         stager: &BlockStager,
         expired: Vec<PeerRequestEntry>,
         batch_limit: usize,
+        servable_floor: u32,
         byte_capacity: &mut usize,
     ) -> Vec<PeerRequestEntry> {
         let mut entries = Vec::with_capacity(batch_limit);
@@ -2280,7 +2315,12 @@ impl DownloadWindow {
             if entries.len() >= batch_limit || *byte_capacity < self.ewma_block_bytes {
                 break;
             }
-            if stager.contains(&entry.hash) || self.pending.contains_key(&entry.hash) {
+            // Below the peer's retained window the entry is unservable for
+            // it: leave it unowned so another peer's scan picks it up.
+            if entry.height < servable_floor
+                || stager.contains(&entry.hash)
+                || self.pending.contains_key(&entry.hash)
+            {
                 continue;
             }
             *byte_capacity = byte_capacity.saturating_sub(self.ewma_block_bytes);
