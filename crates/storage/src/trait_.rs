@@ -253,6 +253,9 @@ pub trait KvStore: Send + Sync + 'static {
 }
 
 /// Backend-neutral atomic write batch.
+///
+/// Operations apply in insertion order, including range deletions over keys
+/// inserted earlier in the same batch.
 pub trait WriteBatch: Send {
     /// Inserts or replaces `key` with `value` in `cf`.
     fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]);
