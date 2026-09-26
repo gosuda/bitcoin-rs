@@ -219,7 +219,6 @@ impl ConnectionShared {
         }
     }
 
-<<<<<<< HEAD
     /// Enqueues a decoded block body into ingress, then forwards its carried
     /// header to header admission.
     ///
@@ -227,20 +226,17 @@ impl ConnectionShared {
     /// while the body is still unsent: request scheduling runs after both
     /// drains, so the staged-or-received body suppresses a duplicate
     /// `getdata` for a tip learned only by delivery.
-||||||| parent of edb571a3 (Bound unsolicited block forwarding per peer)
-=======
-    /// Forwards one inbound full block into the node's ingress.
     ///
     /// PRE: `lease` belongs to the connection that delivered `block`.
     /// POST: the block's header always reaches the headers sink; the body
     ///   reaches the shared inbound block channel when
     ///   [`crate::PeerLease::admit_block_forward`] admits it, and is dropped
-    ///   with a log record otherwise.
+    ///   with a counter record otherwise.
     /// INVARIANT: one connection holds at most
-    ///   [`crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS`] unsolicited bodies in the
-    ///   shared channel at once, and a body the download window owns is never
-    ///   dropped for that bound, so requested sync traffic always arrives.
->>>>>>> edb571a3 (Bound unsolicited block forwarding per peer)
+    ///   [`crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS`] unsolicited
+    ///   bodies in the shared channel at once, and a body the download
+    ///   window owns is never dropped for that bound, so requested sync
+    ///   traffic always arrives.
     fn send_block(
         &self,
         lease: &crate::PeerLease,
@@ -250,9 +246,8 @@ impl ConnectionShared {
     ) {
         let source = lease.source(peer_addr);
         // Every body carries its own header; route it through the headers
-        // sink too so tips learned only by body delivery (`inv`-served,
+        // sink too so tips learned only by body delivery (`inv` getdata,
         // compact reconstruction, or an unsolicited push) reach header
-<<<<<<< HEAD
         // admission. Without a tree node the body can never become the
         // apply frontier's expected block, and no announced-tip credit
         // reaches the delivering peer. The headers drain runs before the
@@ -268,32 +263,18 @@ impl ConnectionShared {
         // body first means the tick that admits the header always marks the
         // body received first.
         let header = block.header;
-||||||| parent of edb571a3 (Bound unsolicited block forwarding per peer)
-        // admission. Without a tree node the body can never become the
-        // apply frontier's expected block, and no announced-tip credit
-        // reaches the delivering peer. The headers drain runs before the
-        // blocks drain each tick, so the body lands already expected. The
-        // forward is not a `headers` response: it must not consume an
-        // outstanding `getheaders` request's pending state.
-        self.send_headers(source, vec![block.header], false, false);
-=======
-        // admission. Without a tree node the body can never become the apply
-        // frontier's expected block, and no announced-tip credit reaches the
-        // delivering peer. The headers drain runs before the blocks drain
-        // each tick, so the body lands already expected. The forward is not a
-        // `headers` response: it must not consume an outstanding `getheaders`
-        // request's pending state.
-        self.send_headers(source, vec![block.header], false, false);
-        let hash = bitcoin_rs_primitives::Hash256::from(block.header.compute_hash());
+        let hash = bitcoin_rs_primitives::Hash256::from(header.compute_hash());
         let requested = self
             .block_sync
             .as_ref()
             .is_some_and(|sync| sync.owns_body_fetch(source, hash));
         let Some(credit) = lease.admit_block_forward(source, hash, requested) else {
             metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
+            self.send_headers(source, vec![header], false, false);
             return;
         };
         self.forward_block(block, serialized, source, Some(credit));
+        self.send_headers(source, vec![header], false, false);
     }
 
     /// Queues an admitted body on the shared inbound block channel.
@@ -310,7 +291,6 @@ impl ConnectionShared {
         source: crate::PeerSource,
         forward_credit: Option<crate::connection::BlockForwardCredit>,
     ) {
->>>>>>> edb571a3 (Bound unsolicited block forwarding per peer)
         let mut inbound = crate::InboundBlock {
             block,
             serialized,
@@ -340,7 +320,6 @@ impl ConnectionShared {
                 }
             }
         }
-        self.send_headers(source, vec![header], false, false);
     }
 
     /// Forwards a decoded transaction into the node's ingress channel.
@@ -1237,13 +1216,6 @@ fn forward_tx_if_relay_open(
         // them unpunished while in initial block download (:4716).
         tracing::debug!(peer_addr = %peer_addr, "tx dropped: initial block download");
     }
-}
-
-/// UNIX seconds for the chain-owned initial-block-download latch.
-fn unix_time_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
 }
 
 /// UNIX seconds for the chain-owned initial-block-download latch.
@@ -2411,7 +2383,7 @@ mod block_forward_tests {
         // Real sync wiring: peer A announces block 2 and the window asks A for
         // its body, so A's requested delivery must outlive A's exhausted
         // unsolicited credits.
-        let (tree, blocks) = mined_chain(1, 0)?;
+        let (mut tree, blocks) = mined_chain(1, 0)?;
         let chain_tip = tree.tip_handle();
         let block_tree = Arc::new(RwLock::new(tree));
         let peers = Arc::new(crate::PeerTable::new());
