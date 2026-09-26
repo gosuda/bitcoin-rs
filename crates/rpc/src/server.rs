@@ -254,6 +254,21 @@ struct HttpRequest {
     body: Vec<u8>,
 }
 
+/// Reads one request-head line with the remaining aggregate budget. The
+/// one-byte sentinel makes an unterminated oversized line fail before EOF.
+fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(String, usize)> {
+    let mut line = String::new();
+    let limit = u64::try_from(remaining + 1).unwrap_or(u64::MAX);
+    let read = (&mut *reader).take(limit).read_line(&mut line)?;
+    if read > remaining {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "headers too large",
+        ));
+    }
+    Ok((line, read))
+}
+
 /// Reads header lines until the blank terminator, enforcing the header size
 /// ceiling and capturing the three headers the demux consumes.
 fn read_headers(
@@ -264,21 +279,14 @@ fn read_headers(
     let mut authorization = None;
     let mut keep_alive = false;
     loop {
-        let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
+        let (line, read) = read_head_line(reader, MAX_HEADER_BYTES - header_bytes)?;
         if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "headers ended early",
             ));
         }
-        header_bytes = header_bytes.saturating_add(line.len());
-        if header_bytes > MAX_HEADER_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "headers too large",
-            ));
-        }
+        header_bytes += read;
         if line == "\r\n" {
             return Ok((header_bytes, content_length, authorization, keep_alive));
         }
@@ -303,8 +311,7 @@ fn read_headers(
 }
 
 fn read_request(reader: &mut BufReader<TcpStream>) -> io::Result<Option<HttpRequest>> {
-    let mut request_line = String::new();
-    let bytes = reader.read_line(&mut request_line)?;
+    let (request_line, bytes) = read_head_line(reader, MAX_HEADER_BYTES)?;
     if bytes == 0 {
         return Ok(None);
     }
@@ -799,7 +806,7 @@ mod tests {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use crate::context::Context;
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+    use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 
     #[test]
     fn configure_rpc_stream_disables_nagle() {
@@ -978,6 +985,80 @@ mod tests {
 
         shutdown.store(true, Ordering::SeqCst);
         drop(handle.join().expect("server thread"));
+        Ok(())
+    }
+
+    /// The request-head budget must be enforced while bytes arrive, even if
+    /// the peer never sends a newline or closes its write half.
+    #[test]
+    fn oversized_unterminated_head_is_rejected_before_newline() -> std::io::Result<()> {
+        for prefix in [
+            b"GET /".as_slice(),
+            b"GET / HTTP/1.1\r\nX-Fill: ".as_slice(),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let address = listener.local_addr()?;
+            let auth = Arc::new(Auth::basic("alice", "secret"));
+            let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept request");
+                serve_connection(
+                    stream,
+                    &auth,
+                    &handler,
+                    false,
+                    core::time::Duration::from_secs(5),
+                )
+            });
+
+            let mut client = TcpStream::connect(address)?;
+            client.set_read_timeout(Some(core::time::Duration::from_secs(2)))?;
+            client.write_all(prefix)?;
+            client.write_all(&vec![b'a'; MAX_HEADER_BYTES])?;
+
+            let mut response = [0_u8; 128];
+            let first_read = client.read(&mut response);
+            client.shutdown(Shutdown::Write)?;
+            let _ = server.join().expect("server thread");
+            let read = first_read?;
+            assert!(
+                response[..read].starts_with(b"HTTP/1.1 400 Bad Request"),
+                "oversized head must fail before newline: {prefix:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exact_request_head_budget_is_accepted() -> std::io::Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let auth = Arc::new(Auth::basic("alice", "secret"));
+        let handler = Arc::new(Handler::new(Arc::new(Context::new())));
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept request");
+            serve_connection(
+                stream,
+                &auth,
+                &handler,
+                false,
+                core::time::Duration::from_secs(5),
+            )
+        });
+
+        let mut request = b"GET / HTTP/1.1\r\nX-Fill: ".to_vec();
+        request.extend(vec![
+            b'a';
+            MAX_HEADER_BYTES - request.len() - b"\r\n\r\n".len()
+        ]);
+        request.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(request.len(), MAX_HEADER_BYTES);
+        let mut client = TcpStream::connect(address)?;
+        client.write_all(&request)?;
+        let mut response = String::new();
+        client.read_to_string(&mut response)?;
+        assert!(response.starts_with("HTTP/1.1 404 Not Found"));
+        server.join().expect("server thread")?;
         Ok(())
     }
 
