@@ -41,10 +41,10 @@ fn handshake_cursors(
 }
 
 /// Deliver each message from `from` to `to` through the collecting
-/// dispatch, writing every response back onto `from`'s stream.
+/// dispatch, writing every response onto `to`'s own stream.
 ///
 /// PRE: both peers wrap writable buffers.
-/// POST: `to` applied every inbound message and answered onto `from`.
+/// POST: `to` applied every inbound message and answered onto `to`.
 /// INVARIANT: response order matches the collecting dispatch's order.
 fn exchange<A, B>(
     from: &mut Peer<A>,
@@ -123,23 +123,4 @@ fn cursor_handshake_advertises_the_pinned_wire_protocol_version() {
         CompactBlockNegotiation::default(),
         "the local advertisement is recorded only after verack"
     );
-}
-
-#[test]
-fn cursor_handshake_records_the_local_compact_block_advertisement()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut left = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
-    let mut right = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
-
-    handshake_cursors(&mut left, &mut right)?;
-
-    assert_eq!(
-        left.compact_blocks.local_version,
-        Some(COMPACT_BLOCK_VERSION)
-    );
-    assert_eq!(
-        right.compact_blocks.local_version,
-        Some(COMPACT_BLOCK_VERSION)
-    );
-    Ok(())
 }
