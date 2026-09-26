@@ -661,6 +661,89 @@ fn body_forwarded_batch_does_not_rearm_the_pending_header_gate()
     Ok(())
 }
 
+/// An empty wire `headers` answer is still an answer from the connection
+/// that sent it: the gate stays with its deadline so idle discovery keeps
+/// its pace and rotates on schedule, but the request is marked answered so
+/// expiry retires it without blaming a peer that responded.
+///
+/// PRE: `a` owns the header request registered at `t0` and `b` is a second
+///   usable peer, so expiry has a fallback; `a` answers with an empty wire
+///   batch ("nothing more").
+/// POST: the gate stays registered with its `t0` deadline and
+///   `answered == true`; at `t0 + HEADER_REQUEST_TIMEOUT` the gate expires
+///   without blame — `a` stays connected and carries no penalty.
+/// INVARIANT: an empty batch never consumes the gate and never moves its
+///   deadline; only the answered flag changes.
+#[test]
+fn empty_wire_batch_marks_the_pending_header_gate_answered()
+-> Result<(), Box<dyn std::error::Error>> {
+    let HeaderSyncFixture {
+        sync,
+        inbound_headers_tx,
+        peers,
+        ..
+    } = header_sync_with_genesis()?;
+    let a = test_addr(9775, 0)?;
+    let b = test_addr(9775, 1)?;
+    let a_rx = connect_peer(&peers, synthetic_peer(a, 8));
+    let _b_rx = connect_peer(&peers, synthetic_peer(b, 8));
+    let a_source = current_source(&peers, a);
+    let t0 = Instant::now();
+
+    sync.tick_at(t0);
+    assert!(
+        a_rx.try_iter()
+            .any(|message| matches!(message, Message::GetHeaders(_))),
+        "the first tick must ask `a`",
+    );
+
+    inbound_headers_tx.send(InboundHeaders {
+        headers: Vec::new(),
+        source: Some(a_source),
+        wire_response: true,
+        body_fetch_owned: false,
+    })?;
+    sync.tick_at(t0 + Duration::from_millis(1));
+
+    {
+        let scheduler = sync.scheduler.lock();
+        let request = scheduler
+            .header_request
+            .as_ref()
+            .ok_or("an empty wire answer must not consume the gate")?;
+        assert_eq!(request.source, a_source, "the gate must stay with `a`");
+        assert!(request.answered, "an empty wire answer is still an answer");
+        assert_eq!(
+            request.requested_at, t0,
+            "an empty wire answer must not move the deadline",
+        );
+    }
+
+    sync.tick_at(t0 + super::HEADER_REQUEST_TIMEOUT);
+
+    assert!(
+        peers.is_connected(a),
+        "a connection that answered must not be rotated away with blame",
+    );
+    assert!(
+        !sync
+            .scheduler
+            .lock()
+            .header_penalties
+            .contains_key(&a_source),
+        "an answering connection must carry no timeout penalty",
+    );
+    assert!(
+        !sync
+            .scheduler
+            .lock()
+            .header_request
+            .is_some_and(|request| request.requested_at == t0 && !request.answered),
+        "the unanswered `t0` deadline must not survive the empty answer",
+    );
+    Ok(())
+}
+
 #[test]
 fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer()
 -> Result<(), Box<dyn std::error::Error>> {

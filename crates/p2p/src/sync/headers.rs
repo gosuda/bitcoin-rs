@@ -138,8 +138,24 @@ impl BlockSync {
                     if !source.is_some_and(|source| {
                         self.scheduler.lock().headers_sync.contains_key(&source)
                     }) {
-                        self.consume_header_request(source, wire_response, headers.is_empty());
+                        if wire_response && headers.is_empty() {
+                            // An empty wire page answers the pending request
+                            // with a batch this node cannot use: the gate
+                            // stays with its deadline so idle discovery keeps
+                            // its pace and rotates on schedule, but the
+                            // request is marked answered so expiry retires it
+                            // without blaming a peer that did respond.
+                            self.note_empty_wire_answer(source);
+                        } else {
+                            self.consume_header_request(source, wire_response, headers.is_empty());
+                        }
                         self.continue_full_page(source, batch_len, announced_tip, now);
+                    } else if wire_response && headers.is_empty() {
+                        // The live-state bypass leaves the sync cursor alone;
+                        // the gate still learns the answer, or the untouched
+                        // deadline would expire into blame for a silence the
+                        // peer did not cause.
+                        self.note_empty_wire_answer(source);
                     }
                     tracing::debug!(
                         accepted,
@@ -438,6 +454,28 @@ impl BlockSync {
         if let Some(request) = &mut scheduler.header_request {
             if request.source == source {
                 request.requested_at = now;
+                request.answered = true;
+            }
+        }
+    }
+
+    /// Marks the exact owner's pending request answered for a wire batch
+    /// that carries no usable headers, without moving its deadline.
+    ///
+    /// PRE: `source` is the connection that delivered the batch, if any.
+    /// POST: the request stays registered with its original deadline, so
+    ///   the gate keeps pacing duplicate `getheaders` and expiry still
+    ///   rotates on schedule — but retires without blame, because the peer
+    ///   answered.
+    /// INVARIANT: only a wire answer marks a request answered; a
+    ///   source-less or body-forwarded batch marks nothing.
+    fn note_empty_wire_answer(&self, source: Option<PeerSource>) {
+        let Some(source) = source else {
+            return;
+        };
+        let mut scheduler = self.scheduler.lock();
+        if let Some(request) = &mut scheduler.header_request {
+            if request.source == source {
                 request.answered = true;
             }
         }
