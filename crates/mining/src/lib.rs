@@ -26,6 +26,8 @@ pub use coinbase::{
     witness_commitment_script,
 };
 pub use context::MiningChainContext;
+#[cfg(any(test, feature = "test-seam"))]
+pub use control::FakeMiningControl;
 pub use control::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
     BlockTemplateResult, BlockValidationResult, GenerateRequest, GenerateSelection, GenerateTx,

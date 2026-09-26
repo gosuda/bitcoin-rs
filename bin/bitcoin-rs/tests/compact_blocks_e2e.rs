@@ -21,8 +21,6 @@
 
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
-mod support;
-
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -42,9 +40,10 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_e2e::node::workspace;
+use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::{Error as HarnessError, Kind, ProcessNode};
 use serde_json::json;
-use support::process_node::{HarnessError, NodeBinary, ProcessNode, workspace};
-use support::process_peer::connect_loopback;
 
 /// Frames are read with the protocol payload bound, not the harness's 4 MiB
 /// cap: a full `block` reply for a heavier block is legal and must not be
@@ -343,7 +342,7 @@ fn is_soft_recv_error(error: &HarnessError) -> bool {
 
 /// Applies a fresh regtest chain and connects one compact-aware peer.
 fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), HarnessError> {
-    let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = CompactPeer::connect(&node, name, Some(2))?;
     if !wait_for(Duration::from_secs(10), &mut || {
         node.rpc("getconnectioncount", &json!([]))

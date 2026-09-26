@@ -2,7 +2,7 @@
 
 #![expect(clippy::expect_used, reason = "public process test assertions")]
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::consensus::serialize;
 use bitcoin::p2p::Magic;
@@ -200,8 +200,33 @@ fn admit_over_p2p(process: &mut ProcessNode, transaction: &bitcoin::Transaction)
     );
 }
 
+/// Move both processes onto a tip that is recent on the candidate's real
+/// clock. Core mines at a frozen launch-time mocktime, so a shared chain
+/// older than the tip-age bound leaves the candidate in initial block
+/// download — the phase where Core itself refuses relayed transactions
+/// (`net_processing.cpp:4713-4716`). Advancing the reference clock and
+/// mining one empty common block first makes wire admission observable on
+/// both binaries.
+fn advance_to_fresh_common_tip(core: &mut ProcessNode, node: &mut ProcessNode) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("wall clock after the epoch")
+        .as_secs();
+    core.rpc("setmocktime", &json!([now]))
+        .expect("advance the reference clock");
+    mine_common_chain(core, node, 1).expect("recent common tip");
+    assert_eq!(
+        node.rpc("getblockchaininfo", &json!([]))
+            .expect("candidate progress")["initialblockdownload"],
+        json!(false),
+        "wire admission runs only outside initial block download"
+    );
+}
+
 /// No listener, service, or pool is constructed in the test process. The same
-/// signed transaction enters each binary's ordinary inbound P2P path.
+/// signed transaction enters each binary's ordinary inbound P2P path. The
+/// candidate must first leave initial block download, so the shared tip is
+/// refreshed before any wire admission.
 #[test]
 fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
     let mut core = ProcessNode::spawn(Kind::Core).expect("reference process");
@@ -224,6 +249,8 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         compare_rpc(&mut core, &mut node, "getrawmempool", &json!([])).expect("initial pools"),
         json!([]),
     );
+    // Wire admission is observable only outside initial block download.
+    advance_to_fresh_common_tip(&mut core, &mut node);
     for process in [&mut core, &mut node] {
         admit_over_p2p(process, &transaction);
     }
@@ -293,12 +320,12 @@ fn p2p_transaction_reaches_admission_confirmation_and_public_queries() {
         json!(null)
     );
     // Block acceptance publishes the chain tip before the derived index catches up.
-    wait_for_txindex(&mut node, 102);
+    wait_for_txindex(&mut node, 103);
     assert_eq!(
         node.http_get_json(&format!("/api/tx/{txid}/status"))
             .expect("public explorer confirmed status"),
         json!({
-            "confirmed": true, "block_height": 102, "block_hash": hash, "block_time": block.header.time,
+            "confirmed": true, "block_height": 103, "block_hash": hash, "block_time": block.header.time,
         })
     );
     core.stop().expect("reap reference");

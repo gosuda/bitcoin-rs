@@ -1062,9 +1062,8 @@ mod manifest_tests {
         use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits, MempoolObserver};
         use parking_lot::RwLock;
         let publisher = std::sync::Arc::new(RecordingPublisher::default());
-        let observer: std::sync::Arc<dyn MempoolObserver> = std::sync::Arc::new(
-            MempoolSequenceObserver::new(std::sync::Arc::clone(&publisher) as _),
-        );
+        let observer: std::sync::Arc<dyn MempoolObserver> =
+            std::sync::Arc::new(MempoolSequenceObserver::new(publisher.clone()));
         let gateway = MempoolGateway::new(
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
             Some(observer),
@@ -1140,9 +1139,8 @@ mod manifest_tests {
         };
         use parking_lot::RwLock;
         let publisher = std::sync::Arc::new(RecordingPublisher::default());
-        let observer: std::sync::Arc<dyn MempoolObserver> = std::sync::Arc::new(
-            MempoolSequenceObserver::new(std::sync::Arc::clone(&publisher) as _),
-        );
+        let observer: std::sync::Arc<dyn MempoolObserver> =
+            std::sync::Arc::new(MempoolSequenceObserver::new(publisher.clone()));
         let gateway = MempoolGateway::new(
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits {
                 min_relay_fee_sat_per_kvb: 0,
@@ -1178,83 +1176,16 @@ mod manifest_tests {
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
         use bitcoin_rs_mempool::{
             AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,
-            MempoolObserver,
         };
+        use bitcoin_rs_mining::FakeMiningControl;
         use bitcoin_rs_mining::MempoolSequenceWake;
-        use bitcoin_rs_mining::{
-            BlockTemplateRequest, BlockTemplateResult, MiningControl, MiningControlError,
-        };
+        use bitcoin_rs_mining::MiningControl;
         use bitcoin_rs_node::mining::MiningGenerationSignal;
-        use compact_str::CompactString;
-        use parking_lot::{Mutex, RwLock};
-
-        struct RecordingControl {
-            published: Mutex<usize>,
-            published_from: Mutex<Vec<u64>>,
-        }
-
-        fn unavailable() -> MiningControlError {
-            MiningControlError::Unavailable(CompactString::from("not wired in this test"))
-        }
-
-        impl MiningControl for RecordingControl {
-            fn get_block_template(
-                &self,
-                _request: BlockTemplateRequest,
-            ) -> Result<BlockTemplateResult, MiningControlError> {
-                Err(unavailable())
-            }
-
-            fn mining_info(&self) -> Result<bitcoin_rs_mining::MiningInfo, MiningControlError> {
-                Err(unavailable())
-            }
-
-            fn network_hash_ps(
-                &self,
-                _lookup: i64,
-                _height: i64,
-            ) -> Result<f64, MiningControlError> {
-                Err(unavailable())
-            }
-
-            fn submit_block(
-                &self,
-                _block: bitcoin_rs_primitives::Block,
-            ) -> Result<bitcoin_rs_mining::BlockValidationResult, MiningControlError> {
-                Err(unavailable())
-            }
-
-            fn submit_header(
-                &self,
-                _header: bitcoin_rs_primitives::Header,
-            ) -> Result<(), MiningControlError> {
-                Err(unavailable())
-            }
-
-            fn publish_generation(&self) {
-                *self.published.lock() += 1;
-            }
-
-            fn generate(
-                &self,
-                _request: bitcoin_rs_mining::GenerateRequest,
-            ) -> Result<Vec<bitcoin_rs_mining::GeneratedBlock>, MiningControlError> {
-                Err(unavailable())
-            }
-        }
-
-        impl MempoolSequenceWake for RecordingControl {
-            fn publish_generation_from(&self, sequence: u64) {
-                self.published_from.lock().push(sequence);
-            }
-        }
+        use parking_lot::RwLock;
 
         let publisher = std::sync::Arc::new(RecordingPublisher::default());
         let signal = std::sync::Arc::new(MiningGenerationSignal::new());
-        let control = std::sync::Arc::new(RecordingControl {
-            published: Mutex::new(0),
-            published_from: Mutex::new(Vec::new()),
-        });
+        let control = FakeMiningControl::unavailable("not wired in this test");
         let control_dyn: std::sync::Arc<dyn MiningControl> = control.clone();
         let wake_dyn: std::sync::Arc<dyn MempoolSequenceWake> = control.clone();
         signal.attach(&control_dyn);
@@ -1263,14 +1194,12 @@ mod manifest_tests {
         let composite = CompositeObserver::new();
         composite.add_leg(
             "sequence",
-            std::sync::Arc::new(MempoolSequenceObserver::new(
-                std::sync::Arc::clone(&publisher) as _,
-            )),
+            std::sync::Arc::new(MempoolSequenceObserver::new(publisher.clone())),
         );
-        composite.add_leg("mining", std::sync::Arc::clone(&signal) as _);
+        composite.add_leg("mining", signal);
         let gateway = MempoolGateway::new(
             std::sync::Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            Some(std::sync::Arc::new(composite) as std::sync::Arc<dyn MempoolObserver>),
+            Some(std::sync::Arc::new(composite)),
         );
         gateway
             .insert_entry(AdmissionOrigin::Rpc, sequence_entry(&sequence_tx(7)))
@@ -1286,7 +1215,7 @@ mod manifest_tests {
             "the mining leg wakes the coordinator with the mutation's sequence"
         );
         assert_eq!(
-            *control.published.lock(),
+            control.publish_count(),
             0,
             "the lock-free path is used, not the publish_generation fallback"
         );
