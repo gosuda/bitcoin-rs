@@ -5,9 +5,7 @@
 
 #![cfg(feature = "redb")]
 
-use bitcoin_rs_storage::{
-    ColumnFamily, KvStore, PrefixScanLimit, StorageError, WriteBatch, WriteCondition,
-};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, StorageError, WriteCondition};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 

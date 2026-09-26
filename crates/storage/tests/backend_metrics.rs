@@ -8,7 +8,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 use bitcoin_rs_storage::cache_budget::{MIN_DBCACHE_BYTES, split_cache_budget};
-use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
+use bitcoin_rs_storage::{ColumnFamily, KvStore};
 use metrics::{
     Counter, CounterFn, Gauge, GaugeFn, Histogram, HistogramFn, Key, KeyName, Metadata, Recorder,
     SharedString, Unit,

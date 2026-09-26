@@ -118,56 +118,19 @@ pub struct PrioritisedTransaction {
 pub struct Mempool {
     /// Entry arena. Public ids are reusable slot indices represented as `u32`.
     pub(crate) entries: EntryArena,
-    /// Tx id to entry id and acceptance sequence. Owned by this module; reach it
-    /// through `contains_txid`, `entry_id_by_txid`, and `entry_by_txid`.
-    by_txid: HashMap<Txid, IndexedEntry>,
-    /// Funding index keyed by script hash then entry id. Owned by this
-    /// module; reach it through `entries_funding_script`.
-    funding: std::collections::BTreeSet<(ScriptHash, EntryId)>,
-    /// Spending index keyed by spent outpoint then entry id. Owned by this
-    /// module; reach it through `is_outpoint_spent` and `outpoint_spender`.
-    spending: std::collections::BTreeSet<(SpendingKey, EntryId)>,
-    /// Witness-id index. Owned by this module; reach it through
-    /// `contains_wtxid` and `entry_by_wtxid`.
-    by_wtxid: HashMap<Wtxid, EntryId>,
-    /// Cached connected-component (cluster) summaries, indexed by component
-    /// id. Maintained by `commit_insert` and `remove_entries_with_reasons`;
-    /// read by the admission fast path in `check_cluster_limits`.
-    components: Vec<ComponentSummary>,
-    /// Recycled component ids. A component whose last member leaves frees
-    /// its id here instead of growing the arena forever.
-    free_components: Vec<u32>,
+    /// Indexes and running totals derived from `entries`: the txid, wtxid,
+    /// funding, and spending indexes, the component summaries, the priority
+    /// index, and the vsize, fee, and fee-rate totals. One owner keeps them
+    /// consistent: inserts account through [`Mempool::account_insert`], and
+    /// removals reverse through [`Derived::account_remove`].
+    derived: Derived,
     /// Nodes examined by graph walks since the last reset. Instrumentation
     /// for the bounded-work contract; one increment per walked entry. Atomic
     /// only because the pool must stay `Sync` behind the gateway's shared
     /// lock.
     graph_steps: AtomicU64,
-    /// Fee-priority index for mining and eviction consumers.
-    pub(crate) pareto: ParetoFront,
     /// Active mempool policy limits.
     pub limits: MempoolLimits,
-    /// Running sum of `vsize` over `entries`.
-    ///
-    /// Maintained by the mutation methods below rather than folded on demand.
-    /// `insert_entry` consults it on every accepted transaction to decide
-    /// whether the pool is over its size limit, so folding it there cost `O(n)`
-    /// per acceptance and made insertion quadratic in pool size on its own.
-    ///
-    /// `entries` is crate-visible so eviction can walk the arena, but every
-    /// mutation still goes through `insert_entry`, `remove_entries`,
-    /// `prioritise` or `clear` — and `debug_assert`s in `total_vsize` and
-    /// `aggregate_fees` fail the moment a future in-crate caller forgets.
-    total_vsize: u64,
-    /// Exact running sum of `fee` over `entries`. A `u32` entry id bounds the
-    /// successful-entry sum below `u128::MAX`.
-    total_fee: u128,
-    /// Ordered multiset of live `MempoolEntry.fee_rate` values keyed to their
-    /// occurrence count. Mutation paths use it to advance `fee_rate_floor`
-    /// when the last entry at the current floor leaves.
-    fee_rate_counts: std::collections::BTreeMap<u64, u64>,
-    /// Cached first key of `fee_rate_counts`. Reads are `O(1)`; inserts and
-    /// removals maintain it together with the multiset.
-    fee_rate_floor: Option<u64>,
     /// Signed additive mining-only fee overlay, keyed by txid. A delta may be
     /// stored before its transaction is admitted, accumulates across calls,
     /// survives ordinary removal and replacement, and is erased only when the
@@ -187,6 +150,121 @@ pub struct Mempool {
     /// mempool component. Failed inserts, no-op removals, clear-on-empty, and
     /// in-pool prioritisation move nothing.
     mempool_sequence: u64,
+}
+
+/// The index and total state derived from `entries`: everything a mutation
+/// must keep in step with membership, and nothing else. Graph-walk
+/// instrumentation (`graph_steps`) and the independent state — limits, the
+/// fee-delta overlay and its sequence, the estimator, and the mempool
+/// sequence — stay on [`Mempool`].
+#[derive(Debug, Default)]
+struct Derived {
+    /// Tx id to entry id and acceptance sequence. Reach it through
+    /// `contains_txid`, `entry_id_by_txid`, and `entry_by_txid`.
+    by_txid: HashMap<Txid, IndexedEntry>,
+    /// Funding index keyed by script hash then entry id. Reach it through
+    /// `entries_funding_script`.
+    funding: std::collections::BTreeSet<(ScriptHash, EntryId)>,
+    /// Spending index keyed by spent outpoint then entry id. Reach it through
+    /// `is_outpoint_spent` and `outpoint_spender`.
+    spending: std::collections::BTreeSet<(SpendingKey, EntryId)>,
+    /// Witness-id index. Reach it through `contains_wtxid` and
+    /// `entry_by_wtxid`.
+    by_wtxid: HashMap<Wtxid, EntryId>,
+    /// Cached connected-component (cluster) summaries, indexed by component
+    /// id. Maintained by `commit_insert` and `remove_entries_with_reasons`;
+    /// read by the admission fast path in `check_cluster_limits`.
+    components: Vec<ComponentSummary>,
+    /// Recycled component ids. A component whose last member leaves frees
+    /// its id here instead of growing the arena forever.
+    free_components: Vec<u32>,
+    /// Fee-priority index for mining and eviction consumers.
+    pub(crate) pareto: ParetoFront,
+    /// Running sum of `vsize` over `entries`.
+    ///
+    /// Maintained by the mutation methods below rather than folded on demand.
+    /// `insert_entry` consults it on every accepted transaction to decide
+    /// whether the pool is over its size limit, so folding it there cost `O(n)`
+    /// per acceptance and made insertion quadratic in pool size on its own.
+    ///
+    /// `entries` is crate-visible so eviction can walk the arena, but every
+    /// mutation still goes through `insert_entry`, `remove_entries`,
+    /// `prioritise` or `clear` — and
+    /// `running_totals_track_inserts_removals_and_prioritise` holds both
+    /// running sums to an independent fold of `entries` across every mutation
+    /// kind.
+    total_vsize: u64,
+    /// Exact running sum of `fee` over `entries`. A `u32` entry id bounds the
+    /// successful-entry sum below `u128::MAX`.
+    total_fee: u128,
+    /// Ordered multiset of live `MempoolEntry.fee_rate` values keyed to their
+    /// occurrence count. Mutation paths use it to advance `fee_rate_floor`
+    /// when the last entry at the current floor leaves.
+    fee_rate_counts: std::collections::BTreeMap<u64, u64>,
+    /// Cached first key of `fee_rate_counts`. Reads are `O(1)`; inserts and
+    /// removals maintain it together with the multiset.
+    fee_rate_floor: Option<u64>,
+}
+
+impl Derived {
+    /// Reverses one entry's accounting across the derived indexes and totals.
+    ///
+    /// PRE: `entry` was accounted exactly once — its txid and wtxid rows are
+    /// live in the indexes, its outputs and inputs hold funding and spending
+    /// rows for `id`, and its vsize, fee, and fee rate sit in the running
+    /// totals. POST: those eight contributions are gone — the txid, wtxid,
+    /// funding, and spending indexes name nothing for `id`, and
+    /// `fee_rate_floor` advances to the next lowest live rate when this was
+    /// the last occurrence of the floor rate. The priority index retires `id`
+    /// in the same mutation through `refresh_metadata`, which is its sole
+    /// removal owner. INVARIANT: a fee rate the multiset never tracked stays
+    /// a debug assertion, so accounting drift fails a test instead of
+    /// silently corrupting the floor.
+    fn account_remove(&mut self, id: EntryId, entry: &MempoolEntry) {
+        self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
+        self.total_fee -= u128::from(entry.fee);
+        let removed_floor = match self.fee_rate_counts.entry(entry.fee_rate) {
+            std::collections::btree_map::Entry::Occupied(mut occupied) => {
+                let count = occupied.get_mut();
+                if *count > 1 {
+                    *count -= 1;
+                    false
+                } else {
+                    let removed_floor = self.fee_rate_floor == Some(entry.fee_rate);
+                    occupied.remove();
+                    removed_floor
+                }
+            }
+            std::collections::btree_map::Entry::Vacant(_) => {
+                debug_assert!(
+                    false,
+                    "fee-rate multiset drifted: removed a rate with no tracked count"
+                );
+                false
+            }
+        };
+        if removed_floor {
+            self.fee_rate_floor = self
+                .fee_rate_counts
+                .first_key_value()
+                .map(|(&rate, _count)| rate);
+        }
+        self.by_txid.remove(&entry.txid);
+        self.by_wtxid.remove(&entry.wtxid);
+        // The priority index and the funding rows settle through the
+        // removal's own metadata refresh: `refresh_metadata` retires ids
+        // that no longer resolve, so no duplicate removal happens here.
+        for output in &entry.tx.outputs {
+            let _ = self
+                .funding
+                .remove(&(ScriptHash::from_script(&output.script_pubkey), id));
+        }
+        for input in &entry.tx.inputs {
+            let _ = self
+                .spending
+                .remove(&(SpendingKey::from(input.previous_output), id));
+        }
+    }
 }
 
 /// Current pool membership, retired together with the existing txid index row.
@@ -529,19 +607,9 @@ impl Mempool {
     pub fn new(limits: MempoolLimits) -> Self {
         Self {
             entries: EntryArena::new(),
-            by_txid: HashMap::new(),
-            funding: std::collections::BTreeSet::new(),
-            spending: std::collections::BTreeSet::new(),
-            by_wtxid: HashMap::new(),
-            components: Vec::new(),
-            free_components: Vec::new(),
+            derived: Derived::default(),
             graph_steps: AtomicU64::new(0),
-            pareto: ParetoFront::new(),
             limits,
-            total_vsize: 0,
-            total_fee: 0,
-            fee_rate_counts: std::collections::BTreeMap::new(),
-            fee_rate_floor: None,
             fee_deltas: HashMap::new(),
             fee_delta_sequence: 0,
             estimator: FeeEstimator::new(),
@@ -565,18 +633,11 @@ impl Mempool {
     pub fn clear(&mut self) -> MutationResult {
         let txids: Vec<Txid> = self.entries.iter().map(|(_id, entry)| entry.txid).collect();
         self.entries.clear();
-        self.by_txid.clear();
-        self.funding.clear();
-        self.spending.clear();
-        self.by_wtxid.clear();
-        self.components.clear();
-        self.free_components.clear();
+        // One assignment instead of a second inventory of the derived
+        // fields: a field added to `Derived` starts empty here without this
+        // list having to learn about it.
+        self.derived = Derived::default();
         self.graph_steps.store(0, Ordering::Relaxed);
-        self.pareto = ParetoFront::new();
-        self.total_vsize = 0;
-        self.total_fee = 0;
-        self.fee_rate_counts.clear();
-        self.fee_rate_floor = None;
         if !self.fee_deltas.is_empty() {
             self.fee_delta_sequence = MutationSequence::advance(self.fee_delta_sequence);
             self.fee_deltas.clear();
@@ -639,7 +700,7 @@ impl Mempool {
         entry: MempoolEntry,
     ) -> Result<crate::mutation::MutationResult, MempoolError> {
         let inputs = self
-            .capture_insertion(entry)
+            .capture_insertion(entry, crate::rbf::FeeEstimation::Estimate)
             .map_err(crate::RbfError::into_pool_error)?;
         let plan = inputs.verify().map_err(crate::RbfError::into_pool_error)?;
         self.commit_pool_change(plan)
@@ -668,12 +729,13 @@ impl Mempool {
             .into());
         }
 
-        if self.by_txid.contains_key(&txid) {
+        if self.derived.by_txid.contains_key(&txid) {
             return Err(MempoolError::DuplicateTransaction);
         }
 
         if entry.tx.inputs.iter().any(|input| {
-            self.by_txid
+            self.derived
+                .by_txid
                 .get(&input.previous_output.txid)
                 .is_some_and(|indexed| excluded.contains(&indexed.id))
         }) {
@@ -713,9 +775,6 @@ impl Mempool {
     pub(crate) fn commit_insert(&mut self, prepared: PreparedInsert) -> MutationResult {
         let entry = prepared.entry;
         let txid = entry.txid;
-        let added_vsize = u64::from(entry.vsize);
-        let added_fee = entry.fee;
-        let added_fee_rate = entry.fee_rate;
         // Neighbours are resolved while the candidate is still outside the
         // arena: parents through the txid index, children through the spend
         // rows that already name this txid's outputs — an orphan promotion or
@@ -754,30 +813,69 @@ impl Mempool {
         if let Some(slot) = self.entries.slot_mut(id) {
             slot.links = GraphLinks { parents, children };
         }
-        self.total_vsize = self.total_vsize.saturating_add(added_vsize);
-        self.total_fee += u128::from(added_fee);
-        *self.fee_rate_counts.entry(added_fee_rate).or_insert(0) += 1;
-        self.fee_rate_floor = Some(
-            self.fee_rate_floor
-                .map_or(added_fee_rate, |floor| floor.min(added_fee_rate)),
-        );
         let mut changes = Vec::new();
         self.push_change(&mut changes, txid, MutationOutcome::Accepted);
-        self.by_txid.insert(
-            txid,
-            IndexedEntry {
-                id,
-                admitted_sequence: self.mempool_sequence,
-            },
-        );
-        self.index_entry(id);
-        // The closure is taken after `index_entry`, because a transaction can
-        // arrive after something that already spends its outputs — an orphan
-        // promotion, or plain out-of-order relay — and those descendants only
-        // become reachable once this entry is in the spend indexes.
+        let admitted_sequence = self.mempool_sequence;
+        self.account_insert(id, admitted_sequence);
+        // The closure is taken after the txid, wtxid, and spend indexes hold
+        // the entry, because a transaction can arrive after something that
+        // already spends its outputs — an orphan promotion, or plain
+        // out-of-order relay — and those descendants only become reachable
+        // once this entry is in the spend indexes.
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
         self.finish_mutation(changes)
+    }
+
+    /// Accounts one admitted entry across the derived indexes and totals.
+    ///
+    /// PRE: `id` names a live, freshly linked arena slot that no derived
+    /// structure accounts yet, and `admitted_sequence` is the sequence value
+    /// the entry's `Accepted` change took. POST: the txid, wtxid, funding,
+    /// and spending indexes name `id`, and the vsize, fee, and fee-rate
+    /// totals include the entry exactly once. INVARIANT: this method is the
+    /// sole insert-path writer of those eight derived fields.
+    fn account_insert(&mut self, id: EntryId, admitted_sequence: u64) {
+        let Some(entry) = self.entry(id) else {
+            debug_assert!(false, "account_insert called for a missing entry");
+            return;
+        };
+        let tx = Arc::clone(&entry.tx);
+        let txid = entry.txid;
+        let wtxid = entry.wtxid;
+        let added_vsize = u64::from(entry.vsize);
+        let added_fee = entry.fee;
+        let added_fee_rate = entry.fee_rate;
+        self.derived.total_vsize = self.derived.total_vsize.saturating_add(added_vsize);
+        self.derived.total_fee += u128::from(added_fee);
+        *self
+            .derived
+            .fee_rate_counts
+            .entry(added_fee_rate)
+            .or_insert(0) += 1;
+        self.derived.fee_rate_floor = Some(
+            self.derived
+                .fee_rate_floor
+                .map_or(added_fee_rate, |floor| floor.min(added_fee_rate)),
+        );
+        self.derived.by_txid.insert(
+            txid,
+            IndexedEntry {
+                id,
+                admitted_sequence,
+            },
+        );
+        self.derived.by_wtxid.insert(wtxid, id);
+        for output in &tx.outputs {
+            self.derived
+                .funding
+                .insert((ScriptHash::from_script(&output.script_pubkey), id));
+        }
+        for input in &tx.inputs {
+            self.derived
+                .spending
+                .insert((SpendingKey::from(input.previous_output), id));
+        }
     }
 
     /// Record arrival only after the complete mutation's capacity decision.
@@ -804,6 +902,7 @@ impl Mempool {
             EntryId::MAX,
         );
         let mut children: Vec<EntryId> = self
+            .derived
             .spending
             .range(start..=end)
             .map(|(_, child)| *child)
@@ -890,19 +989,23 @@ impl Mempool {
 
     /// Cached summary of one component id.
     fn component_summary(&self, component: u32) -> Option<&ComponentSummary> {
-        self.components.get(usize::try_from(component).ok()?)
+        self.derived
+            .components
+            .get(usize::try_from(component).ok()?)
     }
 
     /// Mutable variant of [`Self::component_summary`].
     fn component_summary_mut(&mut self, component: u32) -> Option<&mut ComponentSummary> {
-        self.components.get_mut(usize::try_from(component).ok()?)
+        self.derived
+            .components
+            .get_mut(usize::try_from(component).ok()?)
     }
 
     /// Mints a component id, recycling a freed one when available.
     fn alloc_component(&mut self) -> u32 {
-        self.free_components.pop().unwrap_or_else(|| {
-            self.components.push(ComponentSummary::default());
-            let id = u32::try_from(self.components.len() - 1);
+        self.derived.free_components.pop().unwrap_or_else(|| {
+            self.derived.components.push(ComponentSummary::default());
+            let id = u32::try_from(self.derived.components.len() - 1);
             match id {
                 Ok(id) => id,
                 // Component ids index the u32 entry-id space by construction.
@@ -918,7 +1021,7 @@ impl Mempool {
                 .is_some_and(|summary| *summary == ComponentSummary::default()),
             "freed a component that still reports members"
         );
-        self.free_components.push(component);
+        self.derived.free_components.push(component);
     }
 
     /// Collects the connected component holding `seed` with one walk over
@@ -966,7 +1069,7 @@ impl Mempool {
     /// for callers that only need a presence check.
     #[must_use]
     pub fn contains_txid(&self, txid: &Txid) -> bool {
-        self.by_txid.contains_key(txid)
+        self.derived.by_txid.contains_key(txid)
     }
 
     /// Returns a reference to the `MempoolEntry` for `txid`, or `None` if the
@@ -997,7 +1100,7 @@ impl Mempool {
     /// this lookup after dropping and re-acquiring a pool lock.
     #[must_use]
     pub fn entry_id_by_txid(&self, txid: &Txid) -> Option<EntryId> {
-        self.by_txid.get(txid).map(|indexed| indexed.id)
+        self.derived.by_txid.get(txid).map(|indexed| indexed.id)
     }
 
     /// Returns the resident entry only when its acceptance has `sequence`.
@@ -1009,7 +1112,7 @@ impl Mempool {
     /// pool borrow, so identity and body are observed together.
     #[must_use]
     pub fn entry_by_txid_at_sequence(&self, txid: &Txid, sequence: u64) -> Option<&MempoolEntry> {
-        let indexed = self.by_txid.get(txid)?;
+        let indexed = self.derived.by_txid.get(txid)?;
         if indexed.admitted_sequence != sequence {
             return None;
         }
@@ -1065,15 +1168,14 @@ impl Mempool {
     }
 
     /// Returns the total virtual size of all entries.
+    ///
+    /// Answers from the sum `account_insert` and `Derived::account_remove`
+    /// maintain, so a read is constant time; the release-safe fold comparison
+    /// in `running_totals_track_inserts_removals_and_prioritise` holds the
+    /// sum to the entries it summarizes.
     #[must_use]
     pub fn total_vsize(&self) -> u64 {
-        debug_assert_eq!(
-            self.total_vsize,
-            self.entries.iter().fold(0_u64, |total, (_, entry)| total
-                .saturating_add(u64::from(entry.vsize))),
-            "running vsize total drifted from the entries it summarizes"
-        );
-        self.total_vsize
+        self.derived.total_vsize
     }
 
     /// Evicts the lowest-fee packages until the pool's total vsize is at or
@@ -1091,18 +1193,13 @@ impl Mempool {
     /// Returns the sum of fees of all entries in the pool, in satoshis.
     ///
     /// Used by `getmempoolinfo.total_fee` (BTC = sats / 1e8). The exact internal
-    /// sum preserves saturating `u64` semantics after removals and fee decreases.
+    /// sum preserves saturating `u64` semantics after removals and fee decreases;
+    /// the release-safe fold comparison in
+    /// `running_totals_track_inserts_removals_and_prioritise` holds it to the
+    /// entries it summarizes.
     #[must_use]
     pub fn aggregate_fees(&self) -> u64 {
-        let total_fee = u64::try_from(self.total_fee).unwrap_or(u64::MAX);
-        debug_assert_eq!(
-            total_fee,
-            self.entries
-                .iter()
-                .fold(0_u64, |acc, (_id, entry)| acc.saturating_add(entry.fee)),
-            "running fee total drifted from the entries it summarizes"
-        );
-        total_fee
+        u64::try_from(self.derived.total_fee).unwrap_or(u64::MAX)
     }
 
     /// Returns aggregate counters for the current pool.
@@ -1170,16 +1267,16 @@ impl Mempool {
 
         // `by_txid` is a hash map, so it carries slack; the other three are
         // B-tree sets of fixed-size keys.
-        let by_txid = u64::try_from(self.by_txid.capacity())
+        let by_txid = u64::try_from(self.derived.by_txid.capacity())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<(Txid, IndexedEntry)>()).unwrap_or(0));
-        let funding = u64::try_from(self.funding.len())
+        let funding = u64::try_from(self.derived.funding.len())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<(ScriptHash, EntryId)>()).unwrap_or(0));
-        let spending = u64::try_from(self.spending.len())
+        let spending = u64::try_from(self.derived.spending.len())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<(SpendingKey, EntryId)>()).unwrap_or(0));
-        let by_wtxid = u64::try_from(self.by_wtxid.capacity())
+        let by_wtxid = u64::try_from(self.derived.by_wtxid.capacity())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<(Wtxid, EntryId)>()).unwrap_or(0));
         // The graph links are per-entry `Vec`s inside the arena slots: their
@@ -1196,14 +1293,14 @@ impl Mempool {
                     .saturating_mul(u64::try_from(size_of::<EntryId>()).unwrap_or(0)),
             )
         });
-        let components = u64::try_from(self.components.capacity())
+        let components = u64::try_from(self.derived.components.capacity())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<ComponentSummary>()).unwrap_or(0));
         // The priority index stores every entry twice -- once ordered by
         // priority, once keyed by id so a removal need not search for what to
         // remove -- so it answers for itself rather than being charged one
         // `EntryId` per transaction here.
-        let pareto = self.pareto.dynamic_memory_usage();
+        let pareto = self.derived.pareto.dynamic_memory_usage();
 
         arena
             .saturating_add(transactions)
@@ -1260,7 +1357,11 @@ impl Mempool {
     /// can walk packages without re-consulting the pool.
     #[must_use]
     pub fn mining_snapshot(&self) -> MempoolMiningSnapshot {
-        let order: Vec<EntryId> = self.pareto.top_n(self.pareto.len()).collect();
+        let order: Vec<EntryId> = self
+            .derived
+            .pareto
+            .top_n(self.derived.pareto.len())
+            .collect();
         debug_assert_eq!(
             order.len(),
             self.entries.len(),
@@ -1331,7 +1432,8 @@ impl Mempool {
         script_hash: ScriptHash,
     ) -> impl Iterator<Item = &MempoolEntry> + '_ {
         let entries = &self.entries;
-        self.funding
+        self.derived
+            .funding
             .range((
                 Bound::Included((script_hash, 0)),
                 Bound::Included((script_hash, u32::MAX)),
@@ -1344,7 +1446,7 @@ impl Mempool {
     /// Indexed by `by_wtxid`; O(1) lookup.
     #[must_use]
     pub fn contains_wtxid(&self, wtxid: &Wtxid) -> bool {
-        self.by_wtxid.contains_key(wtxid)
+        self.derived.by_wtxid.contains_key(wtxid)
     }
 
     /// Returns the in-pool entry for `wtxid`, or `None` if none matches.
@@ -1352,7 +1454,7 @@ impl Mempool {
     /// Indexed by `by_wtxid`; O(1) lookup.
     #[must_use]
     pub fn entry_by_wtxid(&self, wtxid: &Wtxid) -> Option<&MempoolEntry> {
-        let id = *self.by_wtxid.get(wtxid)?;
+        let id = *self.derived.by_wtxid.get(wtxid)?;
         self.entry(id)
     }
 
@@ -1382,25 +1484,20 @@ impl Mempool {
     /// Reads the cached first key of the maintained fee-rate multiset so
     /// admission tightening does not scan `entries` or descend the tree.
     /// The min is over `MempoolEntry.fee_rate`, which is pre-computed at insert
-    /// time.
+    /// time; the debug assertion below holds the cached floor to its multiset,
+    /// and `lowest_fee_rate_tracks_duplicate_rates_and_every_removal_path`
+    /// holds the multiset to the entries across removals and replacements.
     #[must_use]
     pub fn lowest_fee_rate(&self) -> Option<u64> {
         debug_assert_eq!(
-            self.fee_rate_floor,
-            self.fee_rate_counts
+            self.derived.fee_rate_floor,
+            self.derived
+                .fee_rate_counts
                 .first_key_value()
                 .map(|(&rate, _count)| rate),
             "cached fee-rate floor drifted from its multiset"
         );
-        debug_assert_eq!(
-            self.fee_rate_floor,
-            self.entries
-                .iter()
-                .map(|(_index, entry)| entry.fee_rate)
-                .min(),
-            "maintained fee-rate floor drifted from the entries it summarizes"
-        );
-        self.fee_rate_floor
+        self.derived.fee_rate_floor
     }
 
     /// Returns mempool entry ids whose `fee_rate` >= `threshold_sat_per_kvb`.
@@ -1423,7 +1520,8 @@ impl Mempool {
     /// never touched.
     #[must_use]
     pub fn is_outpoint_spent(&self, outpoint: &OutPoint) -> bool {
-        self.spending
+        self.derived
+            .spending
             .range(outpoint_range(*outpoint))
             .next()
             .is_some()
@@ -1446,7 +1544,7 @@ impl Mempool {
         &self,
         outpoint: OutPoint,
     ) -> Result<Option<OutpointSpender<'_>>, MempoolError> {
-        let Some(&(_, id)) = self.spending.range(outpoint_range(outpoint)).next() else {
+        let Some(&(_, id)) = self.derived.spending.range(outpoint_range(outpoint)).next() else {
             return Ok(None);
         };
         let entry = self
@@ -1530,7 +1628,7 @@ impl Mempool {
             .map(|(&txid, &fee_delta)| PrioritisedTransaction {
                 txid,
                 fee_delta,
-                in_mempool: self.by_txid.contains_key(&txid),
+                in_mempool: self.derived.by_txid.contains_key(&txid),
                 modified_fee: self.entry_by_txid(&txid).map(MempoolEntry::modified_fee),
             })
             .collect()
@@ -1666,7 +1764,11 @@ impl Mempool {
     pub(crate) fn conflicts_for(&self, tx: &Tx) -> Vec<EntryId> {
         let mut conflicts = Vec::new();
         for input in &tx.inputs {
-            for (_, id) in self.spending.range(outpoint_range(input.previous_output)) {
+            for (_, id) in self
+                .derived
+                .spending
+                .range(outpoint_range(input.previous_output))
+            {
                 conflicts.push(*id);
             }
         }
@@ -1776,55 +1878,12 @@ impl Mempool {
                     survivor_seeds.push(*child);
                 }
             }
-            self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
-            self.total_fee -= u128::from(entry.fee);
-            let removed_floor = match self.fee_rate_counts.entry(entry.fee_rate) {
-                std::collections::btree_map::Entry::Occupied(mut occupied) => {
-                    let count = occupied.get_mut();
-                    if *count > 1 {
-                        *count -= 1;
-                        false
-                    } else {
-                        let removed_floor = self.fee_rate_floor == Some(entry.fee_rate);
-                        occupied.remove();
-                        removed_floor
-                    }
-                }
-                std::collections::btree_map::Entry::Vacant(_) => {
-                    debug_assert!(
-                        false,
-                        "fee-rate multiset drifted: removed a rate with no tracked count"
-                    );
-                    false
-                }
-            };
-            if removed_floor {
-                self.fee_rate_floor = self
-                    .fee_rate_counts
-                    .first_key_value()
-                    .map(|(&rate, _count)| rate);
-            }
-            self.by_txid.remove(&entry.txid);
-            self.by_wtxid.remove(&entry.wtxid);
+            self.derived.account_remove(*id, &entry);
             self.push_change(changes, entry.txid, MutationOutcome::Removed(*reason));
             // A departure that is not a confirmation: eviction, replacement,
             // conflict, and reorg removal all free the estimator's pending
             // slot without saying anything about fee-rate success.
             self.estimator.tx_left(&entry.txid);
-            self.pareto.remove(*id);
-            for (vout, output) in entry.tx.outputs.iter().enumerate() {
-                let Ok(_) = EntryId::try_from(vout) else {
-                    continue;
-                };
-                let _ = self
-                    .funding
-                    .remove(&(ScriptHash::from_script(&output.script_pubkey), *id));
-            }
-            for input in &entry.tx.inputs {
-                let _ = self
-                    .spending
-                    .remove(&(SpendingKey::from(input.previous_output), *id));
-            }
         }
         self.recompute_dirty_components(&survivor_seeds, &dirty_components);
         self.refresh_metadata(&affected);
@@ -1887,32 +1946,6 @@ impl Mempool {
             }
         }
     }
-    fn index_entry(&mut self, id: EntryId) {
-        let Some(entry) = self.entry(id) else {
-            return;
-        };
-        let wtxid = entry.wtxid;
-        let funding_keys = entry
-            .tx
-            .outputs
-            .iter()
-            .map(|output| (ScriptHash::from_script(&output.script_pubkey), id))
-            .collect::<Vec<_>>();
-        let spending_keys = entry
-            .tx
-            .inputs
-            .iter()
-            .map(|input| (SpendingKey::from(input.previous_output), id))
-            .collect::<Vec<_>>();
-        for key in funding_keys {
-            self.funding.insert(key);
-        }
-        for key in spending_keys {
-            self.spending.insert(key);
-        }
-        self.by_wtxid.insert(wtxid, id);
-    }
-
     /// Recomputes one entry's six package totals directly from the spend
     /// graph.
     ///
@@ -2013,9 +2046,9 @@ impl Mempool {
         }
         for id in affected {
             match self.entry(*id).cloned() {
-                Some(entry) => self.pareto.insert(*id, &entry),
+                Some(entry) => self.derived.pareto.insert(*id, &entry),
                 None => {
-                    let _ = self.pareto.remove(*id);
+                    let _ = self.derived.pareto.remove(*id);
                 }
             }
         }
@@ -2086,9 +2119,9 @@ impl Mempool {
             .into_iter()
             .filter_map(|id| self.entry(id).cloned().map(|entry| (id, entry)))
             .collect::<Vec<_>>();
-        self.pareto = ParetoFront::new();
+        self.derived.pareto = ParetoFront::default();
         for (id, entry) in pareto_entries {
-            self.pareto.insert(id, &entry);
+            self.derived.pareto.insert(id, &entry);
         }
     }
 
@@ -2496,7 +2529,7 @@ mod tests {
                 script_pubkey: vec![0x51].into(),
             }],
         };
-        let entry = MempoolEntry::new(Arc::new(tx), 100, 100, 1, 7);
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 100, 1, 7, 0);
         let result = pool.insert_entry(entry);
 
         assert!(
@@ -2522,7 +2555,7 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
-        let entry = MempoolEntry::new(Arc::new(tx), 123, 4_567, 0, 0);
+        let entry = MempoolEntry::new(Arc::new(tx), 123, 4_567, 0, 0, 0);
         let expected_vsize = u64::from(entry.vsize);
         let expected_fee = entry.fee;
 
@@ -2540,8 +2573,8 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         assert_eq!(pool.aggregate_fees(), 0);
 
-        let entry_a = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 400, 500, 1, 7);
-        let entry_b = MempoolEntry::new(Arc::new(tx(2, Vec::new())), 900, 1_000, 2, 7);
+        let entry_a = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 400, 500, 1, 7, 0);
+        let entry_b = MempoolEntry::new(Arc::new(tx(2, Vec::new())), 900, 1_000, 2, 7, 0);
         pool.insert_entry(entry_a)?;
         pool.insert_entry(entry_b)?;
 
@@ -2566,9 +2599,17 @@ mod tests {
             u64::MAX - 1,
             1,
             7,
+            0,
         ))?;
-        pool.insert_entry(MempoolEntry::new(Arc::new(prioritised), 100, 100, 2, 7))?;
-        pool.insert_entry(MempoolEntry::new(Arc::new(removed.clone()), 100, 50, 3, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(prioritised), 100, 100, 2, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(removed.clone()),
+            100,
+            50,
+            3,
+            7,
+            0,
+        ))?;
 
         assert_eq!(pool.aggregate_fees(), u64::MAX);
         assert!(
@@ -2598,7 +2639,7 @@ mod tests {
             }],
         };
         let txid = tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7));
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0));
         assert!(pool.contains_txid(&txid));
         let other = txid_of([0xff; 32]);
         assert!(!pool.contains_txid(&other));
@@ -2617,7 +2658,7 @@ mod tests {
             outputs: vec![],
         };
         let txid = tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))?;
         let Some(entry) = pool.entry_by_txid(&txid) else {
             panic!("entry_by_txid returned None for inserted tx");
         };
@@ -2646,7 +2687,7 @@ mod tests {
         };
         let txid = tx.txid();
         let tx_arc = Arc::new(tx);
-        pool.insert_entry(MempoolEntry::new(Arc::clone(&tx_arc), 500, 100, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&tx_arc), 500, 100, 1, 7, 0))?;
         let Some(retrieved) = pool.transaction_by_txid(&txid) else {
             panic!("transaction_by_txid returned None");
         };
@@ -2695,8 +2736,8 @@ mod tests {
             }],
         };
         let txid_b = tx_b.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx_a), 500, 100, 1, 7))?;
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx_b), 500, 100, 2, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx_a), 500, 100, 1, 7, 0))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx_b), 500, 100, 2, 7, 0))?;
         let txids = pool.iter_txids();
         assert_eq!(txids.len(), 2);
         assert!(txids.contains(&txid_a));
@@ -2718,7 +2759,7 @@ mod tests {
             }],
         };
         let low_txid = low_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7));
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0));
         let high_tx = Tx {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -2729,7 +2770,7 @@ mod tests {
             }],
         };
         let high_txid = high_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7));
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0));
         let ordered = pool.iter_by_fee_rate_desc();
         assert_eq!(ordered.len(), 2);
         let Some(&first_id) = ordered.first() else {
@@ -2761,8 +2802,8 @@ mod tests {
             ..MempoolLimits::default()
         });
 
-        let high = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 1_000, 5_000, 1, 7);
-        let low = MempoolEntry::new(Arc::new(tx(2, Vec::new())), 1_000, 1_500, 1, 7);
+        let high = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 1_000, 5_000, 1, 7, 0);
+        let low = MempoolEntry::new(Arc::new(tx(2, Vec::new())), 1_000, 1_500, 1, 7, 0);
         pool.insert_entry(high)?;
         pool.insert_entry(low)?;
 
@@ -2799,7 +2840,7 @@ mod tests {
         });
         assert_floor(&pool, None, "empty");
 
-        let high = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 1_000, 5_000, 1, 7);
+        let high = MempoolEntry::new(Arc::new(tx(1, Vec::new())), 1_000, 5_000, 1, 7, 0);
         pool.insert_entry(high)?;
         assert_floor(&pool, Some(5_000), "insert high");
 
@@ -2811,12 +2852,13 @@ mod tests {
             1_500,
             1,
             7,
+            0,
         ))?;
         assert_floor(&pool, Some(1_500), "insert lower rate");
 
         let low_b_tx = tx(3, Vec::new());
         let low_b_txid = low_b_tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(low_b_tx), 1_000, 1_500, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(low_b_tx), 1_000, 1_500, 1, 7, 0))?;
         assert_floor(&pool, Some(1_500), "duplicate min rate");
 
         let removed = pool.remove_for_block(&[&low_a_tx], &[low_a_txid], 8);
@@ -2835,13 +2877,14 @@ mod tests {
             2_000,
             1,
             7,
+            0,
         ))?;
         assert_floor(&pool, Some(2_000), "insert new min before block");
         let removed = pool.remove_for_block(&[&mined], &[mined_txid], 8);
         assert_eq!(removed.len(), 1);
         assert_floor(&pool, Some(5_000), "remove_for_block of current min");
 
-        let bulky_low = MempoolEntry::new(Arc::new(tx(5, Vec::new())), 5_000, 5_000, 1, 7);
+        let bulky_low = MempoolEntry::new(Arc::new(tx(5, Vec::new())), 5_000, 5_000, 1, 7, 0);
         pool.insert_entry(bulky_low)?;
         assert_floor(&pool, Some(1_000), "insert eviction victim");
         let evicted = pool.enforce_size_limit(5_000)?;
@@ -2887,13 +2930,14 @@ mod tests {
                 script_pubkey: vec![0x51].into(),
             }],
         };
-        pool.insert_entry(MempoolEntry::new(Arc::new(original), 1_000, 2_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(original), 1_000, 2_000, 1, 7, 0))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx(8, Vec::new())),
             1_000,
             1_500,
             1,
             7,
+            0,
         ))?;
         assert_floor(&pool, Some(1_500), "before replacement");
 
@@ -2912,10 +2956,10 @@ mod tests {
             }],
         };
         pool.replace_transaction(
-            crate::ReplacementCandidate::new(Arc::new(replacement), 1_000, 4_000, 1),
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 1_000, 4_000, 1)
+                .with_sigop_cost(4),
             10,
             1,
-            4,
         )
         .expect("replacement must apply");
         assert_floor(
@@ -2938,7 +2982,7 @@ mod tests {
                 script_pubkey: vec![0x51].into(),
             }],
         };
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7)); // fee_rate = 1000
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0)); // fee_rate = 1000
         let high_tx = Tx {
             version: 2,
             lock_time: LockTime::ZERO,
@@ -2948,7 +2992,7 @@ mod tests {
                 script_pubkey: vec![0x52].into(),
             }],
         };
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7)); // fee_rate = 100_000
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0)); // fee_rate = 100_000
         let high_only = pool.iter_above_fee_rate(50_000);
         assert_eq!(high_only.len(), 1);
         let both = pool.iter_above_fee_rate(500);
@@ -2976,7 +3020,7 @@ mod tests {
             outputs: Vec::new(),
         };
         let rbf_txid = rbf_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7));
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(rbf_tx), 100, 10_000, 1, 7, 0));
         // Non-RBF tx (sequence = MAX = 0xFFFFFFFF).
         let non_rbf_tx = Tx {
             version: 2,
@@ -2993,7 +3037,14 @@ mod tests {
             outputs: Vec::new(),
         };
         let non_rbf_txid = non_rbf_tx.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(non_rbf_tx), 100, 10_000, 1, 7));
+        let _ = pool.insert_entry(MempoolEntry::new(
+            Arc::new(non_rbf_tx),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ));
         let replaceable = pool.iter_replaceable_txids();
         assert!(replaceable.contains(&rbf_txid));
         assert!(!replaceable.contains(&non_rbf_txid));
@@ -3010,7 +3061,7 @@ mod tests {
             inputs: Vec::new(),
             outputs: Vec::new(),
         };
-        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7);
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0);
         pool.insert_entry(entry)?;
         let after = pool.sequence_number();
         assert!(after > before, "expected sequence to bump");
@@ -3029,16 +3080,16 @@ mod tests {
                 script_pubkey: vec![0x51].into(),
             }],
         };
-        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))?;
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))?;
         let seq_before_clear = pool.sequence_number();
 
         pool.clear();
 
         assert_eq!(pool.len(), 0);
-        assert!(pool.by_txid.is_empty());
-        assert!(pool.funding.is_empty());
-        assert!(pool.spending.is_empty());
-        assert!(pool.pareto.is_empty());
+        assert!(pool.derived.by_txid.is_empty());
+        assert!(pool.derived.funding.is_empty());
+        assert!(pool.derived.spending.is_empty());
+        assert!(pool.derived.pareto.is_empty());
         assert!(pool.fee_deltas.is_empty(), "clear is a wholesale reset");
         assert!(pool.sequence_number() > seq_before_clear);
         Ok(())
@@ -3083,7 +3134,7 @@ mod tests {
             }],
         };
         let spending_txid = spending.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(spending), 100, 10_000, 1, 7));
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(spending), 100, 10_000, 1, 7, 0));
         let spender = pool
             .outpoint_spender(outpoint)
             .expect("the index and the entries agree")
@@ -3130,14 +3181,22 @@ mod tests {
         let matching_tx = funder(matching.clone(), 0xaa);
         let matching_txid = matching_tx.txid();
         let matching_wtxid = matching_tx.wtxid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(matching_tx), 100, 10_000, 1, 7))
-            .expect("matching insert");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(matching_tx),
+            100,
+            10_000,
+            1,
+            7,
+            0,
+        ))
+        .expect("matching insert");
         pool.insert_entry(MempoolEntry::new(
             Arc::new(funder(other, 0xbb)),
             100,
             10_000,
             1,
             7,
+            0,
         ))
         .expect("other insert");
 
@@ -3162,7 +3221,9 @@ mod tests {
             vout: 0,
         };
         // No entry was ever inserted, so this row dangles.
-        pool.spending.insert((SpendingKey::from(outpoint), 9_999));
+        pool.derived
+            .spending
+            .insert((SpendingKey::from(outpoint), 9_999));
         assert!(matches!(
             pool.outpoint_spender(outpoint),
             Err(MempoolError::InconsistentSpendingIndex)
@@ -3198,13 +3259,15 @@ mod tests {
             }],
         };
         let entry_txid = tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
             .expect("insertion succeeds");
         let id = pool
             .entry_id_by_txid(&entry_txid)
             .expect("inserted entry id resolves");
         // A row the entry's inputs never earn.
-        pool.spending.insert((SpendingKey::from(indexed), id));
+        pool.derived
+            .spending
+            .insert((SpendingKey::from(indexed), id));
         assert!(matches!(
             pool.outpoint_spender(indexed),
             Err(MempoolError::InconsistentSpendingIndex)
@@ -3237,7 +3300,7 @@ mod tests {
         };
         let first = spender_tx(99_000);
         let first_txid = first.txid();
-        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(first), 100, 10_000, 1, 7));
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(first), 100, 10_000, 1, 7, 0));
         // A second spender of the same outpoint is a pool invariant violation
         // that insertion does not police; the query must still answer with
         // the first indexed entry, like the scan it replaces did.
@@ -3247,6 +3310,7 @@ mod tests {
             10_000,
             1,
             7,
+            0,
         ));
         let spender = pool
             .outpoint_spender(outpoint)
@@ -3277,7 +3341,7 @@ mod tests {
             }],
             outputs: vec![],
         };
-        pool.insert_entry(MempoolEntry::new(Arc::new(spending), 100, 10_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(spending), 100, 10_000, 1, 7, 0))?;
         assert!(pool.is_outpoint_spent(&outpoint));
         Ok(())
     }
@@ -3305,8 +3369,9 @@ mod tests {
             1_000,
             1,
             7,
+            0,
         ))?;
-        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 2, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 2, 7, 0))?;
         let child_id = pool
             .entry_id_by_txid(&child_txid)
             .expect("child id resolves");
@@ -3333,13 +3398,13 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let parent = tx(1, Vec::new());
         let parent_txid = parent.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0, 0))?;
         let parent_id = pool
             .entry_id_by_txid(&parent_txid)
             .expect("parent id resolves");
         let child = tx(2, vec![OutPoint::new(parent_txid, 0)]);
         let child_txid = child.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 0, 0))?;
         let child_id = pool
             .entry_id_by_txid(&child_txid)
             .expect("child id resolves");
@@ -3355,7 +3420,7 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let lone = tx(1, Vec::new());
         let lone_txid = lone.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(lone), 500, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(lone), 500, 1_000, 1, 7, 0))?;
         let Some(id) = pool.entry_id_by_txid(&lone_txid) else {
             panic!("insert failed");
         };
@@ -3369,7 +3434,7 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let tx = tx(1, Vec::new());
         let txid = tx.txid();
-        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))?;
 
         pool.prioritise(txid, 500).expect("overlay delta applies");
 
@@ -3401,7 +3466,7 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let tx = tx(2, Vec::new());
         let txid = tx.txid();
-        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))?;
 
         pool.prioritise(txid, -2_000)
             .expect("negative overlay applies");
@@ -3415,7 +3480,7 @@ mod tests {
         // A negative modified fee ranks below every actual fee, including
         // zero — that is the signed order the priority index keeps.
         assert_eq!(
-            pool.pareto.len(),
+            pool.derived.pareto.len(),
             1,
             "a negative overlay still indexes the entry"
         );
@@ -3427,7 +3492,7 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let entry_tx = tx(3, Vec::new());
         let txid = entry_tx.txid();
-        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(entry_tx), 100, 1_000, 1, 7))?;
+        let _id = pool.insert_entry(MempoolEntry::new(Arc::new(entry_tx), 100, 1_000, 1, 7, 0))?;
 
         pool.prioritise(txid, 2_000).expect("first delta applies");
         pool.prioritise(txid, 3_000)
@@ -3442,7 +3507,8 @@ mod tests {
 
         let other = tx(4, Vec::new());
         let other_txid = other.txid();
-        let _other_id = pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 1, 7))?;
+        let _other_id =
+            pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 1, 7, 0))?;
         pool.prioritise(other_txid, i64::MAX)
             .expect("the signed range edge itself is storable");
         assert_eq!(
@@ -3464,7 +3530,7 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let pooled = tx(30, Vec::new());
         let pooled_txid = pooled.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7, 0))?;
         pool.prioritise(pooled_txid, 500)
             .expect("pooled overlay applies");
 
@@ -3496,7 +3562,7 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let pooled = tx(32, Vec::new());
         let pooled_txid = pooled.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7, 0))?;
         pool.prioritise(pooled_txid, 500)
             .expect("pooled overlay applies");
         pool.prioritise(pooled_txid, -500)
@@ -3518,19 +3584,19 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let parent = tx(5, Vec::new());
         let parent_txid = parent.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 0, 0, 0))?;
         let parent_id = pool
             .entry_id_by_txid(&parent_txid)
             .expect("parent id resolves");
         let child = tx(6, vec![OutPoint::new(parent_txid, 0)]);
         let child_txid = child.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 2_000, 0, 0))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 2_000, 0, 0, 0))?;
         let child_id = pool
             .entry_id_by_txid(&child_txid)
             .expect("child id resolves");
         let grandchild = tx(7, vec![OutPoint::new(child_txid, 0)]);
         let grandchild_txid = grandchild.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(grandchild), 100, 3_000, 0, 0))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(grandchild), 100, 3_000, 0, 0, 0))?;
         let grandchild_id = pool
             .entry_id_by_txid(&grandchild_txid)
             .expect("grandchild id resolves");
@@ -3577,7 +3643,7 @@ mod tests {
         assert!(!pool.contains_txid(&txid));
         assert_eq!(pool.sequence_number(), before);
 
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))?;
 
         let Some(entry) = pool.entry_by_txid(&txid) else {
             panic!("insert failed");
@@ -3596,12 +3662,12 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let tx = tx(9, Vec::new());
         let txid = tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7, 0))?;
         pool.prioritise(txid, 700).expect("delta applies");
 
         assert!(!pool.evict_below_fee_rate(10_001).is_empty());
 
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))?;
         let Some(entry) = pool.entry_by_txid(&txid) else {
             panic!("readmission failed");
         };
@@ -3621,10 +3687,11 @@ mod tests {
             1_000,
             1,
             7,
+            0,
         ))?;
         let child = tx(11, vec![OutPoint::new(parent_txid, 0)]);
         let child_txid = child.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7, 0))?;
         // A delta stored for a transaction that never reached the pool.
         let stranger = tx(12, Vec::new());
         let stranger_txid = stranger.txid();
@@ -3657,7 +3724,7 @@ mod tests {
         assert!(pool.contains_txid(&child_txid));
 
         // Readmission answers from the surviving state alone.
-        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0))?;
         assert_eq!(
             pool.entry_by_txid(&parent_txid)
                 .map(|entry| entry.fee_delta),
@@ -3672,25 +3739,42 @@ mod tests {
         let mut pool = Mempool::new(MempoolLimits::default());
         let lower_fee_tx = tx(13, Vec::new());
         let lower_fee_txid = lower_fee_tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(lower_fee_tx), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(lower_fee_tx),
+            100,
+            1_000,
+            1,
+            7,
+            0,
+        ))?;
         let lower_fee_id = pool
             .entry_id_by_txid(&lower_fee_txid)
             .expect("lower id resolves");
         let higher_fee_tx = tx(14, Vec::new());
         let higher_fee_txid = higher_fee_tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(higher_fee_tx), 100, 2_000, 2, 7))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(higher_fee_tx),
+            100,
+            2_000,
+            2,
+            7,
+            0,
+        ))?;
         let higher_fee_id = pool
             .entry_id_by_txid(&higher_fee_txid)
             .expect("higher id resolves");
 
         assert_eq!(
-            pool.pareto.top_n(1).collect::<Vec<_>>(),
+            pool.derived.pareto.top_n(1).collect::<Vec<_>>(),
             vec![higher_fee_id]
         );
         pool.prioritise(lower_fee_txid, 2_000)
             .expect("delta applies");
 
-        assert_eq!(pool.pareto.top_n(1).collect::<Vec<_>>(), vec![lower_fee_id]);
+        assert_eq!(
+            pool.derived.pareto.top_n(1).collect::<Vec<_>>(),
+            vec![lower_fee_id]
+        );
         Ok(())
     }
 
@@ -3700,11 +3784,11 @@ mod tests {
         let parent = Arc::new(tx(15, Vec::new()));
         let parent_txid = parent.txid();
         let _parent_id =
-            pool.insert_entry(MempoolEntry::new(Arc::clone(&parent), 100, 1_000, 1, 7))?;
+            pool.insert_entry(MempoolEntry::new(Arc::clone(&parent), 100, 1_000, 1, 7, 0))?;
         let child = Arc::new(tx(16, vec![OutPoint::new(parent_txid, 0)]));
         let child_txid = child.txid();
         let _child_id =
-            pool.insert_entry(MempoolEntry::new(Arc::clone(&child), 100, 2_000, 2, 7))?;
+            pool.insert_entry(MempoolEntry::new(Arc::clone(&child), 100, 2_000, 2, 7, 0))?;
 
         let snapshot = pool.mining_snapshot();
         assert_eq!(snapshot.sequence, pool.sequence_number());
@@ -3732,8 +3816,8 @@ mod tests {
         );
         assert_eq!(child_entry.weight, child.weight());
         assert_eq!(
-            child_entry.sigop_cost,
-            bitcoin_rs_script::count_tx_legacy(&child)
+            child_entry.sigop_cost, 0,
+            "the fixture scripts are sigop-free and the constructor took 0"
         );
         assert_eq!(child_entry.wtxid, child.wtxid());
         assert_eq!(child_entry.ancestor_size, 200);
@@ -3768,7 +3852,7 @@ mod tests {
         let tx = tx(17, Vec::new());
         let txid = tx.txid();
         let shared = Arc::new(tx);
-        pool.insert_entry(MempoolEntry::new(Arc::clone(&shared), 100, 1_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::clone(&shared), 100, 1_000, 1, 7, 0))?;
 
         let snapshot = pool.mining_snapshot();
         pool.clear();
@@ -3804,6 +3888,7 @@ mod tests {
             10_000,
             1,
             7,
+            0,
         ))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(second.clone()),
@@ -3811,6 +3896,7 @@ mod tests {
             10_000,
             1,
             7,
+            0,
         ))?;
         assert_eq!(
             pool.estimate_fee_rate(2),
@@ -3851,7 +3937,7 @@ mod tests {
             }],
         };
         let low_txid = low.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(low), 100, 100, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 100, 100, 1, 7, 0))?;
 
         let high = Tx {
             version: 2,
@@ -3863,7 +3949,7 @@ mod tests {
             }],
         };
         let high_txid = high.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(high), 100, 10_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(high), 100, 10_000, 1, 7, 0))?;
 
         let evicted = pool.evict_below_fee_rate(5_000);
 
@@ -3890,7 +3976,7 @@ mod tests {
             }],
         };
         let low_txid = low.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(low), 500, 100, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 500, 100, 1, 7, 0))?;
 
         let high = Tx {
             version: 2,
@@ -3902,7 +3988,7 @@ mod tests {
             }],
         };
         let high_txid = high.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(high), 500, 10_000, 1, 7))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(high), 500, 10_000, 1, 7, 0))?;
 
         let evicted = pool.enforce_size_limit(600)?;
 
@@ -3934,7 +4020,7 @@ mod tests {
             };
             let fee = 100_u64.saturating_add(u64::from(nonce).saturating_mul(50));
 
-            let _ = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 600, fee, 1, 7));
+            let _ = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 600, fee, 1, 7, 0));
         }
 
         assert!(
@@ -3968,18 +4054,18 @@ mod tests {
         let mut pool = Mempool::new(limits);
 
         // Fills the pool at a rate the arrivals below are measured against.
-        let seated = pool.insert_entry(MempoolEntry::new(tx_paying(1), 900, 90_000, 1, 7));
+        let seated = pool.insert_entry(MempoolEntry::new(tx_paying(1), 900, 90_000, 1, 7, 0));
         assert!(seated.is_ok(), "the first transaction fits: {seated:?}");
 
         let before = (pool.sequence_number(), pool.estimator_history());
-        let refused = pool.insert_entry(MempoolEntry::new(tx_paying(2), 900, 10, 2, 7));
+        let refused = pool.insert_entry(MempoolEntry::new(tx_paying(2), 900, 10, 2, 7, 0));
         assert!(matches!(refused, Err(MempoolError::Full)));
         assert_eq!(pool.len(), 1);
         assert_eq!(pool.sequence_number(), before.0);
         assert_eq!(pool.estimator_history(), before.1);
 
         // The paired accept: pays more, so the trim takes the other one.
-        let admitted = pool.insert_entry(MempoolEntry::new(tx_paying(3), 900, 900_000, 3, 7));
+        let admitted = pool.insert_entry(MempoolEntry::new(tx_paying(3), 900, 900_000, 3, 7, 0));
         let Ok(_result) = admitted else {
             panic!("a better-paying transaction must be admitted: {admitted:?}");
         };
@@ -4023,13 +4109,19 @@ mod tests {
             }],
         };
         let original_txid = original.txid();
-        let seated = pool.insert_entry(MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7));
+        let seated = pool.insert_entry(MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7, 0));
         assert!(seated.is_ok(), "original must fit: {seated:?}");
 
         // Bystander: 850 vbytes, high fee rate (10_000 sat/vbyte), fills pool.
         let bystander = tx(8, Vec::new());
-        let seated_by =
-            pool.insert_entry(MempoolEntry::new(Arc::new(bystander), 850, 8_500_000, 1, 7));
+        let seated_by = pool.insert_entry(MempoolEntry::new(
+            Arc::new(bystander),
+            850,
+            8_500_000,
+            1,
+            7,
+            0,
+        ));
         assert!(seated_by.is_ok(), "bystander must fit: {seated_by:?}");
         assert_eq!(pool.len(), 2);
 
@@ -4061,10 +4153,10 @@ mod tests {
             pool.policy_stamp(),
         );
         let result = pool.replace_transaction(
-            crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1),
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1)
+                .with_sigop_cost(4),
             2,
             7,
-            4,
         );
         assert!(matches!(
             result,
@@ -4118,6 +4210,7 @@ mod tests {
                 u64::from(vsize) * 10,
                 u64::from(label),
                 1,
+                0,
             ))?;
             Ok(OutPoint::new(txid, 0))
         };
@@ -4171,7 +4264,7 @@ mod tests {
     ///
     /// The victim is addressed by entry id, which is the slab index and so
     /// follows insertion order. An earlier revision picked it out of
-    /// `pool.by_txid`, a `HashMap` whose iteration order is randomized per
+    /// `pool.derived.by_txid`, a `HashMap` whose iteration order is randomized per
     /// process: the test removed a different entry on every run, and under a
     /// mutation that took the closure after the removal instead of before it,
     /// it went red in only 36 of 60 runs.
@@ -4221,16 +4314,17 @@ mod tests {
 
         let root = tx(31, vec![OutPoint::default()]);
         let root_out = OutPoint::new(root.txid(), 0);
-        pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 500, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 500, 0, 1, 0))?;
         let child = tx(32, vec![root_out]);
         let child_out = OutPoint::new(child.txid(), 0);
-        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 9_000, 1, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 9_000, 1, 1, 0))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx(33, vec![child_out])),
             100,
             100_000,
             2,
             1,
+            0,
         ))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx(34, vec![OutPoint::default()])),
@@ -4238,6 +4332,7 @@ mod tests {
             200,
             3,
             1,
+            0,
         ))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx(35, vec![OutPoint::default()])),
@@ -4245,6 +4340,7 @@ mod tests {
             300,
             4,
             1,
+            0,
         ))?;
         assert!(
             pool.len() < 5,
@@ -4252,7 +4348,11 @@ mod tests {
         );
 
         let incremental = totals(&pool);
-        let index = pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>();
+        let index = pool
+            .derived
+            .pareto
+            .top_n(pool.derived.pareto.len())
+            .collect::<Vec<_>>();
         pool.recompute_all_metadata();
         assert_eq!(
             incremental,
@@ -4261,7 +4361,10 @@ mod tests {
         );
         assert_eq!(
             index,
-            pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>(),
+            pool.derived
+                .pareto
+                .top_n(pool.derived.pareto.len())
+                .collect::<Vec<_>>(),
             "eviction left a stale priority index behind"
         );
         Ok(())
@@ -4269,15 +4372,14 @@ mod tests {
 
     /// The running totals must survive every mutation, not just insertion.
     ///
-    /// `total_vsize` and `aggregate_fees` each guard themselves with a
-    /// `debug_assert` against a fold of `entries`, but a guard only fires when
-    /// something calls it. `total_vsize` is called by `insert_entry` on every
-    /// acceptance, so its bookkeeping was covered by accident; `aggregate_fees`
-    /// is only reached through `stats`, and deleting the fee bookkeeping in
-    /// *both* the removal path and `prioritise` turned nothing red. This calls
-    /// both accessors after each kind of mutation, and compares against an
-    /// independent fold so the check survives a release build where the
-    /// `debug_assert`s are compiled out.
+    /// The accessors answer from maintained sums, not from a fold, so a read
+    /// never re-derives them: a drift surfaces only where a consumer compares
+    /// the total against membership. `total_vsize` is consulted by
+    /// `insert_entry` on every acceptance, but `aggregate_fees` is only
+    /// reached through `stats`, and deleting the fee bookkeeping in *both*
+    /// the removal path and `prioritise` turned nothing red. This calls both
+    /// accessors after each kind of mutation, and compares against an
+    /// independent fold, which is the check a release build keeps.
     #[test]
     fn running_totals_track_inserts_removals_and_prioritise() -> Result<(), MempoolError> {
         fn folded(pool: &Mempool) -> (u64, u64) {
@@ -4303,7 +4405,7 @@ mod tests {
         check(&pool, "inserts");
 
         // Addressed through the fixture's own handles, in insertion order.
-        // `pool.by_txid` is a `HashMap`, so picking from it would choose a
+        // `pool.derived.by_txid` is a `HashMap`, so picking from it would choose a
         // different subject on every run — see
         // `incremental_metadata_matches_the_full_recompute_after_removals`.
         let Some(root) = outs.first().map(|out| out.txid) else {
@@ -4358,7 +4460,11 @@ mod tests {
         pool.prioritise(txid, 5_000_000)
             .expect("prioritise must apply");
 
-        let after_prioritise = pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>();
+        let after_prioritise = pool
+            .derived
+            .pareto
+            .top_n(pool.derived.pareto.len())
+            .collect::<Vec<_>>();
         let totals_after = totals(&pool);
         pool.recompute_all_metadata();
         assert_eq!(
@@ -4368,7 +4474,10 @@ mod tests {
         );
         assert_eq!(
             after_prioritise,
-            pool.pareto.top_n(pool.pareto.len()).collect::<Vec<_>>(),
+            pool.derived
+                .pareto
+                .top_n(pool.derived.pareto.len())
+                .collect::<Vec<_>>(),
             "prioritise left stale priority keys behind"
         );
         Ok(())
@@ -4389,9 +4498,9 @@ mod tests {
         let child = tx(12, vec![parent_out]);
 
         // Child first: at this point it has no in-mempool ancestor.
-        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 1, 0))?;
         // Then the parent it spends from.
-        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 200, 4_000, 1, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 200, 4_000, 1, 1, 0))?;
 
         let incremental = totals(&pool);
         pool.recompute_all_metadata();
@@ -4489,7 +4598,7 @@ mod spend_index_tests {
 
         let mut pool = Mempool::new(MempoolLimits::default());
         for tx in [root, child_a, child_b, child_c] {
-            let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7);
+            let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0);
             let Ok(_id) = pool.insert_entry(entry) else {
                 panic!("mempool insert failed while building the fixture");
             };
@@ -4559,7 +4668,7 @@ mod spend_index_tests {
                 ..MempoolLimits::default()
             };
             let mut pool = Mempool::new(limits);
-            let root_entry = MempoolEntry::new(Arc::new(root.clone()), 100, 10_000, 1, 7);
+            let root_entry = MempoolEntry::new(Arc::new(root.clone()), 100, 10_000, 1, 7, 0);
             let Ok(_id) = pool.insert_entry(root_entry) else {
                 panic!("root must be admitted");
             };
@@ -4573,7 +4682,7 @@ mod spend_index_tests {
                     1,
                     u64::from(vout).saturating_add(2),
                 );
-                let entry = MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7);
+                let entry = MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0);
                 outcomes.push(pool.insert_entry(entry));
             }
             outcomes
@@ -4631,13 +4740,13 @@ mod spend_index_tests {
         };
         let mut pool = Mempool::new(limits);
         for tx in [a, b, c] {
-            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
             else {
                 panic!("the three-member cluster must be admitted under a limit of three");
             };
         }
 
-        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(d), 100, 10_000, 1, 7));
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(d), 100, 10_000, 1, 7, 0));
         assert!(
             matches!(
                 outcome,
@@ -4662,12 +4771,12 @@ mod spend_index_tests {
         };
         let mut pool = Mempool::new(limits);
 
-        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(root), 200, 10_000, 1, 7))
+        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(root), 200, 10_000, 1, 7, 0))
         else {
             panic!("root must be admitted");
         };
         let child = tx_with(&[OutPoint::new(root_txid, 0)], 1, 2);
-        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7));
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0));
         assert!(
             matches!(
                 outcome,
@@ -4697,13 +4806,13 @@ mod spend_index_tests {
         let mut pool = Mempool::new(limits);
 
         // The child lands first; nothing in the pool is its parent yet.
-        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7))
+        let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0))
         else {
             panic!("the child must be admitted into an empty pool");
         };
         // Now its parent arrives. Seeding the walk from parents alone would
         // find nothing and admit it into a cluster of two.
-        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 10_000, 1, 7));
+        let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 10_000, 1, 7, 0));
         assert!(
             matches!(
                 outcome,
@@ -4758,7 +4867,7 @@ mod spend_index_tests {
         };
         let mut pool = Mempool::new(limits);
         for tx in [root, a, b] {
-            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
             else {
                 panic!("the three-member cluster must be admitted under a limit of three");
             };
@@ -4766,10 +4875,10 @@ mod spend_index_tests {
 
         let replacement = tx_with(&[OutPoint::new(root_txid, 0)], 1, 4);
         let result = pool.replace_transaction(
-            crate::ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1),
+            &crate::ReplacementCandidate::new(Arc::new(replacement), 100, 12_000, 1)
+                .with_sigop_cost(4),
             4,
             7,
-            4,
         );
         assert!(
             result.is_ok(),
@@ -4800,7 +4909,7 @@ mod spend_index_tests {
         };
         let mut pool = Mempool::new(limits);
         for tx in [root, child_a, child_b] {
-            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
             else {
                 panic!("the three-member cluster must be admitted under a limit of three");
             };
@@ -4823,7 +4932,8 @@ mod spend_index_tests {
             "the preview must reject a cluster-only violation: {preview:?}"
         );
 
-        let admission = pool.insert_entry(MempoolEntry::new(Arc::new(child_c), 100, 10_000, 4, 7));
+        let admission =
+            pool.insert_entry(MempoolEntry::new(Arc::new(child_c), 100, 10_000, 4, 7, 0));
         assert!(
             matches!(
                 admission,
@@ -4858,7 +4968,7 @@ mod spend_index_tests {
         };
         let mut pool = Mempool::new(limits);
         for tx in [root, a, b] {
-            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7))
+            let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
             else {
                 panic!("the three-member cluster must be admitted under a limit of three");
             };
@@ -4879,8 +4989,15 @@ mod spend_index_tests {
         assert_eq!(preview.evicted, vec![a_id]);
         assert_eq!(pool.tx_count(), 3, "preview does not mutate");
         assert_eq!(
-            pool.insert_entry(MempoolEntry::new(Arc::new(replacement), 100, 20_000, 1, 7))
-                .err(),
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(replacement),
+                100,
+                20_000,
+                1,
+                7,
+                0
+            ))
+            .err(),
             Some(MempoolError::Policy(PolicyError::ClusterCountLimit)),
             "ordinary insertion cannot grow this full cluster"
         );
@@ -4947,12 +5064,12 @@ mod spend_index_tests {
         let child_txid = child.txid();
         let mut pool = Mempool::new(MempoolLimits::default());
 
-        let child_entry = MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7);
+        let child_entry = MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0);
         assert!(
             pool.insert_entry(child_entry).is_ok(),
             "child insertion failed"
         );
-        let parent_entry = MempoolEntry::new(Arc::new(parent), 100, 10_000, 1, 7);
+        let parent_entry = MempoolEntry::new(Arc::new(parent), 100, 10_000, 1, 7, 0);
         assert!(
             pool.insert_entry(parent_entry).is_ok(),
             "parent insertion failed"
@@ -5031,7 +5148,7 @@ mod dynamic_memory_usage_tests {
             ..MempoolLimits::default()
         });
         for tag in 0..count {
-            let entry = MempoolEntry::new(Arc::new(tx_with(script_len, tag)), 100, 10_000, 1, 7);
+            let entry = MempoolEntry::new(Arc::new(tx_with(script_len, tag)), 100, 10_000, 1, 7, 0);
             let Ok(_id) = pool.insert_entry(entry) else {
                 panic!("fixture insert failed");
             };
@@ -5090,16 +5207,16 @@ mod dynamic_memory_usage_tests {
 
     /// A grown-then-emptied pool still holds its arena, and still says so.
     ///
-    /// `slab::Slab` keeps its backing allocation across removals and across
+    /// The slot array keeps its backing allocation across removals and across
     /// `clear`; nothing here hands it back. Charging the arena from `len()`
     /// therefore reported that retained memory as **zero** at exactly the
     /// moment an operator reads `usage` to find out where the memory went --
     /// a pool that peaked at a million transactions and then drained answers
     /// "nothing", while the process RSS says otherwise.
     ///
-    /// The bound below is the arena alone: after `clear` there are no live
-    /// entries, so every other term is zero and what remains is the arena or
-    /// nothing.
+    /// The figure below is the arena alone: after `clear` there are no live
+    /// entries and the derived state is a fresh default, so the one
+    /// allocation that survives is the arena.
     #[test]
     fn the_arena_is_charged_after_the_pool_is_cleared() {
         use core::mem::size_of;
@@ -5112,20 +5229,17 @@ mod dynamic_memory_usage_tests {
             capacity > 0,
             "the fixture must leave a grown arena behind, or this proves nothing"
         );
-        let arena = capacity.saturating_mul(u64::try_from(size_of::<MempoolEntry>()).unwrap_or(0));
-
+        let arena =
+            capacity.saturating_mul(u64::try_from(size_of::<Option<LiveEntry>>()).unwrap_or(0));
         let cleared = pool.dynamic_memory_usage();
-        // Strictly above the arena, not merely at it: the txid map is a hash
-        // map and keeps its capacity across `clear` for the same reason the
-        // slab does, so both retentions have to be counted or this fails.
-        assert!(
-            cleared > arena,
-            "the retained arena and txid map must both be counted: {cleared} vs {arena}"
+        assert_eq!(
+            cleared, arena,
+            "a cleared pool must report its arena and nothing else: {cleared} vs {arena}"
         );
 
         // Against a pool that never grew, which is the difference the old
-        // accounting erased: both have no live entries, and only one of them is
-        // holding memory.
+        // accounting erased: both have no live entries, and only one of them
+        // is holding memory.
         let fresh = Mempool::new(MempoolLimits {
             max_total_bytes: 0,
             ..MempoolLimits::default()
@@ -5157,7 +5271,7 @@ mod dynamic_memory_usage_tests {
         const COUNT: u64 = 32;
 
         let mut pool = pool_with(u8::try_from(COUNT).unwrap_or(0), 64);
-        let index = pool.pareto.dynamic_memory_usage();
+        let index = pool.derived.pareto.dynamic_memory_usage();
 
         // The floor on what two key collections cost lives in `pareto.rs`,
         // beside the private key type it is stated in terms of. This is the
@@ -5174,7 +5288,7 @@ mod dynamic_memory_usage_tests {
         // still computing its own figure from the entry count and ignoring the
         // index entirely, which is the term this replaces.
         let with_index = pool.dynamic_memory_usage();
-        pool.pareto = ParetoFront::new();
+        pool.derived.pareto = ParetoFront::default();
         let without_index = pool.dynamic_memory_usage();
         assert_eq!(
             with_index.saturating_sub(without_index),
@@ -5215,7 +5329,7 @@ mod entry_overhead_tests {
         });
         let count = 8_u32;
         for tag in 0..count {
-            let entry = MempoolEntry::new(Arc::new(empty_tx(tag)), 100, 10_000, 1, 7);
+            let entry = MempoolEntry::new(Arc::new(empty_tx(tag)), 100, 10_000, 1, 7, 0);
             let Ok(_id) = pool.insert_entry(entry) else {
                 panic!("fixture insert failed");
             };
@@ -5312,8 +5426,15 @@ mod graph_tests {
     fn insert_ok(pool: &mut Mempool, nonce: u32, inputs: &[OutPoint], vsize: u32) -> Txid {
         let tx = graph_tx(nonce, inputs, false);
         let txid = tx.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(tx), vsize, 1_000, TIME, HEIGHT))
-            .expect("fixture insert must pass validation");
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(tx),
+            vsize,
+            1_000,
+            TIME,
+            HEIGHT,
+            0,
+        ))
+        .expect("fixture insert must pass validation");
         txid
     }
 
@@ -5323,7 +5444,12 @@ mod graph_tests {
     fn reference_components(pool: &Mempool) -> Vec<Vec<EntryId>> {
         let mut seen: HashSet<EntryId> = HashSet::new();
         let mut components = Vec::new();
-        let live: Vec<EntryId> = pool.by_txid.values().map(|indexed| indexed.id).collect();
+        let live: Vec<EntryId> = pool
+            .derived
+            .by_txid
+            .values()
+            .map(|indexed| indexed.id)
+            .collect();
         for seed in live {
             if !seen.insert(seed) {
                 continue;
@@ -5346,6 +5472,7 @@ mod graph_tests {
                     EntryId::MAX,
                 );
                 let children = pool
+                    .derived
                     .spending
                     .range(start..=end)
                     .map(|(_, child)| *child)
@@ -5566,7 +5693,7 @@ mod graph_tests {
         // b's and d's outputs are the unspent ones; spending them joins both
         // 2-member clusters plus the candidate.
         let joiner = graph_tx(5, &[OutPoint::new(b, 0), OutPoint::new(d, 0)], false);
-        let entry = MempoolEntry::new(Arc::new(joiner.clone()), 100, 1_000, TIME, HEIGHT);
+        let entry = MempoolEntry::new(Arc::new(joiner.clone()), 100, 1_000, TIME, HEIGHT, 0);
         let error = pool
             .insert_entry(entry)
             .expect_err("cluster of five is over the limit");
@@ -5593,6 +5720,109 @@ mod graph_tests {
         // A candidate inside the limit is admitted through the same path.
         let _e = insert_ok(&mut pool, 6, &[OutPoint::new(a, 0)], 100);
         assert_graph_exact(&pool);
+    }
+
+    /// The cached cluster check and the walk must return the same verdict
+    /// while nothing is excluded. In a debug build `check_cluster_limits`
+    /// compares the two on every admission; a release build runs only the
+    /// cache, so this test is the release-safe guard. Each shape exercises a
+    /// different way the paths could diverge: a candidate that merges two
+    /// components, a sibling reached only by an up-then-down edge, a partition
+    /// a removal just re-derived (with a limit tight enough that a stale
+    /// merged summary would flip the verdict), a size-limit verdict answered
+    /// from the merged summary weight, and a neighbour that is an in-pool
+    /// child of the candidate itself.
+    #[test]
+    fn check_cluster_limits_cached_matches_walk_across_graph_shapes() {
+        fn agrees(pool: &Mempool, tx: &Tx, weight: u64, expected: Result<(), PolicyError>) {
+            let excluded: HashSet<EntryId> = HashSet::new();
+            assert_eq!(
+                pool.check_cluster_limits_cached(tx, weight),
+                expected,
+                "cached verdict must match the pinned outcome"
+            );
+            assert_eq!(
+                pool.check_cluster_limits_by_walk(tx, weight, &excluded),
+                expected,
+                "walk verdict must match the pinned outcome"
+            );
+        }
+
+        fn shape_pool(count: u32) -> Mempool {
+            Mempool::new(MempoolLimits {
+                max_total_bytes: 0,
+                min_relay_fee_sat_per_kvb: 0,
+                cluster_count: count,
+                cluster_size_vbytes: 1_000_000,
+                ..MempoolLimits::default()
+            })
+        }
+
+        // Merge: the candidate spends one output of each of two chains, so
+        // its cluster spans five entries against a limit of four.
+        let mut pool = shape_pool(4);
+        let parent_one = insert_ok(&mut pool, 1, &[], 100);
+        let child_one = insert_ok(&mut pool, 2, &[OutPoint::new(parent_one, 0)], 100);
+        let parent_two = insert_ok(&mut pool, 3, &[], 100);
+        let child_two = insert_ok(&mut pool, 4, &[OutPoint::new(parent_two, 0)], 100);
+        let joiner = graph_tx(
+            5,
+            &[OutPoint::new(child_one, 0), OutPoint::new(child_two, 0)],
+            false,
+        );
+        agrees(&pool, &joiner, 400, Err(PolicyError::ClusterCountLimit));
+
+        // Bridge: one parent with two pooled children; the candidate spends
+        // one child, so its cluster reaches the sibling only through an
+        // up-edge followed by a down-edge. Four members at the limit of four.
+        let mut pool = shape_pool(4);
+        let probe = insert_ok(&mut pool, 1, &[], 100);
+        let c1 = insert_ok(&mut pool, 2, &[OutPoint::new(probe, 0)], 100);
+        let _c2 = insert_ok(&mut pool, 3, &[OutPoint::new(probe, 0)], 100);
+        let sibling_spender = graph_tx(4, &[OutPoint::new(c1, 0)], false);
+        agrees(&pool, &sibling_spender, 400, Ok(()));
+
+        // Split: removing the middle entry partitions a three-chain; with a
+        // limit of three the rejoiner of one side is admissible only if the
+        // cached summaries describe the partition, not the old merged
+        // component (a stale summary counts four and refuses).
+        let mut pool = shape_pool(3);
+        let split_root = insert_ok(&mut pool, 1, &[], 100);
+        let split_mid = insert_ok(&mut pool, 2, &[OutPoint::new(split_root, 0)], 100);
+        let _split_tail = insert_ok(&mut pool, 3, &[OutPoint::new(split_mid, 0)], 100);
+        let split_mid_id = pool
+            .entry_id_by_txid(&split_mid)
+            .expect("middle entry resolves");
+        pool.remove_entries_with_reasons(
+            &[(split_mid_id, RemovalReason::Conflict)],
+            &mut Vec::new(),
+        );
+        let rejoiner = graph_tx(4, &[OutPoint::new(split_root, 0)], false);
+        agrees(&pool, &rejoiner, 400, Ok(()));
+
+        // Oversized: inside the member-count limit but over the vbytes one,
+        // which the cached path answers from the merged summary weight.
+        let mut pool = Mempool::new(MempoolLimits {
+            max_total_bytes: 0,
+            min_relay_fee_sat_per_kvb: 0,
+            cluster_count: 8,
+            cluster_size_vbytes: 200,
+            ..MempoolLimits::default()
+        });
+        let oversize_root = insert_ok(&mut pool, 1, &[], 100);
+        let oversize_mid = insert_ok(&mut pool, 2, &[OutPoint::new(oversize_root, 0)], 100);
+        let overweight = graph_tx(3, &[OutPoint::new(oversize_mid, 0)], false);
+        agrees(&pool, &overweight, 400, Err(PolicyError::ClusterSizeLimit));
+
+        // In-pool child: the candidate's output is already spent by a pooled
+        // child (out-of-order arrival), so the candidate's cluster seeds
+        // downward through the spend index.
+        let mut pool = shape_pool(4);
+        let parent_tx = graph_tx(1, &[], false);
+        let parent_txid = parent_tx.txid();
+        let _child = insert_ok(&mut pool, 2, &[OutPoint::new(parent_txid, 0)], 100);
+        agrees(&pool, &parent_tx, 400, Ok(()));
+        assert_eq!(pool.tx_count(), 1, "the fixture pools the child only");
     }
 
     #[test]
@@ -5707,6 +5937,7 @@ mod graph_tests {
             1_000,
             TIME,
             HEIGHT,
+            0,
         ));
         outcome.ok()?;
         txs.push(tx);
@@ -5801,8 +6032,14 @@ mod graph_tests {
                         }
                         let excluded: HashSet<EntryId> = evicted.iter().copied().collect();
                         let fee = 2_000 + u64::try_from(rng.below(1_000)).unwrap_or(0);
-                        let entry =
-                            MempoolEntry::new(Arc::new(candidate.clone()), 100, fee, TIME, HEIGHT);
+                        let entry = MempoolEntry::new(
+                            Arc::new(candidate.clone()),
+                            100,
+                            fee,
+                            TIME,
+                            HEIGHT,
+                            0,
+                        );
                         let Ok(prepared) = pool.validate_insert(entry, &excluded) else {
                             continue;
                         };

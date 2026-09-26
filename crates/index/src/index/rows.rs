@@ -2,7 +2,7 @@
 
 use super::error::IndexError;
 use crate::types::HashPrefixRow;
-use bitcoin_rs_storage::{ColumnFamily, WriteBatch};
+use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily};
 use zerocopy::IntoBytes;
 
 /// One ordered live-view mutation produced by a block.
@@ -158,7 +158,7 @@ impl PendingRows {
 /// which is exactly a block's live rollback; inverted ops are applied in
 /// reverse order so the earliest forward operation determines each key's
 /// undo mutation.
-fn apply_live_ops<B: WriteBatch>(batch: &mut B, ops: &[LiveOp], invert: bool) {
+fn apply_live_ops(batch: &mut BufferedWriteBatch, ops: &[LiveOp], invert: bool) {
     let mut last: hashbrown::HashMap<[u8; crate::types::SCRIPT_LIVE_ROW_SIZE], bool> =
         hashbrown::HashMap::new();
     let record = |op: &LiveOp| {
@@ -182,7 +182,7 @@ fn apply_live_ops<B: WriteBatch>(batch: &mut B, ops: &[LiveOp], invert: bool) {
     }
 }
 
-pub(super) fn put_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows) {
+pub(super) fn put_rows(batch: &mut BufferedWriteBatch, rows: &PendingRows) {
     for (cf, positioned) in [
         (ColumnFamily::TxConfirmed, &rows.txid_rows),
         (ColumnFamily::Funding, &rows.funding_rows),
@@ -202,8 +202,8 @@ pub(super) fn put_rows<B: WriteBatch>(batch: &mut B, rows: &PendingRows) {
     apply_live_ops(batch, &rows.live_ops, false);
 }
 
-pub(super) fn delete_rows<B: WriteBatch>(
-    batch: &mut B,
+pub(super) fn delete_rows(
+    batch: &mut BufferedWriteBatch,
     rows: &PendingRows,
     delete_shared_identity: bool,
 ) {

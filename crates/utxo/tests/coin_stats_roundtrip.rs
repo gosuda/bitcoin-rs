@@ -2,7 +2,8 @@
 
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_storage::{
-    ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition,
+    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError,
+    WriteCondition,
 };
 use bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN;
 use bitcoin_rs_utxo::stats::{
@@ -107,8 +108,6 @@ struct MemoryStore {
 }
 
 impl KvStore for MemoryStore {
-    type WriteBatch = MemoryBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(self
             .rows
@@ -137,20 +136,20 @@ impl KvStore for MemoryStore {
         Ok(Box::new(rows.into_iter()))
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
-        MemoryBatch::default()
+    fn new_batch(&self) -> BufferedWriteBatch {
+        BufferedWriteBatch::default()
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let mut rows = self.rows.write();
-        apply_ops(&mut rows, batch.ops.into_iter());
+        apply_ops(&mut rows, batch.into_ops());
         Ok(())
     }
 
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
-        batch: Self::WriteBatch,
+        batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
         let mut rows = self.rows.write();
         // Every condition observes pre-batch state; the batch may mutate a
@@ -166,7 +165,7 @@ impl KvStore for MemoryStore {
         if !matched {
             return Ok(false);
         }
-        apply_ops(&mut rows, batch.ops.into_iter());
+        apply_ops(&mut rows, batch.into_ops());
         Ok(true)
     }
 
@@ -185,51 +184,24 @@ impl KvStore for MemoryStore {
     }
 }
 
-#[derive(Default)]
-struct MemoryBatch {
-    ops: Vec<MemoryOp>,
-}
-
-enum MemoryOp {
-    Put(ColumnFamily, Vec<u8>, Vec<u8>),
-    Delete(ColumnFamily, Vec<u8>),
-    DeleteRange(ColumnFamily, Vec<u8>, Vec<u8>),
-}
-
-impl WriteBatch for MemoryBatch {
-    fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
-        self.ops
-            .push(MemoryOp::Put(cf, key.to_vec(), value.to_vec()));
-    }
-
-    fn delete(&mut self, cf: ColumnFamily, key: &[u8]) {
-        self.ops.push(MemoryOp::Delete(cf, key.to_vec()));
-    }
-
-    fn delete_range(&mut self, cf: ColumnFamily, start: &[u8], end: &[u8]) {
-        self.ops
-            .push(MemoryOp::DeleteRange(cf, start.to_vec(), end.to_vec()));
-    }
-}
-
 /// Folds one batch's operations into the row list, in order.
-fn apply_ops(rows: &mut Vec<Row>, ops: std::vec::IntoIter<MemoryOp>) {
+fn apply_ops(rows: &mut Vec<Row>, ops: Vec<BatchOp>) {
     for op in ops {
         match op {
-            MemoryOp::Put(cf, key, value) => {
+            BatchOp::Put { cf, key, value } => {
                 if let Some((_row, existing_value)) = rows
                     .iter_mut()
                     .find(|((row_cf, row_key), _value)| *row_cf == cf && row_key == &key)
                 {
-                    *existing_value = value;
+                    *existing_value = value.into();
                 } else {
-                    rows.push(((cf, key), value));
+                    rows.push(((cf, key), value.into()));
                 }
             }
-            MemoryOp::Delete(cf, key) => {
+            BatchOp::Delete { cf, key } => {
                 rows.retain(|((row_cf, row_key), _value)| *row_cf != cf || row_key != &key);
             }
-            MemoryOp::DeleteRange(cf, start, end) => {
+            BatchOp::DeleteRange { cf, start, end } => {
                 rows.retain(|((row_cf, key), _value)| {
                     *row_cf != cf
                         || key.as_slice() < start.as_slice()

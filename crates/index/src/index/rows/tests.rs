@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, Txid};
-use bitcoin_rs_storage::{ColumnFamily, WriteBatch};
+use bitcoin_rs_storage::{BatchOp, BufferedWriteBatch, ColumnFamily};
 
 use super::{
     IndexError, IndexRowCounts, LiveOp, PendingRows, PositionedRow, apply_live_ops, delete_rows,
@@ -9,36 +9,12 @@ use super::{
 };
 use crate::types::{HashPrefixRow, ScriptHash, ScriptLiveRow, TxPosition};
 
-#[derive(Debug, Eq, PartialEq)]
-struct Mutation {
-    cf: ColumnFamily,
-    key: Vec<u8>,
-    value: Option<Vec<u8>>,
-}
-
-#[derive(Default)]
-struct RecordingBatch {
-    mutations: Vec<Mutation>,
-    ranges: Vec<(ColumnFamily, Vec<u8>, Vec<u8>)>,
-}
-
-impl WriteBatch for RecordingBatch {
-    fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
-        self.mutations.push(Mutation {
-            cf,
-            key: key.to_vec(),
-            value: Some(value.to_vec()),
-        });
-    }
-    fn delete(&mut self, cf: ColumnFamily, key: &[u8]) {
-        self.mutations.push(Mutation {
-            cf,
-            key: key.to_vec(),
-            value: None,
-        });
-    }
-    fn delete_range(&mut self, cf: ColumnFamily, start: &[u8], end: &[u8]) {
-        self.ranges.push((cf, start.to_vec(), end.to_vec()));
+/// Reads the target family of one recorded operation.
+fn op_cf(op: &BatchOp) -> ColumnFamily {
+    match op {
+        BatchOp::Put { cf, .. } | BatchOp::Delete { cf, .. } | BatchOp::DeleteRange { cf, .. } => {
+            *cf
+        }
     }
 }
 
@@ -122,32 +98,45 @@ fn row_accounting_matches_emitted_bytes_and_shared_header_deletion() -> Result<(
             live: 0
         }
     );
-    let mut puts = RecordingBatch::default();
+    let mut puts = BufferedWriteBatch::default();
     put_rows(&mut puts, &rows);
-    assert_eq!(puts.mutations.len(), rows.total());
+    let puts = puts.into_ops();
+    assert_eq!(puts.len(), rows.total());
     let encoded_bytes: usize = puts
-        .mutations
         .iter()
-        .map(|mutation| mutation.key.len() + mutation.value.as_ref().map_or(0, Vec::len))
+        .map(|op| match op {
+            BatchOp::Put { key, value, .. } => key.len() + value.len(),
+            BatchOp::Delete { key, .. } => key.len(),
+            BatchOp::DeleteRange { start, end, .. } => start.len() + end.len(),
+        })
         .sum();
     assert_eq!(rows.encoded_bytes()?, encoded_bytes);
     for delete_shared_identity in [false, true] {
-        let mut deletes = RecordingBatch::default();
+        let mut deletes = BufferedWriteBatch::default();
         delete_rows(&mut deletes, &rows, delete_shared_identity);
+        let deletes = deletes.into_ops();
         let expected: Vec<_> = puts
-            .mutations
             .iter()
-            .filter(|mutation| delete_shared_identity || mutation.cf != ColumnFamily::BlockHeaders)
-            .map(|mutation| Mutation {
-                cf: mutation.cf,
-                key: mutation.key.clone(),
-                value: None,
+            .filter(|op| delete_shared_identity || op_cf(op) != ColumnFamily::BlockHeaders)
+            .map(|op| match op {
+                BatchOp::Put { cf, key, .. } => BatchOp::Delete {
+                    cf: *cf,
+                    key: key.clone(),
+                },
+                _ => unreachable!("put_rows records only puts"),
             })
             .collect();
-        assert_eq!(deletes.mutations, expected);
-        assert!(deletes.ranges.is_empty());
+        assert_eq!(deletes, expected);
+        assert!(
+            deletes
+                .iter()
+                .all(|op| !matches!(op, BatchOp::DeleteRange { .. }))
+        );
     }
-    assert!(puts.ranges.is_empty());
+    assert!(
+        puts.iter()
+            .all(|op| !matches!(op, BatchOp::DeleteRange { .. }))
+    );
     Ok(())
 }
 
@@ -177,7 +166,7 @@ fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
                 pattern /= 4;
             }
             for invert in [false, true] {
-                let mut batch = RecordingBatch::default();
+                let mut batch = BufferedWriteBatch::default();
                 apply_live_ops(&mut batch, &ops, invert);
                 let mut expected = BTreeMap::new();
                 for key in keys {
@@ -194,21 +183,33 @@ fn live_coalescing_matches_first_and_last_operations_for_all_small_sequences() {
                         expected.insert(key.as_bytes().to_vec(), insert.then(Vec::new));
                     }
                 }
-                let actual: BTreeMap<_, _> = batch
-                    .mutations
-                    .iter()
-                    .map(|mutation| {
-                        assert_eq!(mutation.cf, ColumnFamily::ScriptLive);
-                        (mutation.key.clone(), mutation.value.clone())
+                let mutations: Vec<(Vec<u8>, Option<Vec<u8>>)> = batch
+                    .into_ops()
+                    .into_iter()
+                    .map(|op| match op {
+                        BatchOp::Put { cf, key, value } => {
+                            assert_eq!(cf, ColumnFamily::ScriptLive);
+                            (key, Some(value.into()))
+                        }
+                        BatchOp::Delete { cf, key } => {
+                            assert_eq!(cf, ColumnFamily::ScriptLive);
+                            (key, None)
+                        }
+                        BatchOp::DeleteRange { .. } => {
+                            panic!("live ops never emit range deletes")
+                        }
                     })
+                    .collect();
+                let actual: BTreeMap<_, _> = mutations
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
                 assert_eq!(
                     actual.len(),
-                    batch.mutations.len(),
+                    mutations.len(),
                     "each live key is emitted once"
                 );
                 assert_eq!(actual, expected, "invert={invert}, ops={ops:?}");
-                assert!(batch.ranges.is_empty());
             }
         }
     }

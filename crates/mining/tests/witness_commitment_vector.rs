@@ -190,6 +190,7 @@ fn snapshot_with(txs: &[Tx], fees: &[u64]) -> Result<MempoolMiningSnapshot, Box<
             fee,
             0,
             0,
+            0,
         ))?;
     }
     Ok(pool.mining_snapshot())

@@ -47,7 +47,7 @@ fn pool() -> Mempool {
 
 fn entry(tx: Tx, fee: u64) -> MempoolEntry {
     let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    MempoolEntry::new(Arc::new(tx), vsize, fee, 1, 1)
+    MempoolEntry::new(Arc::new(tx), vsize, fee, 1, 1, 0)
 }
 
 fn candidate(tx: Tx, fee: u64) -> ReplacementCandidate {
@@ -61,19 +61,18 @@ fn a_higher_direct_rate_and_total_fee_can_still_worsen_the_curve()
     let mut pool = pool();
     let parent = spend(1, &[coin(100)], 1);
     let parent_id = parent.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 0, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 0, 1, 1, 0))?;
     let child = spend(2, &[OutPoint::new(parent_id, 0)], 1);
-    pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 1, 0))?;
     let replacement = spend(3, &[coin(100)], 1);
     let before = pool.mining_snapshot();
     // 1,400 pays the evicted 1,000 plus 300 relay satoshis. Its direct
     // rate beats the zero-fee parent, but 1,400/300 < 1,000/200.
     let error = pool
         .replace_transaction(
-            ReplacementCandidate::new(Arc::new(replacement), 300, 1_400, 1_000),
+            &ReplacementCandidate::new(Arc::new(replacement), 300, 1_400, 1_000),
             2,
             1,
-            0,
         )
         .err();
     assert_eq!(error, Some(RbfError::InsufficientFeerateDiagram));
@@ -88,19 +87,18 @@ fn lower_direct_rate_can_improve_the_parent_child_curve() -> Result<(), Box<dyn 
     let mut pool = pool();
     let parent = spend(1, &[coin(100)], 1);
     let parent_id = parent.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 2_250, 0, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(parent), 2_250, 0, 1, 1, 0))?;
     let child = spend(2, &[OutPoint::new(parent_id, 0)], 1);
     let child_id = child.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 4_000, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 4_000, 1, 1, 0))?;
     let replacement = spend(3, &[OutPoint::new(parent_id, 0)], 1);
     let replacement_id = replacement.txid();
     // Direct rate drops from 40 to 22.5 sat/vB, but the complete cluster
     // improves from 4,000/2,350 to 4,500/2,450 and pays the relay increment.
     pool.replace_transaction(
-        ReplacementCandidate::new(Arc::new(replacement), 200, 4_500, 1_000),
+        &ReplacementCandidate::new(Arc::new(replacement), 200, 4_500, 1_000),
         2,
         1,
-        0,
     )?;
     assert!(pool.contains_txid(&parent_id));
     assert!(!pool.contains_txid(&child_id));
@@ -125,7 +123,7 @@ fn limit_counts_conflicting_clusters_not_evicted_transactions()
     let replacement = candidate(spend(999, &roots, 1), 600_000);
     let plan = pool.check_replacement(&replacement)?;
     assert_eq!(plan.evicted.len(), 150);
-    pool.replace_transaction(replacement, 2, 1, 0)?;
+    pool.replace_transaction(&replacement, 2, 1)?;
     assert_eq!(pool.len(), 1);
     Ok(())
 }
@@ -143,7 +141,7 @@ fn one_hundred_conflicting_clusters_is_the_exact_boundary() -> Result<(), Box<dy
         }
         let replacement = candidate(spend(999, &inputs, 1), 1_000_000);
         let before = pool.sequence_number();
-        let result = pool.replace_transaction(replacement, 2, 1, 0);
+        let result = pool.replace_transaction(&replacement, 2, 1);
         if count == 100 {
             assert!(result.is_ok(), "{result:?}");
             assert_eq!(pool.len(), 1);
@@ -175,7 +173,7 @@ fn modified_fees_and_small_relay_charges_are_enforced() -> Result<(), Box<dyn st
         Some(RbfError::Rule3InsufficientAbsoluteFee)
     );
     pool.prioritise(replacement.tx.txid(), 1_000)?;
-    pool.replace_transaction(replacement, 2, 1, 0)?;
+    pool.replace_transaction(&replacement, 2, 1)?;
     Ok(())
 }
 
@@ -240,7 +238,7 @@ fn truc_sizes_versions_and_sibling_eviction_match_bip431() -> Result<(), Box<dyn
         }
     }
     let child_id = child.txid();
-    pool.replace_transaction(candidate(child, 2_000), 1, 1, 0)?;
+    pool.replace_transaction(&candidate(child, 2_000), 1, 1)?;
     let mut grandchild = spend(3, &[OutPoint::new(child_id, 0)], 1);
     grandchild.version = 3;
     assert_eq!(
@@ -258,7 +256,7 @@ fn truc_sizes_versions_and_sibling_eviction_match_bip431() -> Result<(), Box<dyn
     assert_eq!(pool.mining_snapshot().entries, before.entries);
     assert_eq!(pool.sequence_number(), before.sequence);
     let sibling_id = sibling.txid();
-    let changes = pool.replace_transaction(candidate(sibling, 4_000), 1, 1, 0)?;
+    let changes = pool.replace_transaction(&candidate(sibling, 4_000), 1, 1)?;
     assert_eq!(changes.removed_txids(), vec![child_id]);
     assert!(pool.contains_txid(&parent_id));
     assert!(pool.contains_txid(&sibling_id));

@@ -66,6 +66,7 @@ fn admit_batch(ctx: &Context, fee_sats: u64, entry_height: u32) -> Vec<Tx> {
                 fee_sats,
                 1,
                 entry_height,
+                0,
             ))
             .is_err()
         {

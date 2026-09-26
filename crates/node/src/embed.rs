@@ -395,7 +395,7 @@ mod tests {
         // Control: direct insertion cannot satisfy the gateway-publication test.
         let direct_tx = spending_tx(direct_prevout);
         let vsize = u32::try_from(direct_tx.vsize()).unwrap_or(u32::MAX);
-        let entry = MempoolEntry::new(Arc::new(direct_tx), vsize, 8_000, 0, 1);
+        let entry = MempoolEntry::new(Arc::new(direct_tx), vsize, 8_000, 0, 1, 0);
         node.state
             .mempool()
             .write()

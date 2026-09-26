@@ -5,8 +5,7 @@ use bitcoin_rs_primitives::{Hash256, varint};
 
 use crate::{
     BlockFilePosition, FlatFileBlockReader, FlatFileBlockStore, KvSnapshot, KvStore, StorageError,
-    WriteBatch, block_file_max_height_key, decode_block_file_max_height,
-    encode_block_file_max_height,
+    block_file_max_height_key, decode_block_file_max_height, encode_block_file_max_height,
 };
 
 use std::sync::Arc;

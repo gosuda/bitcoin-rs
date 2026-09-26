@@ -1567,7 +1567,7 @@ mod tests {
         let txid = tx.txid();
         {
             let mut pool = ctx.mempool.pool().write();
-            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))
                 .unwrap_or_else(|err| panic!("insert failed: {err}"));
         }
         let txid_hex = txid.to_string();
@@ -1639,7 +1639,7 @@ mod tests {
         let txid = tx.txid();
         {
             let mut pool = ctx.mempool.pool().write();
-            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))
                 .unwrap_or_else(|err| panic!("insert failed: {err}"));
         }
         let txid_hex = txid.to_string();
@@ -1662,7 +1662,7 @@ mod tests {
         let txid = tx.txid();
         {
             let mut pool = ctx.mempool.pool().write();
-            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7))
+            pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 7, 0))
                 .unwrap_or_else(|err| panic!("insert failed: {err}"));
         }
         let txid_hex = txid.to_string();
@@ -1915,7 +1915,7 @@ mod tests {
         let pooled = pooled_tx.txid();
         {
             let mut pool = ctx.mempool.pool().write();
-            pool.insert_entry(MempoolEntry::new(Arc::new(pooled_tx), 100, 1_000, 1, 7))
+            pool.insert_entry(MempoolEntry::new(Arc::new(pooled_tx), 100, 1_000, 1, 7, 0))
                 .unwrap_or_else(|err| panic!("insert failed: {err}"));
         }
         let absent = Txid::from(Hash256::from_le_bytes(&[0x22; 32]));
@@ -2129,7 +2129,7 @@ mod tests {
         let txid = pooled.txid();
         {
             let mut pool = ctx.mempool.pool().write();
-            pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7))
+            pool.insert_entry(MempoolEntry::new(Arc::new(pooled), 100, 1_000, 1, 7, 0))
                 .unwrap_or_else(|err| panic!("insert failed: {err}"));
         }
         let mut raw = sample_raw_tx();

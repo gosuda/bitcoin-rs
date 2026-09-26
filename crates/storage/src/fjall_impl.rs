@@ -172,8 +172,6 @@ impl FjallStore {
 }
 
 impl KvStore for FjallStore {
-    type WriteBatch = BufferedWriteBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.keyspace(cf)?
             .get(key)
@@ -195,7 +193,7 @@ impl KvStore for FjallStore {
         Ok(Box::new(iterator))
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
+    fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
 
@@ -206,12 +204,12 @@ impl KvStore for FjallStore {
             .map_err(StorageError::backend)
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock();
         self.write_with_durability(batch, None)
     }
 
-    fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let _guard = self.write_lock.lock();
         self.write_with_durability(batch, Some(PersistMode::SyncAll))
     }

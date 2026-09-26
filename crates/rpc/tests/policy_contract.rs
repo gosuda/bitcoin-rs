@@ -163,7 +163,7 @@ fn sendrawtransaction_rejects_below_min_relay_fee_and_agrees_with_the_pool()
     // Pool-path agreement: the same shape rejects at the same floor.
     let mut pool = Mempool::new(MempoolLimits::default());
     let error = pool
-        .insert_entry(MempoolEntry::new(Arc::new(tx), 82, 1, 0, 1))
+        .insert_entry(MempoolEntry::new(Arc::new(tx), 82, 1, 0, 1, 0))
         .err()
         .ok_or("pool path must also reject")?;
     assert!(matches!(
@@ -252,7 +252,7 @@ fn sendrawtransaction_and_testmempoolaccept_quote_the_floor_before_maxfeerate()
         ..MempoolLimits::default()
     });
     let error = pool
-        .insert_entry(MempoolEntry::new(Arc::new(both), 82, 1_230, 0, 1))
+        .insert_entry(MempoolEntry::new(Arc::new(both), 82, 1_230, 0, 1, 0))
         .err()
         .ok_or("pool path must also reject")?;
     assert!(matches!(
@@ -342,7 +342,7 @@ fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
         ..MempoolLimits::default()
     });
     let error = pool
-        .insert_entry(MempoolEntry::new(Arc::new(below), 82, 164, 0, 1))
+        .insert_entry(MempoolEntry::new(Arc::new(below), 82, 164, 0, 1, 0))
         .err()
         .ok_or("pool path must also reject")?;
     assert_eq!(
@@ -352,7 +352,7 @@ fn rpc_outlets_enforce_the_configured_floor() -> Result<(), Box<dyn Error>> {
             min_rate: 5_000,
         })
     );
-    pool.insert_entry(MempoolEntry::new(Arc::new(at_floor), 82, 410, 0, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(at_floor), 82, 410, 0, 1, 0))?;
     Ok(())
 }
 
@@ -372,7 +372,7 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
             1_000,
             0xffff_ffff,
         );
-        pool.insert_entry(MempoolEntry::new(Arc::new(first), 100, 100, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(first), 100, 100, 0, 1, 0))?;
         let second = tx(
             OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&[0x86; 32])),
@@ -381,7 +381,7 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
             1_000,
             0xffff_ffff,
         );
-        pool.insert_entry(MempoolEntry::new(Arc::new(second), 100, 200, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(second), 100, 200, 0, 1, 0))?;
     }
     let handler = Handler::new(Arc::clone(&ctx));
     // Effective floor = cheapest evictable (1 000) + incremental (1 000).
@@ -422,10 +422,14 @@ fn rpc_outlets_enforce_the_pressure_floor() -> Result<(), Box<dyn Error>> {
 
     // The raw insert gate checks only the configured floor, so the same tx
     // admits there (deviation ledger, pressure-floor surface).
-    ctx.mempool
-        .pool()
-        .write()
-        .insert_entry(MempoolEntry::new(Arc::new(lukewarm), 82, 82, 0, 1))?;
+    ctx.mempool.pool().write().insert_entry(MempoolEntry::new(
+        Arc::new(lukewarm),
+        82,
+        82,
+        0,
+        1,
+        0,
+    ))?;
     assert_eq!(ctx.mempool.read().len(), 3);
 
     // Control: with no pressure the same rate admits over the same outlets.
@@ -536,6 +540,7 @@ fn insert_original(
         fee,
         0,
         1,
+        0,
     ))?;
     Ok(original)
 }
@@ -570,12 +575,11 @@ fn sendrawtransaction_applies_an_rbf_replacement_and_sweeps_the_conflicts()
 
     // Pool-path agreement: the same candidate replaces through the pool API.
     let mut pool = Mempool::new(MempoolLimits::default());
-    pool.insert_entry(MempoolEntry::new(Arc::new(original), 4_000, 8_000, 0, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(original), 4_000, 8_000, 0, 1, 0))?;
     pool.replace_transaction(
-        ReplacementCandidate::new(Arc::new(replacement.clone()), 82, 10_000, 1_000),
+        &ReplacementCandidate::new(Arc::new(replacement.clone()), 82, 10_000, 1_000),
         0,
         1,
-        0,
     )?;
     assert!(pool.contains_txid(&rpc_txid(&replacement)));
     Ok(())
@@ -633,6 +637,7 @@ fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dy
         1_000,
         0,
         1,
+        0,
     ))?;
     observer.changes.lock().clear();
 
@@ -679,6 +684,7 @@ fn new_unconfirmed_inputs_are_allowed_on_both_rpcs() -> Result<(), Box<dyn Error
         1_000,
         0,
         1,
+        0,
     ))?;
     let replacement = tx_spending(
         &[
@@ -765,6 +771,7 @@ fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box
         8_000,
         0,
         1,
+        0,
     ))?;
 
     // Search the output count (500 sat each, never dust) for a candidate
@@ -972,7 +979,14 @@ fn replacement_counts_conflicting_clusters_instead_of_descendants() -> Result<()
         for i in 0..100_u32 {
             let child = tx(prev, 400, 0xffff_ffff);
             prev = OutPoint::new(rpc_txid(&child), 0);
-            pool.insert_entry(MempoolEntry::new(Arc::new(child), 50, 100, u64::from(i), 1))?;
+            pool.insert_entry(MempoolEntry::new(
+                Arc::new(child),
+                50,
+                100,
+                u64::from(i),
+                1,
+                0,
+            ))?;
         }
     }
     // Replacement spends the same confirmed outpoint, fee 20_000.
@@ -1013,6 +1027,7 @@ fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, Box<dyn Error>> {
             4_000,
             0,
             1,
+            0,
         ))?;
         txs.push(next);
     }
@@ -1078,7 +1093,14 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
             50_000,
             0xffff_ffff,
         );
-        pool.insert_entry(MempoolEntry::new(Arc::new(root.clone()), 100, 10_000, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(root.clone()),
+            100,
+            10_000,
+            0,
+            1,
+            0,
+        ))?;
         root
     };
     let follower = tx_multi_child(&fund_utxo(&ctx, 0xc2, 100_000), &root);
@@ -1119,9 +1141,9 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_count_limits()
         cluster_count: 1,
         ..MempoolLimits::default()
     });
-    pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 10_000, 0, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 10_000, 0, 1, 0))?;
     let error = pool
-        .insert_entry(MempoolEntry::new(Arc::new(follower), 82, 10_000, 0, 1))
+        .insert_entry(MempoolEntry::new(Arc::new(follower), 82, 10_000, 0, 1, 0))
         .err()
         .ok_or("pool path must also reject")?;
     assert_eq!(
@@ -1147,7 +1169,14 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_cluster_size_limits()
             50_000,
             0xffff_ffff,
         );
-        pool.insert_entry(MempoolEntry::new(Arc::new(root.clone()), 200, 10_000, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(root.clone()),
+            200,
+            10_000,
+            0,
+            1,
+            0,
+        ))?;
         root
     };
     let follower = tx_multi_child(&fund_utxo(&ctx, 0xc4, 100_000), &root);
@@ -1212,13 +1241,21 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_clu
             )
         };
         let original = tx(OutPoint::new(rpc_txid(&root), 0), 40_000, 0xffff_fffd);
-        pool.insert_entry(MempoolEntry::new(Arc::new(root.clone()), 100, 10_000, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(
+            Arc::new(root.clone()),
+            100,
+            10_000,
+            0,
+            1,
+            0,
+        ))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(original.clone()),
             100,
             10_000,
             0,
             1,
+            0,
         ))?;
         (root, original)
     };
@@ -1316,13 +1353,13 @@ fn sendrawtransaction_admission_evicts_the_lowest_fee_packages_under_size_pressu
         // Three independent packages at 3 000 / 1 000 / 2 000 sat/kvB.
         let high = tx(root(0x90), 1_000, 0xffff_ffff);
         let high_txid = high.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(high), 1_000, 3_000, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(high), 1_000, 3_000, 0, 1, 0))?;
         let low = tx(root(0x91), 1_000, 0xffff_ffff);
         let low_txid = low.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(low), 1_000, 1_000, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(low), 1_000, 1_000, 0, 1, 0))?;
         let mid = tx(root(0x92), 1_000, 0xffff_ffff);
         let mid_txid = mid.txid();
-        pool.insert_entry(MempoolEntry::new(Arc::new(mid), 1_000, 2_000, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(mid), 1_000, 2_000, 0, 1, 0))?;
         // Shrink after filling: eviction runs only inside insert paths.
         pool.limits.max_total_bytes = 2_000;
         (high_txid, low_txid, mid_txid)
@@ -1707,6 +1744,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
             REORG_SPEND_FEE_SATS,
             1,
             REORG_SEED_BLOCKS,
+            0,
         ))?;
     }
     let mined_block = reorg_mine_and_apply(&state, seed_tip, REORG_SEED_BLOCKS + 1, vec![spend])?;

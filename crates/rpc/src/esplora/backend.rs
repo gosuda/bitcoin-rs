@@ -263,7 +263,7 @@ mod pagination_tests {
                     u32::try_from(index).expect("small fixture index"),
                 ),
             };
-            let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, time, 0);
+            let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, time, 0, 0);
             expected.push((time, entry.txid));
             ctx.mempool
                 .pool()
@@ -390,7 +390,7 @@ mod pagination_tests {
             }],
             lock_time: LockTime::from_consensus(99),
         };
-        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 0);
+        let entry = MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 0, 0);
         let cursor = entry.txid.to_string();
         ctx.mempool
             .pool()
@@ -412,7 +412,7 @@ mod pagination_tests {
                     lock_time: LockTime::from_consensus(index),
                     ..Tx::default()
                 };
-                MempoolEntry::new(Arc::new(tx), 100, 1_000, u64::from(index % 7), 0)
+                MempoolEntry::new(Arc::new(tx), 100, 1_000, u64::from(index % 7), 0, 0)
             })
             .collect();
         let mut ordered: Vec<_> = entries.iter().collect();
@@ -452,6 +452,7 @@ mod pagination_tests {
                     100,
                     1_000,
                     u64::from(129 - index),
+                    0,
                     0,
                 )
             })

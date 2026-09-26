@@ -134,7 +134,7 @@ mod tests {
         }
         for tx in &txs {
             guard
-                .insert_entry(MempoolEntry::new(Arc::clone(tx), 100, 10_000, 1, 100))
+                .insert_entry(MempoolEntry::new(Arc::clone(tx), 100, 10_000, 1, 100, 0))
                 .expect("the seeded entries must be admissible");
         }
         // Two confirmations: a single one decays to 0.998 within its own

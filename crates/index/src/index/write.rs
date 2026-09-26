@@ -12,7 +12,7 @@ use super::{
     state::resume_capability_reset,
 };
 use bitcoin_rs_primitives::{OutPoint, encode};
-use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
+use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
 /// Mutation-only handle for durable prepared `TxIndex` writes.
 pub struct IndexWriter<S: KvStore> {

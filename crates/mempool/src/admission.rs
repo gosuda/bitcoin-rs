@@ -760,7 +760,7 @@ mod tests {
     fn insert_parent(gateway: &MempoolGateway, parent: Tx, origin: AdmissionOrigin) {
         let inserted = gateway.insert_entry(
             origin,
-            MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1),
+            MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1, 0),
         );
         assert!(inserted.is_ok());
     }
@@ -955,7 +955,7 @@ mod tests {
                     Amount::from_sat(conflict.outputs[0].value.to_sat() - 1);
                 gateway.insert_entry(
                     AdmissionOrigin::Rpc,
-                    MempoolEntry::new(Arc::new(conflict), 100, 1_000, 1, 1),
+                    MempoolEntry::new(Arc::new(conflict), 100, 1_000, 1, 1, 0),
                 )?;
             }
             _ => {
@@ -2420,7 +2420,7 @@ mod tests {
             gateway
                 .insert_entry(
                     AdmissionOrigin::Rpc,
-                    MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 1),
+                    MempoolEntry::new(Arc::new(tx), 100, 1_000, 1, 1, 0),
                 )
                 .expect("fixture entry");
         }
@@ -2473,7 +2473,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1),
+                MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1, 0),
             )
             .expect("fixture entry");
         let change = gateway.begin_chain_change().expect("fence");

@@ -154,7 +154,7 @@ fn maximum_priority_delta_does_not_break_candidate_construction() -> Result<(), 
     let tx = Arc::new(tx_with_witness(1, 1_000, None));
     let txid = tx.txid();
     let vsize = u32::try_from(tx.vsize())?;
-    pool.insert_entry(MempoolEntry::new(tx, vsize, 1_000, 0, 1))?;
+    pool.insert_entry(MempoolEntry::new(tx, vsize, 1_000, 0, 1, 0))?;
     pool.prioritise(txid, i64::MAX)?;
     let snapshot = pool.mining_snapshot();
     let chunks = snapshot.fee_chunks()?;

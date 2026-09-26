@@ -23,7 +23,7 @@
 use hashbrown::HashMap;
 use std::path::Path;
 
-use bitcoin_rs_storage::{ColumnFamily, KvStore, WriteBatch};
+use bitcoin_rs_storage::{ColumnFamily, KvStore};
 
 // ---------------------------------------------------------------------------
 // Corpus

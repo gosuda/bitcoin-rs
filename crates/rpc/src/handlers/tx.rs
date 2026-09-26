@@ -1011,7 +1011,7 @@ mod tests {
             let mut pool = ctx.mempool.pool().write();
             let vsize = u32::try_from(coinbase.vsize())?;
             let entry =
-                MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0);
+                MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0, 0);
             pool.insert_entry(entry)?;
         }
 
@@ -1058,7 +1058,7 @@ mod tests {
             let mut pool = ctx.mempool.pool().write();
             let vsize = u32::try_from(coinbase.vsize())?;
             let entry =
-                MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0);
+                MempoolEntry::new(Arc::new(coinbase.clone()), vsize, u64::from(vsize), 0, 0, 0);
             pool.insert_entry(entry)?;
         }
 
@@ -2022,7 +2022,7 @@ mod tests {
             .mempool
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1),
+                MempoolEntry::new(Arc::new(parent), parent_vsize, 10_000, 0, 1, 0),
             )
             .expect("parent admitted to the mempool");
 

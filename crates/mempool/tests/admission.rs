@@ -182,7 +182,7 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     );
     gateway.insert_entry(
         AdmissionOrigin::Rpc,
-        MempoolEntry::new(Arc::new(unrelated), 100, 100_000_000, 1, 1),
+        MempoolEntry::new(Arc::new(unrelated), 100, 100_000_000, 1, 1, 0),
     )?;
 
     release_tx.send(()).expect("release the parked admission");
@@ -321,7 +321,7 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     let parent_txid = parent.txid();
     gateway.insert_entry(
         AdmissionOrigin::Rpc,
-        MempoolEntry::new(Arc::new(parent), 100, 100_000_000, 1, 1),
+        MempoolEntry::new(Arc::new(parent), 100, 100_000_000, 1, 1, 0),
     )?;
 
     let redeem = vec![opcode::OP_CHECKMULTISIG; 200];
@@ -432,6 +432,113 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
     assert_eq!(
         entry.sigop_cost, 0,
         "stored sigop cost must be the computed value, not the caller-supplied u32::MAX"
+    );
+    Ok(())
+}
+
+/// A v3 candidate whose direct-conflict set is empty still enters through the
+/// replacement door when its parent holds one in-pool v3 sibling: the
+/// discriminator is the conflicts vec `truc_conflicts` returns, not a separate
+/// direct-conflict lookup. Branching on the latter would send this candidate
+/// through the plain door, where BIP431 rejects the parent's second descendant
+/// with `TrucError::Descendants`.
+#[test]
+fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacement_door()
+-> Result<(), Box<dyn Error>> {
+    let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
+        MempoolLimits::default(),
+    )));
+    let gateway = Arc::new(MempoolGateway::new(pool, None));
+
+    // A v3 parent with two `OP_1` outputs, so a later spend verifies with an
+    // empty witness.
+    let parent = Tx {
+        version: 3,
+        lock_time: LockTime::from_consensus(0),
+        inputs: vec![TxIn {
+            previous_output: outpoint(20, 0),
+            script_sig: Script::new(),
+            sequence: Sequence::from_consensus(0xFFFF_FFFF),
+            witness: Witness::new(),
+        }],
+        outputs: vec![
+            TxOut {
+                value: Amount::from_sat(60_000),
+                script_pubkey: Script::from_bytes(anyone_can_spend()),
+            },
+            TxOut {
+                value: Amount::from_sat(40_000),
+                script_pubkey: Script::from_bytes(anyone_can_spend()),
+            },
+        ],
+    };
+    let parent_txid = parent.txid();
+    gateway.insert_entry(
+        AdmissionOrigin::Rpc,
+        MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 1, 0),
+    )?;
+
+    // The sibling spends parent output 0 and is the parent's only descendant.
+    let mut sibling = tx_one_input(
+        OutPoint::new(parent_txid, 0),
+        Vec::new(),
+        Vec::new(),
+        59_000,
+        P2PKH_SCRIPT.to_vec(),
+    );
+    sibling.version = 3;
+    let sibling_txid = sibling.txid();
+    gateway.insert_entry(
+        AdmissionOrigin::Rpc,
+        MempoolEntry::new(Arc::new(sibling), 100, 1_000, 1, 1, 0),
+    )?;
+
+    // The candidate spends parent output 1: no input collides with the
+    // sibling, so the direct-conflict lookup is empty while `truc_conflicts`
+    // returns the sibling for eviction.
+    let mut candidate = tx_one_input(
+        OutPoint::new(parent_txid, 1),
+        Vec::new(),
+        Vec::new(),
+        37_000,
+        P2PKH_SCRIPT.to_vec(),
+    );
+    candidate.version = 3;
+    let candidate_txid = candidate.txid();
+    let context = PackageTxContext {
+        fee: 3_000,
+        vsize: u32::try_from(candidate.vsize()).unwrap_or(u32::MAX),
+        sigop_cost: 0,
+        missing_inputs: false,
+    };
+    let prevouts = vec![(
+        OutPoint::new(parent_txid, 1),
+        TxOut {
+            value: Amount::from_sat(40_000),
+            script_pubkey: Script::from_bytes(anyone_can_spend()),
+        },
+    )];
+    let request = admission_request(&gateway, &candidate, context, prevouts);
+
+    let result = gateway.admit_transaction(request)?;
+    let AdmitOutcome::Committed(changes) = result else {
+        panic!("the sibling-evicting candidate must commit, got {result:?}");
+    };
+
+    let pool = gateway.read();
+    assert_eq!(
+        changes.removed_txids(),
+        vec![sibling_txid],
+        "the sibling leaves through the replacement door"
+    );
+    assert!(
+        pool.contains_txid(&candidate_txid),
+        "the candidate must be resident"
+    );
+    assert!(pool.contains_txid(&parent_txid), "the parent stays");
+    assert!(
+        !pool.contains_txid(&sibling_txid),
+        "the evicted sibling must be gone"
     );
     Ok(())
 }

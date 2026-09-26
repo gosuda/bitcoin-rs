@@ -24,8 +24,8 @@ use bitcoin_rs_index::{
     IndexWatermark, IndexWatermarks, IndexWriter, PreparedBatch, PreparedBatchLimits,
 };
 use bitcoin_rs_storage::{
-    ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScanLimit, StorageError, WriteBatch,
-    WriteCondition,
+    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScanLimit,
+    StorageError, WriteCondition,
 };
 
 /// Reserved capability-reset marker slot mirrored from the index crate.
@@ -117,8 +117,6 @@ impl MemoryStore {
 }
 
 impl KvStore for MemoryStore {
-    type WriteBatch = MemoryBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let guard = self.cfs.read();
         Ok(guard[cf.index()].get(key).cloned())
@@ -139,31 +137,32 @@ impl KvStore for MemoryStore {
         Ok(Box::new(rows.into_iter()))
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
-        MemoryBatch::default()
+    fn new_batch(&self) -> BufferedWriteBatch {
+        BufferedWriteBatch::default()
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         let mut guard = self.cfs.write();
-        apply_ops(&mut guard, batch.ops.into_iter());
+        apply_ops(&mut guard, batch.into_ops());
         Ok(())
     }
 
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
-        batch: Self::WriteBatch,
+        batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
-        let mut guard = self.cfs.write();
-        let matched = conditions.iter().all(|condition| {
-            let (cf, key) = condition.location();
-            condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
-        });
+        let matched = {
+            let guard = self.cfs.read();
+            conditions.iter().all(|condition| {
+                let (cf, key) = condition.location();
+                condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
+            })
+        };
         if !matched {
             return Ok(false);
         }
-        apply_ops(&mut guard, batch.ops.into_iter());
-        Ok(true)
+        self.write(batch).map(|()| true)
     }
 
     fn flush(&self) -> Result<(), StorageError> {
@@ -236,21 +235,21 @@ impl CallTrackingStore {
         self.inner.write(batch)
     }
 
-    fn build_log(batch: &MemoryBatch, durable: bool) -> BatchLog {
+    fn build_log(ops: &[BatchOp], durable: bool) -> BatchLog {
         let mut entry = BatchLog {
             durable,
             marker_put: None,
             deletes: 0,
         };
-        for op in &batch.ops {
+        for op in ops {
             match op {
-                MemoryOp::Put { cf, key, value }
+                BatchOp::Put { cf, key, value }
                     if *cf == ColumnFamily::UtxoMeta && key.as_slice() == RESET_KEY =>
                 {
-                    entry.marker_put = Some(value.clone());
+                    entry.marker_put = Some(value.to_vec());
                 }
-                MemoryOp::Delete { .. } | MemoryOp::DeleteRange { .. } => entry.deletes += 1,
-                MemoryOp::Put { .. } => {}
+                BatchOp::Delete { .. } | BatchOp::DeleteRange { .. } => entry.deletes += 1,
+                BatchOp::Put { .. } => {}
             }
         }
         entry
@@ -258,8 +257,6 @@ impl CallTrackingStore {
 }
 
 impl KvStore for CallTrackingStore {
-    type WriteBatch = MemoryBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.read_order.lock().push((cf, key.to_vec()));
         if cf == ColumnFamily::BlockHeaders {
@@ -279,22 +276,24 @@ impl KvStore for CallTrackingStore {
         self.inner.iter_prefix(cf, prefix)
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
+    fn new_batch(&self) -> BufferedWriteBatch {
         self.inner.new_batch()
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.writes.fetch_add(1, Ordering::Relaxed);
-        let entry = Self::build_log(&batch, false);
-        self.inner.write(batch)?;
+        let ops = batch.into_ops();
+        let entry = Self::build_log(&ops, false);
+        self.inner.write(restore_batch(ops))?;
         self.batches.write().push(entry);
         Ok(())
     }
 
-    fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.durable_writes.fetch_add(1, Ordering::Relaxed);
-        let entry = Self::build_log(&batch, true);
-        self.inner.write(batch)?;
+        let ops = batch.into_ops();
+        let entry = Self::build_log(&ops, true);
+        self.inner.write(restore_batch(ops))?;
         self.batches.write().push(entry);
         Ok(())
     }
@@ -302,13 +301,11 @@ impl KvStore for CallTrackingStore {
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
-        batch: Self::WriteBatch,
+        batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
-        let entry = Self::build_log(&batch, true);
-        if batch
-            .put_value(ColumnFamily::UtxoMeta, CURSOR_KEY)
-            .is_some()
-        {
+        let ops = batch.into_ops();
+        let entry = Self::build_log(&ops, true);
+        if put_value_of(&ops, ColumnFamily::UtxoMeta, CURSOR_KEY).is_some() {
             let tx_watermark = self.cursor_race_tx_watermark.lock().take();
             if let Some(watermark) = tx_watermark {
                 self.inner.put(
@@ -326,7 +323,9 @@ impl KvStore for CallTrackingStore {
                 )?;
             }
         }
-        let applied = self.inner.write_durable_if(conditions, batch)?;
+        let applied = self
+            .inner
+            .write_durable_if(conditions, restore_batch(ops))?;
         if applied {
             self.durable_writes.fetch_add(1, Ordering::Relaxed);
             self.batches.write().push(entry);
@@ -402,90 +401,54 @@ impl KvSnapshot for CallTrackingSnapshot<'_> {
     }
 }
 
-#[derive(Default)]
-struct MemoryBatch {
-    ops: Vec<MemoryOp>,
+/// Returns the recorded value of one put, if the batch records it.
+fn put_value_of(ops: &[BatchOp], cf: ColumnFamily, key: &[u8]) -> Option<Vec<u8>> {
+    ops.iter().find_map(|op| match op {
+        BatchOp::Put {
+            cf: op_cf,
+            key: op_key,
+            value,
+        } if *op_cf == cf && op_key.as_slice() == key => Some(value.to_vec()),
+        _ => None,
+    })
 }
 
-impl MemoryBatch {
-    fn put_value(&self, cf: ColumnFamily, key: &[u8]) -> Option<Vec<u8>> {
-        self.ops.iter().find_map(|op| match op {
-            MemoryOp::Put {
-                cf: op_cf,
-                key: op_key,
-                value,
-            } if *op_cf == cf && op_key.as_slice() == key => Some(value.clone()),
-            _ => None,
-        })
-    }
-
-    fn deletes_derived_rows(&self) -> bool {
-        self.ops.iter().any(|op| {
-            matches!(
-                op,
-                MemoryOp::Delete { cf, .. } | MemoryOp::DeleteRange { cf, .. }
-                    if *cf != ColumnFamily::UtxoMeta
-            )
-        })
-    }
+/// Whether the batch deletes any derived row outside the metadata family.
+fn deletes_derived_rows(ops: &[BatchOp]) -> bool {
+    ops.iter().any(|op| {
+        matches!(
+            op,
+            BatchOp::Delete { cf, .. } | BatchOp::DeleteRange { cf, .. }
+                if *cf != ColumnFamily::UtxoMeta
+        )
+    })
 }
 
-impl WriteBatch for MemoryBatch {
-    fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]) {
-        self.ops.push(MemoryOp::Put {
-            cf,
-            key: key.to_vec(),
-            value: value.to_vec(),
-        });
+/// Re-buffers consumed operations through the public batch surface, so a
+/// tracking wrapper can inspect and then forward one batch unchanged.
+fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
+    let mut batch = BufferedWriteBatch::default();
+    for op in ops {
+        match op {
+            BatchOp::Put { cf, key, value } => batch.put_value(cf, &key, value),
+            BatchOp::Delete { cf, key } => batch.delete(cf, &key),
+            BatchOp::DeleteRange { cf, start, end } => batch.delete_range(cf, &start, &end),
+        }
     }
-
-    fn delete(&mut self, cf: ColumnFamily, key: &[u8]) {
-        self.ops.push(MemoryOp::Delete {
-            cf,
-            key: key.to_vec(),
-        });
-    }
-
-    fn delete_range(&mut self, cf: ColumnFamily, start: &[u8], end: &[u8]) {
-        self.ops.push(MemoryOp::DeleteRange {
-            cf,
-            start: start.to_vec(),
-            end: end.to_vec(),
-        });
-    }
-}
-
-enum MemoryOp {
-    Put {
-        cf: ColumnFamily,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    },
-    Delete {
-        cf: ColumnFamily,
-        key: Vec<u8>,
-    },
-    DeleteRange {
-        cf: ColumnFamily,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    },
+    batch
 }
 
 /// Folds one batch's operations into the column families, in order.
-fn apply_ops(
-    cfs: &mut [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()],
-    ops: std::vec::IntoIter<MemoryOp>,
-) {
+fn apply_ops(cfs: &mut [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()], ops: Vec<BatchOp>) {
     for op in ops {
         match op {
-            MemoryOp::Put { cf, key, value } => {
-                cfs[cf.index()].insert(key, value);
+            BatchOp::Put { cf, key, value } => {
+                cfs[cf.index()].insert(key, value.into());
             }
-            MemoryOp::Delete { cf, key } => {
+            BatchOp::Delete { cf, key } => {
                 cfs[cf.index()].remove(&key);
             }
-            MemoryOp::DeleteRange { cf, start, end } => {
+            BatchOp::DeleteRange { cf, start, end } => {
                 let keys = cfs[cf.index()]
                     .keys()
                     .filter(|key| {
@@ -1416,7 +1379,7 @@ fn seed_populated_stores()
 }
 
 fn seed_populated_store(
-    store: &Arc<impl KvStore<WriteBatch = MemoryBatch>>,
+    store: &Arc<impl KvStore>,
     generation: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut writer = IndexWriter::open(Arc::clone(store), generation)?;
@@ -1618,18 +1581,18 @@ impl ForeignFenceStore {
             .write_durable_if(std::slice::from_ref(&condition), batch)
     }
 
-    fn take_injection(&self, batch: &MemoryBatch) -> Option<CompetingClaim> {
+    fn take_injection(&self, ops: &[BatchOp]) -> Option<CompetingClaim> {
         // Completion is now a marker PUT of an idle value, never a delete:
         // classify reset-key puts by shape, then keep the derived-row delete
         // hook for claim-change regressions.
-        if let Some(value) = batch.put_value(ColumnFamily::UtxoMeta, RESET_KEY) {
+        if let Some(value) = put_value_of(ops, ColumnFamily::UtxoMeta, RESET_KEY) {
             return if is_idle_marker(&value) {
                 self.on_clear.lock().take()
             } else {
                 self.on_claim.lock().take()
             };
         }
-        if batch.deletes_derived_rows() {
+        if deletes_derived_rows(ops) {
             return self.on_delete.lock().take();
         }
         None
@@ -1637,8 +1600,6 @@ impl ForeignFenceStore {
 }
 
 impl KvStore for ForeignFenceStore {
-    type WriteBatch = MemoryBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         self.inner.get(cf, key)
     }
@@ -1651,28 +1612,30 @@ impl KvStore for ForeignFenceStore {
         self.inner.iter_prefix(cf, prefix)
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
+    fn new_batch(&self) -> BufferedWriteBatch {
         self.inner.new_batch()
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
-        if let Some(claim) = self.take_injection(&batch) {
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
+        let ops = batch.into_ops();
+        if let Some(claim) = self.take_injection(&ops) {
             self.run_competing_claim(claim)?;
             self.unconditional_delete_after_claim_change
                 .store(true, Ordering::Release);
         }
-        self.inner.write(batch)
+        self.inner.write(restore_batch(ops))
     }
 
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
-        batch: Self::WriteBatch,
+        batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
-        if let Some(claim) = self.take_injection(&batch) {
+        let ops = batch.into_ops();
+        if let Some(claim) = self.take_injection(&ops) {
             self.run_competing_claim(claim)?;
         }
-        self.inner.write_durable_if(conditions, batch)
+        self.inner.write_durable_if(conditions, restore_batch(ops))
     }
 
     fn flush(&self) -> Result<(), StorageError> {

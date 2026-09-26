@@ -220,7 +220,9 @@ fn fee_only_change_invalidates_prepared_mutation() -> TestResult {
     let tx = spend(&[coin(1)], &[98_000], false);
     let vsize = u32::try_from(tx.vsize())?;
     let candidate = ReplacementCandidate::new(Arc::new(tx.clone()), vsize, 2_000, 1_000);
-    let plan = pool.capture_replacement(&candidate, 1, 1)?.verify()?;
+    let plan = pool
+        .capture_replacement(&candidate, 1, 1, crate::rbf::FeeEstimation::Estimate)?
+        .verify()?;
     pool.prioritise(tx.txid(), -1_999)?;
     assert_eq!(
         pool.sequence_number(),

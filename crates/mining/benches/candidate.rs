@@ -76,6 +76,7 @@ fn snapshot_with(count: usize) -> Mempool {
             10_000 + u64::try_from(seed).expect("pool size fits u64"),
             u64::try_from(seed).expect("pool size fits u64"),
             100,
+            0,
         ))
         .unwrap_or_else(|error| panic!("fixture insert {seed} failed: {error}"));
         last_txid = Some(txid);

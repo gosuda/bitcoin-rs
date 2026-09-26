@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bitcoin_rs_primitives::Hash256;
 
 use crate::pruning::block_undo_key;
-use crate::{ColumnFamily, KvStore, StorageError, WriteBatch as _};
+use crate::{ColumnFamily, KvStore, StorageError};
 
 /// Storage for per-block UTXO undo records.
 ///

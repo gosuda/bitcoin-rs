@@ -16,7 +16,7 @@
 use bitcoin_rs_primitives::Hash256;
 
 use crate::pruning::{BLOCK_DATA_CF, block_body_key, block_undo_key};
-use crate::{ColumnFamily, KvStore, StorageError, WriteBatch as _, WriteCondition};
+use crate::{ColumnFamily, KvStore, StorageError, WriteCondition};
 
 /// Key of the durable-head row in the `UtxoMeta` family.
 ///

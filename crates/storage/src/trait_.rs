@@ -1,3 +1,4 @@
+use crate::batch::BufferedWriteBatch;
 use crate::{ColumnFamily, StorageError};
 use bytes::Bytes;
 
@@ -151,9 +152,6 @@ impl PersistFaultSlot {
 /// durability completion failed or was lost. Snapshots are coherent across
 /// families.
 pub trait KvStore: Send + Sync + 'static {
-    /// Backend-specific atomic write-batch type.
-    type WriteBatch: WriteBatch;
-
     /// Returns the value for `key` in `cf`, if present.
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError>;
 
@@ -174,8 +172,11 @@ pub trait KvStore: Send + Sync + 'static {
         collect_bounded(self.iter_prefix(cf, prefix)?, limit)
     }
 
-    /// Creates an empty backend-specific batch.
-    fn new_batch(&self) -> Self::WriteBatch;
+    /// Returns an empty buffered batch for this or any other store.
+    ///
+    /// PRE: none. POST: the batch records operations but touches no engine
+    /// state until one write method consumes it.
+    fn new_batch(&self) -> BufferedWriteBatch;
 
     /// Inserts or replaces one value through the regular write path.
     fn put(&self, cf: ColumnFamily, key: &[u8], value: &[u8]) -> Result<(), StorageError> {
@@ -192,10 +193,10 @@ pub trait KvStore: Send + Sync + 'static {
     }
 
     /// Atomically applies a batch without a crash-durability guarantee.
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError>;
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError>;
 
     /// Atomically applies a batch whose durability may wait for `flush`.
-    fn write_deferred(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_deferred(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write(batch)
     }
 
@@ -213,7 +214,7 @@ pub trait KvStore: Send + Sync + 'static {
     /// explicit: it applies through [`Self::write_deferred`] and then calls
     /// [`Self::flush`]. Backend overrides must preserve the same receipt and
     /// error semantics even when they use one synchronous commit.
-    fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_deferred(batch)?;
         self.flush()
     }
@@ -231,7 +232,7 @@ pub trait KvStore: Send + Sync + 'static {
     fn write_durable_if(
         &self,
         conditions: &[WriteCondition<'_>],
-        batch: Self::WriteBatch,
+        batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError>;
 
     /// Makes every earlier completed write durable before success.
@@ -252,22 +253,12 @@ pub trait KvStore: Send + Sync + 'static {
     fn arm_persist_fault(&self, fault: PersistFault);
 }
 
-/// Backend-neutral atomic write batch.
-pub trait WriteBatch: Send {
-    /// Inserts or replaces `key` with `value` in `cf`.
-    fn put(&mut self, cf: ColumnFamily, key: &[u8], value: &[u8]);
-
-    /// Inserts or replaces `key` with an owned value in `cf`.
-    fn put_value(&mut self, cf: ColumnFamily, key: &[u8], value: Bytes) {
-        self.put(cf, key, &value);
-    }
-
-    /// Deletes `key` from `cf`.
-    fn delete(&mut self, cf: ColumnFamily, key: &[u8]);
-
-    /// Deletes keys in `[start, end)` from `cf`.
-    fn delete_range(&mut self, cf: ColumnFamily, start: &[u8], end: &[u8]);
-}
+/// Compile-time proof that [`KvStore`] stays object-safe: the trait carries
+/// no associated types or generic methods, so a store dispatches through
+/// `dyn KvStore`. The `&dyn KvStore` coercion fails to compile when the
+/// trait stops being object-safe; rustc never reports the guard as dead, so
+/// it carries no lint expectation.
+fn _kv_store_is_dyn_compatible(_: &dyn KvStore) {}
 
 /// Point-in-time read view over a [`KvStore`].
 pub trait KvSnapshot: Send + Sync {

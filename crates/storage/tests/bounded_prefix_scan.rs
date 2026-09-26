@@ -1,6 +1,6 @@
 //! Cross-backend tests for bounded prefix scans.
 
-use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, StorageError, WriteBatch};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, StorageError};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 

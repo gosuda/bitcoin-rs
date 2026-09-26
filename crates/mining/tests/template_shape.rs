@@ -26,13 +26,14 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
     });
     let parent = tx(1, 50_000, None);
     let parent_txid = parent.txid();
-    mempool.insert_entry(MempoolEntry::new(Arc::new(parent), 150, 1_500, 1, 100))?;
+    mempool.insert_entry(MempoolEntry::new(Arc::new(parent), 150, 1_500, 1, 100, 0))?;
     mempool.insert_entry(MempoolEntry::new(
         Arc::new(tx(2, 40_000, Some(parent_txid))),
         150,
         2_500,
         2,
         100,
+        0,
     ))?;
     for index in 3_u8..12 {
         mempool.insert_entry(MempoolEntry::new(
@@ -41,6 +42,7 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
             1_000 + u64::from(index),
             u64::from(index),
             100,
+            0,
         ))?;
     }
 
@@ -163,6 +165,7 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
             2_000,
             u64::from(label),
             100,
+            0,
         ))?;
     }
     let snapshot = mempool.mining_snapshot();
@@ -296,6 +299,7 @@ fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
         1_000,
         1,
         100,
+        0,
     ))?;
     let one = assemble_candidate(
         &CandidateContext {
@@ -402,6 +406,7 @@ fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
         1_000,
         1,
         100,
+        0,
     ))?;
     mempool.insert_entry(MempoolEntry::new(
         Arc::new(tx(2, 10_000, None)),
@@ -409,6 +414,7 @@ fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
         1_000,
         1,
         100,
+        0,
     ))?;
     let snapshot = mempool.mining_snapshot();
     let context = CandidateContext {

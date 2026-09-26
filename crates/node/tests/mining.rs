@@ -69,6 +69,7 @@ fn advance_mempool_sequence(state: &NodeState) -> anyhow::Result<()> {
             10_000,
             1,
             7,
+            0,
         ))
         .map_err(|error| anyhow::anyhow!("seed insert failed: {error}"))?;
     guard.clear();
@@ -1386,7 +1387,7 @@ fn last_candidate_counts_include_the_coinbase() -> anyhow::Result<()> {
     {
         let mempool = state.mempool();
         let mut guard = mempool.write();
-        guard.insert_entry(MempoolEntry::new(Arc::new(tx), 120, 10_000, 1, 1))?;
+        guard.insert_entry(MempoolEntry::new(Arc::new(tx), 120, 10_000, 1, 1, 0))?;
     }
     mining.publish_generation();
     let one = expect_template(mining.get_block_template(template_request(None))?);

@@ -2,7 +2,9 @@ use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteBatch, WriteCondition};
+use crate::{
+    BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError, WriteCondition,
+};
 use cap_std::ambient_authority;
 use parking_lot::Mutex;
 
@@ -43,8 +45,6 @@ impl CountingStore {
 }
 
 impl KvStore for CountingStore {
-    type WriteBatch = NoopBatch;
-
     fn get(&self, _cf: ColumnFamily, _key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         Ok(None)
     }
@@ -57,18 +57,18 @@ impl KvStore for CountingStore {
         Ok(Box::new(std::iter::empty()))
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
-        NoopBatch
+    fn new_batch(&self) -> BufferedWriteBatch {
+        BufferedWriteBatch::default()
     }
 
-    fn write(&self, _batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write(&self, _batch: BufferedWriteBatch) -> Result<(), StorageError> {
         Ok(())
     }
 
     fn write_durable_if(
         &self,
         _conditions: &[WriteCondition<'_>],
-        _batch: Self::WriteBatch,
+        _batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
         Ok(true)
     }
@@ -88,14 +88,6 @@ impl KvStore for CountingStore {
     fn arm_persist_fault(&self, _fault: crate::PersistFault) {
         unreachable!("unused in writer tests")
     }
-}
-
-struct NoopBatch;
-
-impl WriteBatch for NoopBatch {
-    fn put(&mut self, _cf: ColumnFamily, _key: &[u8], _value: &[u8]) {}
-    fn delete(&mut self, _cf: ColumnFamily, _key: &[u8]) {}
-    fn delete_range(&mut self, _cf: ColumnFamily, _start: &[u8], _end: &[u8]) {}
 }
 
 fn temp_dir(tag: &str) -> TestResult<cap_std::fs::Dir> {

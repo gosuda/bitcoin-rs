@@ -37,9 +37,9 @@ fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<
             assert_eq!(oracle.weight().to_wu(), weight);
             assert_eq!(oracle.vsize(), 101);
         }
-        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 101, 1_000, 0, 1))?;
+        pool.insert_entry(MempoolEntry::new(Arc::new(parent), 101, 1_000, 0, 1, 0))?;
         let before = pool.sequence_number();
-        let result = pool.insert_entry(MempoolEntry::new(Arc::new(child), 101, 1_000, 0, 1));
+        let result = pool.insert_entry(MempoolEntry::new(Arc::new(child), 101, 1_000, 0, 1, 0));
         if child_weight == 403 {
             result?;
             assert_eq!(
@@ -75,12 +75,20 @@ fn chain_accepts_sixty_four_and_rejects_the_next_cluster_member() -> Result<(), 
             4_000,
             u64::from(height),
             1,
+            0,
         ))?;
     }
 
     let rejected = chained_tx(100, previous);
     let err = pool
-        .insert_entry(MempoolEntry::new(Arc::new(rejected), 1_000, 4_000, 65, 1))
+        .insert_entry(MempoolEntry::new(
+            Arc::new(rejected),
+            1_000,
+            4_000,
+            65,
+            1,
+            0,
+        ))
         .err();
 
     assert_eq!(
@@ -98,19 +106,19 @@ fn rpc_graph_facts_are_transitive_and_aggregates_are_inclusive() -> Result<(), B
 
     let root = chained_tx(50, outpoint(49, 0));
     let root_txid = root.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 1_000, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(root), 100, 1_000, 1, 1, 0))?;
     let root_id = pool.entry_id_by_txid(&root_txid).ok_or("missing root id")?;
 
     let child = chained_tx(51, OutPoint::new(root_txid, 0));
     let child_txid = child.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(child), 200, 3_000, 2, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(child), 200, 3_000, 2, 1, 0))?;
     let child_id = pool
         .entry_id_by_txid(&child_txid)
         .ok_or("missing child id")?;
 
     let grandchild = chained_tx(52, OutPoint::new(child_txid, 0));
     let grandchild_txid = grandchild.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(grandchild), 300, 6_000, 3, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(grandchild), 300, 6_000, 3, 1, 0))?;
     let grandchild_id = pool
         .entry_id_by_txid(&grandchild_txid)
         .ok_or("missing grandchild id")?;
@@ -153,7 +161,7 @@ fn cluster_limit_rejects_the_sixty_fifth_fanout_member() -> Result<(), Box<dyn E
     let mut pool = Mempool::new(MempoolLimits::default());
     let parent_tx = multi_output_tx(70, 64);
     let parent_txid = parent_tx.txid();
-    pool.insert_entry(MempoolEntry::new(Arc::new(parent_tx), 100, 1_000, 1, 1))?;
+    pool.insert_entry(MempoolEntry::new(Arc::new(parent_tx), 100, 1_000, 1, 1, 0))?;
 
     for vout in 0_u32..63 {
         let child = chained_tx(u8::try_from(vout + 71)?, OutPoint::new(parent_txid, vout));
@@ -163,13 +171,14 @@ fn cluster_limit_rejects_the_sixty_fifth_fanout_member() -> Result<(), Box<dyn E
             1_000,
             u64::from(vout) + 2,
             1,
+            0,
         ))?;
     }
     assert_eq!(pool.len(), 64);
 
     let rejected = chained_tx(200, OutPoint::new(parent_txid, 63));
     let err = pool
-        .insert_entry(MempoolEntry::new(Arc::new(rejected), 100, 1_000, 30, 1))
+        .insert_entry(MempoolEntry::new(Arc::new(rejected), 100, 1_000, 30, 1, 0))
         .err();
     assert_eq!(
         err,
@@ -184,7 +193,7 @@ fn raw_pool_view_and_entry_metadata_facts() -> Result<(), Box<dyn Error>> {
     let before = pool.sequence_number();
     let tx = chained_tx(80, outpoint(79, 0));
     let txid = tx.txid();
-    let entry = MempoolEntry::new(Arc::new(tx), 150, 3_000, 9, 42).with_sigop_cost(17);
+    let entry = MempoolEntry::new(Arc::new(tx), 150, 3_000, 9, 42, 17);
     assert_eq!(entry.sigop_cost, 17);
     assert_eq!(entry.bip141_vsize, u32::try_from(entry.tx.vsize())?);
     assert_eq!(entry.weight, entry.tx.weight());
@@ -217,6 +226,7 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), Box<dyn Error
         10_000,
         1,
         7,
+        0,
     ))?;
     pool.insert_entry(MempoolEntry::new(
         Arc::new(second.clone()),
@@ -224,6 +234,7 @@ fn fee_estimate_access_reuses_pool_owned_estimator() -> Result<(), Box<dyn Error
         10_000,
         1,
         7,
+        0,
     ))?;
     assert_eq!(pool.estimate_fee_rate(2), None);
 

@@ -18,6 +18,7 @@ use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
+use crate::entry::MempoolEntry;
 use bitcoin_rs_consensus::{ConsensusError, UtxoView, total_sigop_cost, verify_transaction};
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
@@ -344,8 +345,6 @@ fn rejection_scope(tx: &Tx) -> RejectScope {
 /// pool alive. Handoff note for ING-R34: once `Chainstate` gains a
 /// `mempool_gateway` field, the reorg caller can read the handle instead
 /// and `shared` shrinks to run-time composition plus tests.
-#[cfg(any(test, feature = "test-seam"))]
-use crate::entry::MempoolEntry;
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::orphan::RejectScope;
 use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
@@ -700,7 +699,7 @@ impl MempoolGateway {
             let inputs = self
                 .pool
                 .read()
-                .capture_insertion(entry.clone())
+                .capture_insertion(entry.clone(), crate::rbf::FeeEstimation::Estimate)
                 .map_err(RbfError::into_pool_error)?;
             let plan = inputs.verify().map_err(RbfError::into_pool_error)?;
             let result = self.commit(origin, move |pool| {
@@ -719,17 +718,17 @@ impl MempoolGateway {
     pub fn replace_transaction(
         &self,
         origin: AdmissionOrigin,
-        mut candidate: ReplacementCandidate,
+        candidate: &ReplacementCandidate,
         time: u64,
         height: u32,
-        sigop_cost: u32,
     ) -> Result<crate::mutation::MutationResult, RbfError> {
-        candidate.sigop_cost = sigop_cost;
         for _ in 0..crate::admission::MAX_ADMISSION_RETRIES {
-            let inputs = self
-                .pool
-                .read()
-                .capture_replacement(&candidate, time, height)?;
+            let inputs = self.pool.read().capture_replacement(
+                candidate,
+                time,
+                height,
+                crate::rbf::FeeEstimation::Estimate,
+            )?;
             let plan = inputs.verify()?;
             let result = self.commit(origin, move |pool| pool.commit_pool_change(plan));
             if !matches!(result, Err(RbfError::StalePlan)) {
@@ -967,17 +966,36 @@ impl MempoolGateway {
                 }
             }
         } else if prepared.rejection.is_none() {
-            let candidate = ReplacementCandidate::new(
-                Arc::clone(&request.tx),
-                prepared.fact.vsize,
-                prepared.fact.base_fee.unwrap_or(0),
-                policy.incremental_relay_fee_sat_per_kvb,
-            )
-            .with_sigop_cost(prepared.fact.sigop_cost)
             // Reorg re-admissions must not double-count the estimator: the
             // transaction already spent time in the pool before disconnect.
-            .with_fee_estimate(!matches!(request.origin, AdmissionOrigin::Reorg));
-            match pool.capture_replacement(&candidate, request.time, request.height) {
+            let fee_estimation = crate::rbf::FeeEstimation::from_origin(&request.origin);
+            let captured = pool
+                .truc_conflicts(&request.tx, prepared.fact.vsize, true)
+                .and_then(|(conflicts, sibling_eviction)| {
+                    let entry = MempoolEntry::new(
+                        Arc::clone(&request.tx),
+                        prepared.fact.vsize,
+                        prepared.fact.base_fee.unwrap_or(0),
+                        request.time,
+                        request.height,
+                        prepared.fact.sigop_cost,
+                    );
+                    // The conflicts `truc_conflicts` returned decide the door,
+                    // not a second direct lookup: a v3 sibling eviction has an
+                    // empty direct set yet must pay the replacement rules.
+                    if conflicts.is_empty() {
+                        pool.capture_insertion(entry, fee_estimation)
+                    } else {
+                        pool.capture_admission(
+                            entry,
+                            conflicts,
+                            policy.incremental_relay_fee_sat_per_kvb,
+                            sibling_eviction,
+                            fee_estimation,
+                        )
+                    }
+                });
+            match captured {
                 Ok(inputs) => prepared.replacement = ReplacementStage::Captured(inputs),
                 Err(error) => {
                     prepared.reject(replacement_rejection(error), rejection_scope(&request.tx));
@@ -1463,7 +1481,7 @@ mod tests {
     }
 
     fn entry(tx: &Tx) -> MempoolEntry {
-        MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7)
+        MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7, 0)
     }
 
     fn hash(txid: &Txid) -> Hash256 {
@@ -1688,7 +1706,7 @@ mod tests {
 
         // Below the default min-relay floor (1_000 sat/kvB): rejected before
         // any commit.
-        let poor = MempoolEntry::new(Arc::new(tx(4)), 100, 50, 1, 7);
+        let poor = MempoolEntry::new(Arc::new(tx(4)), 100, 50, 1, 7, 0);
         assert!(gateway.insert_entry(AdmissionOrigin::Rpc, poor).is_err());
         let stranger = tx(5);
         let stranger_txid = stranger.txid();
@@ -1739,10 +1757,9 @@ mod tests {
         let result = gateway
             .replace_transaction(
                 AdmissionOrigin::Rpc,
-                crate::ReplacementCandidate::new(Arc::new(replacement), 100, 5_000, 1),
+                &crate::ReplacementCandidate::new(Arc::new(replacement), 100, 5_000, 1),
                 1,
                 7,
-                0,
             )
             .expect("replacement lands");
 
@@ -1829,8 +1846,8 @@ mod tests {
             Some(dyn_observer(&observer)),
         );
 
-        let low = MempoolEntry::new(Arc::new(tx(13)), 100, 100, 1, 7);
-        let high = MempoolEntry::new(Arc::new(tx(14)), 100, 900, 1, 7);
+        let low = MempoolEntry::new(Arc::new(tx(13)), 100, 100, 1, 7, 0);
+        let high = MempoolEntry::new(Arc::new(tx(14)), 100, 900, 1, 7, 0);
         gateway
             .insert_entry(AdmissionOrigin::Rpc, low)
             .expect("low in");
@@ -2290,7 +2307,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(filler), 100, 9_000, 1, 7),
+                MempoolEntry::new(Arc::new(filler), 100, 9_000, 1, 7, 0),
             )
             .expect("filler in");
         observer.seen.lock().clear();
@@ -2304,7 +2321,7 @@ mod tests {
         let error = gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(shed), 100, 100, 1, 7),
+                MempoolEntry::new(Arc::new(shed), 100, 100, 1, 7, 0),
             )
             .expect_err("entry cannot survive trimming");
         assert_eq!(error, crate::MempoolError::Full);
@@ -2337,7 +2354,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7),
+                MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7, 0),
             )
             .expect("original in");
 
@@ -2346,7 +2363,7 @@ mod tests {
         gateway
             .insert_entry(
                 AdmissionOrigin::Rpc,
-                MempoolEntry::new(Arc::new(bystander), 850, 8_500_000, 1, 7),
+                MempoolEntry::new(Arc::new(bystander), 850, 8_500_000, 1, 7, 0),
             )
             .expect("bystander in");
 
@@ -2371,10 +2388,10 @@ mod tests {
         let error = gateway
             .replace_transaction(
                 AdmissionOrigin::Rpc,
-                crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1),
+                &crate::ReplacementCandidate::new(Arc::new(replacement), 900, 100_000, 1)
+                    .with_sigop_cost(4),
                 2,
                 7,
-                4,
             )
             .expect_err("replacement cannot survive capacity trimming");
         assert_eq!(error, crate::RbfError::Mempool(crate::MempoolError::Full));

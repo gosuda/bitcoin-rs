@@ -130,8 +130,6 @@ impl RedbStore {
 }
 
 impl KvStore for RedbStore {
-    type WriteBatch = BufferedWriteBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
         let table = read_txn
@@ -163,7 +161,7 @@ impl KvStore for RedbStore {
         scan_prefix(&read_txn, table_for(cf), prefix, limit)
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
+    fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
 
@@ -181,15 +179,15 @@ impl KvStore for RedbStore {
         write_txn.commit().map_err(StorageError::backend)
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_with_durability(batch, Durability::Immediate)
     }
 
-    fn write_deferred(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_deferred(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_with_durability(batch, Durability::None)
     }
 
-    fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_with_durability(batch, Durability::Immediate)
     }
 
@@ -409,8 +407,6 @@ impl RedbTxIndexStore {
 }
 
 impl KvStore for RedbTxIndexStore {
-    type WriteBatch = BufferedWriteBatch;
-
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
         match cf {
@@ -453,19 +449,19 @@ impl KvStore for RedbTxIndexStore {
         scan_txindex_prefix(&read_txn, cf, prefix, limit)
     }
 
-    fn new_batch(&self) -> Self::WriteBatch {
+    fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
 
-    fn write(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_with_durability(batch, Durability::Immediate)
     }
 
-    fn write_deferred(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_deferred(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_with_durability(batch, Durability::None)
     }
 
-    fn write_durable(&self, batch: Self::WriteBatch) -> Result<(), StorageError> {
+    fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write_with_durability(batch, Durability::Immediate)
     }
 

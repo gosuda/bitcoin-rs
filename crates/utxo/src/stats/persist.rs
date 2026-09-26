@@ -1,4 +1,4 @@
-use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError, WriteBatch};
+use bitcoin_rs_storage::{ColumnFamily, KvStore, StorageError};
 
 use crate::stats::{CoinStats, CoinStatsDecodeError};
 
