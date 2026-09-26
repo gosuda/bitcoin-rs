@@ -12,6 +12,8 @@ extern crate alloc;
 
 /// HTTP Basic and cookie authentication.
 pub mod auth;
+/// Standard-alphabet Base64 encode/decode for auth headers and PSBTs.
+mod base64;
 /// Core-compatible projection of concrete service status.
 pub mod capabilities;
 /// Bitcoin Core wire-contract boundary: versioned response types and the

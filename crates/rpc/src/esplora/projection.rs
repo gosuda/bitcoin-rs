@@ -14,9 +14,9 @@ use bitcoin_rs_script::script::{instructions, is_p2sh, is_p2wsh};
 
 use crate::compat::convert::{self, hex_encode};
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
-use crate::rest::Response;
+use crate::rest::{Response, bad_request, internal_error, not_found, service_unavailable};
 
-use super::http::{bad, internal, not_found, query_error, unavailable};
+use super::http::query_error;
 use super::model::{
     BlockValue, ScriptStats, TransactionInput, TransactionOutput, TransactionStatus,
     TransactionValue, UtxoValue,
@@ -131,7 +131,8 @@ impl<'a> Projection<'a> {
         &self,
         text_id: &str,
     ) -> Result<(Tx, Option<Confirmation>), Response> {
-        let txid = Txid::from_str(text_id).map_err(|_| bad("txid must be 64 hex characters"))?;
+        let txid =
+            Txid::from_str(text_id).map_err(|_| bad_request("txid must be 64 hex characters"))?;
         self.transaction(&txid)?.ok_or_else(not_found)
     }
 
@@ -152,12 +153,12 @@ impl<'a> Projection<'a> {
             .indexes
             .esplora_tx_index
             .as_ref()
-            .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
+            .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?;
         let transaction = index.transaction(txid).map_err(query_error)?;
         transaction.map_or(Ok(None), |transaction| {
             self.confirmation(txid).and_then(|confirmation| {
                 confirmation.map_or_else(
-                    || Err(unavailable("transaction confirmation unavailable")),
+                    || Err(service_unavailable("transaction confirmation unavailable")),
                     |confirmation| Ok(Some((transaction, Some(confirmation)))),
                 )
             })
@@ -169,10 +170,10 @@ impl<'a> Projection<'a> {
             .indexes
             .esplora_tx_index
             .as_ref()
-            .ok_or_else(|| unavailable("transaction lookup index is disabled"))?
+            .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?
             .transaction(txid)
             .map_err(query_error)?
-            .ok_or_else(|| unavailable("confirming transaction unavailable"))
+            .ok_or_else(|| service_unavailable("confirming transaction unavailable"))
     }
 
     /// Resolves confirmation only against the current applied chain.
@@ -188,7 +189,7 @@ impl<'a> Projection<'a> {
             .indexes
             .esplora_tx_index
             .as_ref()
-            .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
+            .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?;
         Ok(index
             .transaction_height(txid)
             .map_err(query_error)?
@@ -241,7 +242,7 @@ impl<'a> Projection<'a> {
             } else {
                 let output = self
                     .prevout(&previous_output)?
-                    .ok_or_else(|| unavailable("previous transaction unavailable"))?;
+                    .ok_or_else(|| service_unavailable("previous transaction unavailable"))?;
                 input_value = input_value.saturating_add(output.value.to_sat());
                 Some(output)
             };
@@ -318,7 +319,7 @@ impl<'a> Projection<'a> {
             .indexes
             .esplora_tx_index
             .as_ref()
-            .ok_or_else(|| unavailable("transaction lookup index is disabled"))?;
+            .ok_or_else(|| service_unavailable("transaction lookup index is disabled"))?;
         let Some(transaction) = index.transaction(&outpoint.txid).map_err(query_error)? else {
             return Ok(None);
         };
@@ -335,14 +336,14 @@ impl<'a> Projection<'a> {
         let header = record
             .header_bytes()
             .and_then(|bytes| deserialize::<Header>(bytes).ok())
-            .ok_or_else(|| unavailable("block header unavailable"))?;
+            .ok_or_else(|| service_unavailable("block header unavailable"))?;
         let bytes = self
             .ctx
             .chain
             .block_body_bytes(record)
-            .ok_or_else(|| unavailable("block body unavailable"))?;
-        let block =
-            deserialize::<Block>(&bytes).map_err(|_| internal("stored block body is corrupt"))?;
+            .ok_or_else(|| service_unavailable("block body unavailable"))?;
+        let block = deserialize::<Block>(&bytes)
+            .map_err(|_| internal_error("stored block body is corrupt"))?;
         Ok(BlockValue {
             id: record.hash.to_string(),
             height: record.height,
@@ -374,8 +375,9 @@ impl<'a> Projection<'a> {
             .ctx
             .chain
             .block_body_bytes(&record)
-            .ok_or_else(|| unavailable("block body unavailable"))?;
-        let block = deserialize(&bytes).map_err(|_| internal("stored block body is corrupt"))?;
+            .ok_or_else(|| service_unavailable("block body unavailable"))?;
+        let block =
+            deserialize(&bytes).map_err(|_| internal_error("stored block body is corrupt"))?;
         Ok((record, block))
     }
 
@@ -384,7 +386,7 @@ impl<'a> Projection<'a> {
         text_hash: &str,
     ) -> Result<bitcoin_rs_index::block_log::BlockRecord, Response> {
         let hash = bitcoin_rs_primitives::Hash256::from_str(text_hash)
-            .map_err(|_| bad("block hash must be 64 hex characters"))?;
+            .map_err(|_| bad_request("block hash must be 64 hex characters"))?;
         self.ctx.chain.block_by_hash(hash).ok_or_else(not_found)
     }
 
@@ -397,7 +399,7 @@ impl<'a> Projection<'a> {
             .indexes
             .script_index
             .as_ref()
-            .ok_or_else(|| unavailable("script index is disabled"))?;
+            .ok_or_else(|| service_unavailable("script index is disabled"))?;
         let snapshot = index.history_snapshot(script_hash).map_err(query_error)?;
         let mut confirmed = snapshot
             .history
@@ -405,7 +407,7 @@ impl<'a> Projection<'a> {
             .map(|record| {
                 let confirmation = self
                     .confirmation_at_height(record.height)
-                    .ok_or_else(|| unavailable("confirming block unavailable"))?;
+                    .ok_or_else(|| service_unavailable("confirming block unavailable"))?;
                 Ok(ConfirmedActivity {
                     record,
                     confirmation,
@@ -441,7 +443,7 @@ impl<'a> Projection<'a> {
             .indexes
             .script_index
             .as_ref()
-            .ok_or_else(|| unavailable("script index is disabled"))?
+            .ok_or_else(|| service_unavailable("script index is disabled"))?
             .unspent_outputs(script_hash)
             .map_err(query_error)?;
         let mempool_hash = MempoolScriptHash::from_byte_array(script_hash.to_byte_array());
@@ -468,7 +470,7 @@ impl<'a> Projection<'a> {
                 let status = self
                     .confirmation_at_height(record.height)
                     .map(TransactionStatus::from)
-                    .ok_or_else(|| unavailable("funding block unavailable"))?;
+                    .ok_or_else(|| service_unavailable("funding block unavailable"))?;
                 Ok(UtxoValue {
                     txid: record.txid.to_string(),
                     vout: record.vout,

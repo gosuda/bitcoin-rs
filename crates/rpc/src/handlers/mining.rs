@@ -1,6 +1,7 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
+use bitcoin::hex::FromHex as _;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
@@ -37,26 +38,6 @@ const PRIORITISE_DUMMY_ERROR: &str =
     "Priority is no longer supported, dummy argument to prioritisetransaction must be 0.";
 const PRIORITISE_DUST_ERROR: &str = "Priority is not supported for transactions with dust outputs.";
 const GENERATE_INVALID_ADDRESS: &str = "Error: Invalid address";
-
-fn from_hex(s: &str) -> Result<Vec<u8>, ()> {
-    fn nibble(byte: u8) -> Result<u8, ()> {
-        Ok(match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => return Err(()),
-        })
-    }
-    let bytes = s.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return Err(());
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.as_chunks::<2>().0 {
-        out.push((nibble(chunk[0])? << 4) | nibble(chunk[1])?);
-    }
-    Ok(out)
-}
 
 pub(crate) fn getblocktemplate(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let control = ctx
@@ -109,7 +90,7 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 fn decode_submitted_block(hex: &str) -> Result<(Block, Vec<u8>), RpcError> {
-    let mut bytes = from_hex(hex).map_err(|()| block_decode_failed())?;
+    let mut bytes = Vec::<u8>::from_hex(hex).map_err(|_| block_decode_failed())?;
     // See the API-15 contract for DecodeHexBlk compatibility behavior.
     let mut reader: &[u8] = &bytes;
     let block = <Block as ConsensusDecode>::consensus_decode(&mut reader)
@@ -126,8 +107,8 @@ fn block_decode_failed() -> RpcError {
 const HEADER_BYTES: usize = 80;
 
 fn decode_block_header(hex: &str) -> Result<Header, RpcError> {
-    let bytes = from_hex(hex)
-        .map_err(|()| RpcError::Deserialization("Block header decode failed".to_owned()))?;
+    let bytes = Vec::<u8>::from_hex(hex)
+        .map_err(|_| RpcError::Deserialization("Block header decode failed".to_owned()))?;
     // Core's DecodeHexBlockHeader unserializes CBlockHeader and ignores leftover
     // bytes, so extra hex after 80 bytes is accepted. Fewer than 80 bytes fail.
     let Some(header_bytes) = bytes.get(..HEADER_BYTES) else {
@@ -416,7 +397,7 @@ fn parse_generateblock_transactions(
             transactions.push(GenerateTx::ResolvedMempool(entry));
             continue;
         }
-        let bytes = from_hex(text).map_err(|()| generateblock_tx_decode_failed(text))?;
+        let bytes = Vec::<u8>::from_hex(text).map_err(|_| generateblock_tx_decode_failed(text))?;
         let tx: Tx = deserialize(&bytes).map_err(|_| generateblock_tx_decode_failed(text))?;
         transactions.push(GenerateTx::Raw(tx));
     }

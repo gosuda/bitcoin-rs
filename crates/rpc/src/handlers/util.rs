@@ -29,17 +29,6 @@ fn conf_target_blocks(conf_target: u64) -> u32 {
     u32::try_from(conf_target).unwrap_or(u32::MAX)
 }
 
-fn btc_amount_json(satoshis: u64) -> Value {
-    let whole = satoshis / 100_000_000;
-    let fractional = satoshis % 100_000_000;
-    let text = format!("{whole}.{fractional:08}");
-    let mut deserializer = sonic_rs::Deserializer::from_str(&text).use_rawnumber();
-    match sonic_rs::Deserialize::deserialize(&mut deserializer) {
-        Ok(value) => value,
-        Err(error) => panic!("formatted unsigned BTC amount was invalid JSON: {error}"),
-    }
-}
-
 /// `uptime` measures from the instant this context's RPC listener bound
 /// (recorded by `RpcServer::bind`), or from its first call for contexts
 /// that never bind a server.
@@ -185,7 +174,7 @@ pub(crate) fn estimaterawfee(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let Some(rate) = pool.estimate_fee_rate(conf_target_blocks(conf_target)) else {
         return Ok(json!({}));
     };
-    let feerate = btc_amount_json(rate.as_sat_per_kvb());
+    let feerate = crate::tx_render::btc_amount_json(rate.as_sat_per_kvb());
     let mut short = sonic_rs::Object::new();
     let _ = short.insert("feerate", feerate.clone());
     let mut medium = sonic_rs::Object::new();
