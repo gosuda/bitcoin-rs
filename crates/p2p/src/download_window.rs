@@ -513,6 +513,9 @@ pub struct BlockedContext {
     pub frontier_hash: Option<Hash256>,
     /// Whether the stager holds the next-expected body (apply lag).
     pub apply_side_busy: bool,
+    /// Distinct exact connections owning validated in-flight blocks this
+    /// tick, from [`DownloadWindow::active_downloading_peers`].
+    pub active_downloading_peers: usize,
 }
 
 /// Why the unified blockage observation convicted an owner.
@@ -2048,6 +2051,23 @@ impl DownloadWindow {
         for hash in stale_staged {
             stager.discard(&hash);
         }
+        // The stager is the single staged-body store: bodies the request
+        // branch left behind are released here, so freed capacity is real
+        // and a late old-branch delivery cannot re-acquire purged state.
+        // A hash the tree cannot resolve is off-branch by definition.
+        let stale_staged: Vec<Hash256> = stager
+            .staged_hashes()
+            .filter(|hash| {
+                let on_branch = tree
+                    .lookup(*hash)
+                    .and_then(|node_id| tree.node(node_id).ok())
+                    .map(|node| is_on_request_branch(node.hash, node.height));
+                on_branch != Some(true)
+            })
+            .collect();
+        for hash in stale_staged {
+            stager.discard(&hash);
+        }
 
         self.next_request_height = request_start_height;
         self.stall = None;
@@ -2602,6 +2622,8 @@ impl DownloadWindow {
     /// request frontier — a below-frontier entry could never be scheduled
     /// anyway, and its expiry would drag `next_request_height` back down
     /// into a re-request sweep of heights already applied.
+    /// `false` when capacity refused the mark: the caller keeps the deferred
+    /// ownership record so a fast delivery still counts as requested.
     pub fn mark_owned_fetch(
         &mut self,
         stager: &mut BlockStager,
@@ -2609,22 +2631,22 @@ impl DownloadWindow {
         hash: Hash256,
         height: u32,
         now: Instant,
-    ) {
+    ) -> bool {
         if self.pending.contains_key(&hash) {
-            return;
+            return true;
         }
         if stager.contains(&hash) {
             // The fetch's body is already staged: the owned fetch is its
             // request evidence, so the body counts as requested and owes
             // no unrequested-admission gate.
             stager.clear_gate_pending(&hash);
-            return;
+            return true;
         }
         if height < self.next_request_height
             || !self.has_request_capacity(stager)
             || self.pending_count_for(owner) >= self.effective_peer_inflight()
         {
-            return;
+            return false;
         }
         let request = PeerRequest {
             owner,
@@ -2638,6 +2660,14 @@ impl DownloadWindow {
         let attempted_owner = self.prefix_probe_attempted_owner;
         self.mark_requested(stager, &request, owner, now);
         self.prefix_probe_attempted_owner = attempted_owner;
+        true
+    }
+
+    /// Releases `hash`'s pending entry without rewinding the request cursor:
+    /// drop-only release for hashes that must never be re-requested
+    /// (invalidated subtrees).
+    pub(crate) fn release_pending(&mut self, hash: &Hash256, now: Instant) {
+        let _ = self.remove_pending(hash, now);
     }
 
     fn remove_pending(&mut self, hash: &Hash256, now: Instant) -> Option<PendingBlock> {
@@ -4726,6 +4756,7 @@ mod tests {
             next_apply_height: Some(1),
             frontier_hash: None,
             apply_side_busy: false,
+            active_downloading_peers: window.active_downloading_peers(),
         };
         // First tick: the episode and the cold-front timer both start.
         assert_eq!(

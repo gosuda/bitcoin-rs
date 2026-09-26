@@ -29,6 +29,10 @@ pub struct BlockStager {
     received_blocks_high_water: usize,
     /// Highest staged-byte total observed; feeds the high-water gauge.
     received_bytes_high_water: usize,
+    /// Live count of staged bodies still awaiting the admission clauses
+    /// because the tree could not resolve their hash at arrival. The shared
+    /// quota on this count bounds orphan floods (`MAX_UNRESOLVED_STAGED_BODIES`).
+    gate_pending_count: usize,
 }
 
 #[derive(Debug)]
@@ -68,6 +72,15 @@ pub struct DrainedBlock {
     /// Carried through a partial-apply restore so an ungated body still owes
     /// the admission clauses afterward.
     gate_pending: bool,
+}
+
+impl DrainedBlock {
+    /// The connection that delivered this body, or `None` for a locally
+    /// injected one.
+    #[must_use]
+    pub(crate) const fn source(&self) -> Option<PeerSource> {
+        self.source
+    }
 }
 
 /// A staged body dropped for retry or eviction.
@@ -110,6 +123,7 @@ impl BlockStager {
             next_received_deadline: None,
             received_blocks_high_water: 0,
             received_bytes_high_water: 0,
+            gate_pending_count: 0,
         }
     }
 
@@ -232,6 +246,18 @@ impl BlockStager {
         self.received.contains_key(hash)
     }
 
+    /// The connection that delivered the staged body, or `None` for a
+    /// locally injected one; `None` also when `hash` is not staged.
+    pub fn staged_source(&self, hash: &Hash256) -> Option<PeerSource> {
+        self.received.get(hash).and_then(|entry| entry.source)
+    }
+
+    /// How many staged bodies still owe the admission clauses because their
+    /// hash was unresolvable at arrival.
+    pub fn gate_pending_count(&self) -> usize {
+        self.gate_pending_count
+    }
+
     /// `(hash, embedded header, delivering connection)` for every staged
     /// body. The sync executor retries header admission for bodies whose
     /// headers are still absent from the tree: a staged body can never
@@ -283,6 +309,7 @@ impl BlockStager {
     /// Restores previously drained bodies after a partial apply.
     pub fn restore_many(&mut self, drained: impl IntoIterator<Item = DrainedBlock>) {
         for drained in drained {
+            let gate_pending = drained.gate_pending;
             let previous = self.received.insert(
                 drained.hash,
                 ReceivedBlock {
@@ -291,13 +318,19 @@ impl BlockStager {
                     received_at: drained.received_at,
                     bytes: drained.bytes,
                     source: drained.source,
-                    gate_pending: drained.gate_pending,
+                    gate_pending,
                 },
             );
             if let Some(previous) = previous {
                 self.received_bytes = self.received_bytes.saturating_sub(previous.bytes);
+                if previous.gate_pending {
+                    self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
+                }
             } else if !self.received_order_contains(&drained.hash) {
                 self.received_order.push_back(drained.hash);
+            }
+            if gate_pending {
+                self.gate_pending_count += 1;
             }
             self.received_bytes = self.received_bytes.saturating_add(drained.bytes);
             self.track_received_deadline(drained.received_at);
@@ -307,6 +340,9 @@ impl BlockStager {
 
     fn take_entry(&mut self, hash: &Hash256) -> Option<DrainedBlock> {
         let entry = self.received.remove(hash)?;
+        if entry.gate_pending {
+            self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
+        }
         self.received_bytes = self.received_bytes.saturating_sub(entry.bytes);
         Some(DrainedBlock {
             hash: *hash,
@@ -398,6 +434,9 @@ impl BlockStager {
 
     fn remove(&mut self, hash: &Hash256) -> Option<DroppedBlock> {
         let entry = self.received.remove(hash)?;
+        if entry.gate_pending {
+            self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
+        }
         self.received_bytes = self.received_bytes.saturating_sub(entry.bytes);
         Some(DroppedBlock { hash: *hash })
     }
@@ -413,8 +452,11 @@ impl BlockStager {
     /// clauses: it staged while the tree could not resolve its hash, so the
     /// arrival gate's missing-header arm passed it without evaluating them.
     pub fn set_gate_pending(&mut self, hash: &Hash256) {
-        if let Some(entry) = self.received.get_mut(hash) {
+        if let Some(entry) = self.received.get_mut(hash)
+            && !entry.gate_pending
+        {
             entry.gate_pending = true;
+            self.gate_pending_count += 1;
         }
     }
 
@@ -431,8 +473,11 @@ impl BlockStager {
     /// Settles the owed gate: the clauses held against the resolved node, or
     /// request evidence (a resolved owned fetch) exempted the body.
     pub fn clear_gate_pending(&mut self, hash: &Hash256) {
-        if let Some(entry) = self.received.get_mut(hash) {
+        if let Some(entry) = self.received.get_mut(hash)
+            && entry.gate_pending
+        {
             entry.gate_pending = false;
+            self.gate_pending_count = self.gate_pending_count.saturating_sub(1);
         }
     }
 

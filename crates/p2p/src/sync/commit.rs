@@ -34,6 +34,50 @@ pub(super) fn restore_split(chunk_start: usize, stopped: usize, chunk_len: usize
 }
 
 impl BlockSync {
+    /// Disconnects the connection that delivered a block the chain rejected
+    /// for a permanent consensus reason.
+    ///
+    /// PRE: the settlement's disposition is `Permanent` and `blocker` is the
+    ///   first body that failed to connect.
+    /// POST: the delivering connection is disconnected, and only then are its
+    ///   `getheaders` gate released and its address marked unresponsive; a
+    ///   body with no attributable source is purged without blame.
+    /// INVARIANT: body-binding (`BodyMutated`) and operational failures never
+    ///   reach this path, and the punishment follows the exact connection, so
+    ///   a same-address replacement is never blamed for its predecessor
+    ///   (Core 31.1 `net_processing.cpp:2031-2068`).
+    fn punish_permanent_block_delivery(&self, blocker: &DrainedBlock) {
+        self.punish_permanent_delivery_source(blocker.source(), blocker.hash);
+    }
+
+    /// Same punishment when the failing body was consumed inside a branch
+    /// switch: the staged entry carries the delivering connection, captured
+    /// before [`Self::purge_invalidated`] drops it. `None` means a locally
+    /// injected body — purged without blame.
+    pub(super) fn punish_permanent_delivery_source(
+        &self,
+        source: Option<crate::PeerSource>,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) {
+        let Some(source) = source else {
+            return;
+        };
+        if !self.peer_table.disconnect_source(source) {
+            return;
+        }
+        self.clear_header_request_for(source);
+        self.scheduler
+            .lock()
+            .window
+            .mark_peer_unresponsive(source.addr, Instant::now());
+        metrics::counter!("node.sync.invalid_block_disconnects").increment(1);
+        tracing::warn!(
+            peer_addr = %source.addr,
+            %hash,
+            "block sync: disconnected the connection that delivered a consensus-invalid block"
+        );
+    }
+
     /// Records a Fatal window settlement: logs the terminal state and latches
     /// the halt flag so later ticks keep staging inbound blocks but start no
     /// further chain transition. Staged blocks stay queued until recreation.
@@ -186,6 +230,9 @@ impl BlockSync {
                         self.purge_invalidated(&error.invalidated);
                         metrics::counter!("node.sync.invalidated_blocks")
                             .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
+                        if let Some(blocker) = blocker {
+                            self.punish_permanent_block_delivery(blocker);
+                        }
                     }
                     break;
                 }

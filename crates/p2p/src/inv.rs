@@ -57,54 +57,36 @@ pub fn request_missing_parents(
     }
 }
 
-/// Applies BIP144's witness request flag without changing hashes. Only
-/// getdata requests use this flag; announcements retain their own types.
-///
-/// Both transaction and block vectors upgrade to their witness variants:
-/// `MSG_WITNESS_BLOCK` is the only block fetch that returns witness data.
-/// A plain `MSG_BLOCK` request is served witness-stripped, and a stripped
-/// segwit body fails the body/header binding check — its witness
-/// commitment no longer matches — surfacing as a consensus connect
-/// failure, which marks the header subtree Permanent rather than retryable.
+/// Applies BIP144's witness request flag to transaction vectors without
+/// changing hashes. Only getdata requests use this flag; announcements
+/// retain their own types. Block bodies are never requested through this
+/// path: block inventory is routed to header sync, and the download window
+/// builds its own `MSG_WITNESS_BLOCK` or compact requests.
 pub(crate) fn request_witness(items: &mut [Inventory], witness: bool) {
     if !witness {
         return;
     }
     for item in items {
-        *item = match *item {
-            Inventory::Transaction(txid) => Inventory::WitnessTransaction(txid),
-            Inventory::Block(hash) => Inventory::WitnessBlock(hash),
-            other => other,
-        };
+        if let Inventory::Transaction(txid) = *item {
+            *item = Inventory::WitnessTransaction(txid);
+        }
     }
 }
 
-/// Classify an inbound inventory announcement into a getdata request.
+/// Returns the block hash carried by a block-typed inventory vector, or
+/// `None` for every other vector.
 ///
-/// Every announced item is requested. Use [`request_inventory_filtered`] to
-/// suppress items the node already holds (mempool, orphan, or recent-rejects).
-pub fn request_inventory(items: &[InventoryVector]) -> Option<Message> {
-    request_inventory_filtered(items, &|_| false)
-}
-
-/// Classify an inbound inventory announcement into a getdata request,
-/// suppressing every item for which `have` returns `true`.
-///
-/// `have` is the node-side "already have" predicate: it receives each
-/// inventory vector and returns `true` when the node already holds the
-/// referenced object, so the caller skips requesting it. Non-transaction
-/// items (blocks, compact blocks, unknown) are never suppressed by the
-/// tx-admission layer — the predicate is only consulted for tx-typed
-/// vectors — so block relay behaviour is unchanged.
-pub fn request_inventory_filtered(
-    items: &[InventoryVector],
-    have: &dyn Fn(&InventoryVector) -> bool,
-) -> Option<Message> {
-    let filtered: Vec<InventoryVector> = items.iter().copied().filter(|item| !have(item)).collect();
-    if filtered.is_empty() {
-        None
-    } else {
-        Some(Message::GetData(filtered))
+/// PRE: `item` is one vector of an inbound `inv` message.
+/// POST: `Some` exactly for `MSG_BLOCK` and `MSG_WITNESS_BLOCK`.
+/// INVARIANT: the hash is returned unchanged; the caller routes it to
+/// header sync and never requests the body from the announcement.
+pub fn inventory_block_hash(item: &InventoryVector) -> Option<Hash256> {
+    use bitcoin::hashes::Hash as _;
+    match item {
+        Inventory::Block(hash) | Inventory::WitnessBlock(hash) => {
+            Some(Hash256::from_le_bytes(hash.as_byte_array()))
+        }
+        _ => None,
     }
 }
 
@@ -226,12 +208,11 @@ mod tests {
         }
     }
 
-    // BIP144: announced `MSG_BLOCK` inventory must be requested as
-    // `MSG_WITNESS_BLOCK` alongside `MSG_TX` -> `MSG_WITNESS_TX`; a plain
-    // block request is served stripped, and a stripped segwit body fails
-    // the header binding at connect. All other inv types pass through.
+    // BIP144: `MSG_TX` is requested as `MSG_WITNESS_TX` from a witness peer
+    // with the same hash. Every other inventory type passes through: block
+    // bodies are never requested from an announcement.
     #[test]
-    fn witness_flag_upgrades_blocks_and_transactions_only() {
+    fn witness_flag_upgrades_transactions_only() {
         let txid = bitcoin::Txid::from_byte_array(*parent(1).as_bytes());
         let hash = bitcoin::BlockHash::from_byte_array([2; 32]);
         let mut items = vec![
@@ -250,20 +231,9 @@ mod tests {
         assert_eq!(items, unchanged);
 
         request_witness(&mut items, true);
-        assert_eq!(
-            items,
-            vec![
-                Inventory::WitnessTransaction(txid),
-                Inventory::WitnessBlock(hash),
-                Inventory::CompactBlock(hash),
-                Inventory::WitnessBlock(hash),
-                Inventory::WitnessTransaction(txid),
-                Inventory::Unknown {
-                    inv_type: 7,
-                    hash: [3; 32],
-                },
-            ]
-        );
+        let mut expected = unchanged;
+        expected[0] = Inventory::WitnessTransaction(txid);
+        assert_eq!(items, expected);
     }
 
     // P2P-02: a stale source cannot target or cancel its successor.

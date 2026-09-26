@@ -54,6 +54,11 @@ pub struct ListenerExtras {
     /// network travels with the latch because the wire magic is not an
     /// identity: a `--p2p-magic` override can carry another network's bytes.
     pub ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
+    /// Block-download orchestrator, used to route block inventory
+    /// announcements and to ask whether an inbound body was requested.
+    /// `None` (tests, and a node without a sync loop) announces nothing and
+    /// treats every body as unsolicited.
+    pub block_sync: Option<Arc<crate::sync::BlockSync>>,
 }
 
 /// Share the wiring for one P2P start epoch.
@@ -100,6 +105,8 @@ pub struct ConnectionShared {
     /// The network travels with the latch because the wire magic is not an
     /// identity: a `--p2p-magic` override can carry another network's bytes.
     pub ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
+    /// Block-download orchestrator for this start epoch.
+    pub block_sync: Option<Arc<crate::sync::BlockSync>>,
 }
 
 impl ConnectionShared {
@@ -141,7 +148,24 @@ impl ConnectionShared {
             compact_hints: extras.compact_hints,
             inbound_tx: extras.inbound_tx,
             ibd: extras.ibd,
+            block_sync: extras.block_sync,
         }
+    }
+
+    /// Routes one block-typed inventory hash into header sync.
+    ///
+    /// PRE: `source` identifies the current connection and `hash` is a block
+    /// inventory hash.
+    /// POST: the sync layer records the connection's best-known block and
+    /// schedules `getheaders`; no block body request is emitted here.
+    /// INVARIANT: block inventory never bypasses header admission and the
+    /// download-window budget.
+    fn announce_block(&self, source: crate::PeerSource, hash: bitcoin_rs_primitives::Hash256) {
+        let Some(sync) = self.block_sync.as_ref() else {
+            return;
+        };
+        sync.announce_block(source, hash);
+        wake_sync(self.wake_tx.as_ref());
     }
 
     fn notify_peer_ready(&self, source: crate::PeerSource) {
@@ -202,12 +226,26 @@ impl ConnectionShared {
     /// while the body is still unsent: request scheduling runs after both
     /// drains, so the staged-or-received body suppresses a duplicate
     /// `getdata` for a tip learned only by delivery.
+    ///
+    /// PRE: `lease` belongs to the connection that delivered `block`.
+    /// POST: when [`crate::PeerLease::admit_block_forward`] admits the body,
+    ///   the body reaches the shared inbound block channel and then its
+    ///   header reaches the headers sink; a refused body drops both with a
+    ///   counter record, so a peer over its unsolicited bound cannot grow
+    ///   the header queue either.
+    /// INVARIANT: one connection holds at most
+    ///   [`crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS`] unsolicited
+    ///   bodies in the shared channel at once, and a body the download
+    ///   window owns is never dropped for that bound, so requested sync
+    ///   traffic always arrives.
     fn send_block(
         &self,
-        source: crate::PeerSource,
+        lease: &crate::PeerLease,
+        peer_addr: SocketAddr,
         block: bitcoin_rs_primitives::Block,
         serialized: bytes::Bytes,
     ) {
+        let source = lease.source(peer_addr);
         // Every body carries its own header; route it through the headers
         // sink too so tips learned only by body delivery (`inv` getdata,
         // compact reconstruction, or an unsolicited push) reach header
@@ -226,10 +264,41 @@ impl ConnectionShared {
         // body first means the tick that admits the header always marks the
         // body received first.
         let header = block.header;
+        let hash = bitcoin_rs_primitives::Hash256::from(header.compute_hash());
+        let requested = self
+            .block_sync
+            .as_ref()
+            .is_some_and(|sync| sync.owns_body_fetch(source, hash));
+        let Some(credit) = lease.admit_block_forward(source, hash, requested) else {
+            // The connection is over its unsolicited bound: drop the header
+            // too, or a flood of refused bodies still grows the header queue
+            // without limit.
+            metrics::counter!("node.sync.dropped_unsolicited_blocks").increment(1);
+            return;
+        };
+        self.forward_block(block, serialized, source, Some(credit));
+        self.send_headers(source, vec![header], false, false);
+    }
+
+    /// Queues an admitted body on the shared inbound block channel.
+    ///
+    /// PRE: `forward_credit` admits this body into the ingress path.
+    /// POST: the body is queued, or dropped because the session was cancelled
+    ///   or the channel disconnected.
+    /// INVARIANT: backpressure waits here, never in the admission step, and
+    ///   the credit is released when sync drops the body it holds.
+    fn forward_block(
+        &self,
+        block: bitcoin_rs_primitives::Block,
+        serialized: bytes::Bytes,
+        source: crate::PeerSource,
+        forward_credit: Option<crate::connection::BlockForwardCredit>,
+    ) {
         let mut inbound = crate::InboundBlock {
             block,
             serialized,
             source: Some(source),
+            forward_credit,
         };
         loop {
             if self.is_session_cancelled() {
@@ -254,7 +323,6 @@ impl ConnectionShared {
                 }
             }
         }
-        self.send_headers(source, vec![header], false, false);
     }
 
     /// Forwards a decoded transaction into the node's ingress channel.
@@ -803,13 +871,14 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                             crate::wire::PeerError::Protocol("outbound queue closed or saturated")
                         })
                     },
+                    &mut |hash| shared.announce_block(lease.source(peer_addr), hash),
                 )?;
                 match message {
                     crate::Message::Headers(headers) => {
                         shared.send_headers(lease.source(peer_addr), headers, true, false);
                     }
                     crate::Message::Block(block) => {
-                        shared.send_block(lease.source(peer_addr), block, raw);
+                        shared.send_block(lease, peer_addr, block, raw);
                     }
                     crate::Message::Tx(tx) => forward_tx_if_relay_open(
                         shared,
@@ -904,6 +973,15 @@ fn process_compact_wire_message(
             crate::compact_blocks::Outcome::RequestMissing(_)
                 | crate::compact_blocks::Outcome::Fallback(_)
         );
+        // Record the fetch before the follow-up leaves: a response landing
+        // before the header drains still counts as requested, not
+        // unsolicited (`SchedulerState::owned_body_fetches`).
+        if body_fetch_owned && let Some(sync) = shared.block_sync.as_ref() {
+            sync.record_owned_body_fetch(
+                lease.source(peer_addr),
+                bitcoin_rs_primitives::Hash256::from(header.compute_hash()),
+            );
+        }
         shared.send_headers(
             lease.source(peer_addr),
             vec![header],
@@ -941,7 +1019,7 @@ fn handle_compact_outcome(
         crate::compact_blocks::Outcome::Complete(block) => {
             let serialized = bitcoin_rs_primitives::consensus_bytes(&block);
             tracing::info!(peer_addr = %peer_addr, hash = %block.block_hash(), "p2p compact block reconstructed");
-            shared.send_block(lease.source(peer_addr), block, serialized.into());
+            shared.send_block(lease, peer_addr, block, serialized.into());
         }
         crate::compact_blocks::Outcome::RequestMissing(request) => {
             tracing::info!(peer_addr = %peer_addr, "p2p compact reconstruction missing");
@@ -1514,7 +1592,7 @@ mod writer_shutdown_tests {
         let source = lease.source(addr);
 
         shared.send_headers(source, Vec::new(), true, false);
-        shared.send_block(source, block, serialized.clone());
+        shared.send_block(&lease, addr, block, serialized.clone());
 
         assert_eq!(headers_rx.try_recv()?.source, Some(source));
         let received = blocks_rx.try_recv()?;
@@ -1527,7 +1605,7 @@ mod writer_shutdown_tests {
     fn send_block_forwards_the_blocks_header() -> Result<(), Box<dyn std::error::Error>> {
         // Every inbound body carries its own header; `send_block` must also
         // emit it through the headers sink so body-only announcements
-        // (`inv` getdata, compact reconstruction, pushes) reach admission.
+        // (`inv`-served, compact reconstruction, pushes) reach admission.
         let (headers_tx, headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
@@ -1541,7 +1619,7 @@ mod writer_shutdown_tests {
         let header = block.header;
         let source = lease.source(addr);
 
-        shared.send_block(source, block, bytes::Bytes::from(block_bytes));
+        shared.send_block(&lease, addr, block, bytes::Bytes::from(block_bytes));
 
         let forwarded = headers_rx.try_recv()?;
         assert_eq!(forwarded.source, Some(source));
@@ -1569,11 +1647,10 @@ mod writer_shutdown_tests {
         let second_bytes = first_bytes.clone();
         let second = bitcoin_rs_primitives::Block::consensus_decode(&second_bytes)
             .map_err(|_| std::io::Error::other("genesis block must decode"))?;
-        let source = lease.source(addr);
-        shared.send_block(source, first, bytes::Bytes::from(first_bytes));
+        shared.send_block(&lease, addr, first, bytes::Bytes::from(first_bytes));
 
         let blocked = std::thread::spawn(move || {
-            shared.send_block(source, second, bytes::Bytes::from(second_bytes));
+            shared.send_block(&lease, addr, second, bytes::Bytes::from(second_bytes));
         });
         let started = std::time::Instant::now();
         while !blocked.is_finished() && started.elapsed() < Duration::from_millis(250) {
@@ -2281,5 +2358,140 @@ mod ready_notify_tests {
         assert!(shared.publish_info_and_notify_ready(addr, &lease, peer_info(addr, 3)));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
         assert_eq!(shared.peer_table.infos(), vec![peer_info(addr, 3)]);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod block_forward_tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use arc_swap::ArcSwapOption;
+    use bitcoin_rs_primitives::{Hash256, consensus_bytes};
+    use parking_lot::{Mutex, RwLock};
+
+    use super::test_shared;
+    use crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
+    use crate::sync::BlockSync;
+    use crate::sync::chain::SyncChain;
+    use crate::sync::tests::{
+        TestChain, coinbase_transaction, connect_peer, current_source, eligible_peer,
+        mined_block_with_prev_hash, mined_chain, test_addr,
+    };
+
+    fn genesis_body() -> bitcoin_rs_primitives::Block {
+        let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
+        let bytes = bitcoin::consensus::encode::serialize(&genesis);
+        bitcoin_rs_primitives::Block::consensus_decode(&bytes)
+            .expect("regtest genesis block must decode")
+    }
+
+    /// One connection cannot fill the shared inbound block channel with bodies
+    /// it was never asked for, and a body the download window owns is never
+    /// dropped for that bound.
+    #[test]
+    fn unsolicited_block_flood_is_bounded_per_source() -> Result<(), Box<dyn std::error::Error>> {
+        // Real sync wiring: peer A announces block 2 and the window asks A for
+        // its body, so A's requested delivery must outlive A's exhausted
+        // unsolicited credits.
+        let (mut tree, blocks) = mined_chain(1, 0)?;
+        let chain_tip = tree.tip_handle();
+        let block_tree = Arc::new(RwLock::new(tree));
+        let peers = Arc::new(crate::PeerTable::new());
+        let (sync_headers_tx, sync_headers_rx) = crossbeam_channel::unbounded();
+        let (sync_blocks_tx, sync_blocks_rx) = crossbeam_channel::unbounded();
+        let chain: Arc<dyn SyncChain> = Arc::new(TestChain::new(
+            chain_tip,
+            Arc::new(ArcSwapOption::empty()),
+            Arc::clone(&block_tree),
+        ));
+        let sync = Arc::new(BlockSync::new(
+            chain,
+            Arc::clone(&peers),
+            Arc::new(Mutex::new(sync_headers_rx)),
+            Arc::new(Mutex::new(sync_blocks_rx)),
+        ));
+        sync_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+        sync.tick();
+
+        let flooded = test_addr(9780, 0)?;
+        // The outbound queue stays alive: a closed queue would cancel the
+        // lease and masquerade as a disconnect.
+        let _rx: crossbeam_channel::Receiver<crate::Message> =
+            connect_peer(&peers, eligible_peer(flooded, 3));
+        let source = current_source(&peers, flooded);
+        let block2 =
+            mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
+        sync_headers_tx.send(crate::InboundHeaders {
+            headers: vec![block2.header],
+            source: Some(source),
+            wire_response: true,
+            body_fetch_owned: false,
+        })?;
+        sync.tick();
+        assert!(
+            sync.owns_body_fetch(source, Hash256::from(block2.block_hash())),
+            "fixture: the window must own block 2's body for this connection"
+        );
+
+        // Listener wiring over the same peer table and sync loop.
+        let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
+        let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
+        let mut shared = test_shared(Arc::clone(&peers), headers_tx, blocks_tx);
+        shared.block_sync = Some(Arc::clone(&sync));
+        let lease = peers
+            .lease(flooded)
+            .ok_or("flood connection must be registered")?;
+        let unrelated = genesis_body();
+        let unrelated_bytes = bytes::Bytes::from(consensus_bytes(&unrelated));
+
+        for _ in 0..=MAX_UNSOLICITED_BLOCK_FORWARDS {
+            shared.send_block(&lease, flooded, unrelated.clone(), unrelated_bytes.clone());
+        }
+        assert_eq!(
+            blocks_rx.len(),
+            MAX_UNSOLICITED_BLOCK_FORWARDS,
+            "one connection may not exceed its own unsolicited forwarding bound"
+        );
+
+        shared.send_block(
+            &lease,
+            flooded,
+            block2.clone(),
+            bytes::Bytes::from(consensus_bytes(&block2)),
+        );
+        assert_eq!(
+            blocks_rx.len(),
+            MAX_UNSOLICITED_BLOCK_FORWARDS + 1,
+            "a delivery the window owns is never dropped for the unsolicited bound"
+        );
+
+        let other: SocketAddr = test_addr(9781, 0)?;
+        let _other_rx: crossbeam_channel::Receiver<crate::Message> =
+            connect_peer(&peers, eligible_peer(other, 3));
+        let other_lease = peers
+            .lease(other)
+            .ok_or("second connection must be registered")?;
+        shared.send_block(
+            &other_lease,
+            other,
+            unrelated.clone(),
+            unrelated_bytes.clone(),
+        );
+        assert_eq!(
+            blocks_rx.len(),
+            MAX_UNSOLICITED_BLOCK_FORWARDS + 2,
+            "the bound is one connection's share of the channel, not a global cap"
+        );
+
+        while blocks_rx.try_recv().is_ok() {}
+        shared.send_block(&lease, flooded, unrelated, unrelated_bytes);
+        assert_eq!(
+            blocks_rx.len(),
+            1,
+            "a forwarding slot returns once sync has taken the body"
+        );
+        Ok(())
     }
 }

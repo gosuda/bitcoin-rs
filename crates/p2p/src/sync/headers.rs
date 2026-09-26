@@ -1,17 +1,21 @@
 //! Header request ownership, locator construction, and inbound header admission.
 
+use super::GetdataRequestOutcome;
 use super::GetheadersOutcome;
 use super::HEADER_REQUEST_TIMEOUT;
 use super::LOCATOR_MAX_ENTRIES;
+use super::MAX_DEFERRED_OWNED_FETCHES;
 use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
+use super::frontier::ChainFrontier;
 use super::frontier::SyncFrontier;
 use super::peers::is_peer_fault;
 use super::peers::outranks;
 use super::peers::shared_active_height;
 use super::peers::sync_peer_candidate;
+use super::requests::COMPACT_RELAY_NEAR_TIP_BLOCKS;
 use super::{BlockSync, SchedulerState};
 use crate::InboundHeaders;
 use crate::Message;
@@ -29,17 +33,15 @@ use std::vec::Vec;
 /// signal rather than evidence worth keeping.
 const MAX_UNRESOLVED_DEMONSTRATED_TIPS: usize = 8;
 
-/// Cap on deferred owned-fetch marks waiting on unattached tip headers:
-/// bounded so a peer cannot grow the scheduler by announcing tips that
-/// never admit. The oldest mark is evicted first.
-const MAX_DEFERRED_OWNED_FETCHES: usize = 16;
-
 impl BlockSync {
     #[allow(clippy::too_many_lines)]
     pub(super) fn drain_inbound_headers(&self) {
         let receiver = self.inbound_headers_rx.lock();
         let mut total_headers = 0_usize;
         let mut credit_refresh_needed = false;
+        // Near-tip batches whose body the announcing connection can serve
+        // straight away; drained after the loop with one frontier read.
+        let mut direct_fetch: Vec<(PeerSource, Hash256)> = Vec::new();
         while let Ok(InboundHeaders {
             headers,
             source,
@@ -63,6 +65,9 @@ impl BlockSync {
                     self.peer_table
                         .note_announced_tip(source, tip_hash, active_height);
                     credit_refresh_needed = true;
+                    if wire_response && !body_fetch_owned {
+                        direct_fetch.push((source, tip_hash));
+                    }
                 }
                 if body_fetch_owned {
                     self.note_owned_body_fetch(source, headers.last());
@@ -82,6 +87,9 @@ impl BlockSync {
                     if let (Some(tip_hash), Some(source)) = (announced_tip, source) {
                         self.peer_table
                             .note_announced_tip(source, tip_hash, active_height);
+                        if wire_response && !body_fetch_owned {
+                            direct_fetch.push((source, tip_hash));
+                        }
                     }
                     credit_refresh_needed = true;
                     tracing::debug!(
@@ -159,9 +167,134 @@ impl BlockSync {
         // The drain may have attached the ancestry a deferred owned fetch
         // was waiting on — resolve it against the tree now.
         self.resolve_owned_body_fetches();
+        if !direct_fetch.is_empty() {
+            let chain = self.observe_chain_frontier();
+            for (source, announced_tip) in direct_fetch {
+                self.direct_fetch_announced_tip(source, announced_tip, &chain);
+            }
+        }
+        self.drain_block_announcements();
         if total_headers > 0 {
             tracing::debug!(total_headers, "block sync: drained inbound headers");
         }
+    }
+
+    /// Applies every queued `MSG_BLOCK` announcement to the announcing
+    /// connection's header-sync state, as Core does in
+    /// `net_processing.cpp:4370-4410`.
+    ///
+    /// PRE: entries were queued by [`BlockSync::announce_block`].
+    /// POST: a hash already in the tree credits its connection with that tip
+    /// and refreshes active-peer credit; a hash the tree does not know asks
+    /// that connection for headers. No block body is requested here.
+    /// INVARIANT: block inventory never bypasses header admission and the
+    /// download-window budget.
+    fn drain_block_announcements(&self) {
+        let pending = std::mem::take(&mut *self.block_announcements.lock());
+        if pending.is_empty() {
+            return;
+        }
+        let mut credit_refresh_needed = false;
+        // `header_request` is a singleton: asking a second peer before the
+        // first answers would orphan the earlier request untracked, so
+        // unknown announcements queue back for a later drain instead.
+        let mut deferred: Vec<(PeerSource, Hash256)> = Vec::new();
+        for (source, hash) in pending {
+            if !self.peer_table.is_current(source) {
+                continue;
+            }
+            // The tree read is scoped so no lock is held across the peer
+            // table or the outbound send the unknown case performs.
+            let (known, active_height) = {
+                let tree = self.chain.block_tree();
+                let height = tree
+                    .tip()
+                    .and_then(|tip| shared_active_height(&tree, tip.tip_id, hash))
+                    .and_then(|height| i32::try_from(height).ok());
+                (tree.lookup(hash).is_some(), height)
+            };
+            if !known {
+                if self.scheduler.lock().header_request.is_some() {
+                    deferred.push((source, hash));
+                } else {
+                    self.request_headers_from(Some(source));
+                }
+                continue;
+            }
+            self.peer_table
+                .note_announced_tip(source, hash, active_height);
+            credit_refresh_needed = true;
+        }
+        if !deferred.is_empty() {
+            let mut announcements = self.block_announcements.lock();
+            for (source, hash) in deferred {
+                announcements.entry(source).or_insert(hash);
+            }
+        }
+        if credit_refresh_needed {
+            self.refresh_active_peer_credit();
+        }
+    }
+
+    /// Requests the body of a freshly announced near-tip header from the
+    /// connection that proved it, without waiting for the next scheduler
+    /// tick. Core direct-fetches in the same situation
+    /// (`HeadersDirectFetchBlocks`, `net_processing.cpp:3098-3158`, gated by
+    /// `CanDirectFetch` at `:1450-1453`).
+    ///
+    /// PRE: `source` is the connection that delivered `announced_tip`.
+    /// POST: the eligible body is requested through
+    /// `send_getdata_for_pending_blocks`, so the download window owns the
+    /// pending hash before this returns; a failed guard requests nothing.
+    /// INVARIANT: the request stays inside the existing window, per-peer, and
+    /// byte budgets, and work too deep below the header tip — a bulk download
+    /// or a large reorg — is left to the ordinary tick scheduler.
+    fn direct_fetch_announced_tip(
+        &self,
+        source: PeerSource,
+        announced_tip: Hash256,
+        chain: &ChainFrontier,
+    ) -> GetdataRequestOutcome {
+        let (Some(chain_tip), Some(required)) = (chain.chain_tip.as_ref(), chain.next_required)
+        else {
+            return GetdataRequestOutcome::default();
+        };
+        if chain.apply_halted {
+            return GetdataRequestOutcome::default();
+        }
+        let Some(height) = self.tip_height_on_active_branch(chain_tip.tip_id, announced_tip) else {
+            return GetdataRequestOutcome::default();
+        };
+        // "Close to synced", in height terms: the block the apply frontier
+        // needs must sit within the near-tip window of the header tip, and
+        // the announced tip must reach at least that far.
+        if chain_tip.height.saturating_sub(required.height) >= COMPACT_RELAY_NEAR_TIP_BLOCKS
+            || height < required.height
+        {
+            return GetdataRequestOutcome::default();
+        }
+        let outcome = self.send_getdata_for_pending_blocks(source, false, height, chain);
+        // The request path primes the expected-apply cache with exactly this
+        // batch. A direct fetch runs before this round's apply pass, where
+        // more bodies may already be staged, so drop the primed cache and let
+        // the apply path walk the tree and repopulate it with the full run —
+        // but only when a request actually went out; a refused outcome left
+        // the cache untouched.
+        if outcome.sent {
+            *self.expected_apply_cache.lock() = None;
+        }
+        outcome
+    }
+
+    /// Height of `hash` when it lies on the branch that ends at `tip`, and
+    /// `None` when the tree does not know it or it belongs to another branch.
+    fn tip_height_on_active_branch(&self, tip: NodeId, hash: Hash256) -> Option<u32> {
+        let tree = self.chain.block_tree();
+        let node_id = tree.lookup(hash)?;
+        let height = tree.node(node_id).ok()?.height;
+        tree.node_at_height_from(tip, height)
+            .is_some_and(|on_branch| on_branch == node_id)
+            .then_some(height)
     }
 
     /// Re-requests header ancestry from `source` after a `Refused`
@@ -266,7 +399,9 @@ impl BlockSync {
             return;
         };
         let SchedulerState { window, stager, .. } = &mut *scheduler;
-        window.mark_owned_fetch(stager, source, hash, height, Instant::now());
+        if !window.mark_owned_fetch(stager, source, hash, height, Instant::now()) {
+            scheduler.owned_body_fetches.push((source, hash));
+        }
     }
 
     /// Resolves deferred owned-fetch marks now that this drain may have
@@ -305,7 +440,11 @@ impl BlockSync {
         let now = Instant::now();
         let SchedulerState { window, stager, .. } = &mut *scheduler;
         for (source, hash, height) in resolved {
-            window.mark_owned_fetch(stager, source, hash, height, now);
+            // A refusal leaves the fetch in flight: keep the deferred mark so
+            // the delivered body still classifies as requested.
+            if !window.mark_owned_fetch(stager, source, hash, height, now) {
+                unresolved.push((source, hash));
+            }
         }
         scheduler.owned_body_fetches.extend(unresolved);
     }

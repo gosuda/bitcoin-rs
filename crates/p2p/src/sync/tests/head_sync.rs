@@ -1004,3 +1004,70 @@ fn owned_fetch_mark_survives_until_its_tip_header_attaches()
     );
     Ok(())
 }
+
+/// A header batch that admits a near-tip block must fetch that block's body
+/// from the announcing connection in the same drain: leaving it to the next
+/// scheduler tick costs a poll interval per block at the tip (Core
+/// `HeadersDirectFetchBlocks`, `net_processing.cpp:3098-3158`).
+#[test]
+fn announced_near_tip_is_direct_fetched_before_tick() -> Result<(), Box<dyn std::error::Error>> {
+    let (tree, blocks) = mined_chain(1, 0)?;
+    let SyncHarness {
+        sync,
+        peers,
+        applied_tip,
+        inbound_headers_tx,
+        inbound_blocks_tx,
+        ..
+    } = SyncHarness::new(tree);
+    inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
+    sync.tick();
+    assert_eq!(
+        applied_tip.load_full().ok_or("missing applied tip")?.hash,
+        Hash256::from(blocks[0].block_hash()),
+    );
+
+    let peer = test_addr(9740, 0)?;
+    // The outbound receiver stays alive: dropping it would cancel the lease.
+    let rx = connect_peer(&peers, eligible_peer(peer, 3));
+    let source = current_source(&peers, peer);
+    let block2 =
+        mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(2)]);
+    inbound_headers_tx.send(InboundHeaders {
+        headers: vec![block2.header],
+        source: Some(source),
+        wire_response: true,
+        body_fetch_owned: false,
+    })?;
+
+    sync.drain_inbound_headers();
+    assert_eq!(
+        witness_block_inventory(next_getdata(&rx)?)?,
+        vec![block2.block_hash()],
+        "the announcing connection is asked for the body without another tick"
+    );
+    assert!(
+        sync.scheduler
+            .lock()
+            .window
+            .contains_pending(&Hash256::from(block2.block_hash())),
+        "the window owns the body the direct fetch requested"
+    );
+
+    // The same path rides the compact flavor for a peer that announced BIP152
+    // relay, because the fetch is the single near-tip request.
+    peers.note_compact_relay(source);
+    let block3 = mined_block_with_prev_hash(block2.block_hash(), 3, vec![coinbase_transaction(3)]);
+    inbound_headers_tx.send(InboundHeaders {
+        headers: vec![block3.header],
+        source: Some(source),
+        wire_response: true,
+        body_fetch_owned: false,
+    })?;
+    sync.drain_inbound_headers();
+    assert!(
+        matches!(next_getdata(&rx)?.first(), Some(Inventory::CompactBlock(_))),
+        "a compact-relay peer's single near-tip fetch rides the compact flavor"
+    );
+    Ok(())
+}

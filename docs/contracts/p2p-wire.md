@@ -236,3 +236,77 @@ on the owned-fetch mark are covered in
 covered in `crates/p2p/src/sync/tests/transitions_4.rs`.
 `crates/p2p/src/listener.rs` test `send_block_forwards_the_blocks_header`
 covers the delivery-path forward.
+
+### `P2P-07`: Block announcements lead with headers; ingress is bounded twice
+
+- **Owner**: the block branch of `dispatch_inbound_full`
+  (`crates/p2p/src/dispatch.rs`), `BlockSync::announce_block` and
+  `BlockSync::drain_block_announcements`
+  (`crates/p2p/src/sync/headers.rs`).
+- `MSG_BLOCK` and `MSG_WITNESS_BLOCK` inventory vectors are availability
+  information, never a body request: each one is queued against the
+  announcing connection and drained by the header drain, which credits that
+  connection with the hash when the tree already knows it
+  (`note_announced_tip`, P2P-03) and asks it for headers when the tree does
+  not. Body requests belong to header admission and the download window
+  alone (Core 31.1 `net_processing.cpp:4370-4410`). Transaction vectors keep
+  the relay gate, the have-filter, and the witness upgrade unchanged.
+- The queue holds one entry per connection — the first unprocessed
+  announcement wins — so a later vector cannot replace an unknown tip before
+  the drain sees it, and a peer cannot grow scheduler state by announcing.
+  While one `getheaders` request is outstanding, further unknown
+  announcements stay queued for a later drain: the singleton
+  `header_request` never has its owner overwritten mid-flight.
+- **Near-tip direct fetch**: `BlockSync::direct_fetch_announced_tip` asks the
+  connection that just proved a header for its body, inside the same drain
+  that admitted it, instead of waiting for the next scheduler tick (Core
+  `HeadersDirectFetchBlocks`, `net_processing.cpp:3098-3158`, gated by
+  `CanDirectFetch` at `:1450-1453`). The request goes through
+  `send_getdata_for_pending_blocks`, so the window's budget, the per-peer
+  in-flight cap, the pending ownership stamp, and the compact-block flavor
+  for a single near-tip fetch from a BIP152 peer all apply unchanged. A tip
+  that is not on the branch the header tip ends at, or that leaves the apply
+  frontier more than `COMPACT_RELAY_NEAR_TIP_BLOCKS` below it, is a bulk
+  download or a large reorg and stays with the ordinary scheduler.
+- **Ingress bounds**: the shared inbound block channel is bounded once for
+  the node (`P2pServiceConfig::inbound_block_queue_limit`, set from
+  `INBOUND_BLOCK_CHANNEL_LIMIT`), and
+  `PeerLease::admit_block_forward` bounds each connection's unsolicited
+  share of it at `MAX_UNSOLICITED_BLOCK_FORWARDS`
+  (`crates/p2p/src/connection.rs`) before that channel. A body the download
+  window owns for that exact connection — a window request or a deferred
+  compact fetch (`BlockSync::owns_body_fetch`) — is always admitted. An
+  over-bound unsolicited body is dropped together with its carried header —
+  refused bodies must not grow the header queue either — with a debug record
+  and a `node.sync.dropped_unsolicited_blocks` counter: the listener never
+  waits on the shared channel for it and the connection is never
+  disconnected for this bound alone. The credit rides the inbound payload and is released
+  when sync takes the body, so staging, discarding, and rejecting all return
+  the slot; ownership and credits are per connection, so a same-address
+  replacement inherits neither.
+- **Permanent consensus failure**: when a staged body's commit settles with
+  `WindowCommitDisposition::Permanent` — in the apply pass or inside a
+  branch switch (`BranchSwitchError::ConnectFailed`, attributed through the
+  staged entry's recorded source) —
+  `BlockSync::punish_permanent_delivery_source` disconnects the delivering
+  connection after the invalidated hashes are purged, and releases its
+  `getheaders` gate and marks it unresponsive only when that exact
+  connection was current and removed (Core `net_processing.cpp:2031-2068`).
+  Each punishment increments `node.sync.invalid_block_disconnects`. A
+  `BodyMutated` or `Operational` settlement failure stays retryable and
+  non-punitive, and a `Fatal` settlement halts admission without peer blame.
+  A body that fails header binding before it can be staged keeps its
+  existing delivery-rejection policy.
+- **Unresolved-body quota**: a body staged while the tree cannot resolve its
+  hash owes the admission clauses later (`gate_pending`); the staged
+  `gate_pending` population is capped at `MAX_UNRESOLVED_STAGED_BODIES`
+  (`crates/p2p/src/sync/receive.rs`), so a multi-peer orphan flood cannot
+  fill the shared staging budget and evict valid progress.
+
+Proof: `crates/p2p/src/dispatch.rs` test
+`inv_block_uses_headers_not_body_getdata`; `crates/p2p/src/sync/tests/head_sync.rs`
+test `announced_near_tip_is_direct_fetched_before_tick`;
+`crates/p2p/src/listener.rs` test
+`unsolicited_block_flood_is_bounded_per_source`; `crates/p2p/src/sync/tests.rs`
+tests `permanent_consensus_body_disconnects_delivering_source` and
+`binding_and_operational_failures_do_not_disconnect`.

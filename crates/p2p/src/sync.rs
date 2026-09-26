@@ -107,6 +107,11 @@ pub struct BlockSync {
     /// paces retries to the request timeout so a paused admission cannot
     /// re-issue the same locator at round-trip pace.
     refused_rerequest_at: Mutex<Option<Instant>>,
+    /// Latest `MSG_BLOCK` inventory hash per announcing connection, drained
+    /// by the next tick's header drain. One entry per connection keeps the
+    /// queue bounded by the live session set, as Core keeps one best block
+    /// per `inv` message.
+    block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     /// Latched by the first [`WindowCommitDisposition::Fatal`] settlement.
     /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
@@ -116,6 +121,11 @@ pub struct BlockSync {
     /// in-place recovery that reopens admission.
     apply_halted: std::sync::atomic::AtomicBool,
 }
+
+/// Cap on deferred owned-fetch marks waiting on unattached tip headers:
+/// bounded so a peer cannot grow the scheduler by announcing tips that
+/// never admit. The oldest mark is evicted first.
+const MAX_DEFERRED_OWNED_FETCHES: usize = 16;
 
 struct SchedulerState {
     window: DownloadWindow,
@@ -225,6 +235,7 @@ impl BlockSync {
                 owned_body_fetches: Vec::new(),
             }),
             refused_rerequest_at: Mutex::new(None),
+            block_announcements: Mutex::new(hashbrown::HashMap::new()),
             expected_apply_cache: Arc::new(Mutex::new(None)),
             apply_halted: std::sync::atomic::AtomicBool::new(false),
         }
@@ -240,6 +251,71 @@ impl BlockSync {
             header_request: None,
             owned_body_fetches: Vec::new(),
         };
+    }
+
+    /// Records one block-typed inventory vector from `source` for the next
+    /// header drain.
+    ///
+    /// PRE: `source` identifies the current connection and `hash` is a
+    /// `MSG_BLOCK` or `MSG_WITNESS_BLOCK` inventory hash.
+    /// POST: the announcement is queued and the sync loop is woken; no block
+    /// body request is emitted here.
+    /// INVARIANT: one entry per connection — the first unprocessed
+    /// announcement wins, so a later vector cannot replace an unknown tip
+    /// before header sync drains it — and a flooding peer cannot grow the
+    /// queue past the live session set.
+    pub fn announce_block(&self, source: PeerSource, hash: Hash256) {
+        self.block_announcements
+            .lock()
+            .entry(source)
+            .or_insert(hash);
+    }
+
+    /// Records an in-flight body fetch the window does not own yet — the
+    /// compact path's `getblocktxn` or fallback `getdata` — so the body
+    /// counts as requested if it arrives before its header drains. The mark
+    /// resolves into a real pending entry on the next header drain
+    /// (`note_owned_body_fetch`/`resolve_owned_body_fetches`).
+    ///
+    /// PRE: `source` issued the fetch for `hash`.
+    /// POST: [`Self::owns_body_fetch`] answers `true` for the pair.
+    /// INVARIANT: bounded by `MAX_DEFERRED_OWNED_FETCHES`; a stale source's
+    /// mark is dropped at resolve time, never attributed to a replacement.
+    pub fn record_owned_body_fetch(&self, source: PeerSource, hash: Hash256) {
+        if !self.peer_table.is_current(source) {
+            return;
+        }
+        let mut scheduler = self.scheduler.lock();
+        if scheduler
+            .owned_body_fetches
+            .iter()
+            .any(|(_, owned)| *owned == hash)
+        {
+            return;
+        }
+        if scheduler.owned_body_fetches.len() >= MAX_DEFERRED_OWNED_FETCHES {
+            scheduler.owned_body_fetches.remove(0);
+        }
+        scheduler.owned_body_fetches.push((source, hash));
+    }
+
+    /// Whether `source` already owns the download of `hash`.
+    ///
+    /// PRE: `source` identifies a live connection and `hash` is a block hash.
+    /// POST: `true` when the download window holds a pending request for
+    ///   `hash` owned by this exact connection, or the compact path marked
+    ///   the body as fetched by it.
+    /// INVARIANT: ownership is compared by connection identity, never by
+    ///   address alone, so a same-address replacement cannot claim its
+    ///   predecessor's request.
+    #[must_use]
+    pub fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
+        let scheduler = self.scheduler.lock();
+        scheduler.window.pending_owner(&hash) == Some(source)
+            || scheduler
+                .owned_body_fetches
+                .iter()
+                .any(|(owner, owned)| *owner == source && *owned == hash)
     }
 
     /// Runs one orchestrator tick as a single canonical frontier
@@ -275,7 +351,7 @@ impl BlockSync {
                         peer.source,
                         peer_idx + 1 == request_peer_count,
                         peer_best_height,
-                        &frontier,
+                        &frontier.chain,
                     );
                     sent_getdata |= request_outcome.sent;
                     if request_outcome.sent && !request_outcome.has_request_capacity {
@@ -473,4 +549,4 @@ impl std::fmt::Display for NoProgressReason {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
