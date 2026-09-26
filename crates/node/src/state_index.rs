@@ -184,9 +184,7 @@ impl DerivedIndexHost {
 
     /// POST: returns a concrete answer in every phase, including disabled.
     /// INVARIANT: callers never see no status for a live node.
-    pub(crate) fn status(
-        &self,
-    ) -> Arc<dyn bitcoin_rs_rpc::capabilities::DerivedIndexCapabilitySource> {
+    pub(crate) fn status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
         self.status.clone()
     }
 
