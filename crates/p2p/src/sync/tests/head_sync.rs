@@ -285,7 +285,7 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted()
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9709, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 2));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
     // Put requested bodies in flight next to the unsolicited one: the
     // getdata marks heights 1..=2 pending in the window.
@@ -338,7 +338,7 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header()
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9711, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 2));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
 
     // A losing fork: a side header at height 1 and a height-2 body on it,
     // so the body's header cannot attach until the side header admits.
@@ -389,7 +389,7 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> Result<(), Box<dyn std
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9712, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 2));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
 
     let fork_root = test_header(genesis_header().compute_hash(), 1);
@@ -499,7 +499,7 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> Result<(), Box<dyn std
     } = SyncHarness::new(tree);
     sync.chain.bootstrap_genesis();
     let peer = test_addr(9713, 0)?;
-    let _rx = connect_peer(&peers, eligible_peer(peer, 2));
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
 
     let fork_root = test_header(genesis_header().compute_hash(), 1);

@@ -1479,6 +1479,9 @@ fn outbound_shared(peer_table: Arc<PeerTable>, magic: Magic) -> ConnectionShared
         magic,
         headers_tx,
         blocks_tx,
+        None,
+        None,
+        ListenerExtras::default(),
     )
 }
 

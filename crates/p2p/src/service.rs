@@ -311,7 +311,7 @@ impl P2pService {
             bound_listeners.push((*addr, listener));
         }
 
-        let shared = crate::listener::ConnectionShared::new(
+        let mut shared = crate::listener::ConnectionShared::new(
             Arc::clone(&self.peer_table),
             Arc::clone(&self.banned),
             Arc::new(crate::NetworkActivity::from_shared(Arc::clone(

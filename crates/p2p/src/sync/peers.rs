@@ -514,6 +514,7 @@ impl BlockSync {
         );
         let policy = BlockDownloadPolicy {
             ibd: Arc::clone(&self.ibd),
+            network: self.chain.network(),
             requested_height: required_height,
         };
         let mut candidates: Vec<FanoutCandidate> = Vec::new();

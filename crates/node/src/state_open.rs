@@ -432,9 +432,8 @@ impl NodeState {
         // `Arc`, so `initialblockdownload`, the transaction-relay gate, and
         // block-peer eligibility can never disagree.
         let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-            chainstate.applied_tip_handle(),
-            chainstate.block_tree_handle(),
-            config.network,
+            chainstate.applied_tip_reader(),
+            chainstate.block_tree_reader(),
         ));
         let sync = Arc::new(crate::sync::block_sync(
             Arc::clone(&chainstate),

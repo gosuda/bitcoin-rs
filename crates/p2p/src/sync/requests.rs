@@ -247,6 +247,7 @@ impl BlockSync {
         let active_front_height = tree.active_height_of(active_tip, front_hash)?;
         let policy = BlockDownloadPolicy {
             ibd: Arc::clone(&self.ibd),
+            network: self.chain.network(),
             requested_height: active_front_height,
         };
         let mut eligible = SmallVec::<[PeerSource; 8]>::new();

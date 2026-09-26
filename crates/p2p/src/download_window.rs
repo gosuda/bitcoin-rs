@@ -244,6 +244,8 @@ pub struct BlockDownloadPolicy {
     pub ibd: Arc<InitialBlockDownload>,
     /// The height of the block body this selection fills.
     pub requested_height: u32,
+    /// The network the latch judges: the work floor is network-dependent.
+    pub network: Network,
 }
 
 /// Whether a peer's advertised services can serve the policy's height.
@@ -271,7 +273,10 @@ pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) ->
     if peer.services & network != 0 {
         return true;
     }
-    if policy.ibd.is_active(crate::counters::now_seconds()) {
+    if policy
+        .ibd
+        .is_active(crate::counters::now_seconds(), policy.network)
+    {
         return false;
     }
     u32::try_from(peer.best_known_height).is_ok_and(|demonstrated| {
