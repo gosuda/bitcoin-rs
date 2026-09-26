@@ -368,7 +368,7 @@ fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Har
         NetworkMessage::Inv(vec![Inventory::WitnessBlock(tip.block_hash())]),
         deadline,
     )?;
-    let end = Instant::now() + Duration::from_secs(60);
+    let end = Instant::now() + Duration::from_mins(1);
     while Instant::now() < end {
         if block_count(&mut node)? == u64::from(CHAIN_LEN)
             && best_hash(&mut node)? == tip.block_hash().to_string()
@@ -733,7 +733,7 @@ fn wrong_root_compact_block_falls_back_to_same_peer() -> Result<(), HarnessError
         peer.serve_item(item, answer_by)?;
     }
 
-    let served = Instant::now() + Duration::from_secs(60);
+    let served = Instant::now() + Duration::from_mins(1);
     while Instant::now() < served {
         if block_count(&mut node)? == u64::from(tip_height + 1) {
             node.stop()?;

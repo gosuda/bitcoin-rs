@@ -318,25 +318,6 @@ impl BlockSync {
                 .any(|(owner, owned)| *owner == source && *owned == hash)
     }
 
-    /// Whether `source` already owns the download of `hash`.
-    ///
-    /// PRE: `source` identifies a live connection and `hash` is a block hash.
-    /// POST: `true` when the download window holds a pending request for
-    ///   `hash` owned by this exact connection, or the compact path marked
-    ///   the body as fetched by it.
-    /// INVARIANT: ownership is compared by connection identity, never by
-    ///   address alone, so a same-address replacement cannot claim its
-    ///   predecessor's request.
-    #[must_use]
-    pub fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
-        let scheduler = self.scheduler.lock();
-        scheduler.window.pending_owner(&hash) == Some(source)
-            || scheduler
-                .owned_body_fetches
-                .iter()
-                .any(|(owner, owned)| *owner == source && *owned == hash)
-    }
-
     /// Runs one orchestrator tick as a single canonical frontier
     /// reconciliation: observe, recover what is unowned, then schedule or
     /// name why progress is impossible.

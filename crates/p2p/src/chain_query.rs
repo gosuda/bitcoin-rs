@@ -10,7 +10,7 @@ use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest, HeaderAndShor
 use bitcoin::blockdata::block::Block as RegistryBlock;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin::p2p::message_compact_blocks::CmpctBlock;
+use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader};
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header};
 #[cfg(test)]
