@@ -7,7 +7,7 @@
 
 use crate::context::TxQueryError;
 use crate::rest::{
-    bad_request_owned, internal_error_owned, not_found, service_unavailable_owned, Response,
+    Response, bad_request_owned, internal_error_owned, not_found, service_unavailable_owned,
 };
 
 pub(super) fn query_limit(query: &str, name: &str) -> Option<usize> {

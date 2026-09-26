@@ -149,7 +149,9 @@ fn parse_estimate_mode(params: &Value) -> Result<(), RpcError> {
         return Ok(());
     }
     let Some(mode) = value.as_str() else {
-        return Err(RpcError::InvalidType("parameter must be a string".to_owned()));
+        return Err(RpcError::InvalidType(
+            "parameter must be a string".to_owned(),
+        ));
     };
     if is_core_fee_estimate_mode(mode) {
         return Ok(());

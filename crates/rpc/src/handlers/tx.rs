@@ -54,7 +54,9 @@ fn block_hash_param_error(value: &str, label: &str) -> RpcError {
             value.len()
         ));
     }
-    RpcError::InvalidParameter(format!("{label} must be hexadecimal string (not '{value}')"))
+    RpcError::InvalidParameter(format!(
+        "{label} must be hexadecimal string (not '{value}')"
+    ))
 }
 
 pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -66,10 +68,9 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
         .map(|value| {
             value
                 .as_str()
-                .ok_or(RpcError::InvalidType("blockhash must be a string".to_owned()))
+                .ok_or_else(|| RpcError::InvalidType("blockhash must be a string".to_owned()))
                 .and_then(|hash| {
-                    Hash256::from_str(hash)
-                        .map_err(|_| block_hash_param_error(hash, "parameter 3"))
+                    Hash256::from_str(hash).map_err(|_| block_hash_param_error(hash, "parameter 3"))
                 })
         })
         .transpose()?;
@@ -236,7 +237,9 @@ pub(crate) fn gettxoutproof(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut wanted = hashbrown::HashSet::new();
     for value in txids_value {
         let Some(txid) = value.as_str() else {
-            return Err(RpcError::InvalidType("each txid must be a string".to_owned()));
+            return Err(RpcError::InvalidType(
+                "each txid must be a string".to_owned(),
+            ));
         };
         wanted.insert(parse_txid(txid, "txid")?);
     }
@@ -485,7 +488,9 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
     let mut txs = Vec::with_capacity(raw_txs.len());
     for raw in raw_txs {
         let Some(raw) = raw.as_str() else {
-            return Err(RpcError::InvalidType("raw transaction must be a string".to_owned()));
+            return Err(RpcError::InvalidType(
+                "raw transaction must be a string".to_owned(),
+            ));
         };
         txs.push(decode_tx(
             raw,
@@ -563,7 +568,7 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         Some(value) => {
             let locktime = value
                 .as_u64()
-                .ok_or(RpcError::InvalidType("locktime must be an integer".to_owned()))?;
+                .ok_or_else(|| RpcError::InvalidType("locktime must be an integer".to_owned()))?;
             u32::try_from(locktime).map_err(|_| RpcError::InvalidParams("locktime exceeds u32"))?
         }
     };
@@ -581,7 +586,7 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     for input in inputs {
         let object = input
             .as_object()
-            .ok_or(RpcError::InvalidType("input must be an object".to_owned()))?;
+            .ok_or_else(|| RpcError::InvalidType("input must be an object".to_owned()))?;
         let txid = parse_txid(
             object
                 .get(&"txid")
@@ -600,9 +605,9 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         let sequence = match object.get(&"sequence") {
             None => default_sequence,
             Some(value) => {
-                let sequence = value
-                    .as_u64()
-                    .ok_or(RpcError::InvalidType("sequence must be an integer".to_owned()))?;
+                let sequence = value.as_u64().ok_or_else(|| {
+                    RpcError::InvalidType("sequence must be an integer".to_owned())
+                })?;
                 u32::try_from(sequence)
                     .map_err(|_| RpcError::InvalidParams("sequence exceeds u32"))?
             }
@@ -620,9 +625,9 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
     let mut tx_outputs = Vec::with_capacity(outputs.len());
     for (key, value) in outputs {
         if key == "data" {
-            let data_hex = value
-                .as_str()
-                .ok_or(RpcError::InvalidType("data output must be a hex string".to_owned()))?;
+            let data_hex = value.as_str().ok_or_else(|| {
+                RpcError::InvalidType("data output must be a hex string".to_owned())
+            })?;
             let data = hex_decode(data_hex)?;
             let mut script = vec![opcode::OP_RETURN];
             script.extend_from_slice(&push_data(&data));
@@ -696,7 +701,9 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
         text.parse::<f64>()
             .map_err(|_| RpcError::InvalidType("maxfeerate must be a number".to_owned()))?
     } else {
-        return Err(RpcError::InvalidType("maxfeerate must be a number".to_owned()));
+        return Err(RpcError::InvalidType(
+            "maxfeerate must be a number".to_owned(),
+        ));
     };
     if !btc_per_kvb.is_finite() || btc_per_kvb < 0.0 {
         return Err(RpcError::InvalidParams("maxfeerate must be non-negative"));
@@ -726,7 +733,9 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
             .map_err(|_| RpcError::InvalidParams("Invalid amount"))?;
         return sats_from_btc(number, "Invalid amount");
     }
-    Err(RpcError::InvalidType("amount must be a number or string".to_owned()))
+    Err(RpcError::InvalidType(
+        "amount must be a number or string".to_owned(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -767,8 +776,8 @@ fn reject_reason_to_frozen_string(reason: AcceptanceRejectReason) -> String {
 pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let raw = required_str(params, 0, "psbt is required")?;
     let extract = optional_bool(params, 1, true)?;
-    let decoded = crate::base64::decode(raw)
-        .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
+    let decoded =
+        crate::base64::decode(raw).map_err(|()| RpcError::InvalidParams("invalid base64 PSBT"))?;
     let Ok(mut psbt) = bitcoin::psbt::Psbt::deserialize(&decoded) else {
         return Err(RpcError::InvalidParams("invalid base64 PSBT"));
     };
@@ -813,29 +822,32 @@ pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, 
         return Err(RpcError::InvalidParams("psbts array must not be empty"));
     };
     let Some(first_str) = first_val.as_str() else {
-        return Err(RpcError::InvalidType("each psbt must be a string".to_owned()));
+        return Err(RpcError::InvalidType(
+            "each psbt must be a string".to_owned(),
+        ));
     };
     let mut psbt = bitcoin::psbt::Psbt::deserialize(
         &crate::base64::decode(first_str)
-            .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?,
+            .map_err(|()| RpcError::InvalidParams("invalid base64 PSBT"))?,
     )
     .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
 
     for value in iter {
         let Some(s) = value.as_str() else {
-            return Err(RpcError::InvalidType("each psbt must be a string".to_owned()));
+            return Err(RpcError::InvalidType(
+                "each psbt must be a string".to_owned(),
+            ));
         };
         let other = bitcoin::psbt::Psbt::deserialize(
-            &crate::base64::decode(s).map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?,
+            &crate::base64::decode(s)
+                .map_err(|()| RpcError::InvalidParams("invalid base64 PSBT"))?,
         )
         .map_err(|_| RpcError::InvalidParams("invalid base64 PSBT"))?;
         psbt.combine(other)
             .map_err(|err| RpcError::Internal(format!("combine failed: {err}")))?;
     }
 
-    typed_to_sonic(&v31::CombinePsbt(crate::base64::encode(
-        &psbt.serialize(),
-    )))
+    typed_to_sonic(&v31::CombinePsbt(crate::base64::encode(&psbt.serialize())))
 }
 
 #[cfg(test)]

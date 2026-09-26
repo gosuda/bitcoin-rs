@@ -729,7 +729,7 @@ fn write_all_vectored(stream: &mut impl Write, header: &[u8], body: &[u8]) -> io
 }
 
 /// Renders one HTTP response head as a string so it can share a single
-/// vectored write with its body. Same header bytes `write_headers` streams,
+/// vectored write with its body: the same header bytes the response carries,
 /// materialized for the one-syscall emission path.
 fn render_response_head(head: &ResponseHead<'_>) -> String {
     let connection = if head.keep_alive {

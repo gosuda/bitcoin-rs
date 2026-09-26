@@ -23,7 +23,7 @@ Owners:
 - `IndexWriter`, `IndexReader`, `IndexCapabilities`, `IndexCapability`, `IndexWatermarks`, `IndexWatermark` in `crates/index/src/index.rs` and `crates/index/src/types.rs`
 - Capability status: worker-owned `DerivedIndexLifecycle` in
   `crates/index/src/runtime.rs` mapped by `DerivedIndexCapability` onto the
-  RPC wire types in `crates/rpc/src/capabilities.rs`. There is no parallel
+  wire types in `crates/index/src/capabilities.rs`. There is no parallel
   status enum.
 
 ## Clauses
@@ -75,7 +75,7 @@ only scheduling mechanics.
   capability watermark matches the height and block hash of the active chain tip.
 - `getcapabilities` reports one compiled txindex row. A missing worker is
   `enabled: false` / `Disabled`; an attached worker supplies the row through
-  `DerivedIndexCapabilitySource`. Proof: `crates/rpc/src/capabilities.rs` tests
+  `DerivedIndexCapabilitySource`. Proof: `crates/index/src/capabilities.rs` tests
   `missing_source_is_the_disabled_txindex_row`, `attached_source_is_the_worker_row`.
 
 `ScriptLive` is not a duplicate coin table. Its empty-valued key is
@@ -245,7 +245,7 @@ remove another script's output.
 - `crates/chainstate/src/reorg.rs` and the `RCV-08` recovery evidence prove
   bounded disconnect streaming under a retention lease; the departed branch
   is not preloaded.
-- `crates/rpc/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`,
+- `crates/index/src/capabilities.rs` tests `missing_source_is_the_disabled_txindex_row`,
   `attached_source_is_the_worker_row`: `getcapabilities` advertises one
   txindex row from `derived_index_status` (`IDX-02`).
 
