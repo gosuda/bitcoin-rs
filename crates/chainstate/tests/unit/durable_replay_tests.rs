@@ -313,9 +313,16 @@ fn mined_child(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            // Four height bytes keep the coinbase height commitment correct
-            // past u8 range, instead of silently failing at height 256.
-            script_sig: Script::from_bytes([&[4], height.to_le_bytes().as_slice(), &[0]].concat()),
+            // `push_int` is the encoding `check_bip34` requires as a prefix;
+            // the trailing byte keeps the script_sig at its minimum size at
+            // heights that encode as a single opcode.
+            script_sig: Script::from_bytes(
+                [
+                    bitcoin_rs_script::push_int(i64::from(height)).as_slice(),
+                    &[0],
+                ]
+                .concat(),
+            ),
             sequence: Sequence::from_consensus(u32::MAX),
             witness: Witness::new(),
         }],

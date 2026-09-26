@@ -200,6 +200,15 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
         pool.extend(body.iter().skip(missing).cloned());
         let hints = BenchHints::new(pool);
         let cmpct = bench_cmpctblock(&body, 0x1234);
+        // Fixture bridging is untimed: the timed closure only selects the
+        // transactions the request names.
+        let bridged_body: Vec<bitcoin::Transaction> = body
+            .iter()
+            .map(|tx| {
+                bitcoin::consensus::encode::deserialize(&consensus_bytes(tx))
+                    .expect("fixture tx bridges to the registry type")
+            })
+            .collect();
         let label = format!("block_{block_txs}_pool_{pool_txs}_missing_{missing}");
         group.bench_function(label, |b| {
             b.iter(|| {
@@ -219,14 +228,10 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
                             .indexes
                             .iter()
                             .map(|index| {
-                                bitcoin::consensus::encode::deserialize(&consensus_bytes(
-                                    body.get(
-                                        usize::try_from(*index)
-                                            .expect("requested index fits usize"),
-                                    )
-                                    .expect("requested index is in the block"),
-                                ))
-                                .expect("fixture tx bridges to the registry type")
+                                bridged_body
+                                    .get(usize::try_from(*index).expect("index fits usize"))
+                                    .expect("requested index is in the block")
+                                    .clone()
                             })
                             .collect();
                         let txn = BlockTxn {

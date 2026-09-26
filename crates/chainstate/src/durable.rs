@@ -608,9 +608,15 @@ fn replay_committed_gap(
     // to whatever the authenticated chain needs, so wide replay is
     // preserved; recoverability is decided by the body-identity and
     // ancestry checks below, never by how wide the gap is.
-    let gap_width = usize::try_from(head.height - base_height + 1)
-        .map_err(|_| unrecoverable("gap width exceeds the address space"))?
-        .min(1 << 16);
+    // Compute in u64: `head.height + 1` overflows u32 on a cold replay whose
+    // head sits at the top of the range, before the clamp can apply.
+    let gap_width = usize::try_from(
+        u64::from(head.height)
+            .saturating_sub(u64::from(base_height))
+            .saturating_add(1)
+            .min(1 << 16),
+    )
+    .map_err(|_| unrecoverable("gap width exceeds the address space"))?;
 
     let Some(store) = handles.block_body_store.as_ref() else {
         return Err(unrecoverable("no block body store is attached"));
