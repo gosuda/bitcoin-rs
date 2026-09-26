@@ -13,7 +13,7 @@
 //! Row semantics:
 //! - `status`: [`Status::Supported`] is differentially verified against the
 //!   pinned reference and requires `reference.differential_harness` in
-//!   `docs/api/core-compat.toml`; [`Status::Deviation`] ships with a
+//!   `crates/rpc/core-compat.toml`; [`Status::Deviation`] ships with a
 //!   recorded difference (the `notes` field cites the source file carrying
 //!   it); [`Status::ImplementedUnverified`] ships without a comparison
 //!   against the pinned reference; [`Status::Extension`] has no Core
@@ -121,7 +121,7 @@ impl Status {
     pub const fn legend(self) -> &'static str {
         match self {
             Self::Supported => {
-                "differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `docs/api/core-compat.toml`."
+                "differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `crates/rpc/core-compat.toml`."
             }
             Self::Deviation => {
                 "shipped with a recorded difference from Core; notes cite the source file."
@@ -179,10 +179,16 @@ pub(crate) const NO_WALLET: &str =
 
 /// The reference custody record, embedded so it cannot drift from the binary.
 ///
+/// Reference identity parsing and custody validation are owned by
+/// `bin/bitcoin-rs/tests/support/reference_set.rs`; the admission-profile
+/// evidence is read from the `[admission_profile]` table.
+///
 /// PRE: The embedded TOML contains reference custody and admission evidence.
-/// POST: The constant is the exact bytes used by the reference custody tests.
-/// INVARIANT: It contains no external-surface row arrays.
-pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
+/// POST: The constant is the exact bytes of `crates/rpc/core-compat.toml` at
+///   compile time — inside the package so `cargo package` stays whole.
+/// INVARIANT: It contains no external-surface row arrays; REGISTRY in
+///   [`crate::registry`] is the only owner of surface claims.
+pub const MANIFEST_TOML: &str = include_str!("../core-compat.toml");
 
 /// Every external surface, declared against Core 31.x.
 ///

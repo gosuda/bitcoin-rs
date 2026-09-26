@@ -258,7 +258,7 @@ fn the_pinned_core_reference_matches_the_locked_kernel() {
             "`{name}` is locked at {locked:?} but the reference record is written \
              against {version}. The pinned Bitcoin Core revision comes from this \
              crate's vendored tree, so a bump means the claims in \
-             docs/api/core-compat.toml need re-reading, not just this line."
+             crates/rpc/core-compat.toml need re-reading, not just this line."
         );
     }
 }

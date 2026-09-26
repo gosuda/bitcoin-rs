@@ -9,11 +9,9 @@
 //! reference is an independent binary, and a missing or substituted
 //! reference binary is a typed failure that names the pinned digest.
 
-use std::fs::File;
 use std::path::Path;
 
 use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
-use bitcoin::hashes::{Hash as _, sha256};
 use bitcoin::{Address, Block, Network, OutPoint};
 use serde_json::{Value, json};
 
@@ -29,25 +27,13 @@ use crate::node::ProcessNode;
 /// INVARIANT: a mismatch is a typed [`Error::Reference`] naming the pinned
 /// digest; it is never a skipped check.
 pub fn verify_reference_binary(path: &Path) -> Result<()> {
-    let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
-        .parse()
-        .map_err(|error| Error::Protocol(format!("cannot parse core-compat.toml: {error}")))?;
-    let expected = table
-        .get("reference")
-        .and_then(|reference| reference.get("release"))
-        .and_then(|release| release.get("bitcoind_sha256"))
-        .and_then(toml::Value::as_str)
-        .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))?
-        .to_owned();
-    let mut file = File::open(path).map_err(|error| Error::Reference {
+    let expected = crate::node::manifest_reference_sha256()?;
+    let actual = crate::node::file_sha256(path).map_err(|error| Error::Reference {
         path: path.to_owned(),
         expected: expected.clone(),
         detail: error.to_string(),
     })?;
-    let mut engine = sha256::Hash::engine();
-    std::io::copy(&mut file, &mut engine)?;
-    let actual = sha256::Hash::from_engine(engine);
-    if actual.to_string() != expected {
+    if actual != expected {
         return Err(Error::Reference {
             path: path.to_owned(),
             expected,
@@ -133,7 +119,10 @@ pub fn mine_common_chain(
     // races the tick supplies the apply; one after it returns a duplicate
     // result string. Both orders converge on one applied genesis.
     let genesis = bitcoin::constants::genesis_block(Network::Regtest);
-    node.rpc("submitblock", &json!([serialize_hex(&genesis)]))?;
+    let reply = node.rpc("submitblock", &json!([serialize_hex(&genesis)]))?;
+    if !(reply.is_null() || reply.as_str() == Some("duplicate")) {
+        return Err(Error::Assertion(format!("submitblock(genesis): {reply}")));
+    }
     let hashes = core.rpc("generatetoaddress", &json!([blocks, address.to_string()]))?;
     let hashes = hashes
         .as_array()

@@ -1,13 +1,13 @@
 # Reference set contract
 
 A readable projection of the `[reference]` record in
-`docs/api/core-compat.toml` and its typed validation in
+`crates/rpc/core-compat.toml` and its typed validation in
 `bin/bitcoin-rs/tests/support/reference_set.rs`. `ReferenceSet` is the parsed
 identity record used by the test and formal gates. It is not a separate
 registry and not a new public type.
 
 This page is a readable projection only. On conflict,
-`docs/api/core-compat.toml` governs the reference values and
+`crates/rpc/core-compat.toml` governs the reference values and
 `bin/bitcoin-rs/tests/support/reference_set.rs` governs their typed validation.
 A version label alone is never custody.
 
@@ -15,7 +15,7 @@ A version label alone is never custody.
 
 ### `REF-01`: Manifest values and parser validation govern
 
-- The `[reference]` record in `docs/api/core-compat.toml` is the
+- The `[reference]` record in `crates/rpc/core-compat.toml` is the
   machine-readable authority for reference identity values.
 - `bin/bitcoin-rs/tests/support/reference_set.rs` is the typed parser that
   enforces required identities, complete source commits, digest formats,
@@ -151,7 +151,7 @@ This is an evidence tool pin. No checker run is claimed by this page.
 
 ## Proven by
 
-- `docs/api/core-compat.toml`: the machine-readable reference identity values.
+- `crates/rpc/core-compat.toml`: the machine-readable reference identity values.
 - `bin/bitcoin-rs/tests/support/reference_set.rs`: typed parsing and custody
   validation for those values.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: rejects label-only,

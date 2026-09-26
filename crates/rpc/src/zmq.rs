@@ -972,6 +972,23 @@ mod manifest_tests {
             published, declared,
             "published ZMQ topics and the declared ZMQ rows must name the same set"
         );
+        // getzmqnotifications names each topic `pub<topic>`; the manifest
+        // row is keyed by the bare topic, so the wire-visible notifier name
+        // must derive from it exactly.
+        for topic in [
+            ZmqTopic::HashBlock,
+            ZmqTopic::HashTx,
+            ZmqTopic::RawBlock,
+            ZmqTopic::RawTx,
+            ZmqTopic::Sequence,
+        ] {
+            assert_eq!(
+                topic.notifier_type(),
+                format!("pub{}", topic.as_str()),
+                "the notifier name for `{}` no longer follows pub<topic>",
+                topic.as_str()
+            );
+        }
     }
 
     #[derive(Default)]
