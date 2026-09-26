@@ -21,7 +21,7 @@ const KERNEL_CUSTODY_SHA256: &str =
 /// against.
 ///
 /// `docs/contracts/reference-set.md` is a readable projection of this record;
-/// on conflict, `docs/api/core-compat.toml` as parsed here governs. A version
+/// on conflict, `crates/rpc/core-compat.toml` as parsed here governs. A version
 /// label alone is never custody: every identity carries its digest, and
 /// [`load_reference_set`] rejects anything less.
 #[derive(Clone, Debug, Eq, PartialEq)]

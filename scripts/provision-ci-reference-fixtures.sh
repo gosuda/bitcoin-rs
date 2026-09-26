@@ -15,7 +15,7 @@ import re
 import sys
 import tomllib
 
-with Path("docs/api/core-compat.toml").open("rb") as stream:
+with Path("crates/rpc/core-compat.toml").open("rb") as stream:
     reference = tomllib.load(stream)["reference"]
 if sys.argv[1] == "core":
     pin = reference["release"]

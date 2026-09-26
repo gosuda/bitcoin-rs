@@ -4,7 +4,7 @@
 
 The [policy contract](../contracts/mempool-policy.md) owns the rules below;
 this page maps them to evidence and intentional compatibility differences.
-[core-compat.toml](../api/core-compat.toml) pins the Core source and binary identities.
+[core-compat.toml](../../crates/rpc/core-compat.toml) pins the Core source and binary identities.
 
 The process policy tests explicitly configure Core with
 `-acceptnonstdtxn=0 -minrelaytxfee=0.00001000
@@ -74,7 +74,7 @@ selected cases do not certify their entire surface.
 
 ## 5. Allowed differences and unsupported cases
 
-The machine-readable list lives in `core-compat.toml` under `admission_profile`.
+The machine-readable list lives in `crates/rpc/core-compat.toml` under `admission_profile`.
 
 - `submitpackage` and aggregate CPFP/package RBF submission remain unsupported;
   the registry returns -32601 and Esplora `/txs/package` remains 404. Multi-row

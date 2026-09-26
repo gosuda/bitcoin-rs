@@ -83,10 +83,15 @@ impl fmt::Display for Error {
                 evidence.display()
             ),
             Self::Timeout {
-                operation, detail, ..
-            } => {
-                write!(f, "timeout waiting for {operation}: {detail}")
-            }
+                pid,
+                operation,
+                evidence,
+                detail,
+            } => write!(
+                f,
+                "timeout waiting for {operation} on child {pid} (evidence {}): {detail}",
+                evidence.display()
+            ),
             Self::Protocol(detail) => write!(f, "protocol: {detail}"),
             Self::Reference {
                 path,

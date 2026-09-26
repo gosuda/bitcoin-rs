@@ -196,6 +196,14 @@ impl Connection {
         let (status, headers, content_length, peer_close) =
             parse_reply_head(&head).map_err(ConnFail::Error)?;
         let content_length = match content_length {
+            // The head bound covers header bytes only; a corrupt peer could
+            // advertise an arbitrary length and drive an unbounded
+            // allocation, so bound it before the buffer exists.
+            Some(length) if length > MAX_BODY => {
+                return Err(ConnFail::Error(Error::Protocol(
+                    "RPC body length exceeds the response bound".into(),
+                )));
+            }
             Some(length) => length,
             // A 1xx, 204, or 304 reply carries no body and may omit
             // Content-Length; any other framing-less reply is a protocol

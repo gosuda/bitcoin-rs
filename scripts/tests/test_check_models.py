@@ -39,8 +39,8 @@ class ModelEvidenceTests(unittest.TestCase):
         (self.home / "lib").mkdir()
         jar = self.home / "lib/apalache.jar"
         jar.write_bytes(b"synthetic tool, not a prover")
-        api = self.root / "docs/api"
-        api.mkdir()
+        api = self.root / "crates/rpc"
+        api.mkdir(parents=True)
         (api / "core-compat.toml").write_text(
             '[reference.formal_tool]\nname = "apalache-mc"\nversion = "0.62.2"\n'
             f'jar_sha256 = "{hashlib.sha256(jar.read_bytes()).hexdigest()}"\n',
@@ -119,7 +119,7 @@ class ModelEvidenceTests(unittest.TestCase):
         # A pin missing one of the name/version/jar_sha256 keys cannot name a
         # tool: main() must report the tool-identity code, 11, never the
         # generic KeyError code 14.
-        pin = self.root / "docs/api/core-compat.toml"
+        pin = self.root / "crates/rpc/core-compat.toml"
         text = pin.read_text(encoding="utf-8")
         pin.write_text(text.replace('version = "0.62.2"\n', ""), encoding="utf-8")
         with patch.object(check_models, "ROOT", self.root):

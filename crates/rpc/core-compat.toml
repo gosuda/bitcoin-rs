@@ -44,11 +44,10 @@ kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"
 kernel_sys_crate_sha256 = "ccee819dc48af6ce3fb213e6f93bae7a7231cd0689b0435afd86ab167cad5321"
 # Set when a differential harness compares *values* against a running reference
 # (#78 scope item 2). Still false, and deliberately so: no harness currently
-# compares result values or shapes against Core's own declarations, and the
-# schema_* deviations recorded on entries below are unenforced documentation.
-# A method whose shape matches can still answer a different number.
+# compares result values or shapes against Core's own declarations. A method
+# whose shape matches can still answer a different number.
 #
-# No entry may claim `supported` while this is false, and the suite enforces it.
+# Surface `supported` claims live in REGISTRY and stay gated on this flag.
 differential_harness = false
 
 
@@ -60,8 +59,9 @@ differential_harness = false
 #
 #   * `[reference.release]` below is the RELEASED Bitcoin Core product,
 #     installed from a checksum-pinned tarball. It is the product behavior
-#     reference every compatibility claim in this file is ultimately made
-#     against -- the same pinned reference the status vocabulary talks about.
+#     reference the compatibility claims in `crates/rpc/src/registry.rs` are
+#     ultimately made against -- the same pinned reference the status
+#     vocabulary talks about.
 #   * the scalar keys above (`core_version = "31.99.0"`, the kernel crates)
 #     are the Core development tree this node links for the oracle lane.
 #     Oracle evidence only: not a release, and never a policy pin.

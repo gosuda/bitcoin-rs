@@ -144,11 +144,11 @@ impl Status {
 ///
 /// PRE: the embedded file parses as TOML and carries the `[reference]` and
 ///   `[admission_profile]` tables.
-/// POST: the constant is the exact bytes of `docs/api/core-compat.toml` at
-///   compile time.
+/// POST: the constant is the exact bytes of `crates/rpc/core-compat.toml`
+///   at compile time — inside the package so `cargo package` stays whole.
 /// INVARIANT: it carries no external-surface row arrays; REGISTRY in
 ///   [`crate::registry`] is the only owner of surface claims.
-pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
+pub const MANIFEST_TOML: &str = include_str!("../core-compat.toml");
 
 /// One declared surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -190,13 +190,6 @@ pub const CORE_VERSION: &str = "31.x";
 /// to hold private key material (see `crates/rpc/src/lib.rs`).
 pub(crate) const NO_WALLET: &str =
     "No wallet: this process holds no private-key material (crates/rpc/src/lib.rs).";
-
-/// The reference custody record, embedded so it cannot drift from the binary.
-///
-/// PRE: The embedded TOML contains reference custody and admission evidence.
-/// POST: The constant is the exact bytes used by the reference custody tests.
-/// INVARIANT: It contains no external-surface row arrays.
-pub const MANIFEST_TOML: &str = include_str!("../../../docs/api/core-compat.toml");
 
 /// Every external surface, declared against Core 31.x.
 ///

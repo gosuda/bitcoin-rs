@@ -11,10 +11,9 @@
 //! request fatal for segwit bodies.
 
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::Write as _;
 use std::net::TcpStream;
-use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::block::Header as BlockHeader;
@@ -29,7 +28,7 @@ use bitcoin::{Block, Witness};
 use serde_json::json;
 
 use crate::error::{Error, Result};
-use crate::node::{ProcessNode, workspace};
+use crate::node::ProcessNode;
 use crate::process_peer::{decode_frame, read_frame};
 
 /// One decoded getdata frame: every item flattened to `(inv_type, hash)`.
@@ -47,6 +46,8 @@ pub struct GetdataSeen {
 pub struct LivePeer {
     stream: TcpStream,
     journal: File,
+    /// Set once the journal rejects a write; later failures stay quiet.
+    journal_broken: bool,
     t0: Instant,
     /// Full blocks servable by hash.
     pub blocks: BTreeMap<bitcoin::BlockHash, Block>,
@@ -88,11 +89,14 @@ impl LivePeer {
         let deadline = Instant::now() + Duration::from_secs(10);
         let stream = crate::process_peer::connect_loopback(node.p2p_addr, deadline)?;
         stream.set_nodelay(true)?;
-        let dir = evidence_dir()?;
-        let journal = File::create(dir.join(format!("{name}-peer.jsonl")))?;
+        // The journal lives inside the node's own run-* evidence dir, next to
+        // its transcript: unique per spawn, so concurrently running test
+        // binaries cannot overwrite or interleave one another's evidence.
+        let journal = File::create(node.evidence.join(format!("{name}-peer.jsonl")))?;
         let mut peer = Self {
             stream,
             journal,
+            journal_broken: false,
             t0: Instant::now(),
             blocks: BTreeMap::new(),
             headers: Vec::new(),
@@ -344,8 +348,16 @@ impl LivePeer {
 
     fn log(&mut self, direction: &str, detail: &str) {
         let line = json!({"at_ms": self.at_ms(), "dir": direction, "detail": detail});
-        let _ = writeln!(self.journal, "{line}");
-        let _ = self.journal.flush();
+        // The journal is the evidence for this transcript; a write that keeps
+        // failing must be loud, not swallowed.
+        let result = writeln!(self.journal, "{line}").and_then(|()| self.journal.flush());
+        if result.is_err() && !self.journal_broken {
+            self.journal_broken = true;
+            eprintln!(
+                "[E2E {:>5}ms {direction}] JOURNAL WRITE FAILED: {result:?}",
+                self.at_ms()
+            );
+        }
         eprintln!("[E2E {:>5}ms {direction}] {detail}", self.at_ms());
     }
 }
@@ -391,10 +403,4 @@ fn strip_witnesses(block: &Block) -> Block {
         }
     }
     stripped
-}
-
-fn evidence_dir() -> Result<PathBuf> {
-    let dir = workspace().join("target/live-peer-e2e");
-    fs::create_dir_all(&dir)?;
-    Ok(dir)
 }

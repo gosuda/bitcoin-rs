@@ -101,7 +101,7 @@ def models(root: Path) -> tuple[Model, ...]:
 
 
 def tool(root: Path) -> Path:
-    with (root / "docs/api/core-compat.toml").open("rb") as stream:
+    with (root / "crates/rpc/core-compat.toml").open("rb") as stream:
         identity = tomllib.load(stream)["reference"]["formal_tool"]
     if any(key not in identity for key in ("name", "version", "jar_sha256")):
         raise EvidenceError(11, "formal tool identity is malformed")
@@ -145,7 +145,7 @@ def run_model(root: Path, executable: Path, model: Model, property_arg: str, tim
     metadata = {
         "argv": argv, "tla_sha256": model.tla_sha256, "cfg_sha256": model.cfg_sha256,
         "constants": cfg_constants(root / "docs/models" / f"{model.name}.cfg"),
-        "reference_manifest_sha256": sha256(root / "docs/api/core-compat.toml"),
+        "reference_manifest_sha256": sha256(root / "crates/rpc/core-compat.toml"),
         "jvm_args": env["JVM_ARGS"], "solver": env["SMT_SOLVER"],
     }
     (run_dir / "identity.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
