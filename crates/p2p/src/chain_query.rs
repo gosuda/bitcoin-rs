@@ -190,8 +190,9 @@ impl ChainQuery for ActiveChainQuery {
     /// POST: return the `blocktxn` reply for a block within
     /// [`MAX_BLOCKTXN_DEPTH`] of the active tip, the whole witness-bearing
     /// `block` for a deeper one, and `None` for a block this node cannot
-    /// serve or while the `headroom` gate is saturated; `Err` reports an
-    /// index past the end of the body.
+    /// serve; `Err` reports an index past the end of the body or a
+    /// saturated `headroom` gate, matching the `getdata` production-halt
+    /// disconnect.
     /// INVARIANT: a deep request is never answered with a small `blocktxn`
     /// and never left unanswered while its body is available (Core 31.1
     /// `net_processing.cpp:4590-4624`); `headroom` is evaluated immediately
@@ -207,21 +208,29 @@ impl ChainQuery for ActiveChainQuery {
         };
         let deep = beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH);
         if !headroom() {
-            return Ok(None);
+            return Err(PeerError::Protocol(
+                "getblocktxn serving halted: outbound production gate",
+            ));
         }
         let Some((payload, tip_height)) = self.load_active_block(height, hash) else {
             return Ok(None);
         };
+        let Ok(block) = bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref())
+        else {
+            return Ok(None);
+        };
+        // Index bounds apply to both reply shapes: a deep request with an
+        // out-of-range index disconnects the same as a shallow one.
+        let tx_count = u64::try_from(block.txdata.len()).unwrap_or(u64::MAX);
+        if request.indexes.last().is_some_and(|last| *last >= tx_count) {
+            return Err(PeerError::Protocol("getblocktxn index out of range"));
+        }
         // The tip may have moved while the body was read; the re-observed
         // depth decides the reply, so a moving tip cannot keep an old block
         // eligible for a compact answer.
         if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
             return Ok(Some(Message::BlockPayload(payload)));
         }
-        let Ok(block) = bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref())
-        else {
-            return Ok(None);
-        };
         BlockTransactions::from_request(request, &block)
             .map(|transactions| Some(Message::BlockTxn(BlockTxn { transactions })))
             .map_err(|_| PeerError::Protocol("getblocktxn index out of range"))
@@ -712,11 +721,11 @@ mod tests {
         let reply = query.block_transactions(&request, &|| {
             headroom_calls.fetch_add(1, Ordering::Relaxed);
             false
-        })?;
+        });
 
         assert!(
-            reply.is_none(),
-            "a saturated gate leaves the request unanswered"
+            matches!(reply, Err(PeerError::Protocol(_))),
+            "a saturated gate disconnects like the getdata production halt"
         );
         assert_eq!(
             body_source.loads.load(Ordering::Relaxed),

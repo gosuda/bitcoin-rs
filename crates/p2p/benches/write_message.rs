@@ -149,6 +149,17 @@ fn bench_tx(seed: u32) -> Tx {
     }
 }
 
+/// A witness-bearing sibling of [`bench_tx`]: the segwit body makes
+/// `txid != wtxid`, so a v2 fixture exercises wtxid matching and witness
+/// body sizes instead of the identity-collision case.
+#[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
+fn bench_witness_tx(seed: u32) -> Tx {
+    let mut tx = bench_tx(seed);
+    tx.inputs[0].witness =
+        Witness::from_stack(vec![vec![u8::try_from(seed & 0xff).expect("low byte"); 2]]);
+    tx
+}
+
 /// A block of `tx_count` transactions whose header commits to their
 /// transaction-ID merkle root, plus the registry `cmpctblock` a peer would
 /// send for it.
@@ -211,12 +222,17 @@ fn bench_block_txn(request: &BlockTransactionsRequest, body: &[Tx]) -> BlockTxn 
 #[expect(clippy::expect_used, reason = "timed fixture calls must fail loudly")]
 fn bench_compact_reconstruction(c: &mut Criterion) {
     let mut group = c.benchmark_group("compact_reconstruction");
-    for (block_txs, decoys, missing) in [(100_usize, 5_000_usize, 0_usize), (100, 5_000, 5)] {
+    for (block_txs, decoys, missing, witness) in [
+        (100_usize, 5_000_usize, 0_usize, false),
+        (100, 5_000, 5, false),
+        (100, 5_000, 5, true),
+    ] {
+        let fixture = if witness { bench_witness_tx } else { bench_tx };
         let body: Vec<Tx> = (1..=u32::try_from(block_txs).expect("block size fits u32"))
-            .map(bench_tx)
+            .map(fixture)
             .collect();
         let mut pool: Vec<Tx> = (1..=u32::try_from(decoys).expect("decoy count fits u32"))
-            .map(|seed| bench_tx(seed + 1_000_000))
+            .map(|seed| fixture(seed + 1_000_000))
             .collect();
         // The coinbase is a mandatory prefill and never needs a hint, so
         // the `missing` transactions after it stay out of the pool: the
@@ -255,7 +271,8 @@ fn bench_compact_reconstruction(c: &mut Criterion) {
                 "the completion stage must deliver the verified block"
             );
         }
-        let label = format!("block_{block_txs}_decoys_{decoys}_missing_{missing}");
+        let witness_tag = if witness { "_witness" } else { "" };
+        let label = format!("block_{block_txs}_decoys_{decoys}_missing_{missing}{witness_tag}");
         group.bench_function(label, |b| {
             b.iter(|| {
                 let mut reconstruction = Reconstruction::new();
