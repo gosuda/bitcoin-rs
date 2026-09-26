@@ -516,7 +516,9 @@ impl BlockSync {
     ///   `STALE_CHECK_INTERVAL`, so a stalled tip costs one dial rather than
     ///   one decision per tick.
     fn follow_tip_progress(&self, frontier: &SyncFrontier, now: Instant) {
-        let Some(tip) = frontier.chain.chain_tip.as_ref() else {
+        // The applied tip — not the header tip — marks real chain progress:
+        // headers can advance for an hour without one validated block.
+        let Some(tip) = frontier.chain.applied_tip.as_ref() else {
             return;
         };
         let block_spacing =
