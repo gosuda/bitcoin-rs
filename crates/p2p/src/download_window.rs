@@ -279,6 +279,9 @@ pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) ->
     {
         return false;
     }
+    if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
+        return false;
+    }
     u32::try_from(peer.best_known_height).is_ok_and(|demonstrated| {
         demonstrated
             .checked_sub(policy.requested_height)
@@ -303,6 +306,10 @@ pub fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u32 {
             .is_active(crate::counters::now_seconds(), policy.network)
     {
         return 0;
+    }
+    if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
+        // No block-serving flag at all: nothing is servable.
+        return u32::MAX;
     }
     u32::try_from(peer.best_known_height)
         .unwrap_or(0)

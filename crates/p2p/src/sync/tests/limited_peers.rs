@@ -92,6 +92,25 @@ fn predicate_limits_pruned_peer_to_the_retained_window() -> Result<(), Box<dyn s
     Ok(())
 }
 
+/// A peer advertising witness relay with no block-serving flag promises
+/// nothing: it is not a `NODE_NETWORK_LIMITED` peer, so the retained window
+/// does not apply — it serves no blocks at all.
+#[test]
+fn predicate_rejects_witness_only_peer_at_any_height() -> Result<(), Box<dyn std::error::Error>> {
+    let addr = test_addr(9603, 0)?;
+    let witness_only = PeerInfo {
+        services: ServiceFlags::WITNESS.to_u64(),
+        ..synthetic_peer(addr, 300)
+    };
+    for requested in [1_u32, 13, 288] {
+        assert!(!statically_fanout_eligible(
+            &witness_only,
+            &policy(synced_ibd_latch(), requested),
+        ));
+    }
+    Ok(())
+}
+
 /// A `NODE_NETWORK` peer is unaffected by the phase or the window: the retained
 /// rule is about pruned storage, not about chain length.
 #[test]
