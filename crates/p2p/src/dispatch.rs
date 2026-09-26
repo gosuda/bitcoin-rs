@@ -100,7 +100,10 @@ pub trait TxInventory: Send + Sync {
     /// Returns `true` when the node already holds the transaction identified
     /// by `hash` — in the mempool, the orphan map, or the recent-rejects
     /// cache. `hash_is_wtxid` follows the inventory item's type: `WTx`
-    /// carries a wtxid, while `Transaction`/`WitnessTransaction` carry a txid.
+    /// carries a wtxid, while `Transaction`/`WitnessTransaction` carry a
+    /// txid. Orphan residency is keyed by wtxid alone: a resident orphan
+    /// suppresses only an exact wtxid match and never claims its txid,
+    /// because another witness variant of the same txid can still be valid.
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool;
 
     /// Returns the witness transaction body for `txid`, or `None` when the
@@ -1555,6 +1558,31 @@ mod tests {
                 assert_eq!(
                     gateway.get_tx_by_wtxid(tx.wtxid()).as_ref(),
                     Some(tx.as_ref())
+                );
+                // The dispatch `getdata` path must express the same
+                // asymmetry: `WTx` serves the resident body while both
+                // txid-typed requests come back `NotFound`.
+                let mut peer = ready_peer();
+                peer.wtxid_relay.mark_peer_supported();
+                assert_eq!(
+                    dispatch_collect_full(
+                        &mut peer,
+                        &Message::GetData(vec![
+                            Inventory::WTx(wtxid),
+                            Inventory::Transaction(txid),
+                            Inventory::WitnessTransaction(txid),
+                        ]),
+                        None,
+                        Some(&gateway),
+                    ),
+                    vec![
+                        Message::Tx(Arc::as_ref(&tx).clone()),
+                        Message::NotFound(vec![
+                            Inventory::Transaction(txid),
+                            Inventory::WitnessTransaction(txid),
+                        ]),
+                    ],
+                    "an orphan body must answer only an exact-wtxid getdata"
                 );
             } else {
                 assert!(
