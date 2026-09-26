@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest};
+use bitcoin::bip152::BlockTransactionsRequest;
 use bitcoin::consensus::encode as bitcoin_encode;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message::{CommandString, NetworkMessage, RawNetworkMessage};
@@ -240,7 +240,8 @@ impl ChainQuery for FakeChain {
     fn block_transactions(
         &self,
         _request: &BlockTransactionsRequest,
-    ) -> Result<Option<BlockTransactions>, PeerError> {
+        _headroom: &dyn Fn() -> bool,
+    ) -> Result<Option<Message>, PeerError> {
         Ok(None)
     }
 }

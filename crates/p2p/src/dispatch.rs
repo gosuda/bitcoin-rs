@@ -1,9 +1,8 @@
 use std::cell::RefCell;
 
-use bitcoin::bip152::{BlockTransactions, BlockTransactionsRequest};
+use bitcoin::bip152::BlockTransactionsRequest;
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::{GetHeadersMessage, Inventory};
-use bitcoin::p2p::message_compact_blocks::BlockTxn;
 use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 use crate::fsm::step;
@@ -61,15 +60,22 @@ pub trait ChainQuery: Send + Sync {
         serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
     ) -> Result<InventoryServing, PeerError>;
 
-    /// Answers one `getblocktxn` from the active chain under the same
-    /// body-availability rules as full blocks. `Ok(None)` leaves the request
-    /// unanswered (unknown, stale, pruned, or headless block); `Err`
-    /// reports an out-of-range transaction index — a protocol disconnect
-    /// per BIP152 (Core scores misbehavior).
+    /// PRE: `request` carries decoded absolute transaction indexes for one
+    /// block.
+    /// POST: return the reply to send — a `blocktxn` for a block shallow
+    /// enough to reconstruct, or the whole witness-bearing `block` for one
+    /// too deep for a useful hint set (Core 31.1 answers both instead of
+    /// leaving a peer to time out); `Ok(None)` leaves the request unanswered
+    /// (unknown, stale, pruned, or headless block, or a saturated
+    /// `headroom` gate). `Err` reports an out-of-range transaction index —
+    /// a protocol disconnect per BIP152 (Core scores misbehavior).
+    /// INVARIANT: `headroom` is evaluated before any block body is loaded,
+    /// so a saturated outbound gate materializes no body for this request.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
-    ) -> Result<Option<BlockTransactions>, PeerError>;
+        headroom: &dyn Fn() -> bool,
+    ) -> Result<Option<Message>, PeerError>;
 }
 
 /// Read-only transaction inventory view used by the Inv filter and the
@@ -271,12 +277,9 @@ pub fn dispatch_inbound_full<S>(
             serve_getdata(chain, tx_inventory, compact_version, items, headroom, send)?;
         }
         Message::GetBlockTxn(request) => {
+            ensure_block_txn_indexes_valid(&request.txs_request)?;
             step(peer, message)?;
-            if let Some(chain) = chain {
-                if let Some(transactions) = chain.block_transactions(&request.txs_request)? {
-                    send(Message::BlockTxn(BlockTxn { transactions }))?;
-                }
-            }
+            serve_block_txn(chain, &request.txs_request, headroom, send)?;
         }
         _ => step(peer, message)?,
     }
@@ -419,6 +422,50 @@ fn serve_getdata_blocks(
     }
     Ok(())
 }
+
+/// Answers one `getblocktxn` through the chain view and sends whatever reply
+/// it produces. PRE: the request's indexes are structurally valid. POST: a
+/// servable block gets its `blocktxn`, a block too deep for a compact answer
+/// gets the whole `block`, and an unknown, stale, headless, or
+/// production-gated block — or a node with no chain view — leaves the
+/// request unanswered. INVARIANT: the dispatch boundary never learns which
+/// reply shape the chain chose, and a saturated `headroom` gate loads no
+/// block body here.
+fn serve_block_txn(
+    chain: Option<&dyn ChainQuery>,
+    request: &BlockTransactionsRequest,
+    headroom: &dyn Fn() -> bool,
+    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+) -> Result<(), PeerError> {
+    let Some(chain) = chain else {
+        return Ok(());
+    };
+    if let Some(response) = chain.block_transactions(request, headroom)? {
+        send(response)?;
+    }
+    Ok(())
+}
+
+/// Rejects a `getblocktxn` whose index list cannot name transactions: empty,
+/// or not strictly increasing.
+///
+/// PRE: the request carries decoded absolute indexes. POST: a malformed list
+/// returns `PeerError::Protocol` and the connection drops through the
+/// listener's error path. INVARIANT: a malformed list never reaches a chain
+/// query, including on a node with no chain at all — one decision at the
+/// inbound boundary (Core 31.1 `net_processing.cpp:4560-4574`).
+fn ensure_block_txn_indexes_valid(request: &BlockTransactionsRequest) -> Result<(), PeerError> {
+    if request.indexes.is_empty() {
+        return Err(PeerError::Protocol("getblocktxn with empty index list"));
+    }
+    if request.indexes.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(PeerError::Protocol(
+            "getblocktxn indexes not strictly increasing",
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_block_locator_within_bounds(
     locator_hashes: &[bitcoin::BlockHash],
     error: &'static str,
@@ -446,6 +493,7 @@ mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::Magic;
     use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
+    use bitcoin::p2p::message_compact_blocks::BlockTxn;
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
         Witness, Wtxid,
@@ -534,7 +582,8 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
-        ) -> Result<Option<BlockTransactions>, PeerError> {
+            _headroom: &dyn Fn() -> bool,
+        ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
     }
@@ -580,7 +629,8 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
-        ) -> Result<Option<BlockTransactions>, PeerError> {
+            _headroom: &dyn Fn() -> bool,
+        ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
     }
@@ -764,11 +814,14 @@ mod tests {
             fn block_transactions(
                 &self,
                 request: &BlockTransactionsRequest,
-            ) -> Result<Option<BlockTransactions>, PeerError> {
-                Ok(Some(BlockTransactions {
-                    block_hash: request.block_hash,
-                    transactions: Vec::new(),
-                }))
+                _headroom: &dyn Fn() -> bool,
+            ) -> Result<Option<Message>, PeerError> {
+                Ok(Some(Message::BlockTxn(BlockTxn {
+                    transactions: BlockTransactions {
+                        block_hash: request.block_hash,
+                        transactions: Vec::new(),
+                    },
+                })))
             }
         }
 
@@ -785,6 +838,127 @@ mod tests {
         )?;
 
         assert!(matches!(responses.as_slice(), [Message::BlockTxn(_)]));
+        Ok(())
+    }
+
+    /// Refuses one `getblocktxn` index list both with a chain attached and
+    /// with none, so the boundary decision cannot depend on chain state.
+    fn assert_getblocktxn_refused(indexes: Vec<u64>) {
+        let chain = FakeChain::with_headers(2);
+        let message = Message::GetBlockTxn(bitcoin::p2p::message_compact_blocks::GetBlockTxn {
+            txs_request: BlockTransactionsRequest {
+                block_hash: bitcoin::BlockHash::from_byte_array([7; 32]),
+                indexes,
+            },
+        });
+        let view: &dyn ChainQuery = &chain;
+        for case in [Some(view), None] {
+            let mut peer = ready_peer();
+            let outcome = dispatch_collect(&mut peer, &message, case);
+            assert!(
+                matches!(outcome, Err(PeerError::Protocol(_))),
+                "a malformed getblocktxn must disconnect, got {outcome:?}",
+            );
+        }
+    }
+
+    /// An empty or non-increasing `getblocktxn` index list is refused at the
+    /// inbound boundary, so a malformed request never reaches a chain query
+    /// and the peer is dropped through the listener's error path (Core 31.1
+    /// `net_processing.cpp:4560-4574`).
+    #[test]
+    fn invalid_getblocktxn_indexes_disconnect() {
+        assert_getblocktxn_refused(Vec::new());
+        assert_getblocktxn_refused(vec![1, 1]);
+        assert_getblocktxn_refused(vec![3, 2]);
+    }
+
+    /// A saturated headroom gate leaves a `getblocktxn` unanswered through
+    /// the real dispatch arm: the chain view is consulted with the dispatch
+    /// closure itself, and a chain that honours it neither loads nor
+    /// replies, exactly as `getdata` block serving behaves.
+    #[test]
+    fn getblocktxn_is_unanswered_while_the_production_gate_is_saturated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct GatedChain {
+            observed: AtomicUsize,
+            loads: AtomicUsize,
+        }
+        impl ChainQuery for GatedChain {
+            fn headers_after(
+                &self,
+                _locator_hashes: &[BlockHash],
+                _stop_hash: BlockHash,
+                _limit: usize,
+            ) -> Vec<Header> {
+                Vec::new()
+            }
+
+            fn serve_inventory_blocks(
+                &self,
+                _items: &[Inventory],
+                _compact_version: Option<u64>,
+                _headroom: &dyn Fn() -> bool,
+                _serve: &mut dyn FnMut(Message) -> Result<(), PeerError>,
+            ) -> Result<InventoryServing, PeerError> {
+                Ok(InventoryServing::default())
+            }
+
+            fn block_transactions(
+                &self,
+                request: &BlockTransactionsRequest,
+                headroom: &dyn Fn() -> bool,
+            ) -> Result<Option<Message>, PeerError> {
+                self.observed.fetch_add(1, Ordering::Relaxed);
+                if !headroom() {
+                    return Ok(None);
+                }
+                self.loads.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(Message::BlockTxn(BlockTxn {
+                    transactions: BlockTransactions {
+                        block_hash: request.block_hash,
+                        transactions: Vec::new(),
+                    },
+                })))
+            }
+        }
+
+        let chain = GatedChain {
+            observed: AtomicUsize::new(0),
+            loads: AtomicUsize::new(0),
+        };
+        let message = Message::GetBlockTxn(bitcoin::p2p::message_compact_blocks::GetBlockTxn {
+            txs_request: BlockTransactionsRequest {
+                block_hash: bitcoin::BlockHash::from_byte_array([7; 32]),
+                indexes: vec![0],
+            },
+        });
+        let mut peer = ready_peer();
+        let collected = RefCell::new(Vec::new());
+        dispatch_inbound_full(
+            &mut peer,
+            &message,
+            Some(&chain),
+            None,
+            &|| true,
+            &|| false,
+            &mut |response| {
+                collected.borrow_mut().push(response);
+                Ok(())
+            },
+            &mut |_| {},
+        )?;
+
+        assert_eq!(chain.observed.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            chain.loads.load(Ordering::Relaxed),
+            0,
+            "a saturated gate must not produce a reply body"
+        );
+        assert!(
+            collected.borrow().is_empty(),
+            "the request stays unanswered"
+        );
         Ok(())
     }
 
@@ -846,7 +1020,8 @@ mod tests {
         fn block_transactions(
             &self,
             _request: &BlockTransactionsRequest,
-        ) -> Result<Option<BlockTransactions>, PeerError> {
+            _headroom: &dyn Fn() -> bool,
+        ) -> Result<Option<Message>, PeerError> {
             Ok(None)
         }
     }
