@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::vec::Vec;
 
 use bitcoin_rs_mempool::SnapshotEntry;
-use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Header, Network, Tx, Txid};
 #[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_primitives::{Hash256, consensus_bytes};
+use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Block, BlockHash, CompactTarget, Header, Network, Tx, Txid};
 use compact_str::CompactString;
 #[cfg(any(test, feature = "test-seam"))]
 use parking_lot::Mutex;
@@ -485,15 +485,6 @@ impl MiningControl for FakeMiningControl {
             return Err(error);
         }
         Ok(self.submit.lock().clone())
-    }
-
-    fn submit_block_with_bytes(
-        &self,
-        block: Block,
-        raw: Vec<u8>,
-    ) -> Result<BlockValidationResult, MiningControlError> {
-        assert_eq!(raw, consensus_bytes(&block));
-        self.submit_block(block)
     }
 
     fn submit_header(&self, _header: Header) -> Result<(), MiningControlError> {
