@@ -67,17 +67,6 @@ impl RpcServer {
         self.listener.local_addr()
     }
 
-    /// Runs the accept loop. Each accepted connection is handled by one bounded worker thread.
-    pub fn serve(self) -> io::Result<()> {
-        let active = Arc::new(Mutex::new(0_usize));
-        for stream in self.listener.incoming() {
-            if let Err(error) = self.handle_accept(&active, stream?) {
-                debug!(%error, "rpc connection setup failed");
-            }
-        }
-        Ok(())
-    }
-
     /// Runs the accept loop until `shutdown` is set to `true`.
     ///
     /// Polls non-blocking accept on a fixed cadence so the loop can observe
@@ -151,12 +140,6 @@ impl RpcServer {
     }
 }
 
-/// Applies HTTP-session socket policy: `TCP_NODELAY` so a small response is
-/// not delayed by Nagle after the status line.
-fn configure_rpc_stream(stream: &TcpStream) -> io::Result<()> {
-    stream.set_nodelay(true)
-}
-
 fn serve_connection(
     stream: TcpStream,
     auth: &Auth,
@@ -164,7 +147,6 @@ fn serve_connection(
     rest_enabled: bool,
     idle_timeout: Duration,
 ) -> io::Result<()> {
-    configure_rpc_stream(&stream)?;
     stream.set_read_timeout(Some(idle_timeout))?;
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(stream);
@@ -747,7 +729,7 @@ fn write_all_vectored(stream: &mut impl Write, header: &[u8], body: &[u8]) -> io
 }
 
 /// Renders one HTTP response head as a string so it can share a single
-/// vectored write with its body. Same header bytes `write_headers` streams,
+/// vectored write with its body: the same header bytes the response carries,
 /// materialized for the one-syscall emission path.
 fn render_response_head(head: &ResponseHead<'_>) -> String {
     let connection = if head.keep_alive {
@@ -802,13 +784,13 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
     #[test]
-    fn configure_rpc_stream_disables_nagle() {
+    fn prepare_http_socket_disables_nagle() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         let client = TcpStream::connect(addr).expect("connect");
         let (server, _) = listener.accept().expect("accept");
-        configure_rpc_stream(&client).expect("configure client");
-        configure_rpc_stream(&server).expect("configure server");
+        let client = prepare_http_socket(client).expect("configure client");
+        let server = prepare_http_socket(server).expect("configure server");
         assert!(client.nodelay().expect("client nodelay"));
         assert!(server.nodelay().expect("server nodelay"));
     }

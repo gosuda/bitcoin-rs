@@ -14,14 +14,6 @@ pub(crate) mod network;
 pub(crate) mod tx;
 pub(crate) mod util;
 
-use crate::manifest::{self, SurfaceKind};
-
-/// Registration consults the compatibility manifest so the declared surface
-/// and the dispatched surface cannot disagree.
-fn is_registered_method(method: &str) -> bool {
-    manifest::is_registered(SurfaceKind::Rpc, method)
-}
-
 /// Enumerates the live registry names in table order.
 ///
 /// Projects from [`crate::registry::REGISTRY`], yielding only rows with a
@@ -55,17 +47,24 @@ impl Handler {
     }
 
     /// Dispatches one Bitcoin Core-compatible JSON-RPC method.
+    ///
+    /// One lookup in [`crate::registry::REGISTRY`] answers both the method
+    /// name and its dispatch arm. The registry is generated from the
+    /// compatibility manifest, so a row without a dispatch arm is a method
+    /// the manifest declares but this build does not ship; it answers
+    /// method-not-found like any unknown method.
+    ///
+    /// PRE: `method` and `params` are the decoded JSON-RPC request fields.
+    /// POST: `Ok(response)` from the row's dispatch arm, or the
+    ///   method-not-found error when no row or no arm exists for `method`.
+    /// INVARIANT: a method that answers is a manifest row, and a manifest
+    ///   row with an arm never returns method-not-found.
     pub fn dispatch(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
-        if !is_registered_method(method) {
-            return Err(RpcError::MethodNotFound(method.to_owned()));
-        }
-        let Some(row) = crate::registry::REGISTRY
+        let Some(handler) = crate::registry::REGISTRY
             .iter()
             .find(|row| row.entry.name == method)
+            .and_then(|row| row.handler)
         else {
-            unreachable!("registered RPC method missing a registry row: {method}");
-        };
-        let Some(handler) = row.handler else {
             return Err(RpcError::MethodNotFound(method.to_owned()));
         };
         handler(&self.ctx, params)
@@ -103,6 +102,62 @@ pub(crate) fn params_array(params: &Value) -> Result<&sonic_rs::Array, RpcError>
         .ok_or(RpcError::InvalidParams("params must be an array"))
 }
 
+/// Returns the type name Bitcoin Core 31.1 spells for a JSON value.
+fn json_type_name(value: &Value) -> &'static str {
+    if value.is_null() {
+        "null"
+    } else if value.is_boolean() {
+        "bool"
+    } else if value.is_number() {
+        "number"
+    } else if value.is_str() {
+        "string"
+    } else if value.is_array() {
+        "array"
+    } else {
+        "object"
+    }
+}
+
+/// Builds Core 31.1's type error for a required positional argument.
+///
+/// PRE: `value` failed the expected-type check for argument `position`.
+/// POST: the `InvalidType` (-3) error whose message names the position, the
+///   argument label, the value's type, and the expected type, in Core 31.1's
+///   `Wrong type passed` shape.
+/// INVARIANT: the message is built only from the call's inputs; no state.
+pub(crate) fn wrong_type(position: usize, label: &str, value: &Value, expected: &str) -> RpcError {
+    RpcError::InvalidType(format!(
+        "Wrong type passed:\n{{\n    \"Position {} ({})\": \"JSON value of type {} is not of expected type {}\"\n}}",
+        position,
+        label,
+        json_type_name(value),
+        expected
+    ))
+}
+
+/// Builds Core 31.1's type error sentence for an unnamed optional argument.
+///
+/// PRE: `value` failed the expected-type check for an optional argument the
+///   dispatcher reads without a declared label.
+/// POST: the `InvalidType` (-3) error carrying Core 31.1's bare sentence.
+/// INVARIANT: the message is built only from the call's inputs; no state.
+pub(crate) fn wrong_type_plain(value: &Value, expected: &str) -> RpcError {
+    RpcError::InvalidType(format!(
+        "JSON value of type {} is not of expected type {}",
+        json_type_name(value),
+        expected
+    ))
+}
+
+/// The argument label Core 31.1 uses, derived from the required-parameter
+/// message the call site passes (`"txid is required"` names the txid).
+fn label_of(name: &str) -> &str {
+    name.strip_suffix(" is required")
+        .or_else(|| name.strip_suffix(" must be a string"))
+        .unwrap_or(name)
+}
+
 pub(crate) fn optional_bool(params: &Value, index: usize, default: bool) -> Result<bool, RpcError> {
     let Some(array) = params.as_array() else {
         return Ok(default);
@@ -115,7 +170,7 @@ pub(crate) fn optional_bool(params: &Value, index: usize, default: bool) -> Resu
     }
     value
         .as_bool()
-        .ok_or(RpcError::InvalidType("parameter must be boolean"))
+        .ok_or_else(|| wrong_type_plain(value, "bool"))
 }
 
 pub(crate) fn required_str<'a>(
@@ -123,10 +178,12 @@ pub(crate) fn required_str<'a>(
     index: usize,
     name: &'static str,
 ) -> Result<&'a str, RpcError> {
-    params_array(params)?
+    let value = params_array(params)?
         .get(index)
-        .and_then(JsonValueTrait::as_str)
-        .ok_or(RpcError::InvalidParams(name))
+        .ok_or(RpcError::InvalidParams(name))?;
+    value
+        .as_str()
+        .ok_or_else(|| wrong_type(index + 1, label_of(name), value, "string"))
 }
 
 pub(crate) fn required_u64(
@@ -134,10 +191,15 @@ pub(crate) fn required_u64(
     index: usize,
     name: &'static str,
 ) -> Result<u64, RpcError> {
-    params_array(params)?
+    let value = params_array(params)?
         .get(index)
-        .and_then(JsonValueTrait::as_u64)
-        .ok_or(RpcError::InvalidParams(name))
+        .ok_or(RpcError::InvalidParams(name))?;
+    if !value.is_number() {
+        return Err(wrong_type(index + 1, label_of(name), value, "number"));
+    }
+    value
+        .as_u64()
+        .ok_or_else(|| RpcError::InvalidParameter(format!("{} is out of range", label_of(name))))
 }
 
 pub(crate) fn required_i64(
@@ -145,16 +207,39 @@ pub(crate) fn required_i64(
     index: usize,
     name: &'static str,
 ) -> Result<i64, RpcError> {
-    params
+    let value = params
         .as_array()
         .and_then(|arr| arr.get(index))
-        .and_then(JsonValueTrait::as_i64)
-        .ok_or(RpcError::InvalidParams(name))
+        .ok_or(RpcError::InvalidParams(name))?;
+    if !value.is_number() {
+        return Err(wrong_type(index + 1, label_of(name), value, "number"));
+    }
+    value
+        .as_i64()
+        .ok_or_else(|| RpcError::InvalidParameter(format!("{} is out of range", label_of(name))))
 }
 
-/// Parses one 64-hex-character transaction id, rejecting anything else.
-pub(crate) fn parse_txid(value: &str) -> Result<Txid, RpcError> {
-    Txid::from_str(value).map_err(|_| RpcError::InvalidParams("txid must be 64 hex characters"))
+/// Parses one transaction id from its 64-character hex encoding.
+///
+/// PRE: `value` is the parameter string a caller supplied; `label` is the
+///   argument name Bitcoin Core 31.1 spells in its `-8` messages
+///   (`"parameter 1"` for `getrawtransaction`, the declared name elsewhere).
+/// POST: the decoded [`Txid`], or the `InvalidParameter` (-8) error whose
+///   message names the length of a wrong-length string or the non-hex
+///   content of a right-length one, exactly as Core 31.1 spells them.
+/// INVARIANT: a decoded txid round-trips through its lowercase hex Display.
+pub(crate) fn parse_txid(value: &str, label: &str) -> Result<Txid, RpcError> {
+    if value.len() != 64 {
+        return Err(RpcError::InvalidParameter(format!(
+            "{label} must be of length 64 (not {}, for '{value}')",
+            value.len()
+        )));
+    }
+    Txid::from_str(value).map_err(|_| {
+        RpcError::InvalidParameter(format!(
+            "{label} must be hexadecimal string (not '{value}')"
+        ))
+    })
 }
 #[cfg(test)]
 mod registry_tests {
@@ -163,7 +248,7 @@ mod registry_tests {
 
     use sonic_rs::json;
 
-    use super::{Handler, live_registry};
+    use super::{Handler, live_registry, optional_bool, parse_txid, required_str, required_u64};
     use crate::context::Context;
     use crate::error::RpcError;
     use crate::manifest::{self, SurfaceKind};
@@ -194,10 +279,13 @@ mod registry_tests {
         );
         let handler = Handler::new(Arc::new(Context::new()));
         for entry in shipped_rpc_rows() {
+            // A subsystem a bare context runs without answers `-32601`
+            // carrying its own name (Core's wallet-disabled behavior); only
+            // a foreign name is drift.
             assert!(
                 !matches!(
                     handler.dispatch(entry.name, &json!([])),
-                    Err(RpcError::MethodNotFound(_))
+                    Err(RpcError::MethodNotFound(name)) if name != entry.name,
                 ),
                 "{} is listed but not dispatchable",
                 entry.name
@@ -237,5 +325,62 @@ mod registry_tests {
             handler.dispatch("getzmqnotifications", &json!([])),
             Err(RpcError::MethodNotFound(_))
         ));
+    }
+
+    // Bitcoin Core 31.1 parameter-error classification, probed against the
+    // pinned release: a wrong JSON type is -3 in Core's own words, a
+    // correctly typed but unacceptable value is -8, and only shape and
+    // arity remain on -32602.
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn wrong_json_type_answers_core_type_error_text() {
+        let params = json!(["abc"]);
+        let error = required_u64(&params, 0, "height is required").expect_err("type error");
+        assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
+        assert_eq!(
+            error.to_string(),
+            "Wrong type passed:\n{\n    \"Position 1 (height)\": \"JSON value of type string is not of expected type number\"\n}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn missing_required_parameter_keeps_the_shape_error() {
+        let params = json!([]);
+        let error = required_str(&params, 0, "txid is required").expect_err("missing");
+        assert_eq!(error.code(), RpcError::INVALID_PARAMS);
+        assert_eq!(error.to_string(), "invalid params: txid is required");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn optional_boolean_type_error_names_the_type() {
+        let params = json!(["ignored", "yes"]);
+        let error = optional_bool(&params, 1, true).expect_err("type error");
+        assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
+        assert_eq!(
+            error.to_string(),
+            "JSON value of type string is not of expected type bool"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn txid_parameter_errors_use_core_text() {
+        let short = parse_txid("123", "parameter 1").expect_err("short");
+        assert_eq!(short.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(
+            short.to_string(),
+            "parameter 1 must be of length 64 (not 3, for '123')"
+        );
+        let non_hex = parse_txid(&"z".repeat(64), "parameter 1").expect_err("non-hex");
+        assert_eq!(non_hex.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(
+            non_hex.to_string(),
+            format!(
+                "parameter 1 must be hexadecimal string (not '{}')",
+                "z".repeat(64)
+            )
+        );
     }
 }

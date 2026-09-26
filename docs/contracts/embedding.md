@@ -40,7 +40,7 @@ the first embedder — there is one lifecycle implementation, not two.
   identical computation `getblockchaininfo` runs. `capabilities()` returns
   the node's concrete-service `CapabilitySnapshot`. Owners:
   `crates/node/src/embed.rs` and `crates/rpc/src/context.rs`; wire types:
-  `crates/rpc/src/capabilities.rs`.
+  `crates/index/src/capabilities.rs`.
 - **EMB-05 — Broadcast is the shared admission.** `Node::broadcast` runs
   `Context::admit_transaction` (`crates/rpc/src/context.rs`) — the identical
   typed admission `sendrawtransaction` runs (`crates/rpc/src/handlers/tx.rs`):

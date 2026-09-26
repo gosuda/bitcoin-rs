@@ -146,7 +146,7 @@ declare_rows! {
     "getprioritisedtransactions", SurfaceKind::Rpc, Status::ImplementedUnverified, "", CORE_VERSION, "Projects the mempool's signed fee-delta overlay, including txids not currently pooled. See docs/contracts/external-api.md#API-28 for modified_fee units.", "0.4.0", Some(mining::getprioritisedtransactions);
 
     // -- JSON-RPC: bitcoin-rs extension ------------------------------
-    "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/rpc/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
+    "getcapabilities", SurfaceKind::Rpc, Status::Extension, "", CORE_VERSION, "bitcoin-rs reporting of compiled/enabled concrete service capabilities and index lifecycle state (crates/rpc/src/handlers/chain.rs, crates/index/src/capabilities.rs).", "0.4.0", Some(chain::getcapabilities);
 
     // -- JSON-RPC: Core surface not exposed (blockchain/control) -----
     "dumptxoutset", SurfaceKind::Rpc, Status::Unimplemented, "", CORE_VERSION, "UTXO snapshot dump not implemented.", "n/a", None;

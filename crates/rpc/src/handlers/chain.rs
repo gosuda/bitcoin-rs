@@ -295,9 +295,10 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
             None => ctx.chain.applied_hash(),
             Some(value) => {
                 let hash = parse_hash(
-                    value
-                        .as_str()
-                        .ok_or(RpcError::InvalidType("blockhash must be a string"))?,
+                    value.as_str().ok_or_else(|| {
+                        RpcError::InvalidType("blockhash must be a string".to_owned())
+                    })?,
+                    "blockhash",
                 )?;
                 let Some(height) = ctx.chain.height_for_hash(hash) else {
                     return Err(RpcError::NotFound("block not found"));
@@ -320,7 +321,7 @@ pub(crate) fn getchaintxstats(ctx: &Arc<Context>, params: &Value) -> Result<Valu
             Some(value) => {
                 let nblocks = value
                     .as_i64()
-                    .ok_or(RpcError::InvalidType("nblocks must be a number"))?;
+                    .ok_or_else(|| RpcError::InvalidType("nblocks must be a number".to_owned()))?;
                 if nblocks < 0 || (nblocks > 0 && nblocks >= i64::from(tip_height)) {
                     return Err(RpcError::InvalidParameter(
                         "Invalid block count: should be between 0 and the block's height - 1"
@@ -528,7 +529,10 @@ pub(crate) fn getbestblockhash(ctx: &Arc<Context>, params: &Value) -> Result<Val
 }
 
 pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
+    let hash = parse_hash(
+        required_str(params, 0, "block hash is required")?,
+        "blockhash",
+    )?;
     let verbosity = getblock_verbosity(params)?;
     let record = ctx
         .chain
@@ -544,7 +548,10 @@ pub(crate) fn getblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcE
 }
 
 pub(crate) fn getblockheader(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
+    let hash = parse_hash(
+        required_str(params, 0, "block hash is required")?,
+        "blockhash",
+    )?;
     let verbose = optional_bool(params, 1, true)?;
     let record = ctx
         .chain
@@ -566,7 +573,7 @@ fn blockstats_record(ctx: &Context, params: &Value) -> Result<BlockRecord, RpcEr
             u32::try_from(height).map_err(|_| RpcError::InvalidParams("height exceeds u32"))?;
         ctx.chain.block_by_height(height)
     } else if let Some(hash) = target.as_str() {
-        let hash = parse_hash(hash)?;
+        let hash = parse_hash(hash, "hash_or_height")?;
         let record = ctx.chain.block_by_hash(hash);
         if let Some(record) = &record
             && ctx.chain.block_hash_at_height(record.height) != Some(hash)
@@ -576,7 +583,7 @@ fn blockstats_record(ctx: &Context, params: &Value) -> Result<BlockRecord, RpcEr
         record
     } else {
         return Err(RpcError::InvalidType(
-            "hash_or_height must be string or number",
+            "hash_or_height must be string or number".to_owned(),
         ));
     };
     record.ok_or(RpcError::NotFound("block not found"))
@@ -902,12 +909,15 @@ pub(crate) fn pruneblockchain(ctx: &Arc<Context>, params: &Value) -> Result<Valu
 }
 
 pub(crate) fn invalidateblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
-    let hash = parse_hash(required_str(params, 0, "block hash is required")?)?;
+    let hash = parse_hash(
+        required_str(params, 0, "block hash is required")?,
+        "blockhash",
+    )?;
     let control = ctx
         .chain
         .chain_control
         .as_ref()
-        .ok_or(RpcError::MethodDisabled("invalidateblock is unavailable"))?;
+        .ok_or_else(|| RpcError::MethodNotFound("invalidateblock".to_owned()))?;
     match control.invalidate_block(hash) {
         Ok(()) => Ok(Value::new_null()),
         Err(ChainControlError::UnknownBlock) => Err(RpcError::NotFound("block not found")),
@@ -991,7 +1001,7 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         Some(value) if value.is_null() => "hash_serialized_3",
         Some(value) => value
             .as_str()
-            .ok_or(RpcError::InvalidType("hash_type must be a string"))?,
+            .ok_or_else(|| RpcError::InvalidType("hash_type must be a string".to_owned()))?,
     };
     let specific_block = matches!(
         array.and_then(|values| values.get(1)),
@@ -1123,8 +1133,7 @@ pub(crate) fn getindexinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 /// `Status::Extension` in the compatibility manifest.
 pub(crate) fn getcapabilities(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let snapshot =
-        crate::capabilities::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
+    let snapshot = bitcoin_rs_index::txindex_snapshot(ctx.indexes.derived_index_status.as_deref());
     Ok(json!({ "capabilities": snapshot.capabilities }))
 }
 
@@ -1155,7 +1164,7 @@ fn scanobjects_param(params: &Value) -> Result<&sonic_rs::Array, RpcError> {
     };
     let scanobjects = scanobjects
         .as_array()
-        .ok_or(RpcError::InvalidType("scanobjects must be an array"))?;
+        .ok_or_else(|| RpcError::InvalidType("scanobjects must be an array".to_owned()))?;
     if scanobjects.is_empty() {
         return Err(RpcError::InvalidParams("scanobjects must not be empty"));
     }
@@ -1211,7 +1220,7 @@ fn scanobject_descriptor(scanobject: &Value) -> Result<&str, RpcError> {
     };
     let descriptor = descriptor
         .as_str()
-        .ok_or(RpcError::InvalidType("scan object desc must be a string"))?;
+        .ok_or_else(|| RpcError::InvalidType("scan object desc must be a string".to_owned()))?;
     if let Some(range) = scanobject.get("range") {
         validate_scanobject_range(range)?;
     }
@@ -1224,7 +1233,7 @@ fn validate_scanobject_range(range: &Value) -> Result<(), RpcError> {
     }
     let Some(bounds) = range.as_array() else {
         return Err(RpcError::InvalidType(
-            "scan object range must be an integer or two-integer array",
+            "scan object range must be an integer or two-integer array".to_owned(),
         ));
     };
     if bounds.len() != 2 {
@@ -1234,12 +1243,12 @@ fn validate_scanobject_range(range: &Value) -> Result<(), RpcError> {
     }
     let Some(start) = bounds.first().and_then(Value::as_u64) else {
         return Err(RpcError::InvalidType(
-            "scan object range start must be an integer",
+            "scan object range start must be an integer".to_owned(),
         ));
     };
     let Some(end) = bounds.get(1).and_then(Value::as_u64) else {
         return Err(RpcError::InvalidType(
-            "scan object range end must be an integer",
+            "scan object range end must be an integer".to_owned(),
         ));
     };
     if start > end {
@@ -1363,11 +1372,23 @@ fn getblock_verbosity(params: &Value) -> Result<u64, RpcError> {
     if let Some(verbose) = value.as_bool() {
         return Ok(u64::from(verbose));
     }
-    Err(RpcError::InvalidType("verbosity must be number or boolean"))
+    Err(RpcError::InvalidType(
+        "verbosity must be number or boolean".to_owned(),
+    ))
 }
 
-fn parse_hash(value: &str) -> Result<Hash256, RpcError> {
-    Hash256::from_str(value).map_err(|_| RpcError::InvalidParams("hash must be 64 hex characters"))
+fn parse_hash(value: &str, label: &str) -> Result<Hash256, RpcError> {
+    if value.len() != 64 {
+        return Err(RpcError::InvalidParameter(format!(
+            "{label} must be of length 64 (not {}, for '{value}')",
+            value.len()
+        )));
+    }
+    Hash256::from_str(value).map_err(|_| {
+        RpcError::InvalidParameter(format!(
+            "{label} must be hexadecimal string (not '{value}')"
+        ))
+    })
 }
 
 /// The block's depth in the **active chain**, or `-1` when it is not in the

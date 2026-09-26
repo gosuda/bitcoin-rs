@@ -149,19 +149,35 @@ impl PeerInfo {
     /// Order follows Bitcoin Core's bit assignment. Unrecognized bits are dropped.
     #[must_use]
     pub fn services_names(&self) -> Vec<&'static str> {
-        [
-            (0, "NETWORK"),
-            (1, "GETUTXO"),
-            (2, "BLOOM"),
-            (3, "WITNESS"),
-            (6, "COMPACT_FILTERS"),
-            (10, "NETWORK_LIMITED"),
-            (11, "P2P_V2"),
-        ]
-        .into_iter()
-        .filter_map(|(bit, name)| (self.services & (1_u64 << bit) != 0).then_some(name))
-        .collect()
+        service_flag_names(self.services)
     }
+}
+
+/// Decodes a Bitcoin service-flags bitmask into its name strings.
+///
+/// One table for every surface that renders service bits (P2P `getpeerinfo`
+/// and RPC `getnetworkinfo`), so the two cannot disagree about a bit. Order
+/// follows Bitcoin Core's bit assignment (`GetServiceNames`); unrecognized
+/// bits are dropped.
+///
+/// PRE: `flags` is a `MSG_...`-free service bitmask as sent on the wire.
+/// POST: the recognized names in bit order, empty when no bit is recognized.
+/// INVARIANT: the name for a bit is a compile-time constant; no allocation
+///   beyond the returned vector occurs.
+#[must_use]
+pub fn service_flag_names(flags: u64) -> Vec<&'static str> {
+    [
+        (0, "NETWORK"),
+        (1, "GETUTXO"),
+        (2, "BLOOM"),
+        (3, "WITNESS"),
+        (6, "COMPACT_FILTERS"),
+        (10, "NETWORK_LIMITED"),
+        (11, "P2P_V2"),
+    ]
+    .into_iter()
+    .filter_map(|(bit, name)| (flags & (1_u64 << bit) != 0).then_some(name))
+    .collect()
 }
 #[cfg(test)]
 mod tests {

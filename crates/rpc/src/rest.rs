@@ -9,6 +9,7 @@
 use alloc::sync::Arc;
 use std::str::FromStr;
 
+use bitcoin::hex::FromHex as _;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, TxOut, Txid, consensus_bytes, deserialize,
 };
@@ -148,7 +149,7 @@ fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
                 if format == "hex" {
                     text_response("text/plain", format!("{hex}\n").into_bytes())
                 } else {
-                    let bytes: Vec<u8> = hex_decode(hex);
+                    let bytes = Vec::<u8>::from_hex(hex).unwrap_or_default();
                     binary_response("application/octet-stream", &bytes)
                 }
             }
@@ -885,35 +886,35 @@ fn sonic_bytes(value: &Value) -> Vec<u8> {
         .into_bytes()
 }
 
-fn hex_decode(hex: &str) -> Vec<u8> {
-    fn nibble(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => 0xff,
-        }
-    }
-    let bytes = hex.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for chunk in bytes.as_chunks::<2>().0 {
-        let hi = nibble(chunk[0]);
-        let lo = nibble(chunk[1]);
-        if hi == 0xff || lo == 0xff {
-            return Vec::new();
-        }
-        out.push((hi << 4) | lo);
-    }
-    out
-}
 // ---------------------------------------------------------------------------
 // Response constructors
 // ---------------------------------------------------------------------------
+//
+// One owner for every HTTP response the RPC crate emits. REST and Esplora
+// routes both build responses here, so status, reason phrase, content type,
+// and body encoding cannot drift between the two surfaces.
+//
+// PRE: `message`/`body` bytes are already in their final wire encoding.
+// POST: a [`Response`] carrying exactly the named status and reason, with
+//   the named content type and the message or body as its payload.
+// INVARIANT: no constructor inspects handler state or mutates shared state;
+//   the same arguments always produce the same bytes.
 
-fn json_response(result: Result<Value, RpcError>) -> Response {
+/// Answers a serialized value as a 200 JSON response.
+///
+/// PRE: `value` serializes losslessly for the response's JSON visitor set.
+/// POST: a 200 `application/json` response carrying the sonic-rs encoding,
+///   or the internal-error response when serialization fails.
+/// INVARIANT: the encoding is sonic-rs output for the same value on every
+///   call; no handler state is read.
+pub(crate) fn json_ok<T: serde::Serialize>(value: T) -> Response {
+    match sonic_rs::to_string(&value) {
+        Ok(body) => text_response("application/json", body.into_bytes()),
+        Err(_) => internal_error("failed to serialize response"),
+    }
+}
+
+pub(crate) fn json_response(result: Result<Value, RpcError>) -> Response {
     match result {
         Ok(value) => text_response("application/json", sonic_bytes(&value)),
         Err(error) => match error {
@@ -929,7 +930,7 @@ fn json_response(result: Result<Value, RpcError>) -> Response {
     }
 }
 
-fn text_response(content_type: &'static str, body: Vec<u8>) -> Response {
+pub(crate) fn text_response(content_type: &'static str, body: Vec<u8>) -> Response {
     Response {
         status: 200,
         reason: "OK",
@@ -938,11 +939,11 @@ fn text_response(content_type: &'static str, body: Vec<u8>) -> Response {
     }
 }
 
-fn binary_response(content_type: &'static str, body: &[u8]) -> Response {
+pub(crate) fn binary_response(content_type: &'static str, body: &[u8]) -> Response {
     text_response(content_type, body.to_vec())
 }
 
-fn service_unavailable(message: &'static str) -> Response {
+pub(crate) fn service_unavailable(message: &'static str) -> Response {
     Response {
         status: 503,
         reason: "Service Unavailable",
@@ -951,7 +952,17 @@ fn service_unavailable(message: &'static str) -> Response {
     }
 }
 
-fn internal_error(message: &'static str) -> Response {
+/// Answers 503 with a message built at the failure site.
+pub(crate) fn service_unavailable_owned(message: String) -> Response {
+    Response {
+        status: 503,
+        reason: "Service Unavailable",
+        content_type: "text/plain",
+        body: message.into_bytes(),
+    }
+}
+
+pub(crate) fn internal_error(message: &'static str) -> Response {
     Response {
         status: 500,
         reason: "Internal Server Error",
@@ -959,7 +970,17 @@ fn internal_error(message: &'static str) -> Response {
         body: message.as_bytes().to_vec(),
     }
 }
-fn bad_request(message: &'static str) -> Response {
+
+/// Answers 500 with a message built at the failure site.
+pub(crate) fn internal_error_owned(message: String) -> Response {
+    Response {
+        status: 500,
+        reason: "Internal Server Error",
+        content_type: "text/plain",
+        body: message.into_bytes(),
+    }
+}
+pub(crate) fn bad_request(message: &'static str) -> Response {
     Response {
         status: 400,
         reason: "Bad Request",
@@ -968,7 +989,7 @@ fn bad_request(message: &'static str) -> Response {
     }
 }
 
-fn bad_request_owned(message: String) -> Response {
+pub(crate) fn bad_request_owned(message: String) -> Response {
     Response {
         status: 400,
         reason: "Bad Request",
@@ -977,15 +998,15 @@ fn bad_request_owned(message: String) -> Response {
     }
 }
 
-fn not_found() -> Response {
+pub(crate) fn not_found() -> Response {
     not_found_with("not found")
 }
 
-fn not_found_with(message: &'static str) -> Response {
+pub(crate) fn not_found_with(message: &'static str) -> Response {
     not_found_owned(message.to_owned())
 }
 
-fn not_found_owned(message: String) -> Response {
+pub(crate) fn not_found_owned(message: String) -> Response {
     Response {
         status: 404,
         reason: "Not Found",

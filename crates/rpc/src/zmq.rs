@@ -155,6 +155,7 @@ pub enum SequenceEvent {
 }
 
 impl SequenceEvent {
+    #[cfg(any(feature = "zmq", test))]
     const fn label(self) -> u8 {
         match self {
             Self::Connected(_) => b'C',
@@ -268,62 +269,6 @@ impl ZmqPublisher for NoOpZmqPublisher {
     fn publish_rawtx(&self, _bytes: &[u8]) {}
 
     fn publish_sequence(&self, _event: SequenceEvent) {}
-}
-
-/// `ZmqPublisher` that emits each event via `tracing::info!`.
-///
-/// Useful in tests and diagnostics that want notification visibility without
-/// opening sockets.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TracingZmqPublisher;
-
-impl ZmqPublisher for TracingZmqPublisher {
-    fn publish_hashblock(&self, hash: Hash256) {
-        tracing::info!(
-            target: "bitcoin_rs_rpc::zmq",
-            topic = "hashblock",
-            hash = %hash.to_string_be(),
-        );
-    }
-
-    fn publish_hashtx(&self, txid: Txid) {
-        tracing::info!(
-            target: "bitcoin_rs_rpc::zmq",
-            topic = "hashtx",
-            txid = %txid,
-        );
-    }
-
-    fn publish_rawblock(&self, bytes: &[u8]) {
-        tracing::info!(
-            target: "bitcoin_rs_rpc::zmq",
-            topic = "rawblock",
-            len = bytes.len(),
-        );
-    }
-
-    fn publish_rawtx(&self, bytes: &[u8]) {
-        tracing::info!(
-            target: "bitcoin_rs_rpc::zmq",
-            topic = "rawtx",
-            len = bytes.len(),
-        );
-    }
-
-    fn publish_sequence(&self, event: SequenceEvent) {
-        let subject = match event {
-            SequenceEvent::Connected(hash) | SequenceEvent::Disconnected(hash) => {
-                hash.to_string_be()
-            }
-            SequenceEvent::Added(txid, _) | SequenceEvent::Removed(txid, _) => txid.to_string(),
-        };
-        tracing::info!(
-            target: "bitcoin_rs_rpc::zmq",
-            topic = "sequence",
-            hash = %subject,
-            label = char::from(event.label()).to_string(),
-        );
-    }
 }
 
 #[cfg(feature = "zmq")]
@@ -891,8 +836,6 @@ mod tests {
             noop.active_notifiers().is_empty(),
             "a publisher with no bound endpoints has no live notifier"
         );
-        let tracing: Arc<dyn ZmqPublisher> = Arc::new(TracingZmqPublisher);
-        assert!(tracing.active_notifiers().is_empty());
     }
 
     #[cfg(feature = "zmq")]

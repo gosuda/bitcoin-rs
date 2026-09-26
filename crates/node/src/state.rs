@@ -412,9 +412,7 @@ impl NodeState {
 
     /// Returns the live txindex status source for `getcapabilities`.
     #[must_use]
-    pub fn derived_index_status(
-        &self,
-    ) -> Arc<dyn bitcoin_rs_rpc::capabilities::DerivedIndexCapabilitySource> {
+    pub fn derived_index_status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
         self.derived_index.status()
     }
 

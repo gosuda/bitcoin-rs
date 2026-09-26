@@ -9,7 +9,7 @@ use core::str::FromStr as _;
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{OutPoint, Txid};
 
-use super::http::{bad, dispatch_error, json_response, query_limit};
+use super::http::{dispatch_error, query_limit};
 use super::model::{Outspend, TransactionValue};
 use super::projection::Projection;
 use super::public::{block_transaction_values, outspend, outspends_for_transaction};
@@ -17,6 +17,7 @@ use crate::context::Context;
 use crate::handlers::Handler;
 use crate::handlers::mining::required_gbt_rules;
 use crate::rest::Response;
+use crate::rest::{bad_request, json_ok};
 use sonic_rs::json as sonic_json;
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, query: &str) -> Option<Response> {
@@ -48,13 +49,13 @@ fn internal_block_txs(ctx: &Context, hash: &str) -> Response {
         Ok(value) => value,
         Err(response) => return response,
     };
-    block_transaction_values(ctx, &record, block.txs.iter()).map_or_else(|r| r, json_response)
+    block_transaction_values(ctx, &record, block.txs.iter()).map_or_else(|r| r, json_ok)
 }
 
 fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Response {
     let max_txs = query_limit(query, "max_txs").unwrap_or(usize::MAX);
     if max_txs == 0 {
-        return json_response(Vec::<TransactionValue>::new());
+        return json_ok(Vec::<TransactionValue>::new());
     }
     // A cursor previously matched the exact lowercase Display text. Parse
     // once, but keep malformed, noncanonical, and absent cursors restarting
@@ -90,7 +91,7 @@ fn internal_mempool_txs(ctx: &Context, last: Option<&str>, query: &str) -> Respo
         .into_iter()
         .map(|transaction| projection.transaction_value(&transaction, None))
         .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_response)
+        .map_or_else(|r| r, json_ok)
 }
 
 /// Selects the API-09 page without retaining the entire eligible suffix.
@@ -136,11 +137,11 @@ fn select_mempool_page<'a>(
 
 fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Response {
     let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
-        return bad("transaction request body must be a JSON array of txids");
+        return bad_request("transaction request body must be a JSON array of txids");
     };
     let ids = match text_ids
         .into_iter()
-        .map(|id| Txid::from_str(&id).map_err(|_| bad("txid must be 64 hex characters")))
+        .map(|id| Txid::from_str(&id).map_err(|_| bad_request("txid must be 64 hex characters")))
         .collect::<Result<Vec<_>, _>>()
     {
         Ok(ids) => ids,
@@ -164,12 +165,12 @@ fn internal_transactions(ctx: &Context, body: &[u8], mempool_only: bool) -> Resp
                 .map(|(transaction, status)| projection.transaction_value(&transaction, status))
         })
         .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_response)
+        .map_or_else(|r| r, json_ok)
 }
 
 fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
     let Ok(text_ids) = serde_json::from_slice::<Vec<String>>(body) else {
-        return bad("outspend request body must be a JSON array of txids");
+        return bad_request("outspend request body must be a JSON array of txids");
     };
     let projection = Projection::new(ctx);
     text_ids
@@ -184,19 +185,19 @@ fn internal_outspends_by_txid(ctx: &Context, body: &[u8]) -> Response {
             })
         })
         .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_response)
+        .map_or_else(|r| r, json_ok)
 }
 
 fn internal_outspends_by_outpoint(ctx: &Context, body: &[u8]) -> Response {
     let Ok(outpoints) = serde_json::from_slice::<Vec<String>>(body) else {
-        return bad("outspend request body must be a JSON array of outpoints");
+        return bad_request("outspend request body must be a JSON array of outpoints");
     };
     let projection = Projection::new(ctx);
     outpoints
         .into_iter()
         .map(|outpoint| internal_outspend(&projection, &outpoint))
         .collect::<Result<Vec<_>, _>>()
-        .map_or_else(|r| r, json_response)
+        .map_or_else(|r| r, json_ok)
 }
 
 fn internal_outspend(
@@ -229,7 +230,7 @@ fn block_template(handler: &Handler) -> Response {
     let request = sonic_json!([{"rules": rules}]);
     handler
         .dispatch("getblocktemplate", &request)
-        .map_or_else(dispatch_error, json_response)
+        .map_or_else(dispatch_error, json_ok)
 }
 
 #[cfg(test)]
