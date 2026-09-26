@@ -276,6 +276,7 @@ mod tests {
         assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
     }
 
+    /// Even an empty body needs one byte to encode its reserved coinbase count.
     #[test]
     fn transaction_count_reservation_rejects_zero_size_capacity() {
         let zero_size = snapshot_entry(independent_tx(1), 1_000, 10, 0, 0);

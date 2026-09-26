@@ -17,6 +17,7 @@ use bitcoin_rs_primitives::{
     Txid, Witness,
 };
 
+/// Checks whole-block scalars and selected dependency indexes against wire and hash oracles.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {

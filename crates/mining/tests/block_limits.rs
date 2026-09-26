@@ -22,6 +22,7 @@ type Assemble =
 
 const ASSEMBLERS: [Assemble; 2] = [assemble_candidate, assemble_ordered_candidate];
 
+/// Checks the 80-byte header and one-byte count against an independently parsed block.
 #[test]
 fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult {
     let snapshot = snapshot(0, false)?;
@@ -51,6 +52,7 @@ fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult 
     Ok(())
 }
 
+/// Both assemblers accept exact limits and account for the 252-to-253 count growth.
 #[test]
 fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult {
     for segwit_active in [false, true] {
@@ -86,6 +88,7 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
     Ok(())
 }
 
+/// Count growth must reject a complete fee chunk and leave its descendants unselected.
 #[test]
 fn count_encoding_growth_skips_a_whole_package_and_its_descendant() -> TestResult {
     for segwit_active in [false, true] {
@@ -120,6 +123,7 @@ fn count_encoding_growth_skips_a_whole_package_and_its_descendant() -> TestResul
     Ok(())
 }
 
+/// Makes one capacity dimension one unit too small while leaving the other unconstrained.
 fn lower_limit(context: &mut CandidateContext, field: &str) {
     if field == "weight" {
         context.max_weight -= 1;
@@ -130,6 +134,7 @@ fn lower_limit(context: &mut CandidateContext, field: &str) {
     }
 }
 
+/// Compares reported totals with rust-bitcoin wire parsing and enforces configured limits.
 fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
     let block = candidate.into_unsolved_block();
     let bytes = consensus_bytes(&block);
@@ -151,6 +156,7 @@ fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
     Ok(())
 }
 
+/// Supplies independent transactions with equal fees so count boundaries decide selection.
 fn snapshot(count: usize, witness: bool) -> Result<MempoolMiningSnapshot, Box<dyn Error>> {
     let entries = (1..=count)
         .map(|label| entry(u16::try_from(label)?, None, 10_000, witness, vec![]))
@@ -161,6 +167,7 @@ fn snapshot(count: usize, witness: bool) -> Result<MempoolMiningSnapshot, Box<dy
     })
 }
 
+/// Creates a measured transaction with optional witness and an explicit dependency edge.
 fn entry(
     label: u16,
     parent: Option<Txid>,
@@ -213,6 +220,7 @@ fn entry(
     })
 }
 
+/// Uses generous regtest limits; each test narrows only the dimension under examination.
 fn context(segwit_active: bool) -> CandidateContext {
     CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
