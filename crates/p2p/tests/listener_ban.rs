@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use bitcoin::p2p::Magic;
+use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::{
     BannedSubnet, IpSubnet, ListenerExtras, NetworkActivity, PeerError, PeerTable,
@@ -222,7 +223,7 @@ fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), Box<dyn E
     let listener_shutdown = Arc::clone(&shutdown);
     let serve_shared = shared.clone();
     let serve_handle = thread::spawn(move || serve(listener, listener_shutdown, serve_shared));
-    let outbound_handle = spawn_outbound_connection(addr, shared);
+    let outbound_handle = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
 
     // Metadata publication attaches the connection counters, so nonzero
     // totals prove both handshakes completed over the loopback wire.

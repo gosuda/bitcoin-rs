@@ -1090,8 +1090,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     use crate::peer::PeerState;
     use std::time::Instant;
 
-    const IDLE_DISCONNECT: Duration = Duration::from_mins(1);
-
     let tx_relay_open =
         || ibd.is_none_or(|(latch, network)| !latch.is_active(unix_time_secs(), *network));
 

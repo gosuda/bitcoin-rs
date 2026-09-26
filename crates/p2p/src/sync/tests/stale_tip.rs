@@ -14,7 +14,7 @@ use bitcoin_rs_primitives::Hash256;
 
 /// The network's target spacing: ten minutes, as every production chain
 /// configures it.
-const SPACING: Duration = Duration::from_secs(600);
+const SPACING: Duration = Duration::from_mins(10);
 
 /// A stand-in tip hash for staleness fixtures; only identity matters.
 const GENESIS_HASH: Hash256 = Hash256::from_le_bytes(&[7u8; 32]);
@@ -34,7 +34,7 @@ const REPLACEMENT_HASH: Hash256 = Hash256::from_le_bytes(&[9u8; 32]);
 fn the_stale_tip_allowance_dials_past_the_slot_cap() {
     // A scheduler whose tip has stood still for three target spacings.
     let t0 = Instant::now();
-    let tree = BlockTree::new();
+    let mut tree = BlockTree::new();
     let chain_tip = tree.tip_handle();
     let (_headers_tx, headers_rx) = unbounded();
     let (_blocks_tx, blocks_rx) = unbounded();

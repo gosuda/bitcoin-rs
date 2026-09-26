@@ -1272,12 +1272,15 @@ mod tests {
             &outbound_tx,
             &mut recently_queued,
             0,
-            DEFAULT_OUTBOUND_TARGET,
+            DEFAULT_OUTBOUND_FULL_RELAY_SLOTS + DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS,
         );
         assert_eq!(queued, 1);
         assert_eq!(
             outbound_rx.try_recv().ok(),
-            Some(SocketAddr::from((Ipv4Addr::LOCALHOST, REPLACEMENT_PORT))),
+            Some(OutboundDial::auto(SocketAddr::from((
+                Ipv4Addr::LOCALHOST,
+                REPLACEMENT_PORT,
+            )))),
         );
     }
 
