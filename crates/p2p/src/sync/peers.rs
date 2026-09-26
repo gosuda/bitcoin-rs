@@ -380,6 +380,19 @@ impl BlockSync {
         let (request_peer_limit, fanout_active, cold_preferred) = {
             let mut scheduler = self.scheduler.lock();
             let SchedulerState { window, stager, .. } = &mut *scheduler;
+            // Purge state the old request branch left behind before the peer
+            // budget is measured: `next_peer_request` is the only other place
+            // a retarget runs, and a stale pending/staged set that fills the
+            // window would truncate `request_peers` to zero and never reach
+            // it, leaving the winning branch unwired until the pending
+            // timeout fires.
+            if let (Some(chain_tip), Some(required)) = (
+                frontier.chain.chain_tip.as_ref(),
+                frontier.chain.next_required,
+            ) {
+                let tree = self.chain.block_tree();
+                window.retarget_request_branch(stager, chain_tip, required.height, &tree, now);
+            }
             for candidate in &mut candidates {
                 candidate.soft_blocked = window
                     .peer_has_expired_pending(candidate.peer.source, now)

@@ -2000,7 +2000,7 @@ impl DownloadWindow {
         non_empty_request(source, entries, next_request_height)
     }
 
-    fn retarget_request_branch(
+    pub(crate) fn retarget_request_branch(
         &mut self,
         stager: &mut BlockStager,
         chain_tip: &TipSnapshot,
