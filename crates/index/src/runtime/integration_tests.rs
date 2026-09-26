@@ -158,6 +158,63 @@ fn blocked_open_abandonment_detaches_and_poisons() {
     drop(open_tx);
 }
 
+/// An interrupted open detaches the backend open thread: the supervisor
+/// still exits, so `open_was_abandoned` is the caller's only signal that a
+/// detached thread may still touch the store.
+#[test]
+fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let (open_tx, open_rx) = crossbeam_channel::bounded::<()>(0);
+    let mut inputs = build_worker_inputs(dir.path(), 43);
+    let open_store = Arc::clone(&inputs.spec.open_store);
+    inputs.spec.open_store = Arc::new(move |dir| {
+        let _ = open_rx.recv();
+        open_store(dir)
+    });
+
+    let worker = DerivedIndexWorker::spawn_with_open(
+        Arc::clone(&inputs.runtime),
+        inputs.spec,
+        Arc::clone(&inputs.lifecycle),
+        inputs.generation.clone(),
+        Arc::clone(&inputs.applied_tip),
+        Arc::clone(&inputs.block_tree),
+        None,
+        inputs.block_source,
+        None,
+        Arc::clone(&inputs.chain_events),
+        RecordedIndexAhead::new(),
+        Arc::clone(&inputs.shutdown),
+        inputs.wake_rx,
+    )
+    .expect("spawn");
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert!(
+        !worker.is_finished(),
+        "worker should still be blocked on open"
+    );
+
+    inputs.shutdown.store(true, Ordering::Release);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !worker.is_finished() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "shutdown during open must exit the supervisor promptly"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // The open thread is still parked on `open_rx` here, but the namespace
+    // poison records the abandonment durably.
+    assert!(worker.open_was_abandoned());
+    assert!(NAMESPACE_REGISTRY.is_poisoned(&dir.path().join("txindex")));
+    worker.join();
+
+    drop(open_tx);
+}
+
 #[test]
 fn open_timeout_publishes_error_not_infinite_spin() {
     let dir = tempfile::tempdir().expect("tempdir");

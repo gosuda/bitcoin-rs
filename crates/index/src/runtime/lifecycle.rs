@@ -194,6 +194,17 @@ impl DerivedIndexWorker {
             .is_some_and(std::thread::JoinHandle::is_finished)
     }
 
+    /// True when this worker's backend open was abandoned: a shutdown or the
+    /// open deadline detached the open thread, which may still touch the
+    /// store after the supervisor exits. The namespace poison is the durable
+    /// record; read it only after `is_finished`, since `finish_worker` sets
+    /// it on the worker's exit path.
+    pub fn open_was_abandoned(&self) -> bool {
+        self.namespace_key
+            .as_ref()
+            .is_some_and(|key| NAMESPACE_REGISTRY.is_poisoned(key))
+    }
+
     /// Requests shutdown and joins the worker thread.
     pub fn join(mut self) {
         self.runtime.request_shutdown();

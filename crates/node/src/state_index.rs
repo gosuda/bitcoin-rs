@@ -144,7 +144,9 @@ impl DerivedIndexHost {
     /// `deadline`, or the join is abandoned, the generation token revoked,
     /// `ShutdownAbandoned` published, the namespace poisoned, and an error
     /// returned so the caller's teardown records the abandonment and
-    /// suppresses the clean checkpoint.
+    /// suppresses the clean checkpoint. A joined worker whose backend open
+    /// detached a thread (shutdown or open deadline mid-open) is also an
+    /// error: the supervisor exits while the open thread may still write.
     /// INVARIANT: `shutdown` is idempotent; `request_shutdown` runs on every
     /// call.
     pub(crate) fn shutdown(&mut self, deadline: Duration) -> Result<()> {
@@ -166,9 +168,18 @@ impl DerivedIndexHost {
             std::thread::sleep(Duration::from_millis(10));
         }
         if worker.is_finished() {
+            // A supervisor that exits mid-open leaves its detached backend
+            // open thread possibly writing to the store; joining it is not a
+            // clean stop, so the checkpoint must stay suppressed.
+            let open_abandoned = worker.open_was_abandoned();
             worker.join();
             #[cfg(test)]
             self.worker_joined.store(true, Ordering::Release);
+            if open_abandoned {
+                return Err(anyhow::anyhow!(
+                    "derived-index worker exited with a detached backend open still in flight"
+                ));
+            }
             return Ok(());
         }
         tracing::warn!("txindex worker still blocked; abandoning join");
