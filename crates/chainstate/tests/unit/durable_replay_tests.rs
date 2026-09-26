@@ -144,6 +144,45 @@ fn committed_gap_replays_to_head_without_recommitting_it() -> Result<(), Box<dyn
     Ok(())
 }
 
+/// Publication carries the count the durable receipt certified, never a
+/// tree-side re-derivation: a replay whose derived count cannot match the
+/// stored head still lands exactly on the head's facts.
+#[test]
+fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut handles, child) = restored_chainstate()?;
+    let bodies = Arc::new(MemoryBodies::default());
+    bodies.persist_block_body(
+        1,
+        Hash256::from(child.block_hash()),
+        &consensus_bytes(&child),
+    )?;
+    // The tree derives 1 (genesis) + 1 (the child's single transaction) = 2;
+    // the stored head certified a different total before the crash.
+    let head = DurableHead {
+        commit_id: 7,
+        height: 1,
+        tip: Hash256::from(child.block_hash()),
+        chain_tx_count: 5,
+        body_extent: None,
+        undo_extent: None,
+    };
+    install_arbitrary_head(&mut handles, head, bodies)?;
+
+    super::reconcile_at_boot(&handles)?;
+
+    let landed = handles
+        .applied_tip
+        .load_full()
+        .ok_or("replay did not publish an applied tip")?;
+    assert_eq!((landed.height, landed.hash), (head.height, head.tip));
+    assert_eq!(
+        landed.chain_tx_count,
+        bitcoin_rs_chain::ChainTxCount::established(5),
+        "the published count is the receipt's, not the derivation's"
+    );
+    Ok(())
+}
+
 #[test]
 fn committed_gap_with_missing_body_fails_closed() -> Result<(), Box<dyn std::error::Error>> {
     let (mut handles, child) = restored_chainstate()?;
