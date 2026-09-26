@@ -61,6 +61,7 @@ pub(super) fn run_worker_with_open(
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
     shutdown: &Arc<AtomicBool>,
     wake_rx: &Receiver<()>,
+    open_abandoned: &Arc<AtomicBool>,
 ) {
     let namespace_key =
         match NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace) {
@@ -112,6 +113,7 @@ pub(super) fn run_worker_with_open(
         generation,
         &namespace_key,
         worker_result,
+        open_abandoned,
     );
 }
 
@@ -124,10 +126,12 @@ fn finish_worker(
     generation: &Generation,
     namespace_key: &Path,
     result: Result<(), DerivedIndexWorkerError>,
+    open_abandoned: &AtomicBool,
 ) {
     let registry = &*NAMESPACE_REGISTRY;
     if let Err(error) = result {
         if error.abandoned_open() {
+            open_abandoned.store(true, Ordering::Release);
             registry.poison(namespace_key, generation.id());
         }
         tracing::error!(%error, "txindex worker open or run failed");
@@ -415,12 +419,21 @@ mod tests {
             let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
             let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
             assert!(NAMESPACE_REGISTRY.claim(key.clone(), generation.id()));
-            finish_worker(&runtime, &lifecycle, &generation, &key, Err(error));
+            let open_abandoned = AtomicBool::new(false);
+            finish_worker(
+                &runtime,
+                &lifecycle,
+                &generation,
+                &key,
+                Err(error),
+                &open_abandoned,
+            );
             assert!(runtime.should_stop());
             assert!(matches!(
                 **lifecycle.load(),
                 DerivedIndexLifecycle::Failed(_)
             ));
+            assert!(open_abandoned.load(Ordering::Acquire));
             assert!(NAMESPACE_REGISTRY.is_poisoned(&key));
             assert!(!NAMESPACE_REGISTRY.claim(key, 2));
         }
@@ -441,7 +454,16 @@ mod tests {
             let runtime = DerivedIndexRuntime::new(crossbeam_channel::bounded(1).0);
             let lifecycle = Arc::new(ArcSwap::from_pointee(DerivedIndexLifecycle::Opening));
             assert!(NAMESPACE_REGISTRY.claim(key.clone(), generation.id()));
-            finish_worker(&runtime, &lifecycle, &generation, &key, result);
+            let open_abandoned = AtomicBool::new(false);
+            finish_worker(
+                &runtime,
+                &lifecycle,
+                &generation,
+                &key,
+                result,
+                &open_abandoned,
+            );
+            assert!(!open_abandoned.load(Ordering::Acquire));
             assert!(!NAMESPACE_REGISTRY.is_poisoned(&key));
             assert!(NAMESPACE_REGISTRY.claim(key.clone(), 2));
             NAMESPACE_REGISTRY.release(&key, 2);

@@ -423,6 +423,10 @@ pub struct DerivedIndexWorker {
     pub generation: Option<Generation>,
     /// Canonical namespace key for poisoning on abandonment.
     namespace_key: Option<PathBuf>,
+    /// Set by `finish_worker` when this worker abandoned its backend open;
+    /// worker-local so a stale process-global poison from an earlier worker
+    /// is not misattributed to this one.
+    open_abandoned: Arc<AtomicBool>,
 }
 
 /// Result of opening the txindex store: writer, reader, and batch limits.
