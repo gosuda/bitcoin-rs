@@ -984,13 +984,15 @@ fn newest_excess_full_relay(
     now: Instant,
     is_downloading: impl Fn(crate::PeerSource) -> bool,
 ) -> Option<crate::PeerSession> {
+    // The census counts every slot occupant — a hand-pinned connection
+    // holds a slot the same as an automatic one — but the victim selection
+    // keeps `is_manual` out, as Core's rule does.
     let sessions: Vec<crate::PeerSession> = peer_table
         .sessions()
         .into_iter()
         .filter(|session| {
             !session.lease.is_inbound()
                 && !session.lease.is_cancelled()
-                && !session.lease.is_manual()
                 && session.lease.role() == crate::peer_info::PeerRole::FullRelay
         })
         .collect();
@@ -1003,8 +1005,9 @@ fn newest_excess_full_relay(
         .rev()
         .take(excess)
         .find(|session| {
-            now.saturating_duration_since(session.lease.connected_at())
-                >= crate::download_window::MINIMUM_CONNECT_TIME
+            !session.lease.is_manual()
+                && now.saturating_duration_since(session.lease.connected_at())
+                    >= crate::download_window::MINIMUM_CONNECT_TIME
                 && !is_downloading(session.lease.source(session.addr))
         })
         .cloned()

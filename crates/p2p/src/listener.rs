@@ -964,6 +964,14 @@ impl Keepalive {
         self.last_send = now;
     }
 
+    /// Records a probe actually queued at `now`: the interval counts from
+    /// the send, not the decision, so a probe skipped for a saturated queue
+    /// stays owed instead of being consumed unsent.
+    fn record_probe(&mut self, now: Instant) {
+        self.last_ping = Some(now);
+        self.record_send(now);
+    }
+
     /// Returns the action owed at `now`, ordering at most one probe per
     /// [`PING_INTERVAL`] and an end once either direction is silent past
     /// [`TIMEOUT_INTERVAL`].
@@ -976,7 +984,7 @@ impl Keepalive {
     /// [`crate::socket::HANDSHAKE_TIMEOUT`] bounds one blocking write at one
     /// minute, so this branch only covers a peer that takes our writes and
     /// never answers them.
-    fn next_action(&mut self, now: Instant) -> KeepaliveAction {
+    fn next_action(&self, now: Instant) -> KeepaliveAction {
         if now.saturating_duration_since(self.last_recv) > TIMEOUT_INTERVAL
             || now.saturating_duration_since(self.last_send) > TIMEOUT_INTERVAL
         {
@@ -986,7 +994,6 @@ impl Keepalive {
             .last_ping
             .is_none_or(|last| now.saturating_duration_since(last) >= PING_INTERVAL);
         if probe_owed {
-            self.last_ping = Some(now);
             KeepaliveAction::Ping
         } else {
             KeepaliveAction::Idle
@@ -1006,6 +1013,7 @@ mod keepalive_tests {
         let t0 = Instant::now();
         let mut keepalive = Keepalive::starting(t0);
         assert_eq!(keepalive.next_action(t0), KeepaliveAction::Ping);
+        keepalive.record_probe(t0);
         assert_eq!(
             keepalive.next_action(t0 + PING_INTERVAL / 2),
             KeepaliveAction::Idle
@@ -1055,6 +1063,7 @@ mod keepalive_tests {
             keepalive.next_action(t0 + TIMEOUT_INTERVAL),
             KeepaliveAction::Ping
         );
+        keepalive.record_probe(t0 + TIMEOUT_INTERVAL);
         assert_eq!(
             keepalive.next_action(t0 + TIMEOUT_INTERVAL + PING_INTERVAL / 2),
             KeepaliveAction::Idle
@@ -1119,7 +1128,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     lease.send(crate::Message::Ping(nonce)).map_err(|_| {
                         crate::wire::PeerError::Protocol("outbound queue closed or saturated")
                     })?;
-                    keepalive.record_send(Instant::now());
+                    keepalive.record_probe(Instant::now());
                 }
             }
             KeepaliveAction::Expired => {

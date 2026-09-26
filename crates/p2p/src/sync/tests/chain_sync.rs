@@ -324,13 +324,16 @@ fn progress_to_the_benchmark_re_arms_the_timeout() {
 }
 
 /// The response window starts only on a probe the connection was actually
-/// asked to answer. When the frontier body became owned after the sweep's
-/// observation and nothing was sent, the record is restored untouched, so
-/// the connection can be retired for ignoring a probe it never received,
-/// and the operator counter does not count the silence as a probe.
+/// asked to answer. The chain-sync probe ignores frontier body ownership —
+/// the lagging peer owes an answer for its own silence — so the fixture's
+/// owned frontier does not suppress the send; the unregistered fixture
+/// connection fails the send instead, and the sweep must still restore the
+/// record untouched so the connection cannot be retired for ignoring a
+/// request it never received, and the operator counter does not count the
+/// silence as a probe.
 #[test]
 #[allow(clippy::expect_used)]
-fn a_frontier_owned_suppression_does_not_arm_the_response_window() {
+fn an_unsent_chain_sync_probe_arms_no_response_window() {
     let t0 = Instant::now();
     // A mined tree whose tip is one header past the last body: the frontier
     // owes a body, and genesis is applied so the probes below have tips and
@@ -367,7 +370,7 @@ fn a_frontier_owned_suppression_does_not_arm_the_response_window() {
     );
     assert!(
         !sync.probe_chain_sync(subject.source, &frontier),
-        "a suppression that sent nothing is not a probe"
+        "a probe that never reached the wire is not a probe"
     );
     assert!(
         !sync

@@ -663,12 +663,9 @@ impl BlockSync {
         frontier: &SyncFrontier,
         source: PeerSource,
     ) -> GetheadersOutcome {
-        let (Some(applied), Some(headers)) = (
-            frontier.chain.applied_tip.as_ref(),
-            frontier.chain.chain_tip.as_ref(),
-        ) else {
+        if frontier.chain.applied_tip.is_none() || frontier.chain.chain_tip.is_none() {
             return GetheadersOutcome::Failed;
-        };
+        }
         // The plan's Probe decision was taken at observation time; a body
         // request scheduled since may already own the frontier, in which
         // case capability discovery has nothing left to resolve and nothing
@@ -681,24 +678,59 @@ impl BlockSync {
         if frontier_owned {
             return GetheadersOutcome::FrontierOwned;
         }
-        let locator = {
-            let tree = self.chain.block_tree();
-            let Some(active_anchor) = tree.node_at_height_from(headers.tip_id, applied.height)
-            else {
-                return GetheadersOutcome::Failed;
-            };
-            tree.block_locator(active_anchor, LOCATOR_MAX_ENTRIES)
+        let Some((our_height, target_height, locator)) = self.applied_frontier_probe(frontier)
+        else {
+            return GetheadersOutcome::Failed;
         };
-        let outcome = self.send_getheaders(
-            source,
-            applied.height,
-            i32::try_from(headers.height).unwrap_or(i32::MAX),
-            locator,
-        );
+        let outcome = self.send_getheaders(source, our_height, target_height, locator);
         if outcome == GetheadersOutcome::Sent {
             metrics::counter!("node.sync.idle_frontier_probes").increment(1);
         }
         outcome
+    }
+
+    /// Sends one `getheaders` for the chain-sync eviction probe: the same
+    /// applied-anchor locator the frontier probe uses, but without the
+    /// frontier-ownership gate — a lagging peer owes an answer for its own
+    /// silence regardless of who owns the next body, and without claiming
+    /// the singleton `header_request` slot.
+    ///
+    /// PRE: `source` names a live subject connection.
+    /// POST: return the wire outcome; `Suppressed` counts only when an
+    ///   identical request is already pending for this connection, and
+    ///   nothing else suppresses the send.
+    pub(super) fn send_chain_sync_probe(
+        &self,
+        frontier: &SyncFrontier,
+        source: PeerSource,
+    ) -> GetheadersOutcome {
+        let Some((our_height, target_height, locator)) = self.applied_frontier_probe(frontier)
+        else {
+            return GetheadersOutcome::Failed;
+        };
+        let outcome =
+            self.send_getheaders_tracked(source, our_height, target_height, locator, false);
+        if outcome == GetheadersOutcome::Sent {
+            metrics::counter!("node.sync.chain_sync_probes").increment(1);
+        }
+        outcome
+    }
+
+    /// The `getheaders` envelope both probes share: `our_height` is the
+    /// applied tip's height, `target_height` the chain tip's, and the
+    /// locator anchors on the active chain at the applied height.
+    fn applied_frontier_probe(&self, frontier: &SyncFrontier) -> Option<(u32, i32, Vec<Hash256>)> {
+        let (applied, headers) = (
+            frontier.chain.applied_tip.as_ref()?,
+            frontier.chain.chain_tip.as_ref()?,
+        );
+        let tree = self.chain.block_tree();
+        let active_anchor = tree.node_at_height_from(headers.tip_id, applied.height)?;
+        Some((
+            applied.height,
+            i32::try_from(headers.height).unwrap_or(i32::MAX),
+            tree.block_locator(active_anchor, LOCATOR_MAX_ENTRIES),
+        ))
     }
 
     /// Sends `getheaders` to the exact connection `source` identifies and
@@ -709,6 +741,20 @@ impl BlockSync {
         our_height: u32,
         target_height: i32,
         locator: Vec<Hash256>,
+    ) -> GetheadersOutcome {
+        self.send_getheaders_tracked(source, our_height, target_height, locator, true)
+    }
+
+    /// `track` registers the request in the singleton `header_request` slot;
+    /// a probe that must not displace the frontier's pending request sends
+    /// untracked — its answer arrives as ordinary inbound headers.
+    fn send_getheaders_tracked(
+        &self,
+        source: crate::PeerSource,
+        our_height: u32,
+        target_height: i32,
+        locator: Vec<Hash256>,
+        track: bool,
     ) -> GetheadersOutcome {
         let Some(locator_tip_hash) = locator.first().copied() else {
             return GetheadersOutcome::Failed;
@@ -739,12 +785,14 @@ impl BlockSync {
         if self
             .peer_table
             .send_then(source, msg, || {
-                self.scheduler.lock().header_request = Some(PendingHeaderRequest {
-                    source,
-                    locator_tip_hash,
-                    target_height,
-                    requested_at: now,
-                });
+                if track {
+                    self.scheduler.lock().header_request = Some(PendingHeaderRequest {
+                        source,
+                        locator_tip_hash,
+                        target_height,
+                        requested_at: now,
+                    });
+                }
             })
             .is_err()
         {

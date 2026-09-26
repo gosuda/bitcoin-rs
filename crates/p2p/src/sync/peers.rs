@@ -674,11 +674,8 @@ impl BlockSync {
     ///   probe nor arms a response window, and no connection is retired for
     ///   ignoring a request it never received.
     pub(super) fn probe_chain_sync(&self, source: PeerSource, frontier: &SyncFrontier) -> bool {
-        match self.probe_frontier_peer(frontier, source) {
-            GetheadersOutcome::Sent | GetheadersOutcome::Suppressed => {
-                metrics::counter!("node.sync.chain_sync_probes").increment(1);
-                true
-            }
+        match self.send_chain_sync_probe(frontier, source) {
+            GetheadersOutcome::Sent | GetheadersOutcome::Suppressed => true,
             GetheadersOutcome::FrontierOwned | GetheadersOutcome::Failed => false,
         }
     }
