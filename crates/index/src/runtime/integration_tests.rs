@@ -162,11 +162,16 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
     let dir = tempfile::tempdir().expect("tempdir");
 
     let (open_tx, open_rx) = crossbeam_channel::bounded::<()>(0);
+    let (entered_tx, entered_rx) = crossbeam_channel::bounded::<()>(0);
+    let (opened_tx, opened_rx) = crossbeam_channel::bounded::<()>(0);
     let mut inputs = build_worker_inputs(dir.path(), 43);
     let open_store = Arc::clone(&inputs.spec.open_store);
     inputs.spec.open_store = Arc::new(move |dir| {
+        let _ = entered_tx.send(());
         let _ = open_rx.recv();
-        open_store(dir)
+        let result = open_store(dir);
+        let _ = opened_tx.send(());
+        result
     });
 
     let worker = DerivedIndexWorker::spawn_with_open(
@@ -186,7 +191,11 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
     )
     .expect("spawn");
 
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    // Entry is signaled from inside `open_store`, so the shutdown below lands
+    // on the abandoned-open path rather than the pre-spawn stop check.
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("open thread entered open_store");
     assert!(
         !worker.is_finished(),
         "worker should still be blocked on open"
@@ -202,13 +211,18 @@ fn shutdown_during_open_reports_abandonment_after_supervisor_exit() {
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    // The open thread is still parked on `open_rx` here, but the namespace
-    // poison records the abandonment durably.
+    // The open thread is still parked on `open_rx` here; the worker-local
+    // flag records the abandonment durably.
     assert!(worker.open_was_abandoned());
     assert!(NAMESPACE_REGISTRY.is_poisoned(&dir.path().join("txindex")));
     worker.join();
 
+    // Release the parked opener and wait for the detached thread to leave
+    // the tempdir before test scope removes it.
     drop(open_tx);
+    opened_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("detached open thread finished with the store");
 }
 
 #[test]

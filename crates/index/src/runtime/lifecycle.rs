@@ -31,6 +31,7 @@ use crossbeam_channel::Receiver;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::thread;
 
 impl DerivedIndexWorker {
@@ -103,6 +104,7 @@ impl DerivedIndexWorker {
             join_handle: Some(join_handle),
             generation: None,
             namespace_key: None,
+            open_abandoned: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -137,6 +139,8 @@ impl DerivedIndexWorker {
             NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace).ok();
         let runtime_for_thread = Arc::clone(&runtime);
         let generation_for_thread = generation.clone();
+        let open_abandoned = Arc::new(AtomicBool::new(false));
+        let open_abandoned_for_thread = Arc::clone(&open_abandoned);
         let join_handle = thread::Builder::new()
             .name("bitcoin-rs-txindex".to_owned())
             .spawn(move || {
@@ -156,6 +160,7 @@ impl DerivedIndexWorker {
                         reporter,
                         &shutdown,
                         &wake_rx,
+                        &open_abandoned_for_thread,
                     );
                 }));
                 match result {
@@ -181,6 +186,7 @@ impl DerivedIndexWorker {
             join_handle: Some(join_handle),
             generation: Some(generation),
             namespace_key,
+            open_abandoned,
         })
     }
 
@@ -193,13 +199,10 @@ impl DerivedIndexWorker {
 
     /// True when this worker's backend open was abandoned: a shutdown or the
     /// open deadline detached the open thread, which may still touch the
-    /// store after the supervisor exits. The namespace poison is the durable
-    /// record; read it only after `is_finished`, since `finish_worker` sets
-    /// it on the worker's exit path.
+    /// store after the supervisor exits. `finish_worker` records it on the
+    /// worker's exit path, so read it only after `is_finished`.
     pub fn open_was_abandoned(&self) -> bool {
-        self.namespace_key
-            .as_ref()
-            .is_some_and(|key| NAMESPACE_REGISTRY.is_poisoned(key))
+        self.open_abandoned.load(Ordering::Acquire)
     }
 
     /// Requests shutdown and joins the worker thread.
