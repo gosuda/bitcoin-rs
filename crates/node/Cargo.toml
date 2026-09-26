@@ -52,7 +52,6 @@ redb = [
 ]
 kernel = ["bitcoin-rs-chainstate/kernel", "bitcoin-rs-consensus/kernel"]
 zmq = ["bitcoin-rs-rpc/zmq"]
-prometheus-http = ["metrics-exporter-prometheus/http-listener"]
 
 [dependencies]
 hashbrown.workspace = true

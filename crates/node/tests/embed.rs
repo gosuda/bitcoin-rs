@@ -54,7 +54,7 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
         let state = NodeState::open(seed_config(&data_dir), None)?;
         state.apply_block(&Network::Regtest.genesis_block())?;
         let outcome = seed_chain(&state, SEED_BLOCKS)?;
-        state.publish_checkpoint()?;
+        let _ = state.publish_checkpoint()?;
         drop(state);
         outcome
     };
@@ -420,7 +420,7 @@ fn dropped_node_releases_services_and_datadir_for_reopen() -> Result<()> {
         let state = NodeState::open(seed_config(&data_dir), None)?;
         state.apply_block(&Network::Regtest.genesis_block())?;
         let outcome = seed_chain(&state, 1)?;
-        state.publish_checkpoint()?;
+        let _ = state.publish_checkpoint()?;
         drop(state);
         outcome
     };

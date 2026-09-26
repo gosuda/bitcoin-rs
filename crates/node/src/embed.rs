@@ -48,23 +48,20 @@ pub struct Node {
     pub(crate) context: Arc<bitcoin_rs_rpc::context::Context>,
 }
 
-// Keep these async methods compatible with supported Clippy versions.
+// Keep these async methods compatible with supported Clippy versions:
+// embedding defers synchronous work until polled, and the trait-impl lint
+// is newer than Rust 1.95.
 #[allow(
     unknown_lints,
+    clippy::unused_async,
     clippy::unused_async_trait_impl,
-    reason = "the method bodies run when the futures are polled"
+    reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
 )]
 impl Node {
     /// Starts an owned node after configuration validation and crash recovery.
     ///
     /// The method drives synchronous node workers on the caller's task. It
     /// neither installs process signal handlers nor creates an executor.
-    #[allow(
-        unknown_lints,
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
-    )]
     pub async fn start(
         config: crate::NodeConfig,
         runtime: crate::RuntimeInputs,
@@ -91,12 +88,6 @@ impl Node {
     }
 
     /// Returns a decoded block, distinguishing unknown from unavailable data.
-    #[allow(
-        unknown_lints,
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
-    )]
     pub async fn block_by_hash(&self, hash: BlockHash) -> Result<Option<Block>, NodeError> {
         let hash = Hash256::from(hash);
         let Some(record) = self.context.chain.block_by_hash(hash) else {
@@ -123,12 +114,6 @@ impl Node {
     /// A disabled or unhealthy confirmed index is unavailable, not an answer
     /// that the transaction does not exist. A complete negative lookup is
     /// `NodeError::NotFound`.
-    #[allow(
-        unknown_lints,
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
-    )]
     pub async fn tx_by_id(&self, txid: Txid) -> Result<Tx, NodeError> {
         let pooled = self.state.mempool().read().transaction_by_txid(&txid);
         if let Some(tx) = pooled {
@@ -169,12 +154,6 @@ impl Node {
     ///
     /// Policy checks and ordered publication belong to the shared gateway;
     /// embedding does not insert directly into the pool or own another gateway.
-    #[allow(
-        unknown_lints,
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
-    )]
     pub async fn broadcast(&self, tx: Tx) -> Result<MutationResult, NodeError> {
         let max_feerate = Some(bitcoin_rs_rpc::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB);
         self.context
@@ -183,12 +162,6 @@ impl Node {
     }
 
     /// Stops owned services, then publishes the clean-shutdown checkpoint.
-    #[allow(
-        unknown_lints,
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "embedding defers synchronous work until polled; the trait-impl lint is newer than Rust 1.95"
-    )]
     pub async fn shutdown(self) -> Result<(), NodeError> {
         self.shutdown_blocking()
     }
@@ -306,34 +279,6 @@ mod tests {
         config
     }
 
-    /// `P2WSH(OP_TRUE)`, spendable without fixture signature material.
-    fn spendable_script() -> Vec<u8> {
-        let mut script = vec![0x00, 0x20];
-        script.extend_from_slice(&[
-            0x4a, 0xe8, 0x15, 0x72, 0xf0, 0x6e, 0x1b, 0x88, 0xfd, 0x5c, 0xed, 0x7a, 0x1a, 0x00,
-            0x09, 0x45, 0x43, 0x2e, 0x83, 0xe1, 0x55, 0x1e, 0x6f, 0x72, 0x1e, 0xe9, 0xc0, 0x0b,
-            0x8c, 0xc3, 0x32, 0x60,
-        ]);
-        script
-    }
-
-    fn spending_tx(previous_output: OutPoint) -> Tx {
-        Tx {
-            version: 2,
-            lock_time: LockTime::from_consensus(0),
-            inputs: vec![TxIn {
-                previous_output,
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0xffff_ffff),
-                witness: Witness::from_stack(vec![vec![0x51]]),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(92_000),
-                script_pubkey: Script::from_bytes(spendable_script()),
-            }],
-        }
-    }
-
     #[test]
     // CONTRACT: docs/contracts/architecture.md#ARCH-05
     fn broadcast_publishes_one_ordered_a_event_through_the_shared_gateway() {
@@ -349,6 +294,29 @@ mod tests {
         ))
         .expect("embedded node starts");
 
+        // `P2WSH(OP_TRUE)`, spendable without fixture signature material;
+        // the spends below are this file's only consumers.
+        let mut op_true_p2wsh = vec![0x00, 0x20];
+        op_true_p2wsh.extend_from_slice(&[
+            0x4a, 0xe8, 0x15, 0x72, 0xf0, 0x6e, 0x1b, 0x88, 0xfd, 0x5c, 0xed, 0x7a, 0x1a, 0x00,
+            0x09, 0x45, 0x43, 0x2e, 0x83, 0xe1, 0x55, 0x1e, 0x6f, 0x72, 0x1e, 0xe9, 0xc0, 0x0b,
+            0x8c, 0xc3, 0x32, 0x60,
+        ]);
+        let spending = |previous_output: OutPoint| Tx {
+            version: 2,
+            lock_time: LockTime::from_consensus(0),
+            inputs: vec![TxIn {
+                previous_output,
+                script_sig: Script::new(),
+                sequence: Sequence::from_consensus(0xffff_ffff),
+                witness: Witness::from_stack(vec![vec![0x51]]),
+            }],
+            outputs: vec![TxOut {
+                value: Amount::from_sat(92_000),
+                script_pubkey: Script::from_bytes(op_true_p2wsh.clone()),
+            }],
+        };
+
         let broadcast_prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5A; 32])), 0);
         let direct_prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5B; 32])), 0);
         let mut changes = BlockChanges::default();
@@ -357,7 +325,7 @@ mod tests {
                 prevout,
                 TxOut {
                     value: Amount::from_sat(100_000),
-                    script_pubkey: Script::from_bytes(spendable_script()),
+                    script_pubkey: Script::from_bytes(op_true_p2wsh.clone()),
                 },
                 false,
                 1,
@@ -370,7 +338,7 @@ mod tests {
             .map_err(|error| format!("fixture utxo commit failed: {error}"))
             .expect("fixture utxo commit");
 
-        let broadcast_tx = spending_tx(broadcast_prevout);
+        let broadcast_tx = spending(broadcast_prevout);
         let broadcast_txid = broadcast_tx.txid();
         let result = block_on(node.broadcast(broadcast_tx)).expect("broadcast accepted");
         assert_eq!(result.len(), 1, "one admission commits one change");
@@ -391,7 +359,7 @@ mod tests {
         publisher.sequence_events.lock().clear();
 
         // Control: direct insertion cannot satisfy the gateway-publication test.
-        let direct_tx = spending_tx(direct_prevout);
+        let direct_tx = spending(direct_prevout);
         let vsize = u32::try_from(direct_tx.vsize()).unwrap_or(u32::MAX);
         let entry = MempoolEntry::new(Arc::new(direct_tx), vsize, 8_000, 0, 1, 0);
         node.state

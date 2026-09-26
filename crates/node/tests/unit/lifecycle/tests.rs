@@ -21,7 +21,7 @@ fn isolated_config(data_dir: &Path) -> NodeConfig {
 
 fn seed_checkpoint(state: &NodeState) -> anyhow::Result<(PathBuf, Vec<u8>)> {
     state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
-    state.write_clean_checkpoint()?;
+    let _ = state.publish_checkpoint()?;
     let current = state
         .data_dir()
         .join("chainstate-checkpoints")

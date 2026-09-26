@@ -588,7 +588,8 @@ mod tests {
     /// Exercise committed-outcome dispatch with a real gateway, without any
     /// mempool mutation or observer that could independently wake the child.
     /// Full chain application and transition ownership have separate tests in
-    /// apply.rs; this checks the follower's lifecycle notification boundary.
+    /// `crates/chainstate`; this checks the follower's lifecycle notification
+    /// boundary.
     #[allow(clippy::too_many_lines)]
     fn assert_admission_followers_after_chain_change(connect: bool) -> anyhow::Result<()> {
         let gateway = MempoolGateway::shared(Arc::new(RwLock::new(Mempool::new(

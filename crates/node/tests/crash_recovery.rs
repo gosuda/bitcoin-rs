@@ -168,7 +168,7 @@ fn checkpoint_fallback_replays_wide_gap_to_durable_head() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config.clone(), None)?;
     state.apply_block(&genesis)?;
-    state.publish_checkpoint()?;
+    let _ = state.publish_checkpoint()?;
     let mut parent = genesis.block_hash();
     for height in 1..=GAP_BLOCKS {
         let block = mined_regtest_child_at(parent, height)?;
@@ -210,7 +210,7 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     old_config.chainstate_journal.enabled = false;
     let old = NodeState::open(old_config.clone(), None)?;
     let genesis_tip = old.apply_block(&genesis)?;
-    old.publish_checkpoint()?;
+    let _ = old.publish_checkpoint()?;
     drop(old);
 
     let journal_dir = data_dir.join("chainstate-journal");
@@ -241,7 +241,7 @@ fn upgrade_matrix_falls_back_without_misclassifying_corruption() -> Result<()> {
     let generation_change = NodeState::open(old_config, None)?;
     let block1 = mined_regtest_child_at(genesis.block_hash(), 1)?;
     let block1_tip = generation_change.apply_block(&block1)?;
-    generation_change.publish_checkpoint()?;
+    let _ = generation_change.publish_checkpoint()?;
     drop(generation_change);
 
     let generation_fallback = NodeState::open(enabled, None)?;
@@ -274,7 +274,7 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
         }
         "publication" => {
             state.apply_block(&genesis)?;
-            state.publish_checkpoint()?;
+            let _ = state.publish_checkpoint()?;
             state.apply_block(&block1)?;
         }
         "disconnect-rolledback" => {
@@ -296,7 +296,7 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
             // The checkpoint lands above the block the disconnect then
             // rewinds past: the restored tip sits at or above the durable
             // head.
-            state.publish_checkpoint()?;
+            let _ = state.publish_checkpoint()?;
             // The rollback completes; the journal is disabled, so nothing
             // clears the marker on the way down.
             state.chainstate().disconnect_block(&block1)?;
@@ -363,7 +363,7 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
     if scenario != "publication" {
         let base = NodeState::open(config.clone(), None)?;
         base.apply_block(&genesis)?;
-        base.publish_checkpoint()?;
+        let _ = base.publish_checkpoint()?;
         drop(base);
     }
 
@@ -405,7 +405,7 @@ fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig,
     let genesis = Network::Regtest.genesis_block();
     let base = NodeState::open(config.clone(), None)?;
     base.apply_block(&genesis)?;
-    base.publish_checkpoint()?;
+    let _ = base.publish_checkpoint()?;
     drop(base);
 
     spawn_kill_and_wait(scenario, &data_dir, 30)?;

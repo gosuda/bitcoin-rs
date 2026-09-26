@@ -321,14 +321,6 @@ impl MiningService {
         self.wake.notify_all();
     }
 
-    /// Reduces shutdown latency after the caller sets the shared shutdown flag.
-    ///
-    /// Correctness does not depend on this notification: every wait is bounded
-    /// and rechecks the shutdown predicate.
-    pub fn notify_shutdown(&self) {
-        self.wake.notify_all();
-    }
-
     fn live_generation_key(&self) -> GenerationKey {
         let tip_hash = self
             .applied_tip

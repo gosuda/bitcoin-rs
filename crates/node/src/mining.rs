@@ -94,14 +94,6 @@ impl MiningCoordinator {
         }
     }
 
-    /// Reduces shutdown latency after the caller sets the shared shutdown flag.
-    ///
-    /// Correctness does not depend on this notification: every wait is bounded
-    /// and rechecks the shutdown predicate.
-    pub fn notify_shutdown(&self) {
-        self.service.notify_shutdown();
-    }
-
     fn propose(&self, block: &Block) -> Result<BlockValidationResult, MiningControlError> {
         // Core GBT proposal looks the hash up before TestBlockValidity.
         if let Some(known) = self.known_block_result(block.block_hash().into()) {

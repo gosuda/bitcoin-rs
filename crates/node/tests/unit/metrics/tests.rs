@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitcoin_rs_index::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
@@ -90,7 +90,7 @@ fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
     );
 
     drop(occupied);
-    let server = start_metrics(Some(unused_ephemeral()), shutdown, &identity())
+    let mut server = start_metrics(Some(unused_ephemeral()), shutdown, &identity())
         .unwrap_or_else(|error| panic!("retry after occupied bind: {error}"))
         .unwrap_or_else(|| panic!("metrics server"));
     metrics::counter!("node_metrics_retry_probe").increment(1);
@@ -100,14 +100,14 @@ fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
         body.contains("node_metrics_retry_probe"),
         "retry scrape missing recorded metric: {body}"
     );
-    server.join();
+    server.stop_and_join();
 }
 
 #[test]
 fn scrape_returns_prometheus_text_with_recorded_metrics() {
     let _guard = SERVER_TEST_LOCK.lock();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
+    let mut server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     metrics::counter!("node_metrics_scrape_probe").increment(1);
     let (status, body) = scrape(server.local_addr());
@@ -120,63 +120,50 @@ fn scrape_returns_prometheus_text_with_recorded_metrics() {
         body.contains("node_metrics_scrape_probe"),
         "body must include recorded metric: {body}"
     );
-    server.join();
+    server.stop_and_join();
 }
 
 #[test]
 fn two_sequential_servers_in_one_process_both_serve() {
     let _guard = SERVER_TEST_LOCK.lock();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let first = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
+    let mut first = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
         .unwrap_or_else(|error| panic!("first: {error}"));
     metrics::counter!("node_metrics_sequential_probe").increment(1);
     let (status, body) = scrape(first.local_addr());
     assert_eq!(status, 200);
     assert!(body.contains("node_metrics_sequential_probe"));
-    first.join();
+    first.stop_and_join();
 
-    let second = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
+    let mut second = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
         .unwrap_or_else(|error| panic!("second: {error}"));
     metrics::counter!("node_metrics_sequential_probe").increment(1);
     let (status, body) = scrape(second.local_addr());
     assert_eq!(status, 200);
     assert!(body.contains("node_metrics_sequential_probe"));
-    second.join();
+    second.stop_and_join();
 }
 
 #[test]
 fn shutdown_exits_the_listener_thread() {
     let _guard = SERVER_TEST_LOCK.lock();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
+    let mut server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     let addr = server.local_addr();
     shutdown.store(true, Ordering::Release);
-    server.join();
-    TcpListener::bind(addr)
-        .unwrap_or_else(|error| panic!("port released after listener join: {error}"));
-}
-
-#[test]
-fn run_retries_metrics_bind_after_occupied_address() {
-    let _guard = SERVER_TEST_LOCK.lock();
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let occupied =
-        TcpListener::bind(unused_ephemeral()).unwrap_or_else(|error| panic!("occupy: {error}"));
-    let busy = occupied
-        .local_addr()
-        .unwrap_or_else(|error| panic!("busy addr: {error}"));
-    assert!(
-        start_metrics(Some(busy), Arc::clone(&shutdown), &identity()).is_err(),
-        "run-path bind must fail on an occupied address"
-    );
-    drop(occupied);
-    let server = start_metrics(Some(unused_ephemeral()), shutdown, &identity())
-        .unwrap_or_else(|error| panic!("run-path retry: {error}"))
-        .unwrap_or_else(|| panic!("server"));
-    let (status, _) = scrape(server.local_addr());
-    assert_eq!(status, 200);
-    server.join();
+    // The shutdown flag alone must end the scrape loop: `stop_and_join`'s
+    // own `stop` signal only fires afterwards, so binding before the
+    // deadline proves the shutdown-driven exit.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpListener::bind(addr).is_err() {
+        assert!(
+            Instant::now() < deadline,
+            "listener never exited on the shutdown flag"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    server.stop_and_join();
 }
 
 /// One rendered readiness sample: `(state label, value)`.
@@ -256,7 +243,7 @@ fn assert_one_active(samples: &[RenderedSample], expected: &str) {
 fn published_gauge_flips_its_active_label_with_the_rpc_source() {
     let _guard = SERVER_TEST_LOCK.lock();
     let shutdown = Arc::new(AtomicBool::new(false));
-    let server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
+    let mut server = MetricsServer::bind(unused_ephemeral(), Arc::clone(&shutdown), &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
 
     publish_txindex_readiness(&FixedSource::enabled(CapabilityState::Ready));
@@ -287,6 +274,5 @@ fn published_gauge_flips_its_active_label_with_the_rpc_source() {
     let samples = readiness_samples(&scrape_body(server.local_addr()));
     assert_one_active(&samples, "Disabled");
 
-    server.join();
-    shutdown.store(true, Ordering::Release);
+    server.stop_and_join();
 }

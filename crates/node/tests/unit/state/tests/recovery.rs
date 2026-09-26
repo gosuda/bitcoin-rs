@@ -230,7 +230,7 @@ fn stale_checkpoint_restore_surfaces_warning_not_silence() -> anyhow::Result<()>
     let state = NodeState::open(config.clone(), None)?;
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
-    state.write_clean_checkpoint()?;
+    let _ = state.publish_checkpoint()?;
     drop(state);
 
     // Simulate the #208 scenario: the node previously ran far ahead

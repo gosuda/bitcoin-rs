@@ -32,7 +32,6 @@ use crossbeam_channel::Sender;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
-pub use prune::NodePruneService;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -342,19 +341,14 @@ impl NodeState {
         Ok(outcome.tip)
     }
 
-    /// Publishes a durable clean checkpoint and returns the published
-    /// generation, or an error if there is no applied tip.
+    /// Publishes one durable clean checkpoint.
     ///
-    /// This is the public boundary for the private checkpoint machinery; it
-    /// keeps `CheckpointWrite`, `CheckpointError`, and the checkpoint module
-    /// internal to the crate.
-    pub fn publish_checkpoint(&self) -> Result<u64> {
-        self.chainstate
-            .publish_checkpoint()?
-            .context("checkpoint refused: no applied tip to publish")
-    }
-
-    pub(crate) fn write_clean_checkpoint(&self) -> anyhow::Result<Option<u64>> {
+    /// PRE: the node state is open.
+    /// POST: the chainstate checkpoint result is returned, including `None`
+    /// when no applied tip exists to publish.
+    /// INVARIANT: publication goes through the chainstate's durable publish
+    /// path; this method adds no policy of its own.
+    pub fn publish_checkpoint(&self) -> Result<Option<u64>> {
         Ok(self.chainstate.publish_checkpoint()?)
     }
 

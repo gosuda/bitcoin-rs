@@ -391,7 +391,7 @@ fn publish_clean_checkpoint_if_eligible(
 ) {
     if let (Some(state), TeardownMode::CleanShutdown, None) = (state, mode, first_error.as_ref()) {
         run_before_clean_checkpoint_hook();
-        match state.write_clean_checkpoint() {
+        match state.publish_checkpoint() {
             Ok(None) => {
                 tracing::info!("no applied tip; clean checkpoint publication skipped");
             }

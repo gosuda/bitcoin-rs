@@ -48,7 +48,7 @@ fn replay_10k_records_with_bounded_time_and_memory() -> Result<()> {
     let genesis = Network::Regtest.genesis_block();
     let state = NodeState::open(config, None)?;
     state.apply_block(&genesis)?;
-    state.publish_checkpoint()?;
+    let _ = state.publish_checkpoint()?;
 
     let mut previous = genesis.block_hash();
     for height in 1..=RECORDS {

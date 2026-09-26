@@ -42,10 +42,11 @@ Data-directory storage evidence is an explicit command, not a node service:
 `bitcoin-rs --measure-storage` emits the logical and physical ledgers defined
 in [storage-footprint.md](../../docs/contracts/storage-footprint.md).
 
-The node crate registers `benches/sync_pipeline.rs` as a Criterion benchmark and
-`benches/chainstate_journal.rs` as a harness-less replay gate (its own `main`).
-Large corpus/replay/evidence harnesses are intentionally not shipped by this
-runtime crate.
+The node crate registers three benchmark targets: `benches/sync_pipeline.rs`,
+a harness-less deterministic initial-sync proxy benchmark (its own `main`);
+`benches/chainstate_journal.rs`, a harness-less journal replay performance
+and memory gate (its own `main`); and `benches/evidence.rs`, the recorded
+sync-pipeline evidence unit tests behind the built-in harness.
 
 ## Features
 - `default` (enables `fjall`, `kernel`, and `zmq`): the performance-oriented fjall
@@ -57,8 +58,6 @@ runtime crate.
   crate.
 - `kernel`: route consensus verification through bitcoinkernel
   (`bitcoin-rs-consensus/kernel`).
-- `prometheus-http`: enables the `metrics-exporter-prometheus/http-listener` feature;
-  the production listener itself is controlled by `metrics_bind`.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.
