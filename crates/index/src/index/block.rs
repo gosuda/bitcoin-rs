@@ -1,8 +1,13 @@
 //! Parse-once block preparation and authoritative spent-script anchoring.
 
 use super::{
-    capability::{IndexCapabilities, IndexCapability}, error::IndexError, prepared::PreparedBlock, rows::LiveOp,
-    rows::PendingRows, rows::PositionedRow, write::IndexWriter,
+    capability::{IndexCapabilities, IndexCapability},
+    error::IndexError,
+    prepared::PreparedBlock,
+    rows::LiveOp,
+    rows::PendingRows,
+    rows::PositionedRow,
+    write::IndexWriter,
 };
 use crate::{
     types::HashPrefixRow, types::HeaderRow, types::ScriptHash, types::SpendingPrefixRow,
@@ -119,7 +124,8 @@ fn pending_rows_for_block_with_header(
             let script = tx
                 .span_bytes(output.script_pubkey())
                 .unwrap_or_else(|| unreachable!("output span belongs to the parsed image"));
-            if capabilities.contains(IndexCapability::ScriptHistory) && !is_op_return_script(script) {
+            if capabilities.contains(IndexCapability::ScriptHistory) && !is_op_return_script(script)
+            {
                 rows.funding_rows.push(PositionedRow {
                     row: HashPrefixRow {
                         prefix: ScriptHash::from_script_bytes(script).prefix(),
