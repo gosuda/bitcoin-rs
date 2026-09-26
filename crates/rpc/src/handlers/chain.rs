@@ -5040,8 +5040,12 @@ mod scantxoutset_tests {
     ) {
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
-        bitcoin_rs_utxo::contract::commit_block_changes(&ctx.chain.utxo, &changes, &test_txid(8_000))
-            .unwrap_or_else(|err| panic!("commit utxo failed: {err}"));
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            &ctx.chain.utxo,
+            &changes,
+            &test_txid(8_000),
+        )
+        .unwrap_or_else(|err| panic!("commit utxo failed: {err}"));
     }
 
     #[test]
