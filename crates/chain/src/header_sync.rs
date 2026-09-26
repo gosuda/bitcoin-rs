@@ -469,9 +469,14 @@ pub fn bip94_timewarp_floor(network: Network, height: u32, parent_time: u32) -> 
 
 /// Compact proof-of-work target decode/encode and block-work helpers.
 ///
-/// These mirror Bitcoin Core's `arith_uint256::SetCompact` decode exactly —
-/// a signed encoding decodes to zero — and `GetCompact` for non-negative
-/// targets on the encode side.
+/// `decode_compact` mirrors Bitcoin Core's `arith_uint256::SetCompact`: the
+/// sign bit is masked out of the mantissa, the magnitude is decoded, and
+/// the sign is reported separately (`negative`, like Core's `pfNegative`,
+/// with `pfOverflow` for size overflow). `compact_to_target` then diverges
+/// deliberately: Core's consensus check rejects the flagged encoding,
+/// while this crate maps a signed encoding to `ChainWork::ZERO` — both
+/// reject the header in practice. `target_to_compact` covers `GetCompact`
+/// for non-negative targets.
 pub(crate) mod pow {
     use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
