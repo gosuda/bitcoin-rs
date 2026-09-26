@@ -33,6 +33,19 @@ impl FeeEstimation {
     }
 }
 
+/// Policy limit enforcement strategy for admission.
+///
+/// [`LimitEnforcement::Full`] applies every policy gate; [`LimitEnforcement::Deferred`]
+/// bypasses cluster limits and per-accept trim during individual admit attempts,
+/// deferring the total-size trim to one post-settlement pass (reorg re-admission).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LimitEnforcement {
+    /// Apply all policy limits immediately.
+    Full,
+    /// Defer cluster and trim limits to post-settlement.
+    Deferred,
+}
+
 /// Candidate transaction and feerate policy used for replacement validation.
 #[derive(Clone, Debug)]
 pub struct ReplacementCandidate {
@@ -188,6 +201,7 @@ pub(crate) struct ReplacementInputs {
     max_vsize: u64,
     limits: crate::MempoolLimits,
     fee_estimation: FeeEstimation,
+    enforcement: LimitEnforcement,
 }
 
 pub(crate) struct PreparedPoolChange {
@@ -201,6 +215,13 @@ pub(crate) struct PreparedPoolChange {
 impl ReplacementInputs {
     /// The potentially expensive graph solver runs over owned facts, with
     /// no pool guard held. The returned plan can only commit at its stamp.
+    ///
+    /// INVARIANT: under [`LimitEnforcement::Deferred`] the per-acceptance
+    /// size trim is not applied — a trim during the walk would shed a parent
+    /// before the child that spends it is re-admitted, and one trim runs
+    /// over the settled pool instead (Core bounds the pool once the new
+    /// branch is active). The projected cluster limits still apply: Core's
+    /// `bypassLimits` path never skips `CalculateMemPoolAncestors`.
     pub(crate) fn verify(self) -> Result<PreparedPoolChange, RbfError> {
         let Some((before_graph, after_graph)) = self.graphs else {
             return Ok(PreparedPoolChange {
@@ -212,7 +233,9 @@ impl ReplacementInputs {
             });
         };
         after_graph.check_limits(self.limits)?;
-        let needs_trim = self.max_vsize > 0 && self.projected_vsize > self.max_vsize;
+        let needs_trim = self.enforcement == LimitEnforcement::Full
+            && self.max_vsize > 0
+            && self.projected_vsize > self.max_vsize;
         let after_chunks = if self.direct.is_empty() && !needs_trim {
             Vec::new()
         } else {
@@ -290,10 +313,20 @@ impl Mempool {
         &self,
         entry: MempoolEntry,
         fee_estimation: FeeEstimation,
+        enforcement: LimitEnforcement,
     ) -> Result<ReplacementInputs, RbfError> {
-        self.capture_admission(entry, Vec::new(), 0, false, fee_estimation)
+        self.capture_admission(entry, Vec::new(), 0, false, fee_estimation, enforcement)
     }
 
+    /// Captures one replacement, resolving its conflict set.
+    ///
+    /// PRE: `candidate` describes a transaction whose fee and vsize are
+    /// already resolved against the current chain and pool.
+    /// POST: the returned inputs describe the removals and the prepared entry
+    /// the commit would apply, with no pool state changed.
+    /// INVARIANT: this door enforces in full. The admission owner that derives
+    /// enforcement from the origin owns the deferred path: it collects the
+    /// conflict set itself and calls `capture_admission` with it.
     pub(crate) fn capture_replacement(
         &self,
         candidate: &ReplacementCandidate,
@@ -317,13 +350,14 @@ impl Mempool {
             candidate.min_relay_fee_rate,
             sibling_eviction,
             fee_estimation,
+            LimitEnforcement::Full,
         )
     }
 
     /// Captures one admission's graph work outside the writer.
     ///
-    /// PRE: `conflicts` and `sibling_eviction` are the pair returned by one
-    /// `truc_conflicts` call; `entry` is complete.
+    /// PRE: `conflicts` and `sibling_eviction` are one conflict-set pair the
+    /// admission owner chose; `entry` is complete.
     /// POST: the inputs verify into a plan that commits only at the captured
     /// stamp; no pool state changes here.
     /// INVARIANT: a non-empty `conflicts` vec is the only route that applies
@@ -336,6 +370,7 @@ impl Mempool {
         incremental_fee_rate: u64,
         sibling_eviction: bool,
         fee_estimation: FeeEstimation,
+        enforcement: LimitEnforcement,
     ) -> Result<ReplacementInputs, RbfError> {
         if !u32::try_from(self.conflicting_cluster_count(&conflicts)?)
             .is_ok_and(|count| count <= self.limits.max_replacement_clusters)
@@ -389,15 +424,19 @@ impl Mempool {
             .checked_sub(removed_vsize)
             .and_then(|size| size.checked_add(u64::from(entry.vsize)))
             .ok_or(RbfError::ArithmeticOverflow)?;
-        let include_all =
-            self.limits.max_total_bytes > 0 && projected_vsize > self.limits.max_total_bytes;
+        // The whole-pool projection exists to feed the size trim; a deferred
+        // admission defers that trim to settlement, so it only ever needs the
+        // affected-cluster graph that `check_limits` reads.
+        let include_all = enforcement == LimitEnforcement::Full
+            && self.limits.max_total_bytes > 0
+            && projected_vsize > self.limits.max_total_bytes;
         let graphs = if conflicts.is_empty() && !include_all {
             None
         } else {
             Some(self.projected_graphs(core::slice::from_ref(&entry), &evicted, include_all)?)
         };
         let excluded: HashSet<_> = evicted.iter().copied().collect();
-        let entry = self.validate_insert(entry, &excluded)?;
+        let entry = self.validate_insert(entry, &excluded, enforcement)?;
         Ok(ReplacementInputs {
             stamp: self.policy_stamp(),
             direct: conflicts.into_iter().collect(),
@@ -408,6 +447,7 @@ impl Mempool {
             max_vsize: self.limits.max_total_bytes,
             limits: self.limits,
             fee_estimation,
+            enforcement,
         })
     }
 
