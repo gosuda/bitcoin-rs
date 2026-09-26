@@ -48,13 +48,15 @@ fn assert_reaped(pid: u32) {
 
 /// The exact binary this test package is compiled against — not the
 /// newest-file heuristic the e2e crate uses for cross-package callers.
-const SELF_BINARY: &Path = Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"));
+fn self_binary() -> &'static Path {
+    Path::new(env!("CARGO_BIN_EXE_bitcoin-rs"))
+}
 
 fn start(binary: Kind) -> ProcessNode {
     ProcessNode::spawn_with(
         binary,
         &SpawnOptions {
-            binary: Some(SELF_BINARY),
+            binary: Some(self_binary()),
             ..Default::default()
         },
     )
@@ -505,7 +507,7 @@ fn rejected_startup_options_leave_no_child() {
     let error = match ProcessNode::spawn_with(
         Kind::BitcoinRs,
         &SpawnOptions {
-            binary: Some(SELF_BINARY),
+            binary: Some(self_binary()),
             extra_args: &["--process-harness-invalid-option"],
             timeout: Some(Duration::from_secs(5)),
             ..Default::default()
@@ -537,7 +539,7 @@ fn successful_child_exit_before_readiness_is_not_startup_success() {
     let error = match ProcessNode::spawn_with(
         Kind::BitcoinRs,
         &SpawnOptions {
-            binary: Some(SELF_BINARY),
+            binary: Some(self_binary()),
             extra_args: &["--help"],
             timeout: Some(Duration::from_secs(5)),
             ..Default::default()
@@ -559,7 +561,7 @@ fn readiness_deadline_reaps_the_child() {
     let error = match ProcessNode::spawn_with(
         Kind::BitcoinRs,
         &SpawnOptions {
-            binary: Some(SELF_BINARY),
+            binary: Some(self_binary()),
             timeout: Some(Duration::ZERO),
             ..Default::default()
         },
@@ -795,7 +797,7 @@ fn start_txindex_node() -> ProcessNode {
     ProcessNode::spawn_with(
         Kind::BitcoinRs,
         &SpawnOptions {
-            binary: Some(SELF_BINARY),
+            binary: Some(self_binary()),
             extra_args: &["--txindex=true"],
             timeout: Some(START_TIMEOUT),
             ..Default::default()
@@ -1037,7 +1039,7 @@ fn startup_readiness_agrees_across_rpc_esplora_and_metrics() {
     let mut node = ProcessNode::spawn_with(
         Kind::BitcoinRs,
         &SpawnOptions {
-            binary: Some(SELF_BINARY),
+            binary: Some(self_binary()),
             extra_args: &["--txindex=true", metrics_flag.as_str()],
             timeout: Some(START_TIMEOUT),
             ..Default::default()
@@ -1204,7 +1206,7 @@ fn destroyed_index_rebuilds_from_canonical_data_and_restores_history() {
     let mut rebuilt = ProcessNode::spawn_in_datadir(
         Kind::BitcoinRs,
         &SpawnOptions {
-            binary: Some(SELF_BINARY),
+            binary: Some(self_binary()),
             extra_args: &["--txindex=true"],
             timeout: Some(START_TIMEOUT),
             ..Default::default()
@@ -1269,7 +1271,7 @@ fn clean_restart_restores_ready_readiness_at_the_pinned_tip() {
     let mut restarted = ProcessNode::spawn_in_datadir(
         Kind::BitcoinRs,
         &SpawnOptions {
-            binary: Some(SELF_BINARY),
+            binary: Some(self_binary()),
             extra_args: &["--txindex=true"],
             timeout: Some(START_TIMEOUT),
             ..Default::default()

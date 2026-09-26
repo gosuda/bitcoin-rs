@@ -15,8 +15,6 @@
 
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
-mod support;
-
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
@@ -34,9 +32,10 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_e2e::node::workspace;
+use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::{Error as HarnessError, Kind, ProcessNode};
 use serde_json::{Value, json};
-use support::process_node::{HarnessError, NodeBinary, ProcessNode, workspace};
-use support::process_peer::connect_loopback;
 
 const REGTEST_BITS: u32 = 0x207f_ffff;
 const HEADER_BYTES: usize = 24;
@@ -533,7 +532,7 @@ fn wait_with_pump(
 
 #[test]
 fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), HarnessError> {
-    let mut node = ProcessNode::start(NodeBinary::BitcoinRs)?;
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let mut peer = GatePeer::connect(&node, "gate")?;
     let mut bystander = GatePeer::connect(&node, "bystander")?;
 

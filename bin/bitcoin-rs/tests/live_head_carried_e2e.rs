@@ -2,7 +2,7 @@
 //! against a spawned bitcoin-rs daemon (regtest, fjall). A loopback wire peer
 //! announces blocks by `inv` only — never sending a `headers` batch for them —
 //! so the delivered body is the node's only copy of the header and must admit
-//! through the staged-body path (P2P-06 + `reconcile_received_heights`).
+//! through the staged-body path (P2P-06 + the received-ledger repair).
 //!
 //!  * T1: headers bootstrap, then inv-only live-head blocks apply one after
 //!    another via their carried headers — no stall across the chain.
@@ -324,9 +324,9 @@ fn carried_header_live_head_applies_and_continues() -> Result<(), Error> {
 
 /// T2: a delivered body whose carried header's parent is unknown is not a
 /// peer fault — the node must issue a recovery `getheaders`, then apply the
-/// staged body in place once the ancestors land. The NEW
-/// `reconcile_received_heights` must repair the 0-height sentinel on h4's
-/// received entry: the node must never re-request h4 and must apply it.
+/// staged body in place once the ancestors land. The received-ledger repair
+/// must replace the 0-height sentinel on h4's received entry: the node must
+/// never re-request h4 and must apply it.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn missing_parent_delivery_recovers_via_getheaders() -> Result<(), Error> {
