@@ -104,7 +104,8 @@ per-peer outbound saturation cancels that connection's lease. Each queued
 announcement is checked against the shared mempool at send time: a
 transaction that left the pool before the relay worker sent it (block
 connection, replacement, eviction, or reorg) is consumed with no `inv`, so a
-peer never receives an announcement whose body `getdata` cannot retrieve.
+peer never receives an announcement for a transaction that had already left
+the pool at send time.
 
 The inventory view respects the reject cache's identity scope: witness-only
 refusals suppress the exact wtxid, not legacy txid inventory or another
@@ -139,14 +140,22 @@ Structural invariants, verified by the deterministic fixtures (`crates/p2p/tests
 
 ## 7. Deviation Ledger
 
-Known deltas from Core 31.1:
+Known deltas from Core 31.1 (the `TXR-nn` labels index Core's tx-relay
+inventory in `net_processing.cpp`: TXR-01–07 are the per-peer request-tracker
+duties Core 31.1 owns in `node::TxDownloadManager` (`src/node/txdownloadman.h`),
+issued through `GetRequestsToSend` in `SendMessages` (`net_processing.cpp:6206`);
+TXR-09 is the trickled inventory schedule, `m_next_inv_send_time` at
+`net_processing.cpp:319` under the `INVENTORY_BROADCAST_*` delays at `:163-166`):
 
 1. **BIP324 v2 transport**: not implemented. We speak v1 only; Core 31 accepts v1 peers.
 2. **BIP330 `sendtxrcncl`**: not implemented; it is the one Core 31 command missing from our 36-command table. Decoded as `Unknown`: ignored from a ready peer (Core ignores unknown commands too), disconnected before readiness. Core whitelists it during handshake, so the only affected topology is a Core peer *dialing* bitcoin-rs with `-txreconciliation=1`. The supported topology — bitcoin-rs dials Core, Core sees an inbound peer — never receives it, because Core sends `sendtxrcncl` to outbound peers only.
 3. **Proactive block announcements**: absent. We do not broadcast `inv`/`headers`/`cmpctblock` for new blocks. Accepted transactions are announced with the negotiated inventory type (§5). Live relay of Core-originated blocks into bitcoin-rs is exercised by the interop lane (§8).
 4. **Address management**: absent. There is no address store, no feeler
-   connection policy, no `getaddr` response, and no addr/addrv2 gossip; peer
-   discovery is limited to the configured `--connect`/`--addnode` surfaces.
+   connection policy, no `getaddr` response, and no addr/addrv2 gossip.
+   Outbound peer discovery runs through DNS-seed bootstrap (on by default:
+   `run_dns_peer_maintenance`, `crates/p2p/src/service.rs`, seeds from
+   `Network::dns_seeds`) and the configured `--connect`/`--addnode`
+   surfaces.
 5. **Service bits**: the advertised set follows storage (`init.cpp:2022-2026`): `NETWORK | WITNESS` normally, `NETWORK_LIMITED | WITNESS` when `storage.prune_target_mb > 0`, so a pruned node never claims a full block history. No `NODE_BLOOM` or `NODE_COMPACT_FILTERS` — those services do not exist here.
 6. **Timestamp**: `version.timestamp` is always 0 (§4).
 7. **Automatic misbehavior bans** (§6) absent; manual bans only.
