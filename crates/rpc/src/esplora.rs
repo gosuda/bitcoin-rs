@@ -1519,6 +1519,7 @@ mod tests {
     fn seed_mempool(ctx: Context, seeds: &[Seed]) -> Arc<Context> {
         for seed in seeds {
             ctx.mempool
+                .gateway
                 .pool()
                 .write()
                 .insert_entry(MempoolEntry::new(
@@ -1578,7 +1579,7 @@ mod tests {
         });
 
         let reached_binning = entered_recv.recv_timeout(GATE_TIMEOUT).is_ok();
-        let writer_progress = ctx.mempool.pool().try_write().is_some();
+        let writer_progress = ctx.mempool.gateway.pool().try_write().is_some();
         let _ = release_send.send(());
         let response = request.join().expect("gated request completes");
 
@@ -1665,7 +1666,7 @@ mod tests {
             });
         }
         let mut ctx = Context::new();
-        ctx.script_index = Some(Arc::new(StaticScriptIndex {
+        ctx.indexes.script_index = Some(Arc::new(StaticScriptIndex {
             history: Vec::new(),
             funding: Vec::new(),
             unspent: Vec::new(),
