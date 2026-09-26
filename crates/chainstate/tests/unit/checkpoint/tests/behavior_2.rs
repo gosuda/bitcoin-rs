@@ -74,6 +74,13 @@ fn checkpoint_writer_reports_height_mismatch_before_count_mismatch()
     let dir = tempfile::tempdir()?;
     let (tree, _, applied) = chain_with_applied_height(0, 0)?;
     let applied_tip = tip_snapshot(&tree, applied)?;
+    // The ordering claim needs a count disagreement to actually exist: an
+    // UNKNOWN tip count is skipped by validation, which would report the
+    // height error even if count validation ran first.
+    let applied_tip = bitcoin_rs_chain::TipSnapshot {
+        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(2),
+        ..applied_tip
+    };
     let data_dir = super::super::open_data_dir(dir.path())?;
     let mut stats = CoinStats::new();
     stats.finish_block(1, 1);

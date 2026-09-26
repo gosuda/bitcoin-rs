@@ -59,7 +59,8 @@ pub struct BlockTreeNode {
     /// Accumulated work through this header.
     pub chainwork: ChainWork,
     /// Cumulative transaction count through this node: `UNKNOWN` until a
-    /// counted parent or genesis establishes it.
+    /// counted parent or genesis establishes it, or a checkpoint restore
+    /// applies an authenticated count directly (`restore_chain_tx_count`).
     pub chain_tx_count: ChainTxCount,
     /// Node validation and chain-selection status.
     pub status: NodeStatus,

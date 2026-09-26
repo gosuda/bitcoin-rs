@@ -56,8 +56,9 @@ identity-checked removal go through `PeerTable`, used by the inbound TCP
 `ConnectionId` and cleaned up through a `PeerLease`. The `listener` module has one
 entry point per role: `bind_listener` binds a local address, `serve` runs the accept
 loop on that bound listener until shutdown, and `spawn_outbound_connection` dials one
-peer. All three read one cloneable `ConnectionShared` wiring value per start epoch,
-which also owns the header, block, and transaction sinks. A connection negotiates
+peer. `serve` and `spawn_outbound_connection` read one cloneable `ConnectionShared`
+wiring value per start epoch, which also owns the header, block, and transaction
+sinks. A connection negotiates
 version/verack in `handshake`, then runs the peer finite-state machine in `fsm`;
 `wire` is the protocol codec, decoding `Message` values and reporting `PeerError`. Inbound traffic reaches
 the host through `dispatch_inbound_full`, which streams getdata responses

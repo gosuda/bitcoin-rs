@@ -245,6 +245,7 @@ impl ChainQuery for FakeChain {
     fn block_transactions(
         &self,
         _request: &BlockTransactionsRequest,
+        _headroom: &dyn Fn() -> bool,
     ) -> Result<Option<Message>, PeerError> {
         Ok(None)
     }

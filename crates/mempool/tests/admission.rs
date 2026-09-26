@@ -438,10 +438,11 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
 
 /// A v3 candidate whose direct-conflict set is empty still enters through the
 /// replacement door when its parent holds one in-pool v3 sibling: the
-/// discriminator is the conflicts vec `truc_conflicts` returns, not a separate
-/// direct-conflict lookup. Branching on the latter would send this candidate
-/// through the plain door, where BIP431 rejects the parent's second descendant
-/// with `TrucError::Descendants`.
+/// discriminator is the conflicts vec `truc_conflicts` returns, and it runs
+/// before the door is chosen. No TRUC check runs in the plain door itself —
+/// routing on a separate direct-conflict lookup would instead admit this
+/// candidate alongside the sibling, and the regression would surface in the
+/// `removed_txids`/`contains_txid` assertions, not as a `TrucError`.
 #[test]
 fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacement_door()
 -> Result<(), Box<dyn Error>> {

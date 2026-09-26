@@ -17,6 +17,18 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Reads the applied tip's chain transaction count; `UNKNOWN` before the
+/// first publication.
+fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_chain::ChainTxCount {
+    state
+        .chainstate()
+        .applied_tip_handle()
+        .load_full()
+        .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| {
+            tip.chain_tx_count
+        })
+}
+
 fn stable_utxo_hash(
     view: &bitcoin_rs_utxo::UtxoSetView<'_>,
 ) -> Result<Hash256, bitcoin_rs_utxo::UtxoError> {
@@ -44,13 +56,7 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
         .utxo_handle()
         .with_stable_view(stable_utxo_hash)?;
     let expected_stats = initial.chainstate().coin_stats_handle().snapshot();
-    let expected_tx_count = initial
-        .chainstate()
-        .applied_tip_handle()
-        .load_full()
-        .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| {
-            tip.chain_tx_count
-        });
+    let expected_tx_count = applied_chain_tx_count(&initial);
     drop(initial);
 
     // No checkpoint was published for `child`: only the journal can recover it.
@@ -76,15 +82,7 @@ fn restart_replays_durable_journal_suffix_above_checkpoint() -> Result<()> {
             .to_bytes(),
         expected_stats.to_bytes()
     );
-    assert_eq!(
-        resumed
-            .chainstate()
-            .applied_tip_handle()
-            .load_full()
-            .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| tip
-                .chain_tx_count),
-        expected_tx_count
-    );
+    assert_eq!(applied_chain_tx_count(&resumed), expected_tx_count);
     Ok(())
 }
 

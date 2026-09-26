@@ -15,8 +15,10 @@ pub struct InboundBlock {
     pub source: Option<crate::PeerSource>,
     /// Releases the delivering connection's unsolicited forwarding slot when
     /// this body leaves the ingress path — drained by sync, discarded by the
-    /// stager, or rejected. `None` for a locally injected body and for one
-    /// the download window already owned.
+    /// stager, or rejected. A body the download window requested carries
+    /// `Some(BlockForwardCredit(None))`: the field stays `Some` per the
+    /// ownership invariant while the no-op inner credit frees nothing.
+    /// `None` only for a locally injected body.
     pub(crate) forward_credit: Option<crate::connection::BlockForwardCredit>,
 }
 /// A `headers` message batch and the peer that delivered it.

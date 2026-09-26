@@ -152,17 +152,18 @@ impl KvStore for MemoryStore {
         conditions: &[WriteCondition<'_>],
         batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
-        let matched = {
-            let guard = self.cfs.read();
-            conditions.iter().all(|condition| {
-                let (cf, key) = condition.location();
-                condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
-            })
-        };
+        // The check and the apply run under one write lock, matching the
+        // backend's atomic conditional write.
+        let mut guard = self.cfs.write();
+        let matched = conditions.iter().all(|condition| {
+            let (cf, key) = condition.location();
+            condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
+        });
         if !matched {
             return Ok(false);
         }
-        self.write(batch).map(|()| true)
+        apply_ops(&mut guard, batch.into_ops());
+        Ok(true)
     }
 
     fn flush(&self) -> Result<(), StorageError> {

@@ -58,11 +58,19 @@ struct MemoryStore {
     cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
     fail_next_durable: AtomicBool,
 }
+type CfsGuard<'a> =
+    parking_lot::RwLockWriteGuard<'a, [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>;
 
 impl MemoryStore {
     /// Folds one batch's recorded operations into the column families, in order.
     fn apply(&self, ops: Vec<BatchOp>) {
         let mut guard = self.cfs.write();
+        Self::apply_locked(&mut guard, ops);
+    }
+
+    /// Folds `ops` into a guard the caller already holds, so a conditional
+    /// write can check and apply under one lock.
+    fn apply_locked(guard: &mut CfsGuard<'_>, ops: Vec<BatchOp>) {
         for op in ops {
             match op {
                 BatchOp::Put { cf, key, value } => {
@@ -106,17 +114,18 @@ impl KvStore for MemoryStore {
                 "injected durable write failure".into(),
             ));
         }
-        let matched = {
-            let guard = self.cfs.read();
-            conditions.iter().all(|condition| {
-                let (cf, key) = condition.location();
-                condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
-            })
-        };
+        // The check and the apply run under one write lock, matching the
+        // backend's atomic conditional write.
+        let mut guard = self.cfs.write();
+        let matched = conditions.iter().all(|condition| {
+            let (cf, key) = condition.location();
+            condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
+        });
         if !matched {
             return Ok(false);
         }
-        self.write(batch).map(|()| true)
+        Self::apply_locked(&mut guard, batch.into_ops());
+        Ok(true)
     }
     fn write_deferred(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
         self.write(batch)

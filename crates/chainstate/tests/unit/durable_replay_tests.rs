@@ -313,7 +313,9 @@ fn mined_child(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid::default(), u32::MAX),
-            script_sig: Script::from_bytes(vec![1, u8::try_from(height)?, 0]),
+            // Four height bytes keep the coinbase height commitment correct
+            // past u8 range, instead of silently failing at height 256.
+            script_sig: Script::from_bytes([&[4], height.to_le_bytes().as_slice(), &[0]].concat()),
             sequence: Sequence::from_consensus(u32::MAX),
             witness: Witness::new(),
         }],

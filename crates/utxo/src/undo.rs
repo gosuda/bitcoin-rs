@@ -92,9 +92,10 @@ pub enum RollbackError {
 /// The marker is read before arming because arming overwrites an earlier
 /// disconnect's `RolledBack` debt, which a refusal would otherwise clear. On
 /// success it stays `RolledBack` until the caller durably publishes the
-/// rolled-back state. A marker that survives to the next startup no longer
-/// refuses it: startup recovers automatically from the durable certified
-/// head before anything serves (`docs/contracts/recovery.md`). Per-coin
+/// rolled-back state. Startup no longer refuses a marker that survives to
+/// the next open: recovery replays automatically from the durable certified
+/// head before anything serves, and still fails closed when that head is
+/// absent or unreadable (`docs/contracts/recovery.md`). Per-coin
 /// coinstats follow [`UtxoSet::undo_block`] through the listener; only
 /// height and transaction count are rewound here.
 ///

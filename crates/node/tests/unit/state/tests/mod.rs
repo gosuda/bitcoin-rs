@@ -25,6 +25,18 @@ use std::{
 };
 
 use super::*;
+
+/// Reads the applied tip's chain transaction count; `UNKNOWN` before the
+/// first publication.
+fn applied_chain_tx_count(state: &NodeState) -> bitcoin_rs_chain::ChainTxCount {
+    state
+        .chainstate()
+        .applied_tip_handle()
+        .load_full()
+        .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| {
+            tip.chain_tx_count
+        })
+}
 use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 
 use bitcoin_rs_index::IndexCapabilities;

@@ -1234,11 +1234,14 @@ impl Mempool {
     /// those entries -- with the priority index answering for itself, because
     /// it stores every entry twice.
     ///
-    /// Capacity rather than length for the two that retain it. Neither the slab
-    /// nor the hash map hands its allocation back on removal or on `clear`, so
-    /// a pool that peaked and then drained is still holding the memory, and a
-    /// figure read off `len()` answers "nothing" at exactly the moment someone
-    /// is asking where it went.
+    /// Capacity rather than length for the structure that retains it: the
+    /// entry arena does not hand its allocation back on removal or on
+    /// `clear`, so a pool that peaked and then drained is still holding that
+    /// memory, and a figure read off `len()` answers "nothing" at exactly
+    /// the moment someone is asking where it went. The derived indexes are
+    /// different: `clear` replaces `derived` wholesale
+    /// (`Derived::default()`), releasing the txid map and priority-index
+    /// allocations along with the entries.
     #[must_use]
     pub fn dynamic_memory_usage(&self) -> u64 {
         use core::mem::size_of;

@@ -16,12 +16,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
     let expected = {
         let state = NodeState::open(config.clone(), None)?;
         assert_eq!(
-            state
-                .chainstate()
-                .applied_tip_handle()
-                .load_full()
-                .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| tip
-                    .chain_tx_count),
+            applied_chain_tx_count(&state),
             bitcoin_rs_chain::ChainTxCount::UNKNOWN,
             "a node that has applied nothing cannot know the count"
         );
@@ -29,13 +24,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
         let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
         let genesis_tx_count = u64::try_from(genesis.txs.len())?;
         let _tip = state.apply_block(&genesis)?;
-        let counted = state
-            .chainstate()
-            .applied_tip_handle()
-            .load_full()
-            .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| {
-                tip.chain_tx_count
-            });
+        let counted = applied_chain_tx_count(&state);
         assert_eq!(
             counted,
             bitcoin_rs_chain::ChainTxCount::established(genesis_tx_count),
@@ -56,15 +45,7 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
         resumed.blocks().read().is_empty(),
         "the record log really does start empty; the count cannot come from it"
     );
-    assert_eq!(
-        resumed
-            .chainstate()
-            .applied_tip_handle()
-            .load_full()
-            .map_or(bitcoin_rs_chain::ChainTxCount::UNKNOWN, |tip| tip
-                .chain_tx_count),
-        expected
-    );
+    assert_eq!(applied_chain_tx_count(&resumed), expected);
     Ok(())
 }
 
