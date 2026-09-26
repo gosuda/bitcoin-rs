@@ -23,7 +23,8 @@ pub enum IndexError {
     /// A block header did not have the consensus 80-byte length.
     #[error("invalid block header length {len}")]
     InvalidHeaderLength {
-        /// Actual header length observed while reading a header row.
+        /// Observed length at the validation boundary — a header row, a short
+        /// block body, or a malformed prefix row.
         len: usize,
     },
     /// A transaction's byte range in the block does not fit the `u32` that
