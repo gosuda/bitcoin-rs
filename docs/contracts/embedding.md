@@ -19,8 +19,10 @@ the first embedder — there is one lifecycle implementation, not two.
   derived-index worker is stopped under a bounded join before `teardown`
   runs, so the clean checkpoint publishes and chainstate closes only
   after the index released its stores. A join abandoned at the deadline
-  records a teardown error, so the clean checkpoint never publishes while
-  a detached worker can still write.
+  records a teardown error, and so does a worker whose backend open was
+  abandoned: its supervisor can exit while the detached open thread still
+  touches the store. Either way the clean checkpoint never publishes
+  while detached index I/O can still write.
   `TeardownMode` distinguishes `StartupAbort` from `CleanShutdown`.
   An aborted or dropped run never publishes a clean checkpoint. Clean
   shutdown publishes only after every prior cleanup stage succeeded. The
