@@ -144,15 +144,15 @@ fn presync_collect(c: &mut Criterion) {
 fn redownload_replay(c: &mut Criterion) {
     let genesis = mine_header(BlockHash::default(), 0);
     let chain = mine_chain(&genesis, 0, 10 * PAGE);
-    let floor = total_work(&chain[..5 * PAGE]);
+    let floor = total_work(&chain);
     let start = anchor(&genesis);
     let params = regtest_params();
 
-    // The setup pass leaves the state at the crossing, waiting for the
-    // replay; criterion times only the replay itself. The crossing lands
-    // exactly at the end of the fifth page, and REDOWNLOAD restarts at the
-    // anchor, so the timed loop replays the whole chain.
-    let collected = &chain[..5 * PAGE];
+    // The setup pass collects the whole chain and lands at the crossing on
+    // its last header; criterion times only the replay. REDOWNLOAD restarts
+    // at the anchor and the floor is the full chain's work, so the timed
+    // loop replays all 20k headers before the buffer drains.
+    let collected = &chain[..];
     let mut group = c.benchmark_group("headers_presync");
     group.bench_function("redownload_replay_20k", |b| {
         b.iter_batched(

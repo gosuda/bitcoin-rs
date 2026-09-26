@@ -22,7 +22,7 @@
 use std::collections::VecDeque;
 
 use bitcoin_rs_chain::{
-    ChainWork, block_work, compact_is_met_by, current_unix_seconds, permitted_difficulty_transition,
+    ChainWork, block_work, current_unix_seconds, permitted_difficulty_transition, validate_pow,
 };
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Header, HeadersSyncParams, Network};
 use sha2::{Digest as _, Sha256};
@@ -269,6 +269,11 @@ pub struct HeadersSyncState {
     redownloaded: VecDeque<CompressedHeader>,
     redownload_last_height: u32,
     redownload_last_hash: Hash256,
+    /// Bits of the last stored redownload header. The buffer can drain
+    /// below it, so the difficulty check reads this rather than the
+    /// buffer's tail — which would wrongly fall back to the anchor's bits
+    /// after a release emptied the buffer mid-retarget.
+    redownload_last_bits: CompactTarget,
     redownload_first_prev_hash: Hash256,
     redownload_work: Work,
     /// Set once the redownloaded chain itself crosses the minimum work: the
@@ -323,6 +328,7 @@ impl HeadersSyncState {
             redownloaded: VecDeque::new(),
             redownload_last_height: chain_start.height,
             redownload_last_hash: chain_start.hash,
+            redownload_last_bits: chain_start.header.bits,
             redownload_first_prev_hash: chain_start.hash,
             redownload_work: chain_start.chain_work,
             process_all_remaining_headers: false,
@@ -450,7 +456,7 @@ impl HeadersSyncState {
             });
         }
         let hash = Hash256::from(header.compute_hash());
-        if !compact_is_met_by(header.bits, hash) {
+        if validate_pow(header, hash, self.chain_start.network).is_err() {
             return Err(HeaderSyncError::InvalidPow {
                 phase: HeadersSyncPhase::Presync,
                 height,
@@ -530,10 +536,7 @@ impl HeadersSyncState {
                 height,
             });
         }
-        let previous_bits = self
-            .redownloaded
-            .back()
-            .map_or(self.chain_start.header.bits, |last| last.bits);
+        let previous_bits = self.redownload_last_bits;
         if !permitted_difficulty_transition(
             self.chain_start.network,
             height,
@@ -545,7 +548,7 @@ impl HeadersSyncState {
                 height,
             });
         }
-        if !compact_is_met_by(header.bits, hash) {
+        if validate_pow(header, hash, self.chain_start.network).is_err() {
             return Err(HeaderSyncError::InvalidPow {
                 phase: HeadersSyncPhase::Redownload,
                 height,
@@ -570,7 +573,27 @@ impl HeadersSyncState {
             .push_back(CompressedHeader::compress(header));
         self.redownload_last_height = height;
         self.redownload_last_hash = hash;
+        self.redownload_last_bits = header.bits;
         Ok(())
+    }
+
+    /// Returns a released prefix to the buffer when the admission path
+    /// refused it, so the next release emits it again rather than losing a
+    /// verified span.
+    ///
+    /// PRE: `headers` are exactly the most recently popped prefix, in
+    ///   order, and the state is still in REDOWNLOAD (not finalized).
+    /// POST: the buffer's front is that prefix again and
+    ///   `redownload_first_prev_hash` points at its first header's parent.
+    pub(crate) fn requeue_released(&mut self, headers: &[Header]) {
+        let Some(first) = headers.first() else {
+            return;
+        };
+        self.redownload_first_prev_hash = Hash256::from(first.prev_blockhash);
+        for header in headers.iter().rev() {
+            self.redownloaded
+                .push_front(CompressedHeader::compress(header));
+        }
     }
 
     /// Releases headers the verified commitments cover

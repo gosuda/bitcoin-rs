@@ -560,9 +560,9 @@ mod tests {
         );
         assert!(
             mainnet
-                .headers_after(&[], BlockHash::default(), 10)
+                .headers_after(&[], second.compute_hash(), 10)
                 .is_empty(),
-            "the stop-hash-only path must refuse too"
+            "the empty-locator stop-hash path must refuse too"
         );
 
         let regtest = ActiveChainQuery::new(

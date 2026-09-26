@@ -19,10 +19,11 @@ use std::net::SocketAddr;
 
 use super::behavior_5::deliver_headers;
 use super::behavior_5::next_locator;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, HeadersSyncParams};
 
 use super::super::SyncBudget;
 use super::super::default_sync_budget;
+use super::super::headers_presync::HeaderAnchor;
 use super::super::headers_presync::HeadersSyncPhase;
 use super::super::headers_presync::HeadersSyncState;
 use super::*;
@@ -572,6 +573,58 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone()
     assert!(
         rx.try_recv().is_err() && !lease.is_cancelled() && peers.is_connected(addr),
         "a forwarded header sends nothing and blames no one"
+    );
+    Ok(())
+}
+
+/// A released prefix that admission refuses must not be lost: the caller
+/// returns it to the live state, and the next page's release emits that
+/// same prefix again — in order — before anything buffered behind it.
+#[test]
+fn a_refused_release_reemits_on_the_next_pop() -> Result<(), Box<dyn std::error::Error>> {
+    let genesis = genesis_header();
+    let anchor = HeaderAnchor {
+        network: Network::Regtest,
+        height: 0,
+        hash: Hash256::from(genesis.compute_hash()),
+        header: genesis,
+        chain_work: ChainWork::ZERO,
+        median_time_past: genesis.time,
+        locator: Vec::new(),
+    };
+    // Small fixtures: a commitment every other header and a four-deep
+    // buffer, so a handful of mined pages exercise a mid-sync release.
+    let params = HeadersSyncParams {
+        commitment_period: 2,
+        redownload_buffer_size: 4,
+    };
+    let chain = chain_on(&genesis, 0, 12);
+    let floor = chain_work(&chain[..8]);
+    let mut state = HeadersSyncState::new(anchor, floor, params, [7_u8; 16]);
+
+    // PRESYNC collects through the crossing at the eighth header.
+    let collected = state
+        .process(&chain[..8], true)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    assert_eq!(collected.phase, HeadersSyncPhase::Redownload);
+
+    // REDOWNLOAD of the first five headers overflows the buffer by one: the
+    // release emits exactly the chain's first header.
+    let released = state
+        .process(&chain[..5], true)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    assert_eq!(released.ready_headers.len(), 1);
+
+    // The caller's admission is refused: the prefix returns to the live
+    // state, and the next page's release must emit it again — first and in
+    // order — rather than stranding it.
+    state.requeue_released(&released.ready_headers);
+    let next = state
+        .process(&chain[5..9], true)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    assert!(
+        next.ready_headers.starts_with(&chain[..5]),
+        "the requeued prefix must lead the next release"
     );
     Ok(())
 }

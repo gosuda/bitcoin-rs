@@ -31,7 +31,6 @@ use bitcoin_rs_chain::{ChainError, NodeId, NodeStatus};
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
-use sha2::Sha256;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -71,13 +70,23 @@ impl BlockSync {
 
             self.consume_header_request(source, wire_response, headers.is_empty());
 
+            // A connection with a live download-twice state must feed its
+            // page to that state even when the tree already holds it:
+            // bypassing the state leaves its cursor behind and the next
+            // page breaks continuity against a stale position.
+            let feeds_live_sync = wire_response
+                && source
+                    .is_some_and(|source| self.scheduler.lock().headers_sync.contains_key(&source));
+
             // Already-known batches skip the transition lock. The listener
             // forwards every inbound body's embedded header here so
             // unannounced tips (`inv`-served, compact-reconstructed, or
             // pushed blocks) reach admission — during bulk delivery those
             // batches would otherwise pay a lock acquisition per body for
             // what is almost always a lookup hit.
-            if let Some((tip_hash, active_height)) = self.known_batch_outcome(&headers) {
+            if !feeds_live_sync
+                && let Some((tip_hash, active_height)) = self.known_batch_outcome(&headers)
+            {
                 if let Some(source) = source {
                     self.peer_table
                         .note_announced_tip(source, tip_hash, active_height);
@@ -912,7 +921,18 @@ impl BlockSync {
         wire_response: bool,
         batch_len: usize,
     ) -> Option<HeaderAdmission> {
-        let Some(source) = source.filter(|_| !headers.is_empty()) else {
+        if headers.is_empty() {
+            // An empty answer ends a live download-twice sync — the peer
+            // has no more headers for this cursor — rather than leaving
+            // the state to pace a stale request.
+            if wire_response {
+                if let Some(source) = source {
+                    self.scheduler.lock().headers_sync.remove(&source);
+                }
+            }
+            return Some(self.chain.admit_headers(headers));
+        }
+        let Some(source) = source else {
             return Some(self.chain.admit_headers(headers));
         };
         // Only a genuine wire `headers` message opens or feeds the
@@ -931,26 +951,31 @@ impl BlockSync {
             }
             return Some(self.chain.admit_headers(headers));
         }
-        let outcome = if self.scheduler.lock().headers_sync.contains_key(&source) {
-            let mut scheduler = self.scheduler.lock();
-            let state = scheduler
-                .headers_sync
-                .get_mut(&source)
-                .unwrap_or_else(|| unreachable!("checked under the same lock two lines above"));
-            Self::advance_presync_state(state, headers, batch_len)
-        } else {
-            // A fresh sync anchors on the tree's fork point, read before
-            // any scheduler or transition lock is taken.
-            let Some(anchor) = self.presync_anchor(headers) else {
-                return Some(self.chain.admit_headers(headers));
+        let outcome = {
+            // Page validation runs without the scheduler lock: hashing a
+            // full page under `scheduler` would stall body-fetch ownership
+            // and every other scheduler read for its duration, so a live
+            // state leaves the map for the check and is committed back only
+            // while its connection is still live — an ownership sweep that
+            // raced in just drops the parked state.
+            let parked = self.scheduler.lock().headers_sync.remove(&source);
+            let mut state = if let Some(state) = parked {
+                state
+            } else {
+                // A fresh sync anchors on the tree's fork point, read
+                // before any scheduler or transition lock is taken.
+                let Some(anchor) = self.presync_anchor(headers) else {
+                    return Some(self.chain.admit_headers(headers));
+                };
+                let minimum_work = self.chain.minimum_chain_work();
+                let params = anchor.network.headers_sync_params();
+                HeadersSyncState::new(anchor, minimum_work, params, presync_salt())
             };
-            let minimum_work = self.chain.minimum_chain_work();
-            let params = anchor.network.headers_sync_params();
-            let mut scheduler = self.scheduler.lock();
-            let state = scheduler.headers_sync.entry(source).or_insert_with(|| {
-                HeadersSyncState::new(anchor, minimum_work, params, presync_salt(source))
-            });
-            Self::advance_presync_state(state, headers, batch_len)
+            let outcome = Self::advance_presync_state(&mut state, headers, batch_len);
+            if self.peer_table.is_current(source) {
+                self.scheduler.lock().headers_sync.insert(source, state);
+            }
+            outcome
         };
         if outcome.finished {
             self.scheduler.lock().headers_sync.remove(&source);
@@ -978,7 +1003,19 @@ impl BlockSync {
             self.send_presync_getheaders(source, outcome.locator, outcome.height);
         }
         if !outcome.ready_headers.is_empty() {
-            return Some(self.chain.admit_headers(&outcome.ready_headers));
+            let admission = self.chain.admit_headers(&outcome.ready_headers);
+            if matches!(admission, HeaderAdmission::Refused(_)) {
+                // Admission is paused: return the released prefix to the
+                // live state so the next page's release re-emits it once
+                // admission reopens. The sync's own continuation is already
+                // in flight, so no tree-anchored re-request runs here — one
+                // would restart the whole sync.
+                if let Some(state) = self.scheduler.lock().headers_sync.get_mut(&source) {
+                    state.requeue_released(&outcome.ready_headers);
+                    return None;
+                }
+            }
+            return Some(admission);
         }
         None
     }
@@ -1118,39 +1155,18 @@ impl BlockSync {
     }
 }
 
-/// Fresh unpredictable key material for one sync's commitment hash.
+/// Fresh unpredictable key material for one sync's commitment hash
+/// (`headerssync.cpp:24` draws the same from a fast RNG).
 ///
 /// PRE: none.
-/// POST: return a salt mixed from the clock, this process, the connection,
-///   and a monotonic counter; Core draws the same material from a fast RNG
-///   per state (`headerssync.cpp:24`).
+/// POST: return a salt from OS-seeded randomness; anything predictable
+///   (clock, PID, peer address) would let a peer precompute which mutated
+///   headers keep their one-bit commitments.
 /// INVARIANT: one salt per sync state, and a spent state's salt is never
 ///   reused: every new state draws a fresh one.
-fn presync_salt(source: PeerSource) -> [u8; 16] {
-    use sha2::Digest as _;
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering;
-    use std::time::SystemTime;
-    use std::time::UNIX_EPOCH;
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    // Every input is folded into the digest as entropy; SHA-256's own
-    // compression does the mixing, so no value is narrowed here.
-    let clock = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    let mut digest = Sha256::new();
-    digest.update(clock.as_secs().to_le_bytes());
-    digest.update(clock.subsec_nanos().to_le_bytes());
-    digest.update(std::process::id().to_le_bytes());
-    match source.addr.ip() {
-        std::net::IpAddr::V4(v4) => digest.update(v4.octets()),
-        std::net::IpAddr::V6(v6) => digest.update(v6.octets()),
-    }
-    digest.update(source.addr.port().to_le_bytes());
-    digest.update(COUNTER.fetch_add(1, Ordering::Relaxed).to_le_bytes());
-    let result = digest.finalize();
+fn presync_salt() -> [u8; 16] {
+    use bitcoin::secp256k1::rand::RngCore as _;
     let mut salt = [0_u8; 16];
-    salt.copy_from_slice(&result[..16]);
+    bitcoin::secp256k1::rand::thread_rng().fill_bytes(&mut salt);
     salt
 }
