@@ -153,7 +153,9 @@ pub(crate) fn wrong_type_plain(value: &Value, expected: &str) -> RpcError {
 /// The argument label Core 31.1 uses, derived from the required-parameter
 /// message the call site passes (`"txid is required"` names the txid).
 fn label_of(name: &str) -> &str {
-    name.strip_suffix(" is required").unwrap_or(name)
+    name.strip_suffix(" is required")
+        .or_else(|| name.strip_suffix(" must be a string"))
+        .unwrap_or(name)
 }
 
 pub(crate) fn optional_bool(params: &Value, index: usize, default: bool) -> Result<bool, RpcError> {
@@ -192,9 +194,12 @@ pub(crate) fn required_u64(
     let value = params_array(params)?
         .get(index)
         .ok_or(RpcError::InvalidParams(name))?;
+    if !value.is_number() {
+        return Err(wrong_type(index + 1, label_of(name), value, "number"));
+    }
     value
         .as_u64()
-        .ok_or_else(|| wrong_type(index + 1, label_of(name), value, "number"))
+        .ok_or_else(|| RpcError::InvalidParameter(format!("{} is out of range", label_of(name))))
 }
 
 pub(crate) fn required_i64(
@@ -206,9 +211,12 @@ pub(crate) fn required_i64(
         .as_array()
         .and_then(|arr| arr.get(index))
         .ok_or(RpcError::InvalidParams(name))?;
+    if !value.is_number() {
+        return Err(wrong_type(index + 1, label_of(name), value, "number"));
+    }
     value
         .as_i64()
-        .ok_or_else(|| wrong_type(index + 1, label_of(name), value, "number"))
+        .ok_or_else(|| RpcError::InvalidParameter(format!("{} is out of range", label_of(name))))
 }
 
 /// Parses one transaction id from its 64-character hex encoding.

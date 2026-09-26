@@ -30,7 +30,16 @@ pub(crate) fn decode(input: &str) -> Result<Vec<u8>, ()> {
         let last = index + 1 == chunk_count;
         let pad2 = chunk[2] == b'=';
         let pad3 = chunk[3] == b'=';
-        if chunk[0] == b'=' || chunk[1] == b'=' || pad2 && !pad3 || pad3 && !last {
+        // `pad2` and `pad3` mark the `=` at positions 2 and 3. The pad bits
+        // of the preceding sextet must be zero — Core's decoder (and RFC
+        // 4648 canonical form) rejects encodings that smuggle data there.
+        if chunk[0] == b'='
+            || chunk[1] == b'='
+            || pad2 && !pad3
+            || pad3 && !last
+            || (pad2 && value(chunk[1]).is_some_and(|b| b & 0b0000_1111 != 0))
+            || (pad3 && !pad2 && value(chunk[2]).is_some_and(|c| c & 0b0000_0011 != 0))
+        {
             return Err(());
         }
 
