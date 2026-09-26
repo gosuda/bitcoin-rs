@@ -273,6 +273,11 @@ pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) ->
     if peer.services & network != 0 {
         return true;
     }
+    // Core applies the retained window only to `NODE_NETWORK_LIMITED`
+    // (`net_processing.cpp:1637`): a peer without it serves no blocks.
+    if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
+        return false;
+    }
     if policy
         .ibd
         .is_active(crate::counters::now_seconds(), policy.network)

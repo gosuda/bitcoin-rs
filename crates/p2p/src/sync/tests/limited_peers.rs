@@ -92,6 +92,27 @@ fn predicate_limits_pruned_peer_to_the_retained_window() -> Result<(), Box<dyn s
     Ok(())
 }
 
+/// A peer advertising only `WITNESS` — neither `NODE_NETWORK` nor
+/// `NODE_NETWORK_LIMITED` — serves no blocks at all: Core applies the retained
+/// window only to peers that set `NODE_NETWORK_LIMITED`, so this peer is
+/// refused even inside the 288-block window.
+#[test]
+fn predicate_refuses_witness_only_peer_inside_the_window() -> Result<(), Box<dyn std::error::Error>>
+{
+    let addr = test_addr(9603, 0)?;
+    let witness_only = PeerInfo {
+        services: ServiceFlags::WITNESS.to_u64(),
+        ..synthetic_peer(addr, 300)
+    };
+    for requested in [1_u32, 13, 288] {
+        assert!(
+            !statically_fanout_eligible(&witness_only, &policy(synced_ibd_latch(), requested)),
+            "a WITNESS-only peer must not be sent a getdata for height {requested}"
+        );
+    }
+    Ok(())
+}
+
 /// A `NODE_NETWORK` peer is unaffected by the phase or the window: the retained
 /// rule is about pruned storage, not about chain length.
 #[test]
