@@ -527,6 +527,12 @@ fn mempool_recent(ctx: &Context) -> Response {
         // `Arc` clone, never every scanned entry.
         let mut latest: Vec<(u64, Txid, u64, u32, Arc<Tx>)> = Vec::with_capacity(RECENT);
         for entry in pool.iter_entries() {
+            let rank = (entry.time, entry.txid);
+            let position = match latest.iter().position(|kept| rank > (kept.0, kept.1)) {
+                Some(position) => position,
+                None if latest.len() < RECENT => latest.len(),
+                None => continue,
+            };
             let candidate = (
                 entry.time,
                 entry.txid,
@@ -534,12 +540,6 @@ fn mempool_recent(ctx: &Context) -> Response {
                 entry.vsize,
                 Arc::clone(&entry.tx),
             );
-            let rank = (candidate.0, candidate.1);
-            let position = match latest.iter().position(|kept| rank > (kept.0, kept.1)) {
-                Some(position) => position,
-                None if latest.len() < RECENT => latest.len(),
-                None => continue,
-            };
             latest.insert(position, candidate);
             latest.truncate(RECENT);
         }
