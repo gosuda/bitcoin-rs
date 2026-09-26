@@ -463,11 +463,18 @@ impl Interpreter {
         )
     }
 
-    /// Executes a script spend with the complete ordered prevout set.
+    /// Executes a script spend.
     ///
-    /// `prevouts` must be aligned with `tx.inputs` (same length, input order).
-    /// BIP341 key-path sighashes commit to every spent output, so multi-input
-    /// taproot spends require the full slice.
+    /// `prevouts` takes one of two accepted forms:
+    ///
+    /// * the complete ordered spent-output set, aligned with `tx.inputs`
+    ///   (same length, input order);
+    /// * exactly one element holding the current input's prevout.
+    ///
+    /// The one-element form serves legacy, `P2SH`, and segwit v0 spends and
+    /// single-input taproot spends. BIP341 key-path sighashes commit to every
+    /// spent output, so a multi-input taproot key-path spend with the
+    /// one-element form returns [`ScriptError::TaprootPrevoutsUnavailable`].
     pub fn execute_with_prevouts(
         &self,
         script_pubkey: &[u8],
