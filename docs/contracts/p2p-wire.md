@@ -290,8 +290,8 @@ covers the delivery-path forward.
 ### `P2P-07`: Block announcements lead with headers; ingress is bounded twice
 
 - **Owner**: the block branch of `dispatch_inbound_full`
-  (`crates/p2p/src/dispatch.rs`), `BlockSync::announce_block` and
-  `BlockSync::drain_block_announcements`
+  (`crates/p2p/src/dispatch.rs`), `BlockSync::announce_block`
+  (`crates/p2p/src/sync.rs`), and `BlockSync::drain_block_announcements`
   (`crates/p2p/src/sync/headers.rs`).
 - `MSG_BLOCK` and `MSG_WITNESS_BLOCK` inventory vectors are availability
   information, never a body request: each one is queued against the

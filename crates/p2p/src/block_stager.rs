@@ -159,7 +159,7 @@ impl BlockStager {
     ///       order.
     /// INVARIANT: yields no heights; the block tree is the only height
     ///       source.
-    pub fn staged_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
+    pub(crate) fn staged_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
         self.received.keys().copied()
     }
 
