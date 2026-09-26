@@ -108,10 +108,18 @@ pub fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
 }
 
 /// Parses a comma-separated fixed-peer list.
+///
+/// Every segment must be one valid endpoint — the same per-segment rule the
+/// CLI applies after its delimiter split and TOML applies per array element,
+/// so no surface quietly accepts a trailing or doubled comma that another
+/// rejects. An all-empty value still means "unset".
 pub fn parse_connect_list(value: &str) -> Result<Vec<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
     value
         .split(',')
-        .filter(|part| !part.trim().is_empty())
         .map(|part| parse_connect_endpoint(part.trim()).map_err(anyhow::Error::msg))
         .collect()
 }
@@ -432,7 +440,7 @@ macro_rules! option_rows {
                 network: Option<NetworkSelection> {
                     cli[#[arg(long = "network", value_parser = parse_network)]]
                     env["BITCOIN_RS_NETWORK", parse_network]
-                    toml native("network")
+                    toml text("network", parse_network)
                 }
                 /// Node data directory.
                 data_dir: Option<PathBuf> {
