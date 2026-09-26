@@ -8,7 +8,6 @@ use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
-use super::defer_owned_body_fetch;
 use super::frontier::ChainFrontier;
 use super::frontier::SyncFrontier;
 use super::peers::is_peer_fault;
@@ -17,6 +16,7 @@ use super::peers::shared_active_height;
 use super::peers::sync_peer_candidate;
 use super::requests::COMPACT_RELAY_NEAR_TIP_BLOCKS;
 use super::{BlockSync, SchedulerState};
+use super::{MAX_DEFERRED_OWNED_FETCHES, defer_owned_body_fetch};
 use crate::InboundHeaders;
 use crate::Message;
 use crate::PeerSource;
@@ -433,17 +433,38 @@ impl BlockSync {
         }
         let mut scheduler = self.scheduler.lock();
         let now = Instant::now();
-        let SchedulerState { window, stager, .. } = &mut *scheduler;
+        let SchedulerState {
+            window,
+            stager,
+            owned_body_fetches,
+            ..
+        } = &mut *scheduler;
         for (source, hash, height) in resolved {
             // A refusal leaves the fetch in flight: keep the deferred mark so
-            // the delivered body still classifies as requested.
-            if !window.mark_owned_fetch(stager, source, hash, height, now) {
+            // the delivered body still classifies as requested. So does a
+            // hash already pending under a different owner — `mark_owned_fetch`
+            // resolves it without recording this owner, and dropping the mark
+            // would disown the second connection's in-flight fetch.
+            if !window.mark_owned_fetch(stager, source, hash, height, now)
+                || window
+                    .pending_owner(&hash)
+                    .is_some_and(|owner| owner != source)
+            {
                 unresolved.push((source, hash));
             }
         }
-        for (source, hash) in unresolved {
-            defer_owned_body_fetch(&mut scheduler, source, hash);
+        // Unresolved marks predate anything recorded during this resolve:
+        // they merge back ahead of the queue in their original order, and the
+        // cap then drops the newest marks — the same oldest-first policy
+        // `defer_owned_body_fetch` applies.
+        let mut merged = unresolved;
+        for mark in owned_body_fetches.drain(..) {
+            if !merged.contains(&mark) {
+                merged.push(mark);
+            }
         }
+        merged.truncate(MAX_DEFERRED_OWNED_FETCHES);
+        *owned_body_fetches = merged;
     }
 
     /// `(announced_tip, active_height)` when every header in `headers` is
