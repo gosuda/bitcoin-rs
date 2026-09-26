@@ -14,15 +14,15 @@ use std::sync::atomic::Ordering;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::current_unix_seconds;
+use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_consensus::{MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SIGOPS_COST, MAX_BLOCK_WEIGHT};
-use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Network;
-use bitcoin_rs_primitives::Tx;
-use bitcoin_rs_script::count_tx_legacy;
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
+use bitcoin_rs_script::VerifyFlags;
 use compact_str::CompactString;
 use core::time::Duration;
 use hashbrown::HashMap;
@@ -183,17 +183,21 @@ pub trait MempoolSnapshotSource: Send + Sync {
     fn mining_snapshot_at(&self, expected_sequence: u64) -> Option<MempoolMiningSnapshot>;
     /// Captures the mining snapshot an explicit generate selection assembles from.
     ///
-    /// `Ordered` selections re-index the pool snapshot to the caller's
-    /// transaction order under one pool read lock; unknown mempool txids are
-    /// a request error.
+    /// Pool facts are captured under one read lock; `Ordered` selections
+    /// re-index the captured snapshot to the caller's transaction order.
+    /// Unknown mempool txids are a request error. Raw transaction costs use copied prevouts from the
+    /// candidate's applied tip and its effective witness-activation flag.
     ///
     /// # Errors
     ///
     /// Returns [`MiningControlError::InvalidRequest`] when an `Ordered`
-    /// selection names a transaction that is not in the mempool.
+    /// selection names a transaction that is not in the mempool, or
+    /// [`MiningControlError::Unavailable`] when the candidate tip changed
+    /// before copying raw transaction prevouts.
     fn selection_snapshot(
         &self,
         selection: &GenerateSelection,
+        context: &CandidateContext,
     ) -> Result<MempoolMiningSnapshot, MiningControlError>;
     /// Number of pooled transactions.
     fn pooled_transaction_count(&self) -> u64;
@@ -666,15 +670,20 @@ impl MiningService {
         let tip = self.applied_tip.applied_tip().ok_or_else(|| {
             MiningControlError::Unavailable(CompactString::from("applied tip is not available"))
         })?;
-        let snapshot = self.mempool.selection_snapshot(selection)?;
         let context = self.candidate_context(&tip)?;
+        let snapshot = self.mempool.selection_snapshot(selection, &context)?;
         match selection {
             GenerateSelection::Mempool => assemble_candidate(&context, &snapshot, payout),
             GenerateSelection::Ordered(_) => {
                 assemble_ordered_candidate(&context, &snapshot, payout)
             }
         }
-        .map_err(|error| MiningControlError::Failed(CompactString::from(error.to_string())))
+        .map_err(|error| match selection {
+            GenerateSelection::Ordered(_) => crate::bip22::ordered_assembly_error(&error),
+            GenerateSelection::Mempool => {
+                MiningControlError::Failed(CompactString::from(error.to_string()))
+            }
+        })
     }
 
     fn version_bits_for(
@@ -776,25 +785,38 @@ fn template_from_candidate(
 ///
 /// `Ordered` selections re-index the mempool snapshot to the caller's
 /// explicit transaction order; unknown mempool txids are request errors.
+/// `prevouts` must come from the candidate's applied-chain view. Raw transaction
+/// costs also resolve outputs of earlier listed transactions, using the same
+/// consensus owner as admitted entries. Later or unselected pool outputs are
+/// not spendable inputs. Missing inputs are retained for block validation.
 ///
 /// # Errors
 ///
 /// Returns [`MiningControlError::InvalidRequest`] when an `Ordered`
 /// selection names a transaction that is not in the mempool.
 pub fn snapshot_for_selection(
-    mempool: &Mempool,
+    full: MempoolMiningSnapshot,
     selection: &GenerateSelection,
+    prevouts: &[(OutPoint, TxOut)],
+    segwit_active: bool,
 ) -> Result<MempoolMiningSnapshot, MiningControlError> {
     match selection {
-        GenerateSelection::Mempool => Ok(mempool.mining_snapshot()),
+        GenerateSelection::Mempool => Ok(full),
         GenerateSelection::Ordered(items) => {
-            let full = mempool.mining_snapshot();
+            let flags = if segwit_active {
+                VerifyFlags::WITNESS
+            } else {
+                VerifyFlags::NONE
+            };
+            let prevouts: HashMap<_, _> =
+                prevouts.iter().map(|(key, value)| (*key, value)).collect();
+            let mut selected_positions = HashMap::with_capacity(items.len());
             let mut by_txid = HashMap::with_capacity(full.entries.len());
             for (index, entry) in full.entries.iter().enumerate() {
                 let position = u32::try_from(index).unwrap_or(u32::MAX);
                 by_txid.insert(entry.txid, position);
             }
-            let mut selected = Vec::with_capacity(items.len());
+            let mut selected: Vec<SnapshotEntry> = Vec::with_capacity(items.len());
             let mut old_to_new = HashMap::with_capacity(items.len());
             for item in items {
                 match item {
@@ -814,7 +836,30 @@ pub fn snapshot_for_selection(
                         entry.ancestors.clear();
                         selected.push(entry);
                     }
-                    GenerateTx::Raw(tx) => selected.push(snapshot_entry_from_raw(tx)),
+                    GenerateTx::Raw(tx) => {
+                        let resolved = tx
+                            .inputs
+                            .iter()
+                            .filter_map(|input| {
+                                let outpoint = input.previous_output;
+                                let earlier_output = selected_positions
+                                    .get(&outpoint.txid)
+                                    .and_then(|&index: &usize| selected.get(index))
+                                    .and_then(|entry| {
+                                        usize::try_from(outpoint.vout)
+                                            .ok()
+                                            .and_then(|vout| entry.tx.outputs.get(vout))
+                                    });
+                                earlier_output
+                                    .or_else(|| prevouts.get(&outpoint).copied())
+                                    .map(|output| (outpoint, output.clone()))
+                            })
+                            .collect::<Vec<_>>();
+                        selected.push(snapshot_entry_from_raw(tx, &resolved, flags));
+                    }
+                }
+                if let Some(entry) = selected.last() {
+                    selected_positions.insert(entry.txid, selected.len() - 1);
                 }
             }
             for entry in &mut selected {
@@ -835,7 +880,13 @@ pub fn snapshot_for_selection(
     }
 }
 
-fn snapshot_entry_from_raw(tx: &Tx) -> SnapshotEntry {
+/// Counts a raw transaction against copied chain outputs and earlier ordered outputs.
+/// Missing inputs remain missing; authoritative block validation owns their rejection.
+fn snapshot_entry_from_raw(
+    tx: &Tx,
+    prevouts: &[(OutPoint, TxOut)],
+    flags: VerifyFlags,
+) -> SnapshotEntry {
     let tx = Arc::new(tx.clone());
     let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
     let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
@@ -846,7 +897,7 @@ fn snapshot_entry_from_raw(tx: &Tx) -> SnapshotEntry {
         bip141_vsize: vsize,
         size,
         weight: tx.weight(),
-        sigop_cost: count_tx_legacy(&tx),
+        sigop_cost: transaction_sigop_cost(&tx, prevouts, flags),
         fee: 0,
         fee_delta: 0,
         time: 0,

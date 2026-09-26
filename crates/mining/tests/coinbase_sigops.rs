@@ -30,6 +30,10 @@ fn coinbase_sigops_match_consensus_cost_in_both_assembly_paths() -> TestResult {
         sequence: 1,
         entries: vec![],
     };
+    // Core uses GetSigOpCount(false) for the legacy component, including
+    // coinbase outputs: OP_1 CHECKMULTISIG counts 20 operations, not one.
+    // GetTransactionSigOpCost multiplies by four and returns for coinbase.
+    // https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_verify.cpp#L112-L153
     let cases = [(vec![0x51], 0), (p2pkh(), 4), (vec![0x51, 0xae], 80)];
     for segwit_active in [false, true] {
         for (payout, expected) in &cases {

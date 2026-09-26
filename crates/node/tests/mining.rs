@@ -1875,3 +1875,84 @@ fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
     assert_eq!(after.hash, before.hash);
     Ok(())
 }
+
+/// Raw generateblock inputs must include the confirmed P2SH redeem costs before
+/// solving, and a refusal retains Core's API-30 rejection class and reason.
+#[test]
+fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> anyhow::Result<()> {
+    let state = open_regtest()?;
+    apply_genesis(&state)?;
+    // The unreachable branch is valid to spend but counts 199 * 20 sigops.
+    // IF + 199 CHECKMULTISIG + ENDIF also fits the 201-op execution limit.
+    let redeem = [vec![0x00, 0x63], vec![0xae; 199], vec![0x68, 0x51]].concat();
+    let payout = bitcoin::ScriptBuf::from_bytes(redeem.clone())
+        .to_p2sh()
+        .into_bytes();
+    let mining = MiningCoordinator::new(
+        state.mempool(),
+        state.chainstate(),
+        state.chain_followers(),
+        payout,
+    );
+    let mut inputs = Vec::new();
+    for _ in 0..6 {
+        let block = solved_template_block(&mining)?;
+        inputs.push(TxIn {
+            previous_output: OutPoint::new(block.txs[0].txid(), 0),
+            script_sig: bitcoin_rs_script::script::push_data(&redeem).into(),
+            sequence: Sequence::MAX,
+            witness: Witness::new(),
+        });
+        assert_eq!(mining.submit_block(block)?, BlockValidationResult::Accepted);
+    }
+    mining.generate(GenerateRequest {
+        payout: vec![0x51],
+        count: 100,
+        max_tries: GenerateRequest::DEFAULT_MAX_TRIES,
+        selection: GenerateSelection::Ordered(Vec::new()),
+        submit: true,
+    })?;
+    let before = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("missing tip"))?;
+    let mut raw = Tx {
+        version: 2,
+        lock_time: LockTime::ZERO,
+        inputs: inputs[..5].to_vec(),
+        // 5 * (199 * 20 * 4) + 100 * 4 = exactly 80,000 cost units.
+        outputs: vec![TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: vec![0xac; 100].into(),
+        }],
+    };
+    let request = |tx, max_tries| GenerateRequest {
+        payout: vec![0x51],
+        count: 1,
+        max_tries,
+        selection: GenerateSelection::Ordered(vec![GenerateTx::Raw(tx)]),
+        submit: false,
+    };
+    assert_eq!(
+        mining
+            .generate(request(raw.clone(), GenerateRequest::DEFAULT_MAX_TRIES))?
+            .len(),
+        1
+    );
+    raw.inputs.push(inputs[5].clone());
+    let error = mining
+        .generate(request(raw, 0))
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("over-budget raw transaction must fail before solve"))?;
+    assert!(
+        matches!(error, MiningControlError::Rejected(ref reason) if reason == "TestBlockValidity failed: bad-blk-sigops"),
+        "unexpected refusal: {error:?}"
+    );
+    let after = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("missing tip"))?;
+    assert_eq!(after.hash, before.hash);
+    assert!(state.mempool().read().is_empty());
+    Ok(())
+}

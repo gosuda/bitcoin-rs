@@ -124,9 +124,14 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
   coinbase-only).
   Listed order is kept, those fees are not added to the coinbase, 64-character
   hex is a mempool txid, and decoded raw transactions are included without
-  mempool admission. Extra positional arguments are rejected. Output parse
-  errors are `API-29`. Consensus failures before the nonce search are
-  `API-30`.
+  mempool admission. Raw transaction sigop costs use copied applied-chain
+  prevouts and outputs of earlier listed transactions, with the candidate's
+  witness activation. The node captures those inputs under the existing chain
+  read fence and computes costs after releasing locks. Unselected or later
+  mempool transactions do not supply previous outputs. Missing inputs still
+  pass to authoritative block validation. Extra positional arguments are
+  rejected. Output parse errors are `API-29`. Consensus failures before the
+  nonce search are `API-30`.
 
 ### `API-06`: `getnetworkhashps` snapshot and invalid-height behavior
 
@@ -497,8 +502,10 @@ owned by [wallet-facing.md](wallet-facing.md).
   (`RpcError::TxVerifyError`) `TestBlockValidity failed: {reason}`,
   where `{reason}` is the BIP22 GetRejectReason string (`API-19`).
 - This pre-check applies only to `GenerateSelection::Ordered`
-  (`generateblock`). `generatetoaddress` (`Mempool`) matches Core
-  `generateBlocks` and does not run it.
+  (`generateblock`). An ordered candidate refused by the mining sigop
+  preflight also returns this `-25` envelope with `bad-blk-sigops`; it does
+  not become an operational `Failed` result. `generatetoaddress` (`Mempool`)
+  matches Core `generateBlocks` and does not run it.
 - The check calls `apply::validate_block` directly.
   `ApplyIntent::Propose` already skips hash-meets-target. It does not
   go through GBT `propose` (`API-18` LookupBlockIndex vocabulary).

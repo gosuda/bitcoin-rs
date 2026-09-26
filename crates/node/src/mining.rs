@@ -21,9 +21,11 @@ use bitcoin_rs_mining::BlockTemplateMode;
 use bitcoin_rs_mining::BlockTemplateRequest;
 use bitcoin_rs_mining::BlockTemplateResult;
 use bitcoin_rs_mining::BlockValidationResult;
+use bitcoin_rs_mining::CandidateContext;
 use bitcoin_rs_mining::ChainContextSource;
 use bitcoin_rs_mining::GenerateRequest;
 use bitcoin_rs_mining::GenerateSelection;
+use bitcoin_rs_mining::GenerateTx;
 use bitcoin_rs_mining::GeneratedBlock;
 use bitcoin_rs_mining::MempoolSequenceWake;
 use bitcoin_rs_mining::MempoolSnapshotSource;
@@ -73,7 +75,10 @@ impl MiningCoordinator {
         let service = MiningService::new(
             network,
             Arc::new(AppliedTipAdapter { tip: applied_tip }),
-            Arc::new(MempoolAdapter { mempool }),
+            Arc::new(MempoolAdapter {
+                mempool,
+                chainstate: Arc::clone(&chainstate),
+            }),
             Arc::new(ChainContextAdapter {
                 block_tree,
                 network,
@@ -252,6 +257,7 @@ impl AppliedTipSource for AppliedTipAdapter {
 /// Serves mempool reads for candidate assembly, one read lock per call.
 struct MempoolAdapter {
     mempool: Arc<RwLock<Mempool>>,
+    chainstate: Arc<Chainstate>,
 }
 
 impl MempoolSnapshotSource for MempoolAdapter {
@@ -274,9 +280,51 @@ impl MempoolSnapshotSource for MempoolAdapter {
     fn selection_snapshot(
         &self,
         selection: &GenerateSelection,
+        context: &CandidateContext,
     ) -> Result<MempoolMiningSnapshot, MiningControlError> {
-        let mempool = self.mempool.read();
-        snapshot_for_selection(&mempool, selection)
+        if !matches!(selection, GenerateSelection::Ordered(items) if items.iter().any(|item| matches!(item, GenerateTx::Raw(_))))
+        {
+            return snapshot_for_selection(
+                self.mempool.read().mining_snapshot(),
+                selection,
+                &[],
+                context.segwit_active,
+            );
+        }
+        // Keep chain inputs tied to the context tip. Match the existing
+        // transition -> mempool lock order, then release both before counting.
+        let (snapshot, prevouts) = {
+            let fence = self.chainstate.read_fence();
+            let _guard = fence.lock();
+            if self
+                .chainstate
+                .applied_tip_snapshot()
+                .is_none_or(|tip| tip.hash != context.previous_block_hash)
+            {
+                return Err(MiningControlError::Unavailable(CompactString::from(
+                    "applied tip changed during generate selection",
+                )));
+            }
+            let snapshot = self.mempool.read().mining_snapshot();
+            let mut prevouts = hashbrown::HashMap::new();
+            if let GenerateSelection::Ordered(items) = selection {
+                for item in items {
+                    if let GenerateTx::Raw(tx) = item {
+                        for input in &tx.inputs {
+                            let outpoint = input.previous_output;
+                            if let hashbrown::hash_map::Entry::Vacant(slot) =
+                                prevouts.entry(outpoint)
+                                && let Some(output) = self.chainstate.utxo().get(&outpoint)
+                            {
+                                slot.insert(output);
+                            }
+                        }
+                    }
+                }
+            }
+            (snapshot, prevouts.into_iter().collect::<Vec<_>>())
+        };
+        snapshot_for_selection(snapshot, selection, &prevouts, context.segwit_active)
     }
 
     fn min_relay_fee_sat_per_kvb(&self) -> u64 {
