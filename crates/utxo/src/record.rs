@@ -334,7 +334,8 @@ impl UtxoRecord {
     /// POST: returns the canonical replacement. If `overwritten` is Some, it
     /// has one entry per addition in addition order; an append has a None
     /// entry.
-    /// INVARIANT: an error leaves the source record and shard table unchanged.
+    /// INVARIANT: an error leaves the source record, shard table, and any
+    /// `overwritten` sink unchanged.
     pub(crate) fn add_run_replacement<'p>(
         existing: Option<&Self>,
         txid: Hash256,
@@ -370,14 +371,23 @@ impl UtxoRecord {
             Some(record) => (record.output_parts(), record.header().inline_len),
             None => (Vec::with_capacity(additions.len()), 0),
         };
+        // Overwrite events are staged locally: `from_output_parts` can still
+        // fail, and a failed add must leave the caller's sink untouched.
+        let mut staged = overwritten
+            .is_some()
+            .then(|| Vec::with_capacity(additions.len()));
         apply_additions(
             &mut parts,
             &mut inline_len,
             additions,
             add_unique,
-            overwritten,
+            staged.as_mut(),
         );
-        Self::from_output_parts(txid, inline_len, &parts)
+        let record = Self::from_output_parts(txid, inline_len, &parts)?;
+        if let (Some(sink), Some(events)) = (overwritten, staged) {
+            sink.extend(events);
+        }
+        Ok(record)
     }
 
     /// Increasing-unique append-copy fast path. Returns `None` when appending
@@ -1866,6 +1876,36 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// A failed non-unique add must leave the caller's overwrite sink
+    /// untouched: the events are staged locally and reach the sink only after
+    /// the replacement encodes. The oversized script fails the encode after
+    /// the duplicate vout has already been merged.
+    #[test]
+    fn failed_non_unique_add_leaves_the_overwrite_sink_untouched() -> Result<(), UtxoError> {
+        let existing = output(0, &[0x51], 10);
+        let record =
+            UtxoRecord::from_owned_outputs(Hash256::default(), std::slice::from_ref(&existing))?;
+        let oversized = vec![0x51; usize::from(u16::MAX) + 1];
+        let addition = OutputParts::new(0, 20, &oversized, false, 0);
+        let mut overwritten = Vec::new();
+        let result = UtxoRecord::add_run_replacement(
+            Some(&record),
+            Hash256::default(),
+            &[addition],
+            false,
+            Some(&mut overwritten),
+        );
+        assert!(
+            matches!(result, Err(UtxoError::ScriptTooLarge { .. })),
+            "the oversized script must fail the encode"
+        );
+        assert!(
+            overwritten.is_empty(),
+            "a failed add must leave the overwrite sink untouched"
+        );
         Ok(())
     }
 }
