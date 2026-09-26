@@ -25,7 +25,7 @@ pub struct MiningChainContext {
     pub bits: CompactTarget,
     /// Earliest timestamp the candidate may carry: previous-tip MTP + 1, or,
     /// at a BIP94 adjustment boundary, the higher of that and the parent's
-    /// timestamp minus [`MAX_TIMEWARP`].
+    /// timestamp minus the `MAX_TIMEWARP` allowance.
     pub min_time: u32,
     /// Median time past of the previous tip over the BIP113 window.
     pub prev_median_time_past: u32,
@@ -66,15 +66,12 @@ impl MiningChainContext {
                 id: previous_tip_id,
             })?;
         let mut min_time = prev_median_time_past.saturating_add(1);
-        let retarget_interval = network.retarget_interval();
-        if network.enforce_bip94()
-            && retarget_interval != 0
-            && height.is_multiple_of(retarget_interval)
-        {
-            // Core's `GetMinimumTime` (`src/node/miner.cpp:42-49`) also
-            // refuses a boundary candidate more than `MAX_TIMEWARP` below its
-            // parent, so a locally built template must not start under the
-            // floor that admission would reject.
+        if bitcoin_rs_chain::at_retarget_boundary(network, height) {
+            // Core's `GetMinimumTime` (`src/node/miner.cpp:42-49`) applies
+            // the `parent.time - MAX_TIMEWARP` floor at every boundary on
+            // every network — unlike admission, which enforces it only
+            // where `enforce_bip94` holds — so a locally built template
+            // must not start under it.
             min_time = min_time.max(parent.header.time.saturating_sub(MAX_TIMEWARP));
         }
         Ok(Self {
@@ -219,9 +216,11 @@ mod tests {
         let inner = MiningChainContext::resolve(&tree, Network::Testnet4, before_tip, last.time)?;
         assert_eq!(inner.min_time, inner.prev_median_time_past + 1);
 
-        // Regtest never enforces BIP94, so its boundary keeps the old floor.
+        // `GetMinimumTime`'s floor is advisory on every network: regtest's
+        // boundary lowers to `time - MAX_TIMEWARP` like testnet4's, even
+        // though only BIP94 networks reject a header under it.
         let regtest = MiningChainContext::resolve(&tree, Network::Regtest, tip, last.time)?;
-        assert_eq!(regtest.min_time, regtest.prev_median_time_past + 1);
+        assert_eq!(regtest.min_time, last.time - 600);
         Ok(())
     }
 

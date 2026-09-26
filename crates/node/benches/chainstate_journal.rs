@@ -157,6 +157,8 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
     };
     let mut block = Block {
         header: Header {
+            // Version 4 keeps the block legal once regtest BIP65 activates
+            // (version < 4 is rejected at height 1351).
             version: 4,
             prev_blockhash,
             merkle_root: Hash256::default(),

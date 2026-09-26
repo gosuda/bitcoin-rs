@@ -1,7 +1,7 @@
 use bitcoin_rs_consensus::{MAX_TIMEWARP, MEDIAN_TIME_PAST_WINDOW};
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
-pub use pow::compact_is_met_by;
+pub use pow::{compact_is_met_by, compact_within_pow_limit};
 use pow::{compact_to_target, target_to_compact};
 
 use crate::{
@@ -141,10 +141,7 @@ pub fn validate_contextual_header(
     // BIP94 timewarp floor at a difficulty-adjustment boundary: the
     // candidate may not fall more than `MAX_TIMEWARP` below its parent
     // (`src/validation.cpp:4100-4110`).
-    let retarget_interval = network.retarget_interval();
-    if network.enforce_bip94() && retarget_interval != 0 && height.is_multiple_of(retarget_interval)
-    {
-        let minimum = parent.header.time.saturating_sub(MAX_TIMEWARP);
+    if let Some(minimum) = bip94_timewarp_floor(network, height, parent.header.time) {
         if header.time < minimum {
             return Err(ChainError::TimewarpAttack {
                 height,
@@ -446,12 +443,36 @@ pub fn permitted_difficulty_transition(
     pow::compact_to_target(pow::target_to_compact(smallest)) <= observed
 }
 
+/// Whether `height` lands on a difficulty-adjustment boundary of `network`.
+///
+/// That boundary is the point where Core's `GetMinimumTime` applies the
+/// `parent.time - MAX_TIMEWARP` timewarp floor
+/// (`src/node/miner.cpp:42-49`); the floor is advisory on every network
+/// and a consensus rule only where [`Network::enforce_bip94`] holds
+/// (`src/validation.cpp:4100-4110`).
+#[must_use]
+pub fn at_retarget_boundary(network: Network, height: u32) -> bool {
+    let retarget_interval = network.retarget_interval();
+    retarget_interval != 0 && height.is_multiple_of(retarget_interval)
+}
+
+/// The consensus timewarp floor for a candidate at `height` extending a
+/// parent stamped `parent_time`.
+///
+/// `Some(parent_time - MAX_TIMEWARP)` at a difficulty-adjustment boundary
+/// on a BIP94 network, `None` elsewhere.
+#[must_use]
+pub fn bip94_timewarp_floor(network: Network, height: u32, parent_time: u32) -> Option<u32> {
+    (network.enforce_bip94() && at_retarget_boundary(network, height))
+        .then(|| parent_time.saturating_sub(MAX_TIMEWARP))
+}
+
 /// Compact proof-of-work target decode/encode and block-work helpers.
 ///
 /// These mirror Bitcoin Core's `arith_uint256::SetCompact`/`GetCompact`
 /// exactly, including sign-bit normalization and overflow classification.
 pub(crate) mod pow {
-    use bitcoin_rs_primitives::{CompactTarget, Hash256};
+    use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
     use crate::node::{BlockHeader, ChainWork};
 
@@ -496,6 +517,20 @@ pub(crate) mod pow {
     pub fn compact_is_met_by(bits: CompactTarget, hash: Hash256) -> bool {
         let target = compact_to_target(bits);
         target != ChainWork::ZERO && ChainWork::from_le_bytes(hash.to_le_bytes()) <= target
+    }
+
+    /// Returns `true` when `bits` decodes to a nonzero target at or below
+    /// `network`'s proof-of-work limit.
+    ///
+    /// Core's `CheckProofOfWork` bounds (`pow.cpp:CheckProofOfWork`), minus
+    /// the hash comparison [`compact_is_met_by`] performs.
+    /// Difficulty-transition rules can accept any bits on
+    /// `allow_min_difficulty_blocks` networks, so the network cap has to be
+    /// checked on its own there.
+    #[must_use]
+    pub fn compact_within_pow_limit(network: Network, bits: CompactTarget) -> bool {
+        let target = compact_to_target(bits);
+        target != ChainWork::ZERO && target <= network.max_target()
     }
 
     /// The block-header proof of work: `~target / (target + 1) + 1`.

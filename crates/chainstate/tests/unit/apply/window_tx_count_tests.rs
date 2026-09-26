@@ -6,9 +6,10 @@
 //! (`docs/contracts/recovery.md`, `RCV-02`; the `WindowGroup` docs in
 //! `src/window.rs` state the same rule for the staged tips).
 //!
-//! PRE: a regtest genesis applied with count 1 and three one-transaction
-//! children whose headers are already in the tree, exactly the state
-//! header-first sync leaves before a body window.
+//! PRE: a regtest genesis applied with count 1 and committed as the
+//! durable head — the state a header-first sync that already applied
+//! genesis leaves before a body window — plus three one-transaction
+//! children whose headers are already in the tree.
 //! POST: one `ChainTransition::connect_window` call drains one
 //! outcome per block in order; outcome `n` carries `1 + n` transactions;
 //! every prefix published (the event sequence advanced once per block);
@@ -17,7 +18,8 @@
 use std::sync::Arc;
 
 use bitcoin_rs_chain::ChainTxCount;
-use bitcoin_rs_primitives::{Network, consensus_bytes};
+use bitcoin_rs_primitives::{Hash256, Network, consensus_bytes};
+use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::UtxoSet;
 
 use super::persistence_tests::{handles, mined_child, seed_genesis};
@@ -28,6 +30,20 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
     let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
     let genesis = Network::Regtest.genesis_block();
     seed_genesis(&handles)?;
+    // A real header-first sync that applied genesis also committed its
+    // durable head; seed it so the window's lineage fence actually runs.
+    handles.durable_head.commit(
+        None,
+        &DurableHead {
+            commit_id: 1,
+            height: 0,
+            tip: Hash256::from(genesis.block_hash()),
+            chain_tx_count: 1,
+            body_extent: None,
+            undo_extent: None,
+        },
+        &CommitRecords::default(),
+    )?;
 
     let first = mined_child(genesis.block_hash(), 1)?;
     let second = mined_child(first.block_hash(), 2)?;

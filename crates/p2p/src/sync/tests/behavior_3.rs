@@ -656,13 +656,17 @@ fn padded_block_exact(size: usize, seed: u8) -> Block {
         vec![super::transaction(seed)],
     );
     block.txs[0].outputs[0].script_pubkey = Vec::new().into();
-    let prefix_growth = |len: usize| match len {
-        0..=252 => 0,
-        253..=0xffff => 2,
-        _ => 4,
-    };
     let wanted = size - consensus_bytes(&block).len();
-    let script_len = wanted - prefix_growth(wanted - prefix_growth(wanted));
+    // Largest script length whose `script_len + varint` total fits `wanted`;
+    // 253-254 and 65538-65539 sit in the prefix-transition gaps and assert
+    // rather than overshoot.
+    let script_len = if wanted <= 252 {
+        wanted
+    } else if wanted <= 0xffff + 2 {
+        wanted - 2
+    } else {
+        wanted - 4
+    };
     block.txs[0].outputs[0].script_pubkey = vec![0_u8; script_len].into();
     assert_eq!(consensus_bytes(&block).len(), size);
     block
