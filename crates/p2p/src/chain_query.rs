@@ -208,15 +208,18 @@ impl ChainQuery for ActiveChainQuery {
         Ok(outcome)
     }
 
-    /// PRE: `request` carries decoded absolute, strictly increasing
-    /// transaction indexes for one block.
+    /// PRE: a shallow `request` carries decoded absolute, strictly
+    /// increasing transaction indexes for one block; a deep one may carry
+    /// any list, which the whole-block answer ignores.
     /// POST: return the `blocktxn` reply for a block within
     /// [`MAX_BLOCKTXN_DEPTH`] of the active tip, the whole witness-bearing
     /// `block` for a deeper one, and `None` for a block this node cannot
-    /// serve; `Err` reports an index past the end of the body.
+    /// serve; `Err` reports a malformed shallow list or an index past the
+    /// end of the body.
     /// INVARIANT: a deep request is never answered with a small `blocktxn`
     /// and never left unanswered while its body is available (Core 31.1
-    /// `net_processing.cpp:4590-4624`).
+    /// `net_processing.cpp:4590-4624`); a malformed list is refused only on
+    /// the shallow path, after the depth decision.
     fn block_transactions(
         &self,
         request: &BlockTransactionsRequest,
@@ -235,6 +238,17 @@ impl ChainQuery for ActiveChainQuery {
         if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
             return Ok(Some(Message::BlockPayload(payload)));
         }
+        // Shallow only: the list must name transactions. A malformed list on
+        // a deep request is answered with the whole block above, never a
+        // disconnect.
+        if request.indexes.is_empty() {
+            return Err(PeerError::Protocol("getblocktxn with empty index list"));
+        }
+        if request.indexes.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(PeerError::Protocol(
+                "getblocktxn indexes not strictly increasing",
+            ));
+        }
         let Ok(block) = bitcoin::consensus::encode::deserialize::<RegistryBlock>(payload.as_ref())
         else {
             return Ok(None);
@@ -247,18 +261,11 @@ impl ChainQuery for ActiveChainQuery {
 
 impl ActiveChainQuery {
     /// Builds one `cmpctblock` for an active-chain body at the requesting
-    /// peer's negotiated BIP152 version. `None` (no negotiation, unknown
-    /// version, undecodable or stale body) leaves the item in `not_found`.
-    fn compact_block_for(
-        &self,
-        height: u32,
-        hash: BlockHash,
-        compact_version: Option<u64>,
-    ) -> Option<Message> {
-        let version = u32::try_from(compact_version?).ok()?;
-        if version != 1 && version != 2 {
-            return None;
-        }
+    /// peer's negotiated BIP152 version. `None` (undecodable or stale body)
+    /// leaves the item in `not_found`; a missing or unsupported version is
+    /// refused by [`Self::response_for`] before this runs.
+    /// PRE: `compact_version` is a supported BIP152 version (1 or 2).
+    fn compact_block_for(&self, height: u32, hash: BlockHash, version: u32) -> Option<Message> {
         let (payload, tip_height) = self.load_active_block(height, hash)?;
         if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) {
             return Some(Message::BlockPayload(payload));
@@ -284,15 +291,31 @@ impl ActiveChainQuery {
             BlockRequest::Full(hash) => self.full_block_response(height, hash),
             // A peer asking for an old block almost certainly cannot match it
             // against a useful mempool, so the compact request is served as
-            // the whole body, whatever it negotiated.
+            // the whole body once a supported BIP152 version is negotiated.
+            // A peer that never negotiated — or negotiated an unsupported
+            // version — belongs in `not_found`, however deep the block.
             BlockRequest::Compact(hash)
-                if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) =>
+                if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH)
+                    && compact_version
+                        .and_then(|version| u32::try_from(version).ok())
+                        .is_some_and(is_supported_compact_version) =>
             {
                 self.full_block_response(height, hash)
             }
-            BlockRequest::Compact(hash) => self.compact_block_for(height, hash, compact_version),
+            BlockRequest::Compact(hash) => {
+                let version = u32::try_from(compact_version?).ok()?;
+                if !is_supported_compact_version(version) {
+                    return None;
+                }
+                self.compact_block_for(height, hash, version)
+            }
         }
     }
+}
+
+/// Whether `version` is a supported BIP152 identity version.
+const fn is_supported_compact_version(version: u32) -> bool {
+    version == 1 || version == 2
 }
 
 /// Whether one block sits deeper below the active tip than `limit`.
@@ -918,6 +941,68 @@ mod tests {
             panic!("a deeper block is answered with the whole block, got {one_deeper:?}");
         };
         assert_eq!(payload_body(payload)?.txdata.len(), 2, "witnesses retained");
+        Ok(())
+    }
+
+    /// A malformed index list is refused only on the shallow path: a deep
+    /// block answers it with the whole `block`, because the depth decision
+    /// precedes any index inspection (Core 31.1
+    /// `net_processing.cpp:4590-4624`).
+    #[test]
+    fn malformed_getblocktxn_list_is_refused_only_when_shallow()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(12);
+        let deep_block = block_at(&headers, 0)?;
+        let query = chain_at(&headers, 0, &deep_block)?;
+
+        let deep = query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
+            block_hash: wire_hash(deep_block.block_hash()),
+            indexes: vec![3, 2],
+        })?;
+        let Some(Message::BlockPayload(payload)) = &deep else {
+            panic!("a deep malformed request is answered with the whole block, got {deep:?}");
+        };
+        assert_eq!(payload_body(payload)?.txdata.len(), 2, "witnesses retained");
+
+        let shallow_block = block_at(&headers, 11)?;
+        let shallow_query = chain_at(&headers, 11, &shallow_block)?;
+        for indexes in [Vec::new(), vec![1, 1]] {
+            let refused =
+                shallow_query.block_transactions(&bitcoin::bip152::BlockTransactionsRequest {
+                    block_hash: wire_hash(shallow_block.block_hash()),
+                    indexes,
+                });
+            assert!(
+                matches!(refused, Err(PeerError::Protocol(_))),
+                "a shallow malformed list is a protocol disconnect, got {refused:?}"
+            );
+        }
+        Ok(())
+    }
+
+    /// A compact `getdata` from a peer that never negotiated BIP152 — or
+    /// negotiated an unsupported version — stays in `not_found`, however
+    /// deep the block: the version gate precedes the deep whole-block
+    /// fallback (BIP152).
+    #[test]
+    fn un_negotiated_compact_getdata_is_never_served() -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(12);
+        let deep_block = block_at(&headers, 0)?;
+        let query = chain_at(&headers, 0, &deep_block)?;
+        let item = Inventory::CompactBlock(wire_hash(deep_block.block_hash()));
+        for version in [None, Some(3_u64), Some(u64::from(u32::MAX) + 1)] {
+            let mut served = Vec::new();
+            let outcome =
+                query.serve_inventory_blocks(&[item], version, &|| true, &mut |message| {
+                    served.push(message);
+                    Ok(())
+                })?;
+            assert!(
+                served.is_empty(),
+                "an un-negotiated compact request is never answered, got {served:?}"
+            );
+            assert_eq!(outcome.not_found, vec![item], "the item lands in not_found");
+        }
         Ok(())
     }
 
