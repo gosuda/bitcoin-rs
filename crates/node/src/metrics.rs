@@ -169,8 +169,6 @@ impl EvidenceIdentity {
 }
 
 fn describe_node_metrics() {
-    metrics::describe_counter!("node.event_loop.mempool_ticks", "mempool maintenance ticks");
-    metrics::describe_counter!("node.event_loop.metrics_scrapes", "metrics scrape ticks");
     metrics::describe_counter!("node.event_loop.sync_ticks", "block sync ticks");
     metrics::describe_counter!(
         "node.event_loop.sync_wakes",

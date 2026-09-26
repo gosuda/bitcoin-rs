@@ -146,7 +146,7 @@ fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow
 
     assert!(
         services
-            .teardown(Some(&state), TeardownMode::CleanShutdown)
+            .teardown(Some(&state), TeardownMode::CleanShutdown, None)
             .is_err()
     );
     assert_eq!(shutdown::take_shutdown_stages_reached(), 1);
@@ -180,7 +180,7 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()
     let mut services = NodeServices::default();
     services.bootstrap_worker = Some(worker);
     let started = std::time::Instant::now();
-    services.teardown(Some(&state), TeardownMode::CleanShutdown)?;
+    services.teardown(Some(&state), TeardownMode::CleanShutdown, None)?;
     let elapsed = started.elapsed();
     assert!(elapsed >= std::time::Duration::from_secs(2));
     assert!(
@@ -242,8 +242,8 @@ fn repeated_teardown_and_drop_join_workers_once() -> anyhow::Result<()> {
     services.tx_ingress = Some(std::thread::spawn(move || {
         worker_joins.fetch_add(1, Ordering::Release);
     }));
-    services.teardown(None, TeardownMode::StartupAbort)?;
-    services.teardown(None, TeardownMode::StartupAbort)?;
+    services.teardown(None, TeardownMode::StartupAbort, None)?;
+    services.teardown(None, TeardownMode::StartupAbort, None)?;
     drop(services);
     assert_eq!(joins.load(Ordering::Acquire), 1);
     assert_eq!(shutdown::take_shutdown_stages_reached(), 1);
@@ -283,6 +283,48 @@ fn startup_rollback_joins_workers_and_preserves_checkpoint() -> anyhow::Result<(
 }
 
 #[test]
+// CONTRACT: docs/contracts/embedding.md EMB-01 — on explicit embedded
+// shutdown the derived-index worker is stopped and joined before the clean
+// checkpoint publishes and before chainstate closes.
+fn explicit_shutdown_joins_index_worker_before_clean_checkpoint() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut config = isolated_config(&temp.path().join("node-index-join"));
+    config.indexes.txindex = true;
+    let node = start_node(config, RuntimeInputs::default(), true)?;
+    // Wait until the worker's store is open (the lifecycle leaves Opening),
+    // so shutdown exercises the live-worker join, not an open race.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while matches!(
+        node.state.derived_index_status().capability().state,
+        bitcoin_rs_index::CapabilityState::Opening
+    ) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "txindex lifecycle remained Opening"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // `worker_joined` flips only after the worker's join returns — a join
+    // abandoned at the deadline never sets it — so the checkpoint-side
+    // observation proves the join ran, not just that shutdown was requested.
+    let joined = node.state.index_worker_joined();
+    let worker_joined_before_checkpoint = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&worker_joined_before_checkpoint);
+    inject_before_clean_checkpoint(move || {
+        flag.store(joined.load(Ordering::Acquire), Ordering::Release);
+    });
+
+    node.shutdown_blocking()?;
+
+    assert!(
+        worker_joined_before_checkpoint.load(Ordering::Acquire),
+        "the derived-index worker must be stopped and joined before the \
+         clean checkpoint publishes"
+    );
+    Ok(())
+}
+
+#[test]
 // CONTRACT: docs/contracts/architecture.md#ARCH-05
 fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
     let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
@@ -291,7 +333,7 @@ fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
     let worker = std::thread::spawn(move || {
         let mut services = NodeServices::default();
         services.event_loop_signal = Some(wake_tx);
-        let result = services.teardown(None, TeardownMode::StartupAbort);
+        let result = services.teardown(None, TeardownMode::StartupAbort, None);
         let _ = done_tx.send(result);
     });
     let result = done_rx.recv_timeout(DRAIN_DEADLINE + Duration::from_secs(5));

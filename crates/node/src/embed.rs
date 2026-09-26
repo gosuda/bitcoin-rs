@@ -197,12 +197,16 @@ impl Node {
 
     pub(crate) fn shutdown_blocking(mut self) -> Result<(), NodeError> {
         // Explicit shutdown must release index stores, not abandon their
-        // workers at the bounded Drop deadline.
+        // workers at the bounded Drop deadline: stop and join the
+        // derived-index worker before teardown, so the clean checkpoint
+        // publishes and chainstate closes only after the worker is gone —
+        // the same order `Drop for Node` uses.
         let Some(services) = self.services.as_mut() else {
             return Err(NodeError::Shutdown("node was already shut down".to_owned()));
         };
+        let index_error = self.state.bounded_index_shutdown(DRAIN_DEADLINE).err();
         let result = services
-            .teardown(Some(&self.state), TeardownMode::CleanShutdown)
+            .teardown(Some(&self.state), TeardownMode::CleanShutdown, index_error)
             .map_err(|error| NodeError::Shutdown(error.to_string()));
         self.services = None;
         // Dropping self releases state and the RPC context's storage clones
@@ -214,8 +218,10 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         if let Some(services) = self.services.as_mut() {
-            self.state.bounded_index_shutdown(DRAIN_DEADLINE);
-            if let Err(error) = services.teardown(Some(&self.state), TeardownMode::StartupAbort) {
+            let index_error = self.state.bounded_index_shutdown(DRAIN_DEADLINE).err();
+            if let Err(error) =
+                services.teardown(Some(&self.state), TeardownMode::StartupAbort, index_error)
+            {
                 tracing::warn!(%error, "dropped embedded node; teardown reported an error");
             }
             self.services = None;

@@ -40,6 +40,8 @@ use std::time::Duration;
 use storage::NodeStorage;
 use storage::StoredBlockBodySource;
 
+#[path = "state_index.rs"]
+mod index;
 #[path = "state_open.rs"]
 mod open;
 #[path = "state_prune.rs"]
@@ -94,15 +96,9 @@ pub struct NodeState {
     #[cfg(test)]
     resume_source: ResumeSource,
     storage: NodeStorage,
-    derived_index_runtime: Option<Arc<bitcoin_rs_index::runtime::DerivedIndexRuntime>>,
-    derived_index_spawn: Option<TxIndexSpawn>,
-    derived_index_worker: Option<bitcoin_rs_index::runtime::DerivedIndexWorker>,
-    derived_index_lifecycle:
-        Option<Arc<arc_swap::ArcSwap<bitcoin_rs_index::runtime::DerivedIndexLifecycle>>>,
-    /// Stable query adapter for txindex/script-index, constructed before open.
-    derived_index_adapter: Option<Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>>,
-    /// Live txindex facts for the RPC `getcapabilities` projection.
-    derived_index_status: Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>,
+    /// Derived-index host: the always-present status source, the configured
+    /// parts, and the one worker state-machine slot.
+    derived_index: index::DerivedIndexHost,
     prune_service: Option<Arc<dyn PruneService>>,
     zmq_publisher: Arc<dyn crate::ZmqPublisher>,
     mempool: Arc<RwLock<Mempool>>,
@@ -139,16 +135,13 @@ pub struct NodeState {
 
 impl Drop for NodeState {
     fn drop(&mut self) {
+        // Closes chain admission permanently. The derived-index worker stop
+        // and join run in `DerivedIndexHost::drop` when that field drops;
+        // relative to this admission guard the order is free: `Chainstate::
+        // close()` keeps admission closed through the permanent `closed`
+        // flag, and the index worker only reads chain handles, so releasing
+        // the guard before the join is behavior-identical to holding it.
         let _admission = self.chainstate.close();
-        // Safety net: if `bounded_index_shutdown` was not called (e.g. in
-        // tests that drop `NodeState` directly), request shutdown and join
-        // any worker not already taken by `bounded_index_shutdown`.
-        if let Some(runtime) = &self.derived_index_runtime {
-            runtime.request_shutdown();
-        }
-        if let Some(worker) = self.derived_index_worker.take() {
-            worker.join();
-        }
     }
 }
 
@@ -378,7 +371,7 @@ impl NodeState {
         if !self.config.indexes.txindex {
             return None;
         }
-        self.derived_index_adapter.as_ref().map(|adapter| {
+        self.derived_index.adapter().map(|adapter| {
             let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
             q
         })
@@ -392,7 +385,7 @@ impl NodeState {
     pub fn esplora_derived_index_query(
         &self,
     ) -> Option<Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery>> {
-        self.derived_index_adapter.as_ref().map(|adapter| {
+        self.derived_index.adapter().map(|adapter| {
             let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
             q
         })
@@ -404,7 +397,7 @@ impl NodeState {
         if !self.config.indexes.script_index.is_enabled() {
             return None;
         }
-        self.derived_index_adapter.as_ref().map(|adapter| {
+        self.derived_index.adapter().map(|adapter| {
             let q: Arc<dyn bitcoin_rs_rpc::context::ScriptIndexQuery> = adapter.clone();
             q
         })
@@ -414,37 +407,7 @@ impl NodeState {
     /// authoritative — after crash recovery — so the index reconciles against
     /// the real chainstate and never mistakes a recovered gap for a stale branch.
     pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
-        let Some(spawn) = self.derived_index_spawn.take() else {
-            return Ok(());
-        };
-        let runtime = self
-            .derived_index_runtime
-            .as_ref()
-            .context("txindex runtime missing for a pending worker spawn")?;
-        let lifecycle = self
-            .derived_index_lifecycle
-            .as_ref()
-            .context("txindex lifecycle missing for a pending worker spawn")?;
-        let worker = bitcoin_rs_index::runtime::DerivedIndexWorker::spawn_with_open(
-            Arc::clone(runtime),
-            spawn.spec,
-            Arc::clone(lifecycle),
-            spawn.generation,
-            self.chainstate.applied_tip_handle(),
-            self.chainstate.block_tree_handle(),
-            self.chainstate.block_body_store_handle(),
-            spawn.block_source,
-            Some(spawn.body_source),
-            Arc::new(IndexChainCursorSource(
-                self.chainstate.chain_events_handle(),
-            )),
-            spawn.recovery_reporter,
-            self.chainstate.shutdown_handle(),
-            spawn.wake_rx,
-        )
-        .context("spawn txindex worker")?;
-        self.derived_index_worker = Some(worker);
-        Ok(())
+        self.derived_index.start(&self.chainstate)
     }
 
     /// Returns the live txindex status source for `getcapabilities`.
@@ -452,65 +415,33 @@ impl NodeState {
     pub fn derived_index_status(
         &self,
     ) -> Arc<dyn bitcoin_rs_rpc::capabilities::DerivedIndexCapabilitySource> {
-        self.derived_index_status.clone()
+        self.derived_index.status()
     }
 
     /// Bounded txindex-worker shutdown: requests the worker shutdown, waits up
     /// to `deadline` for a clean join, and detaches on
     /// expiry. On detach, revokes the generation token and publishes
     /// `ShutdownAbandoned` so queries return typed `Unavailable` instead of
-    /// hitting a torn reader.
-    pub(crate) fn bounded_index_shutdown(&mut self, deadline: Duration) {
-        let start = std::time::Instant::now();
-        if let Some(runtime) = &self.derived_index_runtime {
-            runtime.request_shutdown();
-        }
-        // Take the worker out of self so we can join it without holding self
-        // mutably across the wait.
-        let derived_index_worker = self.derived_index_worker.take();
-        let tx_deadline = start + deadline;
-        if let Some(mut worker) = derived_index_worker {
-            while std::time::Instant::now() < tx_deadline {
-                if worker.is_finished() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            if worker.is_finished() {
-                worker.join();
-            } else {
-                tracing::warn!("txindex worker still blocked; abandoning join");
-                // Revoke the generation token so late publication is a no-op.
-                if let Some(generation_token) = &worker.generation {
-                    generation_token.revoke();
-                }
-                if let Some(lifecycle) = &self.derived_index_lifecycle {
-                    lifecycle.store(Arc::new(
-                        bitcoin_rs_index::runtime::DerivedIndexLifecycle::ShutdownAbandoned,
-                    ));
-                }
-                // Poison the namespace so it cannot be reclaimed in this process.
-                worker.poison_namespace();
-                // Detach the join handle so Drop does not block on join.
-                // The worker thread continues running but will exit after
-                // shutdown is observed; Drop is a no-op for the handle.
-                worker.detach();
-            }
-        }
+    /// hitting a torn reader. An abandoned join is an error: the caller's
+    /// teardown records it and suppresses the clean checkpoint.
+    pub(crate) fn bounded_index_shutdown(&mut self, deadline: Duration) -> Result<()> {
+        self.derived_index.shutdown(deadline)
+    }
+
+    /// `true` once the owned index worker's join returned; stays `false` when
+    /// the bounded join was abandoned. The lifecycle tests read it at the
+    /// checkpoint seam to prove join-before-checkpoint.
+    #[cfg(test)]
+    pub(crate) fn index_worker_joined(&self) -> Arc<AtomicBool> {
+        self.derived_index.worker_joined()
     }
 }
 
 fn derived_index_capabilities(config: &NodeConfig) -> bitcoin_rs_index::IndexCapabilities {
-    bitcoin_rs_index::IndexCapabilities {
-        // Full ScriptIndex-backed Esplora responses need exact historical
-        // transactions to render prevouts and calculate fees. `utxo` owns
-        // only the compact live-output view and must not pay for TxLookup.
-        // `derived_index_query` still exposes TxLookup to Core RPCs only for an
-        // explicit --txindex configuration.
-        tx_lookup: config.indexes.txindex || config.indexes.script_index.keeps_history(),
-        script_history: config.indexes.script_index.keeps_history(),
-        script_live: config.indexes.script_index.is_enabled(),
-    }
+    config
+        .indexes
+        .script_index
+        .enabled_capabilities(config.indexes.txindex)
 }
 
 fn build_derived_index_open_spec(
@@ -573,7 +504,7 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
     }
 }
 
-struct TxIndexSpawn {
+pub(crate) struct TxIndexSpawn {
     spec: bitcoin_rs_index::runtime::DerivedIndexOpenSpec,
     generation: bitcoin_rs_index::runtime::Generation,
     block_source: bitcoin_rs_index::runtime::IndexBlockSource,

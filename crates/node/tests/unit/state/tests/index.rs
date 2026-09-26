@@ -29,11 +29,7 @@ fn script_index_capabilities_match_the_storage_contract() {
     config.indexes.script_index = crate::config::ScriptIndexMode::Utxo;
     assert_eq!(
         derived_index_capabilities(&config),
-        IndexCapabilities {
-            tx_lookup: true,
-            script_history: false,
-            script_live: true,
-        }
+        IndexCapabilities::TX_LOOKUP_SCRIPT_LIVE
     );
 }
 
@@ -67,38 +63,122 @@ fn index_workers_start_only_when_asked() -> anyhow::Result<()> {
     let mut state = NodeState::open(config, None)?;
 
     assert!(state.chain_followers().derived_index().is_some());
+    assert!(state.derived_index.lifecycle_is_opening());
     assert!(
-        state
-            .derived_index_lifecycle
-            .as_ref()
-            .is_some_and(|lifecycle| {
-                matches!(
-                    lifecycle.load().as_ref(),
-                    bitcoin_rs_index::runtime::DerivedIndexLifecycle::Opening
-                )
-            })
+        !state.derived_index.is_running(),
+        "no worker may exist before start_index_workers"
     );
-    assert!(state.derived_index_worker.is_none());
 
     state.start_index_workers()?;
-    assert!(state.derived_index_worker.is_some());
+    assert!(state.derived_index.is_running());
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while state
-        .derived_index_lifecycle
-        .as_ref()
-        .is_some_and(|lifecycle| {
-            matches!(
-                lifecycle.load().as_ref(),
-                bitcoin_rs_index::runtime::DerivedIndexLifecycle::Opening
-            )
-        })
-    {
+    while state.derived_index.lifecycle_is_opening() {
         assert!(
             std::time::Instant::now() < deadline,
             "txindex lifecycle remained Opening"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+    Ok(())
+}
+
+/// C1: `start_index_workers` is idempotent — a second call after the worker
+/// runs is a safe no-op, not a second spawn.
+#[test]
+fn start_index_workers_twice_is_idempotent() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+    config.data_dir = dir.path().join("node");
+    config.p2p.listen.clear();
+    config.indexes.txindex = true;
+    let mut state = NodeState::open(config, None)?;
+
+    state.start_index_workers()?;
+    assert!(state.derived_index.is_running());
+    state.start_index_workers()?;
+    assert!(
+        state.derived_index.is_running(),
+        "the second call must leave the one worker running"
+    );
+    assert_eq!(
+        state.derived_index.spawn_count(),
+        1,
+        "the second call must not have spawned another worker"
+    );
+    Ok(())
+}
+
+/// C6: `derived_index_status` answers a concrete row in every phase,
+/// including a config with no index capability at all.
+#[test]
+fn derived_index_status_answers_when_disabled() -> anyhow::Result<()> {
+    use bitcoin_rs_index::CapabilityState;
+
+    let dir = tempfile::tempdir()?;
+    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+    config.data_dir = dir.path().join("node");
+    config.p2p.listen.clear();
+    config.indexes.txindex = false;
+    config.indexes.script_index = crate::config::ScriptIndexMode::Disabled;
+    let state = NodeState::open(config, None)?;
+
+    let status = state.derived_index_status();
+    assert_eq!(
+        status.capability().state,
+        CapabilityState::Disabled,
+        "a disabled config must answer a concrete Disabled row"
+    );
+    Ok(())
+}
+
+/// Bounded shutdown turns `Running` into `Stopped`, is idempotent, and
+/// leaves the store released for a clean reopen on the same data dir.
+#[test]
+fn bounded_shutdown_stops_the_worker_and_allows_reopen() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+    config.data_dir = dir.path().join("node");
+    config.p2p.listen.clear();
+    config.indexes.txindex = true;
+    let mut state = NodeState::open(config.clone(), None)?;
+    state.start_index_workers()?;
+    assert!(state.derived_index.is_running());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while state.derived_index.lifecycle_is_opening() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "txindex lifecycle remained Opening"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    state.bounded_index_shutdown(Duration::from_secs(5))?;
+    assert!(!state.derived_index.is_running());
+    // A second call is a no-op, not a second stop or a panic.
+    state.bounded_index_shutdown(Duration::from_secs(5))?;
+    drop(state);
+
+    // The worker joined cleanly, so the namespace is free and the store
+    // reopens: a replacement worker starts, opens the store, and leaves
+    // Opening for a real capability state — never Failed or abandoned.
+    let mut reopened = NodeState::open(config, None)?;
+    reopened.start_index_workers()?;
+    assert!(reopened.derived_index.is_running());
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while reopened.derived_index.lifecycle_is_opening() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "replacement txindex worker remained Opening"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // The lifecycle slot — not the derived capability row — is the durable
+    // open signal: a progress read that raced a moving watermark answers a
+    // transient `Failed` while the worker is Serving.
+    assert!(
+        !reopened.derived_index.lifecycle_is_failed(),
+        "the replacement worker must open the reclaimed namespace"
+    );
     Ok(())
 }
 

@@ -9,6 +9,7 @@ use super::catch_up::BatchWait;
 use super::catch_up::wait_for_batch_deadline;
 use super::catch_up::wait_for_revision_quiet;
 use crate::IndexCapabilities;
+use crate::IndexCapability;
 use crate::IndexError;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
@@ -193,9 +194,9 @@ impl Worker {
                 tracing::warn!(
                     depth,
                     cutover = self.rollback_rebuild_cutover,
-                    tx_lookup = capabilities.tx_lookup,
-                    script_history = capabilities.script_history,
-                    script_live = capabilities.script_live,
+                    tx_lookup = capabilities.contains(IndexCapability::TxLookup),
+                    script_history = capabilities.contains(IndexCapability::ScriptHistory),
+                    script_live = capabilities.contains(IndexCapability::ScriptLive),
                     "stale index watermark exceeds the rollback cutover; rebuilding selected capabilities"
                 );
                 (fence, watermarks) = self.reset_for_rebuild(capabilities)?;
@@ -232,9 +233,9 @@ impl Worker {
                 Err(error) if error.requires_capability_rebuild() => {
                     tracing::warn!(
                         error = %error,
-                        tx_lookup = capabilities.tx_lookup,
-                        script_history = capabilities.script_history,
-                        script_live = capabilities.script_live,
+                        tx_lookup = capabilities.contains(IndexCapability::TxLookup),
+                        script_history = capabilities.contains(IndexCapability::ScriptHistory),
+                        script_live = capabilities.contains(IndexCapability::ScriptLive),
                         "index cursor cannot be rolled back; rebuilding selected capabilities"
                     );
                     (fence, watermarks) = self.reset_for_rebuild(capabilities)?;
@@ -259,7 +260,7 @@ impl Worker {
         // Live has no watermark after restoration, an interrupted seed, or a
         // same-pass `reset_for_rebuild`. Seed from one stable UTXO view
         // before `forward_selection` would replay it from genesis (`IDX-07`).
-        if self.enabled.script_live && watermarks.script_live.is_none() {
+        if self.enabled.contains(IndexCapability::ScriptLive) && watermarks.script_live.is_none() {
             self.seed_live_from_utxo()?;
             return Ok(ReconcileAction::Progressed);
         }
@@ -353,37 +354,25 @@ impl Worker {
         watermarks: IndexWatermarks,
         target: Option<&TipSnapshot>,
     ) -> Option<(IndexCapabilities, IndexWatermark)> {
-        let tx = self
-            .enabled
-            .tx_lookup
-            .then_some(watermarks.tx_lookup)
-            .flatten();
-        let script_index = self
-            .enabled
-            .script_history
-            .then_some(watermarks.script_history)
-            .flatten();
-        let script_live = self
-            .enabled
-            .script_live
-            .then_some(watermarks.script_live)
-            .flatten();
+        let enabled_watermark = |capability: IndexCapability| {
+            self.enabled
+                .contains(capability)
+                .then_some(watermarks.get(capability))
+                .flatten()
+        };
         let needs_rollback = |watermark: IndexWatermark| {
             target.is_none_or(|target| !self.watermark_is_on_target_chain(watermark, target))
         };
-        let selected = [tx, script_index, script_live]
+        let selected = IndexCapability::ALL
             .into_iter()
-            .flatten()
+            .filter_map(&enabled_watermark)
             .filter(|watermark| needs_rollback(*watermark))
             .max_by_key(|watermark| watermark.height)?;
-        Some((
-            IndexCapabilities {
-                tx_lookup: tx == Some(selected) && needs_rollback(selected),
-                script_history: script_index == Some(selected) && needs_rollback(selected),
-                script_live: script_live == Some(selected) && needs_rollback(selected),
-            },
-            selected,
-        ))
+        let selection = IndexCapability::ALL
+            .into_iter()
+            .filter(|&capability| enabled_watermark(capability) == Some(selected))
+            .collect();
+        Some((selection, selected))
     }
 
     pub(super) fn forward_selection(
@@ -391,21 +380,20 @@ impl Worker {
         watermarks: IndexWatermarks,
         target: &TipSnapshot,
     ) -> Option<(IndexCapabilities, Option<IndexWatermark>)> {
-        let tx = self.enabled.tx_lookup.then_some(watermarks.tx_lookup);
-        let script_index = self
-            .enabled
-            .script_history
-            .then_some(watermarks.script_history);
-        let script_live = self.enabled.script_live.then_some(watermarks.script_live);
+        let enabled_watermark = |capability: IndexCapability| {
+            self.enabled
+                .contains(capability)
+                .then_some(watermarks.get(capability))
+        };
         let needs_forward = |watermark: Option<IndexWatermark>| {
             watermark.is_none_or(|watermark| watermark.height < target.height)
         };
         let start_height = |watermark: Option<IndexWatermark>| {
             watermark.map_or(0, |watermark| watermark.height.saturating_add(1))
         };
-        let selected_start = [tx, script_index, script_live]
+        let selected_start = IndexCapability::ALL
             .into_iter()
-            .flatten()
+            .filter_map(&enabled_watermark)
             .filter(|watermark| needs_forward(*watermark))
             .map(start_height)
             .min()?;
@@ -413,26 +401,21 @@ impl Worker {
             None
         } else {
             let height = selected_start - 1;
-            [tx, script_index, script_live]
+            IndexCapability::ALL
                 .into_iter()
-                .flatten()
+                .filter_map(&enabled_watermark)
                 .flatten()
                 .find(|watermark| watermark.height == height)
         };
-        Some((
-            IndexCapabilities {
-                tx_lookup: tx.is_some_and(|watermark| {
+        let selection = IndexCapability::ALL
+            .into_iter()
+            .filter(|&capability| {
+                enabled_watermark(capability).is_some_and(|watermark| {
                     needs_forward(watermark) && start_height(watermark) == selected_start
-                }),
-                script_history: script_index.is_some_and(|watermark| {
-                    needs_forward(watermark) && start_height(watermark) == selected_start
-                }),
-                script_live: script_live.is_some_and(|watermark| {
-                    needs_forward(watermark) && start_height(watermark) == selected_start
-                }),
-            },
-            selected_watermark,
-        ))
+                })
+            })
+            .collect();
+        Some((selection, selected_watermark))
     }
 
     pub(super) fn watermark_is_on_target_chain(

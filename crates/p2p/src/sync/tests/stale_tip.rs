@@ -13,7 +13,7 @@ use crate::service::{P2pService, P2pServiceConfig};
 
 /// The network's target spacing: ten minutes, as every production chain
 /// configures it.
-const SPACING: Duration = Duration::from_secs(600);
+const SPACING: Duration = Duration::from_mins(10);
 
 /// The armed allowance must let the connection manager dial past the slot
 /// cap, or the stale-tip rule buys nothing: Core's `ThreadOpenConnections`

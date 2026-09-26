@@ -2,8 +2,7 @@
 
 use super::{
     capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
-    capability::SCRIPT_LIVE_WATERMARK_KEY, capability::watermark_key, error::IndexError,
-    rows::IndexRowCounts,
+    capability::SCRIPT_LIVE_WATERMARK_KEY, error::IndexError, rows::IndexRowCounts,
 };
 use crate::{types::ScriptHashRow, types::SpendingPrefixRow, types::TxidRow};
 use bitcoin_rs_primitives::{OutPoint, Txid};
@@ -47,7 +46,7 @@ impl<S: KvStore> Indexer<S> {
         &self,
         capability: IndexCapability,
     ) -> Result<Option<IndexWatermark>, IndexError> {
-        let key = watermark_key(capability);
+        let key = capability.watermark_key();
         self.store
             .get(ColumnFamily::UtxoMeta, key)?
             .as_deref()
