@@ -7,7 +7,7 @@ mod recovery;
 
 use anyhow::Result;
 
-use bitcoin_rs_chain::TipSnapshot;
+use bitcoin_rs_chain::{TipSnapshot, regtest_fixture};
 
 use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid, chain_constants::CORE_REORG_SAFETY_MARGIN};
 
