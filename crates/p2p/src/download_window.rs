@@ -2000,7 +2000,7 @@ impl DownloadWindow {
         non_empty_request(source, entries, next_request_height)
     }
 
-    fn retarget_request_branch(
+    pub(crate) fn retarget_request_branch(
         &mut self,
         stager: &mut BlockStager,
         chain_tip: &TipSnapshot,
@@ -2033,23 +2033,6 @@ impl DownloadWindow {
             .collect();
         for hash in stale_pending {
             self.remove_pending(&hash, now);
-        }
-        // The stager is the single staged-body store: bodies the request
-        // branch left behind are released here, so freed capacity is real
-        // and a late old-branch delivery cannot re-acquire purged state.
-        // A hash the tree cannot resolve is off-branch by definition.
-        let stale_staged: Vec<Hash256> = stager
-            .staged_hashes()
-            .filter(|hash| {
-                let on_branch = tree
-                    .lookup(*hash)
-                    .and_then(|node_id| tree.node(node_id).ok())
-                    .map(|node| is_on_request_branch(node.hash, node.height));
-                on_branch != Some(true)
-            })
-            .collect();
-        for hash in stale_staged {
-            stager.discard(&hash);
         }
         // The stager is the single staged-body store: bodies the request
         // branch left behind are released here, so freed capacity is real
