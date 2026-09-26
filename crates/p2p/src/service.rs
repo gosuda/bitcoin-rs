@@ -805,6 +805,14 @@ fn run_fixed_peer_bootstrap(
     }
 }
 
+/// Live outbound connections: cancelled leases kept for teardown do not
+/// count, so DNS maintenance keeps refilling while they drain.
+///
+/// PRE: none.
+/// POST: returns the number of sessions whose lease is neither inbound nor
+///   cancelled.
+/// INVARIANT: the count is derived from the live session set; no shadow
+///   counter exists.
 fn live_outbound_count(peer_table: &crate::PeerTable) -> usize {
     peer_table
         .sessions()
@@ -903,8 +911,10 @@ fn retire_extra_full_relay_connection(
 ///
 /// PRE: `slots` is the configured full-relay count.
 /// POST: return `None` while the table holds no more than `slots` such
-///   connections; otherwise return the newest automatic one old enough to be
-///   judged.
+///   connections; otherwise return the newest automatic one beyond `slots`
+///   that is old enough to be judged. A configured-slot connection is never
+///   the victim, so a young extra leaves it in place until the extra itself
+///   ages past [`MINIMUM_CONNECT_TIME`].
 /// INVARIANT: a connection that never finished its handshake still holds a
 ///   slot, so it counts, but a hand-pinned one is never the victim: Core's
 ///   `EvictExtraOutboundPeers` looks only at `IsFullOutboundConn()` and
@@ -932,6 +942,7 @@ fn newest_excess_full_relay(
     }
     sessions
         .iter()
+        .skip(slots)
         .rev()
         .find(|session| {
             now.saturating_duration_since(session.lease.connected_at())
@@ -1363,6 +1374,49 @@ mod tests {
                 .addr,
             excess.addr,
             "the newest automatic connection stays the victim while a pinned one is newer"
+        );
+    }
+
+    /// A young excess connection is passed over rather than judged, and an
+    /// aged configured-slot connection is never the victim: retirement reads
+    /// only the excess suffix.
+    #[test]
+    fn newest_excess_full_relay_leaves_a_young_extra_unjudged() {
+        use crate::connection::PeerLease;
+        use crate::download_window::MINIMUM_CONNECT_TIME;
+        use crate::peer_info::PeerRole;
+
+        fn addr(port: u16) -> SocketAddr {
+            SocketAddr::from(([127, 0, 0, 1], port))
+        }
+
+        let now = Instant::now();
+        let aged = now
+            .checked_sub(MINIMUM_CONNECT_TIME)
+            .expect("test clock is past the minimum connect time");
+        let table = crate::PeerTable::new();
+        for port in 1..=2_u16 {
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut lease = PeerLease::new(tx);
+            lease.backdate_for_test(aged);
+            table.register(addr(port), lease);
+        }
+        let (young_tx, _young_rx) = crossbeam_channel::unbounded();
+        table.register(addr(3), PeerLease::new(young_tx));
+
+        assert!(
+            newest_excess_full_relay(&table, 2, now).is_none(),
+            "the only excess connection is too young to judge, and the two \
+             aged in-slot connections are never candidates"
+        );
+        assert_eq!(
+            table
+                .sessions()
+                .iter()
+                .filter(|session| session.lease.role() == PeerRole::FullRelay)
+                .count(),
+            3,
+            "every connection stays connected"
         );
     }
 }
