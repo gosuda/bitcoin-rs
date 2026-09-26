@@ -320,7 +320,7 @@ impl BlockTree {
     }
 
     /// Builds a block locator starting from `tip_id`. For active tips, returns
-    /// header hashes at offsets 0, 1, 2, ..., 9, 10, 12, 16, 24, 40, ... by
+    /// header hashes at offsets 0, 1, 2, ..., 10, 11, 13, 17, 25, 40, ... by
     /// sampling the height index. Side-chain, malformed, and disconnected tips
     /// walk back through parents with exponential backoff. Stops at the genesis
     /// (no parent) or after `max_entries` hashes.

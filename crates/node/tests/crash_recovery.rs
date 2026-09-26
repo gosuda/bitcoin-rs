@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use parking_lot::Mutex;
 
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
     time::{Duration, Instant},
@@ -310,18 +310,10 @@ fn crash_recovery_subprocess_worker() -> Result<()> {
     }
 }
 
-fn run_sigkill_scenario(scenario: &str) -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let data_dir = temp.path().join(format!("{scenario}-node"));
-    let config = crash_config(scenario, data_dir.clone());
-    let genesis = Network::Regtest.genesis_block();
-    if scenario != "publication" {
-        let base = NodeState::open(config.clone(), None)?;
-        base.apply_block(&genesis)?;
-        base.publish_checkpoint()?;
-        drop(base);
-    }
-
+/// Spawns the parked crash worker for `scenario`, waits for its
+/// `crash-test-ready` marker under `data_dir`, and kills it once ready —
+/// one shared harness for every scenario.
+fn spawn_kill_and_wait(scenario: &str, data_dir: &Path, timeout_secs: u64) -> Result<()> {
     let executable = std::env::current_exe()?;
     let mut child = Command::new(executable)
         .args([
@@ -331,7 +323,7 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
             "--nocapture",
         ])
         .env(CHILD_ENV, "1")
-        .env(DATA_DIR_ENV, &data_dir)
+        .env(DATA_DIR_ENV, data_dir)
         .env(SCENARIO_ENV, scenario)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -340,7 +332,7 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
         .with_context(|| format!("spawn crash worker for {scenario}"))?;
 
     let ready = data_dir.join("crash-test-ready");
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     while !ready.is_file() {
         if let Some(status) = child.try_wait()? {
             let stderr = child.stderr.take().map_or_else(String::new, |stderr| {
@@ -360,6 +352,22 @@ fn run_sigkill_scenario(scenario: &str) -> Result<()> {
     if status.success() {
         bail!("crash worker for {scenario} exited successfully instead of being killed");
     }
+    Ok(())
+}
+
+fn run_sigkill_scenario(scenario: &str) -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let data_dir = temp.path().join(format!("{scenario}-node"));
+    let config = crash_config(scenario, data_dir.clone());
+    let genesis = Network::Regtest.genesis_block();
+    if scenario != "publication" {
+        let base = NodeState::open(config.clone(), None)?;
+        base.apply_block(&genesis)?;
+        base.publish_checkpoint()?;
+        drop(base);
+    }
+
+    spawn_kill_and_wait(scenario, &data_dir, 15)?;
 
     let resumed = NodeState::open(config, None)
         .with_context(|| format!("restart after SIGKILL in {scenario}"))?;
@@ -400,45 +408,7 @@ fn run_marker_scenario(scenario: &str) -> Result<(tempfile::TempDir, NodeConfig,
     base.publish_checkpoint()?;
     drop(base);
 
-    let executable = std::env::current_exe()?;
-    let mut child = Command::new(executable)
-        .args([
-            "--ignored",
-            "--exact",
-            "crash_recovery_subprocess_worker",
-            "--nocapture",
-        ])
-        .env(CHILD_ENV, "1")
-        .env(DATA_DIR_ENV, &data_dir)
-        .env(SCENARIO_ENV, scenario)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("spawn crash worker for {scenario}"))?;
-    let ready = data_dir.join("crash-test-ready");
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !ready.exists() {
-        if let Some(status) = child.try_wait()? {
-            let stderr = child
-                .stderr
-                .take()
-                .map(read_stderr)
-                .transpose()?
-                .unwrap_or_default();
-            bail!("crash worker {scenario} died before ready: {status}: {stderr}");
-        }
-        if Instant::now() > deadline {
-            child.kill()?;
-            bail!("crash worker {scenario} never became ready");
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    child.kill()?;
-    let status = child.wait()?;
-    if status.success() {
-        bail!("crash worker for {scenario} exited successfully instead of being killed");
-    }
+    spawn_kill_and_wait(scenario, &data_dir, 30)?;
 
     let resumed = NodeState::open(config.clone(), None)
         .with_context(|| format!("reopening {scenario} after SIGKILL must complete recovery"))?;

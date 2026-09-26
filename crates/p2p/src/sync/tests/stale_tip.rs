@@ -101,7 +101,9 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
 
     let mut held = Vec::new();
     for (index, listener) in listeners.iter().enumerate() {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Generous deadline: slow CI may legally deliver the third dial
+        // late; the allowance, not the clock, is the assertion.
+        let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             match listener.accept() {
                 Ok((stream, _peer)) => {

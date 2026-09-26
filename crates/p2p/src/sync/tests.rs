@@ -465,6 +465,7 @@ fn check_sync_frontier_pair(
         true,
         100,
         &test_frontier(sync),
+        Instant::now(),
     );
     let expected_ids = expected
         .as_ref()

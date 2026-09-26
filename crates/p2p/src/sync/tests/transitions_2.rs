@@ -89,8 +89,14 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
     let source = current_source(&sync.peer_table, peer);
 
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
-            .sent
+        sync.send_getdata_for_pending_blocks(
+            source,
+            false,
+            100,
+            &test_frontier(&sync),
+            Instant::now()
+        )
+        .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, losing_hashes);
     Ok(TwoBranches {
@@ -121,8 +127,14 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
 
     chain_tip.store(Some(Arc::new(winning_tip)));
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
-            .sent
+        sync.send_getdata_for_pending_blocks(
+            source,
+            false,
+            100,
+            &test_frontier(&sync),
+            Instant::now()
+        )
+        .sent
     );
     let requested = witness_block_inventory(next_getdata(&rx)?)?;
     assert_eq!(requested, winning_hashes);
@@ -162,8 +174,14 @@ fn retarget_purges_staged_off_branch_bodies() -> Result<(), Box<dyn std::error::
 
     chain_tip.store(Some(Arc::new(winning_tip)));
     assert!(
-        sync.send_getdata_for_pending_blocks(source, false, 100, &test_frontier(&sync))
-            .sent
+        sync.send_getdata_for_pending_blocks(
+            source,
+            false,
+            100,
+            &test_frontier(&sync),
+            Instant::now()
+        )
+        .sent
     );
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, winning_hashes);
     assert_eq!(

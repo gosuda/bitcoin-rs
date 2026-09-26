@@ -540,9 +540,20 @@ impl<'a> Projection<'a> {
                 .collect::<std::collections::BTreeSet<_>>();
             for entry in pool.entries_funding_script(mempool_hash) {
                 funders.push((entry.txid, entry.time, Arc::clone(&entry.tx)));
+                // Only the funder's script-paying outputs can be spent by
+                // script-relevant mempool children; probing every output
+                // would run a lookup per unrelated outpoint under the guard.
                 candidates.extend(
-                    (0..entry.tx.outputs.len())
-                        .filter_map(|position| u32::try_from(position).ok())
+                    entry
+                        .tx
+                        .outputs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, output)| {
+                            MempoolScriptHash::from_script(output.script_pubkey.as_bytes())
+                                == mempool_hash
+                        })
+                        .filter_map(|(position, _)| u32::try_from(position).ok())
                         .map(|vout| (entry.txid, vout)),
                 );
             }
