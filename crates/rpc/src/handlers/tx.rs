@@ -76,13 +76,13 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
             .iter()
             .find(|tx| tx.txid() == txid)
             .ok_or(RpcError::NotFound("transaction not in specified block"))?;
-        return render_raw_transaction(ctx, tx, verbose, Some(&record));
+        return render_raw_transaction(ctx, tx, verbose, Some(&record), true);
     }
 
     {
         let pool = ctx.mempool.read();
         if let Some(entry) = pool.entry_by_txid(&txid) {
-            return render_raw_transaction(ctx, entry.tx.as_ref(), verbose, None);
+            return render_raw_transaction(ctx, entry.tx.as_ref(), verbose, None, false);
         }
     }
     if let Some(derived_index) = ctx.derived_index.as_ref() {
@@ -92,13 +92,13 @@ pub(crate) fn getrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<Va
                 .transaction_height(&txid)
                 .map_err(RpcError::from)?
                 .and_then(|height| ctx.block_by_height(height));
-            return render_raw_transaction(ctx, &tx, verbose, record.as_ref());
+            return render_raw_transaction(ctx, &tx, verbose, record.as_ref(), false);
         }
     }
 
     // Compatibility cache used by tests and early wiring; not confirmation proof.
     if let Some(tx) = ctx.transactions.read().get(&txid) {
-        return render_raw_transaction(ctx, tx, verbose, None);
+        return render_raw_transaction(ctx, tx, verbose, None, false);
     }
 
     Err(RpcError::NotFound("transaction not found"))
@@ -137,21 +137,23 @@ fn render_raw_transaction(
     tx: &Tx,
     verbose: bool,
     record: Option<&BlockRecord>,
+    explicit_block: bool,
 ) -> Result<Value, RpcError> {
     if !verbose {
         return typed_to_sonic(&v31::GetRawTransaction(hex_encode(&consensus_bytes(tx))));
     }
-    let chain = record.map(|record| VerboseTxChain {
-        block_hash: record.hash.to_string(),
-        confirmations: u64::from(
-            ctx.applied_height()
-                .saturating_sub(record.height)
-                .saturating_add(1),
-        ),
-        time: u64::from(record.time),
-        in_active_chain: Some(true),
+    let chain = record.map(|record| {
+        let confirmations = super::chain::confirmations(ctx, record.hash.into(), record.height);
+        VerboseTxChain {
+            block_hash: record.hash.to_string(),
+            confirmations: u64::try_from(confirmations).unwrap_or(0),
+            time: u64::from(record.time),
+            in_active_chain: explicit_block.then_some(confirmations > 0),
+        }
     });
-    typed_to_sonic(&convert::raw_transaction_verbose(
+    // Core omits unavailable optional fields. The upstream response type
+    // serializes None as null, so use the existing omission-aware boundary.
+    typed_to_sonic_omitting_nulls(&convert::raw_transaction_verbose(
         tx,
         ctx.chain_network,
         chain,
@@ -983,7 +985,7 @@ mod tests {
         encode::double_sha256,
     };
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
-    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
+    use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
     use std::sync::mpsc;
     use std::thread;
 
@@ -1153,6 +1155,105 @@ mod tests {
     }
 
     #[test]
+    fn getrawtransaction_uses_applied_ancestry_for_explicit_block_metadata() {
+        // API-02 / Core 31.1 rawtransaction.cpp (pinned source
+        // 9be056a8a72b624dae9623b2f7bded92c2a21c91, TxToJSON): a retained
+        // inactive block has zero confirmations and no time fields. Header
+        // validity, height, or body availability alone cannot confirm it.
+        let genesis = distinct_block(1);
+        let mut sibling = distinct_block(2);
+        sibling.header.prev_blockhash = genesis.block_hash();
+        let mut active = distinct_block(3);
+        active.header.prev_blockhash = genesis.block_hash();
+        let mut higher = distinct_block(4);
+        higher.header.prev_blockhash = sibling.block_hash();
+        let mut ctx = Context::new();
+        let blocks = [(&genesis, 0), (&sibling, 1), (&active, 1), (&higher, 2)];
+        ctx.block_body_source = Some(Arc::new(SeededBodySource {
+            bodies: blocks
+                .iter()
+                .map(|(block, height)| (*height, block.block_hash(), consensus_bytes(*block)))
+                .collect(),
+        }));
+        for (block, height) in blocks {
+            ctx.add_block(BlockRecord::from_block(height, block));
+        }
+        let active_tip = {
+            let mut tree = ctx.block_tree.write();
+            let genesis_id = tree
+                .insert_node(None, genesis.header, NodeStatus::Active)
+                .expect("genesis");
+            let sibling_id = tree
+                .insert_node(Some(genesis_id), sibling.header, NodeStatus::Active)
+                .expect("sibling");
+            let active_id = tree
+                .insert_node(Some(genesis_id), active.header, NodeStatus::Active)
+                .expect("active sibling");
+            tree.insert_node(Some(sibling_id), higher.header, NodeStatus::HeaderValid)
+                .expect("higher header fork");
+            let node = tree.node(active_id).expect("active node");
+            bitcoin_rs_chain::TipSnapshot {
+                tip_id: active_id,
+                hash: node.hash,
+                height: node.height,
+                chainwork: node.chainwork,
+            }
+        };
+        ctx.applied_tip.store(Some(Arc::new(active_tip)));
+        let ctx = Arc::new(ctx);
+        for (block, depth) in [(&genesis, 2), (&active, 1), (&sibling, 0), (&higher, 0)] {
+            let tx = &block.txs[0];
+            let args = json!([tx.txid().to_string(), true, block.block_hash().to_string()]);
+            let value = getrawtransaction(&ctx, &args).expect("verbose lookup");
+            assert_eq!(
+                value.get("in_active_chain").and_then(Value::as_bool),
+                Some(depth > 0)
+            );
+            assert_eq!(
+                value.get("confirmations").and_then(Value::as_u64),
+                Some(depth)
+            );
+            assert_eq!(
+                value.get("blockhash").and_then(Value::as_str),
+                Some(block.block_hash().to_string().as_str())
+            );
+            for field in ["time", "blocktime"] {
+                assert_eq!(
+                    value.get(field).and_then(Value::as_u64),
+                    (depth > 0).then_some(u64::from(block.header.time))
+                );
+                if depth == 0 {
+                    assert!(
+                        value.get(field).is_none(),
+                        "inactive {field} must be absent"
+                    );
+                }
+            }
+            let raw = getrawtransaction(
+                &ctx,
+                &json!([tx.txid().to_string(), false, block.block_hash().to_string()]),
+            )
+            .expect("raw lookup");
+            assert_eq!(
+                raw.as_str(),
+                Some(hex_encode(&consensus_bytes(tx)).as_str())
+            );
+        }
+        let missing = getrawtransaction(
+            &ctx,
+            &json!([
+                sibling.txs[0].txid().to_string(),
+                true,
+                active.block_hash().to_string()
+            ]),
+        );
+        assert!(matches!(
+            missing,
+            Err(RpcError::NotFound("transaction not in specified block"))
+        ));
+    }
+
+    #[test]
     fn getrawtransaction_resolves_confirmed_transaction_from_txindex_without_cache() {
         struct StaticQuery {
             tx: Tx,
@@ -1165,6 +1266,10 @@ mod tests {
 
             fn outpoint_value(&self, _outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
                 Ok(None)
+            }
+
+            fn transaction_height(&self, txid: &Txid) -> Result<Option<u32>, TxQueryError> {
+                Ok((self.tx.txid() == *txid).then_some(0))
             }
 
             fn index_info(&self) -> Result<crate::context::DerivedIndexInfo, TxQueryError> {
@@ -1184,6 +1289,14 @@ mod tests {
         ctx.derived_index = Some(Arc::new(StaticQuery {
             tx: coinbase.clone(),
         }));
+        ctx.add_block(BlockRecord::from_block(0, &genesis));
+        let tip = {
+            let mut tree = ctx.block_tree.write();
+            tree.insert_node(None, genesis.header, NodeStatus::Active)
+                .expect("genesis");
+            tree.tip().expect("genesis tip")
+        };
+        ctx.applied_tip.store(Some(tip));
         let ctx = Arc::new(ctx);
 
         assert!(
@@ -1195,6 +1308,13 @@ mod tests {
 
         let expected = hex_encode(&consensus_bytes(&coinbase));
         assert_eq!(result.as_str(), Some(expected.as_str()));
+        let verbose = getrawtransaction(&ctx, &json!([txid.to_string(), true]))
+            .expect("verbose txindex lookup");
+        assert!(verbose.get("in_active_chain").is_none());
+        assert_eq!(
+            verbose.get("confirmations").and_then(Value::as_u64),
+            Some(1)
+        );
     }
 
     #[test]
