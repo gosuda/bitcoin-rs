@@ -63,13 +63,16 @@ fn open_family(data_dir: &std::path::Path) -> Result<ChainFamily> {
     let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
         data_dir.join("chainstate"),
     )?);
-    let files = Arc::new(FlatFileBlockStore::open(data_dir)?);
+    let head = KvDurableHeadStore::new(Arc::clone(&store));
+    let files = Arc::new(match head.load()?.and_then(|head| head.body_extent) {
+        Some(extent) => FlatFileBlockStore::open_with_committed_extent(data_dir, extent)?,
+        None => FlatFileBlockStore::open(data_dir)?,
+    });
     let bodies = Arc::new(IndexedBlockBodyStore::new(
         Arc::clone(&store),
         Arc::clone(&files),
     ));
     let undo = KvUndoStore::new(Arc::clone(&store));
-    let head = KvDurableHeadStore::new(Arc::clone(&store));
     Ok(ChainFamily {
         store,
         _files: files,
@@ -221,15 +224,16 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let data_dir = temp.path().to_path_buf();
         let family = open_family(&data_dir)?;
+        family
+            .bodies
+            .persist_block_body(1, hash_of(1), b"committed-body")?;
+        family.bodies.sync()?;
         let committed = DurableHead {
             commit_id: 1,
             height: 1,
             tip: hash_of(1),
             chain_tx_count: 1,
-            body_extent: Some(bitcoin_rs_storage::BodyExtent {
-                file_no: 0,
-                offset: 128,
-            }),
+            body_extent: family.bodies.append_cursor(),
             undo_extent: Some((1, hash_of(1))),
         };
         family
@@ -382,11 +386,17 @@ fn corrupt_head_rows_fail_startup_fail_closed() -> Result<()> {
         raw.put(ColumnFamily::UtxoMeta, DURABLE_HEAD_KEY, &corrupted)?;
         drop(raw);
 
+        // An unreadable commit point cannot authorize destructive tail recovery.
+        let block_path = data_dir.join("blocks/blk00000.dat");
+        let mut block_bytes = std::fs::read(&block_path)?;
+        block_bytes.extend_from_slice(b"BR");
+        std::fs::write(&block_path, &block_bytes)?;
         let reopened = NodeState::open(test_config(data_dir), None);
         assert!(
             reopened.is_err(),
             "corruption {corruption} must fail startup, got a node"
         );
+        assert_eq!(std::fs::read(&block_path)?, block_bytes);
     }
     Ok(())
 }

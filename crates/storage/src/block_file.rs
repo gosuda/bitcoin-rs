@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::StorageError;
+use crate::{BodyExtent, StorageError};
 
 /// Fixed magic at the start of every flat-file block record.
 pub const BLOCK_FILE_MAGIC: [u8; 4] = *b"BRSB";
@@ -137,9 +137,25 @@ struct ReaderState {
 }
 
 impl FlatFileBlockStore {
-    /// Opens the flat-file store rooted at `data_dir`, recovering the last file if needed.
+    /// Opens a store with no committed body extent, recovering an incomplete tail.
+    ///
+    /// A caller with a durable head must use [`Self::open_with_committed_extent`]
+    /// so recovery cannot discard bytes that head already committed.
     pub fn open(data_dir: impl AsRef<Path>) -> Result<Self, StorageError> {
-        Self::open_with_max_file_bytes(data_dir.as_ref(), BLOCK_FILE_MAX_BYTES)
+        Self::open_with_max_file_bytes(data_dir.as_ref(), BLOCK_FILE_MAX_BYTES, None)
+    }
+
+    /// Opens a store after admitting the durable head's committed body extent.
+    ///
+    /// The extent file must contain complete frames through the committed
+    /// offset. Corruption in that prefix refuses open without changing any
+    /// block file. Only an incomplete tail beyond the extent may be removed.
+    /// Earlier files may have been pruned; this is not a full archive scrub.
+    pub fn open_with_committed_extent(
+        data_dir: impl AsRef<Path>,
+        committed: BodyExtent,
+    ) -> Result<Self, StorageError> {
+        Self::open_with_max_file_bytes(data_dir.as_ref(), BLOCK_FILE_MAX_BYTES, Some(committed))
     }
 
     /// Persists a block body unless `existing` already names its complete matching record.
@@ -436,6 +452,7 @@ impl FlatFileBlockStore {
     fn open_with_max_file_bytes(
         data_dir: &Path,
         max_file_bytes: u64,
+        committed: Option<BodyExtent>,
     ) -> Result<Self, StorageError> {
         if max_file_bytes < RECORD_HEADER_LEN_U64 {
             return Err(StorageError::InvalidOperation(
@@ -443,6 +460,12 @@ impl FlatFileBlockStore {
             ));
         }
         let blocks_dir = data_dir.join(BLOCK_FILE_DIRECTORY);
+        // Admit authority before opening any file with create/write permissions.
+        // Even when a checkpoint already matches the head, these bytes must
+        // survive: an apparent torn tail can instead be a damaged committed frame.
+        if let Some(extent) = committed {
+            validate_committed_extent(&blocks_dir, extent)?;
+        }
         fs::create_dir_all(&blocks_dir)?;
         // Persist the blocks-directory entry in its parent. This runs once per
         // store open, not on the append path.
@@ -458,7 +481,18 @@ impl FlatFileBlockStore {
         // The file may have been created above; persist its directory entry.
         sync_blocks_dir(&blocks_dir)?;
         let file_len = file.metadata()?.len();
-        let recovered_offset = recover_append_offset(&mut file, file_len)?;
+        // The admitted prefix has already been scanned. A newer append file
+        // lies wholly after the durable extent; its scan starts at zero.
+        let scan_start = committed
+            .filter(|extent| extent.file_no == file_no)
+            .map_or(0, |extent| extent.offset);
+        if file_len < scan_start {
+            return Err(StorageError::IncompatibleData(
+                "committed block file shortened after extent admission; preserving block files"
+                    .to_owned(),
+            ));
+        }
+        let recovered_offset = framed_stats_between(&mut file, scan_start, file_len)?.1;
         if recovered_offset != file_len {
             tracing::info!(
                 target: "bitcoin_rs_storage::block_file",
@@ -745,15 +779,35 @@ fn write_record(writer: &mut impl io::Write, header: &[u8], body: &[u8]) -> io::
 /// Does not truncate an incomplete tail.
 pub fn complete_framed_stats(file: &mut File) -> Result<(u64, u64), StorageError> {
     let file_len = file.metadata()?.len();
-    framed_stats_up_to(file, file_len)
+    framed_stats_between(file, 0, file_len)
 }
 
-fn recover_append_offset(file: &mut File, file_len: u64) -> Result<u64, StorageError> {
-    Ok(framed_stats_up_to(file, file_len)?.1)
+fn validate_committed_extent(blocks_dir: &Path, extent: BodyExtent) -> Result<(), StorageError> {
+    let path = block_file_path(blocks_dir, extent.file_no);
+    let corrupt = || {
+        StorageError::IncompatibleData(format!(
+            "committed block-file extent {}:{} is missing or malformed; preserving block files",
+            extent.file_no, extent.offset,
+        ))
+    };
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(corrupt()),
+        Err(error) => return Err(error.into()),
+    };
+    if file.metadata()?.len() < extent.offset
+        || framed_stats_between(&mut file, 0, extent.offset)?.1 != extent.offset
+    {
+        return Err(corrupt());
+    }
+    Ok(())
 }
 
-fn framed_stats_up_to(file: &mut File, file_len: u64) -> Result<(u64, u64), StorageError> {
-    let mut offset = 0_u64;
+fn framed_stats_between(
+    file: &mut File,
+    mut offset: u64,
+    file_len: u64,
+) -> Result<(u64, u64), StorageError> {
     let mut rows = 0_u64;
     while offset < file_len {
         let remaining = file_len
@@ -951,7 +1005,7 @@ mod tests {
     fn disk_usage_follows_the_files_through_appends_and_deletion() -> Result<(), crate::StorageError>
     {
         let data_dir = tempdir()?;
-        let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+        let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
         let blocks_dir = data_dir.path().join(super::BLOCK_FILE_DIRECTORY);
         assert_eq!(store.disk_usage(), 0, "a fresh store occupies nothing");
 
@@ -1051,7 +1105,7 @@ mod tests {
         let data_dir = tempdir()?;
         let blocks_dir = data_dir.path().join(super::BLOCK_FILE_DIRECTORY);
         let expected = {
-            let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+            let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
             let _ = store.persist(None, 1, hash(1), b"first")?;
             store.disk_usage()
         };
@@ -1064,7 +1118,7 @@ mod tests {
             expected,
             "the walk must ignore files that are not block files"
         );
-        let reopened = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+        let reopened = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
         assert_eq!(
             reopened.disk_usage(),
             expected,
@@ -1078,14 +1132,14 @@ mod tests {
     fn disk_usage_is_seeded_from_an_existing_directory() -> Result<(), crate::StorageError> {
         let data_dir = tempdir()?;
         let expected = {
-            let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+            let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
             let _ = store.persist(None, 1, hash(1), b"first")?;
             let _ = store.persist(None, 2, hash(2), b"second")?;
             store.disk_usage()
         };
         assert!(expected > 0, "the fixture must write something");
 
-        let reopened = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+        let reopened = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
         assert_eq!(
             reopened.disk_usage(),
             expected,
@@ -1097,7 +1151,7 @@ mod tests {
     #[test]
     fn round_trips_and_rolls_over_without_large_allocations() -> Result<(), crate::StorageError> {
         let data_dir = tempdir()?;
-        let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+        let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
         let first = store.persist(None, 1, hash(1), b"first")?;
         let second = store.persist(None, 2, hash(2), b"a longer second body")?;
         let third = store.persist(None, 3, hash(3), b"third")?;
@@ -1197,7 +1251,7 @@ mod tests {
     #[test]
     fn reader_matches_one_shot_across_order_and_rollover() -> Result<(), crate::StorageError> {
         let data_dir = tempdir()?;
-        let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120)?;
+        let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
         let first = store.persist(None, 1, hash(1), b"first")?;
         let second = store.persist(None, 2, hash(2), b"a longer second body")?;
         let third = store.persist(None, 3, hash(3), b"third")?;
@@ -1297,6 +1351,139 @@ mod tests {
         assert_eq!(
             std::fs::metadata(path)?.len(),
             complete_end + RECORD_HEADER_LEN_U64 + u64::from(replacement.len)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn committed_extent_refuses_corruption_without_changing_any_file()
+    -> Result<(), crate::StorageError> {
+        for corrupt_length in [false, true] {
+            for newer_orphan in [false, true] {
+                let dir = tempdir()?;
+                let store = FlatFileBlockStore::open(dir.path())?;
+                store.append(1, hash(1), b"first")?;
+                let middle = store.append(2, hash(2), b"middle")?;
+                store.append(3, hash(3), b"last")?;
+                let extent = crate::BodyExtent {
+                    file_no: store.current_file_number(),
+                    offset: store.append_offset(),
+                };
+                let path = store.file_path(extent.file_no);
+                drop(store);
+                let mut damaged = std::fs::read(&path)?;
+                let offset = usize::try_from(middle.offset).map_err(|_| {
+                    crate::StorageError::InvalidOperation("test offset exceeds usize")
+                })?;
+                if corrupt_length {
+                    damaged[offset + 4..offset + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+                } else {
+                    damaged[offset] ^= 0xff;
+                }
+                std::fs::write(&path, &damaged)?;
+                let orphan = dir.path().join("blocks/blk00001.dat");
+                if newer_orphan {
+                    std::fs::write(&orphan, b"BR")?;
+                }
+                assert!(matches!(
+                    FlatFileBlockStore::open_with_committed_extent(dir.path(), extent),
+                    Err(crate::StorageError::IncompatibleData(_))
+                ));
+                assert_eq!(std::fs::read(path)?, damaged);
+                if newer_orphan {
+                    assert_eq!(std::fs::read(orphan)?, b"BR");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_or_short_committed_file_is_not_recreated_or_repaired()
+    -> Result<(), crate::StorageError> {
+        for missing in [false, true] {
+            let dir = tempdir()?;
+            let store = FlatFileBlockStore::open(dir.path())?;
+            store.append(1, hash(1), b"committed")?;
+            let extent = crate::BodyExtent {
+                file_no: store.current_file_number(),
+                offset: store.append_offset(),
+            };
+            let path = store.file_path(extent.file_no);
+            drop(store);
+            if missing {
+                std::fs::remove_file(&path)?;
+            } else {
+                std::fs::write(&path, b"BR")?;
+            }
+            assert!(matches!(
+                FlatFileBlockStore::open_with_committed_extent(dir.path(), extent),
+                Err(crate::StorageError::IncompatibleData(_))
+            ));
+            if missing {
+                assert!(!path.exists());
+            } else {
+                assert_eq!(std::fs::read(path)?, b"BR");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn admitted_extent_preserves_bodies_and_recovers_only_the_orphan_tail()
+    -> Result<(), crate::StorageError> {
+        for newer_orphan in [false, true] {
+            let dir = tempdir()?;
+            let store = FlatFileBlockStore::open(dir.path())?;
+            let committed = store.append(1, hash(1), b"committed")?;
+            let extent = crate::BodyExtent {
+                file_no: store.current_file_number(),
+                offset: store.append_offset(),
+            };
+            let committed_path = store.file_path(extent.file_no);
+            let committed_bytes = std::fs::read(&committed_path)?;
+            drop(store);
+            let tail_path = if newer_orphan {
+                dir.path().join("blocks/blk00001.dat")
+            } else {
+                committed_path.clone()
+            };
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&tail_path)?
+                .write_all(b"BR")?;
+            let reopened = FlatFileBlockStore::open_with_committed_extent(dir.path(), extent)?;
+            assert_eq!(std::fs::read(committed_path)?, committed_bytes);
+            assert_eq!(
+                reopened.load(committed, 1, hash(1))?,
+                Some(b"committed".to_vec())
+            );
+            assert_eq!(reopened.disk_usage(), extent.offset);
+            let next = reopened.append(2, hash(2), b"next")?;
+            assert_eq!(next.offset, if newer_orphan { 0 } else { extent.offset });
+            assert_eq!(reopened.load(next, 2, hash(2))?, Some(b"next".to_vec()));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn committed_extent_allows_pruned_older_file_gaps() -> Result<(), crate::StorageError> {
+        let dir = tempdir()?;
+        let store = FlatFileBlockStore::open_with_max_file_bytes(dir.path(), 60, None)?;
+        let old = store.append(1, hash(1), b"older")?;
+        let retained = store.append(2, hash(2), b"retained")?;
+        assert!(retained.file_no > old.file_no);
+        let extent = crate::BodyExtent {
+            file_no: store.current_file_number(),
+            offset: store.append_offset(),
+        };
+        assert!(store.delete_file_if_not_current(old.file_no)?);
+        drop(store);
+        let reopened = FlatFileBlockStore::open_with_committed_extent(dir.path(), extent)?;
+        assert_eq!(
+            reopened.load(retained, 2, hash(2))?,
+            Some(b"retained".to_vec())
         );
         Ok(())
     }

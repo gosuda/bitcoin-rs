@@ -28,7 +28,6 @@ use bitcoin_rs_mempool::MempoolLimits;
 use bitcoin_rs_p2p::download_window::FAST_OUTBOUND_PEER_TARGET;
 use bitcoin_rs_p2p::download_window::fast_sync_budget;
 use bitcoin_rs_rpc::context::NetworkState;
-use bitcoin_rs_storage::FlatFileBlockStore;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
@@ -66,9 +65,7 @@ impl NodeState {
         );
         let chainstate_cache_bytes = cache_shares[0].bytes;
         let txindex_cache_bytes = cache_shares[1].bytes;
-        let block_files =
-            Arc::new(FlatFileBlockStore::open(&config.data_dir).map_err(anyhow::Error::new)?);
-        let storage = NodeStorage::open(&config, chainstate_cache_bytes, Arc::clone(&block_files))?;
+        let (storage, block_files) = NodeStorage::open(&config, chainstate_cache_bytes)?;
         let undo_store = storage.undo_store();
         let durable_head = storage.durable_head();
         // Before anything reads the chainstate, let alone serves or syncs it.
