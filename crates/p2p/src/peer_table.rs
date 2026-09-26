@@ -154,10 +154,12 @@ impl PeerTable {
     ///
     /// PRE: `lease.is_inbound()` and `max_inbound` is the resolved
     ///   automatic-connection remainder.
-    /// POST: returns the registered lease only when the live inbound count
-    ///   stays below `max_inbound`; otherwise returns `None` and changes no
-    ///   table state. A lease at an address already holding a LIVE inbound
-    ///   connection replaces and cancels it exactly as [`Self::register`]
+    /// POST: a non-inbound lease returns `None` and changes no table state.
+    ///   Otherwise returns the registered lease only when the live inbound
+    ///   count stays below `max_inbound`; otherwise returns `None` and
+    ///   changes no table state. A lease at an address already holding a
+    ///   LIVE inbound connection replaces and cancels it exactly as
+    ///   [`Self::register`]
     ///   does, which never grows the count; a replacement over an already
     ///   cancelled predecessor does grow it, because the cancelled lease was
     ///   never counted, so it faces the same capacity test as a new address.
@@ -171,7 +173,9 @@ impl PeerTable {
         lease: PeerLease,
         max_inbound: usize,
     ) -> Option<PeerLease> {
-        debug_assert!(lease.is_inbound(), "only inbound leases reserve here");
+        if !lease.is_inbound() {
+            return None;
+        }
         let mut entries = self.entries.write();
         let grows_count = match entries.get(&addr) {
             Some(current) => {
