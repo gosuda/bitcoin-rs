@@ -1053,7 +1053,6 @@ fn invalidateblock_readmits_a_below_floor_family_through_the_deferred_fence() ->
     // already paid for its place when it was mined.
     let parent = seed_coinbase_spend_with_fee(1);
     let parent_txid = parent.txid();
-    let child_txid;
     let child = Tx {
         version: 2,
         inputs: vec![TxIn {
@@ -1068,7 +1067,7 @@ fn invalidateblock_readmits_a_below_floor_family_through_the_deferred_fence() ->
         }],
         lock_time: LockTime::from_consensus(0),
     };
-    child_txid = child.txid();
+    let child_txid = child.txid();
 
     let block = mine_regtest_block(&state, seed_tip_hash, SEED_BLOCKS + 1, vec![parent, child])?;
     let mined_hash = Hash256::from(block.block_hash());
