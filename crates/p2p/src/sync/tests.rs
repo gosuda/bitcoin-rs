@@ -1719,18 +1719,20 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block()
     // transition is held.
     let (mut tree, mut blocks) = mined_chain(1, 0)?;
     let tip_id = tree.tip_id().ok_or("missing mined tip")?;
-    let extra_coinbase = mined_block_with_prev_hash(
+    let extra_coinbase = regtest_fixture::mined_block_with_prev_hash(
         blocks[0].block_hash(),
         2,
-        vec![coinbase_transaction(90), coinbase_transaction(91)],
-    );
+        vec![regtest_fixture::coinbase(90), regtest_fixture::coinbase(91)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
     let extra_id =
         tree.insert_node(Some(tip_id), extra_coinbase.header, NodeStatus::HeaderValid)?;
-    let follower = mined_block_with_prev_hash(
+    let follower = regtest_fixture::mined_block_with_prev_hash(
         extra_coinbase.block_hash(),
         3,
-        vec![coinbase_transaction(92)],
-    );
+        vec![regtest_fixture::coinbase(92)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
     tree.insert_node(Some(extra_id), follower.header, NodeStatus::HeaderValid)?;
     let SyncHarness {
         sync,

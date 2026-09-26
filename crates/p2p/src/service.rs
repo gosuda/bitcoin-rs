@@ -605,6 +605,37 @@ impl P2pService {
         core.and(bootstrap)
     }
 
+    /// Test seam for node teardown coverage: installs a caller-spawned
+    /// handle as the outbound drain worker, so join-failure paths are
+    /// reachable without a live peer.
+    #[cfg(feature = "test-seam")]
+    #[doc(hidden)]
+    pub fn test_install_outbound_worker(&self, handle: JoinHandle<()>) {
+        self.workers
+            .lock()
+            .get_or_insert_with(|| Workers {
+                listeners: Vec::new(),
+                outbound: None,
+                bootstrap: None,
+            })
+            .outbound = Some(handle);
+    }
+
+    /// Test seam for node teardown coverage: installs a caller-spawned
+    /// handle as the bootstrap worker.
+    #[cfg(feature = "test-seam")]
+    #[doc(hidden)]
+    pub fn test_install_bootstrap_worker(&self, handle: JoinHandle<()>) {
+        self.workers
+            .lock()
+            .get_or_insert_with(|| Workers {
+                listeners: Vec::new(),
+                outbound: None,
+                bootstrap: None,
+            })
+            .bootstrap = Some(handle);
+    }
+
     /// Returns the single session table owned by this service.
     #[must_use]
     pub fn table(&self) -> Arc<crate::PeerTable> {

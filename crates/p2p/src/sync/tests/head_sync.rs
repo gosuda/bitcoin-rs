@@ -326,8 +326,12 @@ fn staged_body_whose_resolved_header_is_inadmissible_is_evicted()
     // arrival (the missing-header path), and its header extends the losing
     // height-2 branch — once the header resolves it is off the active
     // branch and inadmissible.
-    let fork =
-        mined_block_with_prev_hash(blocks[0].block_hash(), 2, vec![coinbase_transaction(60)]);
+    let fork = regtest_fixture::mined_block_with_prev_hash(
+        blocks[0].block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(60)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
     let fork_hash = Hash256::from(fork.block_hash());
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(fork))?;
     sync.tick();
@@ -368,9 +372,14 @@ fn staged_body_gated_when_the_headers_drain_resolves_its_header()
 
     // A losing fork: a side header at height 1 and a height-2 body on it,
     // so the body's header cannot attach until the side header admits.
-    let fork_root = test_header(genesis_header().compute_hash(), 1);
-    let orphan_body =
-        mined_block_with_prev_hash(fork_root.compute_hash(), 2, vec![coinbase_transaction(70)]);
+    let fork_root = regtest_fixture::mined_regtest_header(genesis_header().compute_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
+    let orphan_body = regtest_fixture::mined_block_with_prev_hash(
+        fork_root.compute_hash(),
+        2,
+        vec![regtest_fixture::coinbase(70)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
     let orphan_hash = Hash256::from(orphan_body.block_hash());
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(orphan_body.clone()))?;
     sync.tick();
@@ -418,9 +427,14 @@ fn deferred_owned_body_fetch_settles_the_staged_gate() -> Result<(), Box<dyn std
     let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
 
-    let fork_root = test_header(genesis_header().compute_hash(), 1);
-    let orphan_body =
-        mined_block_with_prev_hash(fork_root.compute_hash(), 2, vec![coinbase_transaction(71)]);
+    let fork_root = regtest_fixture::mined_regtest_header(genesis_header().compute_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
+    let orphan_body = regtest_fixture::mined_block_with_prev_hash(
+        fork_root.compute_hash(),
+        2,
+        vec![regtest_fixture::coinbase(71)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
     let orphan_hash = Hash256::from(orphan_body.block_hash());
 
     // The owned-fetch announcement arrives before the batch can attach:
@@ -528,9 +542,14 @@ fn stale_owned_fetch_source_does_not_settle_the_gate() -> Result<(), Box<dyn std
     let _rx = connect_peer(&peers, synthetic_peer(peer, 2));
     let source = current_source(&peers, peer);
 
-    let fork_root = test_header(genesis_header().compute_hash(), 1);
-    let orphan_body =
-        mined_block_with_prev_hash(fork_root.compute_hash(), 2, vec![coinbase_transaction(72)]);
+    let fork_root = regtest_fixture::mined_regtest_header(genesis_header().compute_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
+    let orphan_body = regtest_fixture::mined_block_with_prev_hash(
+        fork_root.compute_hash(),
+        2,
+        vec![regtest_fixture::coinbase(72)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
     let orphan_hash = Hash256::from(orphan_body.block_hash());
 
     // Defer the mark, stage the body, then drop the owning connection.
@@ -583,7 +602,7 @@ fn binding_failure_does_not_burn_the_last_staging_slot() -> Result<(), Box<dyn s
     // A body whose header is tree-known and admissible, but whose mutated
     // transactions fail the body/header binding: it may never stage.
     let mut bad = blocks[2].clone();
-    bad.txs.push(coinbase_transaction(90));
+    bad.txs.push(regtest_fixture::coinbase(90));
     let bad_hash = Hash256::from(bad.block_hash());
     let good_hash = Hash256::from(blocks[1].block_hash());
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(bad))?;
@@ -631,12 +650,19 @@ fn gate_pending_body_survives_a_pending_branch_switch() -> Result<(), Box<dyn st
 
     // A heavier fork: one real body at height 2 plus header-only links, so
     // the switch stalls on missing bodies exactly when the body resolves.
-    let fork_root = test_header(genesis_header().compute_hash(), 1);
-    let winner_body =
-        mined_block_with_prev_hash(fork_root.compute_hash(), 2, vec![coinbase_transaction(73)]);
+    let fork_root = regtest_fixture::mined_regtest_header(genesis_header().compute_hash(), 1)
+        .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
+    let winner_body = regtest_fixture::mined_block_with_prev_hash(
+        fork_root.compute_hash(),
+        2,
+        vec![regtest_fixture::coinbase(73)],
+    )
+    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
     let winner_hash = Hash256::from(winner_body.block_hash());
-    let fork_h3 = test_header(winner_body.header.compute_hash(), 3);
-    let fork_h4 = test_header(fork_h3.compute_hash(), 4);
+    let fork_h3 = regtest_fixture::mined_regtest_header(winner_body.header.compute_hash(), 3)
+        .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
+    let fork_h4 = regtest_fixture::mined_regtest_header(fork_h3.compute_hash(), 4)
+        .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(winner_body.clone()))?;
     sync.tick();
     assert!(

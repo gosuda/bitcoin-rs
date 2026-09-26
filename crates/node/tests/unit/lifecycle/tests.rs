@@ -142,7 +142,7 @@ fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow
         .name("bitcoin-rs-outbound-drain".to_owned())
         .spawn(|| panic!("injected worker panic"))?;
     let mut services = NodeServices::default();
-    services.outbound_worker = Some(panicker);
+    state.p2p().test_install_outbound_worker(panicker);
 
     assert!(
         services
@@ -178,7 +178,7 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()
             let _ = exited_tx.send(());
         })?;
     let mut services = NodeServices::default();
-    services.bootstrap_worker = Some(worker);
+    state.p2p().test_install_bootstrap_worker(worker);
     let started = std::time::Instant::now();
     services.teardown(Some(&state), TeardownMode::CleanShutdown, None)?;
     let elapsed = started.elapsed();

@@ -17,6 +17,9 @@ workspace = true
 [features]
 # USDT tracepoints (Bitcoin Core-compatible probe ABI); empty unless enabled.
 usdt = ["bitcoin-rs-trace/usdt"]
+# Worker injection for cross-crate teardown tests; never enabled in release
+# builds.
+test-seam = []
 
 default = ["fjall"]
 rocksdb = ["bitcoin-rs-chain/rocksdb"]

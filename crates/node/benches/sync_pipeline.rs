@@ -58,7 +58,9 @@ use bitcoin::{
     Txid as OracleTxid, Witness as OracleWitness, absolute, opcodes,
     script::Builder as OracleBuilder, transaction,
 };
-use bitcoin_rs_chain::{BlockTree, BlockTreeReader, NodeStatus, TipReader, TipSnapshot, regtest_fixture};
+use bitcoin_rs_chain::{
+    BlockTree, BlockTreeReader, NodeStatus, TipReader, TipSnapshot, regtest_fixture,
+};
 use bitcoin_rs_consensus::compute_merkle_root;
 use bitcoin_rs_index::BlockSource;
 pub mod evidence;
