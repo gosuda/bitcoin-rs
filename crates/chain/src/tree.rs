@@ -870,13 +870,10 @@ fn node_hash_key(nodes: &Slab<BlockTreeNode>, id: NodeId) -> u64 {
 mod tests {
     use bitcoin_rs_primitives::{BlockHash, CompactTarget};
 
-    use std::sync::Arc;
-
     use super::{BlockTree, Hash256, hash_from_header};
     use crate::{
         ChainTxCount,
-        node::{BlockHeader, ChainWork, NodeId, NodeStatus},
-        tip::TipSnapshot,
+        node::{BlockHeader, NodeId, NodeStatus},
     };
 
     #[test]
@@ -1338,6 +1335,10 @@ mod tests {
 
         assert_eq!(tree.tip_id(), Some(genesis_id));
         assert_eq!(tree.node(genesis_id)?.hash, genesis_hash);
+        // The published snapshot is coherent with the active insertion:
+        // genesis's height and hash, not hand-stored values.
+        assert_eq!(tree.tip_height(), Some(0));
+        assert_eq!(tree.tip_hash(), Some(genesis_hash));
         Ok(())
     }
 
@@ -1351,40 +1352,6 @@ mod tests {
     fn tip_hash_returns_none_before_publish() {
         let tree = BlockTree::new();
         assert!(tree.tip_hash().is_none());
-    }
-
-    #[test]
-    fn tip_height_returns_published_tip_height() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
-        tree.tip_handle().store(Some(Arc::new(TipSnapshot {
-            tip_id: genesis_id,
-            height: 7,
-            chainwork: ChainWork::ZERO,
-            hash: genesis_hash,
-            chain_tx_count: ChainTxCount::UNKNOWN,
-        })));
-        assert_eq!(tree.tip_height(), Some(7));
-        Ok(())
-    }
-
-    #[test]
-    fn tip_hash_returns_published_tip_hash() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
-        tree.tip_handle().store(Some(Arc::new(TipSnapshot {
-            tip_id: genesis_id,
-            height: 0,
-            chainwork: ChainWork::ZERO,
-            hash: genesis_hash,
-            chain_tx_count: ChainTxCount::UNKNOWN,
-        })));
-        assert_eq!(tree.tip_hash(), Some(genesis_hash));
-        Ok(())
     }
 
     #[test]
