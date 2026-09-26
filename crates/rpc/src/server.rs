@@ -140,12 +140,6 @@ impl RpcServer {
     }
 }
 
-/// Applies HTTP-session socket policy: `TCP_NODELAY` so a small response is
-/// not delayed by Nagle after the status line.
-fn configure_rpc_stream(stream: &TcpStream) -> io::Result<()> {
-    stream.set_nodelay(true)
-}
-
 fn serve_connection(
     stream: TcpStream,
     auth: &Auth,
@@ -153,7 +147,6 @@ fn serve_connection(
     rest_enabled: bool,
     idle_timeout: Duration,
 ) -> io::Result<()> {
-    configure_rpc_stream(&stream)?;
     stream.set_read_timeout(Some(idle_timeout))?;
     stream.set_write_timeout(Some(idle_timeout))?;
     let mut reader = BufReader::new(stream);
@@ -791,13 +784,13 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
     #[test]
-    fn configure_rpc_stream_disables_nagle() {
+    fn prepare_http_socket_disables_nagle() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
         let addr = listener.local_addr().expect("local_addr");
         let client = TcpStream::connect(addr).expect("connect");
         let (server, _) = listener.accept().expect("accept");
-        configure_rpc_stream(&client).expect("configure client");
-        configure_rpc_stream(&server).expect("configure server");
+        let client = prepare_http_socket(client).expect("configure client");
+        let server = prepare_http_socket(server).expect("configure server");
         assert!(client.nodelay().expect("client nodelay"));
         assert!(server.nodelay().expect("server nodelay"));
     }
