@@ -11,13 +11,14 @@ mod common;
 
 use std::sync::Arc;
 
+use bitcoin_rs_index::types::TxPosition;
 use bitcoin_rs_index::{BlockSource, IndexError, Indexer, ScriptHash, ScriptHistoryEntry};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, varint,
 };
 
-use common::{MemoryStore, put_funding_row, put_spending_row};
+use common::{MemoryStore, put_funding_row, put_funding_row_positions, put_spending_row};
 
 /// A block source backed by a simple map, serving multiple heights.
 struct MultiHeightSource {
@@ -27,6 +28,14 @@ struct MultiHeightSource {
 impl BlockSource for MultiHeightSource {
     fn block_at_height(&self, height: u32) -> Option<Block> {
         self.blocks.get(&height).cloned()
+    }
+
+    fn block_bytes_at_height(&self, height: u32, offset: u32, len: u32) -> Option<Vec<u8>> {
+        let block = self.block_at_height(height)?;
+        let bytes = consensus_bytes(&block);
+        let start = usize::try_from(offset).ok()?;
+        let end = start.checked_add(usize::try_from(len).ok()?)?;
+        bytes.get(start..end).map(<[u8]>::to_vec)
     }
 }
 
@@ -204,9 +213,6 @@ fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn s
     let script = vec![0x51, 0x02];
     let scripthash = ScriptHash::from_script_bytes(&script);
     let store = Arc::new(MemoryStore::default());
-    put_funding_row(&store, scripthash, 1)?;
-    put_funding_row(&store, scripthash, 256)?;
-    let indexer = Indexer::new(store);
 
     let block_at_1 = Block {
         header: header(),
@@ -216,6 +222,19 @@ fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn s
         header: header(),
         txs: vec![tx_with_script(spent_outpoint(4, 0), script)],
     };
+
+    // Rows carry each block's single transaction position — offset past the
+    // 80-byte header and the compact-size count — so `resolve_script_history`
+    // takes its sliced-read path rather than the scan fallback.
+    for (height, block) in [(1_u32, &block_at_1), (256, &block_at_256)] {
+        let offset = 80_usize + varint::encode(u64::try_from(block.txs.len())?).len();
+        let position = TxPosition::new(
+            u32::try_from(offset)?,
+            u32::try_from(block.txs[0].total_size())?,
+        );
+        put_funding_row_positions(&store, scripthash, height, &[position])?;
+    }
+    let indexer = Indexer::new(store);
 
     let source = MultiHeightSource {
         blocks: [(1, block_at_1), (256, block_at_256)].into_iter().collect(),
