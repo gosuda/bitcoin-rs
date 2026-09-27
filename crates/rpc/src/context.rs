@@ -1186,20 +1186,6 @@ impl ChainHandles {
         let bytes: [u8; 32] = node.chainwork.to_be_bytes();
         Some(hex_encode(&bytes))
     }
-
-    /// Returns the hash of the block at `height + 1` on the active chain.
-    #[must_use]
-    pub(crate) fn next_block_hash_for_height(
-        &self,
-        height: u32,
-    ) -> Option<bitcoin_rs_primitives::Hash256> {
-        let tree = self.block_tree.read();
-        let tip = tree.tip()?;
-        let next_height = height.checked_add(1)?;
-        let node_id = tree.node_at_height_from(tip.tip_id, next_height)?;
-        let node = tree.node(node_id).ok()?;
-        Some(node.hash)
-    }
 }
 
 /// One retained applied-tip publication.

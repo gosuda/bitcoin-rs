@@ -803,8 +803,8 @@ fn append_compact_size(body: &mut Vec<u8>, len: usize) {
 /// header.
 ///
 /// PRE: `view` is the response's one captured applied publication.
-/// POST: confirmation and active-membership facts come from that view; the
-///   header-relative next-block hash keeps its own header-tip source.
+/// POST: confirmation, active-membership, and next-block-hash facts come from
+///   that view.
 /// INVARIANT: this helper never loads `applied_tip`, so a response cannot mix
 ///   two publications.
 fn build_chain_context(
@@ -829,10 +829,15 @@ fn build_chain_context(
             .chain_work_hex_for_hash(Hash256::from(record.hash))
             .unwrap_or_else(|| "00".to_owned()),
         n_tx,
-        next_block_hash: ctx
-            .chain
-            .next_block_hash_for_height(record.height)
-            .map(BlockHash::from),
+        next_block_hash: if on_active {
+            record
+                .height
+                .checked_add(1)
+                .and_then(|next| ctx.chain.active_hash_in_view(view, next))
+                .map(BlockHash::from)
+        } else {
+            None
+        },
     }
 }
 
