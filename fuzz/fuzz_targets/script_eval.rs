@@ -2,8 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use bitcoin_rs_script::{Interpreter, VerifyFlags};
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence};
+use bitcoin_rs_script::{Interpreter, VerifyFlags};
 
 /// Fuzz the production default script interpreter.
 ///

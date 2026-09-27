@@ -27,8 +27,8 @@ fuzz_target!(|data: &[u8]| {
     let payload = payload
         .get(..bitcoin_rs_p2p::wire::MAX_MESSAGE_PAYLOAD)
         .unwrap_or(payload);
-    let Some(spec) = bitcoin_rs_p2p::COMMANDS
-        .get(usize::from(*selector) % bitcoin_rs_p2p::COMMANDS.len())
+    let Some(spec) =
+        bitcoin_rs_p2p::COMMANDS.get(usize::from(*selector) % bitcoin_rs_p2p::COMMANDS.len())
     else {
         return;
     };

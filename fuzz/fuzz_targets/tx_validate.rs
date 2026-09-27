@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hashes::{Hash as _, sha256};
-use libfuzzer_sys::fuzz_target;
 use bitcoin_rs_consensus::{UtxoView, verify_transaction, verify_transaction_non_script};
 use bitcoin_rs_mempool::{StandardnessPolicy, is_standard_tx};
 use bitcoin_rs_primitives::{
@@ -12,6 +11,7 @@ use bitcoin_rs_primitives::{
     deserialize as native_deserialize,
 };
 use bitcoin_rs_script::VerifyFlags;
+use libfuzzer_sys::fuzz_target;
 
 /// Applied chain context shared by every validation path below, so the
 /// consensus and policy legs can never silently disagree on height or
@@ -98,13 +98,8 @@ fn validate_native(tx: Tx) {
         prevouts: &prevouts,
     };
     // Non-script consensus leg at the applied height.
-    let _ = verify_transaction_non_script(
-        &tx,
-        &view,
-        HEIGHT,
-        LOCKTIME_CUTOFF,
-        VerifyFlags::STANDARD,
-    );
+    let _ =
+        verify_transaction_non_script(&tx, &view, HEIGHT, LOCKTIME_CUTOFF, VerifyFlags::STANDARD);
     // Full script leg, the same gate admission runs at the spending height:
     // witness stacks now reach SegWit/Taproot verification through the
     // witness-program prevouts above.
