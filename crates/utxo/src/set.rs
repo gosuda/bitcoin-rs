@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, io, time::Instant};
+use std::{borrow::Borrow, io, sync::Arc, time::Instant};
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
@@ -149,6 +149,42 @@ pub struct UtxoSet {
     pub(crate) shards: [Shard; UtxoKey::SHARD_COUNT],
     stable_view_lock: RwLock<()>,
     listener: Option<Box<dyn UtxoChangeListener + Send + Sync>>,
+}
+
+/// Cloneable read-only capability over the authoritative UTXO set.
+///
+/// The underlying set is intentionally not exposed: mutation remains owned by
+/// [`crate::contract`], while admission and projection consumers receive only
+/// the facts they need.
+#[derive(Clone)]
+pub struct UtxoReader {
+    set: Arc<UtxoSet>,
+}
+
+impl UtxoReader {
+    /// Builds a read capability from the owner-held set.
+    #[must_use]
+    pub fn new(set: Arc<UtxoSet>) -> Self {
+        Self { set }
+    }
+
+    /// Looks up one live output.
+    #[must_use]
+    pub fn get(&self, outpoint: &OutPoint) -> Option<TxOut> {
+        self.set.get(outpoint)
+    }
+
+    /// Looks up one live output with its confirmation metadata.
+    #[must_use]
+    pub fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {
+        self.set.get_entry(outpoint)
+    }
+
+    /// Reports whether a transaction still owns at least one live output.
+    #[must_use]
+    pub fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
+        self.set.has_live_outputs_for_txid(txid)
+    }
 }
 
 /// Byte-level accounting of what a UTXO set holds in memory.

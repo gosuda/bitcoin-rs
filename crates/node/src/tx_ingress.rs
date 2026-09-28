@@ -14,7 +14,7 @@ use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_p2p::TxRelayQueue;
 use bitcoin_rs_primitives::{Hash256, Network, Txid, Wtxid};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
-use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_utxo::UtxoReader;
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
 
@@ -37,7 +37,7 @@ pub fn spawn_tx_ingress_consumer(
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
     let chainstate = state.chainstate();
     let consumer = TxIngressConsumer {
-        utxo: chainstate.utxo_handle(),
+        utxo: chainstate.utxo_reader(),
         applied_tip: chainstate.applied_tip_reader(),
         block_tree: chainstate.block_tree_reader(),
         network: chainstate.network(),
@@ -73,7 +73,7 @@ pub fn spawn_tx_ingress_consumer(
 }
 
 struct TxIngressConsumer {
-    utxo: Arc<UtxoSet>,
+    utxo: UtxoReader,
     applied_tip: TipReader,
     block_tree: BlockTreeReader,
     network: Network,
@@ -86,7 +86,7 @@ struct TxIngressConsumer {
 impl TxIngressConsumer {
     fn chain_view(&self) -> ChainAdmissionView {
         ChainAdmissionView::new(
-            Arc::clone(&self.utxo),
+            self.utxo.clone(),
             self.applied_tip.clone(),
             self.block_tree.clone(),
             self.network,

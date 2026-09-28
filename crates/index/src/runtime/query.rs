@@ -187,7 +187,7 @@ pub struct QueryEngineLive {
     /// Authoritative UTXO set for the compact live view.
     pub utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
     /// Serializes live-view work against a chain transition.
-    pub chain_transition: Option<Arc<parking_lot::Mutex<()>>>,
+    pub chain_transition: Option<bitcoin_rs_chain::StableChainView>,
     /// Capability set this engine serves.
     pub enabled: IndexCapabilities,
 }
@@ -220,7 +220,7 @@ pub struct DerivedIndexQueryEngine {
     applied_tip: bitcoin_rs_chain::TipReader,
     body_source: Option<Arc<dyn BlockBodySource>>,
     utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
-    chain_transition: Option<Arc<parking_lot::Mutex<()>>>,
+    chain_transition: Option<bitcoin_rs_chain::StableChainView>,
     enabled: IndexCapabilities,
 }
 

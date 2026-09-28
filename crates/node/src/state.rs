@@ -103,6 +103,8 @@ pub struct NodeState {
     /// header/block channels, this receiver is drained by node orchestration.
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
     inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
+    /// UTXO-owner capability composed directly by node; Chainstate is not a handle broker.
+    utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
     chainstate: Arc<bitcoin_rs_chainstate::Chainstate>,
     /// Derived consumers of committed chain events. Not held by `Chainstate`.
     followers: crate::chain_effects::ChainFollowers,
@@ -123,7 +125,7 @@ impl Drop for NodeState {
         // Close the history boundary first, so a worker still reconciling
         // stops on the owner's shutdown answer instead of pinning rows a
         // process that is leaving will not serve.
-        self.chainstate.retention_handle().shutdown();
+        self.storage.retention().shutdown();
     }
 }
 
@@ -308,6 +310,12 @@ impl NodeState {
         Arc::clone(&self.chainstate)
     }
 
+    /// Returns the UTXO owner's handle for RPC composition.
+    #[must_use]
+    pub(crate) fn utxo_handle(&self) -> Arc<bitcoin_rs_utxo::UtxoSet> {
+        Arc::clone(&self.utxo)
+    }
+
     /// Clone of the derived-consumer set used after committed transitions.
     #[must_use]
     pub fn chain_followers(&self) -> crate::chain_effects::ChainFollowers {
@@ -387,7 +395,8 @@ impl NodeState {
     /// authoritative — after crash recovery — so the index reconciles against
     /// the real chainstate and never mistakes a recovered gap for a stale branch.
     pub fn start_index_workers(&mut self) -> anyhow::Result<()> {
-        self.derived_index.start(&self.chainstate)
+        self.derived_index
+            .start(&self.chainstate, self.storage.index_history())
     }
 
     /// Returns the live txindex status source for `getcapabilities`.

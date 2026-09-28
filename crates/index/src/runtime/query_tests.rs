@@ -14,7 +14,6 @@ use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 use bitcoin_rs_utxo::UtxoSet;
 
 use super::*;
-use parking_lot::Mutex;
 
 #[derive(Clone)]
 struct ScanResponse {
@@ -29,7 +28,7 @@ struct QuerySnapshot {
     script_history_watermark: ScriptHistoryWatermark,
     scans: Vec<ScanResponse>,
     aba: Option<Arc<AbaMutation>>,
-    chain_transition: Arc<Mutex<()>>,
+    chain_transition: bitcoin_rs_chain::StableChainView,
 }
 
 #[derive(Clone, Copy)]
@@ -265,7 +264,7 @@ impl QueryFixture {
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let home = Arc::new(tip.clone());
         applied_tip.store(Some(Arc::clone(&home)));
-        let chain_transition = Arc::new(Mutex::new(()));
+        let chain_transition = bitcoin_rs_chain::StableChainView::new();
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
         let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
@@ -293,7 +292,7 @@ impl QueryFixture {
                 script_history_watermark: ScriptHistoryWatermark::MatchTx,
                 scans: config.scans,
                 aba,
-                chain_transition: Arc::clone(&chain_transition),
+                chain_transition: chain_transition.clone(),
             },
         });
         let records = if config.retain_body {

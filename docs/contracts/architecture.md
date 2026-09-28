@@ -165,8 +165,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   declares every operator option once, with its value grammar and its spelling
   on each process-input surface; the `bitcoin-rs` binary expands that table into
   its argv, environment, TOML, and `bitcoin.conf` readers. Applied-tip mutation,
-  recovery, checkpoint publication,
-  retention, and branch switching are owned by `bitcoin-rs-chainstate`
+  recovery, checkpoint publication, mandatory reorg-retention consumption,
+  and branch switching are owned by `bitcoin-rs-chainstate`
   (`ARCH-07`), not by a public field bag of subsystem handles.
 - `bitcoin-rs-rpc::zmq` owns ZMQ topics, framing, HWM validation, socket
   transport, mempool sequence projection, and live notifier enumeration.
@@ -210,7 +210,10 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 ### `ARCH-07`: Chainstate owns authoritative applied-chain mutation
 
 - `bitcoin_rs_chainstate::Chainstate` is the in-process owner of applied-tip
-  mutation, recovery, branch switching, checkpoint publication, and retention.
+  mutation, recovery, branch switching, checkpoint publication, and mandatory
+  retention consumption. `bitcoin-rs-storage::pruning` owns the retained-history
+  authority and node composes that one authority into chainstate, pruning, and
+  bounded optional index history.
   `NodeState`, `BlockSync`, mining, and RPC chain-control hold or clone that
   service; they do not assemble a transition from independent locks.
 - `Chainstate::begin_transition` and `TransitionLock::into_transition` are the
@@ -223,12 +226,14 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   take the transition lock and cannot mutate chainstate. `ChainEventPublisher`
   cells remain a separate coherent snapshot of the applied tip for index
   consumers (`EVT-01`).
-- Long-lived RPC, P2P, index, and mining consumers receive `TipReader` and
-  `BlockTreeReader` capabilities plus the stable-view fence (`Arc<Mutex<()>>`).
+- Long-lived RPC, P2P, index, and mining consumers receive `TipReader`,
+  `BlockTreeReader`, `UtxoReader`, and `StableChainView` capabilities.
   The readers expose snapshot load and tree read guards respectively; every
   `&self` tree accessor is a pure read, and the tip publication cell is only
-  shareable through `&mut BlockTree`. The fence's only verb is `lock()`, which
-  can delay a transition but grants no mutation path. Header admission uses
+  shareable through `&mut BlockTree`. `StableChainView` hides the transition
+  mutex and exposes only `lock`/`try_lock`; it can delay a transition but
+  grants no mutation path. Raw block-tree, UTXO, and retention handles are
+  fixture-only seams. Header admission uses
   `Chainstate::admit_headers`; normal genesis connect publishes through the
   tree's shared tip cell without a separate publication fallback.
   Short-lived `ChainAdmissionView` values borrow readers; the P2P transaction
@@ -334,12 +339,13 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
 ## Remaining composition boundary
 
 `crates/chainstate` owns authoritative applied-chain mutation, recovery,
-checkpoint payload assembly/publication, reorg, and retention. Storage still
-owns generic journal/checkpoint formats, filesystem operations, backend
-drivers, and durability primitives. Node owns process configuration, concrete
-backend selection, mempool/P2P/index/mining/RPC wiring, and post-commit
-cross-domain effects. Backend construction stays at the `ARCH-03`
-composition seam.
+checkpoint payload assembly/publication, reorg, and mandatory retention use.
+Storage owns the retained-history authority, generic journal/checkpoint
+formats, filesystem operations, backend drivers, and durability primitives.
+Node constructs and distributes the one storage-owned retention authority and
+owns process configuration, concrete backend selection,
+mempool/P2P/index/mining/RPC wiring, and post-commit cross-domain effects.
+Backend construction stays at the `ARCH-03` composition seam.
 
 ## Proven by
 

@@ -209,7 +209,7 @@ impl Harness {
             .then(|| Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
         let chain_transition = enabled
             .contains(IndexCapability::ScriptLive)
-            .then(|| Arc::new(Mutex::new(())));
+            .then(bitcoin_rs_chain::StableChainView::new);
         let retention = Arc::new(RetentionRegistry::new());
         let worker = Worker {
             runtime: Arc::clone(&runtime),

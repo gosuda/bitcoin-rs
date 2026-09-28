@@ -96,7 +96,7 @@ fn make_consumer(
     .expect("utxo commit must succeed");
     let (relay, _relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
     TxIngressConsumer {
-        utxo,
+        utxo: bitcoin_rs_utxo::UtxoReader::new(utxo),
         applied_tip: TipReader::new(Arc::new(ArcSwapOption::empty())),
         block_tree: BlockTreeReader::new(Arc::new(RwLock::new(BlockTree::new()))),
         network: Network::Regtest,

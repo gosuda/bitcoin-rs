@@ -5608,8 +5608,8 @@ mod scantxoutset_tests {
 
     #[test]
     fn scantxoutset_waits_for_one_consistent_utxo_and_tip_transition() {
-        let transition = Arc::new(parking_lot::Mutex::new(()));
-        let context = Context::new().with_chain_transition(Arc::clone(&transition));
+        let transition = bitcoin_rs_chain::StableChainView::new();
+        let context = Context::new().with_chain_transition(transition.clone());
         let old_tip = TipSnapshot {
             tip_id: NodeId::new(0),
             height: 0,

@@ -4,9 +4,48 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use arc_swap::ArcSwapOption;
 #[cfg(any(test, feature = "test-seam"))]
 use parking_lot::RwLockWriteGuard;
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use crate::{BlockTree, TipSnapshot};
+
+/// Cloneable capability for reads that must exclude authoritative chain transitions.
+#[derive(Clone, Default)]
+pub struct StableChainView {
+    inner: Arc<Mutex<()>>,
+}
+
+impl StableChainView {
+    /// Creates an independent transition domain.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Excludes authoritative transitions while the returned proof lives.
+    pub fn lock(&self) -> StableChainGuard<'_> {
+        StableChainGuard {
+            _guard: self.inner.lock(),
+        }
+    }
+
+    /// Attempts to exclude transitions without blocking.
+    pub fn try_lock(&self) -> Option<StableChainGuard<'_>> {
+        self.inner
+            .try_lock()
+            .map(|guard| StableChainGuard { _guard: guard })
+    }
+
+    /// Reports whether two capabilities name the same transition domain.
+    #[must_use]
+    pub fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+/// Proof that authoritative chain transitions are excluded.
+pub struct StableChainGuard<'a> {
+    _guard: MutexGuard<'a, ()>,
+}
 
 /// Cloneable, read-only access to one published chain tip.
 ///

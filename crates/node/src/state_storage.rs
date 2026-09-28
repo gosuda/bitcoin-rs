@@ -20,9 +20,8 @@ pub(super) struct NodeStorage {
     undo_store: Arc<dyn bitcoin_rs_chainstate::UndoStore>,
     durable_head: Arc<dyn bitcoin_rs_storage::DurableHeadStore>,
     block_body_store: Arc<dyn bitcoin_rs_storage::block_body::BlockBodyStore>,
-    /// The executed prune frontier the store reports: the deletions that
-    /// committed, whether or not the datadir predates the record.
-    executed_frontier: bitcoin_rs_storage::pruning::ExecutedFrontier,
+    /// Storage-owned retained-history authority seeded from durable deletions.
+    retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
     pub(super) deferred: Arc<dyn DeferredChainstateServices>,
 }
 
@@ -68,7 +67,9 @@ impl crate::storage_backend::StoreConsumer for ChainstateComposer<'_> {
                 Arc::clone(&store),
                 Arc::clone(&block_files),
             )),
-            executed_frontier,
+            retention: Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
+                executed_frontier,
+            )),
             deferred,
         };
         Ok((storage, block_files))
@@ -122,9 +123,19 @@ impl NodeStorage {
         Arc::clone(&self.durable_head)
     }
 
-    /// The executed prune frontier loaded from the store.
-    pub(super) const fn executed_frontier(&self) -> bitcoin_rs_storage::pruning::ExecutedFrontier {
-        self.executed_frontier
+    /// Clones the storage-owned retained-history authority.
+    pub(super) fn retention(&self) -> Arc<bitcoin_rs_storage::RetentionRegistry> {
+        Arc::clone(&self.retention)
+    }
+
+    /// Builds the bounded optional-history capability for derived indexes.
+    pub(super) fn index_history(&self) -> bitcoin_rs_storage::pruning::HistoryAccess {
+        bitcoin_rs_storage::pruning::HistoryAccess::new(
+            self.retention(),
+            bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
+                bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
+            ),
+        )
     }
 }
 

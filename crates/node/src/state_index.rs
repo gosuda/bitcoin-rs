@@ -90,7 +90,11 @@ impl DerivedIndexHost {
     /// `Stopped` host does not change.
     /// INVARIANT: `start` is idempotent; a second call does not spawn a
     /// second worker.
-    pub(crate) fn start(&mut self, chainstate: &bitcoin_rs_chainstate::Chainstate) -> Result<()> {
+    pub(crate) fn start(
+        &mut self,
+        chainstate: &bitcoin_rs_chainstate::Chainstate,
+        history: bitcoin_rs_storage::pruning::HistoryAccess,
+    ) -> Result<()> {
         let Some(enabled) = self.enabled.as_mut() else {
             return Ok(());
         };
@@ -113,14 +117,7 @@ impl DerivedIndexHost {
             chainstate.applied_tip_reader(),
             chainstate.block_tree_reader(),
             chainstate.block_body_store_handle(),
-            bitcoin_rs_storage::pruning::HistoryAccess::new(
-                chainstate.retention_handle(),
-                // A stalled optional consumer is bounded by the reorg
-                // margin, so it never competes with the mandatory window.
-                bitcoin_rs_storage::pruning::RetentionBudget::from_blocks(
-                    bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN,
-                ),
-            ),
+            history,
             spawn.block_source,
             Some(spawn.body_source),
             Arc::new(super::IndexChainCursorSource(

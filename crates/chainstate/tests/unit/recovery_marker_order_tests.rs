@@ -44,6 +44,7 @@ fn genesis_tip() -> Result<(RwLock<BlockTree>, TipSnapshot), Box<dyn std::error:
         core::slice::from_ref(&genesis),
         NETWORK,
         bitcoin_rs_chain::current_unix_seconds(),
+        bitcoin_rs_chain::HeaderValidationMode::HistoricalReplay,
     )?;
     let tip_id = ids[0];
     let node = tree.node(tip_id)?;

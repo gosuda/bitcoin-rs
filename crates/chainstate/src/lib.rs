@@ -8,7 +8,8 @@
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
-    BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
+    BlockTree, BlockTreeReader, ChainError, ChainTxCount, StableChainGuard, StableChainView,
+    TipReader, TipSnapshot,
 };
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::Block;
@@ -33,8 +34,6 @@ use disconnect::disconnect_block_admitted;
 pub use durable::reconcile_at_boot;
 pub use durable::recover_disconnect_marker;
 use hashbrown::HashMap;
-use parking_lot::Mutex;
-use parking_lot::MutexGuard;
 use parking_lot::RwLock;
 use parking_lot::RwLockReadGuard;
 use parking_lot::RwLockWriteGuard;
@@ -205,13 +204,13 @@ impl ApplyAdmission {
 ///
 /// Field order releases the transition lock before the admission permit.
 struct TransitionGuard<'a> {
-    _transition: MutexGuard<'a, ()>,
+    _transition: StableChainGuard<'a>,
     _admission: RwLockReadGuard<'a, ()>,
 }
 
 fn begin_chain_transition<'a>(
     admission: &'a ApplyAdmission,
-    chain_transition: &'a Mutex<()>,
+    chain_transition: &'a StableChainView,
 ) -> core::result::Result<TransitionGuard<'a>, ApplyError> {
     let admission_guard = admission.enter()?;
     let transition = chain_transition.lock();
@@ -246,7 +245,7 @@ impl<'a> TransitionLock<'a> {
 #[derive(Clone)]
 pub struct PruneAuthority {
     admission: Arc<ApplyAdmission>,
-    chain_transition: Arc<Mutex<()>>,
+    chain_transition: StableChainView,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
 }
 
@@ -490,7 +489,7 @@ pub struct Chainstate {
     /// result. Two such operations interleaved can both validate against the
     /// same tip and then invalidate each other's retention or publication
     /// decisions. This lock spans connects, windows, disconnects, and pruning.
-    pub(crate) chain_transition: Arc<parking_lot::Mutex<()>>,
+    pub(crate) chain_transition: StableChainView,
     pub(crate) assume_valid_height: u32,
     pub(crate) assume_valid_gate: Arc<AssumeValidGate>,
     pub(crate) validation_mode: ValidationMode,
@@ -511,9 +510,9 @@ pub struct Chainstate {
     pub(crate) capture_rawtx: bool,
     /// Serialize the full block for a derived consumer (body store, index, rawblock).
     pub(crate) capture_block_bytes: bool,
-    /// Retention authority shared with the pruning pass: chain transitions
-    /// and required readers pin old-branch bodies here so pruning cannot
-    /// delete data an active transition still re-reads (#655, `RCV-08`).
+    /// Storage-owned retention authority consumed by chain transitions and
+    /// required readers so pruning cannot delete data an active transition
+    /// still re-reads (#655, `RCV-08`).
     ///
     /// It starts from the executed prune frontier the store reports, so a
     /// restart grants no lease over history the previous process deleted
@@ -554,6 +553,8 @@ pub struct ChainstateParts {
     pub durable_head: Arc<dyn DurableHeadStore>,
     /// Process shutdown signal.
     pub shutdown: Arc<AtomicBool>,
+    /// Capability that excludes this service's authoritative transitions.
+    pub stable_view: StableChainView,
     /// Highest assume-valid height.
     pub assume_valid_height: u32,
     /// Historical script-verification policy.
@@ -566,15 +567,8 @@ pub struct ChainstateParts {
     pub capture_rawtx: bool,
     /// Whether connects retain canonical block bytes for node-owned consumers.
     pub capture_block_bytes: bool,
-    /// The executed prune frontier a previous process committed.
-    ///
-    /// The node reconstructs it from the store when it opens, so the
-    /// retention registry starts from the deletions that actually happened
-    /// rather than from the requested prune height.
-    /// [`bitcoin_rs_storage::pruning::ExecutedFrontier::NONE`] is correct for
-    /// a store that never pruned and for a facade with no durable prune
-    /// families.
-    pub executed_frontier: bitcoin_rs_storage::pruning::ExecutedFrontier,
+    /// Storage-owned retained-history authority consumed by reorg/recovery.
+    pub retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
 }
 
 /// Held while new chain mutations are blocked.
@@ -793,7 +787,7 @@ impl Chainstate {
             durable_head: parts.durable_head,
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: parts.shutdown,
-            chain_transition: Arc::new(Mutex::new(())),
+            chain_transition: parts.stable_view,
             assume_valid_height: parts.assume_valid_height,
             assume_valid_gate,
             validation_mode: parts.validation_mode,
@@ -802,9 +796,7 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
-            retention: Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
-                parts.executed_frontier,
-            )),
+            retention: parts.retention,
             ibd,
         }
     }
@@ -913,7 +905,8 @@ impl Chainstate {
         BlockTreeReader::new(Arc::clone(&self.block_tree))
     }
 
-    /// Clones the block-tree cell for the RPC capability bundle.
+    /// Fixture-only writable block-tree handle.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn block_tree_handle(&self) -> Arc<RwLock<BlockTree>> {
         Arc::clone(&self.block_tree)
@@ -954,16 +947,24 @@ impl Chainstate {
         &self.block_tree
     }
 
-    /// Returns the authoritative UTXO set.
+    /// Fixture-only access to the authoritative UTXO set.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn utxo(&self) -> &UtxoSet {
         &self.utxo
     }
 
-    /// Clones the authoritative UTXO handle for node-owned readers.
+    /// Fixture-only writable UTXO handle.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn utxo_handle(&self) -> Arc<UtxoSet> {
         Arc::clone(&self.utxo)
+    }
+
+    /// Returns the UTXO owner's read-only lookup capability.
+    #[must_use]
+    pub fn utxo_reader(&self) -> bitcoin_rs_utxo::UtxoReader {
+        bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&self.utxo))
     }
 
     /// Clones the coin-statistics listener handle.
@@ -1001,20 +1002,17 @@ impl Chainstate {
         Arc::clone(&self.shutdown)
     }
 
-    /// Clones the pruning retention registry.
+    /// Fixture-only access to the storage-owned retention authority.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn retention_handle(&self) -> Arc<bitcoin_rs_storage::RetentionRegistry> {
         Arc::clone(&self.retention)
     }
 
-    /// Returns the stable-view fence used by lower-layer live-view consumers.
-    ///
-    /// Locking this mutex prevents an authoritative transition from starting;
-    /// it grants no mutation capability: all it can do is delay the next
-    /// transition until the guard is dropped.
+    /// Returns the capability for reads that must exclude chain transitions.
     #[must_use]
-    pub fn read_fence(&self) -> Arc<Mutex<()>> {
-        Arc::clone(&self.chain_transition)
+    pub fn stable_view(&self) -> StableChainView {
+        self.chain_transition.clone()
     }
 
     /// Admits headers and publishes the best-work header tip under Chainstate's
@@ -1111,7 +1109,7 @@ impl Chainstate {
     pub fn prune_authority(&self) -> PruneAuthority {
         PruneAuthority {
             admission: Arc::clone(&self.admission),
-            chain_transition: Arc::clone(&self.chain_transition),
+            chain_transition: self.chain_transition.clone(),
             applied_tip: Arc::clone(&self.applied_tip),
         }
     }
@@ -1176,7 +1174,7 @@ impl Chainstate {
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
-            chain_transition: Arc::new(parking_lot::Mutex::new(())),
+            chain_transition: StableChainView::new(),
             assume_valid_height: 0,
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
             validation_mode: ValidationMode::AssumeValid,
