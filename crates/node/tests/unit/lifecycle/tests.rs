@@ -44,6 +44,34 @@ fn rpc_network_handles_borrow_p2p_service_state() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn chain_rpc_and_index_compose_one_transition_domain() -> anyhow::Result<()> {
+    // One domain, three components: open() creates the node's single
+    // `StableChainView` and clones it into Chainstate (whose `stable_view()`
+    // is exactly what bind_rpc hands RPC, crates/node/src/lifecycle.rs) and
+    // into the derived-index open spec. The test observes both handoffs
+    // before the worker consumes the spawn, so a future wiring change that
+    // forks the domain — a second `StableChainView::new()` anywhere — fails
+    // here instead of desynchronizing live-view locking from chain
+    // transitions.
+    let dir = tempfile::tempdir()?;
+    let mut config = isolated_config(dir.path());
+    config.indexes.txindex = true;
+    let state = NodeState::open(config, None)?;
+
+    // The RPC side: bind_rpc composes ChainHandles from this same accessor.
+    let rpc_domain = state.chainstate().stable_view();
+    // The index side: the authority the pending spawn's spec carries.
+    let index_domain = state.derived_index_transition_domain().ok_or_else(|| {
+        anyhow::anyhow!("an enabled index must carry the node's transition domain")
+    })?;
+    assert!(
+        rpc_domain.is_same(&index_domain),
+        "chainstate, RPC, and index must be wired to one transition domain"
+    );
+    Ok(())
+}
+
 fn seed_checkpoint(state: &NodeState) -> anyhow::Result<(PathBuf, Vec<u8>)> {
     state.apply_block(&bitcoin_rs_primitives::Network::Regtest.genesis_block())?;
     let _ = state.publish_checkpoint()?;

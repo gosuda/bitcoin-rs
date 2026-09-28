@@ -641,7 +641,7 @@ fn mining_handler(state: &NodeState) -> Handler {
             applied_tip: state.chainstate().applied_tip_reader(),
             ibd,
             blocks: state.blocks(),
-            utxo: Arc::new(UtxoSet::new()),
+            utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(UtxoSet::new())),
             coin_stats: state.chainstate().coin_stats_handle(),
             block_tree: state.chainstate().block_tree_reader(),
             chain_network: state.config().network,

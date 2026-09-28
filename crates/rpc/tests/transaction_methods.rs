@@ -95,7 +95,7 @@ fn fund_utxo(ctx: &Context, txid_byte: u8, value: u64) -> OutPoint {
         1,
     ));
     bitcoin_rs_utxo::contract::commit_block_changes(
-        &ctx.chain.utxo,
+        &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),
     )

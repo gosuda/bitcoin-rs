@@ -104,6 +104,9 @@ pub struct NodeState {
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
     inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
     /// UTXO-owner capability composed directly by node; Chainstate is not a handle broker.
+    /// Ownership boundary: this is the only raw set handle the node keeps.
+    /// Every accessor that hands the set to another component yields a
+    /// `UtxoReader`, so no reader carries the `utxo::contract` mutation path.
     utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
     chainstate: Arc<bitcoin_rs_chainstate::Chainstate>,
     /// Derived consumers of committed chain events. Not held by `Chainstate`.
@@ -310,10 +313,14 @@ impl NodeState {
         Arc::clone(&self.chainstate)
     }
 
-    /// Returns the UTXO owner's handle for RPC composition.
+    /// Returns the UTXO owner's read capability for RPC composition.
+    ///
+    /// The raw set stays construction-owned storage of [`NodeState`]; handles
+    /// that leave this type are `UtxoReader`s, so consumers observe the set
+    /// without receiving the type-level mutation path `utxo::contract` takes.
     #[must_use]
-    pub(crate) fn utxo_handle(&self) -> Arc<bitcoin_rs_utxo::UtxoSet> {
-        Arc::clone(&self.utxo)
+    pub(crate) fn utxo_reader(&self) -> bitcoin_rs_utxo::UtxoReader {
+        bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&self.utxo))
     }
 
     /// Clone of the derived-consumer set used after committed transitions.
@@ -421,6 +428,16 @@ impl NodeState {
     #[cfg(test)]
     pub(crate) fn index_worker_joined(&self) -> Arc<AtomicBool> {
         self.derived_index.worker_joined()
+    }
+
+    /// The chain-transition authority the pending derived-index spawn will
+    /// receive. Wiring-proof seam: the composition test asserts RPC and index
+    /// derive from the one transition domain chainstate owns.
+    #[cfg(test)]
+    pub(crate) fn derived_index_transition_domain(
+        &self,
+    ) -> Option<bitcoin_rs_chain::StableChainView> {
+        self.derived_index.pending_transition_domain()
     }
 }
 
