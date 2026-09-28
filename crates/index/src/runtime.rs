@@ -408,9 +408,10 @@ pub struct DerivedIndexOpenSpec {
     #[allow(clippy::type_complexity)]
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
-    /// Authoritative UTXO set used to seed and resolve the compact live view.
-    /// Test-only open specs may leave this unset; live queries then fail closed.
-    pub utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
+    /// Authoritative UTXO read capability used to seed and resolve the
+    /// compact live view. Test-only open specs may leave this unset; live
+    /// queries then fail closed.
+    pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     /// Serializes a live-view query or seed against a chain transition.
     pub chain_transition: Option<bitcoin_rs_chain::StableChainView>,
 }
@@ -575,8 +576,8 @@ struct Worker {
     /// and rebuild instead of a per-block rewind. `u32::MAX` means rewind
     /// at any depth (pre-cutover behavior).
     rollback_rebuild_cutover: u32,
-    /// Authoritative UTXO source for live-view seeding.
-    utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
+    /// Authoritative UTXO read capability for live-view seeding.
+    utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     /// Chain transition authority shared with apply and RPC reads.
     chain_transition: Option<bitcoin_rs_chain::StableChainView>,
 }

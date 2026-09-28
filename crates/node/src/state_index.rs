@@ -85,6 +85,17 @@ impl DerivedIndexHost {
         }
     }
 
+    /// The chain-transition authority the pending spawn's spec carries,
+    /// before `start` consumes it. Wiring-proof seam only.
+    #[cfg(test)]
+    pub(crate) fn pending_transition_domain(&self) -> Option<bitcoin_rs_chain::StableChainView> {
+        let enabled = self.enabled.as_ref()?;
+        match &enabled.phase {
+            DerivedIndexPhase::Ready(spawn) => spawn.spec.chain_transition.clone(),
+            _ => None,
+        }
+    }
+
     /// PRE: the applied tip is authoritative (after crash recovery).
     /// POST: a `Ready` host becomes `Running`; a disabled, `Running`, or
     /// `Stopped` host does not change.

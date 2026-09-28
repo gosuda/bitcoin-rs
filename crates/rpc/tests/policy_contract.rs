@@ -106,7 +106,7 @@ fn fund_utxo(ctx: &Context, label: u8, value: u64) -> OutPoint {
         1,
     ));
     bitcoin_rs_utxo::contract::commit_block_changes(
-        &ctx.chain.utxo,
+        &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),
     )
@@ -1664,7 +1664,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             applied_tip: chainstate.applied_tip_reader(),
             ibd,
             blocks: state.blocks(),
-            utxo: chainstate.utxo_handle(),
+            utxo: chainstate.utxo_reader(),
             coin_stats: chainstate.coin_stats_handle(),
             block_tree: chainstate.block_tree_reader(),
             chain_network: Network::Regtest,
@@ -1811,7 +1811,7 @@ fn fund_coinbase_utxo(ctx: &Context, label: u8, value: u64, height: u32) -> OutP
         height,
     ));
     bitcoin_rs_utxo::contract::commit_block_changes(
-        &ctx.chain.utxo,
+        &ctx.chain.utxo.fixture_set(),
         &changes,
         &Hash256::from_le_bytes(&[0xaa; 32]),
     )

@@ -415,8 +415,39 @@ durable.
   preserved across restarts (`RCV-10`).
 - `crates/chainstate/src/reorg.rs` and `crates/chainstate/src/disconnect.rs`
   cover `RCV-05` and bounded disconnect/reorg memory; `RCV-08`'s bounded
-  stream windows and retention leases are exercised by the node sync/recovery
-  scenarios together with the #655 boot-replay tests above.
+  stream windows are exercised by the node sync/recovery scenarios together
+  with the #655 boot-replay tests above, including
+  `crates/node/tests/unit/sync/tests/transitions_7.rs`
+  `disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member`,
+  whose composed transition handles carry the retention registry alongside
+  the reader views.
+- `RCV-08`'s retained-history authority — storage/pruning owns it — is
+  proven at the owner by the #1151 lease/frontier tests below and by the
+  owner-local unit tests in `crates/storage/src/pruning/lease.rs`:
+  `history_grant_is_refused_below_the_line_and_bounded_by_budget` proves an
+  optional consumer's history grant is bounded by its budget: a pass whose
+  line outruns the budget expires the grant instead of clamping forever,
+  while a mandatory pin is never expired. That is the law the node's
+  reorg-margin `RetentionBudget` relies on, and
+  `history_request_below_the_executed_frontier_is_permanent` proves history
+  the executed frontier has deleted answers `Pruned` for good, even to an
+  unlimited request.
+- Node composition of that authority (`RCV-08`: node composes it into
+  chainstate and bounded optional consumers) lives in
+  `crates/node/src/state_storage.rs`: one `RetentionRegistry` is seeded at
+  open, handed to chainstate and the prune service
+  (`crates/node/src/state_open.rs`), and reaches the index host only as the
+  reorg-margin-bounded `HistoryAccess` that `crates/node/src/state.rs` passes
+  to the index worker. The composed wiring is exercised by
+  `crates/node/tests/unit/state/tests/prune.rs`:
+  `prune_waits_for_chain_transition_and_revalidates_applied_tip` proves node
+  pruning serializes against the chainstate transition domain,
+  `prune_refuses_after_apply_admission_closes` proves a closed admission
+  refuses prune, and `prune_to_height_advances_published_height` proves the
+  RPC-facing prune service drives the storage pass across the reorg-margin
+  floor; `crates/node/tests/unit/state/tests/construction.rs`
+  `runtime_accessors_borrow_their_subsystem_owner` proves node accessors lend
+  borrows of the same subsystem owners rather than composing copies.
 
 - Pruning and retained-history authority (#1151): `node:prune_executed` holds
   the executed frontier — one past the highest row a committed pass deleted —

@@ -5538,7 +5538,7 @@ mod scantxoutset_tests {
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
         bitcoin_rs_utxo::contract::commit_block_changes(
-            &ctx.chain.utxo,
+            &ctx.chain.utxo.fixture_set(),
             &changes,
             &test_txid(8_000),
         )

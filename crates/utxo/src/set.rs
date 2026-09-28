@@ -185,6 +185,40 @@ impl UtxoReader {
     pub fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
         self.set.has_live_outputs_for_txid(txid)
     }
+
+    /// Scans a stable whole-set view for exact scriptPubKey matches.
+    pub fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoError> {
+        self.set.scan_script_pubkeys(scripts)
+    }
+
+    /// Runs `read` against a stable whole-set view, blocking commits meanwhile.
+    ///
+    /// The stable view borrows the owner-held set for the closure only: the
+    /// set itself never escapes, so a reader still carries no mutation path.
+    pub fn with_stable_view<R>(&self, read: impl FnOnce(&UtxoSetView<'_>) -> R) -> R {
+        self.set.with_stable_view(read)
+    }
+
+    /// Locks a stable whole-set view until the returned guard is dropped.
+    ///
+    /// Commits take the matching write lock. Acquire any chain-transition
+    /// authority first when both are needed, matching block apply. The guard
+    /// borrows the owner-held set: the set itself never escapes.
+    #[must_use]
+    pub fn lock_stable_view(&self) -> UtxoSetView<'_> {
+        self.set.lock_stable_view()
+    }
+
+    /// Reveals the owner-held set for fixture wiring and test commits.
+    ///
+    /// Not present in production builds: a production reader must never gain
+    /// the set, because `utxo::contract` takes `&UtxoSet` as its mutation
+    /// surface.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn fixture_set(&self) -> Arc<UtxoSet> {
+        Arc::clone(&self.set)
+    }
 }
 
 /// Byte-level accounting of what a UTXO set holds in memory.

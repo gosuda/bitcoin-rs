@@ -206,7 +206,7 @@ impl Harness {
         let body_store: Arc<dyn BlockBodyStore> = fixture.bodies.clone();
         let utxo = enabled
             .contains(IndexCapability::ScriptLive)
-            .then(|| Arc::new(bitcoin_rs_utxo::UtxoSet::new()));
+            .then(|| bitcoin_rs_utxo::UtxoReader::new(Arc::new(bitcoin_rs_utxo::UtxoSet::new())));
         let chain_transition = enabled
             .contains(IndexCapability::ScriptLive)
             .then(bitcoin_rs_chain::StableChainView::new);
