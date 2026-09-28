@@ -50,7 +50,7 @@ pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
 pub use reorg::{ReorgPlan, plan_reorg};
 pub use tip::TipSnapshot;
 pub use tree::BlockTree;
-pub use view::{BlockTreeReader, LatchReader, TipReader};
+pub use view::{BlockTreeReader, LatchReader, StableChainGuard, StableChainView, TipReader};
 
 /// Errors returned by header sync, block-tree, and reorg planning operations.
 #[derive(Debug, Error, PartialEq, Eq)]

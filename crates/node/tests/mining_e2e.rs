@@ -556,7 +556,7 @@ fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Bl
 /// `sendrawtransaction` does: full policy admission over the provisional
 #[allow(clippy::unnecessary_wraps)]
 fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
-    let utxo = state.chainstate().utxo_handle();
+    let utxo = state.chainstate().utxo_reader();
     let applied_tip = state.chainstate().applied_tip_reader();
     let block_tree = state.chainstate().block_tree_reader();
     let view = ChainAdmissionView::new(utxo, applied_tip, block_tree, Network::Regtest);
@@ -645,7 +645,7 @@ fn mining_handler(state: &NodeState) -> Handler {
             coin_stats: state.chainstate().coin_stats_handle(),
             block_tree: state.chainstate().block_tree_reader(),
             chain_network: state.config().network,
-            chain_transition: state.chainstate().read_fence(),
+            chain_transition: state.chainstate().stable_view(),
             closed_for_recovery: state.chainstate().closed_for_recovery_reader(),
             ..ChainHandles::default()
         },
@@ -668,7 +668,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         },
         ..ContextHandles::default()
     })
-    .with_chain_transition(state.chainstate().read_fence());
+    .with_chain_transition(state.chainstate().stable_view());
     Handler::new(Arc::new(ctx))
 }
 

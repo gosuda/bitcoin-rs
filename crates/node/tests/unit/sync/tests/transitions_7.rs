@@ -269,13 +269,16 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            stable_view: bitcoin_rs_chain::StableChainView::new(),
             assume_valid_height: 0,
             validation_mode: bitcoin_rs_chainstate::ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
             journal: None,
             capture_rawtx: false,
             capture_block_bytes: true,
-            executed_frontier: bitcoin_rs_storage::pruning::ExecutedFrontier::NONE,
+            retention: Arc::new(bitcoin_rs_storage::RetentionRegistry::seeded(
+                bitcoin_rs_storage::pruning::ExecutedFrontier::NONE,
+            )),
         });
     handles.apply_block(&genesis, None)?;
     for block in &blocks {
@@ -304,7 +307,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     };
     let nonfinal_txid = nonfinal.txid();
     let view = bitcoin_rs_rpc::context::ChainAdmissionView::new(
-        handles.utxo_handle(),
+        handles.utxo_reader(),
         handles.applied_tip_reader(),
         handles.block_tree_reader(),
         handles.network(),

@@ -203,6 +203,7 @@ impl NodeState {
         // publisher's snapshot into its persisted consumer cursor.
         let chain_events_raw = ChainEventPublisher::new(initial_snapshot);
         let shutdown = Arc::new(AtomicBool::new(false));
+        let stable_view = bitcoin_rs_chain::StableChainView::new();
         let chain_events = Arc::new(chain_events_raw);
         let mut chainstate = bitcoin_rs_chainstate::Chainstate::from_parts(ChainstateParts {
             network: config.network,
@@ -216,20 +217,21 @@ impl NodeState {
             undo_store,
             durable_head,
             shutdown: Arc::clone(&shutdown),
+            stable_view: stable_view.clone(),
             assume_valid_height: config.validation.assume_valid_height,
             validation_mode: config.validation.mode,
             validation_engine: config.validation.engine,
             journal,
             capture_rawtx: false,
             capture_block_bytes: false,
-            executed_frontier: storage.executed_frontier(),
+            retention: storage.retention(),
         });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
         let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
                 spec.utxo = Some(Arc::clone(&utxo));
-                spec.chain_transition = Some(chainstate.read_fence());
+                spec.chain_transition = Some(stable_view);
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                 let runtime =
                     Arc::new(bitcoin_rs_index::runtime::DerivedIndexRuntime::new(wake_tx));
@@ -412,7 +414,7 @@ impl NodeState {
                 Arc::clone(&block_files),
                 chainstate.prune_authority(),
                 Arc::clone(&durable_tip_height),
-                chainstate.retention_handle(),
+                storage.retention(),
             )?)
         } else {
             None
@@ -439,6 +441,7 @@ impl NodeState {
             p2p,
             inbound_tx_tx,
             inbound_tx_rx,
+            utxo,
             chainstate,
             followers,
             sync,

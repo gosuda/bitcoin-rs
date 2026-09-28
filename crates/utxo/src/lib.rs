@@ -42,7 +42,7 @@ pub mod stats;
 mod undo_codec;
 
 pub use overlay::{WindowOverlay, WindowOverlayError};
-pub use set::{UtxoCoin, UtxoError, UtxoMemoryReport, UtxoScan, UtxoSet, UtxoSetView};
+pub use set::{UtxoCoin, UtxoError, UtxoMemoryReport, UtxoReader, UtxoScan, UtxoSet, UtxoSetView};
 pub use snapshot::{
     SnapshotCoin, SnapshotCoinObserver, SnapshotLoad, aggregate_hash, hash_serialized_3,
     read_snapshot_strict_v4, read_snapshot_strict_v4_observed, write_snapshot,

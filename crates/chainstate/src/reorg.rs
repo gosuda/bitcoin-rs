@@ -536,7 +536,7 @@ fn retention_lease_for(
         return Ok(None);
     };
     handles
-        .retention_handle()
+        .retention
         .acquire(floor)
         .map(Some)
         .map_err(|source| ReorgError::RetentionUnavailable { floor, source })

@@ -92,7 +92,7 @@ pub(crate) struct ServerHarness {
     address: SocketAddr,
     shutdown: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
-    transition: Arc<parking_lot::Mutex<()>>,
+    transition: bitcoin_rs_chain::StableChainView,
 }
 
 impl ServerHarness {
@@ -107,7 +107,7 @@ impl ServerHarness {
         let state = &node.state;
         let chainstate = state.chainstate();
         let ibd = chainstate.ibd_latch();
-        let transition = chainstate.read_fence();
+        let transition = chainstate.stable_view();
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
                 chain_tip: chainstate.header_tip_reader(),
@@ -119,7 +119,7 @@ impl ServerHarness {
                 block_tree: chainstate.block_tree_reader(),
                 chain_network: state.config().network,
                 closed_for_recovery: chainstate.closed_for_recovery_reader(),
-                chain_transition: Arc::clone(&transition),
+                chain_transition: transition.clone(),
                 ..ChainHandles::default()
             },
             mempool: MempoolHandles {
@@ -181,11 +181,11 @@ impl ServerHarness {
 
     /// The node's authoritative connect/disconnect barrier, wired into the
     /// RPC context by `start` exactly as the daemon wires it. A test that holds
-    /// this mutex observes the server the way a status client does while a
-    /// block transition is running.
+    /// this capability observes the server the way a status client does while
+    /// a block transition is running.
     #[must_use]
-    pub(crate) fn chain_transition(&self) -> Arc<parking_lot::Mutex<()>> {
-        Arc::clone(&self.transition)
+    pub(crate) fn chain_transition(&self) -> bitcoin_rs_chain::StableChainView {
+        self.transition.clone()
     }
 
     /// Base64 token of the correct `user:password` credentials.

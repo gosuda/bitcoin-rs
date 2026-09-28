@@ -1656,7 +1656,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
     let chainstate = state.chainstate();
     let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
         chainstate.applied_tip_reader(),
-        bitcoin_rs_chain::BlockTreeReader::new(chainstate.block_tree_handle()),
+        chainstate.block_tree_reader(),
     ));
     Handler::new(Arc::new(Context::from_handles(ContextHandles {
         chain: ChainHandles {
@@ -1669,7 +1669,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             block_tree: chainstate.block_tree_reader(),
             chain_network: Network::Regtest,
             closed_for_recovery: chainstate.closed_for_recovery_reader(),
-            chain_transition: chainstate.read_fence(),
+            chain_transition: chainstate.stable_view(),
             chain_control: Some(Arc::new(NodeInvalidator {
                 handles: chainstate,
                 followers: state.chain_followers(),
@@ -1771,7 +1771,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
     .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
     let chainstate = state.chainstate();
     let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
-        chainstate.utxo_handle(),
+        chainstate.utxo_reader(),
         chainstate.applied_tip_reader(),
         chainstate.block_tree_reader(),
         chainstate.network(),

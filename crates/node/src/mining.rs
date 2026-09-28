@@ -255,7 +255,7 @@ impl MempoolSnapshotSource for MempoolAdapter {
         // Keep chain inputs tied to the context tip. Match the existing
         // transition -> mempool lock order, then release both before counting.
         let (snapshot, prevouts) = {
-            let fence = self.chainstate.read_fence();
+            let fence = self.chainstate.stable_view();
             let _guard = fence.lock();
             if self
                 .chainstate
@@ -275,7 +275,7 @@ impl MempoolSnapshotSource for MempoolAdapter {
                             let outpoint = input.previous_output;
                             if let hashbrown::hash_map::Entry::Vacant(slot) =
                                 prevouts.entry(outpoint)
-                                && let Some(output) = self.chainstate.utxo().get(&outpoint)
+                                && let Some(output) = self.chainstate.utxo_reader().get(&outpoint)
                             {
                                 slot.insert(output);
                             }

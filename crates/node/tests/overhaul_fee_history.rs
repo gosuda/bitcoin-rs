@@ -138,7 +138,7 @@ fn spending_tx(parent: Txid, fee_sats: u64, sequence: u32) -> Tx {
 /// ingress.
 fn admit(state: &NodeState, tx: Tx, time: u64) -> Result<SubmitOutcome> {
     let view = ChainAdmissionView::new(
-        state.chainstate().utxo_handle(),
+        state.chainstate().utxo_reader(),
         state.chainstate().applied_tip_reader(),
         state.chainstate().block_tree_reader(),
         Network::Regtest,
