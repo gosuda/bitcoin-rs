@@ -59,8 +59,9 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     Daemon assembly, subsystem lifecycle coordination, and CLI binary entry
     points. `bitcoin-rs-e2e` is the process-level test harness that drives
     the composed daemon and the pinned reference node over their public
-    surfaces only; it declares no internal dependencies and no workspace
-    crate may depend on it.
+    surfaces. Its library has no normal internal dependency edges; integrated
+    benchmarks may use internal crates through dev-dependencies. No workspace
+    crate may take a production dependency on it.
 - **Explicit non-goal**: Layer numbers do not justify speculative new crates or
   thin wrapper layers. A boundary exists only when it isolates external
   dependencies, enforces safety/consensus boundaries, or separates independent
@@ -81,17 +82,19 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   confined to:
   1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose
      backend selection to operators and packaging scripts.
-  2. Services-tier adapter crates (`bitcoin-rs-chain`, `bitcoin-rs-chainstate`,
+  2. The non-published `bitcoin-rs-e2e` package, solely to select backends for
+     the integrated benchmark suite under `e2e/benches`.
+  3. Services-tier adapter crates (`bitcoin-rs-chain`, `bitcoin-rs-chainstate`,
      `bitcoin-rs-utxo`, `bitcoin-rs-p2p`, `bitcoin-rs-index`) whose features exist solely so `-p`
      package builds propagate backend selection into `bitcoin-rs-storage`.
-  3. `bitcoin-rs-storage` itself, which owns the concrete backend engine
+  4. `bitcoin-rs-storage` itself, which owns the concrete backend engine
      dependencies and exposes them through the `KvStore` facade.
 - Crates in Layer 0 (Core) and Layer 3 (Surface / RPC) must never define or
   forward storage backend features.
 - `bitcoin-rs-mempool` and `bitcoin-rs-mining` do not own storage and must not
   define or forward backend feature names; an empty `rocksdb = []` marker
   counts as defining a backend feature and is forbidden.
-- `bitcoin-rs-node` and `bitcoin-rs` may forward backend selection only into
+- `bitcoin-rs-node`, `bitcoin-rs`, and `bitcoin-rs-e2e` may forward backend selection only into
   engine-selecting crates (`bitcoin-rs-storage`, `bitcoin-rs-chain`,
   `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`, `bitcoin-rs-p2p`,
   `bitcoin-rs-index`).
@@ -396,8 +399,8 @@ composition seam.
   - Root `Cargo.toml`: workspace member list and package versions.
   - `crates/storage/Cargo.toml`: engine dependency definitions.
   - `crates/rpc/Cargo.toml`: zero storage backend dependencies or features.
-  - `crates/node/Cargo.toml` and `bin/bitcoin-rs/Cargo.toml`: confined
-    operator-tier backend feature flags.
+  - `crates/node/Cargo.toml`, `bin/bitcoin-rs/Cargo.toml`, and `e2e/Cargo.toml`:
+    confined operator-tier and integrated-benchmark backend feature flags.
 - `crates/chainstate/tests/unit/apply/admission_tests.rs` and
   `crates/chainstate/tests/unit/apply/chain_tx_count_tests.rs` cover admission
   shutdown and coherent chain transaction-count publication. Checkpoint and

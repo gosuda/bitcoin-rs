@@ -4,7 +4,7 @@
 //! needed. This microbenchmark is not an apply-path or full-replay verdict.
 #![allow(missing_docs)]
 
-#[path = "../tests/support/block_facts_fixture.rs"]
+#[path = "../../crates/consensus/tests/support/block_facts_fixture.rs"]
 mod fixtures;
 
 use std::hint::black_box;

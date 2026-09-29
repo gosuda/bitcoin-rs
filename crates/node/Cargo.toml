@@ -7,8 +7,6 @@ version.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "bitcoin-rs :: node"
-# Benchmark targets are explicit, including the evidence-tool unit tests.
-autobenches = false
 
 [lints]
 workspace = true
@@ -100,7 +98,6 @@ bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
-criterion.workspace = true
 sonic-rs.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -109,15 +106,3 @@ bitcoin-rs-script.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-index = { workspace = true, features = ["test-seam"] }
-
-[[bench]]
-name = "sync_pipeline"
-harness = false
-
-[[bench]]
-name = "chainstate_journal"
-harness = false
-
-[[bench]]
-name = "evidence"
-harness = true

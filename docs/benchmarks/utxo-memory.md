@@ -390,7 +390,7 @@ remains because it protects the lookup algorithm without asserting wall time.
 Reproduce the retained production-shaped benchmark:
 
 ```
-cargo bench -p bitcoin-rs-utxo --bench utxo_commit
+cargo bench -p bitcoin-rs-e2e --bench utxo_commit --features fjall
 ```
 
 ### Superseded: the pre-measurement sizing

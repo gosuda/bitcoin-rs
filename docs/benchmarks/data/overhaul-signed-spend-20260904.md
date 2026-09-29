@@ -22,7 +22,9 @@ a paired control for this run.
 
 ## Corpus
 
-`signed_spend_proxy_blocks()` in `crates/node/benches/sync_pipeline.rs`.
+`signed_spend_proxy_blocks()` was measured from the then-current
+`crates/node/benches/sync_pipeline.rs`; the retained harness now lives at
+`e2e/benches/sync_pipeline.rs`.
 117-block skeleton: heights 1..100 fan out 64 coinbase outputs each;
 heights 101..116 spend those outputs. Spend classes: P2PKH, P2WPKH, and
 P2WSH 2-of-3.

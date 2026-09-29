@@ -128,26 +128,10 @@ jobs:
       # ~14 minutes, while `--profile dev` would not catch optimization-level
       # build errors. `cargo bench` accepts any named profile.
       - run: |
-          cargo bench --locked -p bitcoin-rs --no-run --profile quickstart \
+          cargo bench --locked -p bitcoin-rs-e2e --no-run --profile quickstart \
             --no-default-features --features "${FULL_NODE_FEATURES}"
-      # Crate-level UTXO bench target is unreachable from -p bitcoin-rs; compile
-      # the production-allocator benchmark so bench breakage is visible to CI.
-      - run: cargo bench --locked -p bitcoin-rs-utxo --no-run --profile quickstart
-      # The chainstate replay gate is an explicit harness: compile it on every
-      # main push, while measured executions remain release evidence.
-      - run: |
-          cargo bench --locked -p bitcoin-rs-node --no-run --profile quickstart \
-            --no-default-features --features fjall --bench chainstate_journal
       - name: Benchmark evidence validation
-        run: cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --bench evidence
-      # Retained crate-level benchmarks without kernel (this job's previous
-      # whole content): merkle, utxo_commit under fjall, sync_pipeline, and
-      # the mining candidate are not covered by the compiles above.
-      - run: |
-          cargo bench --locked -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle --profile quickstart
-          cargo bench --locked -p bitcoin-rs-utxo     --no-run --no-default-features --features fjall --bench utxo_commit --profile quickstart
-          cargo bench --locked -p bitcoin-rs-mining   --no-run --no-default-features --bench candidate --profile quickstart
-          cargo bench --locked -p bitcoin-rs-node     --no-run --no-default-features --features fjall --bench sync_pipeline --profile quickstart
+        run: cargo test --locked -p bitcoin-rs-e2e --no-default-features --features fjall --bench evidence
 
       # Native script tests do not compile this feature-gated oracle. Exercise
       # it on `main`, with separate build output and retained diagnostics.

@@ -43,7 +43,7 @@ failure-path coverage, and named contracts remain proved.
 | Per-engine `*_equivalence_hash` tests | Consolidate into `portable_backends_have_identical_aggregate_hashes`. Every enabled backend still runs the complete behavioral suite; multi-backend builds compare the resulting hashes without running each engine twice. Two-backend builds now compare too. |
 | Separate peer-constructor direction tests | Consolidate into `constructors_preserve_direction_and_handshake_metadata`. Check both directions, shared metadata, negotiation defaults, and a version-receipt time distinct from handshake completion. |
 | `g18_hot_path_ledger` | Delete historical matrix/path/disposition gates. The declared benchmark ledger and actual campaign artifacts remain. |
-| `overhaul_evidence` | Move identity, overlap and repetition checks to `crates/node/benches/evidence.rs`. Delete the all-cells-unmeasured assertion. |
+| `overhaul_evidence` | Move identity, overlap and repetition checks to `e2e/benches/evidence.rs`. Delete the all-cells-unmeasured assertion. |
 | `g19_validation_default` | Delete the hardcoded promotion verdict and ad-hoc Cargo feature parser. `VAL-01` requires measured promotion evidence; feature builds remain. |
 | `g20_unique_consensus_crates` | Delete the duplicate graph checker. Both dependency-range endpoints require `cargo deny check bans`. |
 | `g20_formal_models` | Remove external Java/solver execution and source-text checks from Rust tests. Keep pinned models, hashes, properties, K=128 and explicit failure outcomes in the dedicated runner. |

@@ -27,7 +27,7 @@ long-poll publication over node-supplied capability sources. Generate assemble-s
 submission, and header-only admission (`submitheader` via `accept_headers`)
 live in the node-owned coordinator that implements `MiningControl`.
 
-`cargo bench -p bitcoin-rs-mining --bench candidate` times `assemble_candidate`
+`cargo bench -p bitcoin-rs-e2e --bench candidate` times `assemble_candidate`
 against pre-captured snapshots. It is a measurement seam, not a budget.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the

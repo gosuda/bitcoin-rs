@@ -50,7 +50,8 @@ Run 3 was elevated by a transient load spike (host load average 50.9 on 80 cores
 ## Scope of this number
 
 Both arms apply the same `spend_heavy_proxy_blocks()` corpus, whose spends are
-bare `OP_TRUE` outputs (`crates/node/benches/sync_pipeline.rs`, `push_int(1)`).
+bare `OP_TRUE` outputs (the then-current `crates/node/benches/sync_pipeline.rs`,
+now `e2e/benches/sync_pipeline.rs`, `push_int(1)`).
 Neither arm verifies a signature. The number therefore measures apply-path
 overhead - parse, prevout resolution, state plumbing - on trivially satisfiable
 scripts. It is not evidence about signature verification cost, and it says

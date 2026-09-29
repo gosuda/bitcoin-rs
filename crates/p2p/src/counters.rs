@@ -799,7 +799,7 @@ mod tests {
     /// message.
     ///
     /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`. Syscall shape is the
-    /// named invariant; elapsed time is `crates/p2p/benches/write_message.rs`.
+    /// named invariant; elapsed time is `e2e/benches/write_message.rs`.
     #[test]
     fn write_message_through_counting_stream_stays_vectored() {
         struct FailOnUnvectored {

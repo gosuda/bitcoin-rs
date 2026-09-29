@@ -1,5 +1,5 @@
 # bitcoin-rs product hot-path ledger. Owner: docs/contracts/hot-path-attribution.md.
-# Ledger parse/record and inventory review live in crates/node/benches/evidence.rs
+# Ledger parse/record and inventory review live in e2e/benches/evidence.rs
 # (HPA-05: the evidence tool validates accounting, not declared-path names).
 schema = "bitcoin-rs-hot-path-ledger-v2"
 
@@ -330,7 +330,7 @@ concurrency_group = "p2p-io"
 domains = ["p2p"]
 seams = ["crates/p2p/src/wire.rs", "crates/p2p/src/peer.rs"]
 disposition = "blocked"
-evidence = "No product-safe skip of checksum/decode. Diagnostic bench: crates/p2p/benches/write_message.rs."
+evidence = "No product-safe skip of checksum/decode. Diagnostic bench: e2e/benches/write_message.rs."
 # Pinned baseline, #650 hot-path bench campaign, measured
 # 2026-09-12T23:09:31Z at tree a445e95d5c2c500f9eec121ee3813cbdaf3d783b on
 # branch bench/hot-path-650. Criterion diagnostic only (HPA-09): these numbers
@@ -380,7 +380,7 @@ evidence = "No product-safe skip of checksum/decode. Diagnostic bench: crates/p2
 #     so custody is available, but the campaign is out of this wave's budget and
 #     #650 defers final product measurements to #629/#625. Per-cell samples stay
 #     empty and the noise floor stays unobserved until those runs append through
-#     `Ledger` (`crates/node/benches/evidence.rs`) with the six-way identity (HPA-12).
+#     `Ledger` (`e2e/benches/evidence.rs`) with the six-way identity (HPA-12).
 
 [[paths]]
 id = "p2p.channels"
@@ -832,7 +832,7 @@ reason = "Weakens the product lifecycle."
 
 # ---------------------------------------------------------------------------
 # Cell histories. One entry per matrix cell; a run appends samples through
-# `Ledger` (`crates/node/benches/evidence.rs`) and never edits or removes an earlier one.
+# `Ledger` (`e2e/benches/evidence.rs`) and never edits or removes an earlier one.
 # An empty history is an unmeasured cell.
 # ---------------------------------------------------------------------------
 

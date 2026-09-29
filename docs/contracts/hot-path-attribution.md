@@ -7,7 +7,7 @@ This page does not record measured seconds.
 Owners:
 - Method: this page (`HPA-01`..`HPA-13`)
 - Inventory and dispositions: `docs/benchmarks/hot-path-ledger.toml`
-- Evidence tooling: `crates/node/benches/evidence.rs` and `tools/benchmark-campaign/`
+- Evidence tooling: `e2e/benches/evidence.rs` and `tools/benchmark-campaign/`
 
 The 2.0x speed gate and the 36-cell denominator live in issues #33 and
 #45. This contract does not change the 36-cell count.
@@ -151,7 +151,7 @@ posture.
 ### `HPA-12`: Evidence identity per sample
 
 - The evidence `Ledger` schema is implemented in
-  `crates/node/benches/evidence.rs` and shared by the benchmark evidence
+  `e2e/benches/evidence.rs` and shared by the benchmark evidence
   tests and the hot-path ledger.
 - Every sample in the evidence ledger carries an identity tuple:
   artifact (binary or library hash), configuration (feature set,
@@ -186,7 +186,7 @@ posture.
 
 ## Evidence and checks
 
-- `cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --bench evidence`
+- `cargo test --locked -p bitcoin-rs-e2e --no-default-features --features fjall --bench evidence`
   checks missing identities, interval overlap and repeated-sample retention.
   It is a benchmark-tool test, not node correctness or a measurement.
 - `tools/benchmark-campaign/` owns measured runs and product comparisons.

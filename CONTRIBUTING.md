@@ -80,7 +80,7 @@ Formal evidence has its own lane: provision with
 `bash scripts/provision-ci-reference-fixtures.sh formal`, then run
 `python3 scripts/check_models.py`. A `--check-only` invocation checks custody,
 not model properties. Benchmark evidence checks run with
-`cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --bench evidence`.
+`cargo test --locked -p bitcoin-rs-e2e --no-default-features --features fjall --bench evidence`.
 
 The [pre-commit configuration](.pre-commit-config.yaml) runs the same script,
 so local hooks are the kernel-free PR gate, not the C++ full-node lane.
@@ -138,24 +138,19 @@ them rather than run the oracle checks.
 
 ### Benchmark compilation check
 
-The main workflow compiles the retained crate-level benchmarks without kernel,
-under the `quickstart` profile (the `bench` profile's fat-LTO build is too
-expensive for a compile-only gate):
+The main workflow compiles the integrated benchmark suite under the E2E
+package with the `quickstart` profile (the `bench` profile's fat-LTO build is
+too expensive for a compile-only gate):
 
 ```sh
-cargo bench -p bitcoin-rs-consensus --no-run --no-default-features --bench merkle --profile quickstart
-cargo bench -p bitcoin-rs-mining --no-run --no-default-features --bench candidate --profile quickstart
-cargo bench -p bitcoin-rs-utxo --no-run \
-  --no-default-features --features fjall --bench utxo_commit --profile quickstart
-cargo bench -p bitcoin-rs-node --no-run \
-  --no-default-features --features fjall --bench sync_pipeline --profile quickstart
-cargo bench -p bitcoin-rs-node --no-run \
-  --no-default-features --features fjall --bench chainstate_journal --profile quickstart
+cargo bench -p bitcoin-rs-e2e --no-run --profile quickstart \
+  --no-default-features --features rocksdb,fjall,redb,kernel
 ```
 
-`--no-run` checks compilation; it produces no performance measurement.
+`--no-run` checks every target in `e2e/benches`; it produces no
+performance measurement.
 
-The same `bench-smoke` job also compiles the kernel-enabled binary-package
+The same `bench-smoke` job also compiles the kernel-enabled E2E-package
 benches (`--features rocksdb,fjall,redb,kernel`), runs the witness-activation
 kernel regression, and checks the SegWit-v0 kernel oracle with retained
 diagnostics.

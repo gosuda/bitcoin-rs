@@ -237,7 +237,7 @@ mod tests {
     use super::*;
     use bitcoin_rs_node::metrics::{CorpusIdentity, Sha256Hex};
 
-    const LEDGER_TOML: &str = include_str!("../../../docs/benchmarks/hot-path-ledger.toml");
+    const LEDGER_TOML: &str = include_str!("../../docs/benchmarks/hot-path-ledger.toml");
     const CELL: &str = "offline.c150.x86_64.fjall";
 
     fn identity() -> EvidenceIdentity {

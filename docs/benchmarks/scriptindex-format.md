@@ -85,7 +85,7 @@ the `MemoryStore` backend (a `BTreeMap`-backed `KvStore`). Logical byte counts
 are exact by construction — they are computed from the serialized key and
 value lengths defined in `crates/index/src/types.rs`, not measured from a
 live database. Physical byte counts on fjall are taken from the existing
-`crates/storage/examples/storage_footprint.rs` harness (200k rows per CF),
+`e2e/benches/storage_footprint.rs` harness (200k rows per CF),
 not re-run here.
 
 No trial count is claimed for physical bytes: the fjall figures are cited

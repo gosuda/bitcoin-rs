@@ -36,7 +36,7 @@ cargo test --locked -p bitcoin-rs --no-default-features --features fjall --test 
 
 | Cell | Owner | Status |
 |---|---|---|
-| Backend write amplification on the synthetic ten-family corpus (retained harness `crates/storage/examples/storage_footprint.rs`) | `crates/storage` | prior evidence only, see below |
+| Backend write amplification on the synthetic ten-family corpus (retained harness `e2e/benches/storage_footprint.rs`) | `crates/storage` | prior evidence only, see below |
 | T02 original-candidate physical high-water, matched workload | T02 collector | `UNMEASURED` |
 | T14 candidate full-tip storage check before authority cutover | T14 | `planned_not_executed` |
 | T39 final integrated campaign | T39 | `planned_not_executed` |
@@ -73,7 +73,9 @@ Retained verbatim from the pre-rewrite document. Headings are demoted one level.
 The compression-fix comparison was measured on 2026-09-02 at branch
 `overhaul/one-session` commit `b0e0935` against the empty-`Spending`
 (`12+0`) corpus. Current-format (`Spending 12+8`) totals were remeasured on
-2026-09-04 from `crates/storage/examples/storage_footprint.rs`.
+2026-09-04 from the harness then located at
+`crates/storage/examples/storage_footprint.rs`; its current integrated location
+is `e2e/benches/storage_footprint.rs`.
 
 ### What was measured
 
@@ -81,10 +83,10 @@ The on-disk footprint of each storage backend after writing a fixed synthetic
 corpus across all ten column families, forcing memtable flush to SST files
 (fjall), and measuring the total bytes occupied on disk.
 
-The measurement harness is `crates/storage/examples/storage_footprint.rs`:
+The measurement harness is `e2e/benches/storage_footprint.rs`:
 
 ```text
-cargo run -p bitcoin-rs-storage --example storage_footprint --release --features fjall,redb,rocksdb -- [backend]
+cargo bench -p bitcoin-rs-e2e --bench storage_footprint --features fjall,redb,rocksdb -- [backend]
 ```
 
 ### Corpus

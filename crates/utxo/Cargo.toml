@@ -35,13 +35,5 @@ sha2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
-criterion.workspace = true
 tempfile = ">=3.20.0, <4"
-# The benchmark uses the same allocator as the production binary. Inherits
-# `default-features = false`, matching `bin/bitcoin-rs`.
-mimalloc.workspace = true
 bitcoin.workspace = true
-
-[[bench]]
-name = "utxo_commit"
-harness = false

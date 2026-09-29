@@ -36,6 +36,8 @@ pub(crate) const NODE_CRATE: &str = "bitcoin-rs-node";
 
 /// The node binary.
 pub(crate) const BIN_CRATE: &str = "bitcoin-rs";
+/// The non-published process-test and integrated-benchmark package.
+pub(crate) const E2E_CRATE: &str = "bitcoin-rs-e2e";
 /// The mempool admission owner.
 pub(crate) const MEMPOOL_CRATE: &str = "bitcoin-rs-mempool";
 /// The authoritative applied-chain owner.
@@ -47,7 +49,7 @@ pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-chainstate";
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
     ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
 /// Crates permitted to define and forward storage backend feature selection.
-pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 8] = [
+pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 9] = [
     STORAGE_CRATE,
     "bitcoin-rs-chain",
     CHAINSTATE_CRATE,
@@ -56,6 +58,7 @@ pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 8] = [
     "bitcoin-rs-index",
     NODE_CRATE,
     BIN_CRATE,
+    E2E_CRATE,
 ];
 
 /// Approved layer for each workspace crate.
@@ -72,7 +75,7 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
         "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
         | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
         RPC_CRATE => 3,
-        NODE_CRATE | BIN_CRATE | "bitcoin-rs-e2e" => 4,
+        NODE_CRATE | BIN_CRATE | E2E_CRATE => 4,
         other => panic!("unclassified workspace crate `{other}`: add it to the layer table"),
     }
 }

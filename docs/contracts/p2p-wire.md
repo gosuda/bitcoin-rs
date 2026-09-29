@@ -275,7 +275,7 @@ covers the delivery-path forward.
   `write_message_through_counting_stream_stays_vectored`: a v1 frame's header
   and payload leave as one `write_vectored`, and the wrapper counts every byte
   the socket took (`P2P-01`). Elapsed time is
-  `crates/p2p/benches/write_message.rs`.
+  `e2e/benches/write_message.rs`.
 - `crates/p2p/src/peer_table.rs` tests
   `note_announced_height_credits_only_the_delivering_connection` and
   `note_announced_height_raises_monotonically_and_reports_actual_updates`
@@ -578,5 +578,5 @@ lifecycle end to end — first-pass commitment collection, the work-floor
 crossing that restarts the sync at the fork point, commitment divergence
 on a substituted redownload header, salted-commitment spends, the benign
 lost-continuity break, and the disconnects every other failure costs the
-connection. `crates/p2p/benches/headers_presync.rs` measures the hashing
+connection. `e2e/benches/headers_presync.rs` measures the hashing
 bound the first pass pays per page.
