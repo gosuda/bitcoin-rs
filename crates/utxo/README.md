@@ -37,6 +37,7 @@ The checkpoint manifest records this component under the current codec identifie
 ## Features
 
 - `rocksdb`, `fjall`, `redb`: forward the storage-backend selection into the `storage` crate.
+- `test-seam`: enables `UtxoReader::fixture_set` so that test builds expose the raw `UtxoSet` through the reader; production builds never compile it, keeping the full mutation path `utxo::contract` private.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

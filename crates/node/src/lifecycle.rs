@@ -73,7 +73,7 @@ impl ChainControl for RpcChainControl {
 
 /// Binds the RPC listener without spawning a worker. Startup records the
 /// worker immediately after spawning, so a later failure cannot detach it.
-fn bind_rpc(
+pub(crate) fn bind_rpc(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
@@ -91,7 +91,7 @@ fn bind_rpc(
             coin_stats: chainstate.coin_stats_handle(),
             block_tree: chainstate.block_tree_reader(),
             chain_network: state.config().network,
-            chain_transition: chainstate.stable_view(),
+            chain_transition: state.stable_view(),
             block_body_source: Some(block_body_source),
             prune_service: state.prune_service(),
             closed_for_recovery: chainstate.closed_for_recovery_reader(),
@@ -524,6 +524,7 @@ pub(crate) fn start_node(
         Arc::clone(&chainstate),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
+        state.stable_view(),
     ));
     let sequence_wake: Arc<dyn bitcoin_rs_mining::MempoolSequenceWake> = coordinator.clone();
     let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> = coordinator;

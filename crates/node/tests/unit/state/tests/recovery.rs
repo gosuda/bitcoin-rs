@@ -306,6 +306,7 @@ type ForkFixture = (
     NodeState,
     bitcoin_rs_chain::NodeId,
     HashMap<bitcoin_rs_primitives::Hash256, (bitcoin_rs_primitives::Block, bytes::Bytes)>,
+    Arc<bitcoin_rs_storage::RetentionRegistry>,
 );
 
 fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
@@ -316,6 +317,7 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
     config.p2p.listen.clear();
     config.chainstate_journal.enabled = false;
     let state = NodeState::open(config, None)?;
+    let retention = state.retention_registry();
     let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
     state.apply_block(&genesis)?;
     let block_one = regtest_fixture::mined_regtest_child_at_time(
@@ -354,16 +356,16 @@ fn forked_regtest_state() -> anyhow::Result<ForkFixture> {
         parent = node_id;
         previous_hash = block.block_hash();
     }
-    Ok((dir, state, parent, fork_bodies))
+    Ok((dir, state, parent, fork_bodies, retention))
 }
 
 /// A completed switch holds its retention lease only for its own duration:
 /// the authority is back with pruning exactly once when it settles.
 #[test]
 fn switch_to_branch_releases_retention_authority_once() -> anyhow::Result<()> {
-    let (_dir, state, fork_tip, fork_bodies) = forked_regtest_state()?;
+    let (_dir, state, fork_tip, fork_bodies, retention) = forked_regtest_state()?;
     let handles = state.chainstate();
-    assert_eq!(handles.retention_handle().active_leases(), 0);
+    assert_eq!(retention.active_leases(), 0);
 
     crate::reorg::switch_to_branch(
         &handles,
@@ -373,7 +375,7 @@ fn switch_to_branch_releases_retention_authority_once() -> anyhow::Result<()> {
         |_| {},
     )?;
 
-    assert_eq!(handles.retention_handle().active_leases(), 0);
+    assert_eq!(retention.active_leases(), 0);
     Ok(())
 }
 
@@ -382,10 +384,10 @@ fn switch_to_branch_releases_retention_authority_once() -> anyhow::Result<()> {
 /// and no lease left behind (`RCV-08`).
 #[test]
 fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<()> {
-    let (_dir, state, fork_tip, fork_bodies) = forked_regtest_state()?;
+    let (_dir, state, fork_tip, fork_bodies, retention) = forked_regtest_state()?;
     let handles = state.chainstate();
     let tip_before = handles.applied_tip().load_full().map(|tip| tip.hash);
-    let reservation = handles.retention_handle().reserve(5);
+    let reservation = retention.reserve(5);
     reservation.commit(5);
 
     let outcome = crate::reorg::switch_to_branch(
@@ -404,7 +406,7 @@ fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<(
         handles.applied_tip().load_full().map(|tip| tip.hash),
         tip_before
     );
-    assert_eq!(handles.retention_handle().active_leases(), 0);
+    assert_eq!(retention.active_leases(), 0);
     // A refused lease must not close admission: nothing was mutated.
     assert!(handles.lock_transition().is_ok());
     Ok(())
@@ -421,7 +423,12 @@ fn switch_to_branch_refuses_history_the_prune_line_crossed() -> anyhow::Result<(
 fn applied_regtest_chain(
     heights: u32,
     checkpoint_height: u32,
-) -> anyhow::Result<(tempfile::TempDir, NodeState, crate::NodeConfig)> {
+) -> anyhow::Result<(
+    tempfile::TempDir,
+    NodeState,
+    crate::NodeConfig,
+    Arc<bitcoin_rs_storage::RetentionRegistry>,
+)> {
     assert!((1..=heights).contains(&checkpoint_height));
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -442,12 +449,13 @@ fn applied_regtest_chain(
             state.publish_checkpoint()?;
         }
     }
-    Ok((dir, state, config))
+    let retention = state.retention_registry();
+    Ok((dir, state, config, retention))
 }
 
 #[test]
 fn missing_checkpoint_replays_durable_head_chain_at_startup() -> anyhow::Result<()> {
-    let (_dir, state, config) = applied_regtest_chain(2, 1)?;
+    let (_dir, state, config, _retention) = applied_regtest_chain(2, 1)?;
     let remembered_tip = state
         .chainstate()
         .applied_tip_snapshot()
@@ -472,7 +480,7 @@ fn missing_checkpoint_replays_durable_head_chain_at_startup() -> anyhow::Result<
 fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyhow::Result<()> {
     for keep_checkpoint in [false, true] {
         for corrupt_length in [false, true] {
-            let (_dir, state, config) = applied_regtest_chain(2, 2)?;
+            let (_dir, state, config, _retention) = applied_regtest_chain(2, 2)?;
             drop(state);
             if !keep_checkpoint {
                 std::fs::remove_dir_all(config.data_dir.join("chainstate-checkpoints"))?;
@@ -512,7 +520,7 @@ fn committed_frame_corruption_refuses_startup_and_preserves_all_bytes() -> anyho
 fn checkpoint_resume_discards_only_incomplete_uncommitted_tail() -> anyhow::Result<()> {
     use std::io::Write as _;
 
-    let (_dir, state, config) = applied_regtest_chain(2, 2)?;
+    let (_dir, state, config, _retention) = applied_regtest_chain(2, 2)?;
     let tip = state
         .chainstate()
         .applied_tip_snapshot()
@@ -538,7 +546,7 @@ fn checkpoint_resume_discards_only_incomplete_uncommitted_tail() -> anyhow::Resu
 
 #[test]
 fn full_revalidation_marker_resumes_on_durable_head() -> anyhow::Result<()> {
-    let (_dir, state, config) = applied_regtest_chain(2, 1)?;
+    let (_dir, state, config, _retention) = applied_regtest_chain(2, 1)?;
     let remembered_tip = state
         .chainstate()
         .applied_tip_snapshot()
@@ -628,7 +636,7 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
     // Checkpoint at 320, then advance to 620. Pruning may delete history
     // below the checkpoint's 288-block safety margin, while a reorg rooted
     // above the checkpoint remains incrementally serviceable.
-    let (_dir, state, _config) = applied_regtest_chain(620, 320)?;
+    let (_dir, state, _config, retention) = applied_regtest_chain(620, 320)?;
     let (deep_tip, deep_bodies, _deep_order) = plan_fork(&state, 20, 2, 1_400_000_000)?;
     let (shallow_tip, shallow_bodies, _shallow_order) = plan_fork(&state, 400, 2, 1_500_000_000)?;
     let Some(service) = state.prune_service() else {
@@ -641,7 +649,7 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
         .prune_to_height(30)
         .map_err(|err| anyhow::anyhow!("prune failed: {err}"))?;
     let handles = state.chainstate();
-    assert_eq!(handles.retention_handle().pruned_below(), 30);
+    assert_eq!(retention.pruned_below(), 30);
 
     // A reorg rooted below the recorded line needs deleted bodies; the
     // retention lease is refused before the first mutation.
@@ -662,7 +670,7 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
         ),
         "deep reorg must refuse deleted history, got: {error:?}"
     );
-    assert_eq!(handles.retention_handle().active_leases(), 0);
+    assert_eq!(retention.active_leases(), 0);
 
     // A reorg rooted above both the prune line and checkpoint base still
     // switches, disconnecting 220
@@ -679,7 +687,7 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
         .load_full()
         .ok_or_else(|| anyhow::anyhow!("reorg must publish a tip"))?;
     assert_eq!(landed.height, 402);
-    assert_eq!(handles.retention_handle().active_leases(), 0);
+    assert_eq!(retention.active_leases(), 0);
     Ok(())
 }
 
@@ -690,7 +698,7 @@ fn prune_then_reorg_refuses_deleted_history_but_keeps_retained_reorgs() -> anyho
 fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Result<()> {
     // A 16-body stager window keeps every switch's connect side bounded.
     const STAGED_PREFIX: u32 = 16;
-    let (_dir, state, _config) = applied_regtest_chain(320, 1)?;
+    let (_dir, state, _config, retention) = applied_regtest_chain(320, 1)?;
     let (fork_tip, fork_bodies, ordered) = plan_fork(&state, 20, 300, 1_600_000_000)?;
     let height_of: HashMap<bitcoin_rs_primitives::Hash256, u32> = ordered
         .iter()
@@ -700,7 +708,7 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
 
     // The reference applies the winning branch linearly on top of the same
     // deterministic first 20 blocks.
-    let (_ref_dir, reference, _ref_config) = applied_regtest_chain(20, 1)?;
+    let (_ref_dir, reference, _ref_config, _retention2) = applied_regtest_chain(20, 1)?;
     for (height, hash) in &ordered {
         let (block, _) = fork_bodies
             .get(hash)
@@ -764,7 +772,7 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
         .load_full()
         .ok_or_else(|| anyhow::anyhow!("restored node must publish a tip"))?;
     assert_eq!(restored.chain_tx_count, reference_tip.chain_tx_count);
-    assert_eq!(handles.retention_handle().active_leases(), 0);
+    assert_eq!(retention.active_leases(), 0);
     Ok(())
 }
 
@@ -777,7 +785,7 @@ fn deep_reorg_streams_bounded_prefixes_to_the_exact_reference() -> anyhow::Resul
 fn restart_without_periodic_publication_restores_tip_and_commit_id() -> anyhow::Result<()> {
     // The checkpoint lands at height 1; blocks 2-4 exist only in the
     // journal suffix and the durable head chain.
-    let (_dir, state, config) = applied_regtest_chain(4, 1)?;
+    let (_dir, state, config, _retention) = applied_regtest_chain(4, 1)?;
     let head = state
         .storage
         .durable_head()

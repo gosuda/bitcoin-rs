@@ -203,7 +203,7 @@ impl NodeState {
         // publisher's snapshot into its persisted consumer cursor.
         let chain_events_raw = ChainEventPublisher::new(initial_snapshot);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let stable_view = bitcoin_rs_chain::StableChainView::new();
+        let stable_view = bitcoin_rs_chain::StableChainView::detached();
         let chain_events = Arc::new(chain_events_raw);
         let mut chainstate = bitcoin_rs_chainstate::Chainstate::from_parts(ChainstateParts {
             network: config.network,
@@ -224,14 +224,15 @@ impl NodeState {
             journal,
             capture_rawtx: false,
             capture_block_bytes: false,
-            retention: storage.retention(),
+            retention: bitcoin_rs_storage::MandatoryRetention::new(storage.retention()),
         });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
         let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
+                // Derive the index's reader from the set now exclusively in ChainstateParts.
                 spec.utxo = Some(bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&utxo)));
-                spec.chain_transition = Some(stable_view);
+                spec.chain_transition = Some(stable_view.clone());
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                 let runtime =
                     Arc::new(bitcoin_rs_index::runtime::DerivedIndexRuntime::new(wake_tx));
@@ -441,8 +442,9 @@ impl NodeState {
             p2p,
             inbound_tx_tx,
             inbound_tx_rx,
-            utxo,
+            utxo_reader: bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&utxo)),
             chainstate,
+            stable_view,
             followers,
             sync,
             recovery_reporter,

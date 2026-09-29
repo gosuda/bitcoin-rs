@@ -47,11 +47,12 @@ fn rpc_network_handles_borrow_p2p_service_state() -> anyhow::Result<()> {
 #[test]
 fn chain_rpc_and_index_compose_one_transition_domain() -> anyhow::Result<()> {
     // One domain, three components: open() creates the node's single
-    // `StableChainView` and clones it into Chainstate (whose `stable_view()`
-    // is exactly what bind_rpc hands RPC, crates/node/src/lifecycle.rs) and
-    // into the derived-index open spec. The test observes both handoffs
-    // before the worker consumes the spawn, so a future wiring change that
-    // forks the domain — a second `StableChainView::new()` anywhere — fails
+    // `StableChainView` and distributes clones to Chainstate (which locks it
+    // internally as its transition authority), to the derived-index open
+    // spec, and to the RPC handles that `bind_rpc` composes. The test
+    // exercises the real `bind_rpc` handoff and observes the index spec
+    // before the worker consumes the spawn. A future wiring change that
+    // forks the domain — a second `StableChainView::detached()` anywhere — fails
     // here instead of desynchronizing live-view locking from chain
     // transitions.
     let dir = tempfile::tempdir()?;
@@ -59,15 +60,30 @@ fn chain_rpc_and_index_compose_one_transition_domain() -> anyhow::Result<()> {
     config.indexes.txindex = true;
     let state = NodeState::open(config, None)?;
 
-    // The RPC side: bind_rpc composes ChainHandles from this same accessor.
-    let rpc_domain = state.chainstate().stable_view();
+    // The RPC side: exercise the real `bind_rpc` path.
+    let ibd = state.ibd();
+    let block_body_source = state.block_body_source()?;
+    let mining_control: Arc<dyn bitcoin_rs_mining::MiningControl> =
+        bitcoin_rs_mining::FakeMiningControl::unavailable("composition test");
+    let (ctx, _server) =
+        crate::lifecycle::bind_rpc(&state, &mining_control, block_body_source, &ibd)?;
+    let rpc_domain = &ctx.chain.chain_transition;
+
     // The index side: the authority the pending spawn's spec carries.
     let index_domain = state.derived_index_transition_domain().ok_or_else(|| {
         anyhow::anyhow!("an enabled index must carry the node's transition domain")
     })?;
+
+    // The state composition side: the same domain lives in NodeState.
+    let state_domain = state.stable_view();
+
     assert!(
         rpc_domain.is_same(&index_domain),
-        "chainstate, RPC, and index must be wired to one transition domain"
+        "bind_rpc handles and index spec must derive from one transition domain"
+    );
+    assert!(
+        rpc_domain.is_same(&state_domain),
+        "bind_rpc handles and NodeState::stable_view must be the same domain"
     );
     Ok(())
 }

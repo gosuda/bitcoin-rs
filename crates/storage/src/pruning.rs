@@ -56,8 +56,8 @@ pub mod undo_pruner;
 
 pub use block_pruner::{BLOCK_DATA_CF, BlockPruner, block_body_key};
 pub use lease::{
-    HistoryAccess, HistoryLease, HistoryUnavailable, PruneReservation, RetentionBudget,
-    RetentionError, RetentionLease, RetentionRegistry,
+    HistoryAccess, HistoryLease, HistoryUnavailable, MandatoryRetention, PruneReservation,
+    RetentionBudget, RetentionError, RetentionLease, RetentionRegistry,
 };
 pub use policy::PrunePolicy;
 pub use undo_pruner::{UndoPruner, block_undo_key};

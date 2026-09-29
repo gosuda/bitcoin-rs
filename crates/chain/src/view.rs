@@ -9,16 +9,24 @@ use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard};
 use crate::{BlockTree, TipSnapshot};
 
 /// Cloneable capability for reads that must exclude authoritative chain transitions.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct StableChainView {
     inner: Arc<Mutex<()>>,
 }
 
 impl StableChainView {
-    /// Creates an independent transition domain.
+    /// Mints a detached transition domain.
+    ///
+    /// This creates an independent, self-owned domain. In production the node
+    /// composition root (`NodeState`) creates exactly one `StableChainView` and
+    /// distributes clones of it to all consumers (RPC, indexes, mining). Tests
+    /// that need a fixture domain may call this; the resulting view is not
+    /// connected to any real chainstate transition authority.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn detached() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Excludes authoritative transitions while the returned proof lives.

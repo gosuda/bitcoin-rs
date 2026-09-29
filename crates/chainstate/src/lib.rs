@@ -517,7 +517,7 @@ pub struct Chainstate {
     /// It starts from the executed prune frontier the store reports, so a
     /// restart grants no lease over history the previous process deleted
     /// (#1151).
-    pub(crate) retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
+    pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
     /// Process-wide initial-block-download latch owned by the chainstate.
     ///
     /// RPC and P2P receive this one read-only answer rather than building
@@ -568,7 +568,9 @@ pub struct ChainstateParts {
     /// Whether connects retain canonical block bytes for node-owned consumers.
     pub capture_block_bytes: bool,
     /// Storage-owned retained-history authority consumed by reorg/recovery.
-    pub retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
+    /// Only [`MandatoryRetention::acquire`] is exposed; callers may not reach
+    /// `reserve` or any other registry-write capability.
+    pub retention: bitcoin_rs_storage::MandatoryRetention,
 }
 
 /// Held while new chain mutations are blocked.
@@ -1002,19 +1004,6 @@ impl Chainstate {
         Arc::clone(&self.shutdown)
     }
 
-    /// Fixture-only access to the storage-owned retention authority.
-    #[cfg(any(test, feature = "test-seam"))]
-    #[must_use]
-    pub fn retention_handle(&self) -> Arc<bitcoin_rs_storage::RetentionRegistry> {
-        Arc::clone(&self.retention)
-    }
-
-    /// Returns the capability for reads that must exclude chain transitions.
-    #[must_use]
-    pub fn stable_view(&self) -> StableChainView {
-        self.chain_transition.clone()
-    }
-
     /// Admits headers and publishes the best-work header tip under Chainstate's
     /// transition authority.
     pub fn admit_headers(
@@ -1174,7 +1163,7 @@ impl Chainstate {
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
-            chain_transition: StableChainView::new(),
+            chain_transition: StableChainView::detached(),
             assume_valid_height: 0,
             assume_valid_gate: Arc::new(AssumeValidGate::with_anchor(None)),
             validation_mode: ValidationMode::AssumeValid,
@@ -1183,7 +1172,9 @@ impl Chainstate {
             checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
-            retention: Arc::new(bitcoin_rs_storage::RetentionRegistry::new()),
+            retention: bitcoin_rs_storage::MandatoryRetention::new(Arc::new(
+                bitcoin_rs_storage::RetentionRegistry::new(),
+            )),
             ibd,
         }
     }

@@ -471,7 +471,7 @@ impl Default for ChainHandles {
             coin_stats: Arc::new(coin_stats_listener),
             block_tree: BlockTreeReader::new(block_tree),
             chain_network: Network::Mainnet,
-            chain_transition: bitcoin_rs_chain::StableChainView::new(),
+            chain_transition: bitcoin_rs_chain::StableChainView::detached(),
             block_body_source: None,
             prune_service: None,
             chain_control: None,
@@ -1427,7 +1427,7 @@ mod tests {
         use std::sync::mpsc;
         use std::time::Duration;
 
-        let barrier = bitcoin_rs_chain::StableChainView::new();
+        let barrier = bitcoin_rs_chain::StableChainView::detached();
         let ctx = Arc::new(Context::new().with_chain_transition(barrier.clone()));
         ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
             tip_id: bitcoin_rs_chain::NodeId::new(0),
@@ -1642,7 +1642,7 @@ mod tests {
         let banned = Arc::new(RwLock::new(Vec::<bitcoin_rs_p2p::BannedSubnet>::new()));
         let added_nodes = Arc::new(RwLock::new(Vec::new()));
         let network_active = Arc::new(core::sync::atomic::AtomicBool::new(true));
-        let chain_transition = bitcoin_rs_chain::StableChainView::new();
+        let chain_transition = bitcoin_rs_chain::StableChainView::detached();
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
                 chain_tip: TipReader::new(Arc::clone(&chain_tip)),
@@ -2208,7 +2208,7 @@ mod tests {
             chain: ChainHandles {
                 chain_tip: TipReader::new(Arc::new(ArcSwapOption::empty())),
                 applied_tip: TipReader::new(Arc::clone(&applied_tip)),
-                chain_transition: bitcoin_rs_chain::StableChainView::new(),
+                chain_transition: bitcoin_rs_chain::StableChainView::detached(),
                 ibd: Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
                     TipReader::new(Arc::clone(&applied_tip)),
                     BlockTreeReader::new(Arc::clone(&block_tree)),

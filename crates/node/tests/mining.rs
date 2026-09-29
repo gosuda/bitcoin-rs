@@ -51,6 +51,7 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
+        state.stable_view(),
     )
 }
 
@@ -1016,6 +1017,7 @@ fn shutdown_ends_long_poll_without_wake() -> anyhow::Result<()> {
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
+        state.stable_view(),
     ));
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -1634,6 +1636,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
+        state.stable_view(),
     ));
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
@@ -1841,6 +1844,7 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> anyhow::Result<()> {
         state.chainstate(),
         state.chain_followers(),
         payout,
+        state.stable_view(),
     );
     let mut inputs = Vec::new();
     for _ in 0..6 {

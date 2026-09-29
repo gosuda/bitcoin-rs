@@ -933,6 +933,7 @@ mod tests {
             state.chainstate(),
             followers,
             Vec::new(),
+            state.stable_view(),
         );
 
         assert_eq!(

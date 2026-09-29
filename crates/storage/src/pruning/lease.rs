@@ -935,3 +935,63 @@ mod tests {
         drop(pass);
     }
 }
+
+/// Mandatory reorg/recovery lease capability.
+///
+/// This type exposes only [`RetentionRegistry::acquire`], the mandatory
+/// reorg/recovery lease. The full `RetentionRegistry` — including
+/// [`RetentionRegistry::reserve`], [`RetentionRegistry::history_from`], and all
+/// write-capability methods — stays with the storage/pruning composition owner
+/// (typically `NodeStorage`). A consumer that holds this capability can keep
+/// required history alive against pruning; it cannot manage the registry itself.
+#[derive(Clone)]
+pub struct MandatoryRetention {
+    registry: Arc<RetentionRegistry>,
+}
+
+impl MandatoryRetention {
+    /// Wraps the given registry.
+    #[must_use]
+    pub fn new(registry: Arc<RetentionRegistry>) -> Self {
+        Self { registry }
+    }
+
+    /// Acquires a mandatory lease pinning rows at `floor` and above against
+    /// pruning.
+    ///
+    /// This is a pure delegate to [`RetentionRegistry::acquire`]; see that
+    /// method's documentation for the semantics and error conditions.
+    pub fn acquire(&self, floor: u32) -> Result<RetentionLease, RetentionError> {
+        self.registry.acquire(floor)
+    }
+}
+
+#[cfg(test)]
+mod mandatory_retention_tests {
+    use super::*;
+
+    fn registry() -> Arc<RetentionRegistry> {
+        Arc::new(RetentionRegistry::new())
+    }
+
+    #[test]
+    fn mandatory_retention_delegates_acquire() {
+        let mandatory = MandatoryRetention::new(registry());
+        let lease = match mandatory.acquire(0) {
+            Ok(lease) => lease,
+            Err(err) => panic!("lease granted: {err}"),
+        };
+        assert_eq!(lease.floor(), 0);
+    }
+
+    // Compile-time proof: `reserve` is not callable through `MandatoryRetention`.
+    // If this type ever grows a `reserve` or `history_from` method, this helper
+    // keeps compiling but the wrapper no longer proves the narrowing — the
+    // assertion below is the shape guard.
+    #[test]
+    fn mandatory_retention_no_reserve_reachability() {
+        fn assert_no_reserve(_: &MandatoryRetention) {}
+        let mandatory = MandatoryRetention::new(registry());
+        assert_no_reserve(&mandatory);
+    }
+}

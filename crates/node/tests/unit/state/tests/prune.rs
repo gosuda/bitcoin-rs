@@ -83,8 +83,7 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
         anyhow::bail!("prune service should exist when prune_target_mb > 0");
     };
 
-    let handles = state.chainstate();
-    let barrier = handles.stable_view();
+    let barrier = state.stable_view();
     let transition = barrier.lock();
     let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
@@ -107,7 +106,6 @@ fn prune_waits_for_chain_transition_and_revalidates_applied_tip() -> anyhow::Res
     })?;
     let status_after = service.status();
     drop(service);
-    drop(handles);
     drop(state);
     let reopened = NodeState::open(config, None)?;
     let Some(reopened_service) = reopened.prune_service() else {

@@ -61,12 +61,16 @@ pub struct MiningCoordinator {
 
 impl MiningCoordinator {
     /// Builds a coordinator over the shared applied-chain and mempool handles.
+    ///
+    /// `stable_view` is threaded in from the node composition root so that
+    /// production code uses the same transition domain as RPC.
     #[must_use]
     pub fn new(
         mempool: Arc<RwLock<Mempool>>,
         chainstate: Arc<Chainstate>,
         followers: ChainFollowers,
         coinbase_script: Vec<u8>,
+        stable_view: bitcoin_rs_chain::StableChainView,
     ) -> Self {
         let network = chainstate.network();
         let applied_tip = chainstate.applied_tip_reader();
@@ -78,6 +82,7 @@ impl MiningCoordinator {
             Arc::new(MempoolAdapter {
                 mempool,
                 chainstate: Arc::clone(&chainstate),
+                stable_view,
             }),
             Arc::new(ChainContextAdapter {
                 block_tree,
@@ -219,6 +224,7 @@ impl AppliedTipSource for AppliedTipAdapter {
 struct MempoolAdapter {
     mempool: Arc<RwLock<Mempool>>,
     chainstate: Arc<Chainstate>,
+    stable_view: bitcoin_rs_chain::StableChainView,
 }
 
 impl MempoolSnapshotSource for MempoolAdapter {
@@ -255,7 +261,7 @@ impl MempoolSnapshotSource for MempoolAdapter {
         // Keep chain inputs tied to the context tip. Match the existing
         // transition -> mempool lock order, then release both before counting.
         let (snapshot, prevouts) = {
-            let fence = self.chainstate.stable_view();
+            let fence = self.stable_view.clone();
             let _guard = fence.lock();
             if self
                 .chainstate

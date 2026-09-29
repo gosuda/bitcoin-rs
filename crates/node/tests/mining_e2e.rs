@@ -632,6 +632,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         state.chainstate(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
+        state.stable_view(),
     );
     let mining_control: Arc<dyn MiningControl> = Arc::new(coordinator);
     let ibd = state.chainstate().ibd_latch();
@@ -645,7 +646,7 @@ fn mining_handler(state: &NodeState) -> Handler {
             coin_stats: state.chainstate().coin_stats_handle(),
             block_tree: state.chainstate().block_tree_reader(),
             chain_network: state.config().network,
-            chain_transition: state.chainstate().stable_view(),
+            chain_transition: state.stable_view(),
             closed_for_recovery: state.chainstate().closed_for_recovery_reader(),
             ..ChainHandles::default()
         },
@@ -668,7 +669,7 @@ fn mining_handler(state: &NodeState) -> Handler {
         },
         ..ContextHandles::default()
     })
-    .with_chain_transition(state.chainstate().stable_view());
+    .with_chain_transition(state.stable_view());
     Handler::new(Arc::new(ctx))
 }
 

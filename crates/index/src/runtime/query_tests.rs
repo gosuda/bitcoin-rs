@@ -263,7 +263,7 @@ impl QueryFixture {
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let home = Arc::new(tip.clone());
         applied_tip.store(Some(Arc::clone(&home)));
-        let chain_transition = bitcoin_rs_chain::StableChainView::new();
+        let chain_transition = bitcoin_rs_chain::StableChainView::detached();
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
         let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));

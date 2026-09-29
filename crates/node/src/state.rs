@@ -103,12 +103,13 @@ pub struct NodeState {
     /// header/block channels, this receiver is drained by node orchestration.
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
     inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
-    /// UTXO-owner capability composed directly by node; Chainstate is not a handle broker.
-    /// Ownership boundary: this is the only raw set handle the node keeps.
-    /// Every accessor that hands the set to another component yields a
-    /// `UtxoReader`, so no reader carries the `utxo::contract` mutation path.
-    utxo: Arc<bitcoin_rs_utxo::UtxoSet>,
+    /// Node's owned UTXO read capability. The raw set lives in `ChainstateParts`;
+    /// this pre-created reader is the only UTXO capability the node exposes.
+    utxo_reader: bitcoin_rs_utxo::UtxoReader,
     chainstate: Arc<bitcoin_rs_chainstate::Chainstate>,
+    /// The single transition domain minted at node open; handed to RPC and
+    /// distributed to derived-index workers from this composition root.
+    stable_view: bitcoin_rs_chain::StableChainView,
     /// Derived consumers of committed chain events. Not held by `Chainstate`.
     followers: crate::chain_effects::ChainFollowers,
     sync: Arc<crate::BlockSync>,
@@ -148,6 +149,18 @@ impl NodeState {
     #[cfg(test)]
     pub(crate) const fn resume_source(&self) -> ResumeSource {
         self.resume_source
+    }
+
+    /// Returns the storage-owned retention registry.
+    ///
+    /// The full authority stays with the node's storage composition
+    /// ([`NodeStorage`]); [`Chainstate`] receives only the
+    /// [`bitcoin_rs_storage::MandatoryRetention`] capability. Production
+    /// consumers receive narrowed capabilities (bounded `HistoryAccess` for
+    /// the index); this accessor exists for composition inspection and tests.
+    #[must_use]
+    pub fn retention_registry(&self) -> Arc<bitcoin_rs_storage::RetentionRegistry> {
+        self.storage.retention()
     }
 
     /// Returns the configured storage backend that was opened.
@@ -313,14 +326,23 @@ impl NodeState {
         Arc::clone(&self.chainstate)
     }
 
-    /// Returns the UTXO owner's read capability for RPC composition.
+    /// Returns the node's UTXO read capability for RPC composition.
     ///
-    /// The raw set stays construction-owned storage of [`NodeState`]; handles
-    /// that leave this type are `UtxoReader`s, so consumers observe the set
-    /// without receiving the type-level mutation path `utxo::contract` takes.
+    /// The raw set stays construction-owned in [`ChainstateParts`](bitcoin_rs_chainstate::ChainstateParts);
+    /// this pre-created reader is the only UTXO capability the node exposes.
+    /// Every call returns the same cloned reader; no allocation.
     #[must_use]
-    pub(crate) fn utxo_reader(&self) -> bitcoin_rs_utxo::UtxoReader {
-        bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&self.utxo))
+    pub fn utxo_reader(&self) -> bitcoin_rs_utxo::UtxoReader {
+        self.utxo_reader.clone()
+    }
+
+    /// Returns the single transition domain minted at node open.
+    ///
+    /// This domain is distributed to RPC (via [`bind_rpc`](crate::lifecycle::bind_rpc))
+    /// and derived-index workers from this composition root.
+    #[must_use]
+    pub fn stable_view(&self) -> bitcoin_rs_chain::StableChainView {
+        self.stable_view.clone()
     }
 
     /// Clone of the derived-consumer set used after committed transitions.
