@@ -62,15 +62,24 @@ type TestResult = Result<(), Box<dyn Error>>;
 // Engine
 // ---------------------------------------------------------------------------
 
-/// Kernel verdict for every input of `tx`, through the same free function the
+/// Kernel result for every input of `tx`, through the same free function the
 /// production `verify_transaction` dispatches to for the `kernel` engine.
-fn kernel_verdict(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: VerifyFlags) -> Verdict {
-    Verdict::of(&bitcoin_rs_consensus::kernel::verify_tx_scripts(
+///
+/// The raw `ConsensusError` is preserved rather than collapsed into
+/// [`Verdict`]: a Reject expectation only counts when a script actually
+/// executed and failed (`ConsensusError::Script`), so parse, precompute and
+/// wiring failures stay visible instead of satisfying the assertion.
+fn kernel_result(
+    tx: &Tx,
+    prevouts: &[(OutPoint, TxOut)],
+    flags: VerifyFlags,
+) -> Result<(), bitcoin_rs_consensus::ConsensusError> {
+    bitcoin_rs_consensus::kernel::verify_tx_scripts(
         tx,
         prevouts,
         flags,
         bitcoin_rs_consensus::ValidationEngine::Kernel,
-    ))
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -381,12 +390,12 @@ fn kernel_verdict_matches_tx_valid_vectors() -> TestResult {
     let mut mismatches = Vec::new();
 
     for row in &mandatory_rows {
-        let actual = kernel_verdict(&row.tx, &row.prevouts, row.flags);
-        if actual == row.expected {
+        let result = kernel_result(&row.tx, &row.prevouts, row.flags);
+        if Verdict::of(&result) == row.expected {
             accepted += 1;
         } else {
             mismatches.push(format!(
-                "row {}: expected Accept, kernel rejected",
+                "row {}: expected Accept, kernel rejected: {result:?}",
                 row.row_index,
             ));
         }
@@ -426,14 +435,20 @@ fn kernel_verdict_matches_tx_invalid_vectors() -> TestResult {
     let mut mismatches = Vec::new();
 
     for row in &mandatory_rows {
-        let actual = kernel_verdict(&row.tx, &row.prevouts, row.flags);
-        if actual == row.expected {
-            rejected += 1;
-        } else {
-            mismatches.push(format!(
+        let result = kernel_result(&row.tx, &row.prevouts, row.flags);
+        match &result {
+            Ok(()) => mismatches.push(format!(
                 "row {}: expected Reject, kernel accepted",
                 row.row_index,
-            ));
+            )),
+            // A rejection only counts when a script actually executed and
+            // failed; parse, precompute or wiring failures would satisfy the
+            // Reject expectation without verifying anything.
+            Err(bitcoin_rs_consensus::ConsensusError::Script { .. }) => rejected += 1,
+            Err(_) => mismatches.push(format!(
+                "row {}: infrastructure failure, not a script verdict: {result:?}",
+                row.row_index,
+            )),
         }
     }
 
@@ -466,7 +481,11 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
         .iter()
         .find(|r| flags_are_mandatory_only(r.flags))
         .ok_or("no mandatory-flag tx_valid rows found")?;
-    let valid_actual = kernel_verdict(&valid_row.tx, &valid_row.prevouts, valid_row.flags);
+    let valid_actual = Verdict::of(&kernel_result(
+        &valid_row.tx,
+        &valid_row.prevouts,
+        valid_row.flags,
+    ));
     assert_eq!(
         valid_actual,
         Verdict::Accept,
@@ -487,7 +506,16 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
         .iter()
         .find(|r| flags_are_mandatory_only(r.flags))
         .ok_or("no mandatory-flag tx_invalid rows found")?;
-    let invalid_actual = kernel_verdict(&invalid_row.tx, &invalid_row.prevouts, invalid_row.flags);
+    let invalid_result = kernel_result(&invalid_row.tx, &invalid_row.prevouts, invalid_row.flags);
+    assert!(
+        matches!(
+            invalid_result,
+            Err(bitcoin_rs_consensus::ConsensusError::Script { .. })
+        ),
+        "mandatory-flag tx_invalid row must fail script verification, not \
+         infrastructure: {invalid_result:?}"
+    );
+    let invalid_actual = Verdict::of(&invalid_result);
     assert_eq!(
         invalid_actual,
         Verdict::Reject,

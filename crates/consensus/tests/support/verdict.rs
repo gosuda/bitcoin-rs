@@ -16,6 +16,13 @@ pub(crate) enum Verdict {
 
 impl Verdict {
     /// Maps any `Result` to a verdict: `Ok` is accept, any `Err` is reject.
+    ///
+    /// Infrastructure errors collapse into `Reject` here by design; a caller
+    /// asserting a Reject expectation must therefore also match the raw error
+    /// to a real verdict variant (`ConsensusError::Script`), or a parse,
+    /// precompute or wiring failure satisfies the assertion without any script
+    /// ever executing. `kernel_block_parity` and `kernel_vector_parity` keep
+    /// the raw `Result` and classify at the call site for exactly that reason.
     pub(crate) fn of<T, E>(result: &Result<T, E>) -> Self {
         match result {
             Ok(_) => Self::Accept,
