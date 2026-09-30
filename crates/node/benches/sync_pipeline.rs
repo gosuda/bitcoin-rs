@@ -13,20 +13,8 @@
     reason = "benchmark: truncation is intentional for perf measurement"
 )]
 #![expect(
-    clippy::cast_sign_loss,
-    reason = "benchmark: sign loss is intentional for perf measurement"
-)]
-#![expect(
-    clippy::cast_precision_loss,
-    reason = "benchmark: precision loss is intentional for perf measurement"
-)]
-#![expect(
     clippy::items_after_statements,
     reason = "benchmark: helper structs defined near use site for readability"
-)]
-#![expect(
-    clippy::suboptimal_flops,
-    reason = "benchmark: explicit mul-add is clearer than fma here"
 )]
 #![expect(
     clippy::semicolon_if_nothing_returned,
@@ -112,7 +100,6 @@ const SPEND_PROXY_SPEND_OUTPUT_VALUE: u64 = 78_124_999;
 
 fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     let blocks = proxy_blocks(PROXY_BLOCKS);
-    print_proxy_summary(&blocks);
 
     c.bench_function("sync_pipeline_apply_proxy", |b| {
         b.iter_batched(
@@ -162,7 +149,6 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
     });
 
     let spend_blocks = spend_heavy_proxy_blocks();
-    print_spend_proxy_summary(&spend_blocks);
     c.bench_function("sync_pipeline_apply_spend_heavy_proxy", |b| {
         b.iter_batched(
             open_regtest_state,
@@ -194,11 +180,10 @@ fn sync_pipeline_apply_proxy(c: &mut Criterion) {
 /// `Tx` (the `to_native` pattern from `crates/script/tests/proptest.rs`).
 ///
 /// Criterion 0.8 cannot report p95/p99/max, so a manual timed sample loop
-/// collects per-sweep durations and prints the percentile table; Criterion
-/// keeps the headline median for comparability with the existing docs.
+/// collects per-sweep durations for the evidence ledger; Criterion keeps the
+/// headline median for comparability with the existing docs.
 fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
     let blocks = signed_spend_proxy_blocks();
-    print_signed_spend_proxy_summary(&blocks);
 
     const SIGNED_SPEND_SAMPLES: usize = 30;
     let origin = Instant::now();
@@ -232,13 +217,6 @@ fn sync_pipeline_apply_signed_spend_proxy(c: &mut Criterion) {
     });
 
     let sweeps = samples.lock();
-    print_percentiles(
-        "signed_spend_proxy",
-        &sweeps
-            .iter()
-            .map(|(_, elapsed)| *elapsed)
-            .collect::<Vec<_>>(),
-    );
     record_evidence("sync_pipeline.signed_spend_proxy", &blocks, &sweeps);
 }
 
@@ -485,62 +463,6 @@ fn block_source_height_lookup(c: &mut Criterion) {
             );
         });
     });
-}
-
-fn print_proxy_summary(blocks: &[Block]) {
-    let (_dir, state) = open_regtest_state();
-    let started = Instant::now();
-    for block in blocks {
-        state
-            .apply_block(block)
-            .unwrap_or_else(|error| panic!("proxy summary apply failed: {error}"));
-    }
-    let elapsed = started.elapsed();
-    let applied_height = state
-        .chainstate()
-        .applied_tip_snapshot()
-        .unwrap_or_else(|| panic!("proxy summary did not publish a tip"))
-        .height;
-    let blocks_per_second = f64::from(applied_height.saturating_add(1)) / elapsed.as_secs_f64();
-    let recorded_body_bytes: usize = state
-        .blocks()
-        .read()
-        .iter()
-        .map(|record| record.body_size)
-        .sum();
-    println!(
-        "sync_pipeline_apply_proxy engine={} blocks={} elapsed={elapsed:?} blocks_per_second={blocks_per_second:.2} recorded_body_bytes={recorded_body_bytes}",
-        bench_engine(),
-        applied_height.saturating_add(1),
-    );
-}
-
-fn print_spend_proxy_summary(blocks: &[Block]) {
-    let (_dir, state) = open_regtest_state();
-    let started = Instant::now();
-    for block in blocks {
-        state
-            .apply_block(block)
-            .unwrap_or_else(|error| panic!("spend-heavy proxy summary apply failed: {error}"));
-    }
-    let elapsed = started.elapsed();
-    let applied_height = state
-        .chainstate()
-        .applied_tip_snapshot()
-        .unwrap_or_else(|| panic!("spend-heavy proxy summary did not publish a tip"))
-        .height;
-    let transaction_count: usize = blocks.iter().map(|block| block.txs.len()).sum();
-    let recorded_body_bytes: usize = state
-        .blocks()
-        .read()
-        .iter()
-        .map(|record| record.body_size)
-        .sum();
-    println!(
-        "sync_pipeline_apply_spend_heavy_proxy engine={} blocks={} txs={transaction_count} elapsed={elapsed:?} recorded_body_bytes={recorded_body_bytes}",
-        bench_engine(),
-        applied_height.saturating_add(1),
-    );
 }
 
 fn block_source_fixture(max_height: u32) -> BenchBlockSource {
@@ -1902,58 +1824,6 @@ fn build_signed_p2wsh_spend(
 fn to_native_tx(tx: &OracleTx) -> Tx {
     let bytes = bitcoin::consensus::serialize(tx);
     deserialize(&bytes).unwrap_or_else(|e| panic!("oracle transaction must decode natively: {e}"))
-}
-
-fn print_signed_spend_proxy_summary(blocks: &[Block]) {
-    let (_dir, state) = open_regtest_state();
-    let started = Instant::now();
-    for block in blocks {
-        state
-            .apply_block(block)
-            .unwrap_or_else(|e| panic!("signed-spend summary apply failed: {e}"));
-    }
-    let elapsed = started.elapsed();
-    let applied_height = state
-        .chainstate()
-        .applied_tip_snapshot()
-        .unwrap_or_else(|| panic!("signed-spend summary did not publish a tip"))
-        .height;
-    let transaction_count: usize = blocks.iter().map(|b| b.txs.len()).sum();
-    println!(
-        "sync_pipeline_apply_signed_spend_proxy engine={} blocks={} txs={transaction_count} elapsed={elapsed:?}",
-        bench_engine(),
-        applied_height.saturating_add(1),
-    );
-}
-
-/// Prints p50/p95/p99/max from the collected per-sweep durations.
-fn print_percentiles(label: &str, samples: &[Duration]) {
-    if samples.is_empty() {
-        return;
-    }
-    let mut sorted: Vec<Duration> = samples.to_vec();
-    sorted.sort();
-    let n = sorted.len();
-    let percentile = |p: f64| -> Duration {
-        let rank = p * (n as f64 - 1.0) / 100.0;
-        let lower = rank.floor() as usize;
-        let upper = rank.ceil() as usize;
-        if lower == upper {
-            sorted[lower]
-        } else {
-            let frac = rank - lower as f64;
-            let lo = sorted[lower].as_nanos() as f64;
-            let hi = sorted[upper].as_nanos() as f64;
-            Duration::from_nanos((lo + (hi - lo) * frac) as u64)
-        }
-    };
-    println!(
-        "{label} samples={n} p50={:?} p95={:?} p99={:?} max={:?}",
-        percentile(50.0),
-        percentile(95.0),
-        percentile(99.0),
-        sorted[n - 1],
-    );
 }
 
 criterion_group!(

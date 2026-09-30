@@ -27,9 +27,8 @@
 
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 
-use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::{AdmissionOrigin, FeeEstimator, SubmitOutcome};
 use bitcoin_rs_node::state::NodeState;
@@ -162,11 +161,15 @@ fn mine_and_apply(
     let coinbase = Tx {
         version: 2,
         inputs: vec![TxIn {
-            previous_output: null_prevout(),
+            previous_output: OutPoint::new(Txid::default(), u32::MAX),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig.
             script_sig: Script::from_bytes(
-                [script_push_int(i64::from(height)), script_push_int(0)].concat(),
+                [
+                    regtest_fixture::script_num_push(i64::from(height)),
+                    regtest_fixture::script_num_push(0),
+                ]
+                .concat(),
             ),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
@@ -192,46 +195,11 @@ fn mine_and_apply(
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| anyhow!("block must have a merkle root"))?;
-    grind_pow(&mut block)?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     state
         .apply_block(&block)
         .map_err(|error| anyhow!("apply failed at height {height}: {error}"))?;
     Ok(block)
-}
-
-fn null_prevout() -> OutPoint {
-    OutPoint::new(Txid::default(), u32::MAX)
-}
-
-/// Minimal script push of a small integer (BIP34 heights): `OP_0` for zero,
-/// `OP_N` for 1..=16, otherwise a length-prefixed little-endian payload.
-fn script_push_int(value: i64) -> Vec<u8> {
-    match value {
-        0 => vec![0x00],
-        1..=16 => vec![0x50 + u8::try_from(value).unwrap_or_default()],
-        _ => {
-            let payload = value.to_le_bytes();
-            let len = payload
-                .iter()
-                .rposition(|byte| *byte != 0)
-                .map_or(1, |position| position + 1);
-            let mut out = vec![u8::try_from(len).unwrap_or(u8::MAX)];
-            out.extend_from_slice(&payload[..len]);
-            out
-        }
-    }
-}
-
-fn grind_pow(block: &mut Block) -> Result<()> {
-    loop {
-        if compact_is_met_by(block.header.bits, block.header.compute_hash().into()) {
-            return Ok(());
-        }
-        let Some(next) = block.header.nonce.checked_add(1) else {
-            bail!("nonce exhausted while grinding block");
-        };
-        block.header.nonce = next;
-    }
 }
 
 // ---------------------------------------------------------------------------
