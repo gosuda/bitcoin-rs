@@ -1821,12 +1821,20 @@ mod tests {
         };
         let spend = Tx {
             version: 2,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(coinbase.txid(), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
+            inputs: vec![
+                TxIn {
+                    previous_output: OutPoint::new(coinbase.txid(), 0),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                },
+                TxIn {
+                    previous_output: OutPoint::new(coinbase.txid(), 1),
+                    script_sig: Script::new(),
+                    sequence: Sequence::MAX,
+                    witness: Witness::new(),
+                },
+            ],
             outputs: vec![
                 TxOut {
                     value: Amount::from_sat(3_000_000_000),
