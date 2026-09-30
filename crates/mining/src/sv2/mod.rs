@@ -68,11 +68,9 @@ impl<C: crate::MiningControl> MiningSource for InProcessSource<C> {
         };
         match self.control.get_block_template(request)? {
             crate::BlockTemplateResult::Template(t) => Ok(Arc::new(t)),
-            crate::BlockTemplateResult::Proposal(_) => {
-                Err(MiningControlError::Rejected(
-                    compact_str::CompactString::new("expected template"),
-                ))
-            }
+            crate::BlockTemplateResult::Proposal(_) => Err(MiningControlError::Rejected(
+                compact_str::CompactString::new("expected template"),
+            )),
         }
     }
 
