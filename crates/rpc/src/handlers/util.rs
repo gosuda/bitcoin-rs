@@ -1304,18 +1304,31 @@ mod tests {
     }
 
     #[test]
-    fn getmemoryinfo_returns_locked_stats_shape() {
+    fn getmemoryinfo_reports_resident_bytes_as_the_whole_locked_pool() {
         use alloc::sync::Arc;
 
         let ctx = Arc::new(Context::new());
         let result = getmemoryinfo(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getmemoryinfo failed: {err}"));
-        assert!(result.get("locked").is_some(), "locked missing: {result:?}");
         let Some(locked) = result.get("locked") else {
-            panic!("locked missing");
+            panic!("locked missing: {result:?}");
         };
-        assert!(locked.get("used").is_some());
-        assert!(locked.get("total").is_some());
+        let field = |name: &str| {
+            locked
+                .get(name)
+                .and_then(JsonValueTrait::as_u64)
+                .unwrap_or_else(|| panic!("{name} is not an unsigned number: {locked:?}"))
+        };
+        let used = field("used");
+        assert!(used > 0, "resident set size read as zero: {locked:?}");
+        assert_eq!(used, field("total"), "the proxy pool is fully used");
+        for name in ["free", "locked", "chunks_used", "chunks_free"] {
+            assert_eq!(
+                field(name),
+                0,
+                "{name} has no meaning for the resident-set proxy"
+            );
+        }
     }
 
     #[test]

@@ -2043,7 +2043,7 @@ mod tests {
     }
 
     #[test]
-    fn getblock_verbosity_2_emits_tx_object_per_transaction() {
+    fn getblock_verbosity_2_emits_every_transaction_of_the_stored_body() {
         let genesis = fixture_genesis();
         let record = BlockRecord::from_block(0, &genesis);
         let mut ctx = Context::new();
@@ -2061,21 +2061,40 @@ mod tests {
         let Some(tx_array) = result.get("tx").and_then(|value| value.as_array()) else {
             panic!("tx field missing: {result:?}");
         };
-        let Some(first) = tx_array.first() else {
+        assert_eq!(
+            tx_array.len(),
+            genesis.txs.len(),
+            "one object per transaction: {result:?}"
+        );
+        let Some((first, tx)) = tx_array.first().zip(genesis.txs.first()) else {
             panic!("expected at least one tx");
         };
-        assert!(
-            first.get("hex").is_some(),
-            "verbosity=2 tx must include hex field: {first:?}"
+        let bytes = consensus_bytes(tx);
+        assert_eq!(
+            first.get("hex").and_then(JsonValueTrait::as_str),
+            Some(hex_encode(&bytes).as_str()),
+            "hex must serialize the transaction itself: {first:?}"
         );
-        assert!(first.get("vsize").is_some());
-        assert!(
-            first.get("vin").is_some(),
-            "shared tx_to_value should emit vin: {first:?}"
+        assert_eq!(
+            first.get("vsize").and_then(JsonValueTrait::as_u64),
+            u64::try_from(bytes.len()).ok(),
+            "a witnessless transaction weighs its serialized size: {first:?}"
         );
-        assert!(
-            first.get("vout").is_some(),
-            "shared tx_to_value should emit vout: {first:?}"
+        assert_eq!(
+            first
+                .get("vin")
+                .and_then(|value| value.as_array())
+                .map(sonic_rs::Array::len),
+            Some(tx.inputs.len()),
+            "vin must carry every input: {first:?}"
+        );
+        assert_eq!(
+            first
+                .get("vout")
+                .and_then(|value| value.as_array())
+                .map(sonic_rs::Array::len),
+            Some(tx.outputs.len()),
+            "vout must carry every output: {first:?}"
         );
     }
 
