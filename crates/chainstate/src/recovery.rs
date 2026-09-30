@@ -215,7 +215,6 @@ pub fn prepare_initial_chainstate(
         restored.chain_tx_count,
     );
     let replay_seconds = replay_started.elapsed().as_secs_f64();
-    metrics::histogram!("node.chainstate_journal.replay_seconds").record(replay_seconds);
     drop(journal_dir);
     match replay {
         Ok(replayed) => {

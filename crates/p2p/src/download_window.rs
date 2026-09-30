@@ -2129,8 +2129,13 @@ impl DownloadWindow {
                     !self.pending.contains_key(&node.hash) && !stager.contains(&node.hash)
                 })
         {
+            let previous_height = self.next_request_height;
             self.next_request_height = request_start_height;
-            metrics::counter!("node.sync.frontier_rewinds").increment(1);
+            tracing::debug!(
+                previous_height,
+                request_start_height,
+                "block sync: rewound unowned request frontier"
+            );
         }
         // `servable_floor` keeps a limited peer's batch inside its retained
         // window: `serves_requested_height` certified only the first height
@@ -2391,7 +2396,6 @@ impl DownloadWindow {
             elapsed_ms = u64::try_from(now.duration_since(probe.started_at).as_millis()).unwrap_or(u64::MAX),
             "block sync: prefix probe elected winner"
         );
-        metrics::counter!("node.sync.prefix_probe_wins").increment(1);
     }
 
     fn resolve_cold_front_delivery(
@@ -2422,7 +2426,12 @@ impl DownloadWindow {
                 self.retain_peer_assignments(|peer| *peer != owner);
                 self.mark_peer_unresponsive(owner.addr, now);
                 self.preferred_peer = Some(alternate);
-                metrics::counter!("node.sync.cold_front_wins").increment(1);
+                tracing::info!(
+                    owner = %owner.addr,
+                    winner = %alternate.addr,
+                    %hash,
+                    "block sync: cold-front hedge elected alternate"
+                );
             }
             _ => {}
         }

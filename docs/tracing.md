@@ -3,7 +3,11 @@
 bitcoin-rs can emit User-space Statically Defined Tracing probes whose
 provider names, probe names, and argument ABI match Bitcoin Core's
 `doc/tracing.md`, so Core-oriented tooling consumes a bitcoin-rs node without
-any bitcoin-rs-specific runtime. The probes are compiled in only with the
+any bitcoin-rs-specific runtime. Where probe payloads sit relative to
+`metrics::` signals and `tracing::` diagnostics is owned by
+[`observability.md`](observability.md) (OBS-03): detailed per-event data —
+payloads, hashes, durations — belongs in probe arguments and must not pollute
+metrics cardinality. The probes are compiled in only with the
 `usdt` cargo feature (default **off**):
 
 ```bash
@@ -117,6 +121,37 @@ re-diagnose them: bpftrace 0.25.0 as shipped on Ubuntu 26.04 asserts in
 `-e "$(cat ...)"` form above is the workaround), and bpftrace 0.27.0 runs
 the file script and fires `validation:block_connected` but delivered no
 `net:*` events.
+
+**bpftrace 0.27 follow-up: both implementations emitted `net:*`.** A
+same-host comparison on 2026-09-29 used x86-64 Linux 6.8.0-117-generic,
+bpftrace v0.27.0, the pinned Core 31.1 release, and bitcoin-rs source
+`73f9ee62115de60e6b89f1a05a97a71cd2032674` built with
+`--release --no-default-features --features fjall,usdt`. Each implementation
+ran two isolated regtest nodes. The tracer attached before `addnode onetry`
+connected them; both nodes received `ping` calls and the traced node mined
+three blocks. The same `smoke.bt` program was supplied with `-e` and `-p`,
+changing only its binary selector path between implementations.
+
+| Implementation | Inbound events | Outbound events | Block-connected events |
+| --- | ---: | ---: | ---: |
+| Bitcoin Core 31.1 | 52 | 52 | 6 |
+| bitcoin-rs | 18 | 12 | 6 |
+
+Both runs retained one peer per node and the tracer exited successfully.
+Counts include only complete runtime event lines, excluding compiler-warning
+excerpts that echo the script's `printf` calls. They are not a parity
+requirement. The original Ubuntu 26.04/kernel 7.0 file-script invocation
+was **not re-tested**; its earlier silence remains unresolved. This run used
+a different kernel and inline invocation and does not isolate the cause or
+certify that original environment.
+It does show that bpftrace 0.27 can consume both implementations' `net:*`
+probes in the tested environment. No mempool event delivery is claimed.
+
+Artifact identities (SHA-256):
+
+- bpftrace: `16194f713ba1fbff2dd76b7abffad4cd61f91e5663b116a5b03c907ae3e20cd8`
+- Core `bitcoind`: `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`
+- bitcoin-rs: `edda12332fb24361f70db758e08b705832f91cdd40af929fb075f48b2ac9e9ac`
 
 The static evidence shipped alongside the live run is the SDT note
 assertion in `crates/node/tests/sdt_notes.rs`, which reads the built

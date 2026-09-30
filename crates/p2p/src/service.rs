@@ -1101,7 +1101,6 @@ fn retire_extra_full_relay_connection(
         return;
     };
     if peer_table.disconnect_connection(session.addr, session.lease.connection_id()) {
-        metrics::counter!("node.sync.extra_peer_disconnects").increment(1);
         tracing::info!(
             peer_addr = %session.addr,
             "p2p retiring the extra full-relay connection: the tip is moving again"

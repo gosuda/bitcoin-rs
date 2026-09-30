@@ -197,6 +197,14 @@ SHA-256 digests of the retired JSON artifacts, kept so an external copy can be m
 
 ### Full recorded stage timers
 
+These are historical measurements taken under the pre-#1195 metric names on
+retired artifacts; per the [observability boundary](../observability.md)
+(OBS-06) the fine-grained stage timers below moved to `tracing::` profile
+events and the surviving metric hooks are the
+[hot-path ledger](hot-path-ledger.toml) keys. The tables are
+evidence of what those runs cost, not a promise that every series still
+exists.
+
 #### Current-campaign control, 0–150,000
 
 Artifact: rs-parprep-current-control-r1 (retired). Stage timers are nested and are not additive.

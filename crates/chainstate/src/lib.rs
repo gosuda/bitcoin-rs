@@ -1939,6 +1939,10 @@ mod chain_tx_count_tests;
 mod persistence_tests;
 
 #[cfg(test)]
+#[path = "../tests/unit/apply/observability_tests.rs"]
+mod observability_tests;
+
+#[cfg(test)]
 #[path = "../tests/unit/apply/window_disposition_tests.rs"]
 mod window_disposition_tests;
 

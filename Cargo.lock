@@ -565,7 +565,6 @@ dependencies = [
  "bitcoin-rs-storage",
  "crossbeam-utils",
  "hashbrown 0.17.1",
- "metrics",
  "nohash-hasher",
  "parking_lot",
  "proptest",

@@ -73,8 +73,6 @@ impl BlockSync {
             .lock()
             .window
             .confirm_prefix_probe(owner, hashes, &successful, now);
-        metrics::counter!("node.sync.prefix_probe_peers")
-            .increment(u64::try_from(successful.len()).unwrap_or(u64::MAX));
         tracing::info!(
             owner = %owner.addr,
             alternates = successful.len(),
@@ -312,7 +310,6 @@ impl BlockSync {
         for source in candidates {
             match self.peer_table.send(source, message) {
                 Ok(()) => {
-                    metrics::counter!("node.sync.cold_front_hedges").increment(1);
                     tracing::info!(
                         owner = %owner.addr,
                         hedge_peer = %source.addr,

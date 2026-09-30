@@ -1,7 +1,7 @@
 //! Metrics server and readiness gauge behaviour.
 //!
-//! The Prometheus recorder is process-global: identity-bearing tests must
-//! not run concurrently in one test binary. `SERVER_TEST_LOCK` enforces it.
+//! The Prometheus recorder is process-global, so server tests must not run
+//! concurrently in one test binary. `SERVER_TEST_LOCK` enforces it.
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -16,8 +16,8 @@ use bitcoin_rs_index::{
 use parking_lot::{Mutex, const_mutex};
 
 use super::{
-    EvidenceIdentity, MetricsServer, PROMETHEUS_HANDLE, Sha256Hex, TXINDEX_READINESS_GAUGE,
-    publish_txindex_readiness, start_metrics,
+    CorpusIdentity, EvidenceIdentity, MetricsServer, PROMETHEUS_HANDLE, Sha256Hex,
+    TXINDEX_READINESS_GAUGE, publish_txindex_readiness, start_metrics,
 };
 
 pub(super) static SERVER_TEST_LOCK: Mutex<()> = const_mutex(());
@@ -32,7 +32,10 @@ pub(super) fn identity() -> EvidenceIdentity {
         binary_sha256: Sha256Hex([1; 32]),
         version: "test".into(),
         config_sha256: Sha256Hex([2; 32]),
-        corpus: None,
+        corpus: Some(CorpusIdentity {
+            id: "probe".into(),
+            manifest_sha256: Sha256Hex([3; 32]),
+        }),
         backend: "memory".into(),
         durability: "checkpoint-only".into(),
         hardware: "test x1".into(),
@@ -104,22 +107,55 @@ fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
 }
 
 #[test]
-fn scrape_returns_prometheus_text_with_recorded_metrics() {
+fn scrape_returns_operator_metrics_without_evidence_identity_labels() {
     let _guard = SERVER_TEST_LOCK.lock();
     let shutdown = Arc::new(AtomicBool::new(false));
     let mut server = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
         .unwrap_or_else(|error| panic!("bind metrics: {error}"));
     metrics::counter!("node_metrics_scrape_probe").increment(1);
+    publish_txindex_readiness(&FixedSource::enabled(CapabilityState::Ready));
     let (status, body) = scrape(server.local_addr());
     assert_eq!(status, 200);
     assert!(
         body.contains("text/plain"),
         "content-type must be prometheus text: {body}"
     );
+    let (_, exposition) = body
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("HTTP response missing header boundary: {body}"));
+    let samples = exposition
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
     assert!(
-        body.contains("node_metrics_scrape_probe"),
-        "body must include recorded metric: {body}"
+        samples
+            .clone()
+            .any(|line| line.starts_with("node_metrics_scrape_probe")),
+        "probe sample missing from scrape: {body}"
     );
+    assert_one_active(&readiness_samples(exposition), "Ready");
+    for sample in samples {
+        for retired_label in [
+            "binary_sha256=",
+            "version=",
+            "config_sha256=",
+            "corpus_id=",
+            "corpus_manifest_sha256=",
+            "hardware=",
+        ] {
+            assert!(
+                !sample.contains(retired_label),
+                "operator metrics must not carry evidence label {retired_label}: {sample}"
+            );
+        }
+        if !sample.starts_with("storage_") {
+            for identity_label in ["backend=", "durability="] {
+                assert!(
+                    !sample.contains(identity_label),
+                    "non-storage metrics must not inherit global identity {identity_label}: {sample}"
+                );
+            }
+        }
+    }
     server.stop_and_join();
 }
 

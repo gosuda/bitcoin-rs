@@ -345,17 +345,21 @@ pub(super) fn verify_block_transactions(
     // order-sensitive step: the overlay walk advances a `BlockLocalUtxoView` so a
     // later transaction sees outputs an earlier one created (or spent) in the same
     // block; the non-overlay case reads the committed shared set directly.
-    let resolution_started = quanta::Instant::now();
+    let resolution_started = tracing::enabled!(tracing::Level::DEBUG).then(quanta::Instant::now);
     let resolution_result =
         resolve_block_prevouts(resolved, block, tx_plan, context.height, view.txids());
-    let resolution_dur = resolution_started.elapsed();
-    metrics::histogram!("node.apply_block.script_resolution_seconds")
-        .record(resolution_dur.as_secs_f64());
+    tracing::debug!(
+        height = context.height,
+        script_resolution_us = resolution_started.map(|start| start.elapsed().as_micros()),
+        "script_verify: profile"
+    );
     let resolved = resolution_result?;
     view.set_resolved(resolved);
-    // preparation and parallel input-check fan-out internally and reports both
-    // sub-stage durations back; record them here on the success and error paths
-    // before propagating the verdict, mirroring the surrounding `*_result` idiom.
+    // Consensus owns preparation and parallel input-check fan-out internally and reports both
+    // sub-stage durations back; report them on the success and error paths
+    // before propagating the verdict, mirroring the surrounding `*_result`
+    // idiom. These sub-stages are development diagnostics (`docs/observability.md`):
+    // they ride the tracing profile event, not the metrics API.
     let mut script_timings = bitcoin_rs_consensus::ScriptStageTimings::default();
     let script_input_result = bitcoin_rs_consensus::verify_block_input_scripts(
         view,
@@ -365,17 +369,12 @@ pub(super) fn verify_block_transactions(
         &mut script_timings,
         parsed,
     );
-    metrics::histogram!("node.apply_block.script_prepare_seconds")
-        .record(script_timings.prepare_seconds);
-    metrics::histogram!("node.apply_block.script_parallel_seconds")
-        .record(script_timings.parallel_seconds);
-    script_input_result?;
     tracing::debug!(
         height = context.height,
-        script_resolution_us = resolution_dur.as_micros(),
         script_prepare_us = (script_timings.prepare_seconds * 1_000_000.0) as u64,
         script_parallel_us = (script_timings.parallel_seconds * 1_000_000.0) as u64,
         "script_verify: profile"
     );
+    script_input_result?;
     Ok(())
 }
