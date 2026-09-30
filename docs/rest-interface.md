@@ -94,12 +94,6 @@ return HTTP 400. Probe a known supported endpoint such as
 `/rest/chaininfo.json` to distinguish a disabled REST gateway from an invalid
 request.
 
-The checked-in Compose stack (`tools/bip300301-enforcer/docker-compose.yaml`)
-supplies the REST, `pubsequence`, version-check bypass, and drynet4 network
-settings required to run the unmodified enforcer. Because `pubsequence`
-carries transaction `A`/`R` events, the stack enables `--enable-mempool` so
-the enforcer tracks the mempool too.
-
 See also [docs/contracts/external-api.md](contracts/external-api.md) for the
 API manifest contract and precedence rule, and [rpc-reference.md](rpc-reference.md)
 for the generated per-route status table.
