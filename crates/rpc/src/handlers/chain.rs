@@ -1811,6 +1811,48 @@ mod tests {
         }
     }
 
+    /// The fixture block plus a second transaction that spends the coinbase
+    /// with a different input and output count, so per-transaction projections
+    /// cannot pass by repeating the coinbase.
+    fn fixture_block_with_spend() -> Block {
+        let mut block = fixture_genesis();
+        let Some(coinbase) = block.txs.first() else {
+            panic!("fixture genesis lost its coinbase");
+        };
+        let spend = Tx {
+            version: 2,
+            inputs: vec![TxIn {
+                previous_output: OutPoint::new(coinbase.txid(), 0),
+                script_sig: Script::new(),
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            outputs: vec![
+                TxOut {
+                    value: Amount::from_sat(3_000_000_000),
+                    script_pubkey: Script::new(),
+                },
+                TxOut {
+                    value: Amount::from_sat(1_999_000_000),
+                    script_pubkey: Script::new(),
+                },
+            ],
+            lock_time: LockTime::ZERO,
+        };
+        block.txs.push(spend);
+        let mut leaves = block
+            .txids()
+            .into_iter()
+            .map(|txid| txid.0.to_le_bytes())
+            .collect();
+        let Some(root) = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
+        else {
+            panic!("merkle root over two transactions");
+        };
+        block.header.merkle_root = Hash256::from_le_bytes(&root);
+        block
+    }
+
     #[test]
     fn percentiles_by_weight_empty_scores_are_zero() {
         let mut scores = Vec::new();
@@ -2044,18 +2086,18 @@ mod tests {
 
     #[test]
     fn getblock_verbosity_2_emits_every_transaction_of_the_stored_body() {
-        let genesis = fixture_genesis();
-        let record = BlockRecord::from_block(0, &genesis);
+        let block = fixture_block_with_spend();
+        let record = BlockRecord::from_block(0, &block);
         let mut ctx = Context::new();
         ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
             height: 0,
             hash: record.hash,
-            body: consensus_bytes(&genesis),
+            body: consensus_bytes(&block),
             calls: core::sync::atomic::AtomicUsize::new(0),
         }));
         let ctx = Arc::new(ctx);
-        seed_block(&ctx, &genesis, record);
-        let block_hash = genesis.block_hash().0;
+        seed_block(&ctx, &block, record);
+        let block_hash = block.block_hash().0;
         let result = getblock(&ctx, &json!([block_hash.to_string_be(), 2]))
             .unwrap_or_else(|err| panic!("getblock failed: {err}"));
         let Some(tx_array) = result.get("tx").and_then(|value| value.as_array()) else {
@@ -2063,39 +2105,38 @@ mod tests {
         };
         assert_eq!(
             tx_array.len(),
-            genesis.txs.len(),
+            block.txs.len(),
             "one object per transaction: {result:?}"
         );
-        let Some((first, tx)) = tx_array.first().zip(genesis.txs.first()) else {
-            panic!("expected at least one tx");
-        };
-        let bytes = consensus_bytes(tx);
-        assert_eq!(
-            first.get("hex").and_then(JsonValueTrait::as_str),
-            Some(hex_encode(&bytes).as_str()),
-            "hex must serialize the transaction itself: {first:?}"
-        );
-        assert_eq!(
-            first.get("vsize").and_then(JsonValueTrait::as_u64),
-            u64::try_from(bytes.len()).ok(),
-            "a witnessless transaction weighs its serialized size: {first:?}"
-        );
-        assert_eq!(
-            first
-                .get("vin")
-                .and_then(|value| value.as_array())
-                .map(sonic_rs::Array::len),
-            Some(tx.inputs.len()),
-            "vin must carry every input: {first:?}"
-        );
-        assert_eq!(
-            first
-                .get("vout")
-                .and_then(|value| value.as_array())
-                .map(sonic_rs::Array::len),
-            Some(tx.outputs.len()),
-            "vout must carry every output: {first:?}"
-        );
+        for (object, tx) in tx_array.iter().zip(&block.txs) {
+            let bytes = consensus_bytes(tx);
+            assert_eq!(
+                object.get("hex").and_then(JsonValueTrait::as_str),
+                Some(hex_encode(&bytes).as_str()),
+                "hex must serialize the transaction itself: {object:?}"
+            );
+            assert_eq!(
+                object.get("vsize").and_then(JsonValueTrait::as_u64),
+                u64::try_from(bytes.len()).ok(),
+                "a witnessless transaction weighs its serialized size: {object:?}"
+            );
+            assert_eq!(
+                object
+                    .get("vin")
+                    .and_then(|value| value.as_array())
+                    .map(sonic_rs::Array::len),
+                Some(tx.inputs.len()),
+                "vin must carry every input: {object:?}"
+            );
+            assert_eq!(
+                object
+                    .get("vout")
+                    .and_then(|value| value.as_array())
+                    .map(sonic_rs::Array::len),
+                Some(tx.outputs.len()),
+                "vout must carry every output: {object:?}"
+            );
+        }
     }
 
     #[test]
