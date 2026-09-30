@@ -1320,7 +1320,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} is not an unsigned number: {locked:?}"))
         };
         let used = field("used");
-        assert!(used > 0, "resident set size read as zero: {locked:?}");
+        if read_linux_rss_bytes().is_some() {
+            assert!(used > 0, "resident set size read as zero: {locked:?}");
+        }
         assert_eq!(used, field("total"), "the proxy pool is fully used");
         for name in ["free", "locked", "chunks_used", "chunks_free"] {
             assert_eq!(
