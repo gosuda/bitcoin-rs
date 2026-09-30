@@ -499,3 +499,6 @@ pub(crate) fn compare(
     }
     Ok(Some(higher.cmp(&lower)))
 }
+
+#[cfg(test)]
+mod tests;

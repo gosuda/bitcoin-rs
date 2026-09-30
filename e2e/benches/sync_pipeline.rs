@@ -258,7 +258,7 @@ fn record_evidence(cell: &str, blocks: &[Block], sweeps: &[(Duration, Duration)]
         manifest_sha256: Sha256Hex::digest(&corpus_bytes),
     });
     let path =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/benchmarks/sync_pipeline.toml");
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/benchmarks/sync_pipeline.toml");
     let mut ledger = match std::fs::read_to_string(&path) {
         Ok(text) => Ledger::parse(&text).unwrap_or_else(|error| panic!("bench ledger: {error}")),
         Err(_) => Ledger {
