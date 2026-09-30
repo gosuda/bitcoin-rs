@@ -79,8 +79,8 @@ Every sample in this cell records six identities. The T02 collector rejects a sa
 
 PR #1124's chainstate extraction is a structural ownership change, not a
 performance-promotion campaign. It carries no baseline-linked before/after
-samples for the extracted apply/reorg paths, so the applicable `CL-19` /
-`CL-20` performance cells remain **UNMEASURED**. No latency, RSS, retained-byte,
+samples for the extracted apply/reorg paths, so the applicable `HPA-13`
+promotion and regression cells remain **UNMEASURED**. No latency, RSS, retained-byte,
 storage, p99, or throughput non-regression verdict is inferred from functional
 tests or from the historical September 4 signed-spend run.
 

@@ -756,7 +756,10 @@ impl BlockSync {
         };
         let outcome = self.send_getheaders(source, our_height, target_height, locator);
         if outcome == GetheadersOutcome::Sent {
-            metrics::counter!("node.sync.idle_frontier_probes").increment(1);
+            tracing::debug!(
+                peer_addr = %source.addr,
+                "block sync: sent idle-frontier capability probe"
+            );
         }
         outcome
     }
@@ -798,7 +801,10 @@ impl BlockSync {
         let outcome =
             self.send_getheaders_tracked(source, our_height, target_height, locator, false);
         if outcome == GetheadersOutcome::Sent {
-            metrics::counter!("node.sync.chain_sync_probes").increment(1);
+            tracing::debug!(
+                peer_addr = %source.addr,
+                "block sync: sent chain-sync eviction probe"
+            );
         }
         outcome
     }

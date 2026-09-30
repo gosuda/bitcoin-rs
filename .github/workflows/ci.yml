@@ -4,63 +4,25 @@ on:
   push:
     branches: [main]
   pull_request:
-    # Every pull request, not only those based on `main`. A stacked PR targets
-    # the branch below it, and `branches: [main]` excluded those by
-    # construction -- five open PRs had never been built or tested, while
-    # reporting no failing checks, which reads exactly like green.
     branches: ['**']
-  # Re-run these lanes on the merge-queue boundary (issue #1279): a queue
-  # entry fires `merge_group`, not `pull_request`, so without this trigger a
-  # queued merge commit would only see the ci-merge-gate workflow and the
-  # portable lanes below would not gate entry into `main`. The concurrency
-  # expression below already handles it: a `merge_group` run falls into the
-  # `run_id` branch (unique group, never cancelled), same as `main` pushes.
   merge_group:
     types: [checks_requested]
 
-# The PR gate only needs to read repository contents. Keep the token scope
-# explicit so repository-level default permissions cannot grant more access.
 permissions:
   contents: read
 
-# Bounded because the trigger above is wider: a superseded pull-request run is
-# cancelled when a newer commit lands on the same PR.
-#
-# `main` pushes are put in a group of their own, keyed by `run_id`, rather than
-# relying on `cancel-in-progress: false`. That flag only protects a run that is
-# already executing: with a shared group, a `main` run that is still *pending*
-# behind an in-progress one is cancelled when a third push arrives, and its
-# commit then has no CI record at all. A unique group per run means `main`
-# pushes never queue against each other and so are never cancelled.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Required PR gate (issue #171): the shortest useful failure signal. `fmt` and
-# `deny` stay parallel (no workspace compile). The compile graph is split into
-# parallel fail-fast lanes (issue #1081): `clippy` reports lint failures
-# without waiting behind any test lane, and the three test lanes run their
-# profiles concurrently instead of serially inside one ~11-minute job, so a
-# failing profile surfaces at its lane's position rather than after every
-# other profile. Each lane's rust-cache key includes the job id, so a lane
-# restores only its own dependency graph instead of the single 2.4 GB archive
-# the old `rust` job restored on every run. Every command lives in
-# scripts/ci-pr.sh. The kernel C++ production lint graph is checked at the
-# merge queue in ci-merge-gate.yml; post-merge behavior and reference lanes
-# live in main.yml, with version/feature campaigns on a separate schedule.
-#
-# Test lanes link with mold (`-C link-arg=-fuse-ld=mold` via RUSTFLAGS) and
-# schedule tests under cargo-nextest, both installed by
-# .github/actions/test-deps; ci-pr.sh falls back to `cargo test` where
-# nextest is absent. The flag changes every crate fingerprint, so the first
-# run after enabling it recompiles dependencies once per lane -- the lane
-# cache then stores the mold-linked artifacts for later runs.
 env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # ── Fast lanes (always run) ──────────────────────────────────────
+
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -68,7 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
-      - run: ./scripts/ci-pr.sh fmt
+      - run: cargo fmt --all -- --check
 
   deny:
     runs-on: ubuntu-latest
@@ -78,10 +40,7 @@ jobs:
       - uses: taiki-e/install-action@39fa37110d4f0b0312682d675dbf52e40db30cb4 # cargo-deny
         with:
           tool: cargo-deny@0.20.2
-      # Full dependency graph (all backends + kernel); commands owned by the
-      # script. cargo-deny resolves metadata without compiling, so this job
-      # installs no C++ toolchain.
-      - run: ./scripts/ci-pr.sh deny
+      - run: cargo deny --workspace --no-default-features --features "rocksdb,fjall,redb,kernel" check
 
   clippy:
     runs-on: ubuntu-latest
@@ -92,15 +51,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
-          # A red clippy run still warms the dependency cache for the next
-          # push of the same PR (issue #1081's edit/push/fix loop).
           cache-on-failure: true
-      # Fails fast at the first profile: a lint failure is the shortest
-      # actionable signal and no longer waits behind fixture downloads or any
-      # test lane. Profile commands live in scripts/ci-pr.sh.
       - run: ./scripts/ci-pr.sh clippy
 
   test-crates:
+    needs: [fmt, deny, clippy]
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -111,11 +66,13 @@ jobs:
         with:
           cache-on-failure: true
       - uses: ./.github/actions/test-deps
-      # The consensus, node, and rpc profiles are fixture-free: only the
-      # binary's tests read the pinned Core fixtures.
       - run: ./scripts/ci-pr.sh test-crates
 
+  # ── Heavy lanes (merge and main only) ────────────────────────────
+
   test-binary:
+    if: github.event_name != 'pull_request'
+    needs: [fmt, deny, clippy]
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -125,24 +82,22 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           cache-on-failure: true
-      # The rocksdb feature compiles rust-librocksdb-sys, whose build runs
-      # bindgen via clang-sys and needs libclang. native-deps also provides
-      # mold; the nextest install lives in test-deps.
       - uses: ./.github/actions/native-deps
       - uses: ./.github/actions/test-deps
-      - name: Provision pinned Core
-        run: bash scripts/provision-ci-reference-fixtures.sh core
+      - run: bash scripts/provision-ci-reference-fixtures.sh core
       - run: ./scripts/ci-pr.sh test-binary
-      - name: Preserve public process compatibility evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Preserve process compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
-          name: process-compatibility-native-binary-${{ github.run_attempt }}
+          name: process-compatibility-binary-${{ github.run_attempt }}
           path: target/process-harness/**
           if-no-files-found: warn
           retention-days: 7
 
   test-workspace:
+    if: github.event_name != 'pull_request'
+    needs: [fmt, deny, clippy]
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
@@ -153,17 +108,65 @@ jobs:
         with:
           cache-on-failure: true
       - uses: ./.github/actions/test-deps
-      # bin/bitcoin-rs is a workspace member, so the kernel-free workspace
-      # pass runs its default-feature test binaries, including the
-      # process-harness suite that launches the pinned bitcoind.
-      - name: Provision pinned Core
-        run: bash scripts/provision-ci-reference-fixtures.sh core
+      - run: bash scripts/provision-ci-reference-fixtures.sh core
       - run: ./scripts/ci-pr.sh test-workspace
-      - name: Preserve public process compatibility evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Preserve process compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
-          name: process-compatibility-native-workspace-${{ github.run_attempt }}
+          name: process-compatibility-workspace-${{ github.run_attempt }}
           path: target/process-harness/**
           if-no-files-found: warn
           retention-days: 7
+
+  # ── Single required check ────────────────────────────────────────
+  #
+  # On PRs: gates fmt, deny, clippy, test-crates.
+  # On merge/main: also gates test-binary, test-workspace.
+  # This is the one status check configured in the GitHub ruleset.
+
+  ci-gate:
+    if: always()
+    runs-on: ubuntu-latest
+    needs: [fmt, deny, clippy, test-crates, test-binary, test-workspace]
+    steps:
+      - name: Evaluate gate
+        run: |
+          needs_json='${{ toJSON(needs) }}'
+
+          check() {
+            local name="$1" allow_skip="$2"
+            local result
+            result=$(echo "$needs_json" | jq -r --arg n "$name" '.[$n].result')
+            echo "  $name: $result"
+            if [[ "$result" == "success" ]]; then
+              return 0
+            elif [[ "$allow_skip" == "true" && "$result" == "skipped" ]]; then
+              return 0
+            else
+              echo "::error::$name $result"
+              return 1
+            fi
+          }
+
+          echo "Fast lanes:"
+          failed=0
+          for job in fmt deny clippy test-crates; do
+            check "$job" false || failed=1
+          done
+
+          echo "Heavy lanes:"
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            for job in test-binary test-workspace; do
+              check "$job" true || true
+            done
+          else
+            for job in test-binary test-workspace; do
+              check "$job" false || failed=1
+            done
+          fi
+
+          if [[ $failed -ne 0 ]]; then
+            exit 1
+          fi
+          echo "Gate passed."

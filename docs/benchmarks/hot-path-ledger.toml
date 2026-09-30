@@ -32,7 +32,7 @@ noise_floor = "unobserved"
 # .outline/reference-corpus/reacquire-20260909T010602Z-a721110f/.
 # Full method note, digests, and remaining residual statement:
 # docs/benchmarks/data/comparator-lanes-20260913.md. Per-cell histories
-# stay empty; noise floor stays unobserved (HPA-03, CL-23).
+# stay empty; noise floor stays unobserved (HPA-03, HPA-08).
 
 # ---------------------------------------------------------------------------
 # Interval tree. Exclusive leaves hang off these; they are not addends.

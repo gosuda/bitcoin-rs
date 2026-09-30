@@ -126,7 +126,7 @@ This is an evidence tool pin. No checker run is claimed by this page.
 
 ### `REF-07`: Pinned mainnet stop and custody rule
 
-- The default unpruned full-tip storage evidence in T39 uses a pinned mainnet
+- The default unpruned full-tip storage campaign uses a pinned mainnet
   stop. The stop is `(height, block_hash)` recorded by the run. No stop may be
   floating or unpinned. The 1 TB budget applies only to that pinned default
   lane.

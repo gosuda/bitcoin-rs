@@ -35,6 +35,7 @@ When code and a contract disagree, fix the drift in the same change. Do not dupl
 | [feature-matrix.md](feature-matrix.md) | `FEAT-01`–`FEAT-02` | Named supported feature combinations; no empty backend markers on crates that do not own storage | `scripts/check-feature-matrix.sh`; `g17_dependency_direction` |
 | [reference-set.md](reference-set.md) | `REF-01`–`REF-07` | Released Core, kernel, corpus, and formal-tool identities | reference record and `overhaul_reference_set` |
 | [ecosystem-compatibility.md](ecosystem-compatibility.md) | `ECO-01`–`ECO-09` | External ecosystem compatibility strategy: black-box evidence, one representative consumer, evidence matrix and status vocabulary | [api/ecosystem-compat.toml](../api/ecosystem-compat.toml) rows; live Core interop lane (`core-differential.md`) |
+| [formal-verification.md](formal-verification.md) | Formal inventory | Model hashes, runner identity, return-code mapping, and proof status | `scripts/check_models.py`; manual model-check workflow |
 
 ## Permanent suite traceability
 

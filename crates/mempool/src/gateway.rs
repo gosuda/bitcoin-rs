@@ -417,8 +417,9 @@ pub trait MempoolObserver: Send + Sync {
 /// Fans one committed mutation out to several named observers.
 ///
 /// Each leg runs under its own [`std::panic::catch_unwind`]: a panicking
-/// leg is counted (`mempool_observer_leg_failed_total{leg}`) and logged
-/// with its name, and the later legs still run. The gateway's outer
+/// leg increments the aggregate `node.mempool.observer_failures_total`
+/// operator counter and is logged with its name, and the later legs still
+/// run. The gateway's outer
 /// `catch_unwind` around the composite stays as the backstop. Legs inherit
 /// the [`MempoolObserver`] contract: best-effort mirrors that run with no
 /// gateway lock held, so a leg may re-enter the gateway.
@@ -440,8 +441,9 @@ impl CompositeObserver {
         }
     }
 
-    /// Appends a named leg. Names identify the leg in failure logs and
-    /// metrics only; order is publication order.
+    /// Appends a named leg. Names identify the leg in failure logs only; the
+    /// operator failure counter is intentionally aggregate. Order is
+    /// publication order.
     pub fn add_leg(&self, name: &'static str, leg: Arc<dyn MempoolObserver>) {
         self.legs.lock().push((name, leg));
     }
@@ -482,7 +484,7 @@ impl MempoolObserver for CompositeObserver {
                 leg.on_mutation(envelope);
             }));
             if let Err(panic_payload) = outcome {
-                metrics::counter!("mempool_observer_leg_failed_total", "leg" => *name).increment(1);
+                metrics::counter!("node.mempool.observer_failures_total").increment(1);
                 let (message, payload_disposal_panicked) = panic_message_and_dispose(panic_payload);
                 tracing::warn!(
                     leg = *name,
@@ -1647,6 +1649,66 @@ mod tests {
     use core::sync::atomic::Ordering;
     use parking_lot::{Mutex, RwLock};
     use std::sync::mpsc;
+
+    /// Records counter keys so the observer-failure metric can prove its
+    /// operator series is aggregate rather than leg-labeled.
+    #[derive(Default)]
+    struct CounterKeyRecorder {
+        keys: Mutex<Vec<(String, usize)>>,
+    }
+
+    impl metrics::Recorder for CounterKeyRecorder {
+        fn describe_counter(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_gauge(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn describe_histogram(
+            &self,
+            _key: metrics::KeyName,
+            _unit: Option<metrics::Unit>,
+            _description: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            self.keys
+                .lock()
+                .push((key.name().to_owned(), key.labels().count()));
+            metrics::Counter::noop()
+        }
+
+        fn register_gauge(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _key: &metrics::Key,
+            _metadata: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
 
     fn entry(tx: &Tx) -> MempoolEntry {
         MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7, 0)
@@ -3011,6 +3073,7 @@ mod tests {
     #[test]
     fn composite_isolates_a_panicking_leg() {
         let recorder = Arc::new(RecordingObserver::default());
+        let metric_recorder = CounterKeyRecorder::default();
         let composite = CompositeObserver::new();
         composite.add_leg("panicker", Arc::new(PanickingObserver));
         composite.add_leg("recorder", dyn_observer(&recorder));
@@ -3019,9 +3082,10 @@ mod tests {
 
         let committed = tx(40);
         let committed_txid = committed.txid();
-        gateway
-            .insert_entry(AdmissionOrigin::Rpc, entry(&committed))
-            .expect("still returns");
+        metrics::with_local_recorder(&metric_recorder, || {
+            gateway.insert_entry(AdmissionOrigin::Rpc, entry(&committed))
+        })
+        .expect("still returns");
 
         assert!(
             gateway.read().contains_txid(&committed_txid),
@@ -3031,6 +3095,15 @@ mod tests {
             *recorder.seen.lock(),
             vec![(hash(&committed_txid), MutationOutcome::Accepted)],
             "the leg after the panicking one still recorded"
+        );
+        let keys = metric_recorder.keys.lock();
+        let failure = keys
+            .iter()
+            .find(|(name, _)| name == "node.mempool.observer_failures_total")
+            .expect("aggregate observer failure counter");
+        assert_eq!(
+            failure.1, 0,
+            "observer identity belongs in tracing, not metric labels"
         );
     }
 

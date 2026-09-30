@@ -35,7 +35,7 @@
 EXTENDS Integers, Naturals, Sequences, FiniteSets
 
 (*************************************************************************)
-(* Constants (mirrored in the root CONSTRAINTS.md register).             *)
+(* Constants (recorded in docs/contracts/formal-verification.md).        *)
 (* K = 128 is a verification bound passed on the command line, not a     *)
 (* production limit and not a constant of this module.                   *)
 (*************************************************************************)

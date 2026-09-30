@@ -254,7 +254,7 @@ remove another script's output.
 `crates/index/src/runtime/query.rs` tests exercise the shared
 historical/live byte budget, independent row/scan/body-read admission limits,
 rejection of truncated scans, and non-consuming rejection of over-budget work
-(`IDX-03`, `CL-14`). No query limit or persisted representation changes.
+(`IDX-03` and the project bounded-resources invariant). No query limit or persisted representation changes.
 
 ### Store-open cancellation evidence
 

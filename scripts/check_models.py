@@ -23,6 +23,7 @@ import tomllib
 from dataclasses import dataclass
 
 ROOT = Path(__file__).resolve().parents[1]
+FORMAL_CONTRACT = Path("docs/contracts/formal-verification.md")
 MODELS = ("ChainAdmission", "PeerLeases", "ProjectionMining")
 PROPERTIES = ("--inv=TypeOK,Safety,TransitionSafety", "--temporal=ConditionalProgress")
 
@@ -71,12 +72,12 @@ def cfg_constants(path: Path) -> str:
 
 def models(root: Path) -> tuple[Model, ...]:
     try:
-        register = (root / "CONSTRAINTS.md").read_text(encoding="utf-8")
+        register = (root / FORMAL_CONTRACT).read_text(encoding="utf-8")
     except (FileNotFoundError, PermissionError) as error:
-        # A missing or unreadable custody register is a model-identity
+        # A missing or unreadable proof inventory is a model-identity
         # failure on the inventory lane, not an unavailable run.
         raise EvidenceError(
-            15, f"proof inventory register is unreadable: {error.filename or error}"
+            15, f"formal verification contract is unreadable: {error.filename or error}"
         ) from error
     inventory: dict[str, Model] = {}
     for line in register.splitlines():

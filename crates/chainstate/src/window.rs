@@ -23,7 +23,6 @@ use crate::error::ApplyError;
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::u32_saturated_len;
 use bitcoin_rs_storage::CommitRecords;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -149,10 +148,9 @@ impl WindowGroup {
             (Some(last), Some(first_prev)) => (last, first_prev),
             _ => return Ok(Vec::new()),
         };
-        let started = quanta::Instant::now();
+        let sync_started = quanta::Instant::now();
         sync_appended_blocks(handles)?;
-        metrics::histogram!("node.durable_head.group_sync_seconds")
-            .record(started.elapsed().as_secs_f64());
+        let group_sync_us = sync_started.elapsed().as_micros();
         let mut undo_rows = Vec::with_capacity(self.pending.len());
         let mut body_rows = Vec::with_capacity(self.pending.len());
         for pending in &self.pending {
@@ -174,7 +172,7 @@ impl WindowGroup {
             chain_tx_count_after: last.outcome.tip.chain_tx_count.to_wire(),
             undo_extent: Some((last.outcome.height, last.outcome.hash)),
         };
-        let started = quanta::Instant::now();
+        let commit_started = quanta::Instant::now();
         let records = CommitRecords {
             undo_rows,
             body_rows,
@@ -186,10 +184,16 @@ impl WindowGroup {
                 .is_some_and(|last| last.outcome.tip.chain_tx_count == receipt.chain_tx_count),
             "the batch certifies the last staged prefix count"
         );
-        metrics::histogram!("node.durable_head.group_commit_seconds")
-            .record(started.elapsed().as_secs_f64());
-        let staged = u32_saturated_len(self.pending.len());
-        metrics::histogram!("node.durable_head.group_blocks").record(f64::from(staged));
+        let group_blocks = self.pending.len();
+        // Per-group decomposition is a development diagnostic
+        // (`docs/observability.md`): it rides the tracing profile event, not
+        // the metrics API.
+        tracing::debug!(
+            blocks = group_blocks,
+            sync_us = group_sync_us,
+            commit_us = commit_started.elapsed().as_micros(),
+            "durable_head: group commit"
+        );
         for pending in &mut self.pending {
             pending.outcome.commit_id = receipt.commit_id;
         }
@@ -688,12 +692,20 @@ pub(super) fn prove_window<'a>(
                 Err(_) => return Vec::new(),
             }
         }
-        metrics::histogram!("node.window.checks_seconds")
-            .record(checks_started.elapsed().as_secs_f64());
+        let checks_us = checks_started.elapsed().as_micros();
         let verify_started = quanta::Instant::now();
         let verdict = bitcoin_rs_consensus::verify_tx::verify_prepared_units(&units);
-        metrics::histogram!("node.window.verify_seconds")
-            .record(verify_started.elapsed().as_secs_f64());
+        let verify_us = verify_started.elapsed();
+        metrics::histogram!("node.window.verify_seconds").record(verify_us.as_secs_f64());
+        // Window-stage decomposition is a development diagnostic
+        // (`docs/observability.md`); only the verify hook stays on the
+        // metrics API as the hot-path ledger requires.
+        tracing::debug!(
+            checks_us,
+            verify_us = verify_us.as_micros(),
+            units = units.len(),
+            "prove_window: profile"
+        );
         if verdict.is_err() {
             return Vec::new();
         }

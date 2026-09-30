@@ -398,7 +398,7 @@ mod wire_metadata_tests {
         }
     }
 
-    // Contract: /CONSTRAINTS.md, "Raw zero-input mempool entry contract".
+    // Regression for the raw trusted-insertion constructor's empty input.
     #[test]
     fn raw_empty_entry_keeps_zero_input_behavior() {
         let entry = MempoolEntry::new(Arc::new(Tx::default()), 0, 0, 0, 0, 0);

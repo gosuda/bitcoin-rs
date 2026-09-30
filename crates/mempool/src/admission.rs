@@ -2069,7 +2069,7 @@ mod tests {
         assert_eq!(
             chain.reads.load(Ordering::SeqCst),
             4,
-            "POL-03/CL-15 pins four attempts independently of the loop constant"
+            "POL-03 pins four attempts independently of the loop constant"
         );
         assert!(gateway.read().is_empty());
         Ok(())

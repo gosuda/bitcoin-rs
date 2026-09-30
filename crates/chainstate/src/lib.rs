@@ -921,7 +921,10 @@ impl Chainstate {
         BlockTreeReader::new(Arc::clone(&self.block_tree))
     }
 
-    /// Clones the block-tree cell for the RPC capability bundle.
+    /// Fixture-only block-tree Arc clone. Not present in production builds.
+    ///
+    /// Production consumers use [`Self::block_tree_reader`] instead.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn block_tree_handle(&self) -> Arc<RwLock<BlockTree>> {
         Arc::clone(&self.block_tree)
@@ -1922,6 +1925,10 @@ mod chain_tx_count_tests;
 #[cfg(test)]
 #[path = "../tests/unit/apply/persistence_tests.rs"]
 mod persistence_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/apply/observability_tests.rs"]
+mod observability_tests;
 
 #[cfg(test)]
 #[path = "../tests/unit/apply/window_disposition_tests.rs"]

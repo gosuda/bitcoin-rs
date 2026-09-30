@@ -57,6 +57,7 @@ use std::sync::atomic::Ordering;
 /// Production mining coordinator owned by the node process.
 pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
+    block_tree: BlockTreeReader,
     followers: ChainFollowers,
     shutdown: Arc<AtomicBool>,
     service: MiningService,
@@ -91,8 +92,10 @@ impl MiningCoordinator {
             coinbase_script,
             Arc::clone(&shutdown),
         );
+        let block_tree = chainstate.block_tree_reader();
         Self {
             chainstate,
+            block_tree,
             followers,
             shutdown,
             service,
@@ -117,7 +120,7 @@ impl MiningCoordinator {
     /// tree entry, including a header-only `Active` tip, is still
     /// inconclusive — `NodeStatus::Active` is the header chain, not scripts.
     fn known_block_result(&self, block_hash: Hash256) -> Option<BlockValidationResult> {
-        let tree = self.chainstate.read_block_tree();
+        let tree = self.block_tree.read();
         let node_id = tree.lookup(block_hash)?;
         let node = tree.node(node_id).ok()?;
         if node.status == NodeStatus::Invalid {
@@ -136,7 +139,7 @@ impl MiningCoordinator {
     /// Core `submitblock` fills the coinbase reserved nonce when the block
     /// already has a BIP141 commitment but no coinbase witness. Proposal skips this.
     fn fill_uncommitted_witness(&self, block: &mut Block) -> bool {
-        let tree = self.chainstate.read_block_tree();
+        let tree = self.block_tree.read();
         let Some(prev_id) = tree.lookup(block.header.prev_blockhash.into()) else {
             return false;
         };
@@ -363,7 +366,7 @@ impl MiningControl for MiningCoordinator {
     fn mining_info(&self) -> Result<MiningInfo, MiningControlError> {
         let tip = self.chainstate.applied_tip_snapshot();
         let network_hashes_per_second = {
-            let tree = self.chainstate.read_block_tree();
+            let tree = self.block_tree.read();
             tip.as_ref().map_or(0.0, |tip| {
                 bitcoin_rs_mining::estimate_network_hashps(
                     &tree,
@@ -379,7 +382,7 @@ impl MiningControl for MiningCoordinator {
     }
 
     fn network_hash_ps(&self, lookup: i64, height: i64) -> Result<f64, MiningControlError> {
-        let tree = self.chainstate.read_block_tree();
+        let tree = self.block_tree.read();
         let tip = self.chainstate.applied_tip_snapshot();
         bitcoin_rs_mining::network_hash_ps(
             &tree,
@@ -419,7 +422,7 @@ impl MiningControl for MiningCoordinator {
         // API-13 reports a missing parent before proof-of-work failures.
         // Known headers stay idempotent; an empty tree also admits network genesis.
         {
-            let tree = self.chainstate.read_block_tree();
+            let tree = self.block_tree.read();
             let hash = header.compute_hash().into();
             let is_genesis_root =
                 tree.is_empty() && hash == self.chainstate.network().genesis_block_hash();

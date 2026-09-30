@@ -39,7 +39,8 @@ cached_matches_pin() {
   [[ -x "${BITCOIND}" && -f "${STAMP}" ]] || return 1
   [[ "$(cat -- "${STAMP}")" == "${TARBALL_SHA256}" ]] || return 1
   local version
-  version="$("${BITCOIND}" -version 2>/dev/null | head -n1 || true)"
+  version="$("${BITCOIND}" -version 2>/dev/null)" || return 1
+  version="${version%%$'\n'*}"
   # Component-exact match against the canonical pin, mirroring
   # crates/p2p/tests/core_interop_live.rs version_is_pinned_line: the pinned
   # "31.1" accepts 31.1(.N) but not 31.10(.N), 31.2(.N), or 30.1(.N).

@@ -516,8 +516,11 @@ impl UtxoSet {
 
         let listener_started = Instant::now();
         listener.on_committed_event_batches(&shard_events);
-        metrics::histogram!("node.utxo.listener.event_batches_seconds")
-            .record(listener_started.elapsed().as_secs_f64());
+        tracing::debug!(
+            batches = shard_events.len(),
+            listener_us = listener_started.elapsed().as_micros(),
+            "utxo listener: event batches"
+        );
 
         let mut errors = errors.into_inner();
         if let Some(error) = errors.pop() {
@@ -550,8 +553,11 @@ impl UtxoSet {
 
         let listener_started = Instant::now();
         listener.on_committed_event_batches(&shard_events);
-        metrics::histogram!("node.utxo.listener.event_batches_seconds")
-            .record(listener_started.elapsed().as_secs_f64());
+        tracing::debug!(
+            batches = shard_events.len(),
+            listener_us = listener_started.elapsed().as_micros(),
+            "utxo listener: event batches"
+        );
 
         if let Some(error) = error {
             return Err(error);

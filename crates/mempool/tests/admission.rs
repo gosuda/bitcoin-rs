@@ -209,7 +209,7 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
     assert_eq!(
         bitcoin_rs_mempool::standardness::MAX_STANDARD_TX_SIGOPS_COST,
         16_000,
-        "POL-04/CL-15 and Core 31.1 policy.h"
+        "POL-04 and Core 31.1 policy.h"
     );
     let pool = Arc::new(parking_lot::RwLock::new(Mempool::new(
         MempoolLimits::default(),

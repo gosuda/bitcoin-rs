@@ -1,4 +1,4 @@
-//! Fault-injection matrix for the durable-head commit protocol (#632, CL-17).
+//! Fault-injection matrix for the durable-head commit protocol (#632, RCV-01).
 //!
 //! Two layers, both in isolated datadirs:
 //!

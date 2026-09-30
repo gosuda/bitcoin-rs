@@ -26,7 +26,8 @@ else:
     pin = reference["formal_tool"]
     if pin["name"] != "apalache-mc":
         raise SystemExit("unexpected formal tool")
-    archive = re.search(r"^\| Archive \| `([^`]+)`", Path("CONSTRAINTS.md").read_text(), re.MULTILINE)
+    contract = Path("docs/contracts/formal-verification.md").read_text()
+    archive = re.search(r"^\| Archive \| `([^`]+)`", contract, re.MULTILINE)
     if archive is None:
         raise SystemExit("formal archive identity missing")
     values = (pin["version"], archive[1], pin["archive_sha256"], pin["jar_sha256"], pin["version"])
@@ -55,10 +56,10 @@ else
   # Hosted runners expose the pinned Java major here; local runs may use an
   # explicitly selected JAVA_HOME instead. Never require Java for Core tests.
   # WHY JAVA_HOME_25_X64: legacy variable name; whatever JDK it selects must
-  # still match the register's observed-Java row below.
+  # still match the formal contract's observed-Java row below.
   export JAVA_HOME="${JAVA_HOME_25_X64:-${JAVA_HOME:?set JAVA_HOME for the formal lane}}"
   [[ -x "$JAVA_HOME/bin/java" ]] || { echo "Java executable missing" >&2; exit 1; }
-  # The register records what java -version actually printed (CONSTRAINTS.md
+  # The formal contract records what java -version actually printed
   # "Java | ... Java <version>"); a JDK that no longer matches that
   # observation invalidates the formal lane's tool identity, before PATH
   # export so nothing downstream runs against the wrong JVM.
@@ -70,7 +71,7 @@ else
   # The banner's label varies by vendor (openjdk, java, Temurin's java);
   # only the quoted version token is identity.
   observed_version="$(printf '%s\n' "$observed" | sed -n '1s/^[[:space:]]*[a-z][a-z]*[[:space:]]\+version[[:space:]]\+"\([^"]*\)".*/\1/p')"
-  register_version="$(sed -n 's/^| Java |.*[[:space:]]Java \([0-9.][0-9.]*\)[[:space:]]*|[[:space:]]*$/\1/p' CONSTRAINTS.md)"
+  register_version="$(sed -n 's/^| Java |.*[[:space:]]Java \([0-9.][0-9.]*\)[[:space:]]*|[[:space:]]*$/\1/p' docs/contracts/formal-verification.md)"
   [[ -n "$observed_version" && -n "$register_version" ]] || {
     printf '%s\n' "Java identity missing: observed '${observed_version:-none}' vs register '${register_version:-none}'" >&2
     exit 1

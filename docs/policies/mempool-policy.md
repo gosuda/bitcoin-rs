@@ -116,6 +116,6 @@ boundaries are in `replacement_profile` and `graph_limits`; package shape,
 ephemeral spending and fee-only invalidation are in `package::tests`.
 No throughput, latency or default promotion follows from these correctness tests.
 
-The scoped CL-14 graph-resource capture emits RSS/retained-byte samples and
+The scoped graph-resource capture emits RSS/retained-byte samples and
 source digests into the same CI artifact directory. Its synthetic admitted
 chains and one-pass times do not establish a product performance baseline.

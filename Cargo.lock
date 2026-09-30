@@ -567,7 +567,6 @@ dependencies = [
  "criterion",
  "crossbeam-utils",
  "hashbrown 0.17.1",
- "metrics",
  "mimalloc",
  "nohash-hasher",
  "parking_lot",

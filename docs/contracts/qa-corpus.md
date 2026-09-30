@@ -63,8 +63,11 @@ end-state evidence roles.
 
 ### `QAC-03`: Importer acquisition and provenance publication
 
-After the setup contract in `CONSTRAINTS.md` succeeds, `scripts/import-qa-assets.sh`
-uses fail-closed acquisition and publication semantics:
+`scripts/import-qa-assets.sh` first verifies that its required tools are
+available and creates its isolated staging paths. Setup failures propagate the
+failing tool status and remove any staging path before acquisition begins.
+After setup succeeds, the importer uses fail-closed acquisition and publication
+semantics:
 
 - the pinned upstream commit check, clone-size measurement, each corpus
   minimization, and the UTC import timestamp must succeed; a nonzero tool status

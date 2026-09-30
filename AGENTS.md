@@ -1,13 +1,9 @@
 # AGENTS.md
 
-- Keep one owner per invariant and durable representation. Reuse existing boundaries; do not add parallel state, forwarding wrappers, or speculative APIs.
-- Describe implemented behavior as implemented and target design as target design.
-- Review persistence reads and writes together. Preserve typed failures, commit points, durability, and recovery semantics.
-- Follow lock order. Keep expensive verification, I/O, and callbacks outside write locks; recheck captured state before commit.
-- Preserve operator data. Schema changes follow the documented replay or migration path; never reset implicitly.
-- Delete superseded code with its replacement. Keep compatibility adapters only when a current public contract requires them.
-- `docs/policies/source-compatibility.md` §3.4 owns TLS provider and transport policy; keep `deny.toml` aligned with it.
-- Tie permanent tests to current contracts and independent references. Missing evidence blocks a claim; it does not prove it.
-- Run the applicable `CONSTRAINTS.md` checks and report results. Do not claim performance or promote defaults without evidence.
-- Keep plans and scratch outside the PR; keep acceptance evidence in the PR or CI artifacts.
-- Check and fix clippy lints before pushing or publishing pull requests.
+- Preserve consensus behavior and externally observable behavior unless the task explicitly changes it.
+- Keep one authoritative owner for each invariant and durable representation. Prefer existing boundaries and direct calls over duplicate state, forwarding wrappers, or speculative abstractions.
+- Keep changes scoped to the task. Remove superseded code with its replacement, and do not mix unrelated cleanup into the same change.
+- Before changing consensus, persistence, or concurrency, inspect the owning contracts and the tests that exercise success, failure, commit, recovery, and lock-order behavior.
+- Preserve operator data. Schema changes must use the documented migration or replay path and must never reset data implicitly.
+- Run the smallest meaningful verification for the changed surface. Broad integration, reference, platform, and performance campaigns belong to their owning CI or evidence workflows.
+- Describe implemented behavior as implemented and target design as target design. Do not claim correctness, compatibility, durability, or performance without the evidence owned by that claim.

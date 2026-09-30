@@ -27,7 +27,7 @@ regression invariant before it is retained.
 | Cargo dependency/feature graph | `ARCH-01`, `DEP-*`, `FEAT-*` | Keep the metadata-based dependency-direction gate, feature builds and cargo-deny. Do not add a second uniqueness checker. |
 | Reference custody | `REF-*`, `CORP-*`, `QAC-01`; artifact identity and unavailable inputs | Keep typed refusal cases and real process/corpus custody. Mutate parsed fields rather than matching historical TOML text. |
 | Benchmark evidence | `HPA-*`; identities, overlap and repeated samples | Run evidence-tool tests with `--bench evidence`; measured campaigns remain separate. No frozen path/cell inventory in normal Cargo tests. |
-| Formal models | `CONSTRAINTS.md` proof inventory | Run `scripts/check_models.py` in the manual lane. Custody checks and runner regressions are not model proofs. |
+| Formal models | [Formal verification contract](formal-verification.md) | Run `scripts/check_models.py` in the manual lane. Custody checks and runner regressions are not model proofs. |
 
 This table is the contract → proof matrix at suite-family granularity. Exact
 test names are intentionally not normative: the executable evidence may be

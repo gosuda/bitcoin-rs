@@ -12,7 +12,7 @@ MuHash RPC. Worktree `.outline/worktree/i650-comparators`, branch
 (`origin/main`). Owner: `docs/contracts/hot-path-attribution.md`
 (`HPA-01`..`HPA-13`). Nothing here fills a product cell, changes any
 residual, or produces a noise floor under `HPA-03`; every ledger cell
-stays empty and every numeric gate field stays UNMEASURED (`CL-23`).
+stays empty and every numeric gate field stays UNMEASURED (`HPA-08`).
 
 ## What ran: harness stability, three alternating repetitions
 
@@ -69,7 +69,7 @@ product candidate/control comparison: both arms of each fixture pair are
 the same program (p2p writes `core-node.py` and `candidate-node.py` from
 one `_node_source`, `comp_lanes.py:142-144`; offline calls the same
 fixture program for both roles), so a fixture ratio near 1.0 is a
-plumbing check, not a product result (`HPA-09`). The `CL-19` stability
+plumbing check, not a product result (`HPA-09`). The `HPA-13` stability
 predicate (each arm within 5% of its own median, improvement exceeding
 host noise) remains unexercised: no candidate/control product pair was
 measured.
@@ -119,7 +119,7 @@ nodes. None of these can be started from the current tree:
 Consequently no Core-vs-bitcoin-rs campaign was attempted: the candidate
 arm cannot be placed at the frozen tip, and running the Core side alone
 would produce the one-arm, no-counterpart evidence the contract refuses
-(`CL-23`). This is a **capability/harness blocker, not a custody blocker**
+(`HPA-08`). This is a **capability/harness blocker, not a custody blocker**
 (#34 and #35), and a **state-construction budget blocker, not an RPC
 absence** (#41: the RPC is implemented; the state is constructible only
 via a long IBD for which no stop-at-height or shipped harness exists).
@@ -165,12 +165,12 @@ construction and the unrun seven-pair product campaign.
   product-cell campaign cannot start because bitcoin-rs has no offline
   archive ingest, no stop-at-height, and no shipped live-IBD product
   lane; corpora and the Core 31.1 oracle are staged and hash-pinned.
-- `CL-19` predicates (≥3 alternating runs, ≥1.05x median, 5% arm
+- `HPA-13` predicates (≥3 alternating runs, ≥1.05x median, 5% arm
   stability, improvement exceeding host noise) remain UNMEASURED for
   every product cell. The fixture figures above are a harness-repeatability
   observation only; many within-run spreads exceed the 5% band, which
   confirms the shared host is unsuitable as a product cell floor.
-- Per `CL-23`: unverified is not supported; unknown is not false. The
+- Per `HPA-08`: unverified is not supported; unknown is not false. The
   three pinned repetitions, the reachability probe, the staged-custody
   digests, and the capability audit are the complete measured record of
   this leg.

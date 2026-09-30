@@ -1,4 +1,4 @@
-//! CL-14 evidence for the mempool surfaces changed by #639.
+//! Resource-bound evidence for the mempool surfaces changed by #639.
 //!
 //! Raw count-bound chains isolate graph costs; verified P2WSH chains check
 //! sigop-adjusted and fractional weight boundaries against rust-bitcoin.
@@ -411,7 +411,7 @@ fn mempool_policy_resource_capture_at_resolved_graph_bounds() -> TestResult {
         "rss_unavailable_reason": (!cfg!(target_os = "linux")).then_some("No RSS collector is configured for this platform; policy checks still run."),
         "transient_retained_allocation_high_water_bytes": Value::Null,
         "complete_cl14_evidence": false,
-        "notes": "RSS has no configured mempool-specific cap. Retained estimates are endpoint samples and omit transient allocations. Vsize and structural limits are checked separately. These partial measurements are not full CL-14 evidence or a regression/throughput claim.",
+        "notes": "RSS has no configured mempool-specific cap. Retained estimates are endpoint samples and omit transient allocations. Vsize and structural limits are checked separately. These partial measurements are not complete resource evidence or a regression/throughput claim.",
         "measurements": measurements,
     });
     let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/process-harness");

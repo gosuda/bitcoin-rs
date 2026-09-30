@@ -123,6 +123,7 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         "chain_tip_handle",
         "applied_tip_handle",
         "block_tree",
+        "block_tree_handle",
         "transition_barrier",
         // Retained-history authority lives in storage/pruning; chainstate
         // keeps only `MandatoryRetention` and must not broker the registry.

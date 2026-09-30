@@ -261,11 +261,7 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
 
 
 class SetupFailureTests(unittest.TestCase):
-    """Regression coverage for CONSTRAINTS.md#qa-corpus-importer-setup-contract.
-
-    QAC-01 names the corpus/provenance owner; the setup section in
-    CONSTRAINTS.md owns the exit-status and cleanup behavior asserted below.
-    """
+    """Regression coverage for the QAC-03 importer setup contract."""
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

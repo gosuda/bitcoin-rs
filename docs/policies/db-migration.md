@@ -92,7 +92,7 @@ The `Cold` path is for a datadir with the current marker and no committed durabl
 | Epoch | Change | Status |
 | --- | --- | --- |
 | `0` | Initial baseline format. An unmarked non-empty datadir adopts it while it is current. | current |
-| `1` | T14 moves authoritative chainstate bytes to the chainstate owner's durable store. The checkpoint commit point is replaced by the durable head. Open refuses with `incompatible_schema`; explicit operator resync is required. | planned |
+| `1` | The target durable layout moves authoritative chainstate bytes to the chainstate owner's durable store. The checkpoint commit point is replaced by the durable head. Open refuses with `incompatible_schema`; explicit operator resync is required. | planned |
 
 ## Removed settings and changed input syntax
 

@@ -8,9 +8,10 @@
 | Explore Bitcoin one module at a time | [Architecture contract](contracts/architecture.md) and each crate's `README.md` |
 | Find a normative clause and its tests | [Contract index](contracts/README.md) |
 | Understand project vocabulary | [Concepts](../CONCEPTS.md) |
-| Inspect gate and evidence status | [Constraint register](../CONSTRAINTS.md) |
+| Read repository-wide invariants | [Project invariants](../CONSTRAINTS.md) |
 | Change the repository | [Agent guidelines](../AGENTS.md) and [contributing](../CONTRIBUTING.md) |
 | Operate recovery or REST | [Recovery contract](contracts/recovery.md) and [REST guide](rest-interface.md) |
+| Place instrumentation in the right layer | [Observability boundary](observability.md), [tracing/USDT](tracing.md) |
 
 The contract index owns the clause/proof map; this page does not maintain a
 second inventory. Contracts take precedence over local source comments,
@@ -47,8 +48,8 @@ registry is not external verification; the two must not be conflated.
 [hot-path contract](contracts/hot-path-attribution.md) owns ledger interpretation.
 `UNMEASURED`, `planned`, and `BLOCKED` are not successful results.
 
-[Formal models](models/) and their configurations remain subject to the
-[constraint register](../CONSTRAINTS.md). A compiled build is not proof of a
+[Formal models](models/) and their configurations are governed by the
+[formal verification contract](contracts/formal-verification.md). A compiled build is not proof of a
 target design, and this index does not duplicate gate verdicts.
 
 The default binary is kernel-free; library defaults are governed separately by

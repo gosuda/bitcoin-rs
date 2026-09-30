@@ -441,7 +441,7 @@ mod pagination_tests {
         }
     }
 
-    // Contract: CONSTRAINTS.md, "Mempool page-selection contracts (v1)", SEL-01.
+    // Regression: selection borrows candidates and clones only the returned page.
     #[test]
     fn selection_borrows_payloads_and_only_the_final_page_is_cloned() {
         let entries: Vec<_> = (0_u32..129)
@@ -492,7 +492,7 @@ mod pagination_tests {
         );
     }
 
-    // Contract: CONSTRAINTS.md, "Mempool page-selection contracts (v1)", SEL-02.
+    // Regression: a zero-sized page must not traverse the pool.
     #[test]
     fn zero_selection_does_not_poll_the_pool_iterator() {
         let entries = std::iter::from_fn(|| -> Option<&MempoolEntry> {

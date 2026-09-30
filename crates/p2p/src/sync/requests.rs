@@ -17,7 +17,7 @@ use crate::download_window::statically_fanout_eligible;
 use crate::download_window::{peer_can_serve_height, servable_floor, serves_requested_height};
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin_rs_primitives::{Hash256, u64_saturated_len};
+use bitcoin_rs_primitives::Hash256;
 use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::Instant;
@@ -73,8 +73,6 @@ impl BlockSync {
             .lock()
             .window
             .confirm_prefix_probe(owner, hashes, &successful, now);
-        metrics::counter!("node.sync.prefix_probe_peers")
-            .increment(u64_saturated_len(successful.len()));
         tracing::info!(
             owner = %owner.addr,
             alternates = successful.len(),
@@ -312,7 +310,6 @@ impl BlockSync {
         for source in candidates {
             match self.peer_table.send(source, message) {
                 Ok(()) => {
-                    metrics::counter!("node.sync.cold_front_hedges").increment(1);
                     tracing::info!(
                         owner = %owner.addr,
                         hedge_peer = %source.addr,

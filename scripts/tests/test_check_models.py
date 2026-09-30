@@ -33,7 +33,9 @@ class ModelEvidenceTests(unittest.TestCase):
             rows.append(
                 f"| {name} | {digest} | {cfg_digest} | N=1 | 128 | BLOCKED | - | - |"
             )
-        (self.root / "CONSTRAINTS.md").write_text("\n".join(rows), encoding="utf-8")
+        contract = self.root / check_models.FORMAL_CONTRACT
+        contract.parent.mkdir(parents=True, exist_ok=True)
+        contract.write_text("\n".join(rows), encoding="utf-8")
         self.home = self.root / "tool"
         (self.home / "bin").mkdir(parents=True)
         (self.home / "lib").mkdir()
@@ -67,7 +69,7 @@ class ModelEvidenceTests(unittest.TestCase):
         with self.assertRaises(check_models.EvidenceError) as error:
             check_models.models(self.root)
         self.assertEqual(error.exception.code, 15)
-        (self.root / "CONSTRAINTS.md").write_text("", encoding="utf-8")
+        (self.root / check_models.FORMAL_CONTRACT).write_text("", encoding="utf-8")
         with self.assertRaises(check_models.EvidenceError) as error:
             check_models.models(self.root)
         self.assertEqual(error.exception.code, 15)
@@ -127,11 +129,11 @@ class ModelEvidenceTests(unittest.TestCase):
                 with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
                     self.assertEqual(check_models.main(), 11)
 
-    def test_deleted_register_is_an_inventory_identity_failure(self) -> None:
-        # A deleted custody register cannot settle model identity: main()
+    def test_deleted_contract_is_an_inventory_identity_failure(self) -> None:
+        # A deleted formal contract cannot settle model identity: main()
         # must report the inventory code, 15, never the generic
         # FileNotFoundError code 14.
-        (self.root / "CONSTRAINTS.md").unlink()
+        (self.root / check_models.FORMAL_CONTRACT).unlink()
         with patch.object(check_models, "ROOT", self.root):
             with patch.object(sys, "argv", ["check_models.py", "--check-only"]):
                 with patch.dict(os.environ, {"APALACHE_HOME": str(self.home)}):
