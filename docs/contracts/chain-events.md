@@ -62,10 +62,17 @@ Owners:
 - A failure before stable publication leaves the fence closed until explicit
   recovery. A guard destructor must never quietly reopen the fence after an
   error.
-- Observer delivery is bounded. The commit path may enqueue an observer record
-  while the transition is held to preserve ordering, but a slow consumer drains
-  on its own thread. It never holds the mempool writer, chain transition
-  reservation, or a storage lock while doing slow downstream work.
+- Mempool observer delivery is bounded to 1,024 retained mutation records,
+  including the active callback. The commit path may enqueue while a chain
+  transition is held to preserve ordering, but releases the mempool writer and
+  publication lock before invoking any callback. A full queue retains the
+  ordered prefix and coalesces later batches into one latest-sequence gap;
+  concurrent mempool mutations can enqueue without waiting for the elected
+  drainer or growing the queue. The elected drainer runs callbacks inline;
+  when invoked during chain settlement, a blocked callback can delay releasing
+  the chain transition and therefore subsequent chain commits. Production
+  legs perform a short in-memory mining wake or best-effort ZMQ send. The
+  socket send uses `DONTWAIT`, but endpoint-lock contention can still wait.
 - Canonical estimator accounting is part of the mempool lifecycle in step 6.
   It is not an observer and is never dropped.
 
@@ -121,10 +128,10 @@ checkpoint or replay a journal as an authority.
 - `crates/chainstate/src/lib.rs` and its connect/disconnect/window modules own
   the ordered commit protocol and stable publication.
 - `crates/mempool/src/gateway.rs` and `crates/mempool/src/mutation.rs`: own the canonical mempool lifecycle and bounded observer delivery.
-- `crates/node/tests/overhaul_mempool_lifecycle.rs` (planned): tests that
-  canonical estimator accounting stays inside the lifecycle, that slow
-  observers never hold the pool writer, and that queue overflow produces gap
-  counters and a reconcile signal with bounded memory.
+- `crates/mempool/src/gateway.rs` test
+  `saturated_observer_queue_coalesces_a_bounded_gap`: a blocked observer does
+  not stop concurrent commits, the retained stream stays within the record
+  bound, and overflow becomes one latest-sequence gap.
 - `crates/node/tests/overhaul_durable_head.rs` (planned): tests that a new
   durable head is published only after mempool alignment.
 - `scripts/check_models.py` (manual evidence lane): checks the

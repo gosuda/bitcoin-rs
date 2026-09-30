@@ -103,6 +103,29 @@ fn trim_after_reorg(
         .map(|_| ())
 }
 
+/// Removes the optional disconnected-transaction reread failure after every
+/// required mempool settlement step has succeeded.
+///
+/// The authoritative branch walk has already committed. A missing old body
+/// can lose re-admission candidates, but it cannot turn that committed walk
+/// into a failed chain operation. An earlier coherent execution error remains
+/// the caller-visible result.
+fn without_optional_reconsideration_failure(
+    outcome: core::result::Result<(), ReorgError>,
+) -> core::result::Result<(), ReorgError> {
+    match outcome {
+        Err(ReorgError::Reconsideration { source, original }) => {
+            metrics::counter!("node.reorg.skipped_reconsideration").increment(1);
+            tracing::warn!(
+                %source,
+                "disconnected transaction re-admission was skipped; committed chain change stands"
+            );
+            original.map_or(Ok(()), |error| Err(*error))
+        }
+        outcome => outcome,
+    }
+}
+
 /// Settles one reorg outcome while the mempool fence is held. A settle that
 /// disconnected nothing leaves the pool untouched: `switch_to_branch` is
 /// polled while a heavier branch is still downloading, and the resident
@@ -167,7 +190,7 @@ fn settle_node_reorg(
             original: outcome.err().map(Box::new),
         });
     }
-    outcome
+    without_optional_reconsideration_failure(outcome)
 }
 
 fn settle_checkpoint_debt(

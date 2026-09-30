@@ -570,6 +570,13 @@ impl bitcoin_rs_mempool::MempoolObserver for MempoolSequenceObserver {
             }
         }
     }
+
+    fn on_gap(&self, latest_sequence: u64) {
+        tracing::warn!(
+            latest_sequence,
+            "dropping bounded ZMQ sequence backlog; the next mempool sequence exposes the gap"
+        );
+    }
 }
 
 #[cfg(test)]

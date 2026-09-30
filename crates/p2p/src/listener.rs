@@ -8,7 +8,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_primitives::Network;
-use crossbeam_channel::{SendTimeoutError, Sender};
+use crossbeam_channel::{SendTimeoutError, Sender, TrySendError};
 use parking_lot::RwLock;
 use thiserror::Error;
 
@@ -263,15 +263,30 @@ impl ConnectionShared {
         wire_response: bool,
         body_fetch_owned: bool,
     ) {
-        if let Err(error) = self.headers_tx.send(crate::InboundHeaders {
+        let inbound = crate::InboundHeaders {
             headers,
             source: Some(source),
             wire_response,
             body_fetch_owned,
-        }) {
-            tracing::warn!(peer_addr = %source.addr, %error, "p2p inbound headers channel disconnected");
-        } else {
-            wake_sync(self.wake_tx.as_ref());
+        };
+        match self.headers_tx.try_send(inbound) {
+            Ok(()) => wake_sync(self.wake_tx.as_ref()),
+            Err(TrySendError::Full(_)) => {
+                metrics::counter!("node.sync.dropped_header_batches").increment(1);
+                let disconnected = self.peer_table.disconnect_source(source);
+                wake_sync(self.wake_tx.as_ref());
+                tracing::warn!(
+                    peer_addr = %source.addr,
+                    disconnected,
+                    "p2p inbound headers queue full; dropping batch and disconnecting source"
+                );
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                tracing::warn!(
+                    peer_addr = %source.addr,
+                    "p2p inbound headers channel disconnected"
+                );
+            }
         }
     }
 
@@ -2306,6 +2321,49 @@ mod writer_shutdown_tests {
         Ok(())
     }
 
+    /// Header ingress saturation drops the newest batch and revokes only the
+    /// connection that supplied it, leaving unrelated peers available for
+    /// sync reassignment.
+    #[test]
+    fn full_header_ingress_disconnects_only_overflowing_source() {
+        let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
+        headers_tx
+            .send(crate::InboundHeaders {
+                headers: Vec::new(),
+                source: None,
+                wire_response: false,
+                body_fetch_owned: false,
+            })
+            .expect("header queue open");
+        let peer_table = Arc::new(crate::PeerTable::new());
+        let shared = test_shared(
+            Arc::clone(&peer_table),
+            headers_tx,
+            crossbeam_channel::unbounded().0,
+        );
+        let first_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_451));
+        let second_addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_452));
+        let (first_tx, _first_rx) = crossbeam_channel::unbounded();
+        let (second_tx, _second_rx) = crossbeam_channel::unbounded();
+        let first = crate::PeerLease::new(first_tx);
+        let second = crate::PeerLease::new(second_tx);
+        let first_source = first.source(first_addr);
+        let second_source = second.source(second_addr);
+        peer_table.register(first_addr, first.clone());
+        peer_table.register(second_addr, second.clone());
+
+        shared.send_headers(first_source, Vec::new(), true, false);
+
+        let retained = headers_rx
+            .try_recv()
+            .expect("original queued batch retained");
+        assert_eq!(retained.source, None, "the newest batch is dropped");
+        assert!(first.is_cancelled());
+        assert!(!peer_table.is_current(first_source));
+        assert!(!second.is_cancelled());
+        assert!(peer_table.is_current(second_source));
+    }
+
     #[test]
     fn send_block_forwards_the_blocks_header() -> Result<(), Box<dyn std::error::Error>> {
         // Every inbound body carries its own header; `send_block` must also
@@ -3138,6 +3196,116 @@ mod block_forward_tests {
         let bytes = bitcoin::consensus::encode::serialize(&genesis);
         bitcoin_rs_primitives::Block::consensus_decode(&bytes)
             .expect("regtest genesis block must decode")
+    }
+
+    fn header_ingress_fixture()
+    -> Result<(super::ConnectionShared, Arc<BlockSync>), Box<dyn std::error::Error>> {
+        let (mut tree, _) = mined_chain(0, 0)?;
+        let chain_tip = tree.tip_handle();
+        let chain: Arc<dyn SyncChain> = Arc::new(TestChain::new(
+            chain_tip,
+            Arc::new(ArcSwapOption::empty()),
+            Arc::new(RwLock::new(tree)),
+        ));
+        let peers = Arc::new(crate::PeerTable::new());
+        let (headers_tx, headers_rx) = crossbeam_channel::bounded(1);
+        let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
+        let sync = Arc::new(BlockSync::new(
+            chain,
+            Arc::clone(&peers),
+            Arc::new(Mutex::new(headers_rx)),
+            Arc::new(Mutex::new(blocks_rx)),
+            crate::sync::syncing_ibd_latch(),
+        ));
+        let mut shared = test_shared(peers, headers_tx, blocks_tx);
+        shared.block_sync = Some(Arc::clone(&sync));
+        Ok((shared, sync))
+    }
+
+    #[test]
+    fn full_header_ingress_reassigns_pending_request_on_tick()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for same_address in [false, true] {
+            let (shared, sync) = header_ingress_fixture()?;
+            let first_addr = test_addr(9781, 0)?;
+            let first_rx = connect_peer(&shared.peer_table, synthetic_peer(first_addr, 1));
+            let first = shared.peer_table.lease(first_addr).ok_or("first lease")?;
+            let first_source = first.source(first_addr);
+            sync.tick();
+            assert!(matches!(
+                first_rx.try_recv()?,
+                crate::Message::GetHeaders(_)
+            ));
+            assert!(first_rx.is_empty());
+
+            shared.send_headers(first_source, Vec::new(), true, false);
+            shared.send_headers(first_source, Vec::new(), true, false);
+            assert!(first.is_cancelled());
+            assert!(!shared.peer_table.is_current(first_source));
+
+            let next_addr = if same_address {
+                first_addr
+            } else {
+                test_addr(9782, 0)?
+            };
+            let next_rx = connect_peer(&shared.peer_table, synthetic_peer(next_addr, 1));
+            let next_source = current_source(&shared.peer_table, next_addr);
+            // No ready callback: the tick itself must sweep the dead owner
+            // before sending and tracking its successor's request.
+            sync.tick();
+            assert!(matches!(next_rx.try_recv()?, crate::Message::GetHeaders(_)));
+            assert!(next_rx.is_empty());
+            assert!(shared.peer_table.is_current(next_source));
+            sync.tick();
+            assert!(
+                next_rx.is_empty(),
+                "a successor's tracked request must suppress a duplicate next tick"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn full_header_ingress_preserves_other_live_pending_request()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for same_address in [false, true] {
+            let (shared, sync) = header_ingress_fixture()?;
+            let overflowing_addr = test_addr(9783, 0)?;
+            let overflowing_rx =
+                connect_peer(&shared.peer_table, synthetic_peer(overflowing_addr, 1));
+            let overflowing = shared
+                .peer_table
+                .lease(overflowing_addr)
+                .ok_or("overflowing lease")?;
+            let owner_addr = if same_address {
+                overflowing_addr
+            } else {
+                test_addr(9784, 0)?
+            };
+            let owner_rx = connect_peer(&shared.peer_table, synthetic_peer(owner_addr, 2));
+            let owner_source = current_source(&shared.peer_table, owner_addr);
+            sync.tick();
+            assert!(matches!(
+                owner_rx.try_recv()?,
+                crate::Message::GetHeaders(_)
+            ));
+            assert!(owner_rx.is_empty());
+            assert!(overflowing_rx.is_empty());
+
+            // A stale callback at the owner's address must not revoke its
+            // replacement; an unrelated live source may revoke only itself.
+            let overflowing_source = overflowing.source(overflowing_addr);
+            shared.send_headers(overflowing_source, Vec::new(), true, false);
+            shared.send_headers(overflowing_source, Vec::new(), true, false);
+            sync.tick();
+            assert!(overflowing.is_cancelled());
+            assert!(shared.peer_table.is_current(owner_source));
+            assert!(
+                owner_rx.is_empty(),
+                "overflow must not clear another live owner's request and resend it"
+            );
+        }
+        Ok(())
     }
 
     /// One connection cannot fill the shared inbound block channel with bodies

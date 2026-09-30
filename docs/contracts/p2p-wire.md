@@ -416,8 +416,9 @@ covers the delivery-path forward.
 
 - **Owner**: the block branch of `dispatch_inbound_full`
   (`crates/p2p/src/dispatch.rs`), `BlockSync::announce_block`
-  (`crates/p2p/src/sync.rs`) and `BlockSync::drain_block_announcements`
-  (`crates/p2p/src/sync/headers.rs`).
+  (`crates/p2p/src/sync.rs`), `BlockSync::drain_block_announcements`
+  (`crates/p2p/src/sync/headers.rs`), and `ConnectionShared::send_headers`
+  (`crates/p2p/src/listener.rs`).
 - `MSG_BLOCK` and `MSG_WITNESS_BLOCK` inventory vectors are availability
   information, never a body request: each one is queued against the
   announcing connection and drained by the header drain, which credits that
@@ -443,8 +444,14 @@ covers the delivery-path forward.
   that is not on the branch the header tip ends at, or that leaves the apply
   frontier more than `COMPACT_RELAY_NEAR_TIP_BLOCKS` below it, is a bulk
   download or a large reorg and stays with the ordinary scheduler.
-- **Ingress bounds**: the shared inbound block channel is bounded once for
-  the node (`P2pServiceConfig::inbound_block_queue_limit`, set from
+- **Ingress bounds**: the shared inbound header channel retains at most 256
+  decoded batches. An overflowing batch is dropped with a counter and only
+  its exact source connection is disconnected. The listener wakes sync;
+  scheduler reconciliation (P2P-02) releases the dead connection's requests
+  before tick selection and reassignment, without clearing an unrelated or
+  same-address replacement's live request. The listener does not mutate
+  scheduler ownership directly. The shared inbound block channel is bounded
+  once for the node (`P2pServiceConfig::inbound_block_queue_limit`, set from
   `INBOUND_BLOCK_CHANNEL_LIMIT`), and
   `PeerLease::admit_block_forward` bounds each connection's unsolicited
   share of it at `MAX_UNSOLICITED_BLOCK_FORWARDS`
@@ -483,7 +490,10 @@ covers the delivery-path forward.
 Proof: `crates/p2p/src/dispatch.rs` test
 `inv_block_uses_headers_not_body_getdata`; `crates/p2p/src/sync/tests/head_sync.rs`
 test `announced_near_tip_is_direct_fetched_before_tick`;
-`crates/p2p/src/listener.rs` test
+`crates/p2p/src/listener.rs` tests
+`full_header_ingress_disconnects_only_overflowing_source`,
+`full_header_ingress_reassigns_pending_request_on_tick`,
+`full_header_ingress_preserves_other_live_pending_request`, and
 `unsolicited_block_flood_is_bounded_per_source`; `crates/p2p/src/sync/tests.rs`
 tests `permanent_consensus_body_disconnects_delivering_source` and
 `binding_and_operational_failures_do_not_disconnect`.

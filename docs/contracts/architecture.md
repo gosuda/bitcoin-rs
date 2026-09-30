@@ -363,6 +363,61 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   `CORE_REORG_SAFETY_MARGIN`; this protects reconsideration of disconnected
   transactions during reorg handling.
 
+### `ARCH-09`: Runtime failure propagation and backpressure
+
+`ARCH-01` constrains compile-time crate dependencies. It does not imply that a
+runtime call is synchronous, required, retried, or allowed to fail a caller.
+The composition owner must make that policy explicit. The authoritative chain
+commit is the boundary: required work before stable publication fails closed;
+derived or observational work after it cannot roll the commit back.
+
+| Runtime edge | Criticality and bound | Failure owner and policy |
+| --- | --- | --- |
+| Chainstate to UTXO, durable head, undo, and mandatory retention (`crates/chainstate/src/durable.rs:115`) | Required, synchronous durability; no artificial wall-clock timeout | Chainstate returns the typed storage/apply failure and keeps mutation admission closed when recovery is required. No downstream consumer may reinterpret a committed outcome as an uncommitted refusal. |
+| Committed chain transition to mempool settlement (`crates/node/src/reorg_effects.rs:113`) | Required for reopening admission; disconnected candidate retention is capped at 20 MB | Node holds the generation fence through block eviction, resident reorg sweep, trim, and `finish`. Their failure closes admission and requests shutdown; the committed chain prefix still stands. Re-reading old bodies for optional transaction re-admission is best-effort: loss is counted/logged and does not fail a successfully committed switch. Restart begins with an empty mempool. |
+| Committed transition to RPC `BlockLog` (`crates/node/src/chain_effects.rs:260`) | Derived in-memory cache; one synchronous write lock, no fallible I/O | `ChainFollowers` owns append/pop. It cannot change chainstate; lock-delay limitations are listed below. |
+| Committed transition to derived index (`crates/index/src/runtime.rs:145`) | Optional, rebuildable; capacity-one `try_send` wake coalesces revisions | `DerivedIndexRuntime` reconciles from the current chain snapshot. Worker error or panic publishes typed unavailability and does not stop chain progress. Shutdown waits five seconds, then revokes the generation, poisons/detaches the namespace, and suppresses a clean checkpoint. |
+| Chain or mempool event to ZMQ (`crates/rpc/src/zmq.rs:399`) | Observational; socket HWM defaults to 1,000 and sends use `DONTWAIT` | Transport saturation drops and logs the notification. `ChainFollowers` contains publisher panics separately for block and sequence dispatch; the committed mutation stands and later consumers continue. Mempool sequence overflow is explicit through sequence gaps. |
+| Mempool commit to observer fanout (`crates/mempool/src/gateway.rs:1441`) | Optional; at most 1,024 retained mutation records including the active callback | `MempoolGateway` preserves the retained prefix, counts overflow, then emits one coalesced latest-sequence gap. Callbacks run outside gateway locks; each composite leg and the outer drain contain panics. Mining refreshes from the gap sequence; ZMQ logs it. |
+| Mempool commit to transaction relay (`crates/p2p/src/tx_relay.rs:130`) | Optional; queue capacity 1,024, non-blocking `try_send` | `TxRelayQueue` drops the newest announcement and counts saturation. Per-peer outbound item and byte budgets disconnect only the saturated peer. Admission is unaffected. |
+| Peer sessions to sync and transaction ingress (`crates/p2p/src/listener.rs:259`) | Session-scoped; header queue 256, block queue 512 with 100 ms cancellation polls, inbound transaction queue 1,024; unsolicited bodies are limited to 16 per connection | Header overflow drops the newest batch and disconnects only its exact source so sync can reassign work. Block waits occur only on the peer thread and end on session cancellation. Transaction overflow drops the body. None of these queues runs under a chainstate write lock. |
+| Chain/mempool change to mining generation (`crates/mining/src/generation_signal.rs:38`) | Optional capability wake; production signal is an in-memory lock/read and notification | `ChainFollowers` contains a panicking mining callback after chain commit. Mempool observer overflow sends the latest sequence so template state coalesces to current state. |
+| Optional versus mandatory retained history (`crates/storage/src/pruning/lease.rs:360`) | Optional leases carry a `RetentionBudget`; mandatory transition leases are separate | The retention registry may expire/refuse optional history and the consumer becomes unavailable or rebuilds. A mandatory identity-preserving reorg lease refusal is a typed chain operation failure before mutation; retained operator data is never reset implicitly. |
+| Process lifecycle joins (`crates/node/src/lifecycle.rs:255`) | Owner-specific | Core services join before clean checkpoint publication. The index has the explicit five-second abandonment policy above; peer/session work is cancelled by its service owner. A join failure suppresses the clean checkpoint instead of claiming durable shutdown. |
+
+Panic containment requires stack unwinding. The workspace `release` profile
+sets `panic = "unwind"`; `quickstart` inherits that setting, so both standard
+builds retain the optional-callback isolation boundaries. This changes panic
+handling, not which owner commits or settles a chain transition. An external
+embedding workspace controls its own profile: Cargo ignores profile settings
+in dependencies. Consumers that select `panic = "abort"`, including through
+Cargo configuration or compiler flags, terminate on a publisher panic instead
+of containing it. Targets without unwinding support cannot provide this
+containment either.
+
+The following limitations are current implementation facts, not target-design
+claims:
+
+- Every `gettxoutsetinfo` scan calls `UtxoSet::with_stable_view`, holding
+  `stable_view_lock.read()` for the entire traversal; authoritative UTXO
+  commits need its write lock. Even an uncontested scan can therefore delay
+  mutation for the full scan. `scantxoutset` and the final `gettxoutsetinfo`
+  retry, after four changed-tip scans, additionally hold `StableRead`. These
+  finite in-memory walks scale with UTXO size and have no hard latency bound.
+- `getchaintxstats` avoids the transition mutex, but its fallback can walk a
+  retained `BlockLog` prefix while holding the log read lock and the block-tree
+  read guard. A committed follower append may wait for that RPC; no immutable
+  log snapshot currently bounds the delay.
+- The production ZMQ socket send uses `DONTWAIT`, but acquiring its endpoint
+  mutex can wait. The production mining wake is constant-size; public custom
+  `ZmqPublisher`, `MiningControl`, and `MempoolObserver` implementations can
+  block indefinitely. With an unwinding build, callback panics are contained;
+  a wall-clock deadline around foreign callbacks is not enforced.
+- ZMQ and mempool observer streams are not durable replay logs. Txindex owns a
+  persisted cursor and reconciles after restart; general post-commit event
+  replay remains issue #77. Tests therefore do not establish crash/restart
+  convergence for every derived consumer.
+
 ## Remaining composition boundary
 
 `crates/chainstate` owns authoritative applied-chain mutation, recovery,
@@ -424,9 +479,34 @@ composition seam.
   parallel runtime projections.
 - `crates/node/src/chain_effects.rs` tests `noop_asks_for_no_payloads`,
   `connect_then_disconnect_rewinds_the_rpc_log_and_emits_in_order`,
+  `optional_publisher_panic_preserves_committed_connect`, and
   `disconnect_does_not_pop_a_different_tail`: post-commit RPC/ZMQ work is
   owned by `ChainFollowers`, not by apply; the connect/disconnect test also
-  proves that the configured ZMQ publisher receives the committed effects.
+  proves that the configured ZMQ publisher receives the committed effects,
+  while the panic test proves one optional publisher cannot roll back the
+  chain or prevent required mempool settlement in the test harness. Cargo
+  ignores the profile's panic strategy for tests, including `cargo test
+  --release`; release containment requires a separately executed non-test
+  binary exercising the publisher callback.
+- `crates/mempool/src/gateway.rs` test
+  `saturated_observer_queue_coalesces_a_bounded_gap` pins the 1,024-record
+  observer bound and latest-sequence overflow signal.
+- `crates/p2p/src/listener.rs` test
+  `full_header_ingress_disconnects_only_overflowing_source` pins header queue
+  saturation to the exact source connection.
+- `crates/node/tests/unit/sync/tests/transitions_2.rs` test
+  `optional_reconsideration_body_loss_preserves_committed_switch` proves that
+  optional old-body loss does not mask a committed branch while the required
+  mempool generation still settles.
+- `crates/index/src/runtime/query_tests.rs` test
+  `failed_worker_makes_queries_unavailable` pins index failure to its query
+  capability. `crates/index/src/runtime/recovery_tests.rs` test
+  `pruned_history_rebuilds_from_the_frontier_and_absent_history_waits` and
+  `crates/storage/src/pruning/lease.rs` test
+  `history_grant_is_refused_below_the_line_and_bounded_by_budget` cover the
+  optional history policy. `crates/node/tests/unit/state/tests/index.rs` test
+  `bounded_shutdown_stops_the_worker_and_allows_reopen` covers the bounded
+  lifecycle handoff.
 - `crates/node/tests/unit/config/tests.rs` tests
   `resolve_prefers_higher_layers_field_by_field` and
   `rpc_cookie_and_credential_layers_keep_one_auth_source`: later `UserConfig`

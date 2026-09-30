@@ -5,13 +5,14 @@
 //! ordered [`MutationEnvelope`] for the optional [`MempoolObserver`] — always
 //! in commit order, by construction. Publication is eventual: a nested or
 //! concurrent mutation call may return before its callback runs, and the
-//! elected drainer completes every queued callback exactly once, in
-//! sequence order, with no gateway lock held. After this, no production
-//! code outside the gateway takes the mempool write lock — lookups go
-//! through the [`MempoolGateway::read`] passthrough. One pool, one
-//! gateway: [`MempoolGateway::shared`] interns a single
-//! [`MempoolGateway`] per pool `Arc` identity, so every route to a pool
-//! shares one publish queue and one observer slot.
+//! elected drainer completes every retained callback exactly once, in
+//! sequence order, with no gateway lock held. The queue is bounded; overflow
+//! coalesces into an explicit latest-sequence gap. After this, no production
+//! code outside the gateway takes the mempool write lock — lookups go through
+//! the [`MempoolGateway::read`] passthrough. One pool, one gateway:
+//! [`MempoolGateway::shared`] interns a single [`MempoolGateway`] per pool
+//! `Arc` identity, so every route to a pool shares one publish queue and one
+//! observer slot.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -397,24 +398,33 @@ use crate::rbf::{LimitEnforcement, RbfError};
 static REGISTRY: LazyLock<Mutex<Vec<Weak<MempoolGateway>>>> =
     LazyLock::new(|| Mutex::new(alloc::vec::Vec::new()));
 
-/// Receives every committed mempool mutation, exactly once, in sequence
-/// order.
+/// Receives a bounded ordered prefix of committed mempool mutations.
 ///
 /// Observers are best-effort mirrors: they run after the mutation is
 /// already committed, so their failures never affect pool state, and a
 /// panic in `on_mutation` is contained by the gateway — the drainer
-/// records it and continues with the remaining queued batches. Callbacks
+/// records it and continues with the remaining queued batches. If a slow
+/// callback fills the bounded publication queue, later batches coalesce into
+/// one [`Self::on_gap`] notification. Callbacks
 /// run with no gateway lock held, so an observer may route mutations back
 /// through the gateway: a nested call commits, enqueues, and returns
 /// immediately, and its publication completes after the in-flight callback
 /// — possibly after the nested call itself has already returned to its
 /// caller.
 pub trait MempoolObserver: Send + Sync {
-    /// Called once per committed, non-empty [`MutationEnvelope`].
+    /// Called once per retained, non-empty [`MutationEnvelope`].
     fn on_mutation(&self, envelope: &MutationEnvelope);
+
+    /// Reports that bounded publication dropped one or more committed batches.
+    ///
+    /// `latest_sequence` is the last mempool sequence covered by the gap.
+    /// Observers that maintain a coalescible current-state wake should refresh
+    /// from live state here. Stream-only observers may leave the default no-op:
+    /// the next delivered envelope's sequence exposes the gap.
+    fn on_gap(&self, _latest_sequence: u64) {}
 }
 
-/// Fans one committed mutation out to several named observers.
+/// Fans one retained mutation or gap out to several named observers.
 ///
 /// Each leg runs under its own [`std::panic::catch_unwind`]: a panicking
 /// leg increments the aggregate `node.mempool.observer_failures_total`
@@ -495,7 +505,34 @@ impl MempoolObserver for CompositeObserver {
             }
         }
     }
+
+    fn on_gap(&self, latest_sequence: u64) {
+        let legs = self.legs.lock().clone();
+        for (name, leg) in &legs {
+            let outcome = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+                leg.on_gap(latest_sequence);
+            }));
+            if let Err(panic_payload) = outcome {
+                metrics::counter!("mempool_observer_leg_failed_total", "leg" => *name).increment(1);
+                let (message, payload_disposal_panicked) = panic_message_and_dispose(panic_payload);
+                tracing::warn!(
+                    leg = *name,
+                    message = %message,
+                    payload_disposal_panicked,
+                    "mempool observer gap callback panicked; later legs continue"
+                );
+            }
+        }
+    }
 }
+
+/// Maximum mutation records retained for optional observer publication.
+///
+/// Each record is fixed-size and owns no transaction body. The count includes
+/// the batch in the active callback. Once this many changes are retained,
+/// later batches coalesce into one scalar gap notification until the retained
+/// prefix has drained.
+const MAX_PENDING_OBSERVER_CHANGES: usize = 1_024;
 
 /// The mutation publication queue state, protected by the `publish` mutex.
 ///
@@ -507,8 +544,21 @@ struct PublishState {
     /// Committed, non-empty envelopes awaiting their observer callback, in
     /// commit order.
     queue: VecDeque<MutationEnvelope>,
+    /// Number of mutation records retained by `queue` plus the active callback.
+    queued_changes: usize,
+    /// Last sequence omitted after the queue reached its change bound.
+    ///
+    /// Once armed, every later batch coalesces here until the queued prefix
+    /// and this notification drain, so no post-gap envelope can overtake it.
+    gap_sequence: Option<u64>,
     /// Whether exactly one caller is draining the queue.
     draining: bool,
+}
+
+enum PendingPublication {
+    Envelope(MutationEnvelope),
+    Gap(u64),
+    Idle,
 }
 
 /// Owns the mempool's write lock and publishes ordered mutation events.
@@ -528,17 +578,17 @@ struct PublishState {
 ///    publish state to idle only once the queue is empty.
 ///
 /// Commits serialize under the write lock and step 3 enqueues under that
-/// same ownership, so the queue order is the commit order and the sequence
-/// order: every committed, non-empty batch is published exactly once, in
-/// order, even across nested and concurrent callers. Publication is
-/// eventual, not synchronous: a nested or concurrent mutation enqueues
-/// and returns while a drainer exists, and its callback may run after
-/// that call has returned. No gateway lock is ever held across an
-/// observer call, so observers may re-enter the gateway freely. An
-/// observer panic is caught and recorded; the drainer continues with
-/// the remaining queue and only then returns to idle. Empty results and
-/// an absent observer enqueue nothing, allocate nothing, and spawn no
-/// thread.
+/// same ownership, so the retained queue order is the commit and sequence
+/// order, even across nested and concurrent callers. Publication is eventual,
+/// not synchronous: a nested or concurrent mutation enqueues and returns while
+/// a drainer exists, and its callback may run after that call has returned.
+/// At most [`MAX_PENDING_OBSERVER_CHANGES`] records are retained, including the
+/// active callback; overflow coalesces into one latest-sequence gap and no
+/// later envelope overtakes it. No gateway lock is ever held across an observer
+/// call, so observers may re-enter the gateway freely. An observer panic is
+/// caught and recorded; the drainer continues with the remaining queue and only
+/// then returns to idle. Empty results and an absent observer enqueue nothing,
+/// allocate nothing, and spawn no thread.
 pub struct MempoolGateway {
     pub(crate) pool: Arc<RwLock<Mempool>>,
     /// Pool guards precede this lock. Never held during observer calls,
@@ -591,6 +641,8 @@ impl MempoolGateway {
             observer: composite,
             publish: Mutex::new(PublishState {
                 queue: VecDeque::new(),
+                queued_changes: 0,
+                gap_sequence: None,
                 draining: false,
             }),
             chain_generation: AtomicU64::new(0),
@@ -931,16 +983,7 @@ impl MempoolGateway {
         // 6. Enqueue the committed mutation and elect a drainer if needed.
         let result = outcome;
         self.update_admission_lifecycle(&pool, &result);
-        let mut elected = false;
-        if !result.changes.is_empty() && self.observer.is_some() {
-            let mut publish = self.publish.lock();
-            publish.queue.push_back(MutationEnvelope {
-                origin: request.origin,
-                result: result.clone(),
-            });
-            elected = !publish.draining;
-            publish.draining = true;
-        }
+        let elected = self.enqueue_observer(request.origin, &result);
         drop(pool);
         if elected {
             self.drain();
@@ -1378,27 +1421,51 @@ impl MempoolGateway {
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> Result<MutationResult, E>,
     ) -> Result<MutationResult, E> {
-        let mut elected = false;
-        let outcome = {
+        let (outcome, elected) = {
             let mut pool = self.pool.write();
             let outcome = mutate(&mut pool)?;
             let result = &outcome;
             self.update_admission_lifecycle(&pool, result);
-            if !result.changes.is_empty() && self.observer.is_some() {
-                let mut publish = self.publish.lock();
-                publish.queue.push_back(MutationEnvelope {
-                    origin,
-                    result: result.clone(),
-                });
-                elected = !publish.draining;
-                publish.draining = true;
-            }
-            outcome
+            let elected = self.enqueue_observer(origin, result);
+            (outcome, elected)
         };
         if elected {
             self.drain();
         }
         Ok(outcome)
+    }
+
+    /// Retains one bounded observer batch or coalesces it into a gap.
+    ///
+    /// Called while the pool writer still serializes sequence assignment. The
+    /// publish lock therefore sees commit order, but no observer callback runs
+    /// until the caller has released the pool writer.
+    fn enqueue_observer(&self, origin: AdmissionOrigin, result: &MutationResult) -> bool {
+        if result.changes.is_empty() || self.observer.is_none() {
+            return false;
+        }
+        let mut publish = self.publish.lock();
+        let elected = !publish.draining;
+        publish.draining = true;
+        let change_count = result.changes.len();
+        let fits = publish.gap_sequence.is_none()
+            && change_count <= MAX_PENDING_OBSERVER_CHANGES.saturating_sub(publish.queued_changes);
+        if fits {
+            publish.queued_changes += change_count;
+            publish.queue.push_back(MutationEnvelope {
+                origin,
+                result: result.clone(),
+            });
+        } else {
+            let latest_sequence = result
+                .sequence_of(change_count.saturating_sub(1))
+                .unwrap_or(result.sequence_base);
+            publish.gap_sequence = Some(latest_sequence);
+            metrics::counter!("mempool_observer_dropped_batches_total").increment(1);
+            metrics::counter!("mempool_observer_dropped_changes_total")
+                .increment(u64::try_from(change_count).unwrap_or(u64::MAX));
+        }
+        elected
     }
 
     /// Finalizes peer-only holding/rejection while the exact admission state
@@ -1461,7 +1528,8 @@ impl MempoolGateway {
         result
     }
 
-    /// Publishes queued batches until the queue is empty, then returns
+    /// Publishes retained batches and one coalesced gap until both are empty,
+    /// then returns
     /// the publish state to idle. Exactly one drainer runs at a time: the
     /// election in [`Self::commit`] is the only place `draining` turns
     /// true, and the idle transition happens under the same mutex only
@@ -1473,28 +1541,42 @@ impl MempoolGateway {
     /// panic hook still prints the panic before it is caught here.
     fn drain(&self) {
         loop {
-            let envelope = {
+            let pending = {
                 let mut publish = self.publish.lock();
                 if let Some(envelope) = publish.queue.pop_front() {
-                    envelope
+                    PendingPublication::Envelope(envelope)
+                } else if let Some(sequence) = publish.gap_sequence.take() {
+                    PendingPublication::Gap(sequence)
                 } else {
                     publish.draining = false;
-                    return;
+                    PendingPublication::Idle
                 }
             };
-            let Some(observer) = self.observer.as_ref() else {
-                continue;
-            };
-            let outcome = std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
-                observer.on_mutation(&envelope);
-            }));
-            if let Err(panic_payload) = outcome {
-                let (message, payload_disposal_panicked) = panic_message_and_dispose(panic_payload);
-                tracing::warn!(
-                    message = %message,
-                    payload_disposal_panicked,
-                    "mempool observer panicked; the committed mutation stands"
-                );
+            if matches!(&pending, PendingPublication::Idle) {
+                return;
+            }
+            if let Some(observer) = self.observer.as_ref() {
+                let outcome =
+                    std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| match &pending {
+                        PendingPublication::Envelope(envelope) => observer.on_mutation(envelope),
+                        PendingPublication::Gap(sequence) => observer.on_gap(*sequence),
+                        PendingPublication::Idle => {}
+                    }));
+                if let Err(panic_payload) = outcome {
+                    let (message, payload_disposal_panicked) =
+                        panic_message_and_dispose(panic_payload);
+                    tracing::warn!(
+                        message = %message,
+                        payload_disposal_panicked,
+                        "mempool observer panicked; the committed mutation stands"
+                    );
+                }
+            }
+            if let PendingPublication::Envelope(envelope) = &pending {
+                let mut publish = self.publish.lock();
+                publish.queued_changes = publish
+                    .queued_changes
+                    .saturating_sub(envelope.result.changes.len());
             }
         }
     }
@@ -1634,7 +1716,8 @@ pub fn reset_admission_park() {
 mod tests {
     use super::{
         AdmissionMode, AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError,
-        CompositeObserver, MempoolGateway, MempoolObserver, SharedGatewayError, ValidationEngine,
+        CompositeObserver, MAX_PENDING_OBSERVER_CHANGES, MempoolGateway, MempoolObserver,
+        SharedGatewayError, ValidationEngine,
     };
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
     use crate::orphan::RejectScope;
@@ -2169,6 +2252,7 @@ mod tests {
         entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
         release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
         stream: Mutex<Vec<u64>>,
+        gaps: Mutex<Vec<u64>>,
     }
 
     impl MempoolObserver for GatedObserver {
@@ -2195,6 +2279,10 @@ mod tests {
                     .expect("main thread still alive to release us");
             }
         }
+
+        fn on_gap(&self, latest_sequence: u64) {
+            self.gaps.lock().push(latest_sequence);
+        }
     }
 
     /// Pins the observable signature of the publication state machine.
@@ -2215,6 +2303,7 @@ mod tests {
             entered: Mutex::new(Some(entered_tx)),
             release: Mutex::new(Some(release_rx)),
             stream: Mutex::new(Vec::new()),
+            gaps: Mutex::new(Vec::new()),
         });
         let gateway = Arc::new(MempoolGateway::new(
             Arc::clone(&pool),
@@ -2272,6 +2361,75 @@ mod tests {
         let pool_read = gateway.read();
         assert!(pool_read.contains_txid(&first_txid));
         assert!(pool_read.contains_txid(&second_txid));
+    }
+
+    /// A blocked optional observer retains only a bounded committed prefix.
+    /// Later commits continue, and overflow coalesces into one latest-sequence
+    /// gap so state-based consumers can refresh without retaining every batch.
+    #[test]
+    fn saturated_observer_queue_coalesces_a_bounded_gap() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let observer = Arc::new(GatedObserver {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+            stream: Mutex::new(Vec::new()),
+            gaps: Mutex::new(Vec::new()),
+        });
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            Some(dyn_observer(&observer)),
+            ValidationEngine::Native,
+        ));
+
+        let first = Arc::clone(&gateway);
+        let first_handle = std::thread::spawn(move || {
+            first
+                .insert_entry(AdmissionOrigin::Rpc, entry(&tx(20)))
+                .expect("first in")
+        });
+        entered_rx
+            .recv_timeout(core::time::Duration::from_secs(10))
+            .expect("first observer call started");
+
+        for vout in
+            0..u32::try_from(MAX_PENDING_OBSERVER_CHANGES + 2).expect("observer bound fits u32")
+        {
+            let mut transaction = tx(21);
+            transaction.inputs[0].previous_output =
+                OutPoint::new(Txid(Hash256::from_le_bytes(&[21; 32])), vout);
+            gateway
+                .insert_entry(AdmissionOrigin::Rpc, entry(&transaction))
+                .expect("commit must not wait for the blocked observer");
+        }
+
+        let final_sequence = gateway.read().sequence_number();
+        assert_eq!(
+            final_sequence,
+            u64::try_from(MAX_PENDING_OBSERVER_CHANGES + 3).expect("bound fits u64")
+        );
+        assert_eq!(
+            observer.stream.lock().as_slice(),
+            &[1],
+            "the callback remains blocked while every later mutation commits"
+        );
+        assert!(observer.gaps.lock().is_empty());
+
+        release_tx.send(()).expect("gate thread alive");
+        first_handle.join().expect("first publisher");
+
+        let stream = observer.stream.lock();
+        assert_eq!(stream.len(), MAX_PENDING_OBSERVER_CHANGES);
+        assert_eq!(stream.first(), Some(&1));
+        assert_eq!(
+            stream.last(),
+            Some(&u64::try_from(MAX_PENDING_OBSERVER_CHANGES).expect("bound fits u64"))
+        );
+        assert_eq!(
+            *observer.gaps.lock(),
+            vec![final_sequence],
+            "all overflow coalesces into the latest committed sequence"
+        );
     }
 
     /// An observer that re-enters the gateway from its first callback and
@@ -2493,15 +2651,15 @@ mod tests {
         }
     }
 
-    /// Races mutations from several threads and requires the published
-    /// stream to be exactly the full sequence range in order. Sequences
-    /// are assigned in commit order under the write lock and enqueued
-    /// under that same ownership, so an in-order stream proves publish
-    /// order == commit order regardless of which caller is elected to
+    /// Races fewer mutations than the retention bound and requires the
+    /// published stream to be exactly the full sequence range in order.
+    /// Sequences are assigned in commit order under the write lock and
+    /// enqueued under that same ownership, so an in-order stream proves
+    /// publish order == commit order regardless of which caller is elected to
     /// drain the queue.
     #[test]
     fn concurrent_mutations_publish_in_sequence_order() {
-        const CYCLES: usize = 1_500;
+        const CYCLES: usize = 100;
         const MEMBER_LABELS: [u8; 4] = [20, 21, 22, 23];
         let observer = Arc::new(SequenceStreamObserver::default());
         let gateway = Arc::new(gateway_with(Some(dyn_observer(&observer))));

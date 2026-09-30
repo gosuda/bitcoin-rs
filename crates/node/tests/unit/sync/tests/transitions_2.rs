@@ -100,6 +100,91 @@ fn branch_switch_uses_staged_bodies_without_durable_store() -> Result<(), Box<dy
     Ok(())
 }
 
+/// Losing an old-branch body only during the optional reconsideration reread
+/// must not report an already-committed branch switch as failed. Required
+/// mempool sweep and generation settlement still complete before success.
+#[test]
+fn optional_reconsideration_body_loss_preserves_committed_switch()
+-> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin_rs_consensus::ValidationEngine;
+    use bitcoin_rs_mempool::{Mempool, MempoolGateway, MempoolLimits};
+    use bitcoin_rs_primitives::Script;
+
+    let (handles, main, mut bodies) = matured_chain(101)?;
+    let gateway = Arc::new(MempoolGateway::new(
+        Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        None,
+        ValidationEngine::Native,
+    ));
+    let followers = crate::chain_effects::ChainFollowers::new(
+        Arc::new(RwLock::new(bitcoin_rs_index::block_log::BlockLog::new())),
+        Arc::new(crate::NoOpZmqPublisher),
+        None,
+        Arc::new(crate::mining::MiningGenerationSignal::new()),
+        Some(Arc::clone(&gateway)),
+    );
+
+    let fork_root_hash = main[99].block_hash();
+    let mut fork_parent = handles
+        .block_tree()
+        .read()
+        .lookup(Hash256::from_le_bytes(fork_root_hash.as_bytes()))
+        .ok_or_else(|| std::io::Error::other("missing fork root node"))?;
+    let mut fork_prev = fork_root_hash;
+    let mut fork = Vec::new();
+    for height in 101..=102_u32 {
+        let mut coinbase = regtest_fixture::coinbase(height);
+        coinbase.outputs[0].script_pubkey = Script::from_bytes(push_int(2));
+        let block = mined_block_with_prev_hash(fork_prev, height, vec![coinbase]);
+        fork_parent = crate::sync::fixture_insert_header_node(
+            &handles,
+            fork_parent,
+            block.header,
+            NodeStatus::HeaderValid,
+        )?;
+        fork_prev = block.block_hash();
+        bodies.insert(
+            Hash256::from_le_bytes(block.block_hash().as_bytes()),
+            (block.clone(), bytes::Bytes::from(consensus_bytes(&block))),
+        );
+        fork.push(block);
+    }
+
+    let departed = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
+    let mut departed_reads = 0_u8;
+    crate::reorg::switch_to_branch(
+        &handles,
+        &followers,
+        fork_parent,
+        |hash| {
+            if hash == departed {
+                departed_reads = departed_reads.saturating_add(1);
+                if departed_reads == 3 {
+                    return None;
+                }
+            }
+            bodies.get(&hash).cloned()
+        },
+        |_| {},
+    )?;
+
+    let tip = handles
+        .applied_tip_reader()
+        .load_full()
+        .ok_or_else(|| std::io::Error::other("branch switch did not publish a tip"))?;
+    assert_eq!(
+        tip.hash,
+        Hash256::from_le_bytes(fork[1].block_hash().as_bytes()),
+        "the authoritative switch remains committed"
+    );
+    assert_eq!(departed_reads, 3, "loss occurred only on reconsideration");
+    assert!(
+        gateway.stable_generation().is_some(),
+        "required settlement reopened admission"
+    );
+    Ok(())
+}
+
 /// When a competing connect lands between a reorg plan and its transition,
 /// the switch must replan on the moved applied tip and still reach its
 /// target.

@@ -59,4 +59,8 @@ impl MempoolObserver for MiningGenerationSignal {
             .unwrap_or(result.sequence_base);
         self.publish_generation_from(wake_sequence);
     }
+
+    fn on_gap(&self, latest_sequence: u64) {
+        self.publish_generation_from(latest_sequence);
+    }
 }

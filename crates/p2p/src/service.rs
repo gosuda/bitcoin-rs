@@ -37,6 +37,13 @@ const EXTRA_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(45);
 
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
 
+/// Maximum decoded header batches waiting for the sync owner.
+///
+/// One wire `headers` message contains at most 2,000 headers. The queue drops
+/// an overflowing batch and disconnects only its source, which lets sync
+/// reassign any pending request without retaining an unbounded peer backlog.
+const DEFAULT_INBOUND_HEADER_QUEUE_LIMIT: usize = 256;
+
 /// Core's automatic-connection maximum, `-maxconnections`
 /// (`DEFAULT_MAX_PEER_CONNECTIONS`, `net.h:81`).
 const DEFAULT_MAX_PEER_CONNECTIONS: usize = 200;
@@ -273,7 +280,8 @@ impl P2pService {
     #[must_use]
     pub fn new(config: P2pServiceConfig, shutdown: Arc<AtomicBool>) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
-        let (inbound_headers_tx, inbound_headers_rx) = crossbeam_channel::unbounded();
+        let (inbound_headers_tx, inbound_headers_rx) =
+            crossbeam_channel::bounded(DEFAULT_INBOUND_HEADER_QUEUE_LIMIT);
         let (inbound_blocks_tx, inbound_blocks_rx) =
             crossbeam_channel::bounded(config.inbound_block_queue_limit);
         Self {

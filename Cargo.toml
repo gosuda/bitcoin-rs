@@ -266,7 +266,8 @@ into_iter_without_iter     = "allow"
 opt-level     = 3
 lto           = "fat"
 codegen-units = 1
-panic         = "abort"
+# Optional post-commit callbacks rely on catch_unwind (ARCH-09).
+panic         = "unwind"
 debug         = "line-tables-only"
 strip         = "symbols"
 

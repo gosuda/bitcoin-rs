@@ -22,9 +22,9 @@ state (`crates/mempool/src/orphan.rs`).
   2. mutate and assign per-change `mempool_sequence` values, then update
      the gateway's orphan state and mark waiting children ready for parents
      that remain in the committed pool,
-  3. while still holding the write lock, enqueue a non-empty
-     `MutationEnvelope` on the publish FIFO and elect a drainer if none
-     exists,
+  3. while still holding the write lock, retain a non-empty
+     `MutationEnvelope` on the bounded publish FIFO, or coalesce it into the
+     current gap, and elect a drainer if none exists,
   4. release the write lock and the publish-state lock,
   5. the elected drainer pops batches one at a time — releasing the
      publish-state lock before every observer call — and returns the
@@ -33,18 +33,22 @@ state (`crates/mempool/src/orphan.rs`).
   same ownership, so the queue order is the commit order and the sequence
   order. An observer never sees a later-committed batch before, or
   interleaved with, an earlier one.
-- Publication is eventual, not synchronous. A nested or concurrent
-  mutation enqueues and returns while a drainer exists; its callback may
-  run after that call has returned. A slow observer delays later
-  publications, not the caller. It can never roll anything back or reorder
-  the stream. Sequences were assigned in step 2, so a lagging observer
-  still sees a gap-free, ordered stream.
+- Publication is best-effort and bounded, not a durable journal. A nested or
+  concurrent mutation enqueues and returns while a drainer exists; its
+  callback may run after that call has returned. The elected caller performs
+  the drain after releasing the pool writer. At most 1,024 mutation records
+  are retained, including the active callback. The retained prefix remains in
+  commit order. Once the bound is reached, later batches do not block or grow
+  memory: they coalesce into one `on_gap(latest_sequence)` notification, and
+  no post-gap envelope can overtake it. A slow observer can delay its elected
+  drainer, but it can never roll back a mutation or hold a gateway lock.
 - The observer receives a `&MutationEnvelope` — the committed
   `MutationResult` paired with the `AdmissionOrigin` that identifies how
   the transaction entered the node (`Rpc`, `Peer`, `Reorg`, or `Block`).
-  The gateway clones one `MutationResult` into the envelope for each
-  committed non-empty batch that has an observer attached, so it can both
-  enqueue publication and return the original result to the caller.
+  The gateway clones one `MutationResult` into the envelope for each retained
+  non-empty batch that has an observer attached, so it can both enqueue
+  publication and return the original result to the caller. An oversized or
+  overflow batch retains only its scalar latest sequence in the coalesced gap.
   Publication of empty results or with an absent observer enqueues nothing,
   allocates nothing, and spawns no thread. Internal admission-state updates
   do not depend on an observer being present or making progress.
@@ -52,13 +56,17 @@ state (`crates/mempool/src/orphan.rs`).
   affect the committed mutation. No gateway lock is held across an
   observer call, so an observer may re-enter the gateway: a nested call
   commits, enqueues, and returns immediately, and its publication
-  completes after the in-flight callback. The accepted-mutation mining
-  wake threads the last change's sequence into
+  completes after the in-flight callback. Each composite leg is isolated from
+  panics independently, for both envelopes and gaps. The accepted-mutation
+  mining wake threads the last change's sequence into
   `MempoolSequenceWake::publish_generation_from`, which builds the
   generation key from `applied_tip` plus that sequence and never touches
   the mempool read lock (`crates/mining/src/generation_signal.rs`); `node` attaches that
   mining observer at gateway construction and the ZMQ sequence observer as
-  an extra named leg on the gateway's `CompositeObserver`.
+  an extra named leg on the gateway's `CompositeObserver`. On a gap, mining
+  wakes from `latest_sequence`; the mempool gateway counts dropped batches
+  and changes, the ZMQ sequence observer logs the gap, and the next delivered
+  mempool sequence exposes it to subscribers.
 
 ### `MPL-02`: Atomic mutation records and sequence assignment
 

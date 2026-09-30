@@ -17,6 +17,43 @@ use bitcoin_rs_mempool::ChainChangeGuard;
 use bitcoin_rs_mempool::MempoolGateway;
 use bitcoin_rs_rpc::zmq::{SequenceEvent, ZmqPublisher};
 
+/// Runs one optional post-commit callback without allowing its panic to
+/// escape into authoritative chain settlement.
+fn isolate_optional_follower(name: &'static str, effect: impl FnOnce()) {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(effect));
+    if let Err(payload) = outcome {
+        let message = payload.downcast_ref::<String>().map_or_else(
+            || {
+                payload
+                    .downcast_ref::<&str>()
+                    .map_or("non-string panic payload", |message| *message)
+                    .to_owned()
+            },
+            Clone::clone,
+        );
+        // Dispose ordinary payloads. A hostile destructor may panic again;
+        // suppress only that replacement payload to contain the boundary.
+        let payload_disposal_panicked =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                drop(payload);
+            }))
+            .map_or_else(
+                |nested| {
+                    let _nested = core::mem::ManuallyDrop::new(nested);
+                    true
+                },
+                |()| false,
+            );
+        metrics::counter!("node.chain_follower_panics_total", "consumer" => name).increment(1);
+        tracing::warn!(
+            consumer = name,
+            %message,
+            payload_disposal_panicked,
+            "optional chain follower panicked; committed chain change stands"
+        );
+    }
+}
+
 /// Failure of a node-owned single-block connect.
 ///
 /// The authoritative chainstate failure and a failure after a successful
@@ -64,8 +101,8 @@ pub enum DisconnectMutationError {
 /// the sequence `C`/`D` events, the mining-generation wake, and mempool
 /// admission all run from here, in the order `ARCH-07` fixes.
 ///
-/// INVARIANT: consumer failure is ignored. A full ZMQ socket or a lagged
-/// index cannot invalidate chainstate.
+/// INVARIANT: optional consumer failure is isolated. A full ZMQ socket, a
+/// panicking publisher, or a lagged index cannot invalidate chainstate.
 #[derive(Clone)]
 pub struct ChainFollowers {
     blocks: Arc<RwLock<BlockLog>>,
@@ -213,11 +250,11 @@ impl ChainFollowers {
     /// PRE: `outcome` is committed and the mempool fence, when present, is
     /// held.
     ///
-    /// POST: block-log record, hash/raw ZMQ, derived-index wake plus sequence
-    /// `C`, mining wake, and mempool orphan re-evaluation run once in that
-    /// order. The block-inclusion removals are committed before sequence
-    /// `C`; a `sequence` subscriber sees no `R` event for them, because the
-    /// block event already covers the departures.
+    /// POST: required mempool work runs once; the block-log record, hash/raw
+    /// ZMQ, the derived-index wake, sequence `C`, and the mining wake are
+    /// attempted once in that order. The block-inclusion removals are committed
+    /// before sequence `C`; a `sequence` subscriber sees no `R` event for them,
+    /// because the block event already covers the departures.
     ///
     /// INVARIANT: consumer failure cannot invalidate chainstate.
     pub fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
@@ -230,16 +267,20 @@ impl ChainFollowers {
                 outcome.height,
             );
         }
-        self.blocks
-            .write()
-            .push(BlockRecord::from_block(outcome.height, block));
-        self.publish_block(outcome);
+        isolate_optional_follower("rpc_block_log", || {
+            self.blocks
+                .write()
+                .push(BlockRecord::from_block(outcome.height, block));
+        });
+        isolate_optional_follower("zmq_block", || self.publish_block(outcome));
         self.wake_index();
-        if self.zmq.wants_notifications() {
-            self.zmq
-                .publish_sequence(SequenceEvent::Connected(outcome.hash));
-        }
-        self.mining.publish_generation();
+        isolate_optional_follower("zmq_sequence", || {
+            if self.zmq.wants_notifications() {
+                self.zmq
+                    .publish_sequence(SequenceEvent::Connected(outcome.hash));
+            }
+        });
+        isolate_optional_follower("mining", || self.mining.publish_generation());
         if let Some(admission) = &self.mempool {
             admission.chain_changed(&outcome.txids);
         }
@@ -250,20 +291,24 @@ impl ChainFollowers {
     ///
     /// PRE: `outcome` is a committed production disconnect.
     ///
-    /// POST: the matching-tail log pop, derived-index wake, and gated
-    /// sequence `D` run once in that order; the mining wake and
-    /// `restored_parents` re-evaluation then run.
+    /// POST: restored-parent re-evaluation runs once; the matching-tail log
+    /// pop, derived-index wake, gated sequence `D`, and mining wake are
+    /// attempted in that order.
     ///
     /// INVARIANT: a non-matching tail is not popped, and no consumer
     /// failure changes the chainstate result.
     pub fn on_disconnect(&self, outcome: &DisconnectOutcome) {
-        self.pop_matching_tail(outcome.hash);
+        isolate_optional_follower("rpc_block_log", || {
+            self.pop_matching_tail(outcome.hash);
+        });
         self.wake_index();
-        if self.zmq.wants_notifications() {
-            self.zmq
-                .publish_sequence(SequenceEvent::Disconnected(outcome.hash));
-        }
-        self.mining.publish_generation();
+        isolate_optional_follower("zmq_sequence", || {
+            if self.zmq.wants_notifications() {
+                self.zmq
+                    .publish_sequence(SequenceEvent::Disconnected(outcome.hash));
+            }
+        });
+        isolate_optional_follower("mining", || self.mining.publish_generation());
         if let Some(admission) = &self.mempool {
             admission.chain_changed(&outcome.restored_parents);
         }
@@ -521,6 +566,38 @@ mod tests {
         }
     }
 
+    /// Optional publisher whose first block callback fails while its later
+    /// sequence callback records whether dispatch continued.
+    #[derive(Debug, Default)]
+    struct PanickingPublisher {
+        sequence_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ZmqPublisher for PanickingPublisher {
+        fn wants_rawtx(&self) -> bool {
+            false
+        }
+
+        fn wants_rawblock(&self) -> bool {
+            false
+        }
+
+        fn publish_hashblock(&self, _: Hash256) {
+            panic!("injected optional publisher failure");
+        }
+
+        fn publish_hashtx(&self, _: bitcoin_rs_primitives::Txid) {}
+
+        fn publish_rawblock(&self, _: &[u8]) {}
+
+        fn publish_rawtx(&self, _: &[u8]) {}
+
+        fn publish_sequence(&self, _: SequenceEvent) {
+            self.sequence_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     #[derive(Debug)]
     struct MoveGenerationOnBlockEvent {
         gateway: Arc<MempoolGateway>,
@@ -630,6 +707,68 @@ mod tests {
             "sequence D closes the disconnect"
         );
         Ok(())
+    }
+
+    /// A panic in an optional post-commit publisher cannot turn the committed
+    /// block into a refusal or prevent required mempool settlement. Later
+    /// optional dispatch also continues.
+    #[test]
+    fn optional_publisher_panic_preserves_committed_connect() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
+        config.data_dir = dir.path().join("node");
+        config.p2p.listen.clear();
+        let state = crate::state::NodeState::open(config, None)?;
+        let publisher = Arc::new(PanickingPublisher::default());
+        let zmq: Arc<dyn ZmqPublisher> = publisher.clone();
+        let followers = ChainFollowers::new(
+            Arc::new(RwLock::new(BlockLog::new())),
+            zmq,
+            None,
+            Arc::new(crate::mining::MiningGenerationSignal::new()),
+            Some(state.mempool_gateway()),
+        );
+        let genesis = Network::Regtest.genesis_block();
+
+        let outcome = followers.apply_connect(&state.chainstate(), &genesis)?;
+
+        assert_eq!(outcome.hash, Hash256::from(genesis.block_hash()));
+        assert_eq!(followers.block_log().read().len(), 1);
+        assert_eq!(
+            publisher
+                .sequence_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "sequence dispatch continues after block publication panics"
+        );
+        assert!(state.mempool_gateway().stable_generation().is_some());
+        assert!(!state.shutdown().load(std::sync::atomic::Ordering::Acquire));
+        Ok(())
+    }
+
+    #[test]
+    fn optional_follower_disposes_payload_and_contains_destructor_panic() {
+        struct Payload {
+            drops: Arc<std::sync::atomic::AtomicUsize>,
+            panic_on_drop: bool,
+        }
+        impl Drop for Payload {
+            fn drop(&mut self) {
+                self.drops
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                assert!(!self.panic_on_drop, "injected payload destructor failure");
+            }
+        }
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for panic_on_drop in [false, true] {
+            let payload = Payload {
+                drops: Arc::clone(&drops),
+                panic_on_drop,
+            };
+            isolate_optional_follower("test", || std::panic::panic_any(payload));
+        }
+        assert_eq!(drops.load(std::sync::atomic::Ordering::Relaxed), 2);
+        assert_eq!(Arc::strong_count(&drops), 1);
     }
 
     /// `ARCH-07`: disconnect does not pop a `BlockLog` tail that is not this block.
