@@ -1,7 +1,7 @@
-//! Node-owned Bitcoin Core-compatible USDT tracepoints.
+//! Optional Bitcoin Core-compatible USDT tracepoints.
 //!
-//! Every function in this module is a no-op unless the node is built with its
-//! `usdt` feature enabled. When it is, the probes
+//! Every function in this crate is a no-op unless the consuming binary is
+//! built with this crate's `usdt` feature enabled. When it is, the probes
 //! carry Bitcoin Core's provider names (`validation`, `mempool`, `net`),
 //! probe names, and argument layout — see [`probe_abi`] and `docs/tracing.md`
 //! for the compatibility table.
@@ -39,7 +39,7 @@ mod raw {
     /// Buffer address for the emitter's by-value pointer arguments.
     ///
     /// Core passes hash and message buffers as pointers by value; see
-    /// [`super::probe_abi`] for why these travel as `u64`.
+    /// [`crate::probe_abi`] for why these travel as `u64`.
     #[cfg(feature = "usdt")]
     fn address_of(buffer: *const u8) -> u64 {
         u64::try_from(buffer.addr()).unwrap_or(0)
@@ -130,67 +130,6 @@ pub type RemovedArgs = (*const u8, &'static str, i32, i64, u64);
 /// must address `payload_size` bytes that outlive the probe call; callers
 /// pass the encoded frame's own byte slice.
 pub type MessageArgs = (i64, String, String, String, u64, *const u8);
-
-/// One node-owned implementation of every lower-layer trace sink.
-#[cfg(feature = "usdt")]
-#[derive(Debug)]
-pub(crate) struct Trace;
-
-/// Returns the chainstate sink only in a USDT-enabled node.
-pub(crate) fn chainstate_sink() -> Option<std::sync::Arc<dyn bitcoin_rs_chainstate::TraceSink>> {
-    #[cfg(feature = "usdt")]
-    return Some(std::sync::Arc::new(Trace));
-    #[cfg(not(feature = "usdt"))]
-    None
-}
-
-/// Returns the mempool sink only in a USDT-enabled node.
-pub(crate) fn mempool_sink() -> Option<std::sync::Arc<dyn bitcoin_rs_mempool::TraceSink>> {
-    #[cfg(feature = "usdt")]
-    return Some(std::sync::Arc::new(Trace));
-    #[cfg(not(feature = "usdt"))]
-    None
-}
-
-/// Returns the P2P sink only in a USDT-enabled node.
-pub(crate) fn p2p_sink() -> Option<std::sync::Arc<dyn bitcoin_rs_p2p::NetTraceSink>> {
-    #[cfg(feature = "usdt")]
-    return Some(std::sync::Arc::new(Trace));
-    #[cfg(not(feature = "usdt"))]
-    None
-}
-
-#[cfg(feature = "usdt")]
-impl bitcoin_rs_chainstate::TraceSink for Trace {
-    fn block_connected(
-        &self,
-        prepare: &mut dyn FnMut() -> bitcoin_rs_chainstate::BlockConnectedTraceArgs,
-    ) {
-        block_connected(prepare);
-    }
-}
-
-#[cfg(feature = "usdt")]
-impl bitcoin_rs_mempool::TraceSink for Trace {
-    fn added(&self, prepare: &mut dyn FnMut() -> bitcoin_rs_mempool::AddedTraceArgs) {
-        added(prepare);
-    }
-
-    fn removed(&self, prepare: &mut dyn FnMut() -> bitcoin_rs_mempool::RemovedTraceArgs) {
-        removed(prepare);
-    }
-}
-
-#[cfg(feature = "usdt")]
-impl bitcoin_rs_p2p::NetTraceSink for Trace {
-    fn inbound_message(&self, prepare: &mut dyn FnMut() -> bitcoin_rs_p2p::MessageTraceArgs) {
-        inbound_message(prepare);
-    }
-
-    fn outbound_message(&self, prepare: &mut dyn FnMut() -> bitcoin_rs_p2p::MessageTraceArgs) {
-        outbound_message(prepare);
-    }
-}
 
 /// Fires `validation:block_connected` if probes are compiled in.
 ///

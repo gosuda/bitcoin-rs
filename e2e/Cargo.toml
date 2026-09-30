@@ -12,6 +12,12 @@ publish = false
 # individual library crates.
 autobenches = false
 
+[features]
+default = ["fjall"]
+fjall = ["bitcoin-rs-node/fjall", "bitcoin-rs-chainstate/fjall"]
+redb = ["bitcoin-rs-node/redb", "bitcoin-rs-chainstate/redb"]
+rocksdb = ["bitcoin-rs-node/rocksdb", "bitcoin-rs-chainstate/rocksdb"]
+
 [lints]
 workspace = true
 

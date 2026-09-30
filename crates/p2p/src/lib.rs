@@ -61,7 +61,6 @@ pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::ListenerExtras;
-pub use net_trace::{MessageTraceArgs, NetTraceSink};
 pub use peer::{
     DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerManager, PeerState,
     SystemDnsResolver,

@@ -1,0 +1,23 @@
+[package]
+name = "bitcoin-rs-trace"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: trace"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Emits SystemTap/DTrace USDT probes with Bitcoin Core's provider names and
+# argument layout. Off by default: nothing is prepared or emitted unless the
+# binary is built with this feature AND a consumer raises a probe semaphore.
+usdt = ["dep:usdt", "dep:tracing"]
+
+[dependencies]
+usdt = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
