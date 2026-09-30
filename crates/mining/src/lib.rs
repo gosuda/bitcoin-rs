@@ -11,6 +11,8 @@ mod context;
 pub mod control;
 /// Node-backed candidate lifecycle service.
 mod coordinator;
+/// Typed external-process mining boundary.
+pub mod external;
 /// Authoritative-mutation wake seam for long-poll mining.
 mod generation_signal;
 /// Network hash-rate estimation.
