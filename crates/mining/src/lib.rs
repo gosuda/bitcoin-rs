@@ -17,6 +17,9 @@ mod generation_signal;
 mod network_hashps;
 /// Transaction selection policy.
 pub mod policy;
+/// Native Stratum V2 Template Distribution Protocol server.
+#[cfg(feature = "sv2")]
+pub mod sv2;
 /// Transport-neutral candidate assembly.
 mod template;
 

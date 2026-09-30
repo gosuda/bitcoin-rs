@@ -58,6 +58,7 @@ redb = [
 ]
 kernel = ["bitcoin-rs-chainstate/kernel", "bitcoin-rs-consensus/kernel"]
 zmq = ["bitcoin-rs-rpc/zmq"]
+sv2 = ["bitcoin-rs-mining/sv2"]
 
 [dependencies]
 hashbrown.workspace = true

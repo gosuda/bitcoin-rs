@@ -235,6 +235,7 @@ fn watch_only_payout_lands_in_candidate_coinbase() -> anyhow::Result<()> {
         network: Some(NetworkSelection::Regtest),
         mining: MiningOverrides {
             payout_address: Some(ADDRESS.to_owned()),
+            ..Default::default()
         },
         ..Default::default()
     };

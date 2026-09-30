@@ -44,6 +44,7 @@ fjall = ["bitcoin-rs-node/fjall"]
 redb = ["bitcoin-rs-node/redb"]
 kernel = ["bitcoin-rs-node/kernel"]
 zmq = ["bitcoin-rs-node/zmq"]
+sv2 = ["bitcoin-rs-node/sv2"]
 
 [[test]]
 name = "g17_dependency_direction"
