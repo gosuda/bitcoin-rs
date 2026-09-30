@@ -22,9 +22,9 @@ impl TemplateHub {
         Self { source }
     }
 
-    /// Waits for and returns the next template from the mining source.
-    pub fn next_template(&self) -> Result<TemplateSnapshot, super::MiningControlError> {
-        let template = self.source.wait_for_template()?;
+    /// Returns the current template from the mining source.
+    pub fn current_template(&self) -> Result<TemplateSnapshot, super::MiningControlError> {
+        let template = self.source.current_template()?;
         let transaction_ids = template
             .candidate
             .transactions

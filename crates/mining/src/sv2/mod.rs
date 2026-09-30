@@ -25,14 +25,22 @@ use crate::{BlockTemplate, MiningControlError};
 /// Abstracted mining source for the SV2 bridge.
 ///
 /// Provides template access and block submission without exposing
-/// the full [`MiningControl`](crate::MiningControl) trait. Implement
-/// this over IPC, direct in-process calls, or any other transport.
+/// the full [`MiningControl`](crate::MiningControl) trait.
 pub trait MiningSource: Send + Sync {
-    /// Blocks until a new template is available.
-    fn wait_for_template(&self) -> Result<Arc<BlockTemplate>, MiningControlError>;
+    /// Returns the current best template.
+    ///
+    /// Does NOT block. Callers should poll or use long-poll semantics
+    /// via the underlying [`MiningControl`](crate::MiningControl) trait.
+    fn current_template(&self) -> Result<Arc<BlockTemplate>, MiningControlError>;
 
     /// Submits a solved block through the authoritative apply path.
-    fn submit_block(&self, block: Block) -> Result<(), MiningControlError>;
+    ///
+    /// Returns the full [`BlockValidationResult`] so callers can distinguish
+    /// accepted, rejected, duplicate, and inconclusive outcomes.
+    fn submit_block(
+        &self,
+        block: Block,
+    ) -> Result<crate::BlockValidationResult, MiningControlError>;
 }
 
 /// In-process adapter wrapping any [`MiningControl`](crate::MiningControl).
@@ -49,7 +57,7 @@ impl<C: crate::MiningControl> InProcessSource<C> {
 }
 
 impl<C: crate::MiningControl> MiningSource for InProcessSource<C> {
-    fn wait_for_template(&self) -> Result<Arc<BlockTemplate>, MiningControlError> {
+    fn current_template(&self) -> Result<Arc<BlockTemplate>, MiningControlError> {
         use crate::{BlockTemplateMode, BlockTemplateRequest};
 
         let request = BlockTemplateRequest {
@@ -68,16 +76,18 @@ impl<C: crate::MiningControl> MiningSource for InProcessSource<C> {
         }
     }
 
-    fn submit_block(&self, block: Block) -> Result<(), MiningControlError> {
-        self.control.submit_block(block)?;
-        Ok(())
+    fn submit_block(
+        &self,
+        block: Block,
+    ) -> Result<crate::BlockValidationResult, MiningControlError> {
+        self.control.submit_block(block)
     }
 }
 
-/// Runs the SV2 template-provider bridge.
+/// Runs the SV2 template-provider server.
 ///
-/// Call from a tokio runtime. The bridge polls `source` for templates
-/// and serves them to connected pools via TDP.
+/// Call from a tokio runtime. The server binds to `listen` and
+/// distributes templates to connected pools via TDP.
 pub async fn run(source: Arc<dyn MiningSource>, listen: std::net::SocketAddr) {
     let hub = TemplateHub::new(source);
     if let Err(e) = Sv2Server::new(listen, hub).run().await {

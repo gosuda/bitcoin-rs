@@ -136,7 +136,13 @@ skip = [
     { crate = "windows_x86_64_gnu@0.52.6", reason = "windows-only split" },
     { crate = "windows_x86_64_gnullvm@0.52.6", reason = "windows-only split" },
     { crate = "windows_x86_64_msvc@0.52.6", reason = "windows-only split" },
-
+    # SV2 protocol crates (behind mining sv2 feature) pull their own
+    # bitcoin/secp256k1 line. Skip the SV2-owned copies only.
+    { crate = "bitcoin@0.32.102", reason = "SV2 protocol crates (sv2 feature)" },
+    { crate = "bitcoin_hashes@0.14.12", reason = "SV2 protocol crates (sv2 feature)" },
+    { crate = "secp256k1@0.29.1", reason = "SV2 protocol crates (sv2 feature)" },
+    { crate = "secp256k1-sys@0.10.1", reason = "SV2 protocol crates (sv2 feature)" },
+    { crate = "hex-conservative@1.0.0", reason = "SV2 protocol crates (sv2 feature)" },
 ]
 
 [sources]

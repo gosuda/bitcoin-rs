@@ -621,6 +621,13 @@ macro_rules! option_rows {
                         env["BITCOIN_RS_MINING_PAYOUT_ADDRESS", parse_text]
                         toml native("mining_payout_address")
                     }
+                    /// SV2 Template Distribution Protocol listen address.
+                    /// When set, the node runs an internal SV2 TP server.
+                    sv2_listen as sv2_listen: Option<SocketAddr> {
+                        cli[#[arg(long = "sv2-listen")]]
+                        env["BITCOIN_RS_SV2_LISTEN", str::parse]
+                        toml native("sv2_listen")
+                    }
                 }
                 /// User-supplied chainstate journal overrides.
                 group chainstate_journal: ChainstateJournalOverrides

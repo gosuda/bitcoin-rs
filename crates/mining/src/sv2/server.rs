@@ -30,7 +30,7 @@ impl Sv2Server {
         // TODO: implement Noise handshake + TDP framing
         // For now, just poll for templates to verify the MiningSource works.
         loop {
-            match self.hub.next_template() {
+            match self.hub.current_template() {
                 Ok(snapshot) => {
                     tracing::info!(
                         height = snapshot.template.candidate.height,
