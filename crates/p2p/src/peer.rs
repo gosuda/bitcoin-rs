@@ -330,6 +330,7 @@ mod tests {
 
         let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
         peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
+            crate::net_trace::test_sink(),
             4,
             SocketAddr::from(([127, 0, 0, 1], 8333)),
             crate::peer_info::PeerRole::FullRelay,
@@ -360,6 +361,7 @@ mod tests {
 
         let mut peer = Peer::new(Cursor::new(frame), Magic::BITCOIN);
         peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
+            crate::net_trace::test_sink(),
             2,
             SocketAddr::from(([127, 0, 0, 1], 8333)),
         ));

@@ -2772,6 +2772,7 @@ mod writer_shutdown_tests {
         let budget = lease.budget_handle();
         let close_rx = lease.close_signal();
         let net_trace = crate::net_trace::NetTrace::outbound(
+            crate::net_trace::test_sink(),
             9,
             "127.0.0.1:18444".parse().expect("valid socket address"),
             crate::peer_info::PeerRole::BlockRelayOnly,

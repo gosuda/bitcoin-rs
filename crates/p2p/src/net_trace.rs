@@ -26,6 +26,27 @@ pub trait NetTraceSink: core::fmt::Debug + Send + Sync {
     fn outbound_message(&self, prepare: &mut dyn FnMut() -> MessageTraceArgs);
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+struct TestTraceSink;
+
+#[cfg(test)]
+impl NetTraceSink for TestTraceSink {
+    fn inbound_message(&self, prepare: &mut dyn FnMut() -> MessageTraceArgs) {
+        let _ = prepare();
+    }
+
+    fn outbound_message(&self, prepare: &mut dyn FnMut() -> MessageTraceArgs) {
+        let _ = prepare();
+    }
+}
+
+/// Returns an eager sink for unit tests that exercise traced connection paths.
+#[cfg(test)]
+pub(crate) fn test_sink() -> std::sync::Arc<dyn NetTraceSink> {
+    std::sync::Arc::new(TestTraceSink)
+}
+
 /// Per-connection identity for the `net:*` probe payloads.
 ///
 /// Captured once where the connection direction and remote address are
@@ -153,7 +174,7 @@ mod tests {
 
     #[test]
     fn message_args_matches_core_abi_positions() {
-        let trace = NetTrace::inbound(7, loopback());
+        let trace = NetTrace::inbound(test_sink(), 7, loopback());
         let payload: &[u8] = b"abc";
 
         let (node_id, addr, conn_type, msg_type, size, pointer) =
@@ -169,7 +190,7 @@ mod tests {
 
     #[test]
     fn message_args_nulls_the_pointer_of_an_empty_payload() {
-        let trace = NetTrace::inbound(1, loopback());
+        let trace = NetTrace::inbound(test_sink(), 1, loopback());
 
         let (_, _, _, _, size, pointer) = message_args(&trace, "ping", &[]);
 
@@ -189,17 +210,21 @@ mod tests {
     fn connection_types_follow_core_connection_type_as_string() {
         let addr = loopback();
 
-        assert_eq!(NetTrace::inbound(1, addr).connection_type, "inbound");
         assert_eq!(
-            NetTrace::outbound(1, addr, PeerRole::FullRelay, false).connection_type,
+            NetTrace::inbound(test_sink(), 1, addr).connection_type,
+            "inbound"
+        );
+        assert_eq!(
+            NetTrace::outbound(test_sink(), 1, addr, PeerRole::FullRelay, false).connection_type,
             "outbound-full-relay"
         );
         assert_eq!(
-            NetTrace::outbound(1, addr, PeerRole::BlockRelayOnly, false).connection_type,
+            NetTrace::outbound(test_sink(), 1, addr, PeerRole::BlockRelayOnly, false)
+                .connection_type,
             "block-relay-only"
         );
         assert_eq!(
-            NetTrace::outbound(1, addr, PeerRole::FullRelay, true).connection_type,
+            NetTrace::outbound(test_sink(), 1, addr, PeerRole::FullRelay, true).connection_type,
             "manual"
         );
     }
