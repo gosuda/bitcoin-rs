@@ -22,19 +22,29 @@ compact_str.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 
+# Optional Stratum V2 dependencies (behind `sv2` feature).
+# Individual protocol crates — avoids stratum-apps' application-level weight.
+template_distribution_sv2 = { workspace = true, optional = true }
+noise_sv2 = { workspace = true, optional = true }
+framing_sv2 = { workspace = true, optional = true }
+codec_sv2 = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
 [features]
 default = []
 test-seam = []
-
+sv2 = [
+    "dep:template_distribution_sv2", "dep:noise_sv2",
+    "dep:framing_sv2", "dep:codec_sv2",
+    "dep:tokio", "dep:tracing",
+]
 
 [dev-dependencies]
 serde_json.workspace = true
 proptest.workspace = true
 bitcoin.workspace = true
 criterion.workspace = true
-# Own integration tests compile the mempool lib without cfg(test): the gated
-# gateway replacement seam must arrive through the test-seam feature, the same
-# way bitcoin-rs-p2p and bitcoin-rs-rpc opt in.
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 
 [[bench]]

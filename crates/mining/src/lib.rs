@@ -11,6 +11,9 @@ mod context;
 pub mod control;
 /// Node-backed candidate lifecycle service.
 mod coordinator;
+/// Stratum V2 template-provider bridge (behind `sv2` feature).
+#[cfg(feature = "sv2")]
+pub mod sv2;
 /// Authoritative-mutation wake seam for long-poll mining.
 mod generation_signal;
 /// Network hash-rate estimation.
