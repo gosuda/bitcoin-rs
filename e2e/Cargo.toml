@@ -102,6 +102,7 @@ harness = false
 [[bench]]
 name = "storage_footprint"
 harness = false
+required-features = ["fjall"]
 
 [[bench]]
 name = "utxo_commit"

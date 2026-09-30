@@ -12,7 +12,7 @@
 //! Run:
 //!
 //! ```text
-//! cargo run -p bitcoin-rs-storage --example storage_footprint --release -- [backend]
+//! cargo bench -p bitcoin-rs-e2e --bench storage_footprint --features fjall -- [backend]
 //! ```
 //!
 //! `backend` is one of `fjall` (default), `redb`, `rocksdb`. The corpus is
