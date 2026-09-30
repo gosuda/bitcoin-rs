@@ -528,6 +528,7 @@ version = "0.9.0"
 dependencies = [
  "arc-swap",
  "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
  "bytes",
  "cap-fs-ext",
  "cap-std",

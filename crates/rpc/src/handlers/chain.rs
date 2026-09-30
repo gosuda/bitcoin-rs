@@ -1589,16 +1589,20 @@ fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Op
     Some(BlockHash::from(node.hash))
 }
 
-/// WHY-local: the chain crate's compact-target comparison is `pub(crate)`,
-/// and this crate must not grow a dependency to reach it. `verifychain` only
-/// needs the `PoW` self-consistency verdict the old `validate_pow` call made:
-/// decode `bits` into a 256-bit target and compare the header hash against it
-/// (both read as little-endian integers, as consensus does).
+/// `verifychain`'s proof-of-work self-consistency verdict: expand `bits` and
+/// compare the header hash against the target, both read as little-endian
+/// integers as consensus does.
+///
+/// WHY-local: chain's `compact_is_met_by` does not act on `SetCompact`'s
+/// overflow flag, while Core's `CheckProofOfWork` rejects a negative,
+/// overflowing, or zero target, and so does this verdict. The network
+/// proof-of-work limit is not checked here.
 fn compact_target_met_by(bits: CompactTarget, hash: Hash256) -> bool {
-    let (target, negative) = bits.decode_magnitude();
-    if negative || target == [0_u8; 32] {
+    let expanded = bits.expand();
+    if expanded.negative || expanded.overflow || expanded.magnitude == [0_u8; 32] {
         return false;
     }
+    let target = expanded.magnitude;
     let hash_bytes = hash.to_le_bytes();
     hash_bytes
         .iter()
@@ -2913,6 +2917,26 @@ mod tests {
             .difficulty_for_bits(CompactTarget::from_consensus(0x207f_ffff));
         let expected = 4.656_542_373_906_924_7e-10_f64;
         assert_eq!(regtest.to_bits(), expected.to_bits());
+    }
+
+    /// Core's `CheckProofOfWork` rejects an overflowing compact target.
+    /// `0x22010001` truncates to the nonzero `1 << 248`, which a zero hash
+    /// meets, so only the overflow flag refuses it.
+    #[test]
+    fn verifychain_pow_rejects_overflowing_compact_targets() {
+        let zero_hash = Hash256::from_le_bytes(&[0_u8; 32]);
+        for bits in [0x2201_0001_u32, 0x2101_0000, 0xff12_3456] {
+            assert!(
+                !compact_target_met_by(CompactTarget::from_consensus(bits), zero_hash),
+                "{bits:#010x} overflows 256 bits and must be unmeetable"
+            );
+        }
+        for bits in [0x207f_ffff_u32, 0x2100_ffff, 0x2200_00ff] {
+            assert!(
+                compact_target_met_by(CompactTarget::from_consensus(bits), zero_hash),
+                "{bits:#010x} fits 256 bits and is met by a zero hash"
+            );
+        }
     }
 
     #[test]

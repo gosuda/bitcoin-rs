@@ -126,6 +126,16 @@ impl PersistFaultSlot {
         *self.0.lock() = Some(fault);
     }
 
+    #[cfg_attr(
+        not(any(
+            test,
+            feature = "test-seam",
+            feature = "fjall",
+            feature = "redb",
+            feature = "rocksdb"
+        )),
+        allow(dead_code)
+    )]
     pub(crate) fn take_at(&self, boundary: PersistBoundary) -> Option<PersistFault> {
         let mut guard = self.0.lock();
         match *guard {

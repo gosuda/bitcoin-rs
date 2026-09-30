@@ -13,6 +13,8 @@ workspace = true
 
 [features]
 default = ["fjall"]
+# The process-local `InMemoryKvStore` for cross-crate test fixtures only.
+test-seam = []
 rocksdb = ["dep:rust-rocksdb"]
 fjall = ["dep:fjall"]
 redb = ["dep:redb"]
@@ -41,3 +43,7 @@ redb = { workspace = true, optional = true }
 libc = ">=0.2.189, <0.3"
 proptest.workspace = true
 tempfile = ">=3.20.0, <4"
+# Own integration tests are a separate crate: the lib compiles there without
+# `cfg(test)`, so `InMemoryKvStore` must arrive through the `test-seam`
+# feature, the same way `bitcoin-rs-chain` opts its tests in.
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }

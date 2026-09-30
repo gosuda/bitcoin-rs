@@ -289,18 +289,14 @@ impl CompactTarget {
         self.0.to_le_bytes()
     }
 
-    /// Decodes into the 256-bit little-endian magnitude and the sign bit.
+    /// Expands into the 256-bit magnitude plus the sign and overflow flags,
+    /// exactly as Core's `arith_uint256::SetCompact` does.
     ///
-    /// Mirrors Core's `arith_uint256::SetCompact` exactly: the mantissa's
-    /// bytes are shifted by the exponent, with bytes pushed past the 256-bit
-    /// width silently dropped.
-    ///
-    /// The magnitude ignores the sign bit — like Core's own `GetHex`, it
-    /// renders the unsigned value — so callers doing proof-of-work
-    /// comparisons must separately treat a negative encoding or an all-zero
-    /// magnitude as unmeetable.
+    /// The magnitude ignores the sign bit, as Core's own `GetHex` renders
+    /// it, so a proof-of-work check must treat a negative, overflowing, or
+    /// all-zero expansion as unmeetable, as Core's `CheckProofOfWork` does.
     #[must_use]
-    pub fn decode_magnitude(self) -> ([u8; 32], bool) {
+    pub fn expand(self) -> ExpandedTarget {
         let bits = self.0;
         let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
         let mut mantissa = bits & 0x007f_ffff;
@@ -316,9 +312,27 @@ impl CompactTarget {
                 }
             }
         }
-        let negative = mantissa != 0 && bits & 0x0080_0000 != 0;
-        (magnitude, negative)
+        ExpandedTarget {
+            magnitude,
+            negative: mantissa != 0 && bits & 0x0080_0000 != 0,
+            overflow: mantissa != 0
+                && (exponent > 34
+                    || (mantissa > 0xff && exponent > 33)
+                    || (mantissa > 0xffff && exponent > 32)),
+        }
     }
+}
+
+/// A compact target expanded as Core's `arith_uint256::SetCompact` expands it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExpandedTarget {
+    /// The 256-bit little-endian magnitude. Mantissa bytes shifted past 256
+    /// bits are dropped, as `SetCompact` drops them.
+    pub magnitude: [u8; 32],
+    /// The sign bit is set on a nonzero mantissa (`pfNegative`).
+    pub negative: bool,
+    /// The mantissa does not fit 256 bits at this exponent (`pfOverflow`).
+    pub overflow: bool,
 }
 
 impl fmt::LowerHex for CompactTarget {
@@ -359,7 +373,44 @@ impl PartialEq<CompactTarget> for u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Amount, LockTime, Sequence};
+    use super::{Amount, CompactTarget, LockTime, Sequence};
+
+    /// `nBits`, the little-endian magnitude bytes as `(index, value)`, and
+    /// the expected negative and overflow flags.
+    type SetCompactCase = (u32, &'static [(usize, u8)], bool, bool);
+
+    #[test]
+    fn expand_reports_set_compact_sign_and_overflow() {
+        // The first five rows are Core's `bignum_SetCompact` vectors; the
+        // rest pin the overflow boundaries at exponents 33 and 34.
+        let cases: [SetCompactCase; 10] = [
+            (0x01fe_dcba, &[(0, 0x7e)], true, false),
+            (0x0492_3456, &[(1, 0x56), (2, 0x34), (3, 0x12)], true, false),
+            (0x0500_9234, &[(2, 0x34), (3, 0x92)], false, false),
+            (
+                0x2012_3456,
+                &[(29, 0x56), (30, 0x34), (31, 0x12)],
+                false,
+                false,
+            ),
+            (0xff12_3456, &[], false, true),
+            (0x2100_ffff, &[(30, 0xff), (31, 0xff)], false, false),
+            (0x2101_0000, &[], false, true),
+            (0x2200_00ff, &[(31, 0xff)], false, false),
+            (0x2200_0100, &[], false, true),
+            (0x2201_0001, &[(31, 0x01)], false, true),
+        ];
+        for (bits, bytes, negative, overflow) in cases {
+            let mut magnitude = [0_u8; 32];
+            for &(index, value) in bytes {
+                magnitude[index] = value;
+            }
+            let expanded = CompactTarget::from_consensus(bits).expand();
+            assert_eq!(expanded.magnitude, magnitude, "magnitude of {bits:#010x}");
+            assert_eq!(expanded.negative, negative, "sign of {bits:#010x}");
+            assert_eq!(expanded.overflow, overflow, "overflow of {bits:#010x}");
+        }
+    }
 
     #[test]
     fn bitcoin_unit_constants_match_protocol_values() {

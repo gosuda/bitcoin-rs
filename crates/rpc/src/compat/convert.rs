@@ -113,7 +113,7 @@ pub(crate) fn signed_sat_to_btc(sats: i128) -> f64 {
 /// arithmetic; the rendered magnitude is unaffected.
 #[must_use]
 pub(crate) fn compact_target_hex(bits: CompactTarget) -> String {
-    let (mut magnitude, _negative) = bits.decode_magnitude();
+    let mut magnitude = bits.expand().magnitude;
     magnitude.reverse();
     hex_encode(&magnitude)
 }

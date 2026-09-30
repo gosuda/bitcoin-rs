@@ -61,7 +61,7 @@ pub use sighash::{
 };
 pub use tx::{Tx, TxIn, TxOut};
 pub use units::{
-    Amount, CompactTarget, LOCKTIME_THRESHOLD, LockTime, SEQUENCE_FINAL,
+    Amount, CompactTarget, ExpandedTarget, LOCKTIME_THRESHOLD, LockTime, SEQUENCE_FINAL,
     SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_GRANULARITY_SECONDS, SEQUENCE_LOCKTIME_MASK,
     SEQUENCE_LOCKTIME_TYPE_FLAG, Sequence,
 };

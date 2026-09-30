@@ -27,6 +27,7 @@ pub use footprint::{
     logical_store_owners, measure_physical_tree, opened_fd_path, opened_path_matches_fd,
 };
 
+#[cfg(any(test, feature = "test-seam"))]
 pub use memory::InMemoryKvStore;
 
 pub use trait_::{
@@ -122,7 +123,9 @@ pub mod durable_head;
 mod error;
 /// Custody-grade logical and physical storage-footprint ledgers.
 pub mod footprint;
-/// Process-local key-value store for tests.
+/// Process-local key-value store for tests. Compiled only for tests and the
+/// `test-seam` feature.
+#[cfg(any(test, feature = "test-seam"))]
 mod memory;
 /// Retention and deletion of block bodies and undo rows.
 pub mod pruning;

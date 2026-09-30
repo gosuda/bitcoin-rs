@@ -522,41 +522,25 @@ pub fn permitted_difficulty_transition(
 
 /// Compact proof-of-work target decode/encode and block-work helpers.
 ///
-/// `decode_compact` mirrors Bitcoin Core's `arith_uint256::SetCompact`: the
-/// sign bit is masked out of the mantissa, the magnitude is decoded, and
-/// the sign is reported separately (`negative`, like Core's `pfNegative`);
-/// a shift past 256 bits folds the decoded magnitude into `ChainWork::ZERO`
-/// rather than surfacing Core's `pfOverflow`. `compact_to_target` then diverges
-/// deliberately: Core's consensus check rejects the flagged encoding,
-/// while this crate maps a signed encoding to `ChainWork::ZERO` — both
-/// reject the header in practice. `target_to_compact` covers `GetCompact`
-/// for non-negative targets.
+/// `compact_to_target` expands `bits` with `CompactTarget::expand`, Core's
+/// `arith_uint256::SetCompact`, and diverges from Core's consensus check,
+/// which rejects both flags `SetCompact` reports: a negative encoding maps
+/// to `ChainWork::ZERO`, and the overflow flag is not acted on, so an
+/// overflowing encoding keeps the magnitude `SetCompact` truncated it to.
+/// `target_to_compact` covers `GetCompact` for non-negative targets.
 pub(crate) mod pow {
     use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
     use crate::node::{BlockHeader, ChainWork};
 
-    struct DecodedCompact {
-        target: ChainWork,
-        negative: bool,
-    }
-
-    fn decode_compact(bits: u32) -> DecodedCompact {
-        let (magnitude, negative) = CompactTarget::from_consensus(bits).decode_magnitude();
-        DecodedCompact {
-            target: ChainWork::from_le_bytes(magnitude),
-            negative,
-        }
-    }
-
     /// Decodes a compact target, returning zero for negative encodings.
     #[must_use]
     pub(crate) fn compact_to_target(bits: CompactTarget) -> ChainWork {
-        let decoded = decode_compact(bits.to_consensus());
-        if decoded.negative {
+        let expanded = bits.expand();
+        if expanded.negative {
             ChainWork::ZERO
         } else {
-            decoded.target
+            ChainWork::from_le_bytes(expanded.magnitude)
         }
     }
 

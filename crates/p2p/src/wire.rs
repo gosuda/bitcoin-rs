@@ -29,8 +29,10 @@ pub const MAX_WRITE_BURST: usize = 8;
 
 /// Maximum number of headers in one `headers` message, sent or accepted.
 ///
-/// Core's `MAX_HEADERS_RESULTS`: a peer that answers with fewer headers has
-/// reached its tip, so serving and syncing both depend on this one bound.
+/// Core's `MAX_HEADERS_RESULTS`. Serving caps each response at it, and sync
+/// relies on it: a peer that answers a zero-`stop_hash` `getheaders`, the only
+/// kind sync sends, with fewer headers has reached its tip. A nonzero
+/// `stop_hash` can end a response early.
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 
 /// Maximum block locator hashes accepted in one locator-based request.
