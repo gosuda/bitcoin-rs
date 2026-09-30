@@ -27,7 +27,7 @@ that documented production selection, not manifest defaults.
 ## Ordering
 
 1. T16 (strict-Rust cryptography lane) must pass first. The verifier is one general BIP340 operation composed over maintained `k256 0.14.0` arithmetic and ECDSA primitives. The `k256` high-level Schnorr signature type is withdrawn because its `Signature` stores a `NonZeroScalar` and cannot represent the whole BIP340 input domain. No custom field or group arithmetic. Overflowing TapTweak is canonically rejected, never reduced. Hybrid-key parity and historical DER and high-S rules are preserved.
-2. T17 then measures the actual final strict artifact. Earlier candidate measurements, including every number in the prior-evidence section, are not promotion proof.
+2. T17 then measures the actual final strict artifact. Earlier candidate measurements are not promotion proof.
 3. Promotion happens in one changeset: complete the measured end-state cells
    below, change the shipped engine selection (`/etc/bitcoin-rs/default.toml`,
    `Dockerfile`), and prove kernel-free transitive closure with the explicit

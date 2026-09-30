@@ -100,7 +100,7 @@ the identical start and shutdown path.
 ## Initial Block Download
 
 ### Initial Block Download (IBD)
-The one-time bulk process of downloading and fully validating the chain from the start point (genesis, or a trusted snapshot) up to the network's current best tip. Live IBD is the download-bound regime (*Sync regimes*); the repository's sync measurements use a local seed and do not measure Internet bandwidth aggregation across peers (`docs/benchmarks/end-to-end-sync.md`, Limitations), so it pins no claim about which cost dominates at high heights.
+The one-time bulk process of downloading and fully validating the chain from the start point (genesis, or a trusted snapshot) up to the network's current best tip. Live IBD is the download-bound regime (*Sync regimes*); the repository has no executed sync measurement, and the live lane it plans runs over loopback peers rather than the public network (`docs/benchmarks/end-to-end-sync.md`), so it pins no claim about which cost dominates at high heights.
 
 ### Apply frontier
 The greatest height up to which every block has been validated and committed to the UTXO set in one unbroken run — distinct from the header tip and from blocks downloaded but not yet applied. It advances only over a contiguous run: one missing block at the frontier stalls all apply progress, which is how a slow peer can freeze sync.

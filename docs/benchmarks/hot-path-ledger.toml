@@ -592,7 +592,7 @@ concurrency_group = "class"
 domains = ["offline", "p2p", "muhash"]
 seams = ["crates/utxo/src/set.rs", "crates/utxo/src/record.rs"]
 disposition = "already_bounded"
-evidence = "UTXO-record arena/pool rejected on churn measurement (docs/benchmarks/utxo-memory.md). mimalloc adopted for production x86-64 Linux (#40). Whole-process allocation gates remain diagnostic until a symmetric collector exists (#44)."
+evidence = "UTXO-record arena/pool rejected; docs/benchmarks/utxo-memory.md owns the layout rule and the condition for reopening the proposal, and its churn attribution was retired with the harness that produced it. mimalloc adopted for production x86-64 Linux (#40). Whole-process allocation gates remain diagnostic until a symmetric collector exists (#44)."
 
 [[paths]]
 id = "class.lock_sched"
@@ -667,7 +667,7 @@ concurrency_group = "memory"
 domains = ["offline", "p2p", "muhash"]
 seams = ["crates/utxo/src/record.rs", "crates/utxo/src/set.rs", "crates/utxo/src/compress.rs"]
 disposition = "already_bounded"
-evidence = "v5 directory codec adopted (#40). Quiet measurement 61.2 B/output accounted, 79.2 B/output RSS at height 412,732. docs/benchmarks/utxo-memory.md."
+evidence = "v5 directory codec adopted (#40). The height-412,732 attribution run measured 61.2 B/output accounted and 79.2 B/output RSS; that run's hook and artifacts are retired, so the figures are historical and unreproducible. docs/benchmarks/utxo-memory.md owns the layout rule and the unexecuted end-state cells."
 
 [[paths]]
 id = "memory.staging_dual_body"
@@ -740,7 +740,7 @@ evidence = "Diagnostic C150 custody adopted AVX2 on x86-64 (#40). Production int
 id = "lever.utxo_arena"
 path = "class.alloc"
 disposition = "rejected"
-evidence = "Churning twice the live set added 5% RSS and flattened. bumpalo arena rejected (docs/benchmarks/utxo-memory.md, #40)."
+evidence = "bumpalo arena rejected in #40: churning twice the live set added 5% RSS and flattened, on a harness since retired. docs/benchmarks/utxo-memory.md owns the condition for reopening the proposal."
 
 [[levers]]
 id = "lever.decoded_block_cache"

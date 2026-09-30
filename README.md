@@ -113,17 +113,13 @@ cargo build --release -p bitcoin-rs --features kernel
 
 ## Benchmark status
 
-[End-to-end synchronization evidence](docs/benchmarks/end-to-end-sync.md) is the
-owner of methodology, measurements, artifact custody, and limitations. It
-retains historical bounded results from superseded engines, including both
-faster local replays and slower daemon IBD results. Those figures are not
-current end-state proof or a general speed comparison with Bitcoin Core.
-
-The owner's end-state cells are marked `planned_not_executed`. Historical raw
-JSON was retired by #224; retained digests can identify an external copy, but
-are not a replacement for the raw evidence. This README makes no current
-performance-superiority claim. Consult the owner document for the status of
-each workload before quoting a result.
+[End-to-end synchronization evidence](docs/benchmarks/end-to-end-sync.md) owns
+the two sync lanes, their methodology and their limitations. Every end-state
+cell there is `planned_not_executed`: no sync measurement in this repository has
+run on the current engines. The historical bounded results from superseded
+engines, and the raw JSON behind them, were retired with their harnesses. This
+README makes no performance claim, and there is no measured speed comparison
+with Bitcoin Core to quote.
 
 ## Architecture
 

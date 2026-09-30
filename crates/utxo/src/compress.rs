@@ -1,8 +1,8 @@
 //! Compact encodings for UTXO record fields.
 //!
-//! These shrink the in-memory record payload, which a mainnet attribution run
-//! measured at 55.1 bytes per live output and 77.4% of process RSS
-//! (`docs/benchmarks/utxo-memory.md`). They are an **internal storage** format:
+//! These shrink the in-memory record payload, which the retired height-412,732
+//! mainnet attribution run (#40) measured at 55.1 bytes per live output and
+//! 77.4% of process RSS. They are an **internal storage** format:
 //! nothing here is consensus-visible, and `hash_serialized_3` and the MuHash
 //! trailer are computed over decoded consensus values, not over these bytes.
 //!

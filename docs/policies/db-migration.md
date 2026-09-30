@@ -127,8 +127,10 @@ How each input layer treats an entry it no longer knows:
 no replacement. The rollback-versus-rebuild cutover is a measured threshold,
 not operator configuration: the single semantic owner is the derived index
 runtime's internal constant (`DEFAULT_ROLLBACK_REBUILD_CUTOVER`, currently
-`100_000`), and the measurement that owns the value lives in
-`docs/benchmarks/index-rollback-rebuild-cutover.md`. An operator carrying any
+`100_000`), and the cell that owns the value lives in
+`docs/benchmarks/index-rollback-rebuild-cutover.md`, where it is
+`planned_not_executed`: `100_000` is a remeasurement baseline, not a measured
+threshold. An operator carrying any
 of these entries must delete them; the TOML entry fails startup, the CLI flag
 fails parsing, and the environment variable is ignored.
 
