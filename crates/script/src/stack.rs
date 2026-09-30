@@ -2,6 +2,8 @@ use smallvec::SmallVec;
 use thiserror::Error;
 use tinyvec::ArrayVec;
 
+use crate::eval::MAX_STACK_SIZE;
+
 /// One stack item.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScriptItem {
@@ -20,13 +22,10 @@ impl Default for ScriptItem {
 /// Bounded script stack with Core's 1000-item maximum depth.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stack {
-    items: ArrayVec<[ScriptItem; Self::MAX_DEPTH]>,
+    items: ArrayVec<[ScriptItem; MAX_STACK_SIZE]>,
 }
 
 impl Stack {
-    /// Maximum stack depth permitted by consensus script evaluation.
-    pub const MAX_DEPTH: usize = 1000;
-
     /// Creates an empty stack.
     #[must_use]
     pub fn new() -> Self {
@@ -154,18 +153,18 @@ pub enum StackError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScriptItem, Stack, StackError};
+    use super::{MAX_STACK_SIZE, ScriptItem, Stack, StackError};
 
     #[test]
     fn stack_rejects_overflow_and_reports_underflow() {
         let mut stack = Stack::new();
         assert_eq!(stack.pop(), Err(StackError::Underflow));
-        for value in 0..Stack::MAX_DEPTH {
+        for value in 0..MAX_STACK_SIZE {
             let num = i64::try_from(value)
                 .unwrap_or_else(|error| panic!("stack test index should fit in i64: {error}"));
             assert_eq!(stack.push(ScriptItem::Num(num)), Ok(()));
         }
-        assert_eq!(stack.len(), Stack::MAX_DEPTH);
+        assert_eq!(stack.len(), MAX_STACK_SIZE);
         assert_eq!(stack.push(ScriptItem::Num(1)), Err(StackError::Overflow));
     }
 }

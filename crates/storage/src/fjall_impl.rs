@@ -37,7 +37,7 @@ impl FjallStore {
             cache_bytes
         };
         metrics::gauge!("storage.cache_capacity_bytes", "backend" => "fjall")
-            .set(crate::metric_f64(cache_bytes));
+            .set(bitcoin_rs_primitives::u64_to_f64(cache_bytes));
         let db = Database::builder(path.as_ref())
             .cache_size(cache_bytes)
             .open()

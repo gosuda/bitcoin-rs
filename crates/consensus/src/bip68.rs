@@ -1,13 +1,9 @@
-use crate::ConsensusError;
+use bitcoin_rs_primitives::{
+    SEQUENCE_LOCKTIME_DISABLE_FLAG, SEQUENCE_LOCKTIME_GRANULARITY_SECONDS, SEQUENCE_LOCKTIME_MASK,
+    SEQUENCE_LOCKTIME_TYPE_FLAG,
+};
 
-/// BIP68 disable flag (`1 << 31`).
-pub const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
-/// BIP68 type flag: set means time-based, clear means height-based (`1 << 22`).
-pub(crate) const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
-/// BIP68 relative-lock magnitude mask.
-pub(crate) const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
-/// BIP68 time-based granularity in seconds (`2^9`).
-pub(crate) const SEQUENCE_LOCKTIME_GRANULARITY_SECONDS: u32 = 512;
+use crate::ConsensusError;
 
 /// Checks one input's BIP68 relative lock; `prevout_mtp` is only read for time-based locks.
 ///

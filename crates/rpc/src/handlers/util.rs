@@ -2,6 +2,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::str::FromStr as _;
 
+use bitcoin_rs_primitives::{hex_encode, u32_saturated};
 use miniscript::DefiniteDescriptorKey;
 use miniscript::Descriptor as MiniscriptDescriptor;
 use miniscript::ForEachKey as _;
@@ -10,9 +11,7 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use corepc_types::v31;
 
-use crate::compat::convert::{
-    self, hex_encode, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
-};
+use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{
@@ -26,7 +25,7 @@ const ESTIMATE_SMART_FEE_MODE_ERROR: &str =
     "Invalid estimate_mode parameter, must be UNSET, ECONOMICAL or CONSERVATIVE";
 
 fn conf_target_blocks(conf_target: u64) -> u32 {
-    u32::try_from(conf_target).unwrap_or(u32::MAX)
+    u32_saturated(conf_target)
 }
 
 /// `uptime` measures from the instant this context's RPC listener bound

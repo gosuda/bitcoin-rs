@@ -1,14 +1,12 @@
+use bitcoin_rs_consensus::{
+    MAX_COINBASE_SCRIPT_SIG_SIZE, MIN_COINBASE_SCRIPT_SIG_SIZE, WITNESS_COMMITMENT_PREFIX,
+    witness_commitment,
+};
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_script::push_int;
 use thiserror::Error;
-
-const MAX_COINBASE_SCRIPT_SIG_LEN: usize = 100;
-const MIN_COINBASE_SCRIPT_SIG_LEN: usize = 2;
-const WITNESS_COMMITMENT_TAG: [u8; 4] = [0xaa, 0x21, 0xa9, 0xed];
-/// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed` prefix. Core `MINIMUM_WITNESS_COMMITMENT` is 38 bytes.
-const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 /// Consensus witness reserved value used when constructing a BIP141 commitment.
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
@@ -102,11 +100,10 @@ pub(crate) fn build_coinbase(
 
 /// Builds the BIP141 `OP_RETURN` witness-commitment script (`6a24aa21a9ed || commitment`).
 pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
-    let mut script = Vec::with_capacity(38);
-    script.push(0x6a); // OP_RETURN
-    script.push(36); // PUSH36
-    script.extend_from_slice(&WITNESS_COMMITMENT_TAG);
-    script.extend_from_slice(commitment.as_byte_array());
+    let commitment = commitment.as_byte_array();
+    let mut script = Vec::with_capacity(WITNESS_COMMITMENT_PREFIX.len() + commitment.len());
+    script.extend_from_slice(&WITNESS_COMMITMENT_PREFIX);
+    script.extend_from_slice(commitment);
     script
 }
 
@@ -115,15 +112,12 @@ pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
 ///
 /// `submitblock` calls this before admission. Proposal mode does not.
 pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: bool) {
-    if !segwit_active {
+    if !segwit_active || witness_commitment(block).is_none() {
         return;
     }
     let Some(coinbase) = block.txs.first_mut() else {
         return;
     };
-    if !coinbase_has_witness_commitment(coinbase) {
-        return;
-    }
     let Some(input) = coinbase.inputs.first_mut() else {
         return;
     };
@@ -131,13 +125,6 @@ pub fn update_uncommitted_block_structures(block: &mut Block, segwit_active: boo
         return;
     }
     input.witness.push(WITNESS_RESERVED_VALUE.to_vec());
-}
-
-fn coinbase_has_witness_commitment(tx: &Tx) -> bool {
-    tx.outputs.iter().any(|output| {
-        output.script_pubkey.len() >= 38
-            && output.script_pubkey.starts_with(&WITNESS_COMMITMENT_PREFIX)
-    })
 }
 
 fn coinbase_script_sig(height: u32) -> Result<Vec<u8>, MiningError> {
@@ -148,13 +135,13 @@ fn coinbase_script_sig(height: u32) -> Result<Vec<u8>, MiningError> {
     // Consensus rejects coinbase scriptSigs shorter than two bytes
     // (`bad-cb-length`). Heights whose BIP34 prefix is a single opcode need a
     // trailing OP_0, matching Bitcoin Core's `CreateNewBlock`.
-    if script.len() < MIN_COINBASE_SCRIPT_SIG_LEN {
+    if script.len() < MIN_COINBASE_SCRIPT_SIG_SIZE {
         script.push(0x00);
     }
-    if script.len() > MAX_COINBASE_SCRIPT_SIG_LEN {
+    if script.len() > MAX_COINBASE_SCRIPT_SIG_SIZE {
         return Err(MiningError::CoinbaseScriptTooLarge {
             len: script.len(),
-            max: MAX_COINBASE_SCRIPT_SIG_LEN,
+            max: MAX_COINBASE_SCRIPT_SIG_SIZE,
         });
     }
     Ok(script)

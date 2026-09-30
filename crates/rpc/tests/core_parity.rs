@@ -13,6 +13,7 @@ mod support;
 
 use std::collections::BTreeSet;
 
+use bitcoin_rs_primitives::u64_saturated_len;
 use bitcoin_rs_rpc::manifest::MANIFEST;
 use serde_json::Value;
 
@@ -58,7 +59,7 @@ fn as_tuple(response: RawResponse) -> HttpTuple {
     HttpTuple {
         status: response.status,
         headers: response.headers,
-        body_len: Some(u64::try_from(response.body.len()).unwrap_or(u64::MAX)),
+        body_len: Some(u64_saturated_len(response.body.len())),
         body,
     }
 }

@@ -2,7 +2,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{Bound, RangeInclusive};
 
-use bitcoin_rs_primitives::{Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid};
+#[cfg(test)]
+use bitcoin_rs_primitives::u32_saturated;
+use bitcoin_rs_primitives::{
+    Hash256, OutPoint, Tx, TxIn, TxOut, Txid, Wtxid, i64_saturated, u32_saturated_len,
+    u64_saturated_len,
+};
 
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
@@ -653,7 +658,7 @@ impl Mempool {
                     entry.txid.as_bytes().as_ptr(),
                     "unknown",
                     i32::try_from(entry.vsize).unwrap_or(i32::MAX),
-                    i64::try_from(entry.fee).unwrap_or(i64::MAX),
+                    i64_saturated(entry.fee),
                     entry.time,
                 )
             });
@@ -782,7 +787,7 @@ impl Mempool {
         let required = crate::rbf::required_fee(min_rate, entry.vsize)
             .map_err(|_| PolicyError::FeeArithmetic)?;
         if enforcement == crate::rbf::LimitEnforcement::Full && entry.modified_fee() < required {
-            let modified_rate = entry.modified_fee() * 1_000 / i128::from(entry.vsize);
+            let modified_rate = entry.modified_fee_rate();
             return Err(PolicyError::BelowMinRelayFee {
                 tx_rate: u64::try_from(modified_rate).unwrap_or(0),
                 min_rate,
@@ -895,7 +900,7 @@ impl Mempool {
             (
                 txid.as_bytes().as_ptr(),
                 i32::try_from(added_vsize).unwrap_or(i32::MAX),
-                i64::try_from(added_fee).unwrap_or(i64::MAX),
+                i64_saturated(added_fee),
             )
         });
         self.finish_mutation(changes)
@@ -1281,7 +1286,7 @@ impl Mempool {
     /// Returns aggregate counters for the current pool.
     #[must_use]
     pub fn stats(&self) -> MempoolStats {
-        let txs = u64::try_from(self.entries.len()).unwrap_or(u64::MAX);
+        let txs = u64_saturated_len(self.entries.len());
         let bytes = self.total_vsize();
         let total_fee = self.aggregate_fees();
         MempoolStats {
@@ -1334,8 +1339,7 @@ impl Mempool {
         // Everything below stays keyed to live entries. They are payload
         // terms -- the transactions and the index keys -- and a removed
         // entry's payload really is gone.
-        let arena = u64::try_from(self.entries.capacity())
-            .unwrap_or(u64::MAX)
+        let arena = u64_saturated_len(self.entries.capacity())
             .saturating_mul(u64::try_from(size_of::<Option<LiveEntry>>()).unwrap_or(0));
 
         let transactions = self
@@ -1346,17 +1350,13 @@ impl Mempool {
 
         // `by_txid` is a hash map, so it carries slack; the other three are
         // B-tree sets of fixed-size keys.
-        let by_txid = u64::try_from(self.derived.by_txid.capacity())
-            .unwrap_or(u64::MAX)
+        let by_txid = u64_saturated_len(self.derived.by_txid.capacity())
             .saturating_mul(u64::try_from(size_of::<(Txid, IndexedEntry)>()).unwrap_or(0));
-        let funding = u64::try_from(self.derived.funding.len())
-            .unwrap_or(u64::MAX)
+        let funding = u64_saturated_len(self.derived.funding.len())
             .saturating_mul(u64::try_from(size_of::<(ScriptHash, EntryId)>()).unwrap_or(0));
-        let spending = u64::try_from(self.derived.spending.len())
-            .unwrap_or(u64::MAX)
+        let spending = u64_saturated_len(self.derived.spending.len())
             .saturating_mul(u64::try_from(size_of::<(SpendingKey, EntryId)>()).unwrap_or(0));
-        let by_wtxid = u64::try_from(self.derived.by_wtxid.capacity())
-            .unwrap_or(u64::MAX)
+        let by_wtxid = u64_saturated_len(self.derived.by_wtxid.capacity())
             .saturating_mul(u64::try_from(size_of::<(Wtxid, EntryId)>()).unwrap_or(0));
         // The graph links are per-entry `Vec`s inside the arena slots: their
         // headers ride in the slot size above, their payload is charged by
@@ -1367,13 +1367,11 @@ impl Mempool {
                 .capacity()
                 .saturating_add(link.children.capacity());
             total.saturating_add(
-                u64::try_from(payload)
-                    .unwrap_or(u64::MAX)
+                u64_saturated_len(payload)
                     .saturating_mul(u64::try_from(size_of::<EntryId>()).unwrap_or(0)),
             )
         });
-        let components = u64::try_from(self.derived.components.capacity())
-            .unwrap_or(u64::MAX)
+        let components = u64_saturated_len(self.derived.components.capacity())
             .saturating_mul(u64::try_from(size_of::<ComponentSummary>()).unwrap_or(0));
         // The priority index stores every entry twice -- once ordered by
         // priority, once keyed by id so a removal need not search for what to
@@ -1656,7 +1654,7 @@ impl Mempool {
             .ok_or(MempoolError::InconsistentSpendingIndex)?;
         Ok(Some(OutpointSpender {
             entry,
-            vin: u32::try_from(vin).unwrap_or(u32::MAX),
+            vin: u32_saturated_len(vin),
         }))
     }
 
@@ -1957,7 +1955,7 @@ impl Mempool {
                     entry.txid.as_bytes().as_ptr(),
                     Self::core_removal_reason(*reason),
                     i32::try_from(entry.vsize).unwrap_or(i32::MAX),
-                    i64::try_from(entry.fee).unwrap_or(i64::MAX),
+                    i64_saturated(entry.fee),
                     entry.time,
                 )
             });
@@ -2043,7 +2041,7 @@ impl Mempool {
                     }
                 }
                 let rebuilt = ComponentSummary {
-                    member_count: u32::try_from(members.len()).unwrap_or(u32::MAX),
+                    member_count: u32_saturated_len(members.len()),
                     weight: members.iter().fold(0_u64, |total, member| {
                         total.saturating_add(
                             self.entry(*member).map_or(0, MempoolEntry::policy_weight),
@@ -2363,9 +2361,7 @@ impl Mempool {
             // transaction cannot pass a limit its cluster would fail.
             return cluster_within_limits(1, weight, &self.limits);
         }
-        let count = u32::try_from(cluster.len())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1);
+        let count = u32_saturated_len(cluster.len()).saturating_add(1);
         let cluster_weight = cluster.iter().fold(weight, |total, id| {
             total.saturating_add(self.entry(*id).map_or(0, MempoolEntry::policy_weight))
         });
@@ -2474,7 +2470,7 @@ impl Mempool {
     pub fn descendant_count_inclusive(&self, id: EntryId) -> u32 {
         let mut descendants = Vec::new();
         self.collect_descendants_inclusive(id, &mut descendants);
-        u32::try_from(descendants.len()).unwrap_or(u32::MAX)
+        u32_saturated_len(descendants.len())
     }
 
     /// Returns the ancestor-package count for `id` (inclusive of `id` itself).
@@ -2485,9 +2481,7 @@ impl Mempool {
     #[must_use]
     pub fn ancestor_count_inclusive(&self, id: EntryId) -> u32 {
         let ancestors = self.ancestor_ids_for_entry(id);
-        u32::try_from(ancestors.len())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1)
+        u32_saturated_len(ancestors.len()).saturating_add(1)
     }
 
     fn entry_mut(&mut self, id: EntryId) -> Option<&mut MempoolEntry> {
@@ -2548,21 +2542,20 @@ fn transaction_heap_usage(tx: &Tx) -> u64 {
     use core::mem::size_of;
 
     let mut total = u64::try_from(size_of::<Tx>()).unwrap_or(0);
-    total = total.saturating_add(
-        u64::try_from(tx.inputs.capacity().saturating_mul(size_of::<TxIn>())).unwrap_or(u64::MAX),
-    );
-    total = total.saturating_add(
-        u64::try_from(tx.outputs.capacity().saturating_mul(size_of::<TxOut>())).unwrap_or(u64::MAX),
-    );
+    total = total.saturating_add(u64_saturated_len(
+        tx.inputs.capacity().saturating_mul(size_of::<TxIn>()),
+    ));
+    total = total.saturating_add(u64_saturated_len(
+        tx.outputs.capacity().saturating_mul(size_of::<TxOut>()),
+    ));
     for input in &tx.inputs {
-        total = total.saturating_add(u64::try_from(input.script_sig.len()).unwrap_or(u64::MAX));
-        total = total.saturating_add(
-            u64::try_from(input.witness.iter().map(std::vec::Vec::len).sum::<usize>())
-                .unwrap_or(u64::MAX),
-        );
+        total = total.saturating_add(u64_saturated_len(input.script_sig.len()));
+        total = total.saturating_add(u64_saturated_len(
+            input.witness.iter().map(std::vec::Vec::len).sum::<usize>(),
+        ));
     }
     for output in &tx.outputs {
-        total = total.saturating_add(u64::try_from(output.script_pubkey.len()).unwrap_or(u64::MAX));
+        total = total.saturating_add(u64_saturated_len(output.script_pubkey.len()));
     }
     total
 }
@@ -3838,14 +3831,8 @@ mod tests {
         assert_eq!(child_entry.fee, 2_000);
         assert_eq!(child_entry.fee_delta, 0);
         assert_eq!(child_entry.vsize, 100);
-        assert_eq!(
-            child_entry.bip141_vsize,
-            u32::try_from(child.vsize()).unwrap_or(u32::MAX)
-        );
-        assert_eq!(
-            child_entry.size,
-            u32::try_from(child.total_size()).unwrap_or(u32::MAX)
-        );
+        assert_eq!(child_entry.bip141_vsize, u32_saturated(child.vsize()));
+        assert_eq!(child_entry.size, u32_saturated_len(child.total_size()));
         assert_eq!(child_entry.weight, child.weight());
         assert_eq!(
             child_entry.sigop_cost, 0,
@@ -5415,7 +5402,7 @@ mod graph_tests {
 
         fn below(&mut self, bound: usize) -> usize {
             // Truncation is wanted: fixture fuzzing, not cryptography.
-            let bound = u64::try_from(bound).unwrap_or(u64::MAX);
+            let bound = u64_saturated_len(bound);
             usize::try_from(self.next() % bound).unwrap_or(0)
         }
     }
@@ -5552,10 +5539,7 @@ mod graph_tests {
                         .map_or(0, |entry| u64::from(entry.vsize)),
                 )
             });
-            assert_eq!(
-                summary.member_count,
-                u32::try_from(members.len()).unwrap_or(u32::MAX)
-            );
+            assert_eq!(summary.member_count, u32_saturated_len(members.len()));
             assert_eq!(
                 summary.weight,
                 vsize * 4,

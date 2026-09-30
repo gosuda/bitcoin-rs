@@ -5,12 +5,11 @@
 use super::{
     Arc, Block, BlockBodySource, BlockHash, BlockLog, BlockSource, BlockTree, DerivedIndexInfo,
     DerivedIndexQuery, DerivedIndexRuntime, Hash256, IndexCapabilities, IndexCapability,
-    IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint, PrefixScanLimit,
-    QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT,
-    RwLock, ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
-    ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexScan,
-    TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize,
-    record_at_height,
+    IndexReader, IndexWatermark, Ordering, OutPoint, PrefixScanLimit, QUERY_BODY_READ_LIMIT,
+    QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT, RwLock, ScriptHash,
+    ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord, ScriptIndexSnapshot, ScriptLiveScan,
+    SpendingRecord, TipSnapshot, Tx, TxIndexScan, TxIndexScanRow, TxIndexSnapshot, TxPosition,
+    TxPositionValue, TxQueryError, Txid, deserialize, record_at_height,
 };
 
 mod scripts;

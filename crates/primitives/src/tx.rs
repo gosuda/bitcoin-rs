@@ -7,6 +7,7 @@ use crate::{
     encode::{
         ConsensusEncode, Sha256Sink, deserialize, encode_tx, finalize_double_sha256, tx_base_size,
     },
+    numeric::u64_saturated_len,
 };
 
 /// A Bitcoin transaction input in native owned form.
@@ -89,10 +90,9 @@ impl Tx {
     /// BIP141 transaction weight: `base_size * 3 + total_size` weight units.
     #[must_use]
     pub fn weight(&self) -> u64 {
-        u64::try_from(self.base_size())
-            .unwrap_or(u64::MAX)
+        u64_saturated_len(self.base_size())
             .saturating_mul(3)
-            .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
+            .saturating_add(u64_saturated_len(self.total_size()))
     }
 
     /// Derives BIP141 virtual size from a transaction weight, rounded up.

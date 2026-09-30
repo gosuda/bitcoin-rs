@@ -1,11 +1,11 @@
 use std::io::{Cursor, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin::p2p::address::Address;
 use bitcoin::p2p::message_network::VersionMessage;
-use bitcoin_rs_primitives::USER_AGENT;
+use bitcoin_rs_primitives::{USER_AGENT, unix_now};
 
 use crate::connection::PeerLease;
 use crate::dispatch::dispatch_inbound;
@@ -221,11 +221,7 @@ pub(crate) fn read_handshake_message<S: Read>(
         match peer.read_message() {
             Ok((message, raw)) => {
                 if matches!(message, Message::Version(_)) {
-                    peer.version_received_time = Some(
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map_or(0, |duration| duration.as_secs()),
-                    );
+                    peer.version_received_time = Some(unix_now());
                 }
                 return Ok((message, raw));
             }

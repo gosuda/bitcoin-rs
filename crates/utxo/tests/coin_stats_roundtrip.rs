@@ -1,20 +1,20 @@
 //! Coinstats persistence round-trip tests.
 
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
-use bitcoin_rs_storage::{
-    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError,
-    WriteCondition,
-};
+#[path = "support/indexed_txid.rs"]
+mod indexed_txid;
+
+use bitcoin_rs_primitives::{Amount, OutPoint, TxOut};
+use bitcoin_rs_storage::InMemoryKvStore;
 use bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN;
 use bitcoin_rs_utxo::stats::{
     CoinStats, CoinStatsDecodeError, CoinStatsListener, load_coin_stats, store_coin_stats,
 };
 
-type Row = ((ColumnFamily, Vec<u8>), Vec<u8>);
+use indexed_txid::txid;
 
 #[test]
 fn coin_stats_persist_load_roundtrips_byte_equal() -> Result<(), Box<dyn std::error::Error>> {
-    let store = MemoryStore::default();
+    let store = InMemoryKvStore::default();
     let mut stats = CoinStats::new();
 
     for index in 0_u32..100 {
@@ -94,120 +94,4 @@ fn coin_stats_codec_is_exact_and_preserves_muhash_continuation()
     assert_eq!(restored, original);
     assert_eq!(restored.to_bytes(), original.to_bytes());
     Ok(())
-}
-
-fn txid(index: u32) -> Hash256 {
-    let mut bytes = [0_u8; 32];
-    bytes[..4].copy_from_slice(&index.to_le_bytes());
-    Hash256::from_le_bytes(&bytes)
-}
-
-#[derive(Default)]
-struct MemoryStore {
-    rows: parking_lot::RwLock<Vec<Row>>,
-}
-
-impl KvStore for MemoryStore {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self
-            .rows
-            .read()
-            .iter()
-            .find(|((row_cf, row_key), _value)| *row_cf == cf && row_key == key)
-            .map(|(_row, value)| value.clone()))
-    }
-
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let mut rows = self
-            .rows
-            .read()
-            .iter()
-            .filter(|((row_cf, key), _value)| *row_cf == cf && key.starts_with(prefix))
-            .map(|((_row_cf, key), value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| match (left, right) {
-            (Ok((left_key, _)), Ok((right_key, _))) => left_key.cmp(right_key),
-            _ => core::cmp::Ordering::Equal,
-        });
-        Ok(Box::new(rows.into_iter()))
-    }
-
-    fn new_batch(&self) -> BufferedWriteBatch {
-        BufferedWriteBatch::default()
-    }
-
-    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        let mut rows = self.rows.write();
-        apply_ops(&mut rows, batch.into_ops());
-        Ok(())
-    }
-
-    fn write_durable_if(
-        &self,
-        conditions: &[WriteCondition<'_>],
-        batch: BufferedWriteBatch,
-    ) -> Result<bool, StorageError> {
-        let mut rows = self.rows.write();
-        // Every condition observes pre-batch state; the batch may mutate a
-        // condition key itself.
-        let matched = conditions.iter().all(|condition| {
-            let (cf, key) = condition.location();
-            condition.matches(
-                rows.iter()
-                    .find(|((row_cf, row_key), _value)| *row_cf == cf && row_key == key)
-                    .map(|(_row, value)| value.as_slice()),
-            )
-        });
-        if !matched {
-            return Ok(false);
-        }
-        apply_ops(&mut rows, batch.into_ops());
-        Ok(true)
-    }
-
-    fn flush(&self) -> Result<(), StorageError> {
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
-        Err(StorageError::InvalidOperation(
-            "memory snapshots unsupported",
-        ))
-    }
-
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
-}
-
-/// Folds one batch's operations into the row list, in order.
-fn apply_ops(rows: &mut Vec<Row>, ops: Vec<BatchOp>) {
-    for op in ops {
-        match op {
-            BatchOp::Put { cf, key, value } => {
-                if let Some((_row, existing_value)) = rows
-                    .iter_mut()
-                    .find(|((row_cf, row_key), _value)| *row_cf == cf && row_key == &key)
-                {
-                    *existing_value = value.into();
-                } else {
-                    rows.push(((cf, key), value.into()));
-                }
-            }
-            BatchOp::Delete { cf, key } => {
-                rows.retain(|((row_cf, row_key), _value)| *row_cf != cf || row_key != &key);
-            }
-            BatchOp::DeleteRange { cf, start, end } => {
-                rows.retain(|((row_cf, key), _value)| {
-                    *row_cf != cf
-                        || key.as_slice() < start.as_slice()
-                        || key.as_slice() >= end.as_slice()
-                });
-            }
-        }
-    }
 }

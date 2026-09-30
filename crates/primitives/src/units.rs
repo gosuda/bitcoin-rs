@@ -177,6 +177,20 @@ impl core::ops::BitAnd<u32> for Sequence {
     }
 }
 
+/// Raw `nSequence` that makes an input final: [`Sequence::MAX`].
+pub const SEQUENCE_FINAL: u32 = Sequence::MAX.0;
+/// BIP68: set in `nSequence` to disable the input's relative lock-time.
+pub const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
+/// BIP68: set in `nSequence` when the relative lock-time counts time, not blocks.
+pub const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
+/// BIP68: the `nSequence` bits holding the relative lock-time value.
+pub const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
+/// BIP68: seconds per unit of a time-based relative lock-time.
+pub const SEQUENCE_LOCKTIME_GRANULARITY_SECONDS: u32 = 512;
+
+/// `nLockTime` values below this are block heights; at or above it, UNIX times.
+pub const LOCKTIME_THRESHOLD: u32 = 500_000_000;
+
 /// A transaction lock time (`nLockTime`).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LockTime(u32);
@@ -273,6 +287,37 @@ impl CompactTarget {
     #[must_use]
     pub const fn to_le_bytes(self) -> [u8; 4] {
         self.0.to_le_bytes()
+    }
+
+    /// Decodes into the 256-bit little-endian magnitude and the sign bit.
+    ///
+    /// Mirrors Core's `arith_uint256::SetCompact` exactly: the mantissa's
+    /// bytes are shifted by the exponent, with bytes pushed past the 256-bit
+    /// width silently dropped.
+    ///
+    /// The magnitude ignores the sign bit — like Core's own `GetHex`, it
+    /// renders the unsigned value — so callers doing proof-of-work
+    /// comparisons must separately treat a negative encoding or an all-zero
+    /// magnitude as unmeetable.
+    #[must_use]
+    pub fn decode_magnitude(self) -> ([u8; 32], bool) {
+        let bits = self.0;
+        let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
+        let mut mantissa = bits & 0x007f_ffff;
+        let mut magnitude = [0_u8; 32];
+        if exponent <= 3 {
+            mantissa >>= 8 * (3 - exponent);
+            magnitude[..8].copy_from_slice(&u64::from(mantissa).to_le_bytes());
+        } else {
+            let shift = exponent - 3;
+            for (offset, byte) in mantissa.to_le_bytes().iter().enumerate() {
+                if let Some(slot) = magnitude.get_mut(shift + offset) {
+                    *slot = *byte;
+                }
+            }
+        }
+        let negative = mantissa != 0 && bits & 0x0080_0000 != 0;
+        (magnitude, negative)
     }
 }
 

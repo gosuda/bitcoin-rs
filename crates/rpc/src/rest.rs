@@ -9,16 +9,16 @@
 use alloc::sync::Arc;
 use std::str::FromStr;
 
-use bitcoin::hex::FromHex as _;
+use bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, TxOut, Txid, consensus_bytes, deserialize,
+    Block, BlockHash, Hash256, Header, TxOut, Txid, consensus_bytes, deserialize, hex_decode,
+    hex_encode, u32_saturated_len,
 };
 
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
-use crate::compat::convert::hex_encode;
 use crate::context::{AppliedView, Context};
 use crate::error::RpcError;
 use crate::handlers::chain::getblockchaininfo;
@@ -32,9 +32,6 @@ const DEFAULT_HEADER_COUNT: u32 = 5;
 const MAX_HEADER_COUNT: u32 = 2_000;
 /// Core's `MAX_GETUTXOS_OUTPOINTS`.
 const MAX_GETUTXOS_OUTPOINTS: usize = 15;
-
-/// BIP141's maximum block weight also bounds any valid serialized block body.
-const MAX_REST_BLOCK_BODY_BYTES: usize = 4_000_000;
 
 /// The Bitcoin Core REST prefixes registered by `StartREST`.
 pub const REGISTRATIONS: [&str; 12] = [
@@ -149,7 +146,7 @@ fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
                 if format == "hex" {
                     text_response("text/plain", format!("{hex}\n").into_bytes())
                 } else {
-                    let bytes = Vec::<u8>::from_hex(hex).unwrap_or_default();
+                    let bytes = hex_decode(hex).unwrap_or_default();
                     binary_response("application/octet-stream", &bytes)
                 }
             }
@@ -237,7 +234,7 @@ fn route_block_part(ctx: &Arc<Context>, suffix: &str) -> Response {
 }
 
 fn bounded_block_body(ctx: &Context, record: &BlockRecord) -> Result<Vec<u8>, Response> {
-    if record.body_size > MAX_REST_BLOCK_BODY_BYTES {
+    if record.body_size > MAX_BLOCK_SERIALIZED_SIZE {
         return Err(internal_error(
             "stored block exceeds the REST response limit",
         ));
@@ -248,7 +245,7 @@ fn bounded_block_body(ctx: &Context, record: &BlockRecord) -> Result<Vec<u8>, Re
             record.hash
         )));
     };
-    if body.len() > MAX_REST_BLOCK_BODY_BYTES {
+    if body.len() > MAX_BLOCK_SERIALIZED_SIZE {
         return Err(internal_error(
             "stored block exceeds the REST response limit",
         ));
@@ -803,7 +800,7 @@ fn build_chain_context(
 ) -> BlockChainContext {
     let on_active =
         ctx.chain.active_hash_in_view(view, record.height) == Some(Hash256::from(record.hash));
-    let n_tx = u32::try_from(record.tx_count).unwrap_or(u32::MAX);
+    let n_tx = u32_saturated_len(record.tx_count);
     BlockChainContext {
         height: record.height,
         confirmations: crate::render::confirmations(view.height(), record.height, on_active),

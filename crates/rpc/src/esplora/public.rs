@@ -8,11 +8,12 @@ use std::sync::Arc;
 // (sanctioned compat seam).
 use bitcoin::consensus::encode::serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::merkle_tree::MerkleBlock;
+use bitcoin_rs_consensus::hash_merkle_pair;
 use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{
+    Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize, hex_decode, hex_encode,
+};
 use serde_json::json;
 use sonic_rs::{JsonValueTrait as _, json as sonic_json};
 
@@ -22,6 +23,7 @@ use super::model::{
     RecentTransaction, ScriptSummary, TransactionValue,
 };
 use super::projection::{Confirmation, Projection};
+use crate::compat::convert::output_at;
 use crate::context::Context;
 use crate::handlers::Handler;
 use crate::rest::{
@@ -169,12 +171,7 @@ fn tx(ctx: &Context, id: &str) -> Response {
 fn tx_hex(ctx: &Context, id: &str) -> Response {
     Projection::new(ctx).required_transaction(id).map_or_else(
         |r| r,
-        |(tx, _)| {
-            text_response(
-                "text/plain",
-                consensus_bytes(&tx).to_lower_hex_string().into_bytes(),
-            )
-        },
+        |(tx, _)| text_response("text/plain", hex_encode(&consensus_bytes(&tx)).into_bytes()),
     )
 }
 fn tx_raw(ctx: &Context, id: &str) -> Response {
@@ -208,10 +205,7 @@ fn tx_merkleblock_proof(ctx: &Context, id: &str) -> Response {
                 candidate.as_byte_array() == txid.as_bytes()
             });
             let _ = record;
-            text_response(
-                "text/plain",
-                serialize(&proof).to_lower_hex_string().into_bytes(),
-            )
+            text_response("text/plain", hex_encode(&serialize(&proof)).into_bytes())
         },
     )
 }
@@ -268,10 +262,7 @@ fn merkle_proof(mut level: Vec<Txid>, mut position: usize) -> Vec<String> {
         let mut next = Vec::with_capacity(level.len().div_ceil(2));
         for pair in level.chunks(2) {
             let right = pair.get(1).unwrap_or(&pair[0]);
-            let mut bytes = [0_u8; 64];
-            bytes[..32].copy_from_slice(pair[0].as_bytes());
-            bytes[32..].copy_from_slice(right.as_bytes());
-            next.push(Txid(double_sha256(&bytes)));
+            next.push(hash_merkle_pair(pair[0], *right));
         }
         level = next;
         position /= 2;
@@ -287,10 +278,7 @@ fn tx_outspend(ctx: &Context, id: &str, vout: &str) -> Response {
     projection.required_transaction(id).map_or_else(
         |r| r,
         |(transaction, _)| {
-            let Some(_) = transaction
-                .outputs
-                .get(usize::try_from(vout).unwrap_or(usize::MAX))
-            else {
+            let Some(_) = output_at(&transaction.outputs, vout) else {
                 return not_found();
             };
             outspend(&projection, OutPoint::new(transaction.txid(), vout))
@@ -378,7 +366,7 @@ fn block_header(ctx: &Context, h: &str) -> Response {
     };
     record.header_bytes().map_or_else(
         || service_unavailable("block header unavailable"),
-        |bytes| text_response("text/plain", bytes.to_lower_hex_string().into_bytes()),
+        |bytes| text_response("text/plain", hex_encode(bytes).into_bytes()),
     )
 }
 fn block_status(ctx: &Context, text_hash: &str) -> Response {
@@ -606,9 +594,7 @@ fn summary_for(ctx: &Context, h: ScriptHash, address: Option<&str>) -> Response 
     let chain_stats = activity.chain_stats();
     json_ok(&ScriptSummary {
         address: address.map(str::to_owned),
-        scripthash: address
-            .is_none()
-            .then(|| h.to_byte_array().to_lower_hex_string()),
+        scripthash: address.is_none().then(|| hex_encode(&h.to_byte_array())),
         chain_stats,
         mempool_stats: activity.mempool_stats(h),
     })
@@ -714,7 +700,9 @@ fn address_hash(ctx: &Context, a: &str) -> Result<ScriptHash, Response> {
     Ok(ScriptHash::from_script_bytes(a.script_pubkey().as_bytes()))
 }
 fn parse_script(s: &str) -> Result<ScriptHash, Response> {
-    Ok(ScriptHash::from_byte_array(
-        <[u8; 32]>::from_hex(s).map_err(|_| bad_request("scripthash must be 64 hex characters"))?,
-    ))
+    let bytes = hex_decode(s)
+        .ok()
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes).ok())
+        .ok_or_else(|| bad_request("scripthash must be 64 hex characters"))?;
+    Ok(ScriptHash::from_byte_array(bytes))
 }

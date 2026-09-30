@@ -11,12 +11,7 @@ use crate::inv::{
     inventory_block_hash, inventory_tx_hash, is_within_inventory_bound, request_witness,
 };
 use crate::peer::{Peer, PeerState};
-use crate::wire::{Message, PeerError};
-
-/// Maximum headers returned by one `headers` response.
-pub const MAX_HEADERS_RESPONSE: usize = 2_000;
-/// Maximum block locator hashes accepted in one locator-based request.
-pub use crate::wire::MAX_LOCATOR_HASHES;
+use crate::wire::{MAX_HEADERS_MESSAGE_COUNT, MAX_LOCATOR_HASHES, Message, PeerError};
 
 /// Outcome of streamed inventory serving. Bodies pass through the serving
 /// sink as they load and are never materialized as a whole.
@@ -148,7 +143,7 @@ impl crate::compact_blocks::CompactBlockHints for bitcoin_rs_mempool::MempoolGat
 /// Chainless dispatch: collects the protocol responses and returns them.
 ///
 /// With `chain: None` responses can never contain a block body, so the batch
-/// is protocol-bounded (at most [`MAX_HEADERS_RESPONSE`] headers, or one
+/// is protocol-bounded (at most [`MAX_HEADERS_MESSAGE_COUNT`] headers, or one
 /// inventory-bound notfound/getdata echo) and safe to materialize whole.
 /// Block announcements go to a no-op sink.
 pub fn dispatch_inbound<S>(
@@ -316,9 +311,9 @@ fn headers_response(chain: Option<&dyn ChainQuery>, request: &GetHeadersMessage)
         .collect();
     let stop_hash = BlockHash(Hash256::from_le_bytes(request.stop_hash.as_byte_array()));
     let mut headers = chain.map_or_else(Vec::new, |chain| {
-        chain.headers_after(&locator_hashes, stop_hash, MAX_HEADERS_RESPONSE)
+        chain.headers_after(&locator_hashes, stop_hash, MAX_HEADERS_MESSAGE_COUNT)
     });
-    headers.truncate(MAX_HEADERS_RESPONSE);
+    headers.truncate(MAX_HEADERS_MESSAGE_COUNT);
     Message::Headers(headers)
 }
 
@@ -521,7 +516,7 @@ mod tests {
     };
 
     use super::{
-        ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, MAX_LOCATOR_HASHES, TxInventory,
+        ChainQuery, InventoryServing, MAX_HEADERS_MESSAGE_COUNT, MAX_LOCATOR_HASHES, TxInventory,
         dispatch_inbound, dispatch_inbound_full, dispatch_inbound_with_chain,
     };
     use crate::connection::{OutboundBudget, PeerLease};
@@ -692,7 +687,7 @@ mod tests {
 
     #[test]
     fn getheaders_truncates_chain_response_above_protocol_cap() -> Result<(), PeerError> {
-        let count = u32::try_from(MAX_HEADERS_RESPONSE + 1)
+        let count = u32::try_from(MAX_HEADERS_MESSAGE_COUNT + 1)
             .map_err(|_| PeerError::Protocol("test header count overflow"))?;
         let chain = GreedyHeaders {
             headers: FakeChain::with_headers(count).headers,
@@ -708,7 +703,7 @@ mod tests {
         let [Message::Headers(headers)] = responses.as_slice() else {
             panic!("expected one headers response, got {responses:?}");
         };
-        assert_eq!(headers.len(), MAX_HEADERS_RESPONSE);
+        assert_eq!(headers.len(), MAX_HEADERS_MESSAGE_COUNT);
         Ok(())
     }
 

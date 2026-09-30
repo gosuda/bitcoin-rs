@@ -23,6 +23,7 @@ use crate::error::ApplyError;
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::u32_saturated_len;
 use bitcoin_rs_storage::CommitRecords;
 use rayon::prelude::*;
 use std::sync::Arc;
@@ -187,7 +188,7 @@ impl WindowGroup {
         );
         metrics::histogram!("node.durable_head.group_commit_seconds")
             .record(started.elapsed().as_secs_f64());
-        let staged = u32::try_from(self.pending.len()).unwrap_or(u32::MAX);
+        let staged = u32_saturated_len(self.pending.len());
         metrics::histogram!("node.durable_head.group_blocks").record(f64::from(staged));
         for pending in &mut self.pending {
             pending.outcome.commit_id = receipt.commit_id;
@@ -556,7 +557,7 @@ pub(super) fn prove_window<'a>(
     let prepare_started = quanta::Instant::now();
     let mut overlay = bitcoin_rs_utxo::WindowOverlay::new(
         handles.utxo.as_ref(),
-        bitcoin_rs_consensus::MAX_SCRIPT_SIZE,
+        bitcoin_rs_primitives::MAX_SCRIPT_SIZE,
     );
     let mut prepared = Vec::with_capacity(blocks.len());
     for ((block, parsed), context) in blocks.iter().zip(parsed).zip(&contexts) {

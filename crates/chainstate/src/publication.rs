@@ -2,7 +2,7 @@
 
 use super::Chainstate;
 use bitcoin_rs_chain::TipSnapshot;
-use bitcoin_rs_primitives::Block;
+use bitcoin_rs_primitives::{Block, u64_saturated_len};
 use std::sync::Arc;
 
 /// Publishes one applied tip and records the chain event that names it.
@@ -27,5 +27,5 @@ pub(super) fn publish_applied(
 /// expression would be two chances for the rewind to subtract something the
 /// apply never added.
 pub(super) fn tx_count_delta_for(block: &Block) -> u64 {
-    u64::try_from(block.txs.len()).unwrap_or(u64::MAX)
+    u64_saturated_len(block.txs.len())
 }

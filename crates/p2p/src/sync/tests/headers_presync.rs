@@ -19,18 +19,18 @@ use std::net::SocketAddr;
 
 use super::behavior_5::deliver_headers;
 use super::behavior_5::next_locator;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, u32_saturated_len, u64_saturated_len};
 
 use super::super::SyncBudget;
 use super::super::default_sync_budget;
 use super::super::headers_presync::HeadersSyncPhase;
 use super::super::headers_presync::HeadersSyncState;
 use super::*;
-use crate::dispatch::MAX_HEADERS_RESPONSE;
+use crate::wire::MAX_HEADERS_MESSAGE_COUNT;
 
 /// The wire page size a full `headers` message must fill to keep a
 /// download-twice sync in its collection phase.
-const PAGE: usize = MAX_HEADERS_RESPONSE;
+const PAGE: usize = MAX_HEADERS_MESSAGE_COUNT;
 
 /// Work units one regtest-easy header mints (measured, not assumed: see
 /// the assertion in the first test).
@@ -69,7 +69,7 @@ fn chain_on(fork: &Header, fork_height: u32, len: usize) -> Vec<Header> {
     let mut headers = Vec::with_capacity(len);
     let mut prev = fork.compute_hash();
     for index in 0..len {
-        let offset = u32::try_from(index).unwrap_or(u32::MAX);
+        let offset = u32_saturated_len(index);
         let header = mine_header(prev, fork_height + offset + 1);
         prev = header.compute_hash();
         headers.push(header);
@@ -156,7 +156,7 @@ fn sync_phase(sync: &BlockSync, source: PeerSource) -> Option<HeadersSyncPhase> 
 /// re-requested from and the second batch falling into admission.
 #[test]
 fn low_work_headers_do_not_reach_block_tree() -> Result<(), Box<dyn std::error::Error>> {
-    let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
+    let floor = ChainWork::from(WORK_PER_HEADER * u64_saturated_len(4 * PAGE));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, lease, rx) = connect(&peers, 9701, 100_000);
     let source = current_source(&peers, addr);
@@ -297,7 +297,7 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn s
     let tree = sync.chain.block_tree();
     assert_eq!(
         tree.height_of_hash(Hash256::from(chain_last)),
-        Some(u32::try_from(PAGE + 500).unwrap_or(u32::MAX)),
+        Some(u32_saturated_len(PAGE + 500)),
         "the committed replay must admit the whole chain in wire order (len {})",
         tree.len(),
     );
@@ -422,7 +422,7 @@ fn redownload_release_continues_from_the_state_cursor() -> Result<(), Box<dyn st
     // pages before the chain runs out, so the release is a buffer
     // overflow, not the completion.
     let chain = chain_on(&genesis_header(), 0, 5 * PAGE);
-    let threshold = ChainWork::from(WORK_PER_HEADER * u64::try_from(5 * PAGE).unwrap_or(u64::MAX));
+    let threshold = ChainWork::from(WORK_PER_HEADER * u64_saturated_len(5 * PAGE));
     assert_eq!(
         chain_work(&chain),
         threshold,
@@ -506,8 +506,7 @@ fn redownload_release_continues_from_the_state_cursor() -> Result<(), Box<dyn st
 /// work into the crossing decision.
 #[test]
 fn a_midbatch_continuity_break_spends_the_sync() -> Result<(), Box<dyn std::error::Error>> {
-    let floor =
-        ChainWork::from(WORK_PER_HEADER * u64::try_from(2 * PAGE + 500).unwrap_or(u64::MAX));
+    let floor = ChainWork::from(WORK_PER_HEADER * u64_saturated_len(2 * PAGE + 500));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, lease, _rx) = connect(&peers, 9705, 100_000);
     let source = current_source(&peers, addr);
@@ -526,7 +525,7 @@ fn a_midbatch_continuity_break_spends_the_sync() -> Result<(), Box<dyn std::erro
     let mut midbreak = chain[PAGE..2 * PAGE - 1].to_vec();
     midbreak.push(mine_header(
         BlockHash(Hash256::from_le_bytes(&[0xa5; 32])),
-        u32::try_from(2 * PAGE).unwrap_or(u32::MAX),
+        u32_saturated_len(2 * PAGE),
     ));
     deliver_headers(&inbound_headers_tx, midbreak, source)?;
     sync.tick();
@@ -557,7 +556,7 @@ fn a_midbatch_continuity_break_spends_the_sync() -> Result<(), Box<dyn std::erro
 #[test]
 fn a_forwarded_body_header_leaves_the_live_sync_state_alone()
 -> Result<(), Box<dyn std::error::Error>> {
-    let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
+    let floor = ChainWork::from(WORK_PER_HEADER * u64_saturated_len(4 * PAGE));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, lease, rx) = connect(&peers, 9706, 100_000);
     let source = current_source(&peers, addr);
@@ -825,7 +824,7 @@ fn a_terminal_low_work_page_demotes_the_source() -> Result<(), Box<dyn std::erro
 #[test]
 fn unsolicited_presync_continuation_keeps_another_peers_pending_request()
 -> Result<(), Box<dyn std::error::Error>> {
-    let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
+    let floor = ChainWork::from(WORK_PER_HEADER * u64_saturated_len(4 * PAGE));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (owner_addr, _owner_lease, owner_rx) = connect(&peers, 9707, 100_000);
     sync.tick();

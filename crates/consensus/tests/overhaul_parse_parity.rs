@@ -18,7 +18,7 @@ use bitcoin_rs_consensus::verify_block::{
 };
 use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
 use bitcoin_rs_primitives::layout::ParsedBlock;
-use bitcoin_rs_primitives::{Block, Tx, Txid, Wtxid, consensus_bytes};
+use bitcoin_rs_primitives::{Block, Tx, Txid, Wtxid, consensus_bytes, u64_saturated_len};
 
 /// Legacy (pre-segwit) golden fixture height; also the mutation-fixture base.
 const LEGACY_HEIGHT: u32 = 170;
@@ -156,9 +156,7 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
             "height {height}: count prefix not after header"
         );
         assert_eq!(
-            u64::from(compact_size_len(
-                u64::try_from(facts.tx_count()).unwrap_or(u64::MAX)
-            )),
+            u64::from(compact_size_len(u64_saturated_len(facts.tx_count()))),
             u64::from(parsed.tx_count_span().len()),
             "height {height}: count prefix length"
         );
@@ -181,7 +179,7 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
         }
         assert_eq!(
             expected_start,
-            u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            u64_saturated_len(bytes.len()),
             "height {height}: spans must tile the image"
         );
         assert_eq!(

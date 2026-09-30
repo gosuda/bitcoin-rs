@@ -32,8 +32,9 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_e2e::live_peer::is_soft_recv_error;
 use bitcoin_rs_e2e::node::workspace;
-use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::process_peer::{connect_loopback, decode_frame};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 use serde_json::{Value, json};
 
@@ -275,17 +276,6 @@ impl GatePeer {
     }
 }
 
-fn is_soft_recv_error(error: &Error) -> bool {
-    match error {
-        Error::Io(io) => matches!(
-            io.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ),
-        Error::Protocol(detail) => detail.contains("deadline"),
-        _ => false,
-    }
-}
-
 fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Error> {
     fn read_exact(
         stream: &mut TcpStream,
@@ -328,15 +318,6 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Erro
     frame.resize(HEADER_BYTES + length, 0);
     read_exact(stream, &mut frame[HEADER_BYTES..], deadline)?;
     Ok(frame)
-}
-
-fn decode_frame(frame: &[u8]) -> Result<NetworkMessage, Error> {
-    let envelope: RawNetworkMessage = bitcoin::consensus::deserialize(frame)
-        .map_err(|error| Error::Protocol(format!("invalid P2P envelope: {error}")))?;
-    if *envelope.magic() != Magic::REGTEST {
-        return Err(Error::Protocol("P2P network mismatch".to_owned()));
-    }
-    Ok(envelope.into_payload())
 }
 
 fn evidence_dir() -> std::path::PathBuf {

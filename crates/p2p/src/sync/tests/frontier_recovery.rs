@@ -2,19 +2,6 @@
 
 use super::*;
 
-/// Returns the next `getheaders` from `rx`, skipping other traffic; fails
-/// when none is queued.
-fn next_getheaders(
-    rx: &crossbeam_channel::Receiver<Message>,
-) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
-    while let Ok(message) = rx.try_recv() {
-        if let Message::GetHeaders(request) = message {
-            return Ok(request);
-        }
-    }
-    Err(std::io::Error::other("expected getheaders").into())
-}
-
 #[test]
 fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix()
 -> Result<(), Box<dyn std::error::Error>> {

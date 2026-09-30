@@ -13,6 +13,7 @@ use super::http::{dispatch_error, query_limit};
 use super::model::{Outspend, TransactionValue};
 use super::projection::Projection;
 use super::public::{block_transaction_values, outspend, outspends_for_transaction};
+use crate::compat::convert::output_at;
 use crate::context::Context;
 use crate::handlers::Handler;
 use crate::handlers::mining::required_gbt_rules;
@@ -217,10 +218,7 @@ fn internal_outspend(
     let Some((transaction, _)) = projection.transaction(&txid)? else {
         return Ok(Outspend::unspent());
     };
-    let Some(_) = transaction
-        .outputs
-        .get(usize::try_from(vout).unwrap_or(usize::MAX))
-    else {
+    let Some(_) = output_at(&transaction.outputs, vout) else {
         return Ok(Outspend::unspent());
     };
     outspend(projection, OutPoint::new(txid, vout))

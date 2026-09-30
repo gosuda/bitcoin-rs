@@ -4,9 +4,7 @@
 //! runtime resolves block identity against the same log. The type lives here
 //! so both owners read it without an edge on the RPC surface crate.
 
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
-
-const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, hex_encode, u64_saturated_len};
 
 /// Block metadata made available to RPC handlers without forcing storage I/O.
 ///
@@ -33,7 +31,7 @@ pub struct BlockRecord {
     /// leaving the log's records empty would have saved nothing. Boxing makes
     /// an absent header cost 8 bytes and allocates only where one is actually
     /// produced, which is once per RPC answer rather than once per block.
-    pub header: Option<Box<[u8; SERIALIZED_BLOCK_HEADER_LEN]>>,
+    pub header: Option<Box<[u8; Header::LEN]>>,
     /// Transaction count in the block.
     pub tx_count: usize,
     /// Block header timestamp (UNIX seconds).
@@ -109,7 +107,7 @@ impl BlockLog {
     pub fn push(&mut self, record: BlockRecord) {
         self.total_body_size = self
             .total_body_size
-            .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX));
+            .saturating_add(u64_saturated_len(record.body_size));
         // Read the last prefix directly rather than through `total_tx_count`:
         // that one carries a `debug_assert` which folds the log, and paying it
         // per append would make block application quadratic in debug builds.
@@ -132,7 +130,7 @@ impl BlockLog {
         let _ = self.cumulative_tx_count.pop();
         self.total_body_size = self
             .total_body_size
-            .saturating_sub(u64::try_from(record.body_size).unwrap_or(u64::MAX));
+            .saturating_sub(u64_saturated_len(record.body_size));
         Some(record)
     }
 
@@ -160,7 +158,7 @@ impl BlockLog {
         debug_assert_eq!(
             self.total_body_size,
             self.records.iter().fold(0_u64, |total, record| total
-                .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX))),
+                .saturating_add(u64_saturated_len(record.body_size))),
             "running body-size total drifted from the records it summarizes"
         );
         self.total_body_size
@@ -336,7 +334,7 @@ impl BlockRecord {
     /// [`Context::record_for_hash`] does, because that fills it from the block
     /// tree.
     #[must_use]
-    pub fn header_bytes(&self) -> Option<&[u8; SERIALIZED_BLOCK_HEADER_LEN]> {
+    pub fn header_bytes(&self) -> Option<&[u8; Header::LEN]> {
         self.header.as_deref()
     }
 
@@ -347,8 +345,8 @@ impl BlockRecord {
     /// the bytes back anyway.
     #[must_use]
     pub fn header_hex(&self) -> String {
-        self.header.as_ref().map_or_else(String::new, |bytes| {
-            bitcoin_rs_storage::checkpoint::hex_encode(bytes.as_slice())
-        })
+        self.header
+            .as_ref()
+            .map_or_else(String::new, |bytes| hex_encode(bytes.as_slice()))
     }
 }

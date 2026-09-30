@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-    consensus_bytes, deserialize,
+    consensus_bytes, deserialize, hex_decode, hex_encode,
 };
 use bitcoin_rs_rpc::context::Context;
 use bitcoin_rs_rpc::{Handler, RpcError};
@@ -22,40 +22,6 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
 /// A standard P2WPKH script paid to a known key.
 const P2WPKH_SCRIPT_HEX: &str = "00141111111111111111111111111111111111111111";
-
-/// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
-/// Decodes hexadecimal into bytes, rejecting odd length and invalid digits.
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    fn nibble(byte: u8) -> Result<u8, String> {
-        match byte {
-            b'0'..=b'9' => Ok(byte - b'0'),
-            b'a'..=b'f' => Ok(byte - b'a' + 10),
-            b'A'..=b'F' => Ok(byte - b'A' + 10),
-            _ => Err(format!("invalid hex digit: {}", char::from(byte))),
-        }
-    }
-    let bytes = hex.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return Err(format!("odd-length hex input: {hex}"));
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.as_chunks::<2>().0 {
-        let high = nibble(pair[0])?;
-        let low = nibble(pair[1])?;
-        out.push(high << 4 | low);
-    }
-    Ok(out)
-}
 
 /// Returns `true` when the script starts with `OP_RETURN` (0x6a).
 fn is_op_return(script: &[u8]) -> bool {

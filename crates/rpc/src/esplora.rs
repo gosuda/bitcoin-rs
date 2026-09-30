@@ -111,14 +111,12 @@ mod tests {
     use std::sync::mpsc::{Receiver, Sender, channel};
     use std::time::Duration;
 
-    use bitcoin::hex::DisplayHex as _;
-    use bitcoin_rs_chain::NodeStatus;
+    use bitcoin_rs_chain::{NodeStatus, regtest_fixture};
     use bitcoin_rs_index::ScriptHash;
     use bitcoin_rs_mempool::MempoolEntry;
-    use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
-        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, hex_encode,
     };
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
     use serde_json::{Value, json};
@@ -128,6 +126,7 @@ mod tests {
         CHAIN_PAGE, address_transaction_summary, block_txs, fee_rate_sat_per_vbyte, history,
         outspend, summary,
     };
+    use crate::compat::convert::output_at;
     use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
     use crate::handlers::Handler;
     use crate::rest::Response;
@@ -209,25 +208,6 @@ mod tests {
         OutPoint::new(Txid::default(), u32::MAX)
     }
 
-    /// Folds txids into the block merkle root the consensus encoder builds,
-    /// so fixture blocks carry self-consistent identity.
-    fn fixture_merkle_root(txids: &[Txid]) -> Hash256 {
-        if let [single] = txids {
-            return single.0;
-        }
-        let next = txids
-            .chunks(2)
-            .map(|pair| {
-                let right = pair.get(1).unwrap_or(&pair[0]);
-                let mut bytes = [0_u8; 64];
-                bytes[..32].copy_from_slice(pair[0].as_bytes());
-                bytes[32..].copy_from_slice(right.as_bytes());
-                Txid(double_sha256(&bytes))
-            })
-            .collect::<Vec<_>>();
-        fixture_merkle_root(&next)
-    }
-
     /// A native one-transaction block standing in for the network genesis the
     /// fixtures previously pulled from the rust-bitcoin crate.
     fn fixture_genesis() -> Block {
@@ -248,7 +228,8 @@ mod tests {
                 },
             )],
         };
-        block.header.merkle_root = fixture_merkle_root(&block.txids());
+        block.header.merkle_root =
+            regtest_fixture::merkle_root(&block.txs).expect("fixture blocks carry a coinbase");
         block
     }
 
@@ -316,11 +297,7 @@ mod tests {
         fn outpoint_value(&self, outpoint: &OutPoint) -> Result<Option<u64>, TxQueryError> {
             let (out_txid, out_vout) = (outpoint.txid, outpoint.vout);
             Ok((self.transaction.txid() == out_txid)
-                .then(|| {
-                    self.transaction
-                        .outputs
-                        .get(usize::try_from(out_vout).unwrap_or(usize::MAX))
-                })
+                .then(|| output_at(&self.transaction.outputs, out_vout))
                 .flatten()
                 .map(|output| output.value.to_sat()))
         }
@@ -383,11 +360,7 @@ mod tests {
                 .0
                 .iter()
                 .find(|(transaction, _)| transaction.txid() == out_txid)
-                .and_then(|(transaction, _)| {
-                    transaction
-                        .outputs
-                        .get(usize::try_from(out_vout).unwrap_or(usize::MAX))
-                })
+                .and_then(|(transaction, _)| output_at(&transaction.outputs, out_vout))
                 .map(|output| output.value.to_sat()))
         }
 
@@ -540,7 +513,8 @@ mod tests {
             },
             txs: vec![transaction.clone()],
         };
-        block.header.merkle_root = fixture_merkle_root(&block.txids());
+        block.header.merkle_root =
+            regtest_fixture::merkle_root(&block.txs).expect("fixture blocks carry a coinbase");
         let record = bitcoin_rs_index::block_log::BlockRecord::from_block(0, &block);
         let txid = transaction.txid();
         let mut context = Context::new();
@@ -606,9 +580,8 @@ mod tests {
         let (handler, transaction, block, address) = contract_fixture()?;
         let txid = transaction.txid().to_string();
         let block_hash = block.block_hash().to_string();
-        let script_hash = ScriptHash::new(&transaction.outputs[0].script_pubkey)
-            .to_byte_array()
-            .to_lower_hex_string();
+        let script_hash =
+            hex_encode(&ScriptHash::new(&transaction.outputs[0].script_pubkey).to_byte_array());
         let routes = [
             (format!("/tx/{txid}"), 200, "application/json"),
             (format!("/tx/{txid}/status"), 200, "application/json"),
@@ -711,7 +684,7 @@ mod tests {
         }
 
         let (broadcast_transaction, _) = transaction_with_funded_input(handler.context().as_ref());
-        let raw = consensus_bytes(&broadcast_transaction).to_lower_hex_string();
+        let raw = hex_encode(&consensus_bytes(&broadcast_transaction));
         let broadcast = route_post(&handler, "/tx", raw.as_bytes());
         assert_eq!(
             broadcast.status,
@@ -1317,7 +1290,7 @@ mod tests {
         let ctx = Arc::new(ctx);
         let txid = transaction.txid();
         let handler = Handler::new(ctx);
-        let raw = consensus_bytes(&transaction).to_lower_hex_string();
+        let raw = hex_encode(&consensus_bytes(&transaction));
         let broadcast = route_post(&handler, "/tx", raw.as_bytes());
         assert_eq!(broadcast.status, 200);
         let response = route(&handler, &format!("/tx/{txid}"), "");
@@ -1333,9 +1306,8 @@ mod tests {
         // behavior. The expected page comes from the cursor-free public route.
         let (handler, transaction, _, address) = contract_fixture()?;
         let txid = transaction.txid().to_string();
-        let script_hash = ScriptHash::new(&transaction.outputs[0].script_pubkey)
-            .to_byte_array()
-            .to_lower_hex_string();
+        let script_hash =
+            hex_encode(&ScriptHash::new(&transaction.outputs[0].script_pubkey).to_byte_array());
         let mut unavailable = Context::new();
         unavailable.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
         let unavailable = Handler::new(Arc::new(unavailable));
@@ -1554,11 +1526,7 @@ mod tests {
             calls: Arc::clone(&calls),
         }));
 
-        let summary = summary(
-            &ctx,
-            &script_hash.to_byte_array().to_lower_hex_string(),
-            None,
-        );
+        let summary = summary(&ctx, &hex_encode(&script_hash.to_byte_array()), None);
         assert_eq!(summary.status, 200);
         let value: Value = serde_json::from_slice(&summary.body).expect("summary json");
         assert_eq!(value["chain_stats"]["funded_txo_count"], json!(30));
@@ -1671,9 +1639,7 @@ mod tests {
         let first_sequence = context.mempool.gateway.pool().read().sequence_number();
         let context = Arc::new(context);
         let handler = Handler::new(Arc::clone(&context));
-        let script_hash = ScriptHash::new(&target)
-            .to_byte_array()
-            .to_lower_hex_string();
+        let script_hash = hex_encode(&ScriptHash::new(&target).to_byte_array());
         let path = format!("/scripthash/{script_hash}");
         let (entered_send, entered_recv) = channel();
         let (release_send, release_recv) = channel();
@@ -2119,9 +2085,7 @@ mod tests {
         }));
         let ctx = seed_mempool(ctx, &seeds);
         let handler = Handler::new(Arc::clone(&ctx));
-        let script_hash = ScriptHash::new(&target)
-            .to_byte_array()
-            .to_lower_hex_string();
+        let script_hash = hex_encode(&ScriptHash::new(&target).to_byte_array());
         ParityFixture {
             ctx,
             handler,

@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use hashbrown::{HashMap, HashSet};
 
 use bitcoin_rs_consensus::bip68;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid, u64_saturated_len, varint};
 
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
@@ -280,7 +280,7 @@ pub(crate) fn bip68_final(pool: &Mempool, tx: &Tx, finality: &Bip68Admission<'_>
     let resolved = finality.resolved_prevouts.unwrap_or(&empty_set);
     for input in &tx.inputs {
         let sequence = input.sequence.to_consensus();
-        if sequence & bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+        if sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
             continue;
         }
         let (prevout_height, prevout_mtp) =
@@ -373,7 +373,9 @@ pub(crate) fn evaluate_one(
         effective_fee_rate: pool
             .modified_fee_for(txid, context.fee)
             .ok()
-            .and_then(|fee| (vsize != 0).then(|| fee * 1_000 / i128::from(vsize)))
+            .and_then(|fee| {
+                (vsize != 0).then(|| crate::entry::signed_fee_rate(fee, u64::from(vsize)))
+            })
             .and_then(|rate| u64::try_from(rate).ok()),
         reject_reason: reject,
     }
@@ -443,7 +445,7 @@ fn check_outputs(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), Standardnes
             let Some(limit) = policy.max_datacarrier_bytes else {
                 return Err(StandardnessError::DataCarrierDisabled);
             };
-            let serialized_script_bytes = compact_size_len(script.len())
+            let serialized_script_bytes = varint::encoded_len(u64_saturated_len(script.len()))
                 .checked_add(script.len())
                 .ok_or(StandardnessError::DataCarrierSizeOverflow)?;
             datacarrier_bytes = datacarrier_bytes
@@ -501,19 +503,6 @@ pub(crate) fn tx_has_dust_outputs(tx: &Tx, dust_relay_fee: u64) -> bool {
     tx.outputs
         .iter()
         .any(|output| is_dust(output, dust_relay_fee))
-}
-
-#[inline]
-const fn compact_size_len(len: usize) -> usize {
-    if len < 0xfd {
-        1
-    } else if len <= 0xffff {
-        3
-    } else if len <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 /// Extracts the payload length from an `OP_RETURN` script.
@@ -812,7 +801,7 @@ mod tests {
         let limit = [&first, &second]
             .into_iter()
             .fold(0_usize, |total, script| {
-                total + super::compact_size_len(script.len()) + script.len()
+                total + varint::encoded_len(u64_saturated_len(script.len())) + script.len()
             });
         tx.outputs = vec![
             TxOut {

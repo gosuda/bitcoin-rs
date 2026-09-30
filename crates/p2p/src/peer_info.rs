@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bitcoin::p2p::message_network::VersionMessage;
+use bitcoin_rs_primitives::i64_saturated;
 
 use crate::counters::PeerCounters;
 
@@ -139,7 +140,7 @@ impl PeerInfo {
             // Freeze the offset at version receipt, not handshake completion.
             time_offset: version
                 .timestamp
-                .saturating_sub(i64::try_from(version_received_time).unwrap_or(i64::MAX)),
+                .saturating_sub(i64_saturated(version_received_time)),
             counters,
         }
     }

@@ -41,7 +41,6 @@ use std::time::{Duration, Instant};
 use std::path::Path;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_primitives::encode::double_sha256;
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
@@ -59,8 +58,9 @@ use bitcoin::{
     script::Builder as OracleBuilder, transaction,
 };
 use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
-use bitcoin_rs_consensus::compute_merkle_root;
+use bitcoin_rs_consensus::{witness_commitment_hash, witness_merkle_root};
 use bitcoin_rs_index::BlockSource;
+use bitcoin_rs_mining::{WITNESS_RESERVED_VALUE, witness_commitment_script};
 pub mod evidence;
 
 use bitcoin_rs_chainstate::Chainstate;
@@ -608,6 +608,17 @@ enum DerivedIndexMode {
     RocksDb,
 }
 
+/// The inbound payloads a fixture's `run` sends, in send order: heights
+/// `2..=N` reversed, then height 1 last (sent after tick 2).
+fn run_send_order(blocks: &[Block]) -> Vec<bitcoin_rs_p2p::InboundBlock> {
+    blocks[1..]
+        .iter()
+        .rev()
+        .chain(std::iter::once(&blocks[0]))
+        .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
+        .collect()
+}
+
 impl SyncFixture {
     fn new(tx_index_mode: DerivedIndexMode) -> Self {
         Self::new_with_peers(tx_index_mode, 1)
@@ -668,15 +679,9 @@ impl SyncFixture {
         }
     }
 
-    /// Pre-clones and pre-serializes the inbound payloads `run` sends, in send
-    /// order: heights `2..=N` reversed, then height 1 last (sent after tick 2).
+    /// Pre-clones and pre-serializes the inbound payloads `run` sends.
     fn prebuild_run(mut self) -> Self {
-        self.prebuilt_inbound = self.blocks[1..]
-            .iter()
-            .rev()
-            .chain(std::iter::once(&self.blocks[0]))
-            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
-            .collect();
+        self.prebuilt_inbound = run_send_order(&self.blocks);
         self
     }
 
@@ -992,15 +997,9 @@ impl ProductionStateSyncFixture {
         }
     }
 
-    /// Pre-clones and pre-serializes the inbound payloads `run` sends, in send
-    /// order: heights `2..=N` reversed, then height 1 last (sent after tick 2).
+    /// Pre-clones and pre-serializes the inbound payloads `run` sends.
     fn prebuild_run(mut self) -> Self {
-        self.prebuilt_inbound = self.blocks[1..]
-            .iter()
-            .rev()
-            .chain(std::iter::once(&self.blocks[0]))
-            .map(|block| bitcoin_rs_p2p::InboundBlock::from_decoded(block.clone()))
-            .collect();
+        self.prebuilt_inbound = run_send_order(&self.blocks);
         self
     }
 
@@ -1447,12 +1446,6 @@ fn coinbase_script_sig(height: u32) -> Vec<u8> {
 // Signed-spend corpus: real ECDSA signatures verified by the script engine.
 // ---------------------------------------------------------------------------
 
-/// BIP141 witness commitment prefix: `OP_RETURN OP_PUSH36 BIP141_COMMITMENT_TAG`.
-const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
-
-/// BIP141 reserved witness value for the coinbase input.
-const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
-
 /// Signing keys for the three spend classes, all derived deterministically.
 struct SigningKeys {
     secp: Secp256k1<All>,
@@ -1589,7 +1582,7 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
     let commitment = witness_commitment_for_coinbase(&outputs);
     outputs.push(TxOut {
         value: Amount::from_sat(0),
-        script_pubkey: witness_commitment_script_pubkey(&commitment).into(),
+        script_pubkey: witness_commitment_script(&commitment).into(),
     });
 
     Tx {
@@ -1623,20 +1616,10 @@ fn p2wsh_2of3_redeem_script(keys: &SigningKeys, _index: u32) -> OracleScriptBuf 
 /// the only transaction in these blocks, so the root is all-zero and the
 /// commitment is `SHA256d(zeros || reserved)`.
 fn witness_commitment_for_coinbase(_outputs: &[TxOut]) -> Hash256 {
-    // Single-tx block: witness merkle root = [0; 32].
-    let root = [0u8; 32];
-    let mut buffer = [0u8; 64];
-    buffer[..32].copy_from_slice(&root);
-    buffer[32..].copy_from_slice(&WITNESS_RESERVED_VALUE);
-    double_sha256(&buffer)
-}
-
-/// Builds the BIP141 witness commitment scriptPubKey: `6a24aa21a9ed || commitment`.
-fn witness_commitment_script_pubkey(commitment: &Hash256) -> Vec<u8> {
-    let mut script = Vec::with_capacity(38);
-    script.extend_from_slice(&WITNESS_COMMITMENT_PREFIX);
-    script.extend_from_slice(commitment.as_byte_array());
-    script
+    witness_commitment_hash(
+        &witness_merkle_root(std::iter::empty()),
+        &WITNESS_RESERVED_VALUE,
+    )
 }
 
 /// Spend block consuming 64 coinbase outputs from 100 blocks back, each with a
@@ -1683,7 +1666,7 @@ fn child_signed_spend_fanout_block(
         .outputs
         .last_mut()
         .unwrap_or_else(|| panic!("coinbase missing commitment output"));
-    last.script_pubkey = witness_commitment_script_pubkey(&commitment).into();
+    last.script_pubkey = witness_commitment_script(&commitment).into();
     // Recompute merkle root after updating the commitment.
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs).unwrap_or_default();
     regtest_fixture::mine_block_to_declared_target(&mut block)
@@ -1694,22 +1677,8 @@ fn child_signed_spend_fanout_block(
 /// Computes the BIP141 witness commitment for a block's transaction set.
 /// Coinbase leaf is all-zero; every other leaf is the transaction's wtxid.
 fn block_witness_commitment(txs: &[Tx]) -> Hash256 {
-    let mut leaves: Vec<[u8; 32]> = txs
-        .iter()
-        .enumerate()
-        .map(|(i, tx)| {
-            if i == 0 {
-                [0u8; 32]
-            } else {
-                *tx.wtxid().as_bytes()
-            }
-        })
-        .collect();
-    let root = compute_merkle_root(&mut leaves).unwrap_or([0u8; 32]);
-    let mut buffer = [0u8; 64];
-    buffer[..32].copy_from_slice(&root);
-    buffer[32..].copy_from_slice(&WITNESS_RESERVED_VALUE);
-    double_sha256(&buffer)
+    let root = witness_merkle_root(txs.iter().skip(1).map(Tx::wtxid));
+    witness_commitment_hash(&root, &WITNESS_RESERVED_VALUE)
 }
 
 /// Builds and signs a single spend transaction for output `vout` of

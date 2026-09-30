@@ -3,6 +3,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
     BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot, softfork_state,
 };
+use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolGateway,
@@ -10,23 +11,18 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
-    BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, consensus_bytes,
+    BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, consensus_bytes, hex_encode,
 };
 
 use bitcoin_rs_consensus::ValidationEngine;
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, Script, Txid};
+use bitcoin_rs_primitives::{Amount, Script, Txid, u32_saturated};
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-use crate::compat::convert::hex_encode;
-
-#[cfg(test)]
-const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
+use std::time::Instant;
 
 /// Core `sendrawtransaction` default `maxfeerate`: 0.1 BTC/kvB in sat/kvB.
 ///
@@ -307,7 +303,7 @@ impl AdmissionChain for ChainAdmissionView {
         let tree = self.block_tree.read();
         let tip_node = tip.as_ref().and_then(|tip| tree.lookup(tip.hash));
         let locktime_cutoff = tip_node
-            .and_then(|node| tree.median_time_past_at(node, 11))
+            .and_then(|node| tree.median_time_past_at(node, MEDIAN_TIME_PAST_WINDOW))
             .unwrap_or(0);
         // CSV activation at the next block gates BIP68 relative locks,
         // matching the block-connect and mining evaluation contexts.
@@ -331,7 +327,7 @@ impl AdmissionChain for ChainAdmissionView {
                             .checked_sub(1)
                             .and_then(|prior| tree.node_at_height_from(tip, prior))
                     })
-                    .and_then(|prior| tree.median_time_past_at(prior, 11))
+                    .and_then(|prior| tree.median_time_past_at(prior, MEDIAN_TIME_PAST_WINDOW))
                     .unwrap_or(0)
             });
             prevout_meta.insert(
@@ -805,7 +801,7 @@ pub(crate) fn admit_transaction(
         Arc::new(tx.clone()),
         AdmissionOrigin::Rpc,
         max_feerate_sat_per_kvb,
-        unix_time_secs(),
+        bitcoin_rs_primitives::unix_now(),
         &chain.admission_chain(),
     ) {
         Ok(SubmitOutcome::Committed(result)) => Ok(result),
@@ -821,12 +817,6 @@ pub(crate) fn admit_transaction(
         Err(SubmitError::Consensus) => Err(AdmissionFailure::Consensus),
         Err(SubmitError::RetryExhausted) => Err(AdmissionFailure::RetryExhausted),
     }
-}
-
-fn unix_time_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
 }
 
 impl ChainHandles {
@@ -880,11 +870,14 @@ impl ChainHandles {
                 (
                     self.difficulty_for_bits(node.header.bits),
                     u64::from(node.header.time),
-                    u64::from(tree.median_time_past_at(tip.tip_id, 11).unwrap_or(0)),
+                    u64::from(
+                        tree.median_time_past_at(tip.tip_id, MEDIAN_TIME_PAST_WINDOW)
+                            .unwrap_or(0),
+                    ),
                 )
             })
         });
-        let now = crate::handlers::chain::unix_now();
+        let now = bitcoin_rs_primitives::unix_now();
         // Core's estimate when the verified-transaction count is known, the
         // height ratio when it is not; `None` is a pre-tracking datadir and
         // means unknown, never zero.
@@ -934,14 +927,7 @@ impl ChainHandles {
 
     /// Big-endian hex of one tip snapshot's chainwork.
     fn tip_chainwork_hex(tip: &TipSnapshot) -> String {
-        let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use core::fmt::Write as _;
-
-            let _: fmt::Result = write!(&mut out, "{byte:02x}");
-        }
-        out
+        hex_encode(&tip.chainwork.to_be_bytes::<32>())
     }
 
     /// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.
@@ -1197,7 +1183,7 @@ impl ChainHandles {
     ) -> Option<u32> {
         let tree = self.block_tree.read();
         let node_id = tree.lookup(hash)?;
-        tree.median_time_past_at(node_id, 11)
+        tree.median_time_past_at(node_id, MEDIAN_TIME_PAST_WINDOW)
     }
 
     /// Returns the block height for `hash` via the in-memory `BlockTree`, or
@@ -1932,7 +1918,10 @@ mod tests {
             record.header_hex(),
             hex_encode(&consensus_bytes(&block.header))
         );
-        assert_eq!(record.header_hex().len(), SERIALIZED_BLOCK_HEADER_LEN * 2);
+        assert_eq!(
+            record.header_hex().len(),
+            bitcoin_rs_primitives::Header::LEN * 2
+        );
     }
 
     /// The tree's header must reach a caller even when the log has the block.
@@ -2210,7 +2199,7 @@ mod tests {
                 .expect("genesis insert");
             let mut child = genesis.header;
             child.prev_blockhash = genesis.block_hash();
-            child.time = u32::try_from(now - 60).unwrap_or(u32::MAX);
+            child.time = u32_saturated(now - 60);
             child.nonce = 1;
             let child_id = tree
                 .insert_node(

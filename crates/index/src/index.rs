@@ -11,7 +11,7 @@ mod snapshot;
 mod state;
 mod write;
 
-pub use block::{MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, SpentCoinScripts};
+pub use block::{NoSpentScripts, SpentCoinScripts};
 pub use capability::{IndexCapabilities, IndexCapability, IndexWatermark, IndexWatermarks};
 pub use error::IndexError;
 pub use prepared::{PreparedBatch, PreparedBatchLimits, PreparedBlock};

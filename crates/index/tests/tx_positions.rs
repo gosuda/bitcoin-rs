@@ -7,8 +7,6 @@
 // A malformed fixture is a test failure; panicking reports it at the call site.
 #![allow(clippy::expect_used)]
 
-mod common;
-
 use std::sync::Arc;
 
 use bitcoin_rs_index::types::{TX_POSITION_SIZE, TxPosition, TxPositionValue, U24_MAX};
@@ -17,10 +15,8 @@ use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, consensus_bytes, deserialize,
 };
-use bitcoin_rs_storage::{ColumnFamily, KvStore};
+use bitcoin_rs_storage::{ColumnFamily, InMemoryKvStore, KvStore};
 use proptest::prelude::*;
-
-use common::MemoryStore;
 
 fn header() -> Header {
     Header {
@@ -93,7 +89,7 @@ fn mixed_block() -> Block {
     }
 }
 
-fn rows_with_values(store: &MemoryStore, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
+fn rows_with_values(store: &InMemoryKvStore, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
     store
         .iter_prefix(cf, &[])
         .expect("iterate")
@@ -107,7 +103,7 @@ fn funding_positions_address_the_transactions_that_funded_the_script() {
     let block = mixed_block();
     let bytes = consensus_bytes(&block);
 
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     IndexWriter::open(Arc::clone(&store), 1)
         .expect("open")
         .commit_block(0, &bytes)
@@ -146,7 +142,7 @@ fn txid_positions_address_their_own_transaction() {
     let block = mixed_block();
     let bytes = consensus_bytes(&block);
 
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     IndexWriter::open(Arc::clone(&store), 1)
         .expect("open")
         .commit_block(0, &bytes)

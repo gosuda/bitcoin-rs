@@ -8,9 +8,7 @@
 //! point deletes, fail-closed unresolvable spends, watermark independence
 //! from history, and seed-then-stamp ordering.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::block::{self, Header};
@@ -23,15 +21,13 @@ use bitcoin::{
 };
 use bitcoin_rs_index::{
     ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexWatermark,
-    IndexWatermarks, IndexWriter, MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits,
-    ScriptHash, ScriptLiveRow, SpentCoinScripts,
+    IndexWatermarks, IndexWriter, PreparedBatch, PreparedBatchLimits, ScriptHash, ScriptLiveRow,
+    SpentCoinScripts,
 };
-use bitcoin_rs_primitives::{Hash256, OutPoint as NativeOutPoint, Txid as NativeTxid};
-use bitcoin_rs_storage::{
-    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScanLimit,
-    StorageError, WriteCondition,
+use bitcoin_rs_primitives::{
+    Hash256, MAX_SCRIPT_SIZE, OutPoint as NativeOutPoint, Txid as NativeTxid,
 };
-use parking_lot::RwLock;
+use bitcoin_rs_storage::{ColumnFamily, InMemoryKvStore, KvStore, PersistFault};
 
 fn commit_rollback_one_with_spent_scripts<S: KvStore>(
     writer: &mut IndexWriter<S>,
@@ -49,163 +45,6 @@ fn commit_rollback_one_with_spent_scripts<S: KvStore>(
         ConsumerCursorUpdate::Clear,
         spent_scripts,
     )
-}
-
-// --- Minimal in-memory KvStore -------------------------------------------
-
-#[derive(Default)]
-struct MemoryStore {
-    cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
-    fail_next_durable: AtomicBool,
-}
-type CfsGuard<'a> =
-    parking_lot::RwLockWriteGuard<'a, [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>;
-
-impl MemoryStore {
-    /// Folds one batch's recorded operations into the column families, in order.
-    fn apply(&self, ops: Vec<BatchOp>) {
-        let mut guard = self.cfs.write();
-        Self::apply_locked(&mut guard, ops);
-    }
-
-    /// Folds `ops` into a guard the caller already holds, so a conditional
-    /// write can check and apply under one lock.
-    fn apply_locked(guard: &mut CfsGuard<'_>, ops: Vec<BatchOp>) {
-        for op in ops {
-            match op {
-                BatchOp::Put { cf, key, value } => {
-                    guard[cf.index()].insert(key, value.into());
-                }
-                BatchOp::Delete { cf, key } => {
-                    guard[cf.index()].remove(&key);
-                }
-                BatchOp::DeleteRange { cf, start, end } => {
-                    let doomed: Vec<Vec<u8>> = guard[cf.index()]
-                        .range(start..end)
-                        .map(|(key, _value)| key.clone())
-                        .collect();
-                    for key in doomed {
-                        guard[cf.index()].remove(&key);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl KvStore for MemoryStore {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.cfs.read()[cf.index()].get(key).cloned())
-    }
-    fn new_batch(&self) -> BufferedWriteBatch {
-        BufferedWriteBatch::default()
-    }
-    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        self.apply(batch.into_ops());
-        Ok(())
-    }
-    fn write_durable_if(
-        &self,
-        conditions: &[WriteCondition<'_>],
-        batch: BufferedWriteBatch,
-    ) -> Result<bool, StorageError> {
-        if self.fail_next_durable.swap(false, Ordering::SeqCst) {
-            return Err(StorageError::Backend(
-                "injected durable write failure".into(),
-            ));
-        }
-        // The check and the apply run under one write lock, matching the
-        // backend's atomic conditional write.
-        let mut guard = self.cfs.write();
-        let matched = conditions.iter().all(|condition| {
-            let (cf, key) = condition.location();
-            condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
-        });
-        if !matched {
-            return Ok(false);
-        }
-        Self::apply_locked(&mut guard, batch.into_ops());
-        Ok(true)
-    }
-    fn write_deferred(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        self.write(batch)
-    }
-    fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        self.write(batch)
-    }
-    fn flush(&self) -> Result<(), StorageError> {
-        Ok(())
-    }
-    // The collect is what ends the borrow of the RwLock guard; handing the
-    // iterator out directly would return a reference into a dropped guard.
-    #[expect(clippy::needless_collect, reason = "decouples from the lock guard")]
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let rows = self.cfs.read()[cf.index()]
-            .range(prefix.to_vec()..)
-            .take_while(|(key, _)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
-    }
-    fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
-        Ok(Box::new(MemorySnapshot {
-            cfs: self.cfs.read().clone(),
-        }))
-    }
-
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
-    fn scan_prefix_bounded(
-        &self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-        limit: PrefixScanLimit,
-    ) -> Result<bitcoin_rs_storage::PrefixScan, StorageError> {
-        let mut rows = Vec::new();
-        let mut bytes = 0_usize;
-        let mut complete = true;
-        for (key, value) in self.cfs.read()[cf.index()]
-            .range(prefix.to_vec()..)
-            .take_while(|(key, _)| key.starts_with(prefix))
-        {
-            if rows.len() >= limit.max_rows || bytes >= limit.max_bytes {
-                complete = false;
-                break;
-            }
-            bytes += key.len() + value.len();
-            rows.push((key.clone(), value.clone()));
-        }
-        Ok(bitcoin_rs_storage::PrefixScan { rows, complete })
-    }
-}
-
-struct MemorySnapshot {
-    cfs: [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()],
-}
-
-impl KvSnapshot for MemorySnapshot {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.cfs[cf.index()].get(key).cloned())
-    }
-
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let prefix = prefix.to_vec();
-        Ok(Box::new(
-            self.cfs[cf.index()]
-                .iter()
-                .filter(move |(key, _)| key.starts_with(&prefix))
-                .map(|(key, value)| Ok((key.clone(), value.clone()))),
-        ))
-    }
 }
 
 // --- Anchor + block fixtures ---------------------------------------------
@@ -290,14 +129,14 @@ fn block_bytes(prev: [u8; 32], txdata: Vec<Transaction>) -> (Vec<u8>, [u8; 32]) 
 }
 
 struct Chain {
-    writer: IndexWriter<MemoryStore>,
+    writer: IndexWriter<InMemoryKvStore>,
     tip: [u8; 32],
     height: u32,
 }
 
 impl Chain {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let store = Arc::new(MemoryStore::default());
+        let store = Arc::new(InMemoryKvStore::default());
         let writer = IndexWriter::open(store, 0)?;
         Ok(Self {
             writer,
@@ -505,7 +344,7 @@ fn same_block_create_and_spend_cancels_without_an_anchor() -> Result<(), Box<dyn
 
     let transient = script(0xdd);
     let transient_op_return = ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x01]);
-    let transient_oversized = ScriptBuf::from_bytes(vec![0x51; MAX_LIVE_SCRIPT_SIZE + 1]);
+    let transient_oversized = ScriptBuf::from_bytes(vec![0x51; MAX_SCRIPT_SIZE + 1]);
     let survivor = script(0xee);
     let external = OutPoint {
         txid: Txid::from_byte_array([9_u8; 32]),
@@ -618,7 +457,7 @@ fn live_predicate_matches_utxo_admission_not_history() -> Result<(), Box<dyn std
     chain.connect(vec![coinbase(0)], &empty)?;
 
     let op_return = ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x02]);
-    let oversized = ScriptBuf::from_bytes(vec![0x51; MAX_LIVE_SCRIPT_SIZE + 1]);
+    let oversized = ScriptBuf::from_bytes(vec![0x51; MAX_SCRIPT_SIZE + 1]);
     let normal = script(0x22);
     let external = OutPoint {
         txid: Txid::from_byte_array([6_u8; 32]),
@@ -689,7 +528,7 @@ fn live_and_history_watermarks_advance_independently() -> Result<(), Box<dyn std
 /// live watermark is durably stamped.
 #[test]
 fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
 
     let wallet = script(0x44);
@@ -766,9 +605,9 @@ fn seeding_resets_partial_rows_and_stamps_once() -> Result<(), Box<dyn std::erro
 #[test]
 fn seed_stream_fenced_write_failure_does_not_publish_watermark()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
-    store.fail_next_durable.store(true, Ordering::SeqCst);
+    store.arm_persist_fault(PersistFault::FailApply);
     let scripthash = ScriptHash::from_script_bytes(script(0x46).as_bytes());
     let coins = (0_u32..4_096)
         .map(|vout| {

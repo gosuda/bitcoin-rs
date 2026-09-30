@@ -206,7 +206,7 @@ mod tests {
     use crate::NodeConfig;
     use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
     use bitcoin_rs_primitives::{
-        Amount, LockTime, Network, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
+        Amount, LockTime, Network, OutPoint, Script, Sequence, TxIn, TxOut, Witness, u32_saturated,
     };
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
     use parking_lot::Mutex;
@@ -357,7 +357,7 @@ mod tests {
 
         // Control: direct insertion cannot satisfy the gateway-publication test.
         let direct_tx = spending(direct_prevout);
-        let vsize = u32::try_from(direct_tx.vsize()).unwrap_or(u32::MAX);
+        let vsize = u32_saturated(direct_tx.vsize());
         let entry = MempoolEntry::new(Arc::new(direct_tx), vsize, 8_000, 0, 1, 0);
         node.state
             .mempool()

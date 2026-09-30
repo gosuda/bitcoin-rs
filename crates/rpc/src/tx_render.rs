@@ -8,13 +8,15 @@
 // the sanctioned rust-bitcoin compat seam (`Address<T>`/`Script` disassembly);
 // all transaction/amount/hash plumbing here is native. The script-shape
 // classification behind `type` lives once in `compat::convert`.
-use bitcoin_rs_primitives::{BlockHash, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, BlockHash, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes, hex_encode,
+};
 
 #[cfg(test)]
-use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
+use bitcoin_rs_primitives::{LockTime, Script, Sequence, Witness};
 use sonic_rs::{Value, json};
 
-use crate::compat::convert::{self, hex_encode};
+use crate::compat::convert;
 
 /// Optional confirmed-chain fields projected beside a transaction object.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,8 +40,9 @@ pub(crate) struct TransactionChainContext {
 /// serialization instead of being reduced through binary floating point.
 #[must_use]
 pub(crate) fn btc_amount_json(satoshis: u64) -> Value {
-    let whole = satoshis / 100_000_000;
-    let fractional = satoshis % 100_000_000;
+    let coin = Amount::COIN.to_sat();
+    let whole = satoshis / coin;
+    let fractional = satoshis % coin;
     let text = format!("{whole}.{fractional:08}");
     let mut deserializer = sonic_rs::Deserializer::from_str(&text).use_rawnumber();
     match sonic_rs::Deserialize::deserialize(&mut deserializer) {

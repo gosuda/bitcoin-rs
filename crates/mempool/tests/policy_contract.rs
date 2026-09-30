@@ -28,6 +28,7 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    u64_saturated_len,
 };
 use bitcoin_rs_script::opcode;
 use parking_lot::RwLock;
@@ -305,9 +306,7 @@ fn fanout_root(label: u8, output_count: usize) -> Tx {
         }],
         outputs: (0..output_count)
             .map(|index| TxOut {
-                value: Amount::from_sat(
-                    1_000_u64.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
-                ),
+                value: Amount::from_sat(1_000_u64.saturating_add(u64_saturated_len(index))),
                 script_pubkey: p2wpkh_script().into(),
             })
             .collect(),

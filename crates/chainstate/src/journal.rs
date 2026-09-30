@@ -10,6 +10,7 @@ use bitcoin_rs_chain::ChainTxCount;
 use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
+use bitcoin_rs_primitives::hex_encode;
 use bitcoin_rs_storage::chainstate_journal::Coin;
 use bitcoin_rs_storage::chainstate_journal::JournalRecord;
 use bitcoin_rs_storage::chainstate_journal::JournalReplayBase;
@@ -271,7 +272,7 @@ fn insert_replayed_header(
             JournalReplayError::HeaderRebuildRejected(format!(
                 "height {}: parent {} missing from checkpoint tree",
                 record.height,
-                bitcoin_rs_storage::checkpoint::hex_encode(&record.prev_hash)
+                hex_encode(&record.prev_hash)
             ))
         })?;
     let node_id = tree

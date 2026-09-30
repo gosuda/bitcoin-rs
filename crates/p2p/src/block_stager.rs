@@ -546,13 +546,11 @@ fn block_size(block: &Block) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::{
-        Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-        Witness, consensus_bytes,
-    };
+    use bitcoin_rs_primitives::{Hash256, Network, consensus_bytes};
     use std::time::{Duration, Instant};
 
     use super::{BlockStager, block_size};
+    use crate::test_support::padded_block_of_size;
     use crate::{SyncBudget, default_sync_budget};
 
     #[test]
@@ -940,34 +938,6 @@ mod tests {
         assert!(stager.contains(&third));
         assert!(stager.contains(&incoming));
     }
-    fn block_with_total_size(target: usize) -> Block {
-        let probe = padded_block(target);
-        let probe_size = block_size(&probe);
-        let padding = target.saturating_mul(2).saturating_sub(probe_size);
-        let block = padded_block(padding);
-        assert_eq!(block_size(&block), target);
-        block
-    }
-
-    fn padded_block(script_len: usize) -> Block {
-        Block {
-            header: Network::Regtest.genesis_block().header,
-            txs: vec![Tx {
-                version: 2,
-                inputs: vec![TxIn {
-                    previous_output: OutPoint::default(),
-                    script_sig: vec![0_u8; script_len].into(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
-                }],
-                outputs: vec![TxOut {
-                    value: Amount::from_sat(0),
-                    script_pubkey: Script::new(),
-                }],
-                lock_time: LockTime::ZERO,
-            }],
-        }
-    }
 
     #[test]
     fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
@@ -980,7 +950,7 @@ mod tests {
                 .max_received_blocks
                 .saturating_mul(crate::download_window::PENDING_BLOCK_BYTE_ESTIMATE)
         );
-        let block = block_with_total_size(crate::download_window::PENDING_BLOCK_BYTE_ESTIMATE);
+        let block = padded_block_of_size(crate::download_window::PENDING_BLOCK_BYTE_ESTIMATE);
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         let mut stager = BlockStager::new(budget);
         let now = Instant::now();

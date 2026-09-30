@@ -32,13 +32,13 @@ use std::str::FromStr;
 use bitcoin::ScriptBuf;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::taproot::{LeafVersion, TaprootBuilder};
-use bitcoin_rs_primitives::tapleaf_hash;
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid,
-    Witness, deserialize,
+    Witness, deserialize, hex_decode, hex_encode,
 };
+use bitcoin_rs_primitives::{TAPSCRIPT_LEAF_VERSION, tapleaf_hash};
 use bitcoin_rs_script::{
-    Interpreter, ScriptError, VerifyFlags, opcode, push_data, push_int, taproot,
+    Interpreter, ScriptError, VerifyFlags, checker, opcode, push_data, push_int, taproot,
 };
 
 // ===========================================================================
@@ -255,7 +255,7 @@ fn parse_core_asm(asm: &str) -> Result<Vec<u8>, String> {
                 return Err(format!("empty 0x token: {token}"));
             }
             let bytes =
-                hex_to_bytes(hex).map_err(|e| format!("invalid hex in token {token}: {e}"))?;
+                hex_decode(hex).map_err(|e| format!("invalid hex in token {token}: {e}"))?;
             script.extend_from_slice(&bytes);
         } else if is_decimal_int(token) {
             let n = token
@@ -540,16 +540,6 @@ fn lookup_opcode(bare: &str) -> Option<u8> {
     None
 }
 
-fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err(format!("odd length: {}", hex.len()));
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("at offset {i}: {e}")))
-        .collect()
-}
-
 // ===========================================================================
 // Transaction construction — Core's BuildCrediting/BuildSpending
 // ===========================================================================
@@ -784,7 +774,7 @@ fn build_taproot_placeholder(leaf_script: &[u8]) -> Result<TaprootPlaceholder, S
 
     // The tree's own merkle root must be the tapleaf hash this crate computes,
     // and this crate's commitment check must accept the pair it just generated.
-    let tapleaf = tapleaf_hash(taproot::TAPROOT_LEAF_TAPSCRIPT, leaf_script);
+    let tapleaf = tapleaf_hash(TAPSCRIPT_LEAF_VERSION, leaf_script);
     let core_root = spend_info
         .merkle_root()
         .ok_or("a one-leaf tree has a merkle root")?;
@@ -920,9 +910,8 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
                     }
                     continue;
                 }
-                items.push(
-                    hex_to_bytes(s).map_err(|e| format!("row {index}: bad witness hex: {e}"))?,
-                );
+                items
+                    .push(hex_decode(s).map_err(|e| format!("row {index}: bad witness hex: {e}"))?);
             }
             (items, amount)
         } else {
@@ -1047,8 +1036,8 @@ fn run_script_tests_native(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<S
                 row.expected,
                 verdict,
                 row.flags.bits(),
-                hex_of(&row.script_sig),
-                hex_of(&row.script_pubkey),
+                hex_encode(&row.script_sig),
+                hex_encode(&row.script_pubkey),
                 row.comment
             ));
         }
@@ -1084,8 +1073,8 @@ fn run_script_tests_kernel(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<S
                 row.expected,
                 verdict,
                 row.flags.bits(),
-                hex_of(&row.script_sig),
-                hex_of(&row.script_pubkey),
+                hex_encode(&row.script_sig),
+                hex_encode(&row.script_pubkey),
                 row.comment
             ));
         }
@@ -1142,7 +1131,7 @@ fn load_tx_vectors(
         }
 
         let tx_hex = arr[1].as_str().unwrap_or("");
-        let tx_bytes = match hex_to_bytes(tx_hex) {
+        let tx_bytes = match hex_decode(tx_hex) {
             Ok(b) => b,
             Err(e) => {
                 counts.record_skip(&format!("bad tx hex: {e}"));
@@ -1397,13 +1386,13 @@ fn load_sighash_vectors(counts: &mut Counts) -> Result<Vec<SighashRow>, String> 
             .ok_or_else(|| format!("sighash row {index}: expected hash is not a string"))?;
 
         let tx_bytes =
-            hex_to_bytes(tx_hex).map_err(|e| format!("sighash row {index}: bad tx hex: {e}"))?;
+            hex_decode(tx_hex).map_err(|e| format!("sighash row {index}: bad tx hex: {e}"))?;
         let tx = deserialize::<Tx>(&tx_bytes)
             .map_err(|e| format!("sighash row {index}: tx deserialize: {e}"))?;
         let script_code = if script_hex.is_empty() {
             Vec::new()
         } else {
-            hex_to_bytes(script_hex)
+            hex_decode(script_hex)
                 .map_err(|e| format!("sighash row {index}: bad script hex: {e}"))?
         };
         let expected_hash = Hash256::from_str_be(expected_hex)
@@ -1429,7 +1418,7 @@ fn run_sighash_vectors(rows: &[SighashRow], counts: &mut Counts) -> Vec<String> 
         // Core's SignatureHash calls SerializeScriptCode which strips
         // OP_CODESEPARATOR (0xab) opcode bytes before hashing. Strip them
         // here to match, so the sighash rows containing CS can be tested.
-        let script_code = strip_codeseparators(&row.script_code);
+        let script_code = checker::remove_codeseparators(&row.script_code);
         let cache = SighashCache::new(&row.tx);
         let result = cache.legacy_signature_hash(row.input_index, &script_code, row.hash_type);
 
@@ -1455,68 +1444,6 @@ fn run_sighash_vectors(rows: &[SighashRow], counts: &mut Counts) -> Vec<String> 
 // ===========================================================================
 // Helpers
 // ===========================================================================
-
-/// Removes `OP_CODESEPARATOR` (0xab) opcodes from a script, matching Core's
-/// `CTransactionSignatureSerializer::SerializeScriptCode`. Bytes inside data
-/// pushes are preserved.
-fn strip_codeseparators(script: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(script.len());
-    let mut pos = 0;
-    while pos < script.len() {
-        let op = script[pos];
-        if op == 0xab {
-            pos += 1;
-        } else if (0x01..=0x4b).contains(&op) {
-            let end = pos + 1 + usize::from(op);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4c {
-            let len_pos = pos + 1;
-            let len = script.get(len_pos).copied().unwrap_or(0);
-            let end = len_pos + 1 + usize::from(len);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4d {
-            let len_pos = pos + 1;
-            let len = u16::from_le_bytes([
-                script.get(len_pos).copied().unwrap_or(0),
-                script.get(len_pos + 1).copied().unwrap_or(0),
-            ]);
-            let end = len_pos + 2 + usize::from(len);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4e {
-            let len_pos = pos + 1;
-            let len = u32::from_le_bytes([
-                script.get(len_pos).copied().unwrap_or(0),
-                script.get(len_pos + 1).copied().unwrap_or(0),
-                script.get(len_pos + 2).copied().unwrap_or(0),
-                script.get(len_pos + 3).copied().unwrap_or(0),
-            ]);
-            let end = len_pos + 4 + usize::try_from(len).unwrap_or(usize::MAX);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else {
-            out.push(op);
-            pos += 1;
-        }
-    }
-    out
-}
-
-/// How many mismatch lines to print per corpus.
-///
-/// Five is enough to see a pattern without burying the counts; set
-/// `SCRIPT_VECTOR_MISMATCHES` higher when triaging a specific group.
-/// Renders a script as hex so a mismatch line names the exact bytes that
-/// failed rather than a row number the reader has to resolve by hand.
-fn hex_of(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
-}
 
 /// The full flag mask this crate defines: `STANDARD` plus the three bits
 /// Core vectors name that `STANDARD` omits. Bit-equal to Core's
@@ -1594,6 +1521,10 @@ fn tx_invalid_flags(names: &str) -> Result<VerifyFlags, String> {
     Ok(parsed)
 }
 
+/// How many mismatch lines to print per corpus.
+///
+/// Five is enough to see a pattern without burying the counts; set
+/// `SCRIPT_VECTOR_MISMATCHES` higher when triaging a specific group.
 fn mismatch_print_limit() -> usize {
     std::env::var("SCRIPT_VECTOR_MISMATCHES")
         .ok()

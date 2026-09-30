@@ -3,6 +3,8 @@
 use crate::{
     BlockHash, Header, Tx, Txid,
     encode::{DecodeError, consensus_len, deserialize},
+    numeric::u64_saturated_len,
+    varint,
 };
 
 /// A Bitcoin block in native owned form.
@@ -39,6 +41,12 @@ impl Block {
         consensus_len(self)
     }
 
+    /// [`Self::total_size`] of a block holding `txs`, without building one.
+    #[must_use]
+    pub fn total_size_of(txs: &[Tx]) -> usize {
+        Self::size_of(txs, Tx::total_size)
+    }
+
     /// Consensus serialization length without BIP144 witness sections.
     ///
     /// Matches Core's `GetSerializeSize(TX_NO_WITNESS(*this))`: the header,
@@ -46,11 +54,13 @@ impl Block {
     /// (txid-layout) size.
     #[must_use]
     pub fn stripped_size(&self) -> usize {
-        Header::LEN
-            .saturating_add(crate::varint::encoded_len(crate::encode::compact_len(
-                self.txs.len(),
-            )))
-            .saturating_add(self.txs.iter().map(Tx::base_size).sum())
+        Self::stripped_size_of(&self.txs)
+    }
+
+    /// [`Self::stripped_size`] of a block holding `txs`, without building one.
+    #[must_use]
+    pub fn stripped_size_of(txs: &[Tx]) -> usize {
+        Self::size_of(txs, Tx::base_size)
     }
 
     /// BIP141 block weight: `stripped_size * 3 + total_size` weight units.
@@ -60,10 +70,22 @@ impl Block {
     /// weights.
     #[must_use]
     pub fn weight(&self) -> u64 {
-        u64::try_from(self.stripped_size())
-            .unwrap_or(u64::MAX)
+        Self::weight_of(&self.txs)
+    }
+
+    /// [`Self::weight`] of a block holding `txs`, without building one.
+    #[must_use]
+    pub fn weight_of(txs: &[Tx]) -> u64 {
+        u64_saturated_len(Self::stripped_size_of(txs))
             .saturating_mul(3)
-            .saturating_add(u64::try_from(self.total_size()).unwrap_or(u64::MAX))
+            .saturating_add(u64_saturated_len(Self::total_size_of(txs)))
+    }
+
+    /// Header, transaction-count compact size, and `tx_size` of each transaction.
+    fn size_of(txs: &[Tx], tx_size: fn(&Tx) -> usize) -> usize {
+        Header::LEN
+            .saturating_add(varint::encoded_len(u64_saturated_len(txs.len())))
+            .saturating_add(txs.iter().map(tx_size).fold(0, usize::saturating_add))
     }
 }
 

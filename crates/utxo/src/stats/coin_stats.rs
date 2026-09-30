@@ -5,13 +5,15 @@ use crate::listener::{
     UtxoChangeEvents, UtxoChangeListener, UtxoCommittedEvent, UtxoInserted, UtxoRemoved,
 };
 use crate::snapshot::{SnapshotCoin, SnapshotCoinObserver};
-use bitcoin_rs_primitives::{OutPoint, TxOut};
+#[cfg(test)]
+use bitcoin_rs_primitives::u32_saturated_len;
+use bitcoin_rs_primitives::{OutPoint, TxOut, u64_saturated_len, varint};
 use parking_lot::Mutex;
 use rayon::prelude::*;
 use smallvec::SmallVec;
 use zerocopy::IntoBytes;
 
-use crate::stats::MuHash3072;
+use crate::stats::{MuHash3072, muhash3072};
 
 const OUTPOINT_BYTES: usize = 36;
 const COIN_HEADER_BYTES: u64 = 4;
@@ -180,8 +182,8 @@ impl CoinStats {
     /// Decodes one exact stable `CoinStats` encoding.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CoinStatsDecodeError> {
         let mut cursor = 0;
-        let numerator = read_array::<384>(bytes, &mut cursor)?;
-        let denominator = read_array::<384>(bytes, &mut cursor)?;
+        let numerator = read_array::<{ muhash3072::BYTE_LEN }>(bytes, &mut cursor)?;
+        let denominator = read_array::<{ muhash3072::BYTE_LEN }>(bytes, &mut cursor)?;
         let height = u32::from_le_bytes(read_array::<4>(bytes, &mut cursor)?);
         let total_amount = u64::from_le_bytes(read_array::<8>(bytes, &mut cursor)?);
         let bogo_size = u64::from_le_bytes(read_array::<8>(bytes, &mut cursor)?);
@@ -370,7 +372,7 @@ impl CoinStatsAccumulator {
 impl SnapshotCoinObserver for CoinStatsAccumulator {
     fn observe_coin(&mut self, coin: SnapshotCoin<'_>) {
         self.stats.total_amount = self.stats.total_amount.saturating_add(coin.value);
-        let script_len = u64::try_from(coin.script_pubkey.len()).unwrap_or(u64::MAX);
+        let script_len = u64_saturated_len(coin.script_pubkey.len());
         self.stats.bogo_size = self
             .stats
             .bogo_size
@@ -420,7 +422,10 @@ impl SnapshotCoinObserver for CoinStatsAccumulator {
         }
     }
 
-    fn select_trailer(&mut self, fallback: [u8; 384]) -> [u8; 384] {
+    fn select_trailer(
+        &mut self,
+        fallback: [u8; muhash3072::BYTE_LEN],
+    ) -> [u8; muhash3072::BYTE_LEN] {
         self.flush_parallel_muhash();
         match &self.mode {
             MuHashMode::Disabled => fallback,
@@ -808,7 +813,7 @@ impl UtxoChangeListener for CoinStatsListener {
         delta.apply_to(&mut state.stats);
     }
 
-    fn muhash3072(&self) -> Option<[u8; 384]> {
+    fn muhash3072(&self) -> Option<[u8; muhash3072::BYTE_LEN]> {
         Some(self.state.lock().stats.muhash.finalize())
     }
 }
@@ -876,34 +881,13 @@ fn encode_txout_into(out: &mut Vec<u8>, txout: &TxOut) {
 #[inline]
 fn encode_value_and_script_into(out: &mut Vec<u8>, value: u64, script_pubkey: &[u8]) {
     out.extend_from_slice(&value.to_le_bytes());
-    encode_compact_size_into(out, script_pubkey.len());
+    out.extend_from_slice(&varint::encode(u64_saturated_len(script_pubkey.len())));
     out.extend_from_slice(script_pubkey);
 }
 
 #[inline]
-fn encode_compact_size_into(out: &mut Vec<u8>, len: usize) {
-    if len < 0xfd {
-        out.push(u8::try_from(len).unwrap_or(0));
-        return;
-    }
-    if let Ok(word_len) = u16::try_from(len) {
-        out.push(0xfd);
-        out.extend_from_slice(&word_len.to_le_bytes());
-        return;
-    }
-    if let Ok(dword_len) = u32::try_from(len) {
-        out.push(0xfe);
-        out.extend_from_slice(&dword_len.to_le_bytes());
-        return;
-    }
-    let qword_len = u64::try_from(len).unwrap_or(u64::MAX);
-    out.push(0xff);
-    out.extend_from_slice(&qword_len.to_le_bytes());
-}
-
-#[inline]
 fn bogo_size(txout: &TxOut) -> u64 {
-    let script_len = u64::try_from(txout.script_pubkey.len()).unwrap_or(u64::MAX);
+    let script_len = u64_saturated_len(txout.script_pubkey.len());
     FIXED_BOGO_SIZE.saturating_add(script_len)
 }
 
@@ -934,21 +918,8 @@ fn coin_hash_encoded_len(script_len: usize) -> usize {
     OUTPOINT_BYTES
         .saturating_add(4)
         .saturating_add(AMOUNT_ENCODED_BYTES)
-        .saturating_add(compact_size_len(script_len))
+        .saturating_add(varint::encoded_len(u64_saturated_len(script_len)))
         .saturating_add(script_len)
-}
-
-#[inline]
-const fn compact_size_len(len: usize) -> usize {
-    if len < 0xfd {
-        1
-    } else if len <= 0xffff {
-        3
-    } else if len <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 #[cfg(test)]
@@ -960,7 +931,10 @@ mod tests {
     use bitcoin::{Amount, ScriptBuf};
     use proptest::prelude::*;
 
-    use super::{CoinStats, CoinStatsRewindError, TxOut, encode_txout_into};
+    use super::{
+        CoinStats, CoinStatsRewindError, TxOut, encode_txout_into, u32_saturated_len,
+        u64_saturated_len,
+    };
 
     #[test]
     fn rewind_inverts_finish_block_and_refuses_without_moving() {
@@ -997,7 +971,7 @@ mod tests {
     #[test]
     fn manual_txout_encoding_matches_consensus_boundaries() {
         for len in [0_usize, 1, 252, 253, 65_535, 65_536] {
-            let value = 50_000 + u64::try_from(len).unwrap_or(u64::MAX);
+            let value = 50_000 + u64_saturated_len(len);
             let script = vec![0x51; len];
             let txout = TxOut {
                 value: bitcoin_rs_primitives::Amount::from_sat(value),
@@ -1032,7 +1006,7 @@ mod tests {
                 value: bitcoin_rs_primitives::Amount::from_sat(if i == 4 {
                     u64::MAX
                 } else {
-                    u64::try_from(i).unwrap_or(u64::MAX).saturating_mul(100_000)
+                    u64_saturated_len(i).saturating_mul(100_000)
                 }),
                 script_pubkey: vec![0x51; script_len].into(),
             };
@@ -1043,7 +1017,7 @@ mod tests {
                 if i == 4 {
                     u32::MAX >> 1
                 } else {
-                    u32::try_from(i).unwrap_or(u32::MAX)
+                    u32_saturated_len(i)
                 },
             ));
         }
@@ -1103,17 +1077,17 @@ mod tests {
         (0..count)
             .map(|index| {
                 let mut txid = [0_u8; 32];
-                txid[..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+                txid[..8].copy_from_slice(&u64_saturated_len(index).to_le_bytes());
                 txid[8] = u8::try_from(index.rotate_left(7)).unwrap_or(u8::MAX);
                 let script_len = script_lens[index % script_lens.len()];
                 TestCoin {
                     txid: bitcoin_rs_primitives::Hash256::from_le_bytes(&txid),
-                    vout: u32::try_from(index).unwrap_or(u32::MAX),
-                    value: 50_000_u64.saturating_add(u64::try_from(index).unwrap_or(u64::MAX)),
+                    vout: u32_saturated_len(index),
+                    value: 50_000_u64.saturating_add(u64_saturated_len(index)),
                     script_pubkey: (0..script_len)
                         .map(|byte| u8::try_from(index.wrapping_add(byte)).unwrap_or(u8::MAX))
                         .collect(),
-                    height: u32::try_from(index % 1_000).unwrap_or(u32::MAX),
+                    height: u32_saturated_len(index % 1_000),
                     coinbase: index % 2 == 1,
                 }
             })

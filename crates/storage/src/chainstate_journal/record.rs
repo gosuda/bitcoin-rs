@@ -1,9 +1,13 @@
 //! Framed, checksummed chainstate journal records.
 
-use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{
+    ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut, u32_saturated_len,
+};
 use std::io::{self, Write};
 
 use thiserror::Error;
+
+use crate::crc32c::crc32c;
 
 const MAGIC: [u8; 4] = *b"JRNL";
 const VERSION: u8 = 1;
@@ -270,19 +274,7 @@ fn put_i64(out: &mut impl Write, value: i64) -> io::Result<()> {
 
 fn u32_len(value: usize) -> u32 {
     debug_assert!(u32::try_from(value).is_ok());
-    u32::try_from(value).unwrap_or(u32::MAX)
-}
-
-pub(super) fn crc32c(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0x82f6_3b78 & mask);
-        }
-    }
-    !crc
+    u32_saturated_len(value)
 }
 
 struct Cursor<'a> {

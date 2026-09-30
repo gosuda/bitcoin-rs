@@ -12,10 +12,9 @@ use thiserror::Error;
 use crate::{
     Hash256, Tx, TxOut,
     encode::{
-        ConsensusEncode, Sha256Sink, Sink as _, compact_len, finalize_double_sha256, write_compact,
-        write_script,
+        ConsensusEncode, Sha256Sink, Sink as _, finalize_double_sha256, write_compact, write_script,
     },
-    varint,
+    u64_saturated_len, varint,
 };
 
 /// Position marker used when no `OP_CODESEPARATOR` executed before the opcodes being signed.
@@ -242,7 +241,7 @@ impl<'t> SighashCache<'t> {
             write_compact(writer, 1);
             encode_legacy_input(writer, input, script_code, input.sequence);
         } else {
-            write_compact(writer, compact_len(total));
+            write_compact(writer, u64_saturated_len(total));
             for (n, txin) in self.tx.inputs.iter().enumerate() {
                 let sequence = if n != input_index && (ty.is_single() || ty.is_none()) {
                     crate::Sequence::ZERO
@@ -255,13 +254,13 @@ impl<'t> SighashCache<'t> {
         }
         match ty {
             EcdsaType::All | EcdsaType::AllAnyoneCanPay => {
-                write_compact(writer, compact_len(self.tx.outputs.len()));
+                write_compact(writer, u64_saturated_len(self.tx.outputs.len()));
                 for output in &self.tx.outputs {
                     output.consensus_encode(writer);
                 }
             }
             EcdsaType::Single | EcdsaType::SingleAnyoneCanPay => {
-                write_compact(writer, compact_len(input_index + 1));
+                write_compact(writer, u64_saturated_len(input_index + 1));
                 for (n, output) in self.tx.outputs.iter().enumerate().take(input_index + 1) {
                     if n == input_index {
                         output.consensus_encode(writer);
@@ -444,7 +443,9 @@ impl<'t> SighashCache<'t> {
             msg.extend_from_slice(&input_index.to_le_bytes());
         }
         if let Some(annex) = annex {
-            let annex_len = varint::encode(compact_len(annex.len())).as_slice().to_vec();
+            let annex_len = varint::encode(u64_saturated_len(annex.len()))
+                .as_slice()
+                .to_vec();
             msg.extend_from_slice(&sha256_parts(&[&annex_len, annex]));
         }
         if base == 0x03 {
@@ -636,7 +637,7 @@ impl Sighash {
 /// (use [`TAPSCRIPT_LEAF_VERSION`] for BIP342 tapscript).
 #[must_use]
 pub fn tapleaf_hash(leaf_version: u8, script: &[u8]) -> Hash256 {
-    let len = varint::encode(compact_len(script.len()))
+    let len = varint::encode(u64_saturated_len(script.len()))
         .as_slice()
         .to_vec();
     let msg = [&[leaf_version][..], len.as_slice(), script].concat();

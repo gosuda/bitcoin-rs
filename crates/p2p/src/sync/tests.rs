@@ -13,6 +13,7 @@ use bitcoin_rs_chain::{
 };
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, Network, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+    u32_saturated, unix_now,
 };
 use crossbeam_channel::unbounded;
 use hashbrown::HashMap;
@@ -1864,7 +1865,7 @@ pub(crate) fn synced_ibd_latch() -> Arc<InitialBlockDownload> {
     let genesis = Network::Regtest.genesis_block();
     let recent = Header {
         prev_blockhash: genesis.block_hash(),
-        time: u32::try_from(crate::counters::now_seconds()).unwrap_or(u32::MAX),
+        time: u32_saturated(unix_now()),
         ..genesis.header
     };
     {
@@ -2060,6 +2061,19 @@ fn next_getdata(
         }
     }
     Err(std::io::Error::other("expected a queued getdata").into())
+}
+
+/// Returns the next `getheaders` from `rx`, skipping other traffic; fails
+/// when none is queued.
+fn next_getheaders(
+    rx: &crossbeam_channel::Receiver<Message>,
+) -> Result<bitcoin::p2p::message_blockdata::GetHeadersMessage, Box<dyn std::error::Error>> {
+    while let Ok(message) = rx.try_recv() {
+        if let Message::GetHeaders(request) = message {
+            return Ok(request);
+        }
+    }
+    Err(std::io::Error::other("expected getheaders").into())
 }
 
 /// Drains `rx`, failing on any `getdata` while ignoring header traffic.
@@ -2770,7 +2784,7 @@ fn binding_and_operational_failures_do_not_disconnect() -> Result<(), Box<dyn st
 /// latch over headers ahead of an absent applied tip.
 #[test]
 fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> Result<(), Box<dyn std::error::Error>> {
-    let now = crate::counters::now_seconds();
+    let now = unix_now();
 
     let syncing = SyncHarness::new(BlockTree::new());
     assert!(

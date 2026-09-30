@@ -8,11 +8,12 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxOut, Txid, deserialize,
+    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxOut, Txid, deserialize, hex_encode,
+    u32_saturated_len, u64_saturated_len,
 };
 use bitcoin_rs_script::script::{instructions, is_p2sh, is_p2wsh};
 
-use crate::compat::convert::{self, hex_encode};
+use crate::compat::convert::{self, output_at};
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
 use crate::rest::{Response, bad_request, internal_error, not_found, service_unavailable};
 
@@ -61,18 +62,18 @@ impl ScriptActivity {
     /// so a script with a long history turns one HTTP request into unbounded
     /// storage I/O. The rows carry the values; the snapshot is the bound.
     pub(super) fn chain_stats(&self) -> ScriptStats {
-        let funded_txo_count = u64::try_from(self.confirmed_funding.len()).unwrap_or(u64::MAX);
+        let funded_txo_count = u64_saturated_len(self.confirmed_funding.len());
         let funded_txo_sum = self
             .confirmed_funding
             .iter()
             .fold(0_u64, |sum, output| sum.saturating_add(output.value));
-        let unspent_count = u64::try_from(self.confirmed_unspent.len()).unwrap_or(u64::MAX);
+        let unspent_count = u64_saturated_len(self.confirmed_unspent.len());
         let unspent_sum = self
             .confirmed_unspent
             .iter()
             .fold(0_u64, |sum, output| sum.saturating_add(output.value));
         ScriptStats {
-            tx_count: u64::try_from(self.confirmed.len()).unwrap_or(u64::MAX),
+            tx_count: u64_saturated_len(self.confirmed.len()),
             funded_txo_count,
             funded_txo_sum,
             spent_txo_count: funded_txo_count.saturating_sub(unspent_count),
@@ -82,7 +83,7 @@ impl ScriptActivity {
 
     pub(super) fn mempool_stats(&self, script_hash: ScriptHash) -> ScriptStats {
         let mut stats = ScriptStats {
-            tx_count: u64::try_from(self.mempool.len()).unwrap_or(u64::MAX),
+            tx_count: u64_saturated_len(self.mempool.len()),
             ..ScriptStats::default()
         };
         let mut target_outputs = std::collections::BTreeMap::new();
@@ -265,7 +266,7 @@ impl<'a> Projection<'a> {
             locktime: transaction.lock_time.to_consensus(),
             vin: inputs,
             vout: outputs,
-            size: u32::try_from(transaction.total_size()).unwrap_or(u32::MAX),
+            size: u32_saturated_len(transaction.total_size()),
             weight: transaction.weight(),
             fee: input_value.saturating_sub(output_value),
             status: Self::status_value(confirmation),
@@ -291,10 +292,7 @@ impl<'a> Projection<'a> {
             .read()
             .transaction_by_txid(&outpoint.txid)
         {
-            return Ok(transaction
-                .outputs
-                .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))
-                .cloned());
+            return Ok(output_at(&transaction.outputs, outpoint.vout).cloned());
         }
         let index = self
             .ctx
@@ -305,10 +303,7 @@ impl<'a> Projection<'a> {
         let Some(transaction) = index.transaction(&outpoint.txid).map_err(query_error)? else {
             return Ok(None);
         };
-        Ok(transaction
-            .outputs
-            .get(usize::try_from(outpoint.vout).unwrap_or(usize::MAX))
-            .cloned())
+        Ok(output_at(&transaction.outputs, outpoint.vout).cloned())
     }
 
     pub(super) fn block_value(
@@ -331,8 +326,8 @@ impl<'a> Projection<'a> {
             height: record.height,
             version: header.version.cast_unsigned(),
             timestamp: header.time,
-            tx_count: u32::try_from(block.txs.len()).unwrap_or(u32::MAX),
-            size: u32::try_from(bytes.len()).unwrap_or(u32::MAX),
+            tx_count: u32_saturated_len(block.txs.len()),
+            size: u32_saturated_len(bytes.len()),
             weight: block.weight(),
             merkle_root: header.merkle_root.to_string(),
             previousblockhash: (header.prev_blockhash != BlockHash::default())

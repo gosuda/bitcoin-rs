@@ -37,6 +37,9 @@ pub mod pool;
 mod rbf;
 /// Transaction relay standardness policy.
 pub mod standardness;
+/// Transaction fixtures shared by in-crate unit tests.
+#[cfg(test)]
+mod test_support;
 /// BIP431 topology policy.
 mod truc;
 

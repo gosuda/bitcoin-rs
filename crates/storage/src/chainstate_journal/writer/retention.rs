@@ -8,6 +8,7 @@ use super::WriterState;
 use super::clear_full_revalidation_marker;
 use super::parse_segment_name;
 use crate::KvStore;
+use bitcoin_rs_primitives::u32_saturated;
 use std::time::Instant;
 
 impl<S: KvStore> JournalWriter<S> {
@@ -100,7 +101,7 @@ impl<S: KvStore> JournalWriter<S> {
         let Ok(bytes) = self.journal_size_bytes() else {
             return;
         };
-        let kib = u32::try_from(bytes / 1024).unwrap_or(u32::MAX);
+        let kib = u32_saturated(bytes / 1024);
         metrics::gauge!("node.chainstate_journal.size_mib").set(f64::from(kib) / 1024.0);
     }
 

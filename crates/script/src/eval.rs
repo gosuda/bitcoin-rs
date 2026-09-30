@@ -11,12 +11,16 @@
 
 use std::borrow::Cow;
 
-use bitcoin_rs_primitives::{CODESEPARATOR_POSITION, Hash256};
+use bitcoin_rs_primitives::{CODESEPARATOR_POSITION, Hash256, MAX_SCRIPT_SIZE};
 use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
 use crate::checker::{SigVersion, TxSignatureChecker};
 use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
+use crate::script::opcode::{
+    OP_1NEGATE, OP_CHECKMULTISIG, OP_CHECKMULTISIGVERIFY, OP_CHECKSIG, OP_CHECKSIGVERIFY, OP_DUP,
+    OP_ENDIF, OP_EQUAL, OP_EQUALVERIFY, OP_HASH160, OP_IF, OP_RETURN,
+};
 use crate::script::{Instruction, instructions, opcode, push_data};
 use crate::stack::{ScriptItem, Stack};
 
@@ -24,18 +28,12 @@ use bitcoin_hashes::{Hash as _, ripemd160, sha1};
 
 /// `OP_NOP` (0x61).
 pub const OP_NOP: u8 = 0x61;
-/// `OP_IF` (0x63).
-pub const OP_IF: u8 = 0x63;
 /// `OP_NOTIF` (0x64).
 pub const OP_NOTIF: u8 = 0x64;
 /// `OP_ELSE` (0x67).
 pub const OP_ELSE: u8 = 0x67;
-/// `OP_ENDIF` (0x68).
-pub const OP_ENDIF: u8 = 0x68;
 /// `OP_VERIFY` (0x69).
 pub const OP_VERIFY: u8 = 0x69;
-/// `OP_RETURN` (0x6a).
-pub const OP_RETURN: u8 = 0x6a;
 /// `OP_TOALTSTACK` (0x6b).
 pub const OP_TOALTSTACK: u8 = 0x6b;
 /// `OP_FROMALTSTACK` (0x6c).
@@ -58,8 +56,6 @@ pub const OP_IFDUP: u8 = 0x73;
 pub const OP_DEPTH: u8 = 0x74;
 /// `OP_DROP` (0x75).
 pub const OP_DROP: u8 = 0x75;
-/// `OP_DUP` (0x76).
-pub const OP_DUP: u8 = 0x76;
 /// `OP_NIP` (0x77).
 pub const OP_NIP: u8 = 0x77;
 /// `OP_OVER` (0x78).
@@ -76,12 +72,6 @@ pub const OP_SWAP: u8 = 0x7c;
 pub const OP_TUCK: u8 = 0x7d;
 /// `OP_SIZE` (0x82).
 pub const OP_SIZE: u8 = 0x82;
-/// `OP_EQUAL` (0x87).
-pub const OP_EQUAL: u8 = 0x87;
-/// `OP_EQUALVERIFY` (0x88).
-pub const OP_EQUALVERIFY: u8 = 0x88;
-/// `OP_1NEGATE` (0x4f).
-pub const OP_1NEGATE: u8 = 0x4f;
 /// `OP_1ADD` (0x8b).
 pub const OP_1ADD: u8 = 0x8b;
 /// `OP_1SUB` (0x8c).
@@ -128,20 +118,10 @@ pub const OP_RIPEMD160: u8 = 0xa6;
 pub const OP_SHA1: u8 = 0xa7;
 /// `OP_SHA256` (0xa8).
 pub const OP_SHA256: u8 = 0xa8;
-/// `OP_HASH160` (0xa9).
-pub const OP_HASH160: u8 = 0xa9;
 /// `OP_HASH256` (0xaa).
 pub const OP_HASH256: u8 = 0xaa;
 /// `OP_CODESEPARATOR` (0xab).
 pub const OP_CODESEPARATOR: u8 = 0xab;
-/// `OP_CHECKSIG` (0xac).
-pub const OP_CHECKSIG: u8 = 0xac;
-/// `OP_CHECKSIGVERIFY` (0xad).
-pub const OP_CHECKSIGVERIFY: u8 = 0xad;
-/// `OP_CHECKMULTISIG` (0xae).
-pub const OP_CHECKMULTISIG: u8 = 0xae;
-/// `OP_CHECKMULTISIGVERIFY` (0xaf).
-pub const OP_CHECKMULTISIGVERIFY: u8 = 0xaf;
 /// `OP_NOP1` (0xb0).
 pub const OP_NOP1: u8 = 0xb0;
 /// `OP_CHECKLOCKTIMEVERIFY` (0xb1).
@@ -165,8 +145,6 @@ pub const OP_NOP10: u8 = 0xb9;
 /// `OP_CHECKSIGADD` (0xba), tapscript only.
 pub const OP_CHECKSIGADD: u8 = 0xba;
 
-/// Maximum serialized script size accepted for `Base`/`WitnessV0` evaluation.
-pub const MAX_SCRIPT_SIZE: usize = 10_000;
 /// Maximum size of one pushed stack element.
 pub const MAX_SCRIPT_ELEMENT_SIZE: usize = 520;
 /// Maximum non-push opcodes per script.

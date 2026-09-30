@@ -15,6 +15,7 @@ use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
+use bitcoin_rs_primitives::u64_saturated_len;
 use rustix::fs::{self as rfs, AtFlags, FileType, Mode, OFlags, Stat};
 use rustix::io::Errno;
 
@@ -429,8 +430,8 @@ fn logical_column_family_named<S: KvStore>(
     for item in store.iter_prefix(cf, &[])? {
         let (key, value) = item?;
         rows = rows.saturating_add(1);
-        key_bytes = key_bytes.saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX));
-        value_bytes = value_bytes.saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
+        key_bytes = key_bytes.saturating_add(u64_saturated_len(key.len()));
+        value_bytes = value_bytes.saturating_add(u64_saturated_len(value.len()));
     }
     Ok(LogicalOwner::new(name, rows, key_bytes, value_bytes))
 }
@@ -620,7 +621,7 @@ fn read_child_file(
     let child_stat = rfs::fstat(&child)?;
     require_regular_file(&child_stat, name)?;
     require_same_dev(&parent, &child_stat, name)?;
-    let limit = u64::try_from(max_bytes.saturating_add(1)).unwrap_or(u64::MAX);
+    let limit = u64_saturated_len(max_bytes.saturating_add(1));
     let mut limited = File::from(child).take(limit);
     let mut bytes = Vec::new();
     limited.read_to_end(&mut bytes)?;
@@ -738,7 +739,7 @@ fn summarize_physical(tree: &BTreeMap<String, InodeSnapshot>) -> PhysicalLedger 
         namespaces: namespaces.into_values().collect(),
         residual,
         allocated_bytes,
-        inode_count: u64::try_from(seen.len()).unwrap_or(u64::MAX),
+        inode_count: u64_saturated_len(seen.len()),
         observation_kind: PhysicalObservationKind::SnapshotLowerBound,
         high_water_allocated_bytes: None,
     }

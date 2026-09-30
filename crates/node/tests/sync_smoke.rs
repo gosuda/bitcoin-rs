@@ -7,10 +7,10 @@ use bitcoin_rs_chain::{BlockTree, TipSnapshot, regtest_fixture};
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_node::Network;
 use bitcoin_rs_primitives::{
-    Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, hex_decode,
 };
-use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_utxo::{UtxoSet, contract::is_coinbase_tx};
 use crossbeam_channel::unbounded;
 use parking_lot::{Mutex, RwLock};
 
@@ -132,18 +132,15 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
             .0
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.mature_coinbase_outpoint))
-            .is_none(),
+        utxo.get(&fixture.mature_coinbase_outpoint).is_none(),
         "mature coinbase prevout must be removed by the height-101 spend",
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.funding_outpoint))
-            .is_none(),
+        utxo.get(&fixture.funding_outpoint).is_none(),
         "funding prevout must be removed by the height-102 spend",
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.spend_outpoint))
-            .is_some(),
+        utxo.get(&fixture.spend_outpoint).is_some(),
         "height-102 spend output must remain live",
     );
 
@@ -220,10 +217,10 @@ fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, Box<dyn std::erro
             let txid = tx.txid();
             for (vout, txout) in tx.outputs.iter().enumerate() {
                 let outpoint = OutPoint::new(txid, u32::try_from(vout)?);
-                stats.insert_utxo(&outpoint, txout, height, is_coinbase(tx));
-                live_outputs.insert(outpoint, (txout.clone(), height, is_coinbase(tx)));
+                stats.insert_utxo(&outpoint, txout, height, is_coinbase_tx(tx));
+                live_outputs.insert(outpoint, (txout.clone(), height, is_coinbase_tx(tx)));
             }
-            if is_coinbase(tx) {
+            if is_coinbase_tx(tx) {
                 continue;
             }
             for input in &tx.inputs {
@@ -348,38 +345,4 @@ fn spend_to_op_true(
 
 fn op_true_script() -> Script {
     vec![0x51].into()
-}
-
-fn primitive_outpoint(outpoint: OutPoint) -> OutPoint {
-    outpoint
-}
-
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1
-        && tx.inputs[0].previous_output.txid == Txid::default()
-        && tx.inputs[0].previous_output.vout == u32::MAX
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let (chunks, remainder) = hex.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "odd hex length").into());
-    }
-
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in chunks {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        bytes.push((high << 4) | low);
-    }
-    Ok(bytes)
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, Box<dyn std::error::Error>> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid hex digit").into()),
-    }
 }

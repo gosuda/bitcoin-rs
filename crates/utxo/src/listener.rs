@@ -8,6 +8,8 @@
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 use smallvec::SmallVec;
 
+use crate::stats::muhash3072;
+
 /// Receives UTXO mutations committed to durable shard state.
 ///
 /// The notification interface is batch-only and order-independent. A commit
@@ -46,7 +48,7 @@ pub(crate) trait UtxoChangeListener {
     fn on_committed_event_batches(&self, batches: &[UtxoChangeEvents<'_>]);
 
     /// Returns the current `MuHash3072` snapshot trailer, when this listener tracks one.
-    fn muhash3072(&self) -> Option<[u8; 384]> {
+    fn muhash3072(&self) -> Option<[u8; muhash3072::BYTE_LEN]> {
         None
     }
 }

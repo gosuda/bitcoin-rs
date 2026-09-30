@@ -10,6 +10,7 @@ use std::sync::Arc;
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    u32_saturated,
 };
 use bitcoin_rs_rpc::Handler;
 use bitcoin_rs_rpc::context::Context;
@@ -136,8 +137,7 @@ fn fee_estimates_projects_confirmed_history_to_sat_per_vbyte() {
         panic!("two confirmations against two sampled misses must qualify target 1");
     };
     let sat_per_kvb = estimate.as_sat_per_kvb();
-    let projected =
-        f64::from(u32::try_from(sat_per_kvb).unwrap_or(u32::MAX)) / 100_000_000.0 * 100_000.0;
+    let projected = f64::from(u32_saturated(sat_per_kvb)) / 100_000_000.0 * 100_000.0;
     assert!(
         projected > 1.0,
         "the seeded history must estimate above the old 1 sat/vB floor"

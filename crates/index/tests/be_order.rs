@@ -14,11 +14,12 @@ use std::sync::Arc;
 use bitcoin_rs_index::types::TxPosition;
 use bitcoin_rs_index::{BlockSource, IndexError, Indexer, ScriptHash, ScriptHistoryEntry};
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, varint,
+    Amount, Block, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    consensus_bytes, varint,
 };
+use bitcoin_rs_storage::InMemoryKvStore;
 
-use common::{MemoryStore, put_funding_row, put_funding_row_positions, put_spending_row};
+use common::{header, put_funding_row, put_funding_row_positions, put_spending_row};
 
 /// A block source backed by a simple map, serving multiple heights.
 struct MultiHeightSource {
@@ -54,7 +55,7 @@ impl BlockSource for MultiHeightSource {
 /// row encoding or range resolution cannot pass a comparison built from the
 /// same `TxPosition` representation.
 fn scan_script_history<B: BlockSource>(
-    indexer: &Indexer<MemoryStore>,
+    indexer: &Indexer<InMemoryKvStore>,
     scripthash: ScriptHash,
     source: &B,
 ) -> Result<Vec<ScriptHistoryEntry>, IndexError> {
@@ -82,17 +83,6 @@ fn scan_script_history<B: BlockSource>(
     }
     entries.sort_by_key(|entry| entry.height);
     Ok(entries)
-}
-
-fn header() -> Header {
-    Header {
-        version: 1,
-        prev_blockhash: BlockHash::default(),
-        merkle_root: Hash256::default(),
-        time: 0,
-        bits: CompactTarget::from_consensus(0),
-        nonce: 0,
-    }
 }
 
 fn tx_with_script(previous_output: OutPoint, script_pubkey: Vec<u8>) -> Tx {
@@ -124,7 +114,7 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
 -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x01];
     let scripthash = ScriptHash::from_script_bytes(&script);
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     put_funding_row(&store, scripthash, 1)?;
     put_funding_row(&store, scripthash, 256)?;
     let indexer = Indexer::new(store);
@@ -185,7 +175,7 @@ fn be_key_order_matches_numeric_and_history_sorts_by_height()
 fn unspent_outputs_with_height_sorts_by_numeric_height() -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x03];
     let scripthash = ScriptHash::from_script_bytes(&script);
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     put_funding_row(&store, scripthash, 1)?;
     put_funding_row(&store, scripthash, 256)?;
     let indexer = Indexer::new(store);
@@ -224,7 +214,7 @@ fn unspent_outputs_with_height_sorts_by_numeric_height() -> Result<(), Box<dyn s
 fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn std::error::Error>> {
     let script = vec![0x51, 0x02];
     let scripthash = ScriptHash::from_script_bytes(&script);
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
 
     // Whole-block channel: scanned by the oracle and by the fallback.
     let scan_block_at_1 = Block {
@@ -307,7 +297,7 @@ fn history_scan_oracle_agrees_with_positioned_resolver() -> Result<(), Box<dyn s
 #[test]
 fn spending_rows_also_use_numeric_height_order() -> Result<(), Box<dyn std::error::Error>> {
     let outpoint = spent_outpoint(7, 0);
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     put_spending_row(&store, &outpoint, 1)?;
     put_spending_row(&store, &outpoint, 256)?;
     let indexer = Indexer::new(store);

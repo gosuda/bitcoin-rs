@@ -9,7 +9,11 @@
 //! (`CheckSignatureEncoding`, `CheckPubKeyEncoding`, `IsLowDERSignature`,
 //! `CheckLockTime`, `CheckSequence`).
 
-use bitcoin_rs_primitives::{Amount, Hash256, Sighash, SighashCache, SighashError, Tx, TxOut};
+use bitcoin_rs_primitives::{
+    Amount, Hash256, LOCKTIME_THRESHOLD, SEQUENCE_FINAL, SEQUENCE_LOCKTIME_DISABLE_FLAG,
+    SEQUENCE_LOCKTIME_MASK, SEQUENCE_LOCKTIME_TYPE_FLAG, Sighash, SighashCache, SighashError, Tx,
+    TxOut,
+};
 use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa::Signature as EcdsaSig};
 
 use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
@@ -27,22 +31,6 @@ pub enum SigVersion {
     Tapscript,
 }
 
-/// BIP65 locktime threshold: values below this are block heights, values at or
-/// above are Unix timestamps (median-time-past).
-const LOCKTIME_THRESHOLD: u32 = 500_000_000;
-
-/// BIP112 sequence-type flag: bit 22 of the sequence field.
-const SEQUENCE_LOCKTIME_TYPE_FLAG: u32 = 1 << 22;
-
-/// BIP112 sequence lock-time mask: the low 16 bits carry the relative lock value.
-const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
-
-/// BIP112 disable flag: bit 31 of the sequence field disables relative locktime.
-const SEQUENCE_LOCKTIME_DISABLE_FLAG: u32 = 1 << 31;
-
-/// The sequence value that marks an input as finalized (disables locktime checks).
-const SEQUENCE_FINAL: u32 = 0xffff_ffff;
-
 /// `SIGHASH_ANYONECANPAY` bit mask for legacy hashtype validation.
 const SIGHASH_ANYONECANPAY: u8 = 0x80;
 
@@ -59,10 +47,12 @@ pub struct TxSignatureChecker<'a> {
     annex: Option<Vec<u8>>,
 }
 
-/// Removes `OP_CODESEPARATOR` (0xab) opcodes from a script, matching Core's
-/// `CTransactionSignatureSerializer::SerializeScriptCode`. Bytes inside data
-/// pushes are preserved. The legacy sighash must exclude CS opcode bytes.
-fn remove_codeseparators(script: &[u8]) -> Vec<u8> {
+/// Removes `OP_CODESEPARATOR` (0xab) opcodes from a script.
+///
+/// Matches Core's `CTransactionSignatureSerializer::SerializeScriptCode`:
+/// bytes inside data pushes are preserved, and the legacy sighash must
+/// exclude the removed opcode bytes.
+pub fn remove_codeseparators(script: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(script.len());
     let mut pos = 0;
     while pos < script.len() {
@@ -666,7 +656,7 @@ mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
     use bitcoin_rs_primitives::{
         Amount, Hash256, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid,
-        Witness,
+        Witness, hex_decode,
     };
 
     use super::{
@@ -1148,14 +1138,15 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .expect("expected hash");
 
-            let tx_bytes = hex_decode(tx_hex);
+            let tx_bytes = hex_decode(tx_hex).expect("sighash.json tx hex");
             let tx = Tx::consensus_decode(&tx_bytes)
                 .unwrap_or_else(|e| panic!("tx decode at row {tested}: {e}"));
 
             // Core's SignatureHash removes OP_CODESEPARATOR (0xab) from
             // script_code before hashing; our legacy_signature_hash expects
             // the pre-processed script. Match Core's SerializeScriptCode.
-            let script_code = remove_codeseparators(&hex_decode(script_hex));
+            let script_code =
+                remove_codeseparators(&hex_decode(script_hex).expect("sighash.json script hex"));
 
             // The hashtype in sighash.json is a signed 32-bit integer;
             // Core casts `int nHashType` to `uint32_t` (bit-preserving).
@@ -1204,19 +1195,5 @@ mod tests {
         assert_eq!(E::SigNullFail.to_string(), "SIG_NULLFAIL");
         assert_eq!(E::SchnorrSig.to_string(), "SCHNORR_SIG");
         assert_eq!(E::ScriptNum.to_string(), "SCRIPTNUM");
-    }
-
-    // --- utility ---
-
-    fn hex_decode(s: &str) -> Vec<u8> {
-        s.as_bytes()
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|chunk| {
-                let hex = std::str::from_utf8(chunk).expect("hex chars are ASCII");
-                u8::from_str_radix(hex, 16).unwrap_or_else(|e| panic!("hex decode: {e}"))
-            })
-            .collect()
     }
 }

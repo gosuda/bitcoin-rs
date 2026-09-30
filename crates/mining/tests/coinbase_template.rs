@@ -17,7 +17,7 @@ use bitcoin_rs_mining::{
 };
 use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, Wtxid,
+    Txid, Witness, Wtxid, u32_saturated, u32_saturated_len,
 };
 
 #[test]
@@ -350,8 +350,8 @@ fn snapshot_from_chain(
 
 fn snapshot_entry(tx: Arc<Tx>, fee: u64, fee_delta: i64, ancestors: Vec<u32>) -> SnapshotEntry {
     let weight = tx.weight();
-    let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
+    let size = u32_saturated_len(tx.total_size());
+    let vsize = u32_saturated(tx.vsize());
     SnapshotEntry {
         txid: tx.txid(),
         wtxid: tx.wtxid(),

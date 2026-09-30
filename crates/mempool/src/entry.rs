@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use bitcoin_rs_primitives::{Tx, Txid, Wtxid};
+use bitcoin_rs_primitives::{Tx, Txid, Wtxid, u32_saturated, u32_saturated_len};
 
 #[cfg(test)]
 use bitcoin_rs_primitives::{LockTime, Script, Witness};
@@ -89,8 +89,8 @@ impl MempoolEntry {
         // Tx owns weight calculation. Reuse its result instead of calling
         // tx.vsize(), which computes the same weight and walks the tx again.
         let weight = tx.weight();
-        let bip141_vsize = u32::try_from(Tx::vsize_from_weight(weight)).unwrap_or(u32::MAX);
-        let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
+        let bip141_vsize = u32_saturated(Tx::vsize_from_weight(weight));
+        let size = u32_saturated_len(tx.total_size());
         Self {
             tx,
             txid,
@@ -165,7 +165,7 @@ pub(crate) const fn fee_rate(fee: u64, vsize: u64) -> u64 {
     fee.saturating_mul(1_000) / vsize
 }
 
-fn signed_fee_rate(fee: i128, vsize: u64) -> i128 {
+pub(crate) fn signed_fee_rate(fee: i128, vsize: u64) -> i128 {
     if vsize == 0 {
         return 0;
     }

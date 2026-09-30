@@ -12,67 +12,31 @@
 
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
-use bitcoin_rs_primitives::{Amount, Script, Tx, TxOut, deserialize};
+#[path = "support/bip143_p2wpkh.rs"]
+mod bip143_p2wpkh;
+
+use bitcoin_rs_primitives::{Amount, Script, Tx, TxOut, deserialize, hex_decode};
 use bitcoin_rs_script::checker::{SigVersion, TxSignatureChecker};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{PublicKey, SECP256K1, SecretKey};
 use sha2::{Digest, Sha256};
 
-const TX_HEX: &str = concat!(
-    "0100000002fff7f7881a8099afa6940d42d1e7f6362bec38171ea3edf433541db4e4ad969f",
-    "0000000000eeffffffef51e1b804cc89d182d279655c3aa89e815b1b309fe287d9b2b55d57",
-    "b90ec68a0100000000ffffffff02202cb206000000001976a9148280b37df378db99f66f85",
-    "c95a783a76ac7a6d5988ac9093510d000000001976a9143bde42dbee7e4dbe6a21b2d50ce2",
-    "f0167faa815988ac11000000",
-);
-const TEST_KEY: &str = "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9";
-const PROGRAM: &str = "00141d0f172a0ecb48aee1be1f2687d2963ae33f71a1";
-const VALUE: u64 = 600_000_000;
-const INPUT: usize = 1;
-
-fn hex(text: &str) -> Vec<u8> {
-    assert!(text.len().is_multiple_of(2));
-    let (pairs, _) = text.as_bytes().as_chunks::<2>();
-    pairs
-        .iter()
-        .map(|pair| {
-            u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16).expect("hex byte")
-        })
-        .collect()
-}
+use bip143_p2wpkh::{INPUT, PROGRAM, TEST_KEY, TX_HEX, VALUE, verify_witness};
 
 fn fixture() -> Tx {
-    deserialize(&hex(TX_HEX)).expect("native fixture decode")
+    deserialize(&hex_decode(TX_HEX).expect("BIP143 fixture tx hex")).expect("native fixture decode")
 }
 
 fn test_key() -> SecretKey {
-    SecretKey::from_slice(&hex(TEST_KEY)).expect("public BIP143 test key")
+    SecretKey::from_slice(&hex_decode(TEST_KEY).expect("BIP143 test key hex"))
+        .expect("public BIP143 test key")
 }
 
 fn p2wpkh_prevout() -> TxOut {
     TxOut {
         value: Amount::from_sat(VALUE),
-        script_pubkey: Script::from_bytes(hex(PROGRAM)),
+        script_pubkey: Script::from_bytes(hex_decode(PROGRAM).expect("P2WPKH program hex")),
     }
-}
-
-fn verify_witness(
-    tx: &Tx,
-    prevout: &TxOut,
-    witness: &[Vec<u8>],
-    flags: VerifyFlags,
-) -> Result<bool, ScriptError> {
-    // These legacy/v0 checks read only the selected input's prevout.
-    let prevouts = vec![prevout.clone(); tx.inputs.len()];
-    Interpreter.execute_with_prevouts(
-        &prevout.script_pubkey,
-        &[],
-        witness,
-        flags,
-        &prevouts,
-        tx,
-        INPUT,
-    )
 }
 
 fn negative_check_script(pubkey: &[u8], multisig: bool) -> Vec<u8> {

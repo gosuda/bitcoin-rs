@@ -1,9 +1,10 @@
 //! Exact-identity block reads and transaction position verification.
 
+use bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE;
+
 use super::{
-    Block, BlockHash, BlockTree, DerivedIndexQueryEngine, Hash256, MAX_SERIALIZED_BLOCK_BYTES,
-    OutPoint, QueryBudget, TipSnapshot, Tx, TxIndexSnapshot, TxPosition, TxPositionValue,
-    TxQueryError, Txid, deserialize,
+    Block, BlockHash, BlockTree, DerivedIndexQueryEngine, Hash256, OutPoint, QueryBudget,
+    TipSnapshot, Tx, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize,
 };
 
 impl DerivedIndexQueryEngine {
@@ -31,7 +32,7 @@ impl DerivedIndexQueryEngine {
         height: u32,
         hash: Hash256,
     ) -> Result<Block, TxQueryError> {
-        budget.reserve_body_read(MAX_SERIALIZED_BLOCK_BYTES)?;
+        budget.reserve_body_read(MAX_BLOCK_SERIALIZED_SIZE)?;
         let bytes = self.resolve_block_body_bytes(height, BlockHash::from(hash))?;
         budget.charge_body_bytes(bytes.len())?;
         Self::verify_block(&bytes, height, hash)
@@ -75,7 +76,7 @@ impl DerivedIndexQueryEngine {
         for &position in positions {
             let end = position.end()?;
             if position.byte_len() == 0
-                || usize::try_from(end).ok()? > MAX_SERIALIZED_BLOCK_BYTES
+                || usize::try_from(end).ok()? > MAX_BLOCK_SERIALIZED_SIZE
                 || previous.is_some_and(|prior| {
                     position.offset() <= prior.offset()
                         || position.offset() < prior.end().unwrap_or(u32::MAX)

@@ -5,10 +5,12 @@
 //! operator reads to tell a peer that is feeding the node from one that is
 //! merely connected to it.
 
+#[cfg(test)]
+use bitcoin_rs_primitives::u64_saturated_len;
+use bitcoin_rs_primitives::unix_now;
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bytes and activity times for one peer connection.
 ///
@@ -55,7 +57,7 @@ impl PeerCounters {
         let _previous = self
             .bytes_sent
             .fetch_add(u64::try_from(bytes).unwrap_or(0), Ordering::Relaxed);
-        self.last_send.store(now_seconds(), Ordering::Relaxed);
+        self.last_send.store(unix_now(), Ordering::Relaxed);
     }
 
     fn record_recv(&self, bytes: usize) {
@@ -65,7 +67,7 @@ impl PeerCounters {
         let _previous = self
             .bytes_recv
             .fetch_add(u64::try_from(bytes).unwrap_or(0), Ordering::Relaxed);
-        self.last_recv.store(now_seconds(), Ordering::Relaxed);
+        self.last_recv.store(unix_now(), Ordering::Relaxed);
     }
 }
 
@@ -80,12 +82,6 @@ impl PartialEq for PeerCounters {
 }
 
 impl Eq for PeerCounters {}
-
-pub(crate) fn now_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
 
 /// A stream that counts everything passing through it.
 ///
@@ -282,6 +278,26 @@ impl<S: Write> Write for CountingStream<S> {
 mod tests {
     use super::*;
 
+    /// A socket that hands out `remaining` in its first read and fails any
+    /// later one, so a test proves the wrapper never asks it twice.
+    struct OneShot {
+        remaining: Vec<u8>,
+        reads: u8,
+    }
+
+    impl Read for OneShot {
+        fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
+            self.reads = self.reads.saturating_add(1);
+            if self.reads > 1 {
+                return Err(std::io::Error::other("socket read more than once"));
+            }
+            let take = self.remaining.len().min(buffer.len());
+            buffer[..take].copy_from_slice(&self.remaining[..take]);
+            self.remaining.drain(..take);
+            Ok(take)
+        }
+    }
+
     /// The count is of bytes that actually moved, not of bytes offered.
     ///
     /// A short write is the case that separates the two: counting the buffer
@@ -333,23 +349,6 @@ mod tests {
     /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn leftover_bytes_do_not_revisit_the_socket() {
-        struct OneShot {
-            remaining: Vec<u8>,
-            reads: u8,
-        }
-        impl Read for OneShot {
-            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
-                self.reads = self.reads.saturating_add(1);
-                if self.reads > 1 {
-                    return Err(std::io::Error::other("socket read more than once"));
-                }
-                let take = self.remaining.len().min(buffer.len());
-                buffer[..take].copy_from_slice(&self.remaining[..take]);
-                self.remaining.drain(..take);
-                Ok(take)
-            }
-        }
-
         let counters = Arc::new(PeerCounters::default());
         let mut stream = CountingStream::new(
             OneShot {
@@ -431,23 +430,6 @@ mod tests {
     /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn two_wire_messages_decode_from_one_socket_read() {
-        struct OneShot {
-            remaining: Vec<u8>,
-            reads: u8,
-        }
-        impl Read for OneShot {
-            fn read(&mut self, buffer: &mut [u8]) -> IoResult<usize> {
-                self.reads = self.reads.saturating_add(1);
-                if self.reads > 1 {
-                    return Err(std::io::Error::other("socket read more than once"));
-                }
-                let take = self.remaining.len().min(buffer.len());
-                buffer[..take].copy_from_slice(&self.remaining[..take]);
-                self.remaining.drain(..take);
-                Ok(take)
-            }
-        }
-
         let mut frames = Vec::new();
         crate::wire::write_message(
             &mut frames,
@@ -840,9 +822,6 @@ mod tests {
             1,
             "header and payload in one writev"
         );
-        assert_eq!(
-            counters.bytes_sent(),
-            u64::try_from(written).unwrap_or(u64::MAX)
-        );
+        assert_eq!(counters.bytes_sent(), u64_saturated_len(written));
     }
 }

@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::contract::{BlockChanges, UndoBatch, UtxoAdd};
 use crate::listener::{UtxoChangeEvents, UtxoChangeListener};
+use crate::stats::muhash3072;
 use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
 
 /// Below this many combined add+remove operations, a multi-shard no-listener
@@ -259,7 +260,7 @@ impl UtxoSetView<'_> {
         &self.set.shards[idx]
     }
 
-    pub(crate) fn listener_muhash3072(&self) -> Option<[u8; 384]> {
+    pub(crate) fn listener_muhash3072(&self) -> Option<[u8; muhash3072::BYTE_LEN]> {
         self.set
             .listener
             .as_deref()

@@ -332,7 +332,10 @@ pub fn assemble_block_from_template(template: &Value, coinbase_script: &Script) 
     Ok(block)
 }
 
-fn coinbase_script_sig(height: u32) -> ScriptBuf {
+/// BIP34 coinbase `scriptSig` for `height`: the minimal height push, padded
+/// with `OP_0` when that alone is below the 2-byte consensus minimum.
+#[must_use]
+pub fn coinbase_script_sig(height: u32) -> ScriptBuf {
     let mut builder = Builder::new().push_int(i64::from(height));
     if builder.as_bytes().len() < 2 {
         builder = builder.push_int(0);

@@ -6,12 +6,16 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bitcoin_rs_p2p::wire::PROTOCOL_VERSION;
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
-use bitcoin_rs_primitives::USER_AGENT;
+use bitcoin_rs_primitives::{
+    USER_AGENT, i64_saturated, u32_saturated, u32_saturated_len, u64_saturated_len, unix_now,
+    unix_seconds,
+};
 use crossbeam_channel::TrySendError;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
-use crate::compat::convert::{i64_saturated, typed_to_sonic, typed_to_sonic_omitting_nulls};
+use crate::compat::convert::{typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{
@@ -41,12 +45,6 @@ fn parse_setban_target(raw: &str) -> Result<IpSubnet, RpcError> {
     ))
 }
 
-fn epoch_seconds(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH)
-        .ok()
-        .map_or(0, |duration| duration.as_secs())
-}
-
 /// Resolves the finite expiry requested by `setban`.
 ///
 /// SETBAN-EXPIRY-01: zero relative bantime uses `DEFAULT_BAN_TIME_SECS`;
@@ -60,7 +58,7 @@ fn epoch_seconds(time: SystemTime) -> u64 {
 /// `RpcError::InvalidParameter` (-8), before any ban-list mutation. Equality
 /// is allowed, including when `now` has subsecond precision.
 fn ban_until(now: SystemTime, bantime: u64, absolute: bool) -> Result<SystemTime, RpcError> {
-    if absolute && bantime < epoch_seconds(now) {
+    if absolute && bantime < unix_seconds(now) {
         return Err(RpcError::InvalidParameter(
             "Error: Absolute timestamp is in the past".to_owned(),
         ));
@@ -130,7 +128,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     typed_to_sonic(&v31::GetNetworkInfo {
         version: usize::try_from(bitcoin_rs_primitives::client_version()).unwrap_or(usize::MAX),
         subversion: USER_AGENT.to_owned(),
-        protocol_version: 70016,
+        protocol_version: usize::try_from(PROTOCOL_VERSION).unwrap_or(usize::MAX),
         local_services: format!("{:016x}", ctx.network.local_services),
         local_services_names: bitcoin_rs_p2p::service_flag_names(ctx.network.local_services)
             .into_iter()
@@ -210,7 +208,7 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
         .filter_map(|session| session.info.as_ref().map(|info| (session, info)))
         .enumerate()
         .map(|(id, (session, peer))| v31::PeerInfo {
-            id: u32::try_from(id).unwrap_or(u32::MAX),
+            id: u32_saturated_len(id),
             address: peer.addr.to_string(),
             address_bind: Some(peer.addr_bind.to_string()),
             address_local: None,
@@ -226,8 +224,8 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
             // stream; block-relay-only and inbound-nonrelay leases do not.
             relay_transactions: session.lease.is_inbound()
                 || session.lease.role() == bitcoin_rs_p2p::PeerRole::FullRelay,
-            last_send: i64::try_from(peer.counters.last_send()).unwrap_or(i64::MAX),
-            last_received: i64::try_from(peer.counters.last_recv()).unwrap_or(i64::MAX),
+            last_send: i64_saturated(peer.counters.last_send()),
+            last_received: i64_saturated(peer.counters.last_recv()),
             last_transaction: 0,
             last_block: 0,
             bytes_sent: peer.counters.bytes_sent(),
@@ -298,19 +296,18 @@ pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Val
 pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
     let banned = ctx.network.banned.read();
-    let now = epoch_seconds(SystemTime::now());
+    let now = unix_now();
     let entries = banned
         .iter()
         .map(|entry| {
-            let banned_until = entry.banned_until.map_or(0, epoch_seconds);
-            let ban_created = epoch_seconds(entry.ban_created);
+            let banned_until = entry.banned_until.map_or(0, unix_seconds);
+            let ban_created = unix_seconds(entry.ban_created);
             v31::Banned {
                 address: entry.subnet.to_string(),
-                ban_created: u32::try_from(ban_created).unwrap_or(u32::MAX),
-                banned_until: u32::try_from(banned_until).unwrap_or(u32::MAX),
-                ban_duration: u32::try_from(banned_until.saturating_sub(ban_created))
-                    .unwrap_or(u32::MAX),
-                time_remaining: u32::try_from(banned_until.saturating_sub(now)).unwrap_or(u32::MAX),
+                ban_created: u32_saturated(ban_created),
+                banned_until: u32_saturated(banned_until),
+                ban_duration: u32_saturated(banned_until.saturating_sub(ban_created)),
+                time_remaining: u32_saturated(banned_until.saturating_sub(now)),
             }
         })
         .collect::<Vec<_>>();
@@ -457,7 +454,7 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
 
 pub(crate) fn getconnectioncount(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let count = u64::try_from(ctx.network.peer_table.len()).unwrap_or(u64::MAX);
+    let count = u64_saturated_len(ctx.network.peer_table.len());
     typed_to_sonic(&v31::GetConnectionCount(count))
 }
 
@@ -494,7 +491,7 @@ pub(crate) fn getnettotals(ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let count = optional_u64(params, 0, 1)?;
 
-    let now = epoch_seconds(SystemTime::now());
+    let now = unix_now();
     let mut seen: HashSet<SocketAddr> = HashSet::new();
     let mut entries: Vec<v31::NodeAddress> = Vec::new();
 

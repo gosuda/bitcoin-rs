@@ -168,8 +168,7 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
             saw_non_coinbase = true;
             if tx.version >= 2 {
                 has_bip68_sequence_locks |= tx.inputs.iter().any(|input| {
-                    input.sequence & bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG
-                        == 0
+                    input.sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG == 0
                 });
             }
             spent_input_count = spent_input_count.saturating_add(input_count);

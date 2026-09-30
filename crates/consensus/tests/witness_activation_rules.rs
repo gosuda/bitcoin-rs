@@ -4,15 +4,19 @@
 //! `CheckWitnessMalleation`. These fixtures isolate block witness rules; they
 //! are not mined or UTXO-valid chain fixtures.
 
+#[path = "support/single_tx_block.rs"]
+mod single_tx_block;
+
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_consensus::block_view::BlockView;
 use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, verify_block_rules, verify_block_rules_precomputed,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Header, LockTime, OutPoint, Script, Sequence, Tx,
-    TxIn, TxOut, Txid, Witness,
+    Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
+
+use single_tx_block::block;
 
 const PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 // SHA256d(00*32 || 00*32): coinbase-only witness root and zero reserved value.
@@ -53,21 +57,6 @@ fn coinbase(with_witness: bool, with_commitment: bool) -> Tx {
         tx.outputs.push(commitment_output());
     }
     tx
-}
-
-fn block(tx: Tx) -> Block {
-    let merkle_root = tx.txid().into();
-    Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: BlockHash::default(),
-            merkle_root,
-            time: 0,
-            bits: CompactTarget::from_consensus(0),
-            nonce: 0,
-        },
-        txs: vec![tx],
-    }
 }
 
 fn verify_with_activation(block: &Block, segwit_active: bool) -> Result<(), ConsensusError> {

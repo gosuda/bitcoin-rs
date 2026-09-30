@@ -6,12 +6,17 @@
 //! that does not bind to its header (issue #1070). They are not mined or
 //! UTXO-valid chain fixtures.
 
+#[path = "support/single_tx_block.rs"]
+mod single_tx_block;
+
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_consensus::{check_block_body_binding, compute_merkle_root};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
 };
+
+use single_tx_block::block;
 
 const PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 // SHA256d(00*32 || 00*32): coinbase-only witness root and zero reserved value.
@@ -48,21 +53,6 @@ fn coinbase(witness: Option<Vec<Vec<u8>>>, commitment: Option<[u8; 32]>) -> Tx {
         tx.outputs.push(commitment_output(commitment));
     }
     tx
-}
-
-fn block(tx: Tx) -> Block {
-    let merkle_root = tx.txid().into();
-    Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: BlockHash::default(),
-            merkle_root,
-            time: 0,
-            bits: CompactTarget::from_consensus(0),
-            nonce: 0,
-        },
-        txs: vec![tx],
-    }
 }
 
 /// (a) A block with a BIP141 commitment but a witness-stripped coinbase

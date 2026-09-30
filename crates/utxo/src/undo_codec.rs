@@ -17,7 +17,9 @@
 
 use std::collections::HashSet;
 
-use bitcoin_rs_primitives::{ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut};
+use bitcoin_rs_primitives::{
+    ConsensusDecode, ConsensusEncode, Hash256, OutPoint, TxOut, u32_saturated_len,
+};
 use thiserror::Error;
 
 use crate::contract::{UndoBatch, UtxoAdd};
@@ -192,7 +194,7 @@ fn bounded_capacity(count: u32) -> usize {
 /// cannot carry anywhere near `u32::MAX` outputs or inputs.
 fn u32_len(len: usize) -> u32 {
     debug_assert!(u32::try_from(len).is_ok(), "undo entry count exceeds u32");
-    u32::try_from(len).unwrap_or(u32::MAX)
+    u32_saturated_len(len)
 }
 
 fn reject_duplicate(

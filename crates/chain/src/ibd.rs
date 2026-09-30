@@ -141,7 +141,7 @@ impl InitialBlockDownload {
 mod initial_block_download_tests {
     use std::sync::Arc;
 
-    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network, u32_saturated};
 
     use parking_lot::RwLock;
 
@@ -213,7 +213,7 @@ mod initial_block_download_tests {
         // Timestamped one minute ago, so recency is satisfied and only the work
         // floor can be what decides. A two-block regtest-difficulty chain has
         // nowhere near mainnet's `nMinimumChainWork`.
-        let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
+        let latch = latch_with_tip_at(u32_saturated(now - 60));
         assert!(
             latch.is_active(now, Network::Mainnet),
             "a chain this cheap must not count as synced merely for being recent"
@@ -229,7 +229,7 @@ mod initial_block_download_tests {
         // as synced. The latch stores no network, so a caller that assembles a
         // context before its network is chosen is still judged by the network
         // it runs.
-        let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
+        let latch = latch_with_tip_at(u32_saturated(now - 60));
         assert!(latch.is_active(now, Network::Mainnet));
         assert!(!latch.is_active(now, Network::Regtest));
     }
@@ -238,34 +238,34 @@ mod initial_block_download_tests {
     fn a_stale_tip_with_enough_work_is_still_initial_block_download() {
         let now = 1_800_000_000_u64;
         // Regtest's work floor is zero, so only the tip's age is left to decide.
-        let latch = latch_with_tip_at(u32::try_from(now - DAY - 60).unwrap_or(u32::MAX));
+        let latch = latch_with_tip_at(u32_saturated(now - DAY - 60));
         assert!(latch.is_active(now, Network::Regtest));
     }
 
     #[test]
     fn a_recent_tip_with_enough_work_exits_initial_block_download() {
         let now = 1_800_000_000_u64;
-        let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
+        let latch = latch_with_tip_at(u32_saturated(now - 60));
         assert!(!latch.is_active(now, Network::Regtest));
     }
 
     #[test]
     fn the_tip_age_boundary_is_twenty_four_hours() {
         let now = 1_800_000_000_u64;
-        let at_the_edge = latch_with_tip_at(u32::try_from(now - DAY).unwrap_or(u32::MAX));
+        let at_the_edge = latch_with_tip_at(u32_saturated(now - DAY));
         assert!(
             !at_the_edge.is_active(now, Network::Regtest),
             "exactly `max_tip_age` old is still recent enough"
         );
 
-        let past_the_edge = latch_with_tip_at(u32::try_from(now - DAY - 1).unwrap_or(u32::MAX));
+        let past_the_edge = latch_with_tip_at(u32_saturated(now - DAY - 1));
         assert!(past_the_edge.is_active(now, Network::Regtest));
     }
 
     #[test]
     fn leaving_initial_block_download_latches() {
         let now = 1_800_000_000_u64;
-        let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
+        let latch = latch_with_tip_at(u32_saturated(now - 60));
         assert!(!latch.is_active(now, Network::Regtest));
 
         // Two days later, with no new block. Judged afresh the tip is stale and
@@ -281,7 +281,7 @@ mod initial_block_download_tests {
     #[test]
     fn the_latch_does_not_fire_before_the_conditions_are_met() {
         let now = 1_800_000_000_u64;
-        let latch = latch_with_tip_at(u32::try_from(now - DAY - 60).unwrap_or(u32::MAX));
+        let latch = latch_with_tip_at(u32_saturated(now - DAY - 60));
         assert!(latch.is_active(now, Network::Regtest));
         // Same tip, asked later at a time when it *is* within the window.
         assert!(!latch.is_active(now - DAY, Network::Regtest));

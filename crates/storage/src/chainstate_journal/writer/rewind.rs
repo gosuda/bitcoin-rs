@@ -12,6 +12,7 @@ use super::WriterState;
 use super::parse_segment_name;
 use super::segment_name;
 use crate::KvStore;
+use bitcoin_rs_primitives::u64_saturated_len;
 use std::io::Read;
 use std::time::Instant;
 
@@ -218,7 +219,7 @@ pub(super) fn scan_fork_cursor(
     chain_tx_count: &mut u64,
 ) -> Result<Option<ForkCursor>, JournalWriterError> {
     const FRAME_HEADER_U64: u64 = 4 + 1 + 4;
-    if end > u64::try_from(bytes.len()).unwrap_or(u64::MAX) || start > end {
+    if end > u64_saturated_len(bytes.len()) || start > end {
         return Err(JournalWriterError::CursorMismatch(format!(
             "segment {generation} committed window is outside the file"
         )));

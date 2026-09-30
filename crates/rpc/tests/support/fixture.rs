@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use bitcoin::hex::DisplayHex as _;
+use bitcoin_rs_primitives::{hex_encode, u64_saturated_len};
 use bitcoin_rs_rpc::manifest::{MANIFEST, SurfaceKind};
 use serde::Deserialize;
 use serde_json::Value;
@@ -29,12 +29,6 @@ use super::manifest_check;
 )]
 #[path = "../../../../bin/bitcoin-rs/tests/support/reference_set.rs"]
 mod reference_set;
-
-/// Converts an in-memory byte length to `u64` for ceiling comparisons; a
-/// length that does not fit is above every ceiling and is refused by them.
-fn len_u64(len: usize) -> u64 {
-    u64::try_from(len).unwrap_or(u64::MAX)
-}
 
 /// How the pinned Core result relates to the live bitcoin-rs result.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -365,7 +359,7 @@ fn load_corpus_from(
             )));
         }
         let bytes = read_regular_bounded(&dir_fd, &name, &path)?;
-        let actual = len_u64(bytes.len());
+        let actual = u64_saturated_len(bytes.len());
         corpus_bytes += actual;
         if corpus_bytes > MAX_CORPUS_BYTES {
             return Err(LoadError::Violation(format!(
@@ -445,7 +439,7 @@ pub(crate) fn read_regular_bounded(
         .take(MAX_FIXTURE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(LoadError::Io)?;
-    if len_u64(bytes.len()) > MAX_FIXTURE_BYTES {
+    if u64_saturated_len(bytes.len()) > MAX_FIXTURE_BYTES {
         return Err(LoadError::Violation(format!(
             "{} is above the per-fixture ceiling of {MAX_FIXTURE_BYTES} bytes",
             path.display()
@@ -498,7 +492,7 @@ fn enforce_depth(text: &str, path: &Path) -> Result<(), LoadError> {
 fn settle_body_lengths(fixture: &mut Fixture) {
     let settle = |tuple: &mut HttpTuple| match &tuple.body {
         BodyForm::Empty => tuple.body_len = Some(0),
-        BodyForm::Text { text } => tuple.body_len = Some(len_u64(text.len())),
+        BodyForm::Text { text } => tuple.body_len = Some(u64_saturated_len(text.len())),
         BodyForm::Json { .. } => tuple.body_len = None,
     };
     settle(&mut fixture.core);
@@ -672,7 +666,7 @@ fn validate_provenance(
             path.display()
         )));
     }
-    if provenance.core_binary_sha256 != release.bitcoind_sha256.to_lower_hex_string() {
+    if provenance.core_binary_sha256 != hex_encode(&release.bitcoind_sha256) {
         return Err(LoadError::Violation(format!(
             "{}: pinned binary digest does not match the selected Core release",
             path.display()

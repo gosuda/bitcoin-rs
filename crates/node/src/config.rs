@@ -6,6 +6,7 @@ use bitcoin_rs_chainstate::{ChainstateJournalConfig, ValidationMode};
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_index::IndexCapabilities;
 use bitcoin_rs_primitives::Network;
+use bitcoin_rs_rpc::bitcoin_network;
 use bitcoin_rs_storage::StorageBackend;
 use core::fmt;
 use crossbeam_channel::Receiver;
@@ -451,16 +452,6 @@ impl NetworkProfile {
                 .assume_valid_anchor()
                 .map_or(0, |(height, _)| height),
         }
-    }
-}
-
-fn bitcoin_network(network: Network) -> bitcoin::Network {
-    match network {
-        Network::Mainnet => bitcoin::Network::Bitcoin,
-        Network::Testnet3 => bitcoin::Network::Testnet,
-        Network::Testnet4 => bitcoin::Network::Testnet4,
-        Network::Signet => bitcoin::Network::Signet,
-        Network::Regtest => bitcoin::Network::Regtest,
     }
 }
 

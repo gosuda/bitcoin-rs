@@ -11,7 +11,9 @@
 use std::ops::Range;
 
 use bitcoin_rs_primitives::layout::{ByteSpan, ParsedBlock, ParsedTransaction};
-use bitcoin_rs_primitives::{Block, DecodeError, Network, Tx, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{
+    Block, DecodeError, Network, Tx, consensus_bytes, deserialize, u64_saturated_len,
+};
 
 /// Golden fixture heights: one legacy-only block and one with segwit
 /// transactions (height 481824 is the first segwit block on mainnet).
@@ -192,7 +194,7 @@ fn span_file_ranges_widen_in_checked_u64() {
             .file_range(base)
             .expect("plenty of headroom under u64::MAX");
         assert!(file_range.end > file_range.start);
-        assert!(file_range.end <= base + u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        assert!(file_range.end <= base + u64_saturated_len(bytes.len()));
     }
     // A base at u64::MAX with a non-zero length overflows and reports None.
     let span = parsed

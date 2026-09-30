@@ -45,6 +45,9 @@ pub mod socket;
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
+/// Block fixtures shared by in-crate unit tests.
+#[cfg(test)]
+mod test_support;
 /// Bounded transaction announcements and their peer relay worker.
 pub mod tx_relay;
 /// Bitcoin P2P wire codec.
@@ -61,10 +64,7 @@ pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::ListenerExtras;
-pub use peer::{
-    DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerManager, PeerState,
-    SystemDnsResolver,
-};
+pub use peer::{DnsResolver, NetworkActivity, Peer, PeerManager, PeerState, SystemDnsResolver};
 pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{

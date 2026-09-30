@@ -1,8 +1,17 @@
 //! Snapshot trailer integration tests for coinstats.
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
+
+#[path = "support/indexed_txid.rs"]
+mod indexed_txid;
+#[path = "support/shard_txid.rs"]
+mod shard_txid;
+
+use bitcoin_rs_primitives::{Amount, OutPoint, TxOut};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{UtxoSet, write_snapshot};
+
+use indexed_txid::txid;
+use shard_txid::txid_in_shard;
 
 #[test]
 fn snapshot_trailer_uses_listener_muhash() -> Result<(), Box<dyn std::error::Error>> {
@@ -343,19 +352,4 @@ fn txout(index: u32) -> TxOut {
 /// The shard a UTXO key selects: the first little-endian txid byte.
 fn shard_of(outpoint: &OutPoint) -> u8 {
     outpoint.txid.0.to_le_bytes()[0]
-}
-
-fn txid(index: u32) -> Hash256 {
-    let mut bytes = [0_u8; 32];
-    bytes[..4].copy_from_slice(&index.to_le_bytes());
-    Hash256::from_le_bytes(&bytes)
-}
-
-fn txid_in_shard(shard: u8, suffix: u64) -> Hash256 {
-    let mut bytes = [0_u8; 32];
-    bytes[0] = shard;
-    bytes[1..9].copy_from_slice(&suffix.to_le_bytes());
-    bytes[9..17].copy_from_slice(&suffix.rotate_left(13).to_le_bytes());
-    bytes[17..25].copy_from_slice(&suffix.wrapping_mul(29).to_le_bytes());
-    Hash256::from_le_bytes(&bytes)
 }

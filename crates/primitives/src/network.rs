@@ -837,14 +837,7 @@ mod tests {
 #[cfg(test)]
 mod chain_params_tests {
     use super::{Network, hex_be_32};
-
-    fn to_hex(bytes: [u8; 32]) -> String {
-        let mut out = String::with_capacity(64);
-        for byte in bytes {
-            out.push_str(&format!("{byte:02x}"));
-        }
-        out
-    }
+    use crate::hex_encode;
 
     #[test]
     fn hex_be_32_places_the_first_character_in_the_high_bit_of_byte_zero() {
@@ -888,7 +881,11 @@ mod chain_params_tests {
             ),
         ];
         for (network, hex) in expected {
-            assert_eq!(to_hex(network.minimum_chain_work()), hex, "{network:?}");
+            assert_eq!(
+                hex_encode(&network.minimum_chain_work()),
+                hex,
+                "{network:?}"
+            );
         }
     }
 

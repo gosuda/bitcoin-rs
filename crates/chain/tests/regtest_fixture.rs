@@ -1,6 +1,6 @@
 //! Contract tests for the shared regtest fixture: declared-target mining,
-//! merkle binding, determinism, and the script-num encoding the coinbases
-//! rely on. Deterministic, no wire.
+//! merkle binding, determinism, and the coinbase height push. Deterministic,
+//! no wire.
 
 use bitcoin::Target;
 use bitcoin::hashes::Hash;
@@ -33,9 +33,10 @@ fn mined_child_meets_declared_target() -> Result<(), Box<dyn std::error::Error>>
     );
     validate_pow(&child.header, Hash256::from(hash), Network::Regtest)?;
     let script_sig = &child.txs[0].inputs[0].script_sig;
-    let height_push = regtest_fixture::script_num_push(1);
+    // The `bitcoin` crate's CScriptNum builder is the independent BIP34 oracle.
+    let height_push = Builder::new().push_int(1).into_script();
     assert!(
-        script_sig.as_bytes().starts_with(height_push.as_slice())
+        script_sig.as_bytes().starts_with(height_push.as_bytes())
             && (2..=100).contains(&script_sig.as_bytes().len()),
         "the coinbase scriptSig must carry the height push inside the consensus 2..=100 range"
     );
@@ -104,38 +105,4 @@ fn grind_is_deterministic() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(first.block_hash(), second.block_hash());
     Ok(())
-}
-
-#[test]
-fn script_num_push_matches_cscriptnum() {
-    let cases: [(i64, &[u8]); 6] = [
-        (0, &[0x00]),               // OP_0
-        (1, &[0x51]),               // OP_1
-        (16, &[0x60]),              // OP_16
-        (127, &[0x01, 0x7f]),       // explicit one-byte push
-        (128, &[0x02, 0x80, 0x00]), // sign byte keeps the magnitude positive
-        (-1, &[0x4f]),              // OP_1NEGATE
-    ];
-    for (value, expected) in cases {
-        assert_eq!(
-            regtest_fixture::script_num_push(value).as_slice(),
-            expected,
-            "script-num push for {value}"
-        );
-    }
-    // Differential: the `bitcoin` crate's own CScriptNum builder (the same
-    // encoding `bitcoin_rs_script::push_int` and the BIP34 checker use).
-    for (value, expected) in cases {
-        let script = Builder::new().push_int(value).into_script();
-        assert_eq!(
-            script.as_bytes(),
-            expected,
-            "bitcoin Builder::push_int disagrees with the pinned encoding for {value}"
-        );
-        assert_eq!(
-            regtest_fixture::script_num_push(value).as_slice(),
-            script.as_bytes(),
-            "bitcoin Builder::push_int disagrees with the fixture encoding for {value}"
-        );
-    }
 }

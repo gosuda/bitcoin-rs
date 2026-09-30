@@ -43,9 +43,9 @@ pub use deployment::{
     softfork_state,
 };
 pub use header_sync::{
-    HeaderAdmission, HeaderValidationMode, accept_headers, block_work, compact_is_met_by,
-    current_unix_seconds, permitted_difficulty_transition, validate_contextual_header,
-    validate_pow,
+    HeaderAdmission, HeaderValidationMode, MAX_FUTURE_TIME_SECONDS, accept_headers, block_work,
+    compact_is_met_by, current_unix_seconds, permitted_difficulty_transition,
+    validate_contextual_header, validate_pow,
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};

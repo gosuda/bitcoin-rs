@@ -12,6 +12,8 @@ use super::ExpectedRun;
 use super::chain::WindowCommitDisposition;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::u32_saturated_len;
+use bitcoin_rs_primitives::u64_saturated_len;
 use std::time::Instant;
 use std::vec::Vec;
 
@@ -229,7 +231,7 @@ impl BlockSync {
                         // round failed.
                         self.purge_invalidated(&error.invalidated);
                         metrics::counter!("node.sync.invalidated_blocks")
-                            .increment(u64::try_from(error.invalidated.len()).unwrap_or(u64::MAX));
+                            .increment(u64_saturated_len(error.invalidated.len()));
                         if let Some(blocker) = blocker {
                             self.punish_permanent_block_delivery(blocker);
                         }
@@ -310,7 +312,7 @@ impl BlockSync {
             return None;
         }
 
-        let max_offset = u32::try_from(max_count.saturating_sub(1)).unwrap_or(u32::MAX);
+        let max_offset = u32_saturated_len(max_count.saturating_sub(1));
         let end_height = start_height
             .saturating_add(max_offset)
             .min(chain_tip.height);

@@ -41,17 +41,6 @@ pub fn network_name(network: Network) -> &'static str {
     }
 }
 
-/// Encodes bytes as lowercase hexadecimal without separators.
-pub fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
-}
-
 /// Decodes exactly `2 * N` lowercase hexadecimal characters.
 pub fn decode_hex<const N: usize>(encoded: &str) -> Result<[u8; N], CheckpointError> {
     if encoded.len() != N.saturating_mul(2)

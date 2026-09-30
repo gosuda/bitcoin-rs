@@ -2,7 +2,9 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::Instant;
 
-use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut};
+use bitcoin_rs_primitives::{
+    Amount, LOCKTIME_THRESHOLD, OutPoint, SEQUENCE_FINAL, Sequence, Tx, TxOut,
+};
 
 use crate::block_view::BlockView;
 use crate::sigops::transaction_sigop_cost;
@@ -14,10 +16,10 @@ use crate::ScriptEngine;
 use crate::UtxoView;
 use crate::{ConsensusError, MAX_BLOCK_SIGOPS_COST, ValidationEngine};
 
-const LOCKTIME_THRESHOLD: u32 = 500_000_000;
-const SEQUENCE_FINAL: u32 = 0xffff_ffff;
-const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
-const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
+/// Shortest coinbase scriptSig consensus accepts, in bytes (Core `bad-cb-length`).
+pub const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
+/// Longest coinbase scriptSig consensus accepts, in bytes (Core `bad-cb-length`).
+pub const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
 /// Number of blocks after a coinbase that its outputs become spendable.
 pub const COINBASE_MATURITY: u32 = 100;
@@ -805,7 +807,7 @@ mod tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
-        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
+        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize, hex_decode,
     };
     #[cfg(not(feature = "kernel"))]
     use bitcoin_rs_primitives::{Sighash, SighashCache};
@@ -1975,28 +1977,14 @@ mod tests {
         amount_sat: u64,
     }
 
-    /// Decodes a hex string to bytes; panics on malformed input. The fixture is
-    /// committed and validated, so a malformed hex is a corpus regression, not
-    /// a runtime condition.
-    fn decode_hex(hex: &str) -> Vec<u8> {
-        assert!(hex.len().is_multiple_of(2), "hex string has odd length");
-        hex.as_bytes()
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| {
-                let digits = std::str::from_utf8(pair).unwrap_or_else(|_| panic!("hex ascii"));
-                u8::from_str_radix(digits, 16).unwrap_or_else(|_| panic!("hex digit"))
-            })
-            .collect()
-    }
-
     /// Loads and decodes the committed mainnet Taproot script-path fixture.
     fn load_taproot_scriptpath_fixture() -> TaprootScriptPathFixture {
         let json = include_str!("../tests/vectors/scripts/taproot_scriptpath_spend.json");
         let file: TaprootScriptPathFile = serde_json::from_str(json)
             .unwrap_or_else(|error| panic!("taproot scriptpath fixture parses: {error}"));
-        let tx: Tx = deserialize(&decode_hex(&file.tx_hex))
+        let tx_bytes = hex_decode(&file.tx_hex)
+            .unwrap_or_else(|error| panic!("taproot scriptpath tx hex is valid hex: {error}"));
+        let tx: Tx = deserialize(&tx_bytes)
             .unwrap_or_else(|error| panic!("taproot scriptpath tx hex decodes: {error}"));
         assert_eq!(
             file.prevouts.len(),
@@ -2008,7 +1996,9 @@ mod tests {
             .iter()
             .map(|prevout| TxOut {
                 value: Amount::from_sat(prevout.amount_sat),
-                script_pubkey: decode_hex(&prevout.script_hex).into(),
+                script_pubkey: hex_decode(&prevout.script_hex)
+                    .unwrap_or_else(|error| panic!("taproot scriptpath prevout hex: {error}"))
+                    .into(),
             })
             .collect::<Vec<_>>();
         let flags = VerifyFlags::from_core_names(&file.flags)

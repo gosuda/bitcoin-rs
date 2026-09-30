@@ -10,7 +10,8 @@ use std::borrow::Cow;
 use std::fmt;
 
 use bitcoin_rs_primitives::{
-    Amount, Script, Sighash, SighashCache, Tx, TxOut, Witness, varint::encoded_len,
+    Amount, Script, Sighash, SighashCache, TAPSCRIPT_LEAF_VERSION, Tx, TxOut, Witness,
+    encode::witness_stack_size, i64_saturated_len,
 };
 use secp256k1::{Message, XOnlyPublicKey, schnorr::Signature};
 use thiserror::Error;
@@ -886,7 +887,7 @@ fn verify_taproot_scriptpath(
     }
 
     // Core: if ((control[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT)
-    if leaf_version != taproot::TAPROOT_LEAF_TAPSCRIPT {
+    if leaf_version != TAPSCRIPT_LEAF_VERSION {
         // Unknown leaf version: success by consensus, discouraged by policy.
         if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_TAPROOT_VERSION) {
             return Err(invalid(ScriptErrCode::DiscourageUpgradableTaprootVersion));
@@ -916,15 +917,9 @@ fn verify_taproot_scriptpath(
     // `witness.stack` is the *original* full witness (including annex,
     // control, and script). The serialization is a CompactSize count
     // prefix followed by each element as CompactSize(len) + bytes.
-    let witness_serialized_size: usize =
-        encoded_len(u64::try_from(witness.len()).unwrap_or(u64::MAX))
-            + witness
-                .iter()
-                .map(|elem| encoded_len(u64::try_from(elem.len()).unwrap_or(u64::MAX)) + elem.len())
-                .sum::<usize>();
-    let mut validation_weight_left = Some(
-        i64::try_from(witness_serialized_size).unwrap_or(i64::MAX) + eval::VALIDATION_WEIGHT_OFFSET,
-    );
+    let witness_serialized_size = witness_stack_size(witness);
+    let mut validation_weight_left =
+        Some(i64_saturated_len(witness_serialized_size) + eval::VALIDATION_WEIGHT_OFFSET);
 
     let mut checker = TxSignatureChecker::new(spending, input_idx, Amount::ZERO, prevouts);
     checker.set_annex(annex_bytes);

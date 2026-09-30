@@ -5,11 +5,12 @@
 //! mutating operations leave the stack unchanged on that error. This helper
 //! contract supports the Core-vector parity required by
 //! `docs/contracts/validation-default.md` `VAL-02`.
+use bitcoin_rs_script::eval::MAX_STACK_SIZE;
 use bitcoin_rs_script::{ScriptItem, Stack, StackError};
 
 #[test]
 fn invalid_depths_return_underflow_without_mutating() -> Result<(), StackError> {
-    for len in [0, 1, Stack::MAX_DEPTH] {
+    for len in [0, 1, MAX_STACK_SIZE] {
         let mut stack = Stack::new();
         for _ in 0..len {
             stack.push(ScriptItem::Num(7))?;

@@ -8,11 +8,11 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 use crate::{
     UtxoError, UtxoKey, UtxoSet, UtxoSetView,
     record::{OneUtxoOut, OwnedUtxoOut},
+    stats::muhash3072,
 };
 
 const SNAPSHOT_MAGIC: u32 = 0x55_54_58_4f;
 const SNAPSHOT_WRITE_VERSION: u32 = 4;
-const MUHASH_TRAILER_LEN: usize = 384;
 
 #[derive(Copy, Clone, FromBytes, IntoBytes, KnownLayout, Immutable, Unaligned)]
 #[repr(C, packed)]
@@ -52,7 +52,7 @@ pub struct SnapshotLoad {
     /// Snapshot chain height.
     pub height: u32,
     /// `MuHash3072` trailer bytes.
-    pub muhash_trailer: [u8; MUHASH_TRAILER_LEN],
+    pub muhash_trailer: [u8; muhash3072::BYTE_LEN],
 }
 
 /// A live coin borrowed while a snapshot is traversed.
@@ -85,7 +85,10 @@ pub trait SnapshotCoinObserver {
     fn observe_coin(&mut self, coin: SnapshotCoin<'_>);
 
     /// Selects the final snapshot trailer, defaulting to the supplied fallback.
-    fn select_trailer(&mut self, fallback: [u8; MUHASH_TRAILER_LEN]) -> [u8; MUHASH_TRAILER_LEN] {
+    fn select_trailer(
+        &mut self,
+        fallback: [u8; muhash3072::BYTE_LEN],
+    ) -> [u8; muhash3072::BYTE_LEN] {
         fallback
     }
 }
@@ -100,7 +103,7 @@ pub fn write_snapshot(
     tip_hash: &Hash256,
     height: u32,
     writer: &mut impl Write,
-) -> Result<[u8; MUHASH_TRAILER_LEN], UtxoError> {
+) -> Result<[u8; muhash3072::BYTE_LEN], UtxoError> {
     write_snapshot_observed(set, tip_hash, height, writer, ()).map(|(trailer, ())| trailer)
 }
 
@@ -114,7 +117,7 @@ pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     height: u32,
     writer: &mut W,
     mut observer: O,
-) -> Result<([u8; MUHASH_TRAILER_LEN], O), UtxoError> {
+) -> Result<([u8; muhash3072::BYTE_LEN], O), UtxoError> {
     set.with_stable_view(|view| {
         let record_count = u64::try_from(view.record_count())
             .map_err(|_| UtxoError::SnapshotRecordCountTooLarge { count: u64::MAX })?;
@@ -175,7 +178,7 @@ pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
 
         let fallback = view
             .listener_muhash3072()
-            .unwrap_or([0_u8; MUHASH_TRAILER_LEN]);
+            .unwrap_or([0_u8; muhash3072::BYTE_LEN]);
         let trailer = observer.select_trailer(fallback);
         writer.write_all(&trailer)?;
         Ok((trailer, observer))
@@ -238,7 +241,7 @@ pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
         });
     }
 
-    let mut muhash_trailer = [0_u8; MUHASH_TRAILER_LEN];
+    let mut muhash_trailer = [0_u8; muhash3072::BYTE_LEN];
     reader.read_exact(&mut muhash_trailer)?;
     let mut trailing = [0_u8; 1];
     if reader.read(&mut trailing)? != 0 {

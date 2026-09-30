@@ -1,4 +1,4 @@
-use super::format::{decode_hex, generation_name, hex_encode, network_name, valid_generation_name};
+use super::format::{decode_hex, generation_name, network_name, valid_generation_name};
 use super::fs::{CheckpointRoot, open_file, read_file};
 use super::{
     COINSTATS_ARTIFACT_LEN, COINSTATS_MAGIC, COINSTATS_VERSION, CURRENT_FILE, CURRENT_FORMAT,
@@ -6,6 +6,7 @@ use super::{
     CheckpointLoadError, CheckpointManifestV1, CurrentV1, MANIFEST_FILE, MANIFEST_FORMAT,
     MANIFEST_VERSION, MAX_CHECKPOINT_METADATA_BYTES, MAX_CHECKPOINT_PAYLOAD_BYTES,
 };
+use bitcoin_rs_primitives::hex_encode;
 use cap_std::fs::{Dir, File};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom};

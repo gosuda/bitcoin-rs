@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use bitcoin_rs_primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserialize};
+use bitcoin_rs_primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserialize, hex_decode};
 use serde_json::Value;
 
 #[test]
@@ -79,7 +79,8 @@ fn sighash_vectors_match_bitcoin_cache() {
         let hash_type = raw_u32_at(row, 3);
         let expected = hash_at(row, 4);
         let tx: Tx = deserialize_hex(tx_hex);
-        let script = decode_hex(script_hex);
+        let script = hex_decode(script_hex)
+            .unwrap_or_else(|error| panic!("sighash script hex should decode: {error}"));
         if script.contains(&0xab) {
             skipped_codeseparator = skipped_codeseparator.saturating_add(1);
             continue;
@@ -117,7 +118,8 @@ fn parse_tx_vectors(name: &str, must_deserialize_all: bool) -> (usize, usize) {
         let Some(tx_hex) = row.get(1).and_then(Value::as_str) else {
             continue;
         };
-        let bytes = decode_hex(tx_hex);
+        let bytes = hex_decode(tx_hex)
+            .unwrap_or_else(|error| panic!("tx vector hex should decode: {error}"));
         if deserialize::<Tx>(&bytes).is_ok() {
             parsed = parsed.saturating_add(1);
         } else if must_deserialize_all {
@@ -140,32 +142,12 @@ fn read_json(name: &str) -> Value {
 }
 
 fn deserialize_hex<T: ConsensusDecode>(hex: &str) -> T {
-    let bytes = decode_hex(hex);
+    let bytes = hex_decode(hex)
+        .unwrap_or_else(|error| panic!("hex consensus payload should decode: {error}"));
     match deserialize(&bytes) {
         Ok(value) => value,
         Err(error) => panic!("hex consensus payload should deserialize: {error}"),
     }
-}
-
-fn decode_hex(hex: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let mut chars = hex.chars();
-    while let Some(high) = chars.next() {
-        let low = chars
-            .next()
-            .unwrap_or_else(|| panic!("hex string has odd length"));
-        let high = hex_nibble(high);
-        let low = hex_nibble(low);
-        bytes.push((high << 4) | low);
-    }
-    bytes
-}
-
-fn hex_nibble(ch: char) -> u8 {
-    let Some(value) = ch.to_digit(16) else {
-        panic!("invalid hex digit {ch}");
-    };
-    u8::try_from(value).unwrap_or_else(|error| panic!("hex digit should fit in u8: {error}"))
 }
 
 fn string_at(row: &[Value], index: usize) -> &str {

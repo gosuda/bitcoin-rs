@@ -12,7 +12,7 @@ use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolGateway, PeerToken, SubmitError, SubmitOutcome};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_p2p::TxRelayQueue;
-use bitcoin_rs_primitives::{Hash256, Network, Txid, Wtxid};
+use bitcoin_rs_primitives::{Hash256, Network, Txid, Wtxid, unix_now};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
 use bitcoin_rs_utxo::UtxoReader;
 use crossbeam_channel::Receiver;
@@ -101,14 +101,14 @@ impl TxIngressConsumer {
             Arc::new(inbound.tx),
             AdmissionOrigin::Peer(source),
             None,
-            unix_time_secs(),
+            unix_now(),
             &self.chain_view(),
         );
         self.dispatch_outcome(txid, wtxid, source, outcome);
     }
 
     fn process_retries(&self) -> bool {
-        let now = unix_time_secs();
+        let now = unix_now();
         let live_peers = self
             .peer_table
             .live_sessions()
@@ -158,12 +158,6 @@ impl TxIngressConsumer {
             Err(error) => tracing::debug!(%txid, ?error, "peer transaction not admitted"),
         }
     }
-}
-
-pub(crate) fn unix_time_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
 }
 
 #[cfg(test)]

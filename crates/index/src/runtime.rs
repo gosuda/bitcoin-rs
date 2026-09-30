@@ -234,8 +234,6 @@ const QUERY_SCAN_COUNT_LIMIT: usize = 4_096;
 
 const QUERY_BODY_READ_LIMIT: usize = 4_096;
 
-const MAX_SERIALIZED_BLOCK_BYTES: usize = 4_000_000;
-
 /// Writer-side batch limits.
 ///
 /// Capped by actual retained row count and encoded bytes to keep each forward

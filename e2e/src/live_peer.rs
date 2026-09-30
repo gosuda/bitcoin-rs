@@ -348,7 +348,8 @@ impl LivePeer {
 
 /// True when a frame-read failure is just "no data yet" (read timeout or
 /// deadline bookkeeping) rather than a dropped connection.
-fn is_soft_recv_error(error: &Error) -> bool {
+#[must_use]
+pub fn is_soft_recv_error(error: &Error) -> bool {
     match error {
         Error::Io(io) => matches!(
             io.kind(),

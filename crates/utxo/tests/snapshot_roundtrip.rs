@@ -1,5 +1,8 @@
 //! Contract coverage for the native version-4 UTXO snapshot format.
 
+#[path = "support/seeded_txid.rs"]
+mod seeded_txid;
+
 use std::io::{Cursor, Seek};
 
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut};
@@ -11,14 +14,7 @@ use bitcoin_rs_utxo::{
 };
 use tempfile::tempfile;
 
-fn txid(seed: u64) -> Hash256 {
-    let mut bytes = [0_u8; 32];
-    bytes[..8].copy_from_slice(&seed.to_le_bytes());
-    bytes[8..16].copy_from_slice(&seed.rotate_left(23).to_le_bytes());
-    bytes[16..24].copy_from_slice(&seed.wrapping_mul(0x94d0_49bb_1331_11eb).to_le_bytes());
-    bytes[24..32].copy_from_slice(&seed.wrapping_add(0x0123_4567_89ab_cdef).to_le_bytes());
-    Hash256::from_le_bytes(&bytes)
-}
+use seeded_txid::txid;
 
 fn txout(seed: u64) -> TxOut {
     TxOut {

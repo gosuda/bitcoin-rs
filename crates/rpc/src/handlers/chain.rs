@@ -3,9 +3,12 @@ use core::cell::OnceCell;
 use core::str::FromStr as _;
 
 use bitcoin_rs_chain::NodeStatus;
+use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, TxOut, consensus_bytes, deserialize,
+    hex_encode, i64_saturated, i64_saturated_len, u32_saturated, u32_saturated_len,
+    u64_saturated_len, u64_to_f64,
 };
 
 #[cfg(test)]
@@ -16,8 +19,8 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueMutTrait as _, JsonValueTrait, 
 
 use super::util::{descriptor_checksum, strip_addr_wrapper};
 use crate::compat::convert::{
-    self, compact_target_hex, hex_encode, i32_saturated, i64_saturated, i64_saturated_len,
-    sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
+    self, compact_target_hex, core_chain_name, i32_saturated, i64_to_f64, output_at, sat_to_btc,
+    typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
 use crate::context::{AppliedView, ChainControlError, Context, TxQueryError};
 use crate::error::RpcError;
@@ -42,13 +45,7 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
                 .node(tip.tip_id)
                 .map_or(CompactTarget::from_consensus(0), |node| node.header.bits)
         });
-    let chain = match progress.network {
-        Network::Mainnet => "main",
-        Network::Testnet3 => "test",
-        Network::Testnet4 => "testnet4",
-        Network::Signet => "signet",
-        Network::Regtest => "regtest",
-    };
+    let chain = core_chain_name(progress.network);
     let response = v31::GetBlockchainInfo {
         chain: chain.to_owned(),
         blocks: i64::from(progress.blocks),
@@ -85,13 +82,6 @@ pub(crate) fn getblockchaininfo(ctx: &Arc<Context>, params: &Value) -> Result<Va
     Ok(response)
 }
 
-/// UNIX seconds now.
-pub(crate) fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
-
 /// Bitcoin Core's `GuessVerificationProgress`, as a fraction in `[0, 1]`.
 ///
 /// The quantity is **transactions verified over transactions believed to
@@ -123,8 +113,8 @@ pub(crate) fn verification_progress(
     }
     let data = network.chain_tx_data();
 
-    let now_signed = i64::try_from(now).unwrap_or(i64::MAX);
-    let tip_time_signed = i64::try_from(tip_time).unwrap_or(i64::MAX);
+    let now_signed = i64_saturated(now);
+    let tip_time_signed = i64_saturated(tip_time);
     let block_time = if (now_signed - tip_time_signed).abs() <= RECENT_TIP_WINDOW_SECONDS
         && header_height >= applied_height
     {
@@ -137,7 +127,7 @@ pub(crate) fn verification_progress(
 
     let total = if chain_tx_count <= data.tx_count {
         // Still behind the pinned observation: extrapolate forward from it.
-        let elapsed = now_signed.saturating_sub(i64::try_from(data.time).unwrap_or(i64::MAX));
+        let elapsed = now_signed.saturating_sub(i64_saturated(data.time));
         i64_to_f64(elapsed).mul_add(data.tx_rate, u64_to_f64(data.tx_count))
     } else {
         // Past it, so this node's own count is the better baseline. Without
@@ -149,24 +139,6 @@ pub(crate) fn verification_progress(
         return 0.0;
     }
     (u64_to_f64(chain_tx_count) / total).clamp(0.0, 1.0)
-}
-
-/// `u64` to `f64` without a silent `as` cast, which this crate forbids.
-///
-/// Exact for every input up to `2^53`; above that the low half rounds, which is
-/// inherent to `f64` and is what Bitcoin Core accepts here too.
-fn u64_to_f64(value: u64) -> f64 {
-    const TWO_POW_32: f64 = 4_294_967_296.0;
-
-    let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);
-    let low = u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX);
-    f64::from(high).mul_add(TWO_POW_32, f64::from(low))
-}
-
-/// [`u64_to_f64`] with a sign; the elapsed times here can run either way.
-fn i64_to_f64(value: i64) -> f64 {
-    let magnitude = u64_to_f64(value.unsigned_abs());
-    if value < 0 { -magnitude } else { magnitude }
 }
 
 pub(crate) fn getdifficulty(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -573,15 +545,19 @@ fn window_stats(
     }
     let start_height = selected
         .height
-        .saturating_sub(u32::try_from(window_block_count).unwrap_or(u32::MAX));
+        .saturating_sub(u32_saturated(window_block_count));
     let Some(start_id) = tree.node_at_height_from(selected_id, start_height) else {
         return Err(RpcError::Internal(
             "selected chain is missing the window ancestor".to_owned(),
         ));
     };
     let window_tx_count = window_tx_count_between(ctx, tree, start_id, selected_id, &branch_cache);
-    let end_mtp = tree.median_time_past_at(selected_id, 11).unwrap_or(0);
-    let start_mtp = tree.median_time_past_at(start_id, 11).unwrap_or(0);
+    let end_mtp = tree
+        .median_time_past_at(selected_id, MEDIAN_TIME_PAST_WINDOW)
+        .unwrap_or(0);
+    let start_mtp = tree
+        .median_time_past_at(start_id, MEDIAN_TIME_PAST_WINDOW)
+        .unwrap_or(0);
     let window_interval = u64::from(end_mtp.saturating_sub(start_mtp));
     Ok(ChainTxStats {
         selected: true,
@@ -688,7 +664,7 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let fee_fields = compute_fee_fields(ctx, &block).map_err(crate::error::RpcError::from)?;
     let utxo_size_inc =
         utxo_size_inc_for_block(ctx, &block).map_err(crate::error::RpcError::from)?;
-    let txs = u64::try_from(block.txs.len()).unwrap_or(u64::MAX);
+    let txs = u64_saturated_len(block.txs.len());
     let mut total_out = 0_u64;
     let mut total_size = 0_u64;
     let mut total_weight = 0_u64;
@@ -699,15 +675,15 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
     let mut swtotal_weight = 0_u64;
     let mut tx_sizes = Vec::new();
     for (index, tx) in block.txs.iter().enumerate() {
-        outs = outs.saturating_add(u64::try_from(tx.outputs.len()).unwrap_or(u64::MAX));
+        outs = outs.saturating_add(u64_saturated_len(tx.outputs.len()));
         if index == 0 {
             continue;
         }
-        ins = ins.saturating_add(u64::try_from(tx.inputs.len()).unwrap_or(u64::MAX));
+        ins = ins.saturating_add(u64_saturated_len(tx.inputs.len()));
         for output in &tx.outputs {
             total_out = total_out.saturating_add(output.value.to_sat());
         }
-        let tx_size = u64::try_from(tx.total_size()).unwrap_or(u64::MAX);
+        let tx_size = u64_saturated_len(tx.total_size());
         let tx_weight = tx.weight();
         tx_sizes.push(tx_size);
         total_size = total_size.saturating_add(tx_size);
@@ -729,9 +705,7 @@ pub(crate) fn getblockstats(ctx: &Arc<Context>, params: &Value) -> Result<Value,
         let median = truncated_median(&mut tx_sizes);
         (avg, max, min, median)
     };
-    let utxo_increase = i64::try_from(outs)
-        .unwrap_or(i64::MAX)
-        .saturating_sub(i64::try_from(ins).unwrap_or(i64::MAX));
+    let utxo_increase = i64_saturated(outs).saturating_sub(i64_saturated(ins));
 
     typed_to_sonic(&v31::GetBlockStats {
         average_fee: Some(fee_fields.avgfee),
@@ -922,16 +896,14 @@ fn compute_fee_fields(ctx: &Context, block: &Block) -> Result<FeeFields, TxQuery
 const PER_UTXO_OVERHEAD: u64 = 36 + 4;
 
 fn output_utxo_size(output: &TxOut) -> u64 {
-    u64::try_from(consensus_bytes(output).len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(PER_UTXO_OVERHEAD)
+    u64_saturated_len(consensus_bytes(output).len()).saturating_add(PER_UTXO_OVERHEAD)
 }
 
 fn utxo_size_inc_for_block(ctx: &Context, block: &Block) -> Result<i64, TxQueryError> {
     let mut size_inc = 0_i64;
     for tx in &block.txs {
         for output in &tx.outputs {
-            let added = i64::try_from(output_utxo_size(output)).unwrap_or(i64::MAX);
+            let added = i64_saturated(output_utxo_size(output));
             size_inc = size_inc.saturating_add(added);
         }
     }
@@ -950,15 +922,12 @@ fn utxo_size_inc_for_block(ctx: &Context, block: &Block) -> Result<i64, TxQueryE
                     "input transaction missing from complete index".into(),
                 ));
             };
-            let Some(output) = prev
-                .outputs
-                .get(usize::try_from(input.previous_output.vout).unwrap_or(usize::MAX))
-            else {
+            let Some(output) = output_at(&prev.outputs, input.previous_output.vout) else {
                 return Err(TxQueryError::Unavailable(
                     "input vout missing from complete index".into(),
                 ));
             };
-            let removed = i64::try_from(output_utxo_size(output)).unwrap_or(i64::MAX);
+            let removed = i64_saturated(output_utxo_size(output));
             size_inc = size_inc.saturating_sub(removed);
         }
     }
@@ -1124,7 +1093,7 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
                 stable.len(),
                 stable.record_count(),
                 set_hash,
-                u64::try_from(stable.memory_report().accounted_bytes()).unwrap_or(u64::MAX),
+                u64_saturated_len(stable.memory_report().accounted_bytes()),
             ))
         })
     };
@@ -1156,7 +1125,7 @@ pub(crate) fn gettxoutsetinfo(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         height: i64::from(applied_height),
         best_block: best_block.to_string_be(),
         transactions: Some(i64_saturated_len(transactions)),
-        tx_outs: i64_saturated(u64::try_from(txouts).unwrap_or(u64::MAX)),
+        tx_outs: i64_saturated_len(txouts),
         bogo_size: i64_saturated(stats.bogo_size),
         hash_serialized_3,
         disk_size: Some(i64_saturated(disk_size)),
@@ -1274,7 +1243,7 @@ fn scantxoutset_addr_scan(
     let (unspents, total_amount) = scan_unspents(ctx, &scan, &scan_scripts, height);
     typed_to_sonic(&v31::ScanTxOutSetStart {
         success: true,
-        tx_outs: u64::try_from(scan.txouts).unwrap_or(u64::MAX),
+        tx_outs: u64_saturated_len(scan.txouts),
         height: u64::from(height),
         best_block: bestblock.to_string_be(),
         unspents,
@@ -1536,7 +1505,7 @@ fn block_verbose_typed(
             target: compact_target_hex(header.bits),
             difficulty: ctx.chain.difficulty_for_bits(header.bits),
             chain_work: chainwork_hex,
-            n_tx: u32::try_from(record.tx_count).unwrap_or(u32::MAX),
+            n_tx: u32_saturated_len(record.tx_count),
             previous_block_hash: Some(header.prev_blockhash.to_string()),
             next_block_hash: next_block_hash.map(|hash| hash.to_string()),
         });
@@ -1620,24 +1589,16 @@ fn next_applied_block_hash(ctx: &Context, view: &AppliedView, height: u32) -> Op
     Some(BlockHash::from(node.hash))
 }
 
-/// WHY-local: the chain crate's compact-target helpers are `pub(crate)`, and
-/// this crate must not grow a dependency to reach them. `verifychain` only
+/// WHY-local: the chain crate's compact-target comparison is `pub(crate)`,
+/// and this crate must not grow a dependency to reach it. `verifychain` only
 /// needs the `PoW` self-consistency verdict the old `validate_pow` call made:
 /// decode `bits` into a 256-bit target and compare the header hash against it
 /// (both read as little-endian integers, as consensus does).
 fn compact_target_met_by(bits: CompactTarget, hash: Hash256) -> bool {
-    let bits = bits.to_consensus();
-    let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
-    let mantissa = u64::from(bits & 0x007f_ffff);
-    // A zero mantissa or a negative sign bit decodes to a zero target, and an
-    // exponent past 32 bytes overflows the 256-bit range; none are meetable.
-    if mantissa == 0 || bits & 0x0080_0000 != 0 || exponent > 32 {
+    let (target, negative) = bits.decode_magnitude();
+    if negative || target == [0_u8; 32] {
         return false;
     }
-    let mut target = [0_u8; 32];
-    let mantissa_bytes = mantissa.to_le_bytes();
-    let start = exponent - 3;
-    target[start..start + 3].copy_from_slice(&mantissa_bytes[..3]);
     let hash_bytes = hash.to_le_bytes();
     hash_bytes
         .iter()
@@ -1742,7 +1703,7 @@ mod tests {
                     merkle_root: Hash256::default(),
                     time,
                     bits: CompactTarget::from_consensus(bits),
-                    nonce: u32::try_from(index).unwrap_or(u32::MAX),
+                    nonce: u32_saturated_len(index),
                 };
                 previous_hash = header.compute_hash();
                 tip_id = tree
@@ -1755,7 +1716,7 @@ mod tests {
         };
         let tip = TipSnapshot {
             tip_id,
-            height: u32::try_from(times.len().saturating_sub(1)).unwrap_or(u32::MAX),
+            height: u32_saturated_len(times.len().saturating_sub(1)),
             chainwork: ChainWork::ZERO,
             hash: tip_hash,
             chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
@@ -3042,7 +3003,7 @@ mod tests {
 
         assert_eq!(
             result.get("size_on_disk").and_then(JsonValueTrait::as_u64),
-            Some(u64::try_from(body.len()).unwrap_or(u64::MAX))
+            Some(u64_saturated_len(body.len()))
         );
     }
 
@@ -3068,7 +3029,7 @@ mod tests {
 
         let genesis = fixture_genesis();
         let record = BlockRecord::from_block(0, &genesis);
-        let record_bytes = u64::try_from(record.body_size).unwrap_or(u64::MAX);
+        let record_bytes = u64_saturated_len(record.body_size);
         let store_bytes = record_bytes.saturating_add(4_096);
         let ctx =
             Arc::new(Context::new().with_block_body_source(Arc::new(SizedStore(store_bytes))));
@@ -4441,7 +4402,7 @@ mod chaintxstats_durability_tests {
             .zip(counts.iter().copied())
             .enumerate()
         {
-            let height = u32::try_from(index).unwrap_or(u32::MAX);
+            let height = u32_saturated_len(index);
             let header = Header {
                 version: 1,
                 prev_blockhash: prev,
@@ -4496,7 +4457,7 @@ mod chaintxstats_durability_tests {
         let mut hashes = Vec::new();
         let mut tip = None;
         for index in 0..blocks {
-            let height = u32::try_from(index).unwrap_or(u32::MAX);
+            let height = u32_saturated_len(index);
             let header = Header {
                 version: 1,
                 prev_blockhash: prev,
@@ -4689,7 +4650,7 @@ mod chaintxstats_durability_tests {
 
         // A prefix that matches the selected branch answers both figures.
         for (index, hash) in branch.iter().enumerate() {
-            let height = u32::try_from(index).unwrap_or(u32::MAX);
+            let height = u32_saturated_len(index);
             ctx.chain.add_block(record(height, *hash));
         }
         let matched = getchaintxstats(&ctx, &json!([]))
@@ -4713,7 +4674,7 @@ mod chaintxstats_durability_tests {
         ctx.chain.blocks.write().clear();
         let displaced = Hash256::from_le_bytes(&[0xee_u8; 32]);
         for (index, hash) in branch.iter().enumerate() {
-            let height = u32::try_from(index).unwrap_or(u32::MAX);
+            let height = u32_saturated_len(index);
             let claimed = if height == 1 { displaced } else { *hash };
             ctx.chain.add_block(record(height, claimed));
         }
@@ -4907,7 +4868,7 @@ mod chaintxstats_window_tests {
         let mut parent = None;
         let mut tip = None;
         for (index, &time) in times.iter().enumerate() {
-            let height = u32::try_from(index).unwrap_or(u32::MAX);
+            let height = u32_saturated_len(index);
             let candidate = header(previous, time, height);
             previous = candidate.compute_hash();
             let hash = previous;
@@ -5469,28 +5430,7 @@ mod verification_progress_wiring_tests {
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod float_conversion_tests {
-    use super::{i64_to_f64, u64_to_f64};
-
-    #[test]
-    fn u64_to_f64_is_exact_below_two_to_the_fifty_third() {
-        for value in [
-            0_u64,
-            1,
-            4_294_967_295,
-            4_294_967_296,
-            1_315_805_869,
-            1 << 52,
-        ] {
-            // Independently derived: the halves recombined by hand.
-            let expected = f64::from(u32::try_from(value >> 32).unwrap_or(u32::MAX))
-                * 4_294_967_296.0_f64
-                + f64::from(u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX));
-            assert!(
-                (u64_to_f64(value) - expected).abs() < f64::EPSILON,
-                "{value}"
-            );
-        }
-    }
+    use super::i64_to_f64;
 
     #[test]
     fn i64_to_f64_carries_the_sign() {

@@ -7,7 +7,7 @@
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{Block, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, varint};
+use crate::{Block, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, u64_saturated_len, varint};
 
 /// Byte sink used by consensus encoding. Writes cannot fail.
 pub trait Sink {
@@ -189,19 +189,13 @@ pub(crate) fn write_compact(sink: &mut impl Sink, value: u64) {
     sink.write_all(varint::encode(value).as_slice());
 }
 
-/// Compact-size length of a `Vec` slice: a `Vec` is always shorter than
-/// `usize::MAX`, so the conversion cannot fail.
-pub(crate) fn compact_len(len: usize) -> u64 {
-    u64::try_from(len).unwrap_or_else(|_| unreachable!("vec length fits u64"))
-}
-
 pub(crate) fn write_script(sink: &mut impl Sink, script: &[u8]) {
-    write_compact(sink, compact_len(script.len()));
+    write_compact(sink, u64_saturated_len(script.len()));
     sink.write_all(script);
 }
 
 fn script_size(script: &[u8]) -> usize {
-    varint::encoded_len(compact_len(script.len())).saturating_add(script.len())
+    varint::encoded_len(u64_saturated_len(script.len())).saturating_add(script.len())
 }
 
 impl ConsensusEncode for OutPoint {
@@ -289,8 +283,10 @@ fn tx_has_witness(tx: &Tx) -> bool {
     tx.inputs.iter().any(|input| !input.witness.is_empty())
 }
 
-fn witness_stack_size(witness: &[Vec<u8>]) -> usize {
-    varint::encoded_len(compact_len(witness.len())).saturating_add(
+/// Serialized size of a witness stack: Core's `GetSerializeSize(witness.stack)`.
+#[must_use]
+pub fn witness_stack_size(witness: &[Vec<u8>]) -> usize {
+    varint::encoded_len(u64_saturated_len(witness.len())).saturating_add(
         witness
             .iter()
             .map(|item| script_size(item))
@@ -306,19 +302,19 @@ pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
     if has_witness {
         sink.write_all(&[0x00, 0x01]);
     }
-    write_compact(sink, compact_len(tx.inputs.len()));
+    write_compact(sink, u64_saturated_len(tx.inputs.len()));
     for input in &tx.inputs {
         input.consensus_encode(sink);
     }
-    write_compact(sink, compact_len(tx.outputs.len()));
+    write_compact(sink, u64_saturated_len(tx.outputs.len()));
     for output in &tx.outputs {
         output.consensus_encode(sink);
     }
     if has_witness {
         for input in &tx.inputs {
-            write_compact(sink, compact_len(input.witness.len()));
+            write_compact(sink, u64_saturated_len(input.witness.len()));
             for item in &input.witness {
-                write_compact(sink, compact_len(item.len()));
+                write_compact(sink, u64_saturated_len(item.len()));
                 sink.write_all(item);
             }
         }
@@ -328,14 +324,14 @@ pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
 
 pub(crate) fn tx_base_size(tx: &Tx) -> usize {
     4_usize
-        .saturating_add(varint::encoded_len(compact_len(tx.inputs.len())))
+        .saturating_add(varint::encoded_len(u64_saturated_len(tx.inputs.len())))
         .saturating_add(
             tx.inputs
                 .iter()
                 .map(ConsensusEncode::consensus_size)
                 .fold(0_usize, usize::saturating_add),
         )
-        .saturating_add(varint::encoded_len(compact_len(tx.outputs.len())))
+        .saturating_add(varint::encoded_len(u64_saturated_len(tx.outputs.len())))
         .saturating_add(
             tx.outputs
                 .iter()
@@ -378,21 +374,14 @@ impl ConsensusDecode for Tx {
 impl ConsensusEncode for Block {
     fn consensus_encode(&self, sink: &mut impl Sink) {
         self.header.consensus_encode(sink);
-        write_compact(sink, compact_len(self.txs.len()));
+        write_compact(sink, u64_saturated_len(self.txs.len()));
         for tx in &self.txs {
             tx.consensus_encode(sink);
         }
     }
 
     fn consensus_size(&self) -> usize {
-        Header::LEN
-            .saturating_add(varint::encoded_len(compact_len(self.txs.len())))
-            .saturating_add(
-                self.txs
-                    .iter()
-                    .map(ConsensusEncode::consensus_size)
-                    .fold(0_usize, usize::saturating_add),
-            )
+        Self::total_size_of(&self.txs)
     }
 }
 

@@ -4,20 +4,20 @@ use hashbrown::HashSet;
 
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::hex::FromHex as _;
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_mempool::SubmitError;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
 use bitcoin_rs_primitives::{
-    Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+    Amount, Block as NativeBlock, Hash256, HexDecodeError, LockTime, OutPoint, Script, Sequence,
+    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize as native_deserialize, hex_encode,
+    u64_to_f64,
 };
 use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
-    self, VerboseTxChain, hex_encode, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
+    self, VerboseTxChain, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
 use crate::context::{self, AdmissionFailure, Context};
 use crate::error::RpcError;
@@ -30,11 +30,11 @@ use corepc_types::v31;
 /// A non-hex string is a correctly typed but unacceptable value, so it
 /// answers Bitcoin Core's `RPC_INVALID_PARAMETER` (-8) class.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, RpcError> {
-    Vec::<u8>::from_hex(hex).map_err(|error| match error {
-        bitcoin::hex::HexToBytesError::OddLengthString(_) => {
+    bitcoin_rs_primitives::hex_decode(hex).map_err(|error| match error {
+        HexDecodeError::OddLength => {
             RpcError::InvalidParameter("hex string must have even length".to_owned())
         }
-        bitcoin::hex::HexToBytesError::InvalidChar(_) => {
+        HexDecodeError::InvalidChar => {
             RpcError::InvalidParameter("invalid hex character".to_owned())
         }
     })
@@ -688,7 +688,7 @@ const U64_MAX_F64: f64 = 18_446_744_073_709_551_616.0;
 /// the range check above already bounds `raw` to `[0, 2^64)`, so the cast
 /// only truncates fractional satoshi dust, matching the historical behavior.
 fn sats_from_btc(btc: f64, message: &'static str) -> Result<u64, RpcError> {
-    let raw = btc * 100_000_000.0;
+    let raw = btc * u64_to_f64(Amount::COIN.to_sat());
     if !raw.is_finite() || !(0.0..U64_MAX_F64).contains(&raw) {
         return Err(RpcError::InvalidParams(message));
     }
@@ -725,7 +725,7 @@ fn optional_max_feerate(params: &Value, index: usize) -> Result<Option<u64>, Rpc
     // Core's `ParseFeeRate` refuses rates at or above 1 BTC/kvB, so the
     // ceiling is enforced on the integer domain to keep the parameter
     // contract identical.
-    if sats >= 100_000_000 {
+    if sats >= Amount::COIN.to_sat() {
         return Err(RpcError::InvalidParams(
             "Fee rates larger than or equal to 1BTC/kvB are not accepted",
         ));
@@ -871,6 +871,7 @@ mod tests {
     };
     use bitcoin_rs_primitives::{
         Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
+        u32_saturated,
     };
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
@@ -2056,7 +2057,7 @@ mod tests {
             .finish()
             .expect("finish chain change to next even generation");
 
-        let parent_vsize = u32::try_from(parent.vsize()).unwrap_or(u32::MAX);
+        let parent_vsize = u32_saturated(parent.vsize());
         ctx_clone
             .mempool
             .gateway
@@ -2149,11 +2150,10 @@ mod gettxout_via_utxo_tests {
 mod acceptance_tests {
     use alloc::sync::Arc;
 
-    use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_chain::{BlockHeader, NodeId, NodeStatus, TipSnapshot};
     use bitcoin_rs_primitives::{
         Amount, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
-        TxOut, Txid, Witness, consensus_bytes,
+        TxOut, Txid, Witness, consensus_bytes, hex_encode,
     };
     use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
     use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, json};
@@ -2217,7 +2217,7 @@ mod acceptance_tests {
     }
 
     fn hex_of(tx: &Tx) -> String {
-        consensus_bytes(tx).to_lower_hex_string()
+        hex_encode(&consensus_bytes(tx))
     }
 
     /// The transaction must land in the mempool.

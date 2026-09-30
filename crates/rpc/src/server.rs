@@ -4,6 +4,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::Duration;
 
+use bitcoin_rs_primitives::u64_saturated_len;
 use parking_lot::Mutex;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value, json};
 use tracing::{debug, warn};
@@ -240,7 +241,7 @@ struct HttpRequest {
 /// one-byte sentinel makes an unterminated oversized line fail before EOF.
 fn read_head_line(reader: &mut impl BufRead, remaining: usize) -> io::Result<(String, usize)> {
     let mut line = String::new();
-    let limit = u64::try_from(remaining + 1).unwrap_or(u64::MAX);
+    let limit = u64_saturated_len(remaining + 1);
     let read = (&mut *reader).take(limit).read_line(&mut line)?;
     if read > remaining {
         return Err(io::Error::new(

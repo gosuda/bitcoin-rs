@@ -1476,7 +1476,7 @@ struct DisconnectPlan {
 /// 596s at 64 — a real gain, and not the 389s the replay driver reaches.
 /// Raising the staging cap further is not a constant change: the staller-arming
 /// invariant ties the staged byte budget to the staged count at
-/// `MAX_SERIALIZED_BLOCK_SIZE`, so a 1024-block stage would demand a 2 GB bound.
+/// `MAX_BLOCK_SERIALIZED_SIZE`, so a 1024-block stage would demand a 2 GB bound.
 pub const SCRIPT_BATCH_WINDOW: usize = 1024;
 
 /// How many bytes of block data one window may hold.

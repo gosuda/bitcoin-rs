@@ -103,6 +103,7 @@ mod tests {
 
     use bitcoin_rs_primitives::{
         Amount, Block, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        u32_saturated_len,
     };
 
     const fn pushnum(n: u8) -> u8 {
@@ -127,7 +128,7 @@ mod tests {
         let oracle = OracleScriptBuf::from_bytes(script);
         assert_eq!(
             count_legacy(oracle.as_bytes()),
-            u32::try_from(oracle.count_sigops_legacy()).unwrap_or(u32::MAX)
+            u32_saturated_len(oracle.count_sigops_legacy())
         );
     }
 

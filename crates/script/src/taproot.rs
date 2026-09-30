@@ -23,9 +23,6 @@ pub const TAPROOT_CONTROL_MAX_SIZE: usize =
 /// Mask isolating the leaf version from the control block's first byte.
 pub const TAPROOT_LEAF_MASK: u8 = 0xfe;
 
-/// Leaf version for BIP342 tapscript.
-pub const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
-
 /// Verifies a taproot key-path Schnorr signature.
 #[must_use]
 pub fn verify_taproot_keypath(
@@ -124,14 +121,11 @@ pub fn verify_taproot_commitment(control: &[u8], program: &[u8], tapleaf_hash: &
 
 #[cfg(test)]
 mod tests {
-    use bitcoin_rs_primitives::Hash256;
+    use bitcoin_rs_primitives::{Hash256, TAPSCRIPT_LEAF_VERSION, hex_decode};
     use secp256k1::{Keypair, Message, Parity, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
     use sha2::{Digest, Sha256};
 
-    use super::{
-        TAPROOT_LEAF_TAPSCRIPT, compute_taproot_merkle_root, verify_taproot_commitment,
-        verify_taproot_keypath,
-    };
+    use super::{compute_taproot_merkle_root, verify_taproot_commitment, verify_taproot_keypath};
 
     fn tagged_hash(tag: &[u8], msg: &[u8]) -> [u8; 32] {
         let tag_hash = Sha256::digest(tag);
@@ -160,7 +154,7 @@ mod tests {
             let kp = Keypair::from_secret_key(&secp, &secret);
             let (internal, _) = XOnlyPublicKey::from_keypair(&kp);
 
-            let leaf_version = TAPROOT_LEAF_TAPSCRIPT;
+            let leaf_version = TAPSCRIPT_LEAF_VERSION;
             let mut tapleaf_msg = vec![leaf_version];
             tapleaf_msg.extend(compact_size(script.len()));
             tapleaf_msg.extend_from_slice(script);
@@ -309,14 +303,6 @@ mod tests {
         assert_eq!(merkle.as_byte_array(), fixture.tapleaf.as_byte_array());
     }
 
-    fn fixture_hex(text: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
-        assert!(text.len().is_multiple_of(2));
-        (0..text.len())
-            .step_by(2)
-            .map(|offset| u8::from_str_radix(&text[offset..offset + 2], 16))
-            .collect()
-    }
-
     struct CommitmentVector {
         control: &'static str,
         leaf: &'static str,
@@ -408,17 +394,17 @@ mod tests {
             output,
         } in BIP341_VECTORS
         {
-            let mut control = fixture_hex(control)?;
-            let leaf: [u8; 32] = fixture_hex(leaf)?.try_into().map_err(|_| "leaf width")?;
+            let mut control = hex_decode(control)?;
+            let leaf: [u8; 32] = hex_decode(leaf)?.try_into().map_err(|_| "leaf width")?;
             let leaf = Hash256::from_le_bytes(&leaf);
-            let expected_root = fixture_hex(root)?;
+            let expected_root = hex_decode(root)?;
             let actual = compute_taproot_merkle_root(&control, &leaf);
             assert_eq!(actual.as_byte_array().as_slice(), expected_root);
             let mut engine = std::sync::LazyLock::force(&super::TAPTWEAK_ENGINE).clone();
             Digest::update(&mut engine, &control[1..33]);
             Digest::update(&mut engine, actual.as_byte_array());
-            assert_eq!(engine.finalize().as_slice(), fixture_hex(tweak)?);
-            let output = fixture_hex(output)?;
+            assert_eq!(engine.finalize().as_slice(), hex_decode(tweak)?);
+            let output = hex_decode(output)?;
             assert!(verify_taproot_commitment(&control, &output, &leaf));
             control[0] ^= 1;
             assert!(!verify_taproot_commitment(&control, &output, &leaf));

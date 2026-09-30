@@ -1,3 +1,5 @@
+use bitcoin_rs_primitives::u64_saturated_len;
+
 use crate::standardness::StandardnessPolicy;
 
 use thiserror::Error;
@@ -132,7 +134,7 @@ impl MempoolPolicySnapshot {
     pub fn max_data_carrier_size(&self) -> u64 {
         self.standardness
             .max_datacarrier_bytes
-            .map_or(0, |bytes| u64::try_from(bytes).unwrap_or(u64::MAX))
+            .map_or(0, u64_saturated_len)
     }
 }
 

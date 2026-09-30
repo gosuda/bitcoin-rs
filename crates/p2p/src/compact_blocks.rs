@@ -29,6 +29,7 @@ use bitcoin::bip152::{BlockTransactionsRequest, HeaderAndShortIds, ShortId};
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock, GetBlockTxn};
 use bitcoin_rs_primitives::deserialize;
+use bitcoin_rs_primitives::u64_saturated_len;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 
 /// Compact-block protocol version this node advertises: the identity
@@ -169,7 +170,7 @@ impl Reconstruction {
             .iter()
             .enumerate()
             .filter(|(_, slot)| slot.is_none())
-            .map(|(index, _)| u64::try_from(index).unwrap_or(u64::MAX))
+            .map(|(index, _)| u64_saturated_len(index))
             .collect();
         if missing.is_empty() {
             return match complete_block(header, filled) {

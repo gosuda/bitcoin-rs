@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use bitcoin_rs_primitives::{
     Amount, Script, Sequence, Sighash, SighashCache, Tx as NativeTx, TxOut, Witness,
-    encode::deserialize,
+    encode::deserialize, hex_decode,
 };
 
 type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
@@ -44,16 +44,6 @@ fn taproot_hash_type(byte: u8) -> Sighash {
     }
 }
 
-fn hex_decode(hex: &str) -> Vec<u8> {
-    (0..hex.len())
-        .step_by(2)
-        .map(|index| {
-            u8::from_str_radix(&hex[index..index + 2], 16)
-                .unwrap_or_else(|error| panic!("bad hex at {index}: {error}"))
-        })
-        .collect()
-}
-
 /// BIP test vectors publish digests in computation (internal) byte order.
 fn digest_hex(digest: &bitcoin_rs_primitives::Hash256) -> String {
     digest
@@ -76,12 +66,14 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
         let example = vectors
             .get(example)
             .unwrap_or_else(|| panic!("bip143.json missing {example}"));
-        let tx_bytes = hex_decode(example["unsigned_tx"].as_str().expect("tx hex"));
+        let tx_bytes = hex_decode(example["unsigned_tx"].as_str().expect("tx hex"))
+            .expect("bip143 unsigned_tx is valid hex");
         let tx = deserialize::<NativeTx>(&tx_bytes)
             .unwrap_or_else(|error| panic!("{example}: native decode failed: {error}"));
         // The cache API takes the raw script bytes and writes the compactSize
         // prefix itself; the checked-in vectors store scriptCode raw.
-        let script_code = hex_decode(example["script_code"].as_str().expect("script code"));
+        let script_code = hex_decode(example["script_code"].as_str().expect("script code"))
+            .expect("bip143 script_code is valid hex");
         let value_sats = example["value_sats"].as_u64().expect("value sats");
         let input_index = usize::try_from(example["input_index"].as_u64().expect("input index"))
             .expect("input index fits usize");
@@ -158,7 +150,8 @@ fn bip341_keypath_vectors_match_spec_digests() -> Result<()> {
 
     let mut checked = 0_usize;
     for case in spending {
-        let tx_bytes = hex_decode(case["given"]["rawUnsignedTx"].as_str().expect("raw tx"));
+        let tx_bytes = hex_decode(case["given"]["rawUnsignedTx"].as_str().expect("raw tx"))
+            .expect("bip341 rawUnsignedTx is valid hex");
         let tx = deserialize::<NativeTx>(&tx_bytes)
             .unwrap_or_else(|error| panic!("bip341: native decode failed: {error}"));
         let prevouts: Vec<TxOut> = case["given"]["utxosSpent"]
@@ -167,9 +160,10 @@ fn bip341_keypath_vectors_match_spec_digests() -> Result<()> {
             .iter()
             .map(|utxo| TxOut {
                 value: Amount::from_sat(utxo["amountSats"].as_u64().expect("amount sats")),
-                script_pubkey: Script::from_bytes(hex_decode(
-                    utxo["scriptPubKey"].as_str().expect("script pubkey"),
-                )),
+                script_pubkey: Script::from_bytes(
+                    hex_decode(utxo["scriptPubKey"].as_str().expect("script pubkey"))
+                        .expect("bip341 scriptPubKey is valid hex"),
+                ),
             })
             .collect();
 

@@ -16,6 +16,7 @@ use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
+use bitcoin_rs_script::push_int;
 
 use crate::compact_is_met_by;
 
@@ -40,51 +41,10 @@ pub fn genesis_time() -> u32 {
     Network::Regtest.genesis_block().header.time
 }
 
-/// Sign-magnitude `CScriptNum` push (the encoding the node and p2p fixtures use).
-///
-/// Mirrors `bitcoin_rs_script::push_int`, which is also the encoding the
-/// BIP34 checker expects, without pulling a script-crate dependency into
-/// chain: `OP_0` for zero, `OP_1NEGATE` for minus one, `OP_1`..`OP_16` for
-/// 1..=16, and a length-prefixed sign-magnitude push otherwise.
-///
-/// PRE: `value` is a BIP34-height-sized integer.
-/// POST: the returned bytes are a minimal script-num push.
-#[must_use]
-pub fn script_num_push(value: i64) -> Vec<u8> {
-    if value == 0 {
-        return vec![0x00]; // OP_0
-    }
-    if value == -1 {
-        return vec![0x4f]; // OP_1NEGATE
-    }
-    if (1..=16).contains(&value) {
-        let small = u8::try_from(value).unwrap_or_default();
-        return vec![0x50 + small]; // OP_1..OP_16
-    }
-    let negative = value < 0;
-    let mut magnitude = value.unsigned_abs();
-    let mut bytes = Vec::new();
-    while magnitude > 0 {
-        bytes.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
-        magnitude >>= 8;
-    }
-    if let Some(last) = bytes.last_mut() {
-        if *last & 0x80 != 0 {
-            bytes.push(if negative { 0x80 } else { 0x00 });
-        } else if negative {
-            *last |= 0x80;
-        }
-    }
-    let mut out = Vec::with_capacity(bytes.len() + 1);
-    out.push(u8::try_from(bytes.len()).unwrap_or_default());
-    out.extend_from_slice(&bytes);
-    out
-}
-
 /// The canonical one-coinbase transaction for `height`.
 ///
 /// PRE: `height` fits an i64 script number.
-/// POST: the coinbase spends the null outpoint, carries `script_num_push(height)`
+/// POST: the coinbase spends the null outpoint, carries `push_int(height)`
 /// followed by an `OP_0` extranonce byte in its scriptSig (consensus requires
 /// 2..=100 scriptSig bytes, and the height push alone is one byte for heights
 /// 1..=16), and pays the regtest block subsidy at `height` to an empty
@@ -92,8 +52,8 @@ pub fn script_num_push(value: i64) -> Vec<u8> {
 /// halving (every 150 blocks) pulls it under one satoshi.
 #[must_use]
 pub fn coinbase(height: u32) -> Tx {
-    let mut script_sig = script_num_push(i64::from(height));
-    script_sig.extend_from_slice(&script_num_push(0));
+    let mut script_sig = push_int(i64::from(height));
+    script_sig.extend_from_slice(&push_int(0));
     Tx {
         version: 2,
         lock_time: LockTime::from_consensus(0),

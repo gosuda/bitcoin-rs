@@ -24,13 +24,16 @@ use super::window::{PendingBlockCommit, PublishMode};
 use crate::error::ApplyError;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chain::node::NodeId;
-use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
 use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::MAX_SCRIPT_SIZE;
 use bitcoin_rs_primitives::Txid;
 use bitcoin_rs_primitives::consensus_bytes;
+use bitcoin_rs_primitives::i64_saturated;
+use bitcoin_rs_primitives::u32_saturated_len;
+use bitcoin_rs_primitives::u64_saturated_len;
 use bitcoin_rs_storage::CommitRecords;
 use bitcoin_rs_utxo::contract::BlockChangeError;
 use bitcoin_rs_utxo::contract::build_block_changes;
@@ -627,7 +630,7 @@ fn emit_block_connected(
         let mut inputs: u32 = 0;
         let mut sigops: u64 = 0;
         for (index, tx) in block.txs.iter().enumerate() {
-            inputs = inputs.saturating_add(u32::try_from(tx.inputs.len()).unwrap_or(u32::MAX));
+            inputs = inputs.saturating_add(u32_saturated_len(tx.inputs.len()));
             let mut prevouts = Vec::with_capacity(tx.inputs.len());
             for input in &tx.inputs {
                 if let Some(output) = view.lookup(&input.previous_output) {
@@ -638,19 +641,15 @@ fn emit_block_connected(
                 bitcoin_rs_consensus::transaction_sigop_cost(tx, &prevouts, flags),
             ));
             if let Some(txid) = txids.get(index) {
-                let _ = view.add_outputs(
-                    u32::try_from(index).unwrap_or(u32::MAX),
-                    *txid,
-                    tx.outputs.len(),
-                );
+                let _ = view.add_outputs(u32_saturated_len(index), *txid, tx.outputs.len());
             }
         }
         (
             block_hash.as_byte_array().as_ptr(),
             i32::try_from(height).unwrap_or(i32::MAX),
-            u64::try_from(block.txs.len()).unwrap_or(u64::MAX),
+            u64_saturated_len(block.txs.len()),
             i32::try_from(inputs).unwrap_or(i32::MAX),
-            i64::try_from(sigops).unwrap_or(i64::MAX),
+            i64_saturated(sigops),
             i64::try_from(elapsed.as_nanos()).unwrap_or(i64::MAX),
         )
     });
@@ -732,7 +731,7 @@ pub(super) fn check_bip68_sequence_locks(
         }
         for tx_input in &tx.inputs {
             let sequence = tx_input.sequence;
-            if sequence & bitcoin_rs_consensus::bip68::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
+            if sequence & bitcoin_rs_primitives::SEQUENCE_LOCKTIME_DISABLE_FLAG != 0 {
                 continue;
             }
             let Some(entry) = view.lookup_meta(&tx_input.previous_output) else {

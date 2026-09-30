@@ -14,7 +14,7 @@ workspace = true
 [features]
 default = []
 # Mutable access on read capabilities for cross-crate fixtures only.
-test-seam = []
+test-seam = ["dep:bitcoin-rs-script"]
 rocksdb = ["bitcoin-rs-storage/rocksdb"]
 fjall = ["bitcoin-rs-storage/fjall"]
 redb = ["bitcoin-rs-storage/redb"]
@@ -22,6 +22,8 @@ redb = ["bitcoin-rs-storage/redb"]
 [dependencies]
 bitcoin-rs-primitives.workspace = true
 bitcoin-rs-consensus.workspace = true
+# The regtest fixture's BIP34 height push; consensus already links it.
+bitcoin-rs-script = { workspace = true, optional = true }
 bitcoin-rs-storage = { workspace = true, default-features = false }
 slab.workspace = true
 hashbrown.workspace = true

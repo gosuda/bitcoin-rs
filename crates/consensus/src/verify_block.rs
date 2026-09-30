@@ -9,7 +9,7 @@ use crate::sha256d64::{self, Avx2Sha256d64, detect_avx2};
 use crate::verify_tx::is_coinbase;
 
 /// BIP141 witness commitment output prefix: `OP_RETURN` `OP_PUSHBYTES_36` `commitment_header`.
-const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+pub const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
 /// Eight AVX2 lanes hash eight parent pairs, so a tree needs 16 leaves before
 /// the batch kernel can issue work. Smaller trees stay on the spine.
@@ -18,8 +18,12 @@ const AVX2_MERKLE_MIN_LEAVES: usize = sha256d64::LANES * 2;
 /// BIP141 maximum block weight in weight units.
 pub const MAX_BLOCK_WEIGHT: u64 = 4_000_000;
 
-/// Consensus maximum serialized block size.
-pub const MAX_BLOCK_SERIALIZED_SIZE: u64 = 4_000_000;
+/// Consensus maximum serialized block size, in bytes.
+///
+/// A block's witness serialization cannot exceed its BIP141 weight, so no
+/// valid block is larger. A `usize` because buffer and budget arithmetic,
+/// const assertions included, consumes it directly.
+pub const MAX_BLOCK_SERIALIZED_SIZE: usize = 4_000_000;
 
 /// Computes contextual script verification flags for a block.
 #[must_use]
@@ -193,7 +197,8 @@ fn block_has_witness(block: &Block) -> bool {
 }
 
 /// Double-SHA256 over `left || right`, the Merkle parent of two nodes.
-fn hash_merkle_pair(left: Txid, right: Txid) -> Txid {
+#[must_use]
+pub fn hash_merkle_pair(left: Txid, right: Txid) -> Txid {
     Txid(hash_merkle_bytes(left.as_bytes(), right.as_bytes()))
 }
 
@@ -347,17 +352,13 @@ fn hash_avx2_parent_batches<T: Copy>(
     idx
 }
 
-/// BIP141 witness commitment verification over cached witness IDs.
+/// Returns the BIP141 witness commitment in `block`'s coinbase, if any.
 ///
-/// Finds the last coinbase output matching the commitment prefix, extracts the
-/// reserved value from the coinbase witness (must be exactly one 32-byte
-/// element), builds the witness merkle tree (coinbase leaf = all-zeros), and
-/// checks `SHA256d(witness_merkle_root || reserved) == commitment`.
-///
-/// `wtxids` must contain one witness ID per block transaction in block order;
-/// computing them here would re-serialize and re-hash every transaction on a
-/// path the node can already serve from its parse-once view.
-pub(crate) fn witness_commitment(block: &Block) -> Option<&[u8]> {
+/// Mirrors Core's `GetWitnessCommitmentIndex`: the last coinbase output of at
+/// least 38 bytes that starts with [`WITNESS_COMMITMENT_PREFIX`] carries the
+/// commitment, and the 32 bytes after the prefix are returned.
+#[must_use]
+pub fn witness_commitment(block: &Block) -> Option<&[u8]> {
     block
         .txs
         .first()?
@@ -465,6 +466,32 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     check_witness_malleation(block, segwit_active, &wtxids)
 }
 
+/// BIP141 witness merkle root (Core's `BlockWitnessMerkleRoot`): the coinbase
+/// contributes the all-zero leaf and every other transaction its wtxid, in
+/// block order.
+#[must_use]
+pub fn witness_merkle_root(non_coinbase_wtxids: impl IntoIterator<Item = Wtxid>) -> [u8; 32] {
+    let wtxids = non_coinbase_wtxids.into_iter();
+    let mut leaves = Vec::with_capacity(wtxids.size_hint().0.saturating_add(1));
+    leaves.push([0_u8; 32]);
+    leaves.extend(wtxids.map(|wtxid| *wtxid.as_bytes()));
+    // The coinbase leaf keeps the fold non-empty, so a root always exists.
+    compute_merkle_root(&mut leaves).unwrap_or_default()
+}
+
+/// BIP141 witness commitment: `SHA256d(witness_merkle_root || reserved)`,
+/// the same two-node hash a merkle parent takes.
+#[must_use]
+pub fn witness_commitment_hash(witness_merkle_root: &[u8; 32], reserved: &[u8; 32]) -> Hash256 {
+    hash_merkle_bytes(witness_merkle_root, reserved)
+}
+
+/// Checks the block's BIP141 `commitment` against `wtxids` and the coinbase's
+/// `reserved` value.
+///
+/// `wtxids` must contain one witness ID per block transaction in block order;
+/// computing them here would re-serialize and re-hash every transaction on a
+/// path the node can already serve from its parse-once view.
 fn witness_commitment_hash_matches(
     block: &Block,
     wtxids: &[Wtxid],
@@ -474,24 +501,16 @@ fn witness_commitment_hash_matches(
     if wtxids.len() != block.txs.len() {
         return false;
     }
-    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(block.txs.len());
-    for (index, wtxid) in wtxids.iter().enumerate() {
-        leaves.push(if index == 0 {
-            [0_u8; 32]
-        } else {
-            *wtxid.as_bytes()
-        });
-    }
-    let Some(root) = compute_merkle_root(&mut leaves) else {
+    let (Some((_coinbase, rest)), Ok(reserved)) =
+        (wtxids.split_first(), <&[u8; 32]>::try_from(reserved))
+    else {
         return false;
     };
-
-    let mut buffer = [0_u8; 64];
-    buffer[..32].copy_from_slice(&root);
-    buffer[32..].copy_from_slice(reserved);
-    &sha256d(&buffer)[..] == commitment
+    let root = witness_merkle_root(rest.iter().copied());
+    &witness_commitment_hash(&root, reserved).to_le_bytes()[..] == commitment
 }
 
+#[cfg(test)]
 fn sha256d(data: &[u8]) -> [u8; 32] {
     double_sha256(data).to_le_bytes()
 }

@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_chain::{BlockTree, InitialBlockDownload, TipSnapshot};
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE;
+use bitcoin_rs_primitives::{Hash256, Network, u32_saturated_len, unix_now};
 use hashbrown::{HashMap, HashSet};
 use smallvec::SmallVec;
 
@@ -43,10 +44,6 @@ const NODE_NETWORK_LIMITED_MIN_BLOCKS: u32 = 288;
 /// that keeps only the retained window may have pruned two of its newest
 /// blocks by the time the request lands.
 const NODE_NETWORK_LIMITED_RACE_BUFFER: u32 = 2;
-/// `NODE_NETWORK_LIMITED` (bit 10) has no `ServiceFlags` variant in this
-/// `rust-bitcoin` version; the bit follows the protocol assignment also
-/// decoded in `PeerInfo::services_names`.
-const NETWORK_LIMITED: u64 = 1_u64 << 10;
 /// Maximum number of in-flight getdata requests we'll track per `BlockSync`.
 ///
 /// 256 is the measured single-peer IBD depth: a bounded 0–150,000 daemon
@@ -70,9 +67,6 @@ pub const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIM
 /// without eviction. At the 150k acceptance window this bound rarely binds —
 /// blocks there are far below the per-slot estimate.
 pub const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
-/// Consensus-maximum serialized block size in bytes: a witness-serialized
-/// block cannot exceed its 4,000,000 weight, so no valid block is larger.
-pub const MAX_SERIALIZED_BLOCK_SIZE: usize = crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
 // Staller-arming reachability invariant (Phase 1 of the staller arming
 // redesign): the stall episode arms on a staged-count fraction
 // (`received >= max_received_blocks / 2`, `window_blocked_on` term 3), so the
@@ -84,7 +78,7 @@ pub const MAX_SERIALIZED_BLOCK_SIZE: usize = crate::MAX_BLOCK_SERIALIZED_SIZE_US
 // both constants together; this assertion turns silent drift into a build
 // failure. (Margin at 256: 256 * 2 MiB >= 128 * 4_000_000, ~4.9%.)
 const _: () = assert!(
-    RECEIVED_BLOCK_BYTE_BUDGET >= RECEIVED_BLOCK_BUDGET / 2 * MAX_SERIALIZED_BLOCK_SIZE,
+    RECEIVED_BLOCK_BYTE_BUDGET >= RECEIVED_BLOCK_BUDGET / 2 * MAX_BLOCK_SERIALIZED_SIZE,
     "staged byte budget must admit half the staged count window at max block size"
 );
 /// Maximum decoded inbound blocks held before handing them to `BlockStager`,
@@ -288,10 +282,7 @@ pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) ->
     if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
         return false;
     }
-    if policy
-        .ibd
-        .is_active(crate::counters::now_seconds(), policy.network)
-    {
+    if policy.ibd.is_active(unix_now(), policy.network) {
         return false;
     }
     u32::try_from(peer.best_known_height).is_ok_and(|demonstrated| {
@@ -312,11 +303,7 @@ pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) ->
 #[must_use]
 pub fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u32 {
     let network = ServiceFlags::NETWORK.to_u64();
-    if peer.services & network != 0
-        || policy
-            .ibd
-            .is_active(crate::counters::now_seconds(), policy.network)
-    {
+    if peer.services & network != 0 || policy.ibd.is_active(unix_now(), policy.network) {
         return 0;
     }
     if peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() == 0 {
@@ -345,7 +332,8 @@ pub fn statically_fanout_eligible(peer: &PeerInfo, policy: &BlockDownloadPolicy)
 
 fn peer_advertises_block_service(peer: &PeerInfo) -> bool {
     let network = ServiceFlags::NETWORK.to_u64();
-    peer.services & (network | NETWORK_LIMITED) != 0
+    let limited = ServiceFlags::NETWORK_LIMITED.to_u64();
+    peer.services & (network | limited) != 0
 }
 
 /// Whether a peer advertising block service can serve one required body height.
@@ -360,8 +348,8 @@ pub(crate) fn peer_can_serve_height(
     if !peer_advertises_block_service(peer) || required_height > peer_height {
         return false;
     }
-    let limited_only =
-        peer.services & NETWORK_LIMITED != 0 && peer.services & ServiceFlags::NETWORK.to_u64() == 0;
+    let limited_only = peer.services & ServiceFlags::NETWORK_LIMITED.to_u64() != 0
+        && peer.services & ServiceFlags::NETWORK.to_u64() == 0;
     !limited_only
         || peer_height - required_height
             < NODE_NETWORK_LIMITED_MIN_BLOCKS - NODE_NETWORK_LIMITED_RACE_BUFFER
@@ -1899,7 +1887,7 @@ impl DownloadWindow {
         if let Some(timeout) = self.budget.pending_timeout_override {
             return timeout;
         }
-        let other = u32::try_from(active_downloading_peers.saturating_sub(1)).unwrap_or(u32::MAX);
+        let other = u32_saturated_len(active_downloading_peers.saturating_sub(1));
         let raw_factor = BLOCK_DOWNLOAD_TIMEOUT_BASE
             .saturating_add(BLOCK_DOWNLOAD_TIMEOUT_PER_PEER.saturating_mul(other));
         self.budget.block_spacing.saturating_mul(raw_factor) / 2
@@ -2250,7 +2238,7 @@ impl DownloadWindow {
             .saturating_add(selected_hashes.map_or(0, SelectedHashes::len));
         // Each skipped hash can displace at most one eligible height from the prefix.
         let scan_limit = scan.remaining_limit.saturating_add(skipped_hashes);
-        let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
+        let scan_span = u32_saturated_len(scan_limit.saturating_sub(1));
         let request_end_height = scan
             .height
             .saturating_add(scan_span)
@@ -2329,7 +2317,7 @@ impl DownloadWindow {
         if !self.pending.is_empty() || stager.received_len() > 0 {
             return None;
         }
-        let span = u32::try_from(scan.remaining_limit.saturating_sub(1)).unwrap_or(u32::MAX);
+        let span = u32_saturated_len(scan.remaining_limit.saturating_sub(1));
         let request_end_height = scan
             .height
             .saturating_add(span)
@@ -2932,10 +2920,7 @@ mod tests {
     use bitcoin_rs_primitives::Hash256;
 
     use bitcoin_rs_chain::Network;
-    use bitcoin_rs_primitives::{
-        Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
-        consensus_bytes,
-    };
+    use bitcoin_rs_primitives::consensus_bytes;
 
     use super::{
         BlameReason, BlockStager, BlockedContext, BlockedDecision, ColdFrontState, DownloadWindow,
@@ -2943,6 +2928,7 @@ mod tests {
         PENDING_BUDGET, SyncBudget, count_stall_episode_cleared, fast_sync_budget,
     };
     use crate::connection::PeerSource;
+    use crate::test_support::padded_block_of_size;
 
     /// A stager whose budget mirrors `window`'s, so window-side backpressure
     /// reads see the same bytes/counts a real sync pair would.
@@ -2986,42 +2972,6 @@ mod tests {
     /// coinbase script.
     const SMALL_BODY: usize = 141;
 
-    /// A one-coinbase block whose serialized size is exactly `total_bytes`.
-    /// The script-length prefix grows by 2 bytes at 253 and again at 65536,
-    /// so sizes 253, 254, 65538, and 65539 above the empty-script size do
-    /// not exist.
-    fn padded_regtest_block(total_bytes: usize) -> Block {
-        let wanted = total_bytes.saturating_sub(padded_regtest_block_with_script(0).total_size());
-        let script_len = match wanted {
-            0..=252 => wanted,
-            255..=65_537 => wanted - 2,
-            _ => wanted.saturating_sub(4),
-        };
-        let block = padded_regtest_block_with_script(script_len);
-        assert_eq!(block.total_size(), total_bytes);
-        block
-    }
-
-    fn padded_regtest_block_with_script(script_len: usize) -> Block {
-        Block {
-            header: Network::Regtest.genesis_block().header,
-            txs: vec![Tx {
-                version: 2,
-                inputs: vec![TxIn {
-                    previous_output: OutPoint::default(),
-                    script_sig: vec![0_u8; script_len].into(),
-                    sequence: Sequence::MAX,
-                    witness: Witness::new(),
-                }],
-                outputs: vec![TxOut {
-                    value: Amount::from_sat(0),
-                    script_pubkey: Script::new(),
-                }],
-                lock_time: LockTime::ZERO,
-            }],
-        }
-    }
-
     /// Stages one `total_bytes`-long body into `stager`.
     fn stage_body(
         stager: &mut BlockStager,
@@ -3030,7 +2980,7 @@ mod tests {
         source: Option<PeerSource>,
         now: Instant,
     ) {
-        let block = padded_regtest_block(total_bytes);
+        let block = padded_block_of_size(total_bytes);
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         match stager.insert(hash, None, block, serialized, source, now) {
             crate::StagedBlock::Memory { .. } => {}

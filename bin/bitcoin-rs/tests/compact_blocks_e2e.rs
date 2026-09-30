@@ -21,6 +21,9 @@
 
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
+#[path = "support/poll.rs"]
+mod poll;
+
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -40,9 +43,11 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, BlockHash, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_e2e::live_peer::is_soft_recv_error;
 use bitcoin_rs_e2e::node::workspace;
-use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::process_peer::{connect_loopback, decode_frame};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
+use poll::wait_for;
 use serde_json::json;
 
 /// Frames are read with the protocol payload bound, not the harness's 4 MiB
@@ -323,26 +328,6 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Erro
     Ok(frame)
 }
 
-fn decode_frame(frame: &[u8]) -> Result<NetworkMessage, Error> {
-    let envelope: RawNetworkMessage = bitcoin::consensus::deserialize(frame)
-        .map_err(|error| Error::Protocol(format!("invalid P2P envelope: {error}")))?;
-    if *envelope.magic() != Magic::REGTEST {
-        return Err(Error::Protocol("P2P network mismatch".to_owned()));
-    }
-    Ok(envelope.into_payload())
-}
-
-fn is_soft_recv_error(error: &Error) -> bool {
-    match error {
-        Error::Io(io) => matches!(
-            io.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ),
-        Error::Protocol(detail) => detail.contains("deadline"),
-        _ => false,
-    }
-}
-
 /// Applies a fresh regtest chain and connects one compact-aware peer.
 fn synced_peer(name: &str) -> Result<(ProcessNode, CompactPeer, Vec<Block>), Error> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
@@ -409,17 +394,6 @@ fn best_hash(node: &mut ProcessNode) -> Result<String, Error> {
         .as_str()
         .unwrap_or("")
         .to_owned())
-}
-
-fn wait_for(dur: Duration, check: &mut dyn FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + dur;
-    while Instant::now() < deadline {
-        if check() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    false
 }
 
 fn evidence_dir() -> std::path::PathBuf {

@@ -34,10 +34,10 @@ mod rewind;
 
 #[cfg(test)]
 use super::record::JournalRecord;
-use super::record::crc32c;
 #[cfg(test)]
 use super::record::encode_record;
 use crate::KvStore;
+use crate::crc32c::crc32c;
 use std::path::Path;
 use std::time::Duration;
 use std::time::Instant;

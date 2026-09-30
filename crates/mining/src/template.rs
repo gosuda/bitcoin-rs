@@ -4,8 +4,8 @@ use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_consensus::{compute_merkle_root, transaction_sigop_cost};
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_primitives::{
-    Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid,
-    encode::double_sha256, varint,
+    Block, BlockHash, CompactTarget, Hash256, Header, Network, Tx, Txid, Wtxid, u64_saturated_len,
+    varint,
 };
 use bitcoin_rs_script::VerifyFlags;
 use hashbrown::HashMap;
@@ -274,7 +274,7 @@ pub(crate) fn transaction_count_size(body_count: usize) -> Result<u64, MiningErr
         .ok()
         .and_then(|count| count.checked_add(1))
         .ok_or(overflow)?;
-    Ok(u64::try_from(varint::encoded_len(count)).unwrap_or(u64::MAX))
+    Ok(u64_saturated_len(varint::encoded_len(count)))
 }
 
 /// Reserves the header and a coinbase with the final witness-commitment shape.
@@ -295,7 +295,7 @@ fn fixed_reservation(
             field: "coinbase size",
         }
     })?;
-    let header_size = u64::try_from(Header::LEN).unwrap_or(u64::MAX);
+    let header_size = u64_saturated_len(Header::LEN);
     Ok(FixedReservation {
         weight: reservation
             .weight()
@@ -379,8 +379,15 @@ fn finish_candidate(
 ) -> Result<Candidate, MiningError> {
     let (witness_merkle_root, witness_reserved_value, witness_commitment) = if context.segwit_active
     {
-        let root = witness_merkle_root(snapshot, &body.ordered)?;
-        let commitment = witness_commitment_hash(&root, &WITNESS_RESERVED_VALUE);
+        let root = Hash256::from_le_bytes(&bitcoin_rs_consensus::witness_merkle_root(
+            body.ordered
+                .iter()
+                .map(|&index| snapshot.entries[index].wtxid),
+        ));
+        let commitment = bitcoin_rs_consensus::witness_commitment_hash(
+            root.as_byte_array(),
+            &WITNESS_RESERVED_VALUE,
+        );
         (Some(root), Some(WITNESS_RESERVED_VALUE), Some(commitment))
     } else {
         (None, None, None)
@@ -489,20 +496,6 @@ fn depends(tx: &Tx, tx_positions: &HashMap<Txid, u32>) -> Vec<u32> {
     depends
 }
 
-/// BIP141 witness merkle root. The coinbase contributes the all-zero wtxid leaf.
-fn witness_merkle_root(
-    snapshot: &MempoolMiningSnapshot,
-    ordered: &[usize],
-) -> Result<Hash256, MiningError> {
-    let mut leaves = Vec::with_capacity(ordered.len().saturating_add(1));
-    // BIP141: the coinbase wtxid leaf is the all-zero hash, not the real wtxid.
-    leaves.push([0_u8; 32]);
-    for &index in ordered {
-        leaves.push(*snapshot.entries[index].wtxid.as_bytes());
-    }
-    merkle_root_from_leaves(&mut leaves)
-}
-
 fn merkle_root_from_txids(txids: impl IntoIterator<Item = Txid>) -> Result<Hash256, MiningError> {
     let mut leaves = txids
         .into_iter()
@@ -517,11 +510,4 @@ fn merkle_root_from_leaves(leaves: &mut Vec<[u8; 32]>) -> Result<Hash256, Mining
         .ok_or(MiningError::CandidateScalarOverflow {
             field: "merkle root",
         })
-}
-
-fn witness_commitment_hash(witness_merkle_root: &Hash256, reserved: &[u8; 32]) -> Hash256 {
-    let mut pair = [0_u8; 64];
-    pair[..32].copy_from_slice(witness_merkle_root.as_byte_array());
-    pair[32..].copy_from_slice(reserved);
-    double_sha256(&pair)
 }

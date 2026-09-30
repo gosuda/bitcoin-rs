@@ -8,6 +8,7 @@ use super::PROTOCOL_VERSION;
 use super::PendingHeaderRequest;
 use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
+use super::clamped_height_u32;
 use super::frontier::ChainFrontier;
 use super::frontier::SyncFrontier;
 use super::headers_presync::HeaderAnchor;
@@ -706,7 +707,7 @@ impl BlockSync {
             }
         }
         if let Some((source, peer)) = header_peer {
-            let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
+            let peer_best_height = clamped_height_u32(peer.best_known_height);
             if peer_best_height > header_height {
                 self.send_getheaders(
                     source,
@@ -845,7 +846,8 @@ impl BlockSync {
         let Some(locator_tip_hash) = locator.first().copied() else {
             return GetheadersOutcome::Failed;
         };
-        let target_height = u32::try_from(target_height).unwrap_or(0);
+        let target_height = clamped_height_u32(target_height);
+
         let now = Instant::now();
         if self.has_pending_getheaders(source, locator_tip_hash, target_height, now) {
             tracing::trace!(
@@ -1134,7 +1136,7 @@ impl BlockSync {
         batch_len: usize,
     ) -> PresyncOutcome {
         let (failure, request_more, ready_headers, finished) =
-            match state.process(headers, batch_len >= crate::dispatch::MAX_HEADERS_RESPONSE) {
+            match state.process(headers, batch_len >= crate::wire::MAX_HEADERS_MESSAGE_COUNT) {
                 Ok(result) => (
                     None,
                     result.request_more,

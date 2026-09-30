@@ -27,9 +27,8 @@ pub use capabilities::{
 pub use index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
-    MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch, PreparedBatchLimits, PreparedBlock,
-    ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow,
-    TxIndexSnapshot,
+    NoSpentScripts, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHistoryEntry,
+    ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
 };
 pub use query_api::{
     DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource, ScriptHistoryRecord,

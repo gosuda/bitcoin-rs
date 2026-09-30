@@ -275,10 +275,6 @@ impl NetworkActivity {
     }
 }
 
-/// Consensus maximum serialized block size in bytes, in `usize` form for
-/// wire-buffer arithmetic. `peer` is the single p2p authority for this limit.
-pub const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
-
 #[cfg(test)]
 mod tests {
     use super::*;

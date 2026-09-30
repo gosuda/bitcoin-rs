@@ -3,6 +3,8 @@
 
 extern crate alloc;
 
+#[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
+use bitcoin_rs_primitives::u64_saturated_len;
 use core::{fmt, str::FromStr};
 
 pub use batch::{BatchOp, BufferedWriteBatch};
@@ -24,6 +26,8 @@ pub use footprint::{
     PhysicalNamespace, PhysicalObservationKind, dir_has_entries, logical_column_family,
     logical_store_owners, measure_physical_tree, opened_fd_path, opened_path_matches_fd,
 };
+
+pub use memory::InMemoryKvStore;
 
 pub use trait_::{
     KvIter, KvPair, KvSnapshot, KvStore, PersistBoundary, PersistFault, PersistFaultSlot,
@@ -110,12 +114,16 @@ mod block_file;
 pub mod cache_budget;
 /// Logical column-family names shared by all storage backends.
 mod column_families;
+/// CRC32C (Castagnoli) checksum shared by durable-head and journal framing.
+mod crc32c;
 /// Durable chain head record and its atomic commit boundary.
 pub mod durable_head;
 /// Storage error type.
 mod error;
 /// Custody-grade logical and physical storage-footprint ledgers.
 pub mod footprint;
+/// Process-local key-value store for tests.
+mod memory;
 /// Retention and deletion of block bodies and undo rows.
 pub mod pruning;
 /// Durable rollback-evidence sidecars and the warning snapshot.
@@ -132,23 +140,10 @@ mod redb_impl;
 #[cfg(feature = "rocksdb")]
 mod rocksdb_impl;
 
-/// Converts a `u64` byte count to an `f64` metric value.
-///
-/// Split the value into 32-bit limbs so the conversion uses only exact
-/// `f64::from(u32)` operations and rounds like a direct `u64` conversion.
-#[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
-pub(crate) fn metric_f64(value: u64) -> f64 {
-    const TWO32: f64 = 4_294_967_296.0;
-    let [b0, b1, b2, b3, b4, b5, b6, b7] = value.to_le_bytes();
-    let low = u32::from_le_bytes([b0, b1, b2, b3]);
-    let high = u32::from_le_bytes([b4, b5, b6, b7]);
-    f64::from(high).mul_add(TWO32, f64::from(low))
-}
-
 /// Converts a `usize` byte count to an `f64` metric value via `u64`.
 #[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 pub(crate) fn metric_f64_from_usize(value: usize) -> f64 {
-    metric_f64(u64::try_from(value).unwrap_or(u64::MAX))
+    bitcoin_rs_primitives::u64_to_f64(u64_saturated_len(value))
 }
 
 pub mod chainstate_journal;

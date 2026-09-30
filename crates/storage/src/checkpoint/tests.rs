@@ -3,6 +3,7 @@ use super::fs::CheckpointRoot;
 use super::load::read_current;
 use super::*;
 
+use bitcoin_rs_primitives::hex_encode;
 use cap_std::ambient_authority;
 use sha2::{Digest, Sha256};
 use std::fs;

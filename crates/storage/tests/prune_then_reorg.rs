@@ -2,7 +2,6 @@
 extern crate alloc;
 
 use alloc::sync::Arc;
-use std::collections::BTreeMap;
 
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
@@ -12,11 +11,11 @@ use bitcoin_rs_storage::pruning::{
     load_pruneheight, prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
 };
 use bitcoin_rs_storage::{
-    BatchOp, BlockFilePosition, BufferedWriteBatch, ColumnFamily, FlatFileBlockStore, KvIter,
-    KvSnapshot, KvStore, KvUndoStore, StorageError, UndoStore, WriteCondition,
+    BlockFilePosition, BufferedWriteBatch, ColumnFamily, FlatFileBlockStore, InMemoryKvStore,
+    KvIter, KvSnapshot, KvStore, KvUndoStore, StorageError, UndoStore, WriteCondition,
     block_file_max_height_key, decode_block_file_max_height, encode_block_file_max_height,
 };
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use tempfile::tempdir;
 
@@ -1091,8 +1090,10 @@ enum WriteDurableOutcome {
 /// its reads; the pruning module keeps the constant private.
 const EXECUTED_FRONTIER_KEY: &[u8] = b"node:prune_executed";
 
+/// [`InMemoryKvStore`] behind two scenario knobs that fault specific call
+/// sites; the inner store's own persistence faults stay unarmed.
 struct MemoryStore {
-    cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
+    inner: InMemoryKvStore,
     /// Armed outcome for the next `write_durable`.
     write_durable_outcome: Mutex<Option<WriteDurableOutcome>>,
     /// Reads of `node:prune_executed` fail once this many have succeeded,
@@ -1103,7 +1104,7 @@ struct MemoryStore {
 impl Default for MemoryStore {
     fn default() -> Self {
         Self {
-            cfs: RwLock::new(Default::default()),
+            inner: InMemoryKvStore::default(),
             write_durable_outcome: Mutex::new(None),
             executed_reads_allowed: AtomicUsize::new(usize::MAX),
         }
@@ -1141,58 +1142,23 @@ impl KvStore for MemoryStore {
                 ));
             }
         }
-        let guard = self.cfs.read();
-        Ok(guard[cf.index()].get(key).cloned())
+        self.inner.get(cf, key)
     }
 
-    // RATIONALE: `KvIter` outlives the lock guard, so test rows are cloned before returning.
-    #[allow(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError> {
-        let rows = self
-            .cfs
-            .read()
-            .get(cf.index())
-            .into_iter()
-            .flat_map(|cf_rows| {
-                cf_rows
-                    .range(prefix.to_vec()..)
-                    .take_while(|(key, _value)| key.starts_with(prefix))
-            })
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
+        self.inner.iter_prefix(cf, prefix)
     }
 
     fn new_batch(&self) -> BufferedWriteBatch {
-        BufferedWriteBatch::default()
+        self.inner.new_batch()
     }
 
     fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        let mut guard = self.cfs.write();
-        for op in batch.into_ops() {
-            match op {
-                BatchOp::Put { cf, key, value } => {
-                    guard[cf.index()].insert(key, value.into());
-                }
-                BatchOp::Delete { cf, key } => {
-                    guard[cf.index()].remove(&key);
-                }
-                BatchOp::DeleteRange { cf, start, end } => {
-                    let keys = guard[cf.index()]
-                        .range(start..end)
-                        .map(|(key, _value)| key.clone())
-                        .collect::<Vec<_>>();
-                    for key in keys {
-                        guard[cf.index()].remove(&key);
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.inner.write(batch)
     }
 
     fn write_durable(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
@@ -1201,7 +1167,7 @@ impl KvStore for MemoryStore {
             // The ambiguous post-application case: the whole atomic batch is
             // visible, and durability completion then fails.
             Some(WriteDurableOutcome::AppliedThenFailed) => {
-                self.write(batch)?;
+                self.inner.write(batch)?;
                 Err(StorageError::InvalidOperation(
                     "injected post-apply durability failure",
                 ))
@@ -1209,7 +1175,7 @@ impl KvStore for MemoryStore {
             Some(WriteDurableOutcome::FailedBeforeApply) => Err(StorageError::InvalidOperation(
                 "injected pre-apply durability failure",
             )),
-            None => self.write(batch),
+            None => self.inner.write(batch),
         }
     }
 
@@ -1218,71 +1184,19 @@ impl KvStore for MemoryStore {
         conditions: &[WriteCondition<'_>],
         batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
-        let mut guard = self.cfs.write();
-        for condition in conditions {
-            let (cf, key) = condition.location();
-            let current = guard[cf.index()].get(key);
-            if !condition.matches(current.map(Vec::as_slice)) {
-                return Ok(false);
-            }
-        }
-        for op in batch.into_ops() {
-            match op {
-                BatchOp::Put { cf, key, value } => {
-                    guard[cf.index()].insert(key, value.into());
-                }
-                BatchOp::Delete { cf, key } => {
-                    guard[cf.index()].remove(&key);
-                }
-                BatchOp::DeleteRange { cf, start, end } => {
-                    let keys = guard[cf.index()]
-                        .range(start..end)
-                        .map(|(key, _value)| key.clone())
-                        .collect::<Vec<_>>();
-                    for key in keys {
-                        guard[cf.index()].remove(&key);
-                    }
-                }
-            }
-        }
-        Ok(true)
+        self.inner.write_durable_if(conditions, batch)
     }
 
     fn flush(&self) -> Result<(), StorageError> {
-        Ok(())
+        self.inner.flush()
     }
 
     fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
-        let guard = self.cfs.read();
-        Ok(Box::new(MemorySnapshot { cfs: guard.clone() }))
+        self.inner.snapshot()
     }
 
     fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
-}
-
-struct MemorySnapshot {
-    cfs: [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()],
-}
-
-impl KvSnapshot for MemorySnapshot {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.cfs[cf.index()].get(key).cloned())
-    }
-
-    // RATIONALE: the returned `KvIter` must not borrow the caller-owned prefix slice.
-    #[allow(clippy::needless_collect)]
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let rows = self.cfs[cf.index()]
-            .range(prefix.to_vec()..)
-            .take_while(|(key, _value)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
+        // Deliberately not forwarded: this double faults only the call sites
+        // its two knobs name, never whichever boundary fires next.
     }
 }

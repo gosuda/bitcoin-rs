@@ -1,9 +1,14 @@
 //! Public commit/get coverage for the UTXO set.
 
+#[path = "support/shard_txid.rs"]
+mod shard_txid;
+
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, varint};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::{UtxoError, UtxoSet, hash_serialized_3};
 use sha2::{Digest, Sha256};
+
+use shard_txid::txid_in_shard;
 
 fn txid(seed: u64) -> Hash256 {
     let mut bytes = [0_u8; 32];
@@ -30,15 +35,6 @@ fn txid_with_prefix(prefix: u64, suffix: u64) -> Hash256 {
     bytes[8..16].copy_from_slice(&suffix.to_le_bytes());
     bytes[16..24].copy_from_slice(&suffix.rotate_left(11).to_le_bytes());
     bytes[24..32].copy_from_slice(&suffix.wrapping_mul(17).to_le_bytes());
-    Hash256::from_le_bytes(&bytes)
-}
-
-fn txid_in_shard(shard: u8, suffix: u64) -> Hash256 {
-    let mut bytes = [0_u8; 32];
-    bytes[0] = shard;
-    bytes[1..9].copy_from_slice(&suffix.to_le_bytes());
-    bytes[9..17].copy_from_slice(&suffix.rotate_left(13).to_le_bytes());
-    bytes[17..25].copy_from_slice(&suffix.wrapping_mul(29).to_le_bytes());
     Hash256::from_le_bytes(&bytes)
 }
 

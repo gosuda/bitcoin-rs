@@ -18,7 +18,7 @@ use std::str::FromStr as _;
 use bitcoin_rs_primitives::{
     Amount, Block as NativeBlock, ConsensusDecode, ConsensusEncode, DecodeError, LockTime, Script,
     Sequence, Sighash, SighashCache, Tx as NativeTx, TxOut, Witness, Wtxid, consensus_bytes,
-    deserialize,
+    deserialize, hex_decode,
 };
 
 type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
@@ -368,10 +368,10 @@ fn legacy_sighash_matches_core_vectors() -> Result<()> {
             .and_then(|v| v.as_str())
             .expect("expected sighash");
 
-        let tx_bytes = hex_decode(tx_hex);
+        let tx_bytes = hex_decode(tx_hex).expect("sighash.json raw_transaction is valid hex");
         let native_tx = deserialize::<NativeTx>(&tx_bytes)
             .unwrap_or_else(|error| panic!("vector {expected}: native decode failed: {error}"));
-        let script = hex_decode(script_hex);
+        let script = hex_decode(script_hex).expect("sighash.json script is valid hex");
         #[expect(
             clippy::as_conversions,
             clippy::cast_sign_loss,
@@ -531,14 +531,4 @@ fn sighash_cache_matches_one_shot_helpers_across_fixtures() {
             }
         }
     }
-}
-
-fn hex_decode(hex: &str) -> Vec<u8> {
-    (0..hex.len())
-        .step_by(2)
-        .map(|index| {
-            u8::from_str_radix(&hex[index..index + 2], 16)
-                .unwrap_or_else(|error| panic!("bad hex at {index}: {error}"))
-        })
-        .collect()
 }

@@ -1,5 +1,7 @@
 //! Read-only synchronization progress and bounded-window metrics.
 
+use bitcoin_rs_primitives::{u32_saturated_len, unix_now};
+
 use super::BlockSync;
 
 impl BlockSync {
@@ -76,8 +78,7 @@ impl BlockSync {
     ///   heights. The applied and header heights, and `gap`, stay progress
     ///   facts only.
     pub(super) fn in_initial_block_download(&self) -> bool {
-        self.ibd
-            .is_active(crate::counters::now_seconds(), self.chain.network())
+        self.ibd.is_active(unix_now(), self.chain.network())
     }
 
     pub(super) fn record_sync_metrics(&self) {
@@ -108,5 +109,5 @@ impl BlockSync {
 }
 
 pub(super) fn metric_count(value: usize) -> f64 {
-    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+    f64::from(u32_saturated_len(value))
 }

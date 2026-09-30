@@ -299,9 +299,7 @@ impl CheckpointPublisher {
                 self.chain_events.epoch(),
                 tip.height,
                 tip.hash.to_string_be(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs()),
+                bitcoin_rs_primitives::unix_now(),
             );
             write_witness(&self.data_dir, &witness).map_err(|e| {
                 CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(

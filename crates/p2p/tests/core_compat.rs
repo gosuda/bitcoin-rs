@@ -25,15 +25,14 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
 use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
-    ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, dispatch_inbound,
-    dispatch_inbound_with_chain,
+    ChainQuery, InventoryServing, dispatch_inbound, dispatch_inbound_with_chain,
 };
 use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
 use bitcoin_rs_p2p::listener::{ConnectionShared, bind_listener, serve, spawn_outbound_connection};
 use bitcoin_rs_p2p::wire::{
-    MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION, PeerError, read_message,
-    write_message,
+    MAX_HEADERS_MESSAGE_COUNT, MAX_LOCATOR_HASHES, MAX_MESSAGE_PAYLOAD, PROTOCOL_VERSION,
+    PeerError, read_message, write_message,
 };
 use bitcoin_rs_p2p::{
     BannedSubnet, COMMANDS, CORE_UNTYPED_COMMANDS, InboundBlock, InboundHeaders, ListenerExtras,
@@ -41,6 +40,7 @@ use bitcoin_rs_p2p::{
 };
 use bitcoin_rs_primitives::{
     Block, BlockHash as NativeBlockHash, CompactTarget, Hash256, Header, consensus_bytes,
+    hex_decode, u32_saturated, u32_saturated_len, unix_now,
 };
 use bitcoin_rs_primitives::{Network, USER_AGENT};
 use hashbrown::HashMap;
@@ -73,28 +73,6 @@ const NETWORK_TABLE: [(Network, Magic, u16); 5] = [
 fn genesis_block() -> Result<Block, Box<dyn Error>> {
     let bytes = hex_decode(REGTEST_GENESIS_HEX)?;
     Ok(Block::consensus_decode(&bytes)?)
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let (chunks, remainder) = hex.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Err("odd hex length".into());
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in chunks {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        bytes.push((high << 4) | low);
-    }
-    Ok(bytes)
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, Box<dyn Error>> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err("invalid hex digit".into()),
-    }
 }
 
 /// Chains `count` synthetic headers onto `parent`, deterministically.
@@ -334,7 +312,7 @@ fn raw_frame(magic: Magic, command: &[u8; 12], payload: &[u8]) -> Vec<u8> {
     let mut frame = Vec::with_capacity(24 + payload.len());
     frame.extend_from_slice(&magic.to_bytes());
     frame.extend_from_slice(command);
-    let length = u32::try_from(payload.len()).unwrap_or(u32::MAX);
+    let length = u32_saturated_len(payload.len());
     frame.extend_from_slice(&length.to_le_bytes());
     frame.extend_from_slice(&checksum(payload));
     frame.extend_from_slice(payload);
@@ -766,7 +744,7 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
 #[test]
 fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Error>> {
     let genesis = genesis_block()?;
-    let headers = child_headers(&genesis.header, MAX_HEADERS_RESPONSE + 1);
+    let headers = child_headers(&genesis.header, MAX_HEADERS_MESSAGE_COUNT + 1);
     let chain = FakeChain::new(headers.clone(), HashMap::new());
     let mut peer = ready_peer(Magic::REGTEST)?;
 
@@ -779,7 +757,7 @@ fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Err
     let Some(Message::Headers(served)) = response.first() else {
         return Err("expected headers response".into());
     };
-    assert_eq!(served.len(), MAX_HEADERS_RESPONSE);
+    assert_eq!(served.len(), MAX_HEADERS_MESSAGE_COUNT);
     assert_eq!(served.len(), 2_000, "Core 31.1 max headers per message");
     Ok(())
 }
@@ -1286,7 +1264,7 @@ fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Err
         .iter()
         .map(|(locator, stop)| {
             (
-                before.headers_after(locator, *stop, MAX_HEADERS_RESPONSE),
+                before.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
                 before.headers_after(locator, *stop, 1),
             )
         })
@@ -1303,7 +1281,7 @@ fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Err
     let after = FakeChain::new(headers, bodies);
     for ((locator, stop), (wide, narrow)) in cases.iter().zip(&expected) {
         assert_eq!(
-            after.headers_after(locator, *stop, MAX_HEADERS_RESPONSE),
+            after.headers_after(locator, *stop, MAX_HEADERS_MESSAGE_COUNT),
             *wide
         );
         assert_eq!(after.headers_after(locator, *stop, 1), *narrow);
@@ -1631,12 +1609,9 @@ fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
     let magic = Magic::BITCOIN;
     let peer_table = Arc::new(PeerTable::new());
     let mut shared = outbound_shared(Arc::clone(&peer_table), magic);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = unix_now();
     let recent = Header {
-        time: u32::try_from(now).unwrap_or(u32::MAX),
+        time: u32_saturated(now),
         ..genesis_block()?.header
     };
     shared.chain_query = Some(Arc::new(FakeChain::new(vec![recent], HashMap::new())));

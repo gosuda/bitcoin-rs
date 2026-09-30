@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::{Hash256, Txid};
+use bitcoin_rs_primitives::{Hash256, Txid, u64_saturated_len};
 
 /// Canonical modulo-2^64 arithmetic for mutation sequence values.
 pub(crate) struct MutationSequence;
@@ -22,7 +22,7 @@ impl MutationSequence {
 
     /// Derives the first sequence value of a batch ending at `current`.
     pub(crate) fn base(current: u64, len: usize) -> u64 {
-        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        let len = u64_saturated_len(len);
         if len == 0 {
             0
         } else {

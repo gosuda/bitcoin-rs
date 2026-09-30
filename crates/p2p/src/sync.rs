@@ -58,6 +58,8 @@ use crate::download_window::PENDING_BUDGET;
 use crate::download_window::RECEIVED_BLOCK_BUDGET;
 #[cfg(test)]
 use crate::download_window::RECEIVED_BLOCK_TIMEOUT;
+// The version outbound `getheaders` advertises is the one the wire layer owns.
+use crate::wire::PROTOCOL_VERSION;
 #[cfg(test)]
 use commit::restore_split;
 
@@ -82,9 +84,6 @@ pub(crate) use crate::download_window::MIN_PEERS_FOR_FANOUT;
 
 /// Maximum number of locator entries we ever send.
 const LOCATOR_MAX_ENTRIES: usize = 32;
-
-/// Wire protocol version we advertise on outbound `getheaders`.
-const PROTOCOL_VERSION: u32 = 70_016;
 
 /// Time after which an unanswered `getheaders` request may be retried.
 const HEADER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -173,6 +172,12 @@ fn tip_may_be_stale(
 }
 
 type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
+
+/// Clamps a signed height to `0` rather than panicking or wrapping; a
+/// negative height has no wire meaning here and is treated as unknown.
+fn clamped_height_u32(height: i32) -> u32 {
+    u32::try_from(height).unwrap_or(0)
+}
 
 /// Block download orchestrator.
 ///
@@ -511,7 +516,7 @@ impl BlockSync {
             if plan.schedule_bodies {
                 let request_peer_count = selection.request_peers.len();
                 for (peer_idx, peer) in selection.request_peers.iter().enumerate() {
-                    let peer_best_height = u32::try_from(peer.best_known_height).unwrap_or(0);
+                    let peer_best_height = clamped_height_u32(peer.best_known_height);
                     let request_outcome = self.send_getdata_for_pending_blocks(
                         peer.source,
                         peer_idx + 1 == request_peer_count,

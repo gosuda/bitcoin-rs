@@ -141,9 +141,7 @@ impl NodeState {
                         &restored_hash,
                         source,
                         &witness.block_hash,
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| d.as_secs()),
+                        bitcoin_rs_primitives::unix_now(),
                     )
                     .context("write checkpoint-fallback event marker")?;
                 let gap = witness_height.saturating_sub(restored_height);

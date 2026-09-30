@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_primitives::{Txid, u32_saturated_len};
 use hashbrown::HashMap;
 
 /// Bucket fee-rate growth numerator: each bucket's lower bound is 5% above
@@ -260,7 +260,7 @@ impl FeeEstimator {
         // sit in the pending set: a re-admitted entry is dropped once it
         // outlives every target, so past `MAX_CONF_TARGET` heights a record
         // can never again meet a pending entry of the same transaction.
-        let prune_window = u32::try_from(MAX_CONF_TARGET).unwrap_or(u32::MAX);
+        let prune_window = u32_saturated_len(MAX_CONF_TARGET);
         self.confirmed_at.retain(|_, confirmed_height| {
             block_height.saturating_sub(*confirmed_height) <= prune_window
         });
@@ -445,7 +445,7 @@ mod history_codec {
         build_buckets,
     };
     use alloc::vec::Vec;
-    use bitcoin_rs_primitives::Txid;
+    use bitcoin_rs_primitives::{Txid, u32_saturated_len};
     use hashbrown::HashMap;
 
     /// Magic prefix of every version-1 history payload.
@@ -549,10 +549,7 @@ mod history_codec {
             }
             None => out.push(0),
         }
-        push_u32(
-            &mut out,
-            u32::try_from(est.buckets.len()).unwrap_or(u32::MAX),
-        );
+        push_u32(&mut out, u32_saturated_len(est.buckets.len()));
         for bucket in &est.buckets {
             out.extend_from_slice(&bucket.fee_rate_sat_per_kvb.to_le_bytes());
             push_counts(&mut out, &bucket.confirmed_within);
@@ -560,22 +557,16 @@ mod history_codec {
         }
         let mut pending: Vec<_> = est.pending.iter().collect();
         pending.sort_unstable_by_key(|(txid, _)| **txid);
-        push_u32(&mut out, u32::try_from(pending.len()).unwrap_or(u32::MAX));
+        push_u32(&mut out, u32_saturated_len(pending.len()));
         for (txid, entry) in pending {
             out.extend_from_slice(txid.as_bytes());
-            push_u32(
-                &mut out,
-                u32::try_from(entry.bucket_index).unwrap_or(u32::MAX),
-            );
+            push_u32(&mut out, u32_saturated_len(entry.bucket_index));
             out.extend_from_slice(&entry.entry_height.to_le_bytes());
-            push_u32(
-                &mut out,
-                u32::try_from(entry.resolved_through).unwrap_or(u32::MAX),
-            );
+            push_u32(&mut out, u32_saturated_len(entry.resolved_through));
         }
         let mut confirmed: Vec<_> = est.confirmed_at.iter().collect();
         confirmed.sort_unstable_by_key(|(txid, _)| **txid);
-        push_u32(&mut out, u32::try_from(confirmed.len()).unwrap_or(u32::MAX));
+        push_u32(&mut out, u32_saturated_len(confirmed.len()));
         for (txid, height) in confirmed {
             out.extend_from_slice(txid.as_bytes());
             out.extend_from_slice(&height.to_le_bytes());
@@ -868,7 +859,7 @@ mod tests {
     #[test]
     fn a_departure_frees_capacity_for_new_transactions() {
         let mut est = FeeEstimator::new();
-        for n in 0..u32::try_from(MAX_PENDING_ENTRIES).unwrap_or(u32::MAX) {
+        for n in 0..u32_saturated_len(MAX_PENDING_ENTRIES) {
             est.tx_entered(wide_txid(n), 10_000, 100);
         }
         assert_eq!(
@@ -1148,7 +1139,7 @@ mod tests {
             FeeEstimator::from_history_bytes(&bytes).expect("the encoder's own bytes must decode");
         assert_estimator_state_eq(&est, &restored);
         assert_eq!(est.confirmed_at, restored.confirmed_at);
-        for target in 1..=u32::try_from(MAX_CONF_TARGET).unwrap_or(u32::MAX) {
+        for target in 1..=u32_saturated_len(MAX_CONF_TARGET) {
             assert_eq!(est.estimate(target), restored.estimate(target));
         }
     }

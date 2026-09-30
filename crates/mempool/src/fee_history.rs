@@ -5,6 +5,7 @@
 use std::io::{self, Read};
 use std::path::Path;
 
+use bitcoin_rs_primitives::u64_saturated_len;
 use parking_lot::RwLock;
 
 use crate::{FeeEstimator, Mempool};
@@ -33,7 +34,7 @@ fn read_history(path: &Path) -> io::Result<Option<Vec<u8>>> {
     std::fs::File::open(path)?
         .take(MAX_HISTORY_FILE_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_HISTORY_FILE_BYTES {
+    if u64_saturated_len(bytes.len()) > MAX_HISTORY_FILE_BYTES {
         return Err(io::Error::other("exceeds the version-1 size bound"));
     }
     Ok(Some(bytes))

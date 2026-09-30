@@ -47,6 +47,8 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::consensus_bytes;
+use bitcoin_rs_primitives::hex_encode;
+use bitcoin_rs_primitives::u64_saturated_len;
 use compact_str::CompactString;
 use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
@@ -241,7 +243,7 @@ impl MempoolSnapshotSource for MempoolAdapter {
     }
 
     fn pooled_transaction_count(&self) -> u64 {
-        u64::try_from(self.mempool.read().len()).unwrap_or(u64::MAX)
+        u64_saturated_len(self.mempool.read().len())
     }
 
     fn selection_snapshot(
@@ -512,7 +514,7 @@ impl MiningControl for MiningCoordinator {
             }
             generated.push(GeneratedBlock {
                 hash: block.block_hash(),
-                hex: bitcoin_rs_storage::checkpoint::hex_encode(&consensus_bytes(&block)),
+                hex: hex_encode(&consensus_bytes(&block)),
             });
         }
         Ok(generated)

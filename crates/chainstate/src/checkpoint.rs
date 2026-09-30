@@ -6,6 +6,7 @@ use bitcoin_rs_chain::ChainWork;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::hex_encode;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 pub(crate) use bitcoin_rs_storage::checkpoint::COINSTATS_ARTIFACT_LEN;
@@ -45,7 +46,6 @@ use bitcoin_rs_storage::checkpoint::coinstats_artifact_payload;
 use bitcoin_rs_storage::checkpoint::commit_publication;
 pub(crate) use bitcoin_rs_storage::checkpoint::corrupt_checkpoint;
 use bitcoin_rs_storage::checkpoint::decode_hex;
-pub(crate) use bitcoin_rs_storage::checkpoint::hex_encode;
 use bitcoin_rs_storage::checkpoint::network_name;
 use bitcoin_rs_storage::checkpoint::open_current_checkpoint;
 #[cfg(test)]
@@ -59,6 +59,7 @@ use bitcoin_rs_utxo::stats::CoinStats;
 use bitcoin_rs_utxo::stats::CoinStatsAccumulator;
 use bitcoin_rs_utxo::stats::CoinStatsListener;
 use bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN;
+use bitcoin_rs_utxo::stats::muhash3072;
 use bitcoin_rs_utxo::write_snapshot_observed;
 use cap_std::fs::Dir;
 use cap_std::fs::File;
@@ -560,7 +561,7 @@ pub(crate) fn write_checkpoint_from_dir(
     let mut fused_stats = accumulator.into_stats();
     fused_stats.tx_count = listener_stats.tx_count;
     let record_count = utxo.record_count();
-    if trailer == [0_u8; 384] {
+    if trailer == [0_u8; muhash3072::BYTE_LEN] {
         return Err(CheckpointError::Store(StoreError::Invalid(
             "scanned UTXO snapshot has a zero MuHash trailer".to_owned(),
         )));

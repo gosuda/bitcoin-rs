@@ -56,7 +56,7 @@ impl RedbStore {
             cache_bytes
         };
         metrics::gauge!("storage.cache_capacity_bytes", "backend" => "redb")
-            .set(crate::metric_f64(cache_bytes));
+            .set(bitcoin_rs_primitives::u64_to_f64(cache_bytes));
         let db_path = database_path(path.as_ref())?;
         let db = Database::builder()
             .set_cache_size(usize::try_from(cache_bytes).unwrap_or(usize::MAX))
@@ -570,7 +570,7 @@ pub fn open_redb_tx_index_store_with_cache(
         cache_bytes
     };
     metrics::gauge!("storage.cache_capacity_bytes", "backend" => "redb-txindex")
-        .set(crate::metric_f64(cache_bytes));
+        .set(bitcoin_rs_primitives::u64_to_f64(cache_bytes));
     RedbTxIndexStore::open_with_cache(path, cache_bytes)
 }
 

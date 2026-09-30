@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_primitives::{
-    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness,
+    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, u32_saturated,
+    u32_saturated_len,
 };
 use bitcoin_rs_script::count_tx_legacy;
 
@@ -44,8 +45,8 @@ fn baseline_entry(tx: Arc<Tx>, vsize: u32, fee: u64, time: u64, height: u32) -> 
     let own_size = u64::from(vsize);
     let txid = tx.txid();
     let wtxid = tx.wtxid();
-    let bip141_vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
+    let bip141_vsize = u32_saturated(tx.vsize());
+    let size = u32_saturated_len(tx.total_size());
     let weight = tx.weight();
     let sigop_cost = count_tx_legacy(&tx);
     MempoolEntry {

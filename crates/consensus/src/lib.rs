@@ -14,8 +14,6 @@
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-/// Maximum consensus script size in bytes.
-pub const MAX_SCRIPT_SIZE: usize = 10_000;
 /// Maximum distance a BIP94 candidate timestamp may fall below its parent
 /// block's timestamp at a difficulty-adjustment boundary
 /// (`MAX_TIMEWARP`, Core `src/consensus/consensus.h:30-37`).
@@ -55,17 +53,18 @@ pub use block_view::BlockView;
 pub use engine::ValidationEngine;
 pub use sigops::transaction_sigop_cost;
 pub use verify_block::{
-    BlockRuleContext, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT, check_block_body_binding,
-    compute_merkle_root, verify_block_rules, verify_block_rules_precomputed, verify_flags,
-    verify_merkle_root_with_txids,
+    BlockRuleContext, MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_WEIGHT, WITNESS_COMMITMENT_PREFIX,
+    check_block_body_binding, compute_merkle_root, hash_merkle_pair, verify_block_rules,
+    verify_block_rules_precomputed, verify_flags, verify_merkle_root_with_txids,
+    witness_commitment, witness_commitment_hash, witness_merkle_root,
 };
 pub use verify_tx::{
-    COINBASE_MATURITY, ScriptStageTimings, check_coinbase_maturity, is_final_tx,
-    verify_block_input_scripts, verify_coinbase_script_sig_size, verify_transaction,
-    verify_transaction_non_script,
+    COINBASE_MATURITY, MAX_COINBASE_SCRIPT_SIG_SIZE, MIN_COINBASE_SCRIPT_SIG_SIZE,
+    ScriptStageTimings, check_coinbase_maturity, is_final_tx, verify_block_input_scripts,
+    verify_coinbase_script_sig_size, verify_transaction, verify_transaction_non_script,
 };
 
-use bitcoin_rs_primitives::{OutPoint, TxOut};
+use bitcoin_rs_primitives::{Amount, OutPoint, TxOut};
 use thiserror::Error;
 
 /// Minimal UTXO lookup contract used by the portable validator.
@@ -277,7 +276,7 @@ pub enum ConsensusError {
 /// reachable in a test.
 #[must_use]
 pub const fn block_subsidy(height: u32, halving_interval: u32) -> u64 {
-    const INITIAL_SUBSIDY_SATS: u64 = 50 * 100_000_000;
+    const INITIAL_SUBSIDY_SATS: u64 = 50 * Amount::COIN.to_sat();
 
     if halving_interval == 0 {
         return INITIAL_SUBSIDY_SATS;

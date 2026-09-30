@@ -23,6 +23,7 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    u32_saturated,
 };
 use bitcoin_rs_script::opcode;
 
@@ -145,7 +146,7 @@ fn stale_policy_verdict_becomes_retryable() -> Result<(), Box<dyn Error>> {
     let tx = tx_one_input(prev, Vec::new(), Vec::new(), 99_000, P2PKH_SCRIPT.to_vec());
     let context = PackageTxContext {
         fee: 1_000,
-        vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
+        vsize: u32_saturated(tx.vsize()),
         sigop_cost: 0,
         missing_inputs: false,
     };
@@ -226,7 +227,7 @@ fn p2sh_sigop_cost_exceeds_standard_limit() {
     );
     let context = PackageTxContext {
         fee: 1_000,
-        vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
+        vsize: u32_saturated(tx.vsize()),
         sigop_cost: 0,
         missing_inputs: false,
     };
@@ -274,7 +275,7 @@ fn p2wsh_sigop_cost_exceeds_standard_limit() {
     );
     let context = PackageTxContext {
         fee: 1_000,
-        vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
+        vsize: u32_saturated(tx.vsize()),
         sigop_cost: 0,
         missing_inputs: false,
     };
@@ -353,7 +354,7 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     };
     let context = PackageTxContext {
         fee: 1_000,
-        vsize: u32::try_from(child.vsize()).unwrap_or(u32::MAX),
+        vsize: u32_saturated(child.vsize()),
         sigop_cost: 0,
         missing_inputs: false,
     };
@@ -406,7 +407,7 @@ fn caller_sigop_cost_is_ignored_in_stored_entry() -> Result<(), Box<dyn Error>> 
     // Claim an absurd sigop cost; the gateway must not use it.
     let context = PackageTxContext {
         fee: 1_000,
-        vsize: u32::try_from(tx.vsize()).unwrap_or(u32::MAX),
+        vsize: u32_saturated(tx.vsize()),
         sigop_cost: u32::MAX,
         missing_inputs: false,
     };
@@ -513,7 +514,7 @@ fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacemen
     let candidate_txid = candidate.txid();
     let context = PackageTxContext {
         fee: 3_000,
-        vsize: u32::try_from(candidate.vsize()).unwrap_or(u32::MAX),
+        vsize: u32_saturated(candidate.vsize()),
         sigop_cost: 0,
         missing_inputs: false,
     };

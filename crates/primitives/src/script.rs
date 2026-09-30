@@ -2,6 +2,11 @@
 
 use core::ops::{Deref, DerefMut};
 
+/// Largest script, in bytes, that legacy and segwit v0 evaluation accepts and
+/// the UTXO set admits as a coin (Core's `MAX_SCRIPT_SIZE`; tapscript is exempt
+/// from the evaluation limit).
+pub const MAX_SCRIPT_SIZE: usize = 10_000;
+
 /// A Bitcoin script (`scriptSig` or `scriptPubKey`) as owned consensus bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Script(Vec<u8>);

@@ -3,10 +3,9 @@
 //! Callers supply applied-chain facts. This module never queries node state and
 //! does not choose JSON-RPC versus REST transport policy.
 
-use bitcoin_rs_primitives::{Block, Header, Network, consensus_bytes};
+use bitcoin_rs_primitives::{Block, Header, Network, consensus_bytes, hex_encode};
 use sonic_rs::{Value, json};
 
-use crate::compat::convert::hex_encode;
 use crate::tx_render::transaction_json;
 
 /// Applied-chain facts required to project a header or block.

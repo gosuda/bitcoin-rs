@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot, compact_is_met_by};
-use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
+use bitcoin_rs_primitives::MAX_SCRIPT_SIZE;
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness,

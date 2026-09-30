@@ -1,6 +1,5 @@
 //! Roundtrip tests for electrs-shaped index rows over a small in-memory `KvStore`.
 use std::{
-    collections::BTreeMap,
     path::PathBuf,
     sync::{
         Arc,
@@ -24,8 +23,8 @@ use bitcoin_rs_index::{
     IndexWatermark, IndexWatermarks, IndexWriter, PreparedBatch, PreparedBatchLimits,
 };
 use bitcoin_rs_storage::{
-    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PrefixScanLimit,
-    StorageError, WriteCondition,
+    BatchOp, BufferedWriteBatch, ColumnFamily, InMemoryKvStore, KvIter, KvSnapshot, KvStore,
+    PrefixScanLimit, StorageError, WriteCondition,
 };
 
 /// Reserved capability-reset marker slot mirrored from the index crate.
@@ -51,7 +50,7 @@ const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
 
 /// Interrupted 9-byte claim from an earlier binary: mask plus process epoch,
 /// with no base version.
-fn fenced_marker(mask: u8, process_epoch: u64) -> Vec<u8> {
+fn legacy_nine_byte_claim(mask: u8, process_epoch: u64) -> Vec<u8> {
     let mut value = Vec::with_capacity(9);
     value.push(mask);
     value.extend_from_slice(&process_epoch.to_le_bytes());
@@ -96,87 +95,27 @@ fn stored_idle_version<S: KvStore>(store: &Arc<S>) -> Result<u64, Box<dyn std::e
     }
 }
 
-#[derive(Default)]
-struct MemoryStore {
-    cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
+/// Whole-family reads for row-occupancy assertions.
+///
+/// A failed scan panics, failing the test at the assertion instead of
+/// reading as an empty family.
+trait FamilyRows {
+    /// Number of rows in `cf`.
+    fn count(&self, cf: ColumnFamily) -> usize;
+
+    /// Every row in `cf`, in key order.
+    fn rows(&self, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)>;
 }
 
-impl MemoryStore {
+impl FamilyRows for InMemoryKvStore {
     fn count(&self, cf: ColumnFamily) -> usize {
-        let guard = self.cfs.read();
-        guard[cf.index()].len()
+        self.rows(cf).len()
     }
 
     fn rows(&self, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let guard = self.cfs.read();
-        guard[cf.index()]
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
-    }
-}
-
-impl KvStore for MemoryStore {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        let guard = self.cfs.read();
-        Ok(guard[cf.index()].get(key).cloned())
-    }
-
-    #[allow(clippy::needless_collect)] // SPEC: returned KvIter must own cloned rows after the lock guard is dropped.
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let guard = self.cfs.read();
-        let rows = guard[cf.index()]
-            .iter()
-            .filter(|(key, _value)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
-    }
-
-    fn new_batch(&self) -> BufferedWriteBatch {
-        BufferedWriteBatch::default()
-    }
-
-    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        let mut guard = self.cfs.write();
-        apply_ops(&mut guard, batch.into_ops());
-        Ok(())
-    }
-
-    fn write_durable_if(
-        &self,
-        conditions: &[WriteCondition<'_>],
-        batch: BufferedWriteBatch,
-    ) -> Result<bool, StorageError> {
-        // The check and the apply run under one write lock, matching the
-        // backend's atomic conditional write.
-        let mut guard = self.cfs.write();
-        let matched = conditions.iter().all(|condition| {
-            let (cf, key) = condition.location();
-            condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
-        });
-        if !matched {
-            return Ok(false);
-        }
-        apply_ops(&mut guard, batch.into_ops());
-        Ok(true)
-    }
-
-    fn flush(&self) -> Result<(), StorageError> {
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
-        let guard = self.cfs.read();
-        Ok(Box::new(MemorySnapshot { cfs: guard.clone() }))
-    }
-
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
+        self.iter_prefix(cf, &[])
+            .and_then(Iterator::collect)
+            .unwrap_or_else(|error| panic!("{cf:?} scan failed: {error}"))
     }
 }
 
@@ -190,7 +129,7 @@ struct BatchLog {
 
 #[derive(Default)]
 struct CallTrackingStore {
-    inner: MemoryStore,
+    inner: InMemoryKvStore,
     writes: AtomicUsize,
     durable_writes: AtomicUsize,
     flushes: AtomicUsize,
@@ -439,56 +378,6 @@ fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
     batch
 }
 
-/// Folds one batch's operations into the column families, in order.
-fn apply_ops(cfs: &mut [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()], ops: Vec<BatchOp>) {
-    for op in ops {
-        match op {
-            BatchOp::Put { cf, key, value } => {
-                cfs[cf.index()].insert(key, value.into());
-            }
-            BatchOp::Delete { cf, key } => {
-                cfs[cf.index()].remove(&key);
-            }
-            BatchOp::DeleteRange { cf, start, end } => {
-                let keys = cfs[cf.index()]
-                    .keys()
-                    .filter(|key| {
-                        key.as_slice() >= start.as_slice() && key.as_slice() < end.as_slice()
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for key in keys {
-                    cfs[cf.index()].remove(&key);
-                }
-            }
-        }
-    }
-}
-
-struct MemorySnapshot {
-    cfs: [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()],
-}
-
-impl KvSnapshot for MemorySnapshot {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.cfs[cf.index()].get(key).cloned())
-    }
-
-    #[allow(clippy::needless_collect)] // SPEC: returned KvIter owns cloned rows to match backend iterator ownership.
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let rows = self.cfs[cf.index()]
-            .iter()
-            .filter(|(key, _value)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
-    }
-}
-
 /// CONTRACT: IDX-09 — canonical electrs row cardinality after an atomic commit.
 /// CONTRACT: IDX-06 — electrs-shaped occupancy after one atomic forward commit.
 #[test]
@@ -527,7 +416,7 @@ fn commit_golden_blocks_writes_expected_electrs_rows() -> Result<(), Box<dyn std
     ];
 
     for (height, expected) in cases {
-        let store = std::sync::Arc::new(MemoryStore::default());
+        let store = std::sync::Arc::new(InMemoryKvStore::default());
         let mut writer = IndexWriter::open(std::sync::Arc::clone(&store), 1)?;
         let block = read_fixture(height)?;
 
@@ -593,7 +482,7 @@ fn watermark_roundtrip_and_invalid_rejection() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
@@ -610,7 +499,7 @@ fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
 fn format_4_open_refuses_for_rebuild() -> Result<(), Box<dyn std::error::Error>> {
     // Format 5 changed every row family, so a format-4 store refuses start
     // and recovery full-resets it for rebuild. No in-place upgrade exists.
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &4_u32.to_le_bytes())?;
     assert!(matches!(
@@ -630,7 +519,7 @@ fn format_4_open_refuses_for_rebuild() -> Result<(), Box<dyn std::error::Error>>
 
 #[test]
 fn unversioned_rows_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     store.put(ColumnFamily::TxConfirmed, b"orphan-row", &[])?;
 
     assert!(matches!(
@@ -642,7 +531,7 @@ fn unversioned_rows_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
@@ -670,7 +559,7 @@ fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), Box<dyn s
 
 #[test]
 fn invalid_watermark_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
@@ -691,7 +580,7 @@ fn invalid_watermark_rejected() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
@@ -721,7 +610,7 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
 
 #[test]
 fn prepare_block_for_rejects_a_short_body() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     // Forty bytes cannot hold the fixed 80-byte header the parser requires.
@@ -739,7 +628,7 @@ fn prepare_block_for_rejects_a_short_body() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn prepare_block_for_rejects_a_truncated_transaction() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     // Cut the coinbase short: the header and the transaction count still
@@ -759,7 +648,7 @@ fn prepare_block_for_rejects_a_truncated_transaction() -> Result<(), Box<dyn std
 
 #[test]
 fn prepare_block_for_rejects_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let mut body = read_fixture(0)?;
     let hash = block_hash(&body);
@@ -779,7 +668,7 @@ fn prepare_block_for_rejects_trailing_bytes() -> Result<(), Box<dyn std::error::
 
 #[test]
 fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body0 = read_fixture(0)?;
     let body1 = read_fixture(1)?;
@@ -853,7 +742,7 @@ fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), Box<dyn st
 
 #[test]
 fn snapshot_scan_preserves_position_values() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let block = Block::consensus_decode(&body)?;
@@ -914,7 +803,7 @@ fn spending_rows_carry_transaction_positions() -> Result<(), Box<dyn std::error:
         u32::try_from(spending_bytes.len())?,
     );
 
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let prepared = writer.prepare_block(0, block_hash(&body), &body)?;
     let mut batch = PreparedBatch::new(PreparedBatchLimits {
@@ -973,7 +862,7 @@ fn commit_forward_uses_one_durable_write() -> Result<(), Box<dyn std::error::Err
 #[test]
 fn capability_commits_own_only_their_rows_and_watermarks() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
@@ -1058,7 +947,7 @@ fn aligned_capabilities_share_one_atomic_commit() -> Result<(), Box<dyn std::err
 #[test]
 fn script_index_reset_preserves_tx_lookup_and_shared_identity()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
@@ -1091,7 +980,7 @@ fn script_index_reset_preserves_tx_lookup_and_shared_identity()
 #[test]
 fn rollback_preserves_shared_ancestors_for_a_disabled_capability()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body0 = read_fixture(0)?;
     let body1 = read_fixture(1)?;
@@ -1130,7 +1019,7 @@ fn rollback_preserves_shared_ancestors_for_a_disabled_capability()
 
 #[test]
 fn resetting_the_only_cursor_removes_shared_identity() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let block =
@@ -1151,7 +1040,7 @@ fn resetting_the_only_cursor_removes_shared_identity() -> Result<(), Box<dyn std
 
 #[test]
 fn open_resumes_interrupted_capability_reset() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
@@ -1167,7 +1056,11 @@ fn open_resumes_interrupted_capability_reset() -> Result<(), Box<dyn std::error:
     // A crashed fenced reset: the marker names generation 3; the next open
     // (generation 1) adopts it, finishes the deletion, and clears it.
     let mut interrupted = store.new_batch();
-    interrupted.put(ColumnFamily::UtxoMeta, RESET_KEY, &fenced_marker(0b10, 3));
+    interrupted.put(
+        ColumnFamily::UtxoMeta,
+        RESET_KEY,
+        &legacy_nine_byte_claim(0b10, 3),
+    );
     interrupted.delete(ColumnFamily::UtxoMeta, &[0x00, b'S']);
     interrupted.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
     store.write_durable(interrupted)?;
@@ -1238,7 +1131,7 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
 
 #[test]
 fn forward_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let body = read_fixture(1)?;
@@ -1255,7 +1148,7 @@ fn forward_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::erro
     claim.put(
         ColumnFamily::UtxoMeta,
         RESET_KEY,
-        &fenced_marker(SCRIPT_HISTORY_MASK, 9),
+        &legacy_nine_byte_claim(SCRIPT_HISTORY_MASK, 9),
     );
     claim.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
     claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
@@ -1280,7 +1173,7 @@ fn forward_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::erro
 
 #[test]
 fn rollback_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let body = read_fixture(0)?;
@@ -1290,7 +1183,7 @@ fn rollback_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::err
     claim.put(
         ColumnFamily::UtxoMeta,
         RESET_KEY,
-        &fenced_marker(SCRIPT_HISTORY_MASK, 9),
+        &legacy_nine_byte_claim(SCRIPT_HISTORY_MASK, 9),
     );
     claim.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
     claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
@@ -1317,7 +1210,7 @@ fn rollback_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::err
 
 #[test]
 fn consumer_cursor_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (fence, _) = writer.fenced_watermarks()?;
@@ -1326,7 +1219,7 @@ fn consumer_cursor_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn s
     claim.put(
         ColumnFamily::UtxoMeta,
         RESET_KEY,
-        &fenced_marker(TX_LOOKUP_MASK, 9),
+        &legacy_nine_byte_claim(TX_LOOKUP_MASK, 9),
     );
     claim.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
     claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
@@ -1344,7 +1237,7 @@ fn consumer_cursor_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn s
 
 #[test]
 fn rollback_is_excluded_by_a_reset_fence() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let body = read_fixture(0)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     writer.commit_block(0, &body)?;
@@ -1353,7 +1246,7 @@ fn rollback_is_excluded_by_a_reset_fence() -> Result<(), Box<dyn std::error::Err
     claim.put(
         ColumnFamily::UtxoMeta,
         RESET_KEY,
-        &fenced_marker(SCRIPT_HISTORY_MASK, 9),
+        &legacy_nine_byte_claim(SCRIPT_HISTORY_MASK, 9),
     );
     claim.put(ColumnFamily::UtxoMeta, FORMAT_KEY, &FORMAT_VALUE);
     claim.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
@@ -1424,9 +1317,9 @@ fn legacy_one_byte_marker_is_adopted_durably_then_completed()
 
 /// Both stores hold one populated block of rows for every capability.
 fn seed_populated_stores()
--> Result<(Arc<MemoryStore>, Arc<MemoryStore>), Box<dyn std::error::Error>> {
-    let control = Arc::new(MemoryStore::default());
-    let interrupted = Arc::new(MemoryStore::default());
+-> Result<(Arc<InMemoryKvStore>, Arc<InMemoryKvStore>), Box<dyn std::error::Error>> {
+    let control = Arc::new(InMemoryKvStore::default());
+    let interrupted = Arc::new(InMemoryKvStore::default());
     for store in [&control, &interrupted] {
         seed_populated_store(store, 1)?;
     }
@@ -1452,9 +1345,13 @@ fn seed_populated_store(
 
 /// Crash state right after the fenced marker commit: rows intact, selected
 /// watermark already gone.
-fn crash_after_marker_commit(store: &MemoryStore) -> Result<(), Box<dyn std::error::Error>> {
+fn crash_after_marker_commit(store: &InMemoryKvStore) -> Result<(), Box<dyn std::error::Error>> {
     let mut batch = store.new_batch();
-    batch.put(ColumnFamily::UtxoMeta, RESET_KEY, &fenced_marker(0b10, 3));
+    batch.put(
+        ColumnFamily::UtxoMeta,
+        RESET_KEY,
+        &legacy_nine_byte_claim(0b10, 3),
+    );
     batch.delete(ColumnFamily::UtxoMeta, &[0x00, b'S']);
     batch.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
     store.write_durable(batch)?;
@@ -1462,7 +1359,7 @@ fn crash_after_marker_commit(store: &MemoryStore) -> Result<(), Box<dyn std::err
 }
 
 /// Every column family's full byte state, marker included.
-fn dump_all(store: &MemoryStore) -> Vec<(ColumnFamily, Vec<u8>, Vec<u8>)> {
+fn dump_all(store: &InMemoryKvStore) -> Vec<(ColumnFamily, Vec<u8>, Vec<u8>)> {
     let mut rows = Vec::new();
     for &cf in ColumnFamily::ALL {
         rows.extend(
@@ -1576,7 +1473,7 @@ struct CompetingClaim {
 /// The delete hook also fires for an unconditional write, which makes a
 /// regression from exact-claim conditional deletion observable without sleeps.
 struct ForeignFenceStore {
-    inner: MemoryStore,
+    inner: InMemoryKvStore,
     on_claim: Mutex<Option<CompetingClaim>>,
     on_delete: Mutex<Option<CompetingClaim>>,
     on_clear: Mutex<Option<CompetingClaim>>,
@@ -1709,7 +1606,7 @@ impl KvStore for ForeignFenceStore {
 #[test]
 fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(ForeignFenceStore {
-        inner: MemoryStore::default(),
+        inner: InMemoryKvStore::default(),
         on_claim: Mutex::new(None),
         on_delete: Mutex::new(None),
         on_clear: Mutex::new(Some(CompetingClaim {
@@ -1723,7 +1620,7 @@ fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), Box<dyn st
     crashed.put(
         ColumnFamily::UtxoMeta,
         RESET_KEY,
-        &fenced_marker(TX_LOOKUP_MASK, 3),
+        &legacy_nine_byte_claim(TX_LOOKUP_MASK, 3),
     );
     crashed.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
     crashed.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
@@ -1744,7 +1641,7 @@ fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), Box<dyn st
 #[test]
 fn changed_claim_prevents_stale_row_deletion() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(ForeignFenceStore {
-        inner: MemoryStore::default(),
+        inner: InMemoryKvStore::default(),
         on_claim: Mutex::new(None),
         on_delete: Mutex::new(Some(CompetingClaim {
             generation: 9,
@@ -1758,7 +1655,7 @@ fn changed_claim_prevents_stale_row_deletion() -> Result<(), Box<dyn std::error:
     crashed.put(
         ColumnFamily::UtxoMeta,
         RESET_KEY,
-        &fenced_marker(TX_LOOKUP_MASK, 4),
+        &legacy_nine_byte_claim(TX_LOOKUP_MASK, 4),
     );
     crashed.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
     crashed.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
@@ -1791,7 +1688,7 @@ fn competing_claim_during_claim_merges_different_masks() -> Result<(), Box<dyn s
     // losing Absent claim must retry from fresh state, adopt the union
     // mask, and clear the union of watermarks — no sleeps, no lost claim.
     let store = Arc::new(ForeignFenceStore {
-        inner: MemoryStore::default(),
+        inner: InMemoryKvStore::default(),
         on_claim: Mutex::new(Some(CompetingClaim {
             generation: 9,
             requested_mask: SCRIPT_HISTORY_MASK,
@@ -1833,13 +1730,13 @@ fn competing_claim_during_claim_merges_different_masks() -> Result<(), Box<dyn s
 #[test]
 fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut foreign = store.new_batch();
     foreign.put(
         ColumnFamily::UtxoMeta,
         RESET_KEY,
-        &fenced_marker(SCRIPT_HISTORY_MASK, 9),
+        &legacy_nine_byte_claim(SCRIPT_HISTORY_MASK, 9),
     );
     foreign.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
     foreign.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
@@ -1865,7 +1762,7 @@ fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset()
 
 #[test]
 fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
 
     let writer = IndexWriter::open(Arc::clone(&store), 1)?;
@@ -1891,7 +1788,7 @@ fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::err
 
 #[test]
 fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body0 = read_fixture(0)?;
     let body1 = read_fixture(1)?;
@@ -1945,7 +1842,7 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn format_version_requires_exact_bytes() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     // Extra trailing byte must be rejected even though the prefix is version 4.
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1961,7 +1858,7 @@ fn format_version_requires_exact_bytes() -> Result<(), Box<dyn std::error::Error
 
 #[test]
 fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let current = IndexWatermark {
         height: u32::MAX - 1,
         hash: [0; 32],
@@ -2001,7 +1898,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let overflow = IndexWatermark {
         height: u32::MAX,
         hash: [0xab; 32],
@@ -2036,7 +1933,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
 
 #[test]
 fn rollback_rejects_prev_at_genesis() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let block = writer.prepare_block(0, block_hash(&body), &body)?;
@@ -2101,7 +1998,7 @@ fn redb_snapshot_preserves_position_values() -> Result<(), Box<dyn std::error::E
 /// Writes a complete competing full-capability claim, exactly as a correct
 /// concurrent reset publication commits it.
 fn inject_full_claim(
-    store: &MemoryStore,
+    store: &InMemoryKvStore,
     process_epoch: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut claim = store.new_batch();
@@ -2121,7 +2018,7 @@ fn inject_full_claim(
 #[test]
 fn full_reset_between_derive_and_commit_rejects_forward() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (fence, _) = writer.fenced_watermarks()?;
@@ -2148,7 +2045,7 @@ fn full_reset_between_derive_and_commit_rejects_forward() -> Result<(), Box<dyn 
 #[test]
 fn full_reset_between_derive_and_commit_rejects_rollback() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (fence, _) = writer.fenced_watermarks()?;
@@ -2172,7 +2069,7 @@ fn full_reset_between_derive_and_commit_rejects_rollback() -> Result<(), Box<dyn
 #[test]
 fn full_reset_between_derive_and_commit_skips_stale_cursor()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (fence, _) = writer.fenced_watermarks()?;
@@ -2204,7 +2101,7 @@ fn full_reset_between_derive_and_commit_skips_stale_cursor()
 #[test]
 fn double_reset_same_generation_still_rejects_stale_commit()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     writer.reset_capabilities(IndexCapabilities::HISTORICAL)?;
@@ -2248,7 +2145,7 @@ fn double_reset_same_generation_still_rejects_stale_commit()
 #[test]
 fn intermediate_rollback_deletes_cursor_and_survives_reopen()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (fence, _) = writer.fenced_watermarks()?;
     let body0 = read_fixture(0)?;
@@ -2284,7 +2181,7 @@ fn intermediate_rollback_deletes_cursor_and_survives_reopen()
 
 #[test]
 fn intermediate_rollback_removes_stale_cursor() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (fence, _) = writer.fenced_watermarks()?;
@@ -2315,7 +2212,7 @@ fn intermediate_rollback_removes_stale_cursor() -> Result<(), Box<dyn std::error
 #[test]
 fn stale_cursor_publish_is_rejected_when_watermarks_lag() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
     let (stale_fence, _) = writer.fenced_watermarks()?;
@@ -2426,7 +2323,7 @@ fn cursor_publish_rejects_script_watermark_race() -> Result<(), Box<dyn std::err
 
 #[test]
 fn oversized_first_row_does_not_escape_reset() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     // A derived row far larger than the reset scan's whole byte budget: a
     // backend that dropped it instead of admitting it as the first row would
@@ -2763,7 +2660,7 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
 #[test]
 fn ordinary_revision_overflow_rejects_forward_without_destroying_state()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut near_ceiling = store.new_batch();
     near_ceiling.put(
@@ -2807,7 +2704,7 @@ fn ordinary_revision_overflow_rejects_forward_without_destroying_state()
 
 #[test]
 fn reset_version_overflow_is_rejected_before_claiming() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut near_ceiling = store.new_batch();
     near_ceiling.put(ColumnFamily::UtxoMeta, RESET_KEY, &idle_bytes(u64::MAX - 1));
@@ -2837,7 +2734,7 @@ fn reset_version_overflow_is_rejected_before_claiming() -> Result<(), Box<dyn st
 #[test]
 fn reset_revision_overflow_is_rejected_before_claim_publication()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut state = store.new_batch();
     state.put(ColumnFamily::UtxoMeta, RESET_KEY, &idle_bytes(1));
@@ -2861,15 +2758,6 @@ fn reset_revision_overflow_is_rejected_before_claim_publication()
         "revision overflow must leave reset state, rows, cursors, and watermarks untouched"
     );
     Ok(())
-}
-
-/// Interrupted 9-byte claim from an earlier binary: mask plus process epoch,
-/// with no base version.
-fn legacy_nine_byte_claim(mask: u8, process_epoch: u64) -> Vec<u8> {
-    let mut value = Vec::with_capacity(9);
-    value.push(mask);
-    value.extend_from_slice(&process_epoch.to_le_bytes());
-    value
 }
 
 /// A fence captured before a legacy claim round-trip must not come back
@@ -3067,7 +2955,7 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
 #[test]
 fn second_writer_forward_contention_rejects_stale_fence() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut winner = IndexWriter::open(Arc::clone(&store), 4)?;
     let mut loser = IndexWriter::open(Arc::clone(&store), 5)?;
@@ -3132,7 +3020,7 @@ fn second_writer_forward_contention_rejects_stale_fence() -> Result<(), Box<dyn 
 #[test]
 fn second_writer_rollback_contention_rejects_stale_fence() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     seed_populated_store(&store, 1)?;
     let mut winner = IndexWriter::open(Arc::clone(&store), 4)?;
     let mut loser = IndexWriter::open(Arc::clone(&store), 5)?;

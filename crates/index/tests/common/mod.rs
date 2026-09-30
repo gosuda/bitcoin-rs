@@ -1,138 +1,17 @@
-//! Shared test support: a backend-free `KvStore` over `BTreeMap`.
+//! Shared test support: writers for raw index rows, plus a block header
+//! fixture.
 //!
-//! Deliberately not behind a storage feature. Correctness tests that gate a
-//! refactor must run on a plain `cargo test --workspace`; a test hidden behind
-//! `required-features` is a test that silently does not run.
+//! The rows land in `bitcoin_rs_storage::InMemoryKvStore`, the backend-free
+//! `KvStore` owned by bitcoin-rs-storage. Deliberately not behind a storage
+//! feature. Correctness tests that gate a refactor must run on a plain
+//! `cargo test --workspace`; a test hidden behind `required-features` is a
+//! test that silently does not run.
 #![allow(dead_code)]
-
-use std::collections::BTreeMap;
 
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
 use bitcoin_rs_index::{ScriptHash, ScriptHashRow, SpendingPrefixRow};
-use bitcoin_rs_primitives::OutPoint;
-use bitcoin_rs_storage::{
-    BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError,
-    WriteCondition,
-};
-use parking_lot::RwLock;
-
-#[derive(Default)]
-pub(crate) struct MemoryStore {
-    cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
-}
-
-/// Folds one batch's recorded operations into the column families, in order.
-fn apply_ops(cfs: &mut [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()], ops: Vec<BatchOp>) {
-    for op in ops {
-        match op {
-            BatchOp::Put { cf, key, value } => {
-                cfs[cf.index()].insert(key, value.into());
-            }
-            BatchOp::Delete { cf, key } => {
-                cfs[cf.index()].remove(&key);
-            }
-            BatchOp::DeleteRange { cf, start, end } => {
-                let doomed: Vec<Vec<u8>> = cfs[cf.index()]
-                    .range(start..end)
-                    .map(|(key, _value)| key.clone())
-                    .collect();
-                for key in doomed {
-                    cfs[cf.index()].remove(&key);
-                }
-            }
-        }
-    }
-}
-
-impl KvStore for MemoryStore {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        let guard = self.cfs.read();
-        Ok(guard[cf.index()].get(key).cloned())
-    }
-
-    #[allow(clippy::needless_collect)] // SPEC: returned KvIter must own cloned rows after the lock guard is dropped.
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let guard = self.cfs.read();
-        let rows = guard[cf.index()]
-            .iter()
-            .filter(|(key, _value)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
-    }
-
-    fn new_batch(&self) -> BufferedWriteBatch {
-        BufferedWriteBatch::default()
-    }
-
-    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        let mut guard = self.cfs.write();
-        apply_ops(&mut guard, batch.into_ops());
-        Ok(())
-    }
-
-    fn write_durable_if(
-        &self,
-        conditions: &[WriteCondition<'_>],
-        batch: BufferedWriteBatch,
-    ) -> Result<bool, StorageError> {
-        // Every condition observes pre-batch state; the batch is allowed to
-        // put or delete a condition key itself. The check and the apply run
-        // under one write lock, matching the backend's atomic conditional
-        // write.
-        let mut guard = self.cfs.write();
-        let matched = conditions.iter().all(|condition| {
-            let (cf, key) = condition.location();
-            condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
-        });
-        if !matched {
-            return Ok(false);
-        }
-        apply_ops(&mut guard, batch.into_ops());
-        Ok(true)
-    }
-
-    fn flush(&self) -> Result<(), StorageError> {
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
-        let guard = self.cfs.read();
-        Ok(Box::new(MemorySnapshot { cfs: guard.clone() }))
-    }
-
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
-    }
-}
-
-pub(crate) struct MemorySnapshot {
-    cfs: [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()],
-}
-
-impl KvSnapshot for MemorySnapshot {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.cfs[cf.index()].get(key).cloned())
-    }
-
-    #[allow(clippy::needless_collect)] // SPEC: returned KvIter owns cloned rows to match backend iterator ownership.
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let rows = self.cfs[cf.index()]
-            .iter()
-            .filter(|(key, _value)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
-    }
-}
+use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, OutPoint};
+use bitcoin_rs_storage::{ColumnFamily, InMemoryKvStore, KvStore, StorageError};
 
 /// Writes one funding-row key at `height` with an empty value.
 ///
@@ -140,7 +19,7 @@ impl KvSnapshot for MemorySnapshot {
 /// little-endian key order, not watermark contiguity, use this instead of
 /// [`bitcoin_rs_index::IndexWriter::commit_block`].
 pub(crate) fn put_funding_row(
-    store: &MemoryStore,
+    store: &InMemoryKvStore,
     scripthash: ScriptHash,
     height: u32,
 ) -> Result<(), StorageError> {
@@ -157,7 +36,7 @@ pub(crate) fn put_funding_row(
 /// `TxPosition`-backed resolution use this instead of the empty-value
 /// [`put_funding_row`].
 pub(crate) fn put_funding_row_positions(
-    store: &MemoryStore,
+    store: &InMemoryKvStore,
     scripthash: ScriptHash,
     height: u32,
     positions: &[TxPosition],
@@ -178,7 +57,7 @@ pub(crate) fn put_funding_row_positions(
 
 /// Writes one spending-row key at `height` with an empty value.
 pub(crate) fn put_spending_row(
-    store: &MemoryStore,
+    store: &InMemoryKvStore,
     outpoint: &OutPoint,
     height: u32,
 ) -> Result<(), StorageError> {
@@ -187,4 +66,17 @@ pub(crate) fn put_spending_row(
         &SpendingPrefixRow::row(outpoint, height).to_db_row(),
         &[],
     )
+}
+
+/// A version-1 header with every other field zeroed, for fixture blocks that
+/// need no chain linkage or proof of work.
+pub(crate) fn header() -> Header {
+    Header {
+        version: 1,
+        prev_blockhash: BlockHash::default(),
+        merkle_root: Hash256::default(),
+        time: 0,
+        bits: CompactTarget::from_consensus(0),
+        nonce: 0,
+    }
 }

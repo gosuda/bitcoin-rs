@@ -28,6 +28,7 @@ use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::OutPoint;
+use bitcoin_rs_primitives::u64_saturated_len;
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::UtxoCoin;
 use bitcoin_rs_utxo::contract::{
@@ -816,7 +817,7 @@ fn replay_gap_chain(
     };
     let transition = handles.begin_transition()?;
     // A length always fits u64; the metrics counter counts in u64.
-    let replayed_blocks = u64::try_from(chain.len()).unwrap_or(u64::MAX);
+    let replayed_blocks = u64_saturated_len(chain.len());
     let replayed = (|| {
         let mut commit_id = 0_u64;
         for (height, hash) in chain {

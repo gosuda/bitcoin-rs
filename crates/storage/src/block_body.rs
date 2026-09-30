@@ -1,7 +1,7 @@
 //! Indexed authoritative block bodies, read sessions, and durability.
 
 use crate::durable_head::BodyExtent;
-use bitcoin_rs_primitives::{Hash256, varint};
+use bitcoin_rs_primitives::{Hash256, Header, varint};
 
 use crate::{
     BlockFilePosition, FlatFileBlockReader, FlatFileBlockStore, KvSnapshot, KvStore, StorageError,
@@ -10,8 +10,7 @@ use crate::{
 
 use std::sync::Arc;
 
-const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
-const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = SERIALIZED_BLOCK_HEADER_LEN + 9;
+const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = Header::LEN + 9;
 
 /// Block payload facts available without materializing a full block body.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -23,7 +22,7 @@ pub struct BlockBodyMetadata {
 }
 
 fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {
-    let cursor = bytes.get(SERIALIZED_BLOCK_HEADER_LEN..)?;
+    let cursor = bytes.get(Header::LEN..)?;
     let (count, _) = varint::decode(cursor).ok()?;
     usize::try_from(count).ok()
 }
@@ -589,9 +588,6 @@ mod metadata_tests {
         let block = Network::Regtest.genesis_block();
         let bytes = consensus_bytes(&block);
         assert_eq!(decode_block_tx_count(&bytes), Some(block.txs.len()));
-        assert_eq!(
-            decode_block_tx_count(&bytes[..SERIALIZED_BLOCK_HEADER_LEN]),
-            None
-        );
+        assert_eq!(decode_block_tx_count(&bytes[..Header::LEN]), None);
     }
 }

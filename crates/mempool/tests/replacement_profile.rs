@@ -8,6 +8,7 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    u32_saturated,
 };
 
 fn coin(tag: u32) -> OutPoint {
@@ -46,12 +47,12 @@ fn pool() -> Mempool {
 }
 
 fn entry(tx: Tx, fee: u64) -> MempoolEntry {
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
+    let vsize = u32_saturated(tx.vsize());
     MempoolEntry::new(Arc::new(tx), vsize, fee, 1, 1, 0)
 }
 
 fn candidate(tx: Tx, fee: u64) -> ReplacementCandidate {
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
+    let vsize = u32_saturated(tx.vsize());
     ReplacementCandidate::new(Arc::new(tx), vsize, fee, 1_000)
 }
 

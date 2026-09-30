@@ -502,9 +502,7 @@ pub(crate) fn sequence_payload(event: SequenceEvent) -> Vec<u8> {
 
 #[cfg(any(feature = "zmq", test))]
 pub(crate) fn hash_body_from_txid(txid: Txid) -> [u8; 32] {
-    let mut body = *txid.as_bytes();
-    body.reverse();
-    body
+    hash_body_from_hash(txid.0)
 }
 
 #[cfg(any(feature = "zmq", test))]

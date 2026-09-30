@@ -5,7 +5,7 @@
 //! incomplete prevouts and must retain its explicit missing-input fact.
 
 use bitcoin_rs_consensus::transaction_sigop_cost;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, u32_saturated};
 use bitcoin_rs_script::VerifyFlags;
 
 use crate::standardness::PackageTxContext;
@@ -18,7 +18,7 @@ pub(crate) fn adjusted_weight(wire_weight: u64, sigop_cost: u32) -> u64 {
 
 pub(crate) fn charged_weight(wire_weight: u64, vsize: u32, sigop_cost: u32) -> u64 {
     let exact = adjusted_weight(wire_weight, sigop_cost);
-    if exact.div_ceil(4) == u64::from(vsize) {
+    if Tx::vsize_from_weight(exact) == u64::from(vsize) {
         exact
     } else {
         u64::from(vsize) * 4
@@ -27,7 +27,7 @@ pub(crate) fn charged_weight(wire_weight: u64, vsize: u32, sigop_cost: u32) -> u
 
 pub(crate) fn policy_vsize(tx: &Tx, sigop_cost: u32) -> u32 {
     let weight = adjusted_weight(tx.weight(), sigop_cost);
-    u32::try_from(weight.div_ceil(4)).unwrap_or(u32::MAX)
+    u32_saturated(Tx::vsize_from_weight(weight))
 }
 
 /// Derives admission accounting from the resolved input outputs.

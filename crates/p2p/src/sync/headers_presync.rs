@@ -22,18 +22,14 @@
 use std::collections::VecDeque;
 
 use bitcoin_rs_chain::{
-    ChainWork, block_work, current_unix_seconds, permitted_difficulty_transition, validate_pow,
+    ChainWork, MAX_FUTURE_TIME_SECONDS, block_work, current_unix_seconds,
+    permitted_difficulty_transition, validate_pow,
 };
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Header, HeadersSyncParams, Network};
 use sha2::{Digest as _, Sha256};
 
 /// Cumulative proof of work, ordered like Core's `arith_uint256` chainwork.
 type Work = ChainWork;
-
-/// Core's `MAX_FUTURE_BLOCK_TIME` (`bitcoin-core/src/consensus/params.h`), the
-/// drift the honest-chain length estimate allows on top of the median-time-past
-/// bound (`bitcoin-core/src/headerssync.cpp:33-49`).
-const MAX_FUTURE_BLOCK_TIME_SECONDS: u64 = 2 * 60 * 60;
 
 /// The phase of one peer's download-twice sync.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -377,7 +373,7 @@ impl HeadersSyncState {
         // sync aborts rather than the memory bound growing unbounded.
         let seconds_since_start =
             u64::from(current_unix_seconds().saturating_sub(chain_start.median_time_past))
-                .saturating_add(MAX_FUTURE_BLOCK_TIME_SECONDS);
+                .saturating_add(u64::from(MAX_FUTURE_TIME_SECONDS));
         let max_commitments = 6_u64.saturating_mul(seconds_since_start) / period;
         let last_header_bits = chain_start.header.bits.to_consensus();
         Self {

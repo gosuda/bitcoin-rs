@@ -17,6 +17,8 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Instant;
 
+use bitcoin_rs_primitives::u64_saturated_len;
+
 use super::limits::{
     CONNECT_TIMEOUT, IO_TIMEOUT, MAX_HEADER_LINE_BYTES, MAX_RESPONSE_BODY_BYTES,
     MAX_RESPONSE_HEADERS, MAX_STATUS_LINE_BYTES,
@@ -410,7 +412,7 @@ impl Connection {
                 return String::from_utf8(line)
                     .map_err(|_| HttpError::Framing("header block is not valid utf-8"));
             }
-            if u64::try_from(line.len()).unwrap_or(u64::MAX) >= ceiling {
+            if u64_saturated_len(line.len()) >= ceiling {
                 return Err(HttpError::Framing(
                     "line exceeded the declared byte ceiling",
                 ));

@@ -9,14 +9,16 @@ use hashbrown::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bitcoin_rs_chain::{BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapshot};
+use bitcoin_rs_chain::{
+    BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
+};
 use bitcoin_rs_index::block_log::BlockRecord;
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::FakeMiningControl;
 use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode::double_sha256,
+    Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, hex_encode,
 };
 use bitcoin_rs_rpc::context::{ChainControl, ChainControlError, Context};
 use bitcoin_rs_rpc::{Handler, RpcError};
@@ -641,35 +643,6 @@ fn seed_tree_chain(ctx: &Context, block: &Block) -> Block {
     linked_block
 }
 
-/// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
-/// Computes the consensus merkle root over `txs` by folding hash pairs with
-/// double SHA-256, duplicating the final hash when a layer has odd length.
-fn fixture_merkle_root(txs: &[Tx]) -> Hash256 {
-    let mut layer: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    while layer.len() > 1 {
-        if layer.len() % 2 == 1 {
-            layer.push(*layer.last().expect("non-empty merkle layer"));
-        }
-        layer = layer
-            .chunks(2)
-            .map(|pair| *double_sha256(&pair.concat()).as_byte_array())
-            .collect();
-    }
-    layer
-        .first()
-        .map_or_else(Hash256::default, Hash256::from_le_bytes)
-}
-
 fn fee_block(low_tx: Tx, high_tx: Tx) -> Block {
     let coinbase = Tx {
         version: 2,
@@ -686,7 +659,7 @@ fn fee_block(low_tx: Tx, high_tx: Tx) -> Block {
         }],
     };
     let txs = vec![coinbase, low_tx, high_tx];
-    let merkle_root = fixture_merkle_root(&txs);
+    let merkle_root = regtest_fixture::merkle_root(&txs).expect("fixture block has transactions");
     Block {
         header: Header {
             version: 1,
@@ -746,7 +719,8 @@ impl Fixture {
 
         ctx.chain.chain_network = Network::Regtest;
         let tx = tx(1, vec![0x51]);
-        let merkle_root = fixture_merkle_root(std::slice::from_ref(&tx));
+        let merkle_root = regtest_fixture::merkle_root(std::slice::from_ref(&tx))
+            .expect("fixture block has transactions");
         let block = Block {
             header: Header {
                 version: 1,

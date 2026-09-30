@@ -1,5 +1,5 @@
 use bitcoin_rs_consensus::{MAX_TIMEWARP, MEDIAN_TIME_PAST_WINDOW};
-use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
+use bitcoin_rs_primitives::{CompactTarget, Hash256, Network, u32_saturated, unix_seconds};
 
 pub use pow::{compact_is_met_by, compact_within_pow_limit};
 use pow::{compact_to_target, target_to_compact};
@@ -11,8 +11,9 @@ use crate::{
 };
 
 /// Maximum number of seconds a header timestamp may lie ahead of the
-/// current system time, per the Bitcoin consensus future-drift bound.
-const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
+/// current system time, per the Bitcoin consensus future-drift bound
+/// (Core's `MAX_FUTURE_BLOCK_TIME`).
+pub const MAX_FUTURE_TIME_SECONDS: u32 = 7200;
 
 /// Selects which contextual header checks apply to a batch of headers.
 ///
@@ -135,10 +136,7 @@ pub fn current_unix_seconds() -> u32 {
 }
 
 fn unix_seconds_at(now: std::time::SystemTime) -> u32 {
-    now.duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX)
-        })
+    u32_saturated(unix_seconds(now))
 }
 
 /// Validates the contextual rules for a header extending `parent_id`.
@@ -544,22 +542,11 @@ pub(crate) mod pow {
     }
 
     fn decode_compact(bits: u32) -> DecodedCompact {
-        let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
-        let mut mantissa = bits & 0x007f_ffff;
-        let target = if exponent <= 3 {
-            mantissa >>= 8 * (3 - exponent);
-            ChainWork::from(mantissa)
-        } else {
-            let shift = 8 * (exponent - 3);
-            if shift < 256 {
-                ChainWork::from(mantissa) << shift
-            } else {
-                ChainWork::ZERO
-            }
-        };
-        let negative = mantissa != 0 && bits & 0x0080_0000 != 0;
-
-        DecodedCompact { target, negative }
+        let (magnitude, negative) = CompactTarget::from_consensus(bits).decode_magnitude();
+        DecodedCompact {
+            target: ChainWork::from_le_bytes(magnitude),
+            negative,
+        }
     }
 
     /// Decodes a compact target, returning zero for negative encodings.

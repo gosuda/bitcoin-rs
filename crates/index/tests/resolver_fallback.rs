@@ -10,12 +10,12 @@ use bitcoin_rs_index::{
     BlockSource, IndexWriter, Indexer, ScriptHash, ScriptHashRow, ScriptHistoryEntry,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, varint,
+    Amount, Block, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    consensus_bytes, varint,
 };
-use bitcoin_rs_storage::{ColumnFamily, KvStore as _};
+use bitcoin_rs_storage::{ColumnFamily, InMemoryKvStore, KvStore as _};
 
-use common::MemoryStore;
+use common::header;
 
 const HEIGHT: u32 = 0;
 
@@ -34,17 +34,6 @@ impl BlockSource for FixtureSource {
         let start = usize::try_from(offset).ok()?;
         let end = start.checked_add(usize::try_from(len).ok()?)?;
         bytes.get(start..end).map(<[u8]>::to_vec)
-    }
-}
-
-fn header() -> Header {
-    Header {
-        version: 1,
-        prev_blockhash: BlockHash::default(),
-        merkle_root: Hash256::default(),
-        time: 0,
-        bits: CompactTarget::from_consensus(0),
-        nonce: 0,
     }
 }
 
@@ -95,7 +84,7 @@ fn eight_byte_prefix_collision_resolves_full_script_identity()
 
     let target = ScriptHash::from_script_bytes(&target_script);
     let row = ScriptHashRow::row(target, HEIGHT).to_db_row();
-    let store = Arc::new(MemoryStore::default());
+    let store = Arc::new(InMemoryKvStore::default());
     IndexWriter::open(Arc::clone(&store), 1)?.commit_block(0, &bytes)?;
     let indexer = Indexer::new(Arc::clone(&store));
 

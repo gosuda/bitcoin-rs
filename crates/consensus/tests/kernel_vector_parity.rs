@@ -43,34 +43,20 @@
 
 #![cfg(feature = "kernel")]
 
+#[path = "support/verdict.rs"]
+mod verdict;
+
 use std::error::Error;
 use std::path::Path;
 use std::str::FromStr;
 
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, deserialize};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, deserialize, hex_decode};
 use bitcoin_rs_script::VerifyFlags;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
+use verdict::Verdict;
+
 type TestResult = Result<(), Box<dyn Error>>;
-
-// ---------------------------------------------------------------------------
-// Verdict model
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Verdict {
-    Accept,
-    Reject,
-}
-
-impl Verdict {
-    fn of<T, E>(result: &Result<T, E>) -> Self {
-        match result {
-            Ok(_) => Self::Accept,
-            Err(_) => Self::Reject,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Engine
@@ -112,7 +98,7 @@ fn parse_core_asm(asm: &str) -> Result<Vec<u8>, String> {
     for token in asm.split_whitespace() {
         if let Some(hex) = token.strip_prefix("0x") {
             let bytes =
-                hex_to_bytes(hex).map_err(|e| format!("invalid hex in token {token}: {e}"))?;
+                hex_decode(hex).map_err(|e| format!("invalid hex in token {token}: {e}"))?;
             script.extend_from_slice(&bytes);
         } else if let Ok(n) = token.parse::<i64>() {
             script.extend_from_slice(&push_int(n));
@@ -249,20 +235,6 @@ fn resolve_opcode(name: &str) -> Option<u8> {
     })
 }
 
-fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err(format!("odd length: {}", hex.len()));
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            let byte = u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|e| format!("at offset {i}: {e}"))?;
-            Ok(byte)
-        })
-        .collect()
-}
-
 // ---------------------------------------------------------------------------
 // Vector loading
 // ---------------------------------------------------------------------------
@@ -317,7 +289,7 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
         let tx_hex = arr[1]
             .as_str()
             .ok_or_else(|| format!("row {index}: tx hex should be string"))?;
-        let tx_bytes = hex_to_bytes(tx_hex).map_err(|e| format!("row {index}: bad tx hex: {e}"))?;
+        let tx_bytes = hex_decode(tx_hex).map_err(|e| format!("row {index}: bad tx hex: {e}"))?;
         let tx: Tx = deserialize(&tx_bytes)
             .map_err(|e| format!("row {index}: tx should deserialize: {e}"))?;
 

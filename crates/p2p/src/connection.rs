@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
+use bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE;
 use crossbeam_channel::{Receiver, SendError, Sender, TrySendError};
 use parking_lot::Mutex;
 static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -76,16 +77,12 @@ pub const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
 /// fit: after fifteen, 60,000,360 bytes remain below this 64 MiB high-water.
 pub const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
-/// Consensus maximum serialized block size. `peer` owns the value
-/// ([`crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE`]); `connection` references it
-/// rather than carrying an independent copy.
-const BLOCK_SERIALIZED_SIZE: usize = crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
-
 /// Full framed-wire bytes reserved before loading a worst-case block body.
 ///
-/// Equals `HEADER_LEN + MAX_BLOCK_SERIALIZED_SIZE_USIZE`: the full encoded wire
+/// Equals `HEADER_LEN + MAX_BLOCK_SERIALIZED_SIZE`: the full encoded wire
 /// byte count that `wire_len` charges and `write_message` releases.
-pub const BLOCK_PRODUCTION_RESERVE_BYTES: usize = crate::wire::HEADER_LEN + BLOCK_SERIALIZED_SIZE;
+pub const BLOCK_PRODUCTION_RESERVE_BYTES: usize =
+    crate::wire::HEADER_LEN + MAX_BLOCK_SERIALIZED_SIZE;
 
 const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES > 15 * BLOCK_PRODUCTION_RESERVE_BYTES);
 
@@ -702,11 +699,8 @@ mod tests {
         // must be admissible into a queue whose byte cap equals the reserve.
         // A smaller reserve would refuse a real 4 MB block; a larger one
         // would over-reserve.
-        let Ok(block_size) = usize::try_from(bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE)
-        else {
-            panic!("MAX_BLOCK_SERIALIZED_SIZE exceeds usize on this platform")
-        };
-        let worst_case_wire = crate::wire::HEADER_LEN + block_size;
+        let worst_case_wire =
+            crate::wire::HEADER_LEN + bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE;
         assert_eq!(
             super::BLOCK_PRODUCTION_RESERVE_BYTES,
             worst_case_wire,

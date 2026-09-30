@@ -11,6 +11,7 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::Tx;
 use bitcoin_rs_primitives::TxOut;
+use bitcoin_rs_primitives::u64_saturated_len;
 use std::sync::Arc;
 
 #[test]
@@ -29,7 +30,7 @@ fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
     };
     let mut first_id = None;
     for seq in 0..=CANDIDATE_CACHE_LIMIT {
-        let seq = u64::try_from(seq).unwrap_or(u64::MAX);
+        let seq = u64_saturated_len(seq);
         let hash = Hash256::from_le_bytes(&[u8::try_from(seq).unwrap_or(0xff); 32]);
         let id = TemplateId::new(&hash, seq);
         if seq == 0 {

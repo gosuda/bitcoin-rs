@@ -5,6 +5,8 @@
 //! with rust-bitcoin 0.32's `Script` helpers (and Core's `GetOp` loop behind
 //! them); differential tests pin the parity where the two overlap.
 
+use bitcoin_rs_primitives::{u64_saturated_len, varint};
+
 /// Opcode byte constants the workspace builds and inspects scripts with.
 pub mod opcode {
     /// `OP_0`: pushes an empty byte string.
@@ -493,7 +495,8 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     if script.len() > 10_000 {
         return 0;
     }
-    let script_size = varint_size(script.len()).saturating_add(script.len());
+    let script_size =
+        varint::encoded_len(u64_saturated_len(script.len())).saturating_add(script.len());
     let size = if is_op_return(script) {
         0
     } else if is_witness_program(script) {
@@ -501,8 +504,7 @@ pub fn minimal_non_dust(script: &[u8], dust_relay_fee_sat_per_kvb: u64) -> u64 {
     } else {
         32 + 4 + 1 + 107 + 4 + 8 + script_size
     };
-    let product =
-        dust_relay_fee_sat_per_kvb.saturating_mul(u64::try_from(size).unwrap_or(u64::MAX));
+    let product = dust_relay_fee_sat_per_kvb.saturating_mul(u64_saturated_len(size));
     product.saturating_add(999) / 1000
 }
 
@@ -563,19 +565,6 @@ pub fn push_int(value: i64) -> Vec<u8> {
         _ => {}
     }
     push_data(&bytes)
-}
-
-/// Compact-size (Bitcoin varint) encoding length in bytes.
-const fn varint_size(value: usize) -> usize {
-    if value < 0xfd {
-        1
-    } else if value <= 0xffff {
-        3
-    } else if value <= 0xffff_ffff {
-        5
-    } else {
-        9
-    }
 }
 
 #[cfg(test)]
@@ -774,5 +763,30 @@ mod tests {
         assert_eq!(push_int(-500), vec![0x02, 0xf4, 0x81]);
         assert_eq!(push_data(&[1, 2]), vec![0x02, 1, 2]);
         assert_eq!(push_data(&[0; 76])[..2], [opcode::OP_PUSHDATA1, 76]);
+    }
+
+    #[test]
+    fn int_pushes_match_cscriptnum() {
+        let cases: [(i64, &[u8]); 6] = [
+            (0, &[0x00]),               // OP_0
+            (1, &[0x51]),               // OP_1
+            (16, &[0x60]),              // OP_16
+            (127, &[0x01, 0x7f]),       // explicit one-byte push
+            (128, &[0x02, 0x80, 0x00]), // sign byte keeps the magnitude positive
+            (-1, &[0x4f]),              // OP_1NEGATE
+        ];
+        // Differential: the `bitcoin` crate's own CScriptNum builder, the
+        // encoding the BIP34 checker and the regtest coinbase fixtures use.
+        for (value, expected) in cases {
+            let oracle = bitcoin::script::Builder::new()
+                .push_int(value)
+                .into_script();
+            assert_eq!(
+                oracle.as_bytes(),
+                expected,
+                "bitcoin Builder::push_int for {value}"
+            );
+            assert_eq!(push_int(value), expected, "push_int for {value}");
+        }
     }
 }

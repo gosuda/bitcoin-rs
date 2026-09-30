@@ -10,24 +10,23 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
-use bitcoin_rs_chain::{
-    BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader, block_work, compact_is_met_by,
-};
+use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
+use bitcoin_rs_chain::{BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader, block_work};
 use bitcoin_rs_p2p::sync::{HeaderAnchor, HeadersSyncPhase, HeadersSyncState};
+use bitcoin_rs_p2p::wire::MAX_HEADERS_MESSAGE_COUNT;
 use bitcoin_rs_p2p::{ActiveChainQuery, ChainQuery};
 use bitcoin_rs_primitives::{
-    BlockHash, CompactTarget, Hash256, Header, HeadersSyncParams, Network,
+    BlockHash, CompactTarget, Hash256, Header, HeadersSyncParams, Network, u32_saturated_len,
 };
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use parking_lot::RwLock;
 
-/// The wire page size a full `headers` message carries
-/// (`net_processing.h:48-57`).
-const PAGE: usize = 2_000;
+/// The wire page size a full `headers` message carries.
+const PAGE: usize = MAX_HEADERS_MESSAGE_COUNT;
 
 /// Regtest's minimum-difficulty compact target: the cheapest proof of work
 /// the consensus rules allow, so fixture mining costs about one hash.
-const EASY_BITS: CompactTarget = CompactTarget::from_consensus(0x207f_ffff);
+const EASY_BITS: CompactTarget = CompactTarget::from_consensus(REGTEST_BITS);
 
 /// A fixed base timestamp, so no bench ever reads the wall clock.
 const FIXTURE_TIME: u32 = 1_700_000_000;
@@ -46,9 +45,8 @@ fn mine_header(prev: BlockHash, height: u32) -> Header {
         bits: EASY_BITS,
         nonce: height,
     };
-    while !compact_is_met_by(EASY_BITS, Hash256::from(header.compute_hash())) {
-        header.nonce = header.nonce.wrapping_add(1);
-    }
+    regtest_fixture::mine_header_to_declared_target(&mut header)
+        .unwrap_or_else(|error| panic!("mining a fixture header failed: {error}"));
     header
 }
 
@@ -58,7 +56,7 @@ fn mine_chain(fork: &Header, fork_height: u32, len: usize) -> Vec<Header> {
     let mut prev = fork.compute_hash();
     (0..len)
         .map(|index| {
-            let offset = u32::try_from(index).unwrap_or(u32::MAX);
+            let offset = u32_saturated_len(index);
             let header = mine_header(prev, fork_height + offset + 1);
             prev = header.compute_hash();
             header
@@ -206,7 +204,7 @@ fn serve_headers_page(c: &mut Criterion) {
         .expect("fixture genesis");
 
     for height in 1..(10 * PAGE) {
-        let header = plain_header(prev, u32::try_from(height).unwrap_or(u32::MAX));
+        let header = plain_header(prev, u32_saturated_len(height));
         prev = header.compute_hash();
         parent = tree
             .insert_node(Some(parent), header, NodeStatus::Active)

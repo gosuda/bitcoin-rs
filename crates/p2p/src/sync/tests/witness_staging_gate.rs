@@ -24,8 +24,8 @@ const ZERO_RESERVED_COMMITMENT: [u8; 32] = [
 /// share the same txid — witness data is not committed to in the txid — so
 /// they produce the same merkle root and block hash.
 fn segwit_coinbase(height: u32, witness: bool) -> Tx {
-    let mut script_sig = regtest_fixture::script_num_push(i64::from(height));
-    script_sig.extend_from_slice(&regtest_fixture::script_num_push(1));
+    let mut script_sig = bitcoin_rs_script::push_int(i64::from(height));
+    script_sig.extend_from_slice(&bitcoin_rs_script::push_int(1));
     let mut commitment_script = WITNESS_PREFIX.to_vec();
     commitment_script.extend_from_slice(&ZERO_RESERVED_COMMITMENT);
     Tx {

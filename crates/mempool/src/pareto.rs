@@ -1,5 +1,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 
+use bitcoin_rs_primitives::u64_saturated_len;
+
 use crate::{EntryId, MempoolEntry};
 
 /// Priority index ordered by signed modified fee rate, modified ancestor fee
@@ -135,11 +137,9 @@ impl ParetoFront {
     pub(crate) fn dynamic_memory_usage(&self) -> u64 {
         use core::mem::size_of;
 
-        let ordered = u64::try_from(self.order.len())
-            .unwrap_or(u64::MAX)
+        let ordered = u64_saturated_len(self.order.len())
             .saturating_mul(u64::try_from(size_of::<ParetoKey>()).unwrap_or(0));
-        let by_id = u64::try_from(self.keys.len())
-            .unwrap_or(u64::MAX)
+        let by_id = u64_saturated_len(self.keys.len())
             .saturating_mul(u64::try_from(size_of::<(EntryId, ParetoKey)>()).unwrap_or(0));
         ordered.saturating_add(by_id)
     }

@@ -16,6 +16,7 @@ use anyhow::bail;
 use bitcoin_rs_index::IndexWatermark;
 use bitcoin_rs_index::Indexer;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::hex_encode;
 use bitcoin_rs_storage::DataDirAnchor;
 use bitcoin_rs_storage::FootprintError;
 use bitcoin_rs_storage::LogicalLedger;
@@ -235,7 +236,7 @@ fn compiled_features() -> Vec<String> {
 
 fn cargo_lock_sha256() -> String {
     let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"));
-    bitcoin_rs_storage::checkpoint::hex_encode(&Sha256::digest(lock.as_bytes()))
+    hex_encode(&Sha256::digest(lock.as_bytes()))
 }
 
 fn sha256_file(path: &Path) -> io::Result<String> {
@@ -249,9 +250,7 @@ fn sha256_file(path: &Path) -> io::Result<String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(bitcoin_rs_storage::checkpoint::hex_encode(
-        &hasher.finalize(),
-    ))
+    Ok(hex_encode(&hasher.finalize()))
 }
 
 fn collect_logical(

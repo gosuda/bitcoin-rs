@@ -14,7 +14,11 @@ Rule checks live in `verify_tx` and `verify_block` with per-subject helpers
 `verify_transaction` family (with median-time-past and borrowed variants),
 `is_final_tx`, and the `verify_block_rules` family including Merkle-root verification.
 `compute_merkle_root` is the sole pairwise SHA-256d fold (AVX2 or spine) used by
-block rules, witness-commitment checks, and mining candidate assembly.
+block rules, witness-commitment checks, and mining candidate assembly;
+`hash_merkle_pair` is its two-node parent hash, which merkle-proof builders reuse.
+`witness_merkle_root` and `witness_commitment_hash` compute the BIP141
+commitment for both the block-rule check and mining, and `witness_commitment`
+finds the one a coinbase carries.
 `kernel::BlockParse` parses a serialized block exactly once — through the Rust
 layout parse under `validation.engine = "native"`, or `bitcoinkernel::Block::new`
 under `validation.engine = "kernel"` on `kernel`-feature builds — yielding the
@@ -24,9 +28,10 @@ checks to the selected backend over its resolved `(OutPoint, TxOut)`
 `spent_outputs` rows. BIP9 activation is
 `compute_state`
 over a `DeploymentContext` with `DeploymentParams`. Consensus bounds are exported as
-`MAX_SCRIPT_SIZE`, `MAX_BLOCK_SIGOPS_COST`, `MAX_BLOCK_WEIGHT`, and
-`MAX_BLOCK_SERIALIZED_SIZE`; failures are `ConsensusError`
-variants.
+`MAX_BLOCK_SIGOPS_COST`, `MAX_BLOCK_WEIGHT`, `MAX_BLOCK_SERIALIZED_SIZE`, and the
+coinbase scriptSig range `MIN_COINBASE_SCRIPT_SIG_SIZE..=MAX_COINBASE_SCRIPT_SIG_SIZE`;
+`MAX_SCRIPT_SIZE` lives in `bitcoin-rs-primitives`, below the interpreter that
+enforces it. Failures are `ConsensusError` variants.
 
 ## Features
 - `kernel` (off by default): compiles [bitcoinkernel](../../CONCEPTS.md#bitcoinkernel)

@@ -2,9 +2,10 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
 use bitcoin_rs_mempool::MempoolEntry;
+use bitcoin_rs_primitives::i64_saturated;
 use sonic_rs::Value;
 
-use crate::compat::convert::{i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic};
+use crate::compat::convert::{sat_to_btc, signed_sat_to_btc, typed_to_sonic};
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, parse_txid, required_str};

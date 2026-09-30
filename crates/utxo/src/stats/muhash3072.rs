@@ -4,7 +4,9 @@ use bitcoin_rs_primitives::Hash256;
 use ruint::Uint;
 use sha2::{Digest, Sha256};
 
-const BYTE_LEN: usize = 384;
+/// Serialized width of one 3072-bit `MuHash3072` element, in bytes: the
+/// [`MuHash3072::finalize`] value and each half of the stored state.
+pub const BYTE_LEN: usize = 384;
 const LIMBS: usize = 48;
 const LIMB_BITS: usize = 64;
 const MAX_PRIME_DIFF: u64 = 1_103_717;

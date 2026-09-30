@@ -104,9 +104,7 @@ impl Worker {
         let Some(capability) = index_ahead_capability_label(capabilities) else {
             return Ok(());
         };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let now = bitcoin_rs_primitives::unix_now();
         self.reporter
             .report_index_ahead(
                 &capability,

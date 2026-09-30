@@ -6,7 +6,7 @@ use bitcoin_rs_chain::{
 
 #[path = "support/pow_oracle.rs"]
 mod pow_oracle;
-use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
+use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, u32_saturated};
 use pow_oracle::pow_is_met;
 
 #[test]
@@ -589,13 +589,9 @@ fn seed_period(
         .map(|height| {
             (
                 bits,
-                anchor_time.saturating_add(
-                    u32::try_from(
-                        u64::from(tip_time - anchor_time) * u64::from(height)
-                            / u64::from(tip_height),
-                    )
-                    .unwrap_or(u32::MAX),
-                ),
+                anchor_time.saturating_add(u32_saturated(
+                    u64::from(tip_time - anchor_time) * u64::from(height) / u64::from(tip_height),
+                )),
             )
         })
         .collect();
@@ -885,12 +881,9 @@ fn testnet4_retarget_uses_first_period_bits_after_min_difficulty_tip()
         };
         headers.push((
             bits,
-            DAA_ANCHOR_TIME.saturating_add(
-                u32::try_from(
-                    u64::from(expected_timespan) * u64::from(height) / u64::from(interval - 1),
-                )
-                .unwrap_or(u32::MAX),
-            ),
+            DAA_ANCHOR_TIME.saturating_add(u32_saturated(
+                u64::from(expected_timespan) * u64::from(height) / u64::from(interval - 1),
+            )),
         ));
     }
     let (parent_id, _) = seed_headers(&mut tree, &headers)?;

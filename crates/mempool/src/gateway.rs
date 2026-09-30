@@ -1637,6 +1637,7 @@ mod tests {
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
     use crate::orphan::RejectScope;
     use crate::standardness::PackageTxContext;
+    use crate::test_support::tx;
     use crate::{Mempool, MempoolEntry, MempoolLimits};
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -1646,23 +1647,6 @@ mod tests {
     use core::sync::atomic::Ordering;
     use parking_lot::{Mutex, RwLock};
     use std::sync::mpsc;
-
-    fn tx(label: u8) -> Tx {
-        Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51, label].into(),
-            }],
-        }
-    }
 
     fn entry(tx: &Tx) -> MempoolEntry {
         MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7, 0)

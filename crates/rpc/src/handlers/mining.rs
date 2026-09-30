@@ -1,7 +1,6 @@
 use alloc::sync::Arc;
 use core::str::FromStr as _;
 
-use bitcoin::hex::FromHex as _;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_mining::{
     AvailableMiningRule, BlockTemplate, BlockTemplateMode, BlockTemplateRequest,
@@ -10,14 +9,15 @@ use bitcoin_rs_mining::{
     witness_commitment_script,
 };
 use bitcoin_rs_primitives::{
-    Block, ConsensusDecode, Header, Network, Tx, Txid, consensus_bytes, deserialize,
+    Block, ConsensusDecode, Header, Network, Tx, Txid, consensus_bytes, deserialize, hex_decode,
+    hex_encode, i64_saturated,
 };
 use compact_str::CompactString;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
-    self, compact_target_hex, hex_encode, i64_saturated, sat_to_btc, signed_sat_to_i64,
-    typed_to_sonic, typed_to_sonic_omitting_nulls,
+    self, compact_target_hex, core_chain_name, sat_to_btc, signed_sat_to_i64, typed_to_sonic,
+    typed_to_sonic_omitting_nulls,
 };
 use crate::context::Context;
 use crate::error::RpcError;
@@ -93,7 +93,7 @@ pub(crate) fn submitblock(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 }
 
 fn decode_submitted_block(hex: &str) -> Result<(Block, Vec<u8>), RpcError> {
-    let mut bytes = Vec::<u8>::from_hex(hex).map_err(|_| block_decode_failed())?;
+    let mut bytes = hex_decode(hex).map_err(|_| block_decode_failed())?;
     // See the API-15 contract for DecodeHexBlk compatibility behavior.
     let mut reader: &[u8] = &bytes;
     let block = <Block as ConsensusDecode>::consensus_decode(&mut reader)
@@ -110,7 +110,7 @@ fn block_decode_failed() -> RpcError {
 const HEADER_BYTES: usize = 80;
 
 fn decode_block_header(hex: &str) -> Result<Header, RpcError> {
-    let bytes = Vec::<u8>::from_hex(hex)
+    let bytes = hex_decode(hex)
         .map_err(|_| RpcError::Deserialization("Block header decode failed".to_owned()))?;
     // Core's DecodeHexBlockHeader unserializes CBlockHeader and ignores leftover
     // bytes, so extra hex after 80 bytes is accepted. Fewer than 80 bytes fail.
@@ -410,7 +410,7 @@ fn parse_generateblock_transactions(
             transactions.push(GenerateTx::ResolvedMempool(entry));
             continue;
         }
-        let bytes = Vec::<u8>::from_hex(text).map_err(|_| generateblock_tx_decode_failed(text))?;
+        let bytes = hex_decode(text).map_err(|_| generateblock_tx_decode_failed(text))?;
         let tx: Tx = deserialize(&bytes).map_err(|_| generateblock_tx_decode_failed(text))?;
         transactions.push(GenerateTx::Raw(tx));
     }
@@ -602,9 +602,7 @@ fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
             "bitcoin-rs is not connected!".to_owned(),
         ));
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
+    let now = bitcoin_rs_primitives::unix_now();
     if ctx.chain.ibd.is_active(now, ctx.chain.chain_network) {
         return Err(RpcError::ClientInInitialDownload(
             "bitcoin-rs is in initial sync and waiting for blocks...".to_owned(),
@@ -695,13 +693,7 @@ fn render_block_template(template: &BlockTemplate) -> Result<Value, RpcError> {
 }
 
 fn render_mining_info(info: &MiningInfo) -> Result<Value, RpcError> {
-    let chain = match info.network {
-        bitcoin_rs_primitives::Network::Mainnet => "main",
-        bitcoin_rs_primitives::Network::Testnet3 => "test",
-        bitcoin_rs_primitives::Network::Testnet4 => "testnet4",
-        bitcoin_rs_primitives::Network::Signet => "signet",
-        bitcoin_rs_primitives::Network::Regtest => "regtest",
-    };
+    let chain = core_chain_name(info.network);
     let next_bits = format!("{:08x}", info.next_bits);
     let next_target = compact_target_hex(info.next_bits);
     let next_height = u64::from(info.blocks) + 1;

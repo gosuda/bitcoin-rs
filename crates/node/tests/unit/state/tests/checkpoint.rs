@@ -1,5 +1,12 @@
 use super::*;
 
+/// The UTXO set's `hash_serialized_3`, in the shape `with_stable_view` takes.
+fn stable_hash(
+    view: &bitcoin_rs_utxo::UtxoSetView<'_>,
+) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
+    view.hash_serialized_3()
+}
+
 /// Undo pruning must respect the durable tip, not the in-memory one.
 ///
 /// The applied tip can run far ahead of the last clean checkpoint. Pruning
@@ -51,11 +58,6 @@ fn the_chain_transaction_count_survives_a_checkpoint_restart() -> anyhow::Result
 
 #[test]
 fn clean_checkpoint_reopens_and_applies_the_next_block() -> anyhow::Result<()> {
-    fn stable_hash(
-        view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
-        view.hash_serialized_3()
-    }
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -220,12 +222,6 @@ fn rolling_coinstats_resume_continues_through_next_block() -> anyhow::Result<()>
 
 #[test]
 fn journal_replay_restores_state_above_checkpoint() -> anyhow::Result<()> {
-    fn stable_hash(
-        view: &bitcoin_rs_utxo::UtxoSetView<'_>,
-    ) -> Result<bitcoin_rs_primitives::Hash256, bitcoin_rs_utxo::UtxoError> {
-        view.hash_serialized_3()
-    }
-
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("journal-resume");
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);

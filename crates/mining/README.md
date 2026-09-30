@@ -9,8 +9,8 @@ within weight, serialized-size, and sigop limits. It consumes the snapshot's
 ancestor lists and consensus `is_final_tx`; it does not re-validate the
 mempool DAG. The `coinbase` module funds
 the coinbase (subsidy plus actual fees) and, when `SegWit` is active, attaches the
-witness commitment through consensus `compute_merkle_root` (the same AVX2/spine
-fold block rules use).
+witness commitment that consensus `witness_merkle_root` and
+`witness_commitment_hash` compute (the same helpers the block-rule check uses).
 [`into_unsolved_block`](crate::Candidate::into_unsolved_block) turns that candidate
 into a block whose header has a zero nonce, and [`solve_block`](crate::solve_block) searches
 nonces until the header meets its compact target. Failures surface as

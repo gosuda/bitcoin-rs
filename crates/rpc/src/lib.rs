@@ -41,6 +41,7 @@ mod tx_render;
 pub mod zmq;
 
 pub use auth::Auth;
+pub use compat::convert::bitcoin_network;
 pub use manifest::MANIFEST_TOML;
 
 pub use error::RpcError;

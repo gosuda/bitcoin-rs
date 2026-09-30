@@ -1,8 +1,9 @@
-//! In-memory test doubles shared by in-crate unit tests.
+//! In-memory test doubles and fixtures shared by in-crate unit tests.
 
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::chainstate_journal::Coin;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
@@ -28,5 +29,19 @@ impl BlockBodyStore for MemoryBodies {
 
     fn sync(&self) -> Result<(), StorageError> {
         Ok(())
+    }
+}
+
+/// A coinbase journal coin at vout 0 of the txid filled with `marker`, paying
+/// `value` sats to `OP_TRUE`, created at `height`.
+pub(crate) fn coin(marker: u8, height: u32, value: u64) -> Coin {
+    Coin {
+        outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
+        txout: TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51].into(),
+        },
+        height,
+        coinbase: true,
     }
 }

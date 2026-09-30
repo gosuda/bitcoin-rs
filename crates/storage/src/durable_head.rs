@@ -15,6 +15,7 @@
 
 use bitcoin_rs_primitives::Hash256;
 
+use crate::crc32c::crc32c;
 use crate::pruning::{BLOCK_DATA_CF, block_body_key, block_undo_key};
 use crate::{ColumnFamily, KvStore, StorageError, WriteCondition};
 
@@ -336,19 +337,6 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
         *head = Some(*next);
         Ok(())
     }
-}
-
-/// CRC32C (Castagnoli), matching the chainstate journal's framing checksum.
-fn crc32c(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0x82_F6_3B_78 & mask);
-        }
-    }
-    !crc
 }
 
 #[cfg(test)]

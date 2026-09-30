@@ -15,6 +15,7 @@ use super::{
     CHECKPOINT_ROOT, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointFailpoint,
     CheckpointManifestV1, CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
 };
+use bitcoin_rs_primitives::hex_encode;
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -134,7 +135,7 @@ pub fn commit_publication(
         version: CURRENT_VERSION,
         generation,
         directory: paths.directory.clone(),
-        manifest_sha256: super::format::hex_encode(&Sha256::digest(&manifest_bytes)),
+        manifest_sha256: hex_encode(&Sha256::digest(&manifest_bytes)),
     };
     let current_bytes = serde_json::to_vec(&current)?;
     let mut cf = root.create_file(&paths.current_temp)?;

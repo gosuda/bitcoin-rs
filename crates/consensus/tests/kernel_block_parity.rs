@@ -78,45 +78,22 @@
 
 #![cfg(feature = "kernel")]
 
+#[path = "support/verdict.rs"]
+mod verdict;
+
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use bitcoin_rs_consensus::ConsensusError;
-use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, consensus_bytes, deserialize, hex_decode};
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
 use serde::Deserialize;
+
+use verdict::Verdict;
 
 /// Convenient alias for fallible test bodies (house style: tests return a
 /// `Result` and use `?`, mirroring `crates/utxo/tests/commit_commute.rs`).
 type TestResult = Result<(), Box<dyn Error>>;
-
-// ---------------------------------------------------------------------------
-// Verdict model
-// ---------------------------------------------------------------------------
-
-/// A coarse accept/reject verdict, the only thing this harness compares. We
-/// intentionally collapse *why* a path rejected: the kernel and the Rust path
-/// classify failures with different error taxonomies, and requiring identical
-/// reasons would test the taxonomy, not consensus. Identical accept/reject is
-/// the invariant; reason strings are surfaced only in assertion messages for
-/// triage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Verdict {
-    /// The engine accepted the spend.
-    Accept,
-    /// The engine rejected the spend.
-    Reject,
-}
-
-impl Verdict {
-    /// Maps any `Result` to a verdict: `Ok` is accept, any `Err` is reject.
-    fn of<T, E>(result: &Result<T, E>) -> Self {
-        match result {
-            Ok(_) => Self::Accept,
-            Err(_) => Self::Reject,
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Engines
@@ -486,7 +463,7 @@ fn load_fixtures() -> Result<Vec<Fixture>, Box<dyn Error>> {
 }
 
 fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn Error>> {
-    let tx: Tx = deserialize(&decode_hex(&file.tx_hex)?)
+    let tx: Tx = deserialize(&hex_decode(&file.tx_hex)?)
         .map_err(|error| format!("{}: tx hex does not decode: {error}", path.display()))?;
     let computed_txid = tx.txid().to_string();
     if computed_txid != file.txid {
@@ -525,7 +502,7 @@ fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn E
         .map(|prevout| {
             Ok(TxOut {
                 value: bitcoin_rs_primitives::Amount::from_sat(prevout.amount_sat),
-                script_pubkey: decode_hex(&prevout.script_hex)?.into(),
+                script_pubkey: hex_decode(&prevout.script_hex)?.into(),
             })
         })
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
@@ -538,19 +515,6 @@ fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn E
         prevouts,
         flags,
     })
-}
-
-fn decode_hex(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("hex string has odd length".into());
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let digits = hex.as_bytes();
-    for pair in digits.as_chunks::<2>().0 {
-        let value = u8::from_str_radix(str::from_utf8(pair)?, 16)?;
-        bytes.push(value);
-    }
-    Ok(bytes)
 }
 
 /// Rejects an empty fixture set so the verdict loop cannot pass vacuously.

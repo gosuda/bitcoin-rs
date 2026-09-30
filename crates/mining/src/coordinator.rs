@@ -21,6 +21,10 @@ use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_primitives::CompactTarget;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Network;
+use bitcoin_rs_primitives::hex_decode;
+use bitcoin_rs_primitives::u32_saturated;
+use bitcoin_rs_primitives::u32_saturated_len;
+use bitcoin_rs_primitives::u64_saturated_len;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
 use compact_str::CompactString;
@@ -569,8 +573,7 @@ impl MiningService {
                     state.cache_insert(template_id, Arc::clone(candidate));
                     state.last_candidate = Some(LastCandidateInfo {
                         weight: candidate.weight,
-                        transactions: u64::try_from(candidate.transactions.len())
-                            .unwrap_or(u64::MAX)
+                        transactions: u64_saturated_len(candidate.transactions.len())
                             .saturating_add(1),
                     });
                     state.published = Some(key);
@@ -638,7 +641,7 @@ impl MiningService {
             csv_active: chain.csv_active,
             segwit_active: chain.segwit_active,
             max_weight: MAX_BLOCK_WEIGHT,
-            max_size: MAX_BLOCK_SERIALIZED_SIZE,
+            max_size: u64_saturated_len(MAX_BLOCK_SERIALIZED_SIZE),
             max_sigops: u64::from(MAX_BLOCK_SIGOPS_COST),
         })
     }
@@ -805,7 +808,7 @@ pub fn snapshot_for_selection(
             let mut selected_positions = HashMap::with_capacity(items.len());
             let mut by_txid = HashMap::with_capacity(full.entries.len());
             for (index, entry) in full.entries.iter().enumerate() {
-                let position = u32::try_from(index).unwrap_or(u32::MAX);
+                let position = u32_saturated_len(index);
                 by_txid.insert(entry.txid, position);
             }
             let mut selected: Vec<SnapshotEntry> = Vec::with_capacity(items.len());
@@ -818,7 +821,7 @@ pub fn snapshot_for_selection(
                                 "transaction not in mempool",
                             )));
                         };
-                        let new_index = u32::try_from(selected.len()).unwrap_or(u32::MAX);
+                        let new_index = u32_saturated_len(selected.len());
                         old_to_new.insert(old, new_index);
                         let old_usize = usize::try_from(old).unwrap_or(usize::MAX);
                         selected.push(full.entries[old_usize].clone());
@@ -880,8 +883,8 @@ fn snapshot_entry_from_raw(
     flags: VerifyFlags,
 ) -> SnapshotEntry {
     let tx = Arc::new(tx.clone());
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
-    let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
+    let vsize = u32_saturated(tx.vsize());
+    let size = u32_saturated_len(tx.total_size());
     SnapshotEntry {
         txid: tx.txid(),
         wtxid: tx.wtxid(),
@@ -940,33 +943,8 @@ fn signet_info(network: Network) -> Option<SignetMiningInfo> {
         return None;
     }
     let challenge = hex_decode(DEFAULT_SIGNET_CHALLENGE)
-        .unwrap_or_else(|| panic!("Bitcoin Core's default Signet challenge is invalid hex"));
+        .unwrap_or_else(|_| panic!("Bitcoin Core's default Signet challenge is invalid hex"));
     Some(SignetMiningInfo { challenge })
-}
-
-/// Decodes a lowercase hex string to bytes. Returns `None` on invalid input.
-fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let mut chars = hex.as_bytes().iter();
-    while let Some(&hi) = chars.next() {
-        let &lo = chars.next()?;
-        let high = decode_nibble(hi)?;
-        let low = decode_nibble(lo)?;
-        bytes.push((high << 4) | low);
-    }
-    Some(bytes)
-}
-
-fn decode_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

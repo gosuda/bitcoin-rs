@@ -14,7 +14,7 @@ use bitcoin_rs_node::{
 
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Tx, TxIn, TxOut, Txid, Witness, hex_encode,
 };
 
 use compact_str::CompactString;
@@ -109,17 +109,6 @@ fn expect_template(result: BlockTemplateResult) -> BlockTemplate {
             panic!("expected template, got {other:?}")
         }
     }
-}
-
-/// Lowercase hex, matching the retained wire-seam hex formatting the challenge
-/// assertion compares against.
-fn to_lower_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 /// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed`.
@@ -1050,7 +1039,7 @@ fn mining_info_reports_default_signet_challenge() -> anyhow::Result<()> {
         panic!("default Signet did not expose challenge metadata");
     };
     assert_eq!(
-        to_lower_hex(&signet.challenge),
+        hex_encode(&signet.challenge),
         concat!(
             "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430",
             "210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",

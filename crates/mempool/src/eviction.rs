@@ -133,12 +133,11 @@ pub fn mempool_min_fee_sat_per_kvb(pool: &Mempool, incremental_relay_fee_sat_per
 #[allow(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
-    use bitcoin_rs_primitives::{
-        Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-    };
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint};
 
     use super::{evict_lowest_fee_packages, mempool_min_fee_sat_per_kvb};
     use crate::mutation::{MutationChange, MutationOutcome, RemovalReason};
+    use crate::test_support::tx;
     use crate::{Mempool, MempoolEntry, MempoolLimits};
 
     #[test]
@@ -262,22 +261,5 @@ mod tests {
         assert_eq!(evicted.len(), 1);
         assert_eq!(pool.lowest_fee_rate(), Some(4_000));
         assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 5_000);
-    }
-
-    fn tx(label: u8) -> Tx {
-        Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[label; 32])), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51, label].into(),
-            }],
-        }
     }
 }

@@ -142,7 +142,7 @@ fn settle_node_reorg(
                 let _ = gateway.reconsider_disconnected(
                     change,
                     &chain,
-                    crate::tx_ingress::unix_time_secs(),
+                    bitcoin_rs_primitives::unix_now(),
                     observer.disconnected.drain(..),
                 );
             }

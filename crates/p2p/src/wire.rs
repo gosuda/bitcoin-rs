@@ -27,7 +27,10 @@ pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
 /// Maximum control messages coalesced into one vectored write.
 pub const MAX_WRITE_BURST: usize = 8;
 
-/// Maximum number of headers accepted in one `headers` message.
+/// Maximum number of headers in one `headers` message, sent or accepted.
+///
+/// Core's `MAX_HEADERS_RESULTS`: a peer that answers with fewer headers has
+/// reached its tip, so serving and syncing both depend on this one bound.
 pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 
 /// Maximum block locator hashes accepted in one locator-based request.

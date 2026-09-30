@@ -14,7 +14,10 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use bitcoin::Address;
-use bitcoin_rs_primitives::{CompactTarget, Network, Tx, TxIn, TxOut, consensus_bytes};
+use bitcoin_rs_primitives::{
+    Amount, CompactTarget, Network, Tx, TxIn, TxOut, consensus_bytes, hex_encode,
+    u64_saturated_len, u64_to_f64,
+};
 use bitcoin_rs_script::{
     is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_push_only, multisig_key_count,
     witness_program,
@@ -27,7 +30,7 @@ use crate::tx_render;
 /// Maps a native network onto the rust-bitcoin network for the sanctioned
 /// address seams (`Address` parsing requires it).
 #[must_use]
-pub(crate) const fn bitcoin_network(network: Network) -> bitcoin::Network {
+pub const fn bitcoin_network(network: Network) -> bitcoin::Network {
     match network {
         Network::Mainnet => bitcoin::Network::Bitcoin,
         Network::Testnet3 => bitcoin::Network::Testnet,
@@ -37,16 +40,18 @@ pub(crate) const fn bitcoin_network(network: Network) -> bitcoin::Network {
     }
 }
 
-/// Saturating `u64 -> i64` for Core wire counters typed as `i64`.
+/// Bitcoin Core's RPC `chain` field spelling (`getblockchaininfo`,
+/// `getmininginfo`). Distinct from [`Network::identity_name`], which is the
+/// evidence/log spelling ("testnet3" vs Core's "test").
 #[must_use]
-pub(crate) fn i64_saturated(value: u64) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
-}
-
-/// Saturating `usize -> i64` for Core wire counters typed as `i64`.
-#[must_use]
-pub(crate) fn i64_saturated_len(value: usize) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
+pub(crate) const fn core_chain_name(network: Network) -> &'static str {
+    match network {
+        Network::Mainnet => "main",
+        Network::Testnet3 => "test",
+        Network::Testnet4 => "testnet4",
+        Network::Signet => "signet",
+        Network::Regtest => "regtest",
+    }
 }
 
 /// Saturating `i64 -> i32` for Core wire counters typed as `i32`.
@@ -59,6 +64,20 @@ pub(crate) fn i32_saturated(value: i64) -> i32 {
             i32::MAX
         }
     })
+}
+
+/// Looks up an output by its wire `vout`, treating an out-of-range index as
+/// absent rather than panicking.
+#[must_use]
+pub(crate) fn output_at(outputs: &[TxOut], vout: u32) -> Option<&TxOut> {
+    outputs.get(usize::try_from(vout).unwrap_or(usize::MAX))
+}
+
+/// [`u64_to_f64`] with a sign; elapsed times and deltas can run either way.
+#[must_use]
+pub(crate) fn i64_to_f64(value: i64) -> f64 {
+    let magnitude = u64_to_f64(value.unsigned_abs());
+    if value < 0 { -magnitude } else { magnitude }
 }
 
 /// Converts satoshis to the BTC float carried by the versioned Core types.
@@ -85,44 +104,18 @@ pub(crate) fn signed_sat_to_i64(sats: i128) -> i64 {
 /// Signed counterpart for fee fields that carry deltas.
 #[must_use]
 pub(crate) fn signed_sat_to_btc(sats: i128) -> f64 {
-    let clamped = signed_sat_to_i64(sats);
-    let magnitude = clamped.unsigned_abs();
-    let high = u32::try_from(magnitude >> 32).unwrap_or(u32::MAX);
-    let low = u32::try_from(magnitude & 0xffff_ffff).unwrap_or(u32::MAX);
-    let value = f64::from(high).mul_add(4_294_967_296.0, f64::from(low));
-    (if clamped.is_negative() { -value } else { value }) / 100_000_000.0
+    i64_to_f64(signed_sat_to_i64(sats)) / u64_to_f64(Amount::COIN.to_sat())
 }
 
 /// Expands a compact `nBits` into its 64-character lowercase target hex, the
 /// spelling Core uses for `target` fields: the `SetCompact` magnitude rendered
-/// MSB-first by `arith_uint256::GetHex`.
-///
-/// The 23-bit masked mantissa is right-shifted into the low bytes for
-/// exponents up to three, and left-shifted to byte `exponent - 3` above that,
-/// with bytes pushed past 256 bits dropped — Core's shift semantics, including
-/// the degenerate exponents that collapse to an all-zero target. The sign bit
-/// only negates in Core's arithmetic; the rendered magnitude is unaffected.
+/// MSB-first by `arith_uint256::GetHex`. The sign bit only negates in Core's
+/// arithmetic; the rendered magnitude is unaffected.
 #[must_use]
 pub(crate) fn compact_target_hex(bits: CompactTarget) -> String {
-    let bits = bits.to_consensus();
-    let exponent = bits >> 24;
-    let word = u64::from(bits & 0x007f_ffff);
-    // Least-significant byte first; reversed for the wire's big-endian hex.
-    let mut target = [0_u8; 32];
-    if exponent <= 3 {
-        let shifted = word >> (8 * (3 - exponent));
-        target[..8].copy_from_slice(&shifted.to_le_bytes());
-    } else {
-        let shift = usize::try_from(exponent - 3).unwrap_or(32);
-        let raw = word.to_le_bytes();
-        for (offset, byte) in raw.iter().enumerate() {
-            if let Some(slot) = target.get_mut(shift + offset) {
-                *slot = *byte;
-            }
-        }
-    }
-    target.reverse();
-    hex_encode(&target)
+    let (mut magnitude, _negative) = bits.decode_magnitude();
+    magnitude.reverse();
+    hex_encode(&magnitude)
 }
 
 /// Script disassembly (`asm`) via the sanctioned rust-bitcoin seam.
@@ -383,7 +376,7 @@ pub(crate) fn raw_transaction_verbose(
         hex: hex_encode(&consensus_bytes(tx)),
         txid: tx.txid().to_string(),
         hash: tx.wtxid().to_string(),
-        size: u64::try_from(tx.total_size()).unwrap_or(u64::MAX),
+        size: u64_saturated_len(tx.total_size()),
         vsize: tx.vsize(),
         weight: tx.weight(),
         version: tx.version,
@@ -423,7 +416,7 @@ pub(crate) fn raw_transaction(
     Ok(corepc_types::v17::RawTransaction {
         txid: tx.txid().to_string(),
         hash: tx.wtxid().to_string(),
-        size: u64::try_from(tx.total_size()).unwrap_or(u64::MAX),
+        size: u64_saturated_len(tx.total_size()),
         vsize: tx.vsize(),
         weight: tx.weight(),
         version: tx.version,
@@ -474,21 +467,9 @@ fn raw_output_typed(
 ) -> Result<corepc_types::v31::RawTransactionOutput, RpcError> {
     Ok(corepc_types::v31::RawTransactionOutput {
         value: sat_to_btc(output.value.to_sat()),
-        index: u64::try_from(index).unwrap_or(u64::MAX),
+        index: u64_saturated_len(index),
         script_pubkey: script_pub_key_typed(&output.script_pubkey, network)?,
     })
-}
-
-/// Lowercase hex encoding for wire strings.
-#[must_use]
-pub(crate) fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
 }
 
 /// Representative raw `scriptPubKey` bytes for every [`ScriptShape`].

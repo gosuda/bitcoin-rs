@@ -4,15 +4,14 @@
 //! the Merkle result so later validation stages do not derive them again.
 
 use bitcoin_rs_primitives::{
-    Tx, TxOut, Txid, Wtxid,
+    Block, Header, Tx, TxOut, Txid, Wtxid,
     encode::{double_sha256, finalize_double_sha256},
     layout::{ByteSpan, ParsedBlock, ParsedTransaction},
+    u64_saturated_len,
 };
 use sha2::{Digest, Sha256};
 
 use crate::verify_block::merkle_root_and_mutation_borrowed;
-
-const HEADER_LEN: u64 = 80;
 
 /// Facts derived once for a decoded block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,10 +52,10 @@ impl BlockFacts {
             txids.push(txid);
         }
 
-        let stripped = HEADER_LEN
+        let stripped = u64_saturated_len(Header::LEN)
             .saturating_add(u64::from(parsed.tx_count_span().len()))
             .saturating_add(base_sizes);
-        let total = len_u64(parsed.consumed_len());
+        let total = u64_saturated_len(parsed.consumed_len());
         let weight = stripped.saturating_mul(3).saturating_add(total);
         let (merkle_root, merkle_mutated) = merkle_root_and_mutation(&txids);
 
@@ -79,10 +78,8 @@ impl BlockFacts {
             txids.len(),
             "block facts need one txid per transaction"
         );
-        let has_witness = txs
-            .iter()
-            .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()));
-        let weight = decoded_block_weight(txs);
+        let has_witness = txs.iter().any(Tx::has_witness);
+        let weight = Block::weight_of(txs);
         let (merkle_root, merkle_mutated) = merkle_root_and_mutation(&txids);
 
         Self {
@@ -243,17 +240,6 @@ impl<'b> BlockView<'b> {
     }
 }
 
-fn decoded_block_weight(txs: &[Tx]) -> u64 {
-    let count_len = u64::from(compact_size_len(len_u64(txs.len())));
-    let mut stripped = HEADER_LEN.saturating_add(count_len);
-    let mut total = HEADER_LEN.saturating_add(count_len);
-    for tx in txs {
-        stripped = stripped.saturating_add(len_u64(tx.base_size()));
-        total = total.saturating_add(len_u64(tx.total_size()));
-    }
-    stripped.saturating_mul(3).saturating_add(total)
-}
-
 fn merkle_root_and_mutation(txids: &[Txid]) -> (Option<Txid>, bool) {
     merkle_root_and_mutation_borrowed(txids)
         .map_or((None, false), |(root, mutated)| (Some(root), mutated))
@@ -276,7 +262,7 @@ fn txid_and_base_size(tx: &ParsedTransaction<'_>) -> (Txid, u64) {
     let mut base_size = 0;
     for part in parts {
         engine.update(part);
-        base_size += len_u64(part.len());
+        base_size += u64_saturated_len(part.len());
     }
     (Txid(finalize_double_sha256(engine)), base_size)
 }
@@ -287,17 +273,4 @@ fn wtxid_from_span(tx: &ParsedTransaction<'_>) -> Wtxid {
         .span_bytes(tx.span())
         .unwrap_or_else(|| unreachable!("span belongs to the parsed image"));
     Wtxid(double_sha256(bytes))
-}
-
-const fn compact_size_len(value: u64) -> u32 {
-    match value {
-        0..=0xfc => 1,
-        0xfd..=0xffff => 3,
-        0x1_0000..=0xffff_ffff => 5,
-        _ => 9,
-    }
-}
-
-fn len_u64(len: usize) -> u64 {
-    u64::try_from(len).unwrap_or_else(|_| unreachable!("usize length fits u64"))
 }

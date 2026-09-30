@@ -35,7 +35,7 @@ use crate::{
         ConsensusDecode, double_sha256, finalize_double_sha256, read_array, read_i32_le,
         read_u32_le, read_u64_le,
     },
-    varint,
+    u64_saturated_len, varint,
 };
 
 /// Serialized block header length in bytes.
@@ -201,11 +201,6 @@ fn impossible(available: usize) -> DecodeError {
     }
 }
 
-/// Widens a `usize` length into `u64`; slice and vector lengths always fit.
-fn widening(len: usize) -> u64 {
-    u64::try_from(len).unwrap_or_else(|_| unreachable!("usize length fits u64"))
-}
-
 /// Parse cursor over one immutable byte image: positions are `u64` and every
 /// advance is bounds-checked before any slicing or reservation happens.
 struct ImageCursor<'i> {
@@ -216,7 +211,7 @@ struct ImageCursor<'i> {
 impl ImageCursor<'_> {
     /// The image length in `u64`.
     fn limit(&self) -> u64 {
-        widening(self.image.len())
+        u64_saturated_len(self.image.len())
     }
 
     /// Bytes from the cursor to the end of the image.
@@ -247,7 +242,7 @@ impl ImageCursor<'_> {
             .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
         let (value, consumed) =
             varint::decode(&self.image[offset..]).map_err(DecodeError::Varint)?;
-        let span = ByteSpan::checked(self.pos, widening(consumed), self.limit())?;
+        let span = ByteSpan::checked(self.pos, u64_saturated_len(consumed), self.limit())?;
         self.pos = span.end();
         Ok((value, span))
     }
@@ -268,15 +263,17 @@ impl ImageCursor<'_> {
     }
 }
 
+/// Slices `span` out of `image`, or `None` when `span` indexes a different
+/// image that does not cover it.
+fn try_slice_at(image: &[u8], span: ByteSpan) -> Option<&[u8]> {
+    let end = usize::try_from(span.end()).ok()?;
+    image.get(widen(span.start())..end)
+}
+
 /// Slices a span out of `image`; spans are constructed only against the image
-/// they index, so the fallbacks are unreachable.
+/// they index, so the fallback is unreachable.
 fn slice_at(image: &[u8], span: ByteSpan) -> &[u8] {
-    let start = widen(span.start());
-    let end = usize::try_from(span.end())
-        .unwrap_or_else(|_| unreachable!("span end stays within its image"));
-    image
-        .get(start..end)
-        .unwrap_or_else(|| unreachable!("span was checked against this image"))
+    try_slice_at(image, span).unwrap_or_else(|| unreachable!("span was checked against this image"))
 }
 
 /// Wire layout of one transaction input: byte spans into the owning image
@@ -363,32 +360,48 @@ pub struct ParsedTransaction<'a> {
     witness_spans: Vec<ByteSpan>,
 }
 
+/// Runs `parse_at` from the front of `*reader` and advances `reader` past
+/// exactly the bytes it consumed.
+fn parse_front<'a, T>(
+    reader: &mut &'a [u8],
+    parse_at: impl FnOnce(&'a [u8], &mut u64) -> Result<T, DecodeError>,
+) -> Result<T, DecodeError> {
+    let image = *reader;
+    let mut cursor = 0_u64;
+    let parsed = parse_at(image, &mut cursor)?;
+    let consumed =
+        usize::try_from(cursor).unwrap_or_else(|_| unreachable!("cursor stays within its image"));
+    *reader = &image[consumed..];
+    Ok(parsed)
+}
+
+/// Runs `parse_at` over `bytes`, which it must consume exactly; trailing bytes
+/// are a typed error.
+fn parse_whole<'a, T>(
+    bytes: &'a [u8],
+    parse_at: impl FnOnce(&'a [u8], &mut u64) -> Result<T, DecodeError>,
+) -> Result<T, DecodeError> {
+    let mut rest = bytes;
+    let parsed = parse_front(&mut rest, parse_at)?;
+    if !rest.is_empty() {
+        return Err(DecodeError::TrailingBytes {
+            remaining: rest.len(),
+        });
+    }
+    Ok(parsed)
+}
+
 impl<'a> ParsedTransaction<'a> {
     /// Parses one transaction from the front of `reader`, advancing `reader`
     /// past exactly the consumed bytes.
     pub fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
-        let image = *reader;
-        let mut cursor = 0_u64;
-        let parsed = Self::parse_at(image, &mut cursor)?;
-        let consumed = usize::try_from(cursor)
-            .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
-        *reader = &image[consumed..];
-        Ok(parsed)
+        parse_front(reader, Self::parse_at)
     }
 
     /// Parses one transaction that must occupy exactly `bytes`; trailing
     /// bytes are a typed error.
     pub fn parse_exact(bytes: &'a [u8]) -> Result<Self, DecodeError> {
-        let mut cursor = 0_u64;
-        let parsed = Self::parse_at(bytes, &mut cursor)?;
-        let consumed = usize::try_from(cursor)
-            .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
-        if consumed != bytes.len() {
-            return Err(DecodeError::TrailingBytes {
-                remaining: bytes.len() - consumed,
-            });
-        }
-        Ok(parsed)
+        parse_whole(bytes, Self::parse_at)
     }
 
     /// Parses one transaction starting at `*cursor` inside `image` and
@@ -456,13 +469,13 @@ impl<'a> ParsedTransaction<'a> {
             for input in &mut inputs {
                 let (item_count, _count_span) = cur.read_compact()?;
                 cur.require_count(item_count, MIN_WITNESS_ITEM_LEN)?;
-                let first = widening(witness_spans.len());
+                let first = u64_saturated_len(witness_spans.len());
                 for _ in 0..item_count {
                     let (item_len, _len_span) = cur.read_compact()?;
                     let item = cur.take(item_len)?;
                     witness_spans.push(item);
                 }
-                let limit = widening(witness_spans.len());
+                let limit = u64_saturated_len(witness_spans.len());
                 input.witness = MetadataRange::new(first, limit, limit)?;
             }
             // BIP144 round-trip rule, checked at the same position as both
@@ -557,9 +570,7 @@ impl<'a> ParsedTransaction<'a> {
     /// span produced by this parse always resolves.
     #[must_use]
     pub fn span_bytes(&self, span: ByteSpan) -> Option<&'a [u8]> {
-        let start = widen(span.start());
-        let end = usize::try_from(span.end()).ok()?;
-        self.bytes.get(start..end)
+        try_slice_at(self.bytes, span)
     }
 
     /// Computes the transaction id from checked borrowed spans.
@@ -722,28 +733,13 @@ impl<'a> ParsedBlock<'a> {
     /// Parses one block from the front of `reader`, advancing `reader` past
     /// exactly the consumed bytes.
     pub fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
-        let image = *reader;
-        let mut cursor = 0_u64;
-        let parsed = Self::parse_at(image, &mut cursor)?;
-        let consumed = usize::try_from(cursor)
-            .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
-        *reader = &image[consumed..];
-        Ok(parsed)
+        parse_front(reader, Self::parse_at)
     }
 
     /// Parses one block that must occupy exactly `bytes`; trailing bytes are
     /// a typed error.
     pub fn parse_exact(bytes: &'a [u8]) -> Result<Self, DecodeError> {
-        let mut cursor = 0_u64;
-        let parsed = Self::parse_at(bytes, &mut cursor)?;
-        let consumed = usize::try_from(cursor)
-            .unwrap_or_else(|_| unreachable!("cursor stays within its image"));
-        if consumed != bytes.len() {
-            return Err(DecodeError::TrailingBytes {
-                remaining: bytes.len() - consumed,
-            });
-        }
-        Ok(parsed)
+        parse_whole(bytes, Self::parse_at)
     }
 
     /// Parses one block starting at `*cursor` inside `image` and advances
@@ -832,9 +828,7 @@ impl<'a> ParsedBlock<'a> {
     /// span produced by this parse always resolves.
     #[must_use]
     pub fn span_bytes(&self, span: ByteSpan) -> Option<&'a [u8]> {
-        let start = widen(span.start());
-        let end = usize::try_from(span.end()).ok()?;
-        self.bytes.get(start..end)
+        try_slice_at(self.bytes, span)
     }
 
     /// Materializes the owned block from the validated spans.

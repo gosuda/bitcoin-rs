@@ -1,4 +1,4 @@
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Hash256, u64_saturated_len};
 use smallvec::SmallVec;
 
 use crate::{UtxoError, UtxoKey};
@@ -429,7 +429,7 @@ impl UtxoRecord {
         for addition in additions {
             let payload_len = addition.payload_len()?;
             if width_for(u64::from(addition.vout)) > old.vout_width
-                || width_for(u64::try_from(payload_len).unwrap_or(u64::MAX)) > old.len_width
+                || width_for(u64_saturated_len(payload_len)) > old.len_width
             {
                 return Ok(None);
             }
@@ -466,7 +466,7 @@ impl UtxoRecord {
         }
         buf.extend_from_slice(region(old.len_dir, old.payloads)?);
         for addition in additions {
-            let len = u64::try_from(addition.payload_len()?).unwrap_or(u64::MAX);
+            let len = u64_saturated_len(addition.payload_len()?);
             push_dir_entry(&mut buf, len, old.len_width)?;
         }
         buf.extend_from_slice(region(old.payloads, bytes.len())?);
@@ -879,7 +879,7 @@ fn encode_record(
             .ok_or(UtxoError::RecordTooLarge { len: payload_total })?;
         payload_lens.push(u32::try_from(len).map_err(|_| UtxoError::RecordTooLarge { len })?);
         max_vout = max_vout.max(u64::from(output.vout));
-        max_len = max_len.max(u64::try_from(len).unwrap_or(u64::MAX));
+        max_len = max_len.max(u64_saturated_len(len));
     }
     let vout_width = width_for(max_vout);
     let len_width = width_for(max_len);
@@ -981,7 +981,7 @@ fn validate_encoded(bytes: &[u8]) -> Result<RecordHeader, UtxoError> {
     for index in 0..layout.count {
         max_vout = max_vout.max(u64::from(layout.vout_at(bytes, index)?));
         let len = layout.payload_len_at(bytes, index)?;
-        max_len = max_len.max(u64::try_from(len).unwrap_or(u64::MAX));
+        max_len = max_len.max(u64_saturated_len(len));
         let (_, next) = decode_output_at(bytes, &layout, index, cursor)?;
         cursor = next;
     }
@@ -1199,7 +1199,7 @@ mod tests {
         for case in cases {
             let payload = OutputParts::from_owned(&case).payload_len()?;
             let vout_width = width_for(u64::from(case.vout));
-            let len_width = width_for(u64::try_from(payload).unwrap_or(u64::MAX));
+            let len_width = width_for(u64_saturated_len(payload));
             // header || widths || one vout entry || one length entry || payload
             let expected = RECORD_HEADER_LEN + 1 + vout_width + len_width + payload;
             let record = UtxoRecord::from_owned_outputs(Hash256::default(), &[case])?;

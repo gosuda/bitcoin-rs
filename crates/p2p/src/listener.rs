@@ -2,12 +2,12 @@ use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_primitives::{Network, unix_now};
 use crossbeam_channel::{SendTimeoutError, Sender};
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -250,9 +250,7 @@ impl ConnectionShared {
         else {
             return u64::MAX;
         };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
+        let now = unix_now();
         now.saturating_sub(u64::from(tip_time)) / POW_TARGET_SPACING_SECS
     }
 
@@ -712,7 +710,7 @@ fn run_outbound_connection(
             "missing remote version after outbound handshake",
         ));
     };
-    let conn_time = unix_secs(SystemTime::now());
+    let conn_time = unix_now();
     let info = crate::PeerInfo::outbound_from_version(
         addr,
         addr_bind,
@@ -917,7 +915,7 @@ fn run_handshake(
             "missing remote version after successful handshake",
         ));
     };
-    let conn_time = unix_secs(SystemTime::now());
+    let conn_time = unix_now();
     let info = crate::PeerInfo::inbound_from_version(
         peer_addr,
         addr_bind,
@@ -1294,7 +1292,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
     use std::time::Instant;
 
     let tx_relay_open =
-        || ibd.is_none_or(|(latch, network)| !latch.is_active(unix_time_secs(), *network));
+        || ibd.is_none_or(|(latch, network)| !latch.is_active(unix_now(), *network));
 
     let mut keepalive = Keepalive::starting(Instant::now());
     let budget = lease.budget_handle();
@@ -1730,11 +1728,6 @@ fn run_writer_loop(
     }
 }
 
-fn unix_secs(now: SystemTime) -> u64 {
-    now.duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
-}
-
 /// Forwards a decoded transaction into ingress while the relay gate is open.
 ///
 /// PRE: `relay_open` was read from the node-owned IBD handle for this
@@ -1754,13 +1747,6 @@ fn forward_tx_if_relay_open(
         // them unpunished while in initial block download (:4716).
         tracing::debug!(peer_addr = %peer_addr, "tx dropped: initial block download");
     }
-}
-
-/// UNIX seconds for the chain-owned initial-block-download latch.
-fn unix_time_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
 }
 
 fn wake_sync(sync_wake_tx: Option<&Sender<()>>) {

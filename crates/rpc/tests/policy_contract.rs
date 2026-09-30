@@ -28,7 +28,7 @@ use bitcoin_rs_node::{
 
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes,
+    Txid, Witness, consensus_bytes, hex_encode, u32_saturated, u64_saturated_len,
 };
 
 use bitcoin_rs_rpc::{
@@ -39,7 +39,9 @@ use bitcoin_rs_rpc::{
     },
 };
 
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_script::push_int;
+
+use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, is_coinbase_tx};
 
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
@@ -79,17 +81,6 @@ fn rpc_txid(tx: &Tx) -> Txid {
 /// decoder consumes.
 fn raw_tx_hex(tx: &Tx) -> String {
     hex_encode(&consensus_bytes(tx))
-}
-
-/// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
 }
 
 /// Commits one funded UTXO to the context's UTXO set and returns the RPC-side
@@ -661,7 +652,7 @@ fn sendrawtransaction_publishes_admission_through_gateway() -> Result<(), Box<dy
         .write()
         .insert_entry(MempoolEntry::new(
             Arc::new(child.clone()),
-            u32::try_from(child.vsize()).unwrap_or(u32::MAX),
+            u32_saturated(child.vsize()),
             1_000,
             0,
             1,
@@ -821,8 +812,8 @@ fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box
         let mut found = None;
         for count in 320_usize..=400 {
             let candidate = many_output_tx(confirmed_outpoint(0x9b), 500, count);
-            let vsize = u64::from(u32::try_from(candidate.vsize()).unwrap_or(u32::MAX));
-            let candidate_fee = 200_000 - 500 * u64::try_from(count).unwrap_or(u64::MAX);
+            let vsize = u64::from(u32_saturated(candidate.vsize()));
+            let candidate_fee = 200_000 - 500 * u64_saturated_len(count);
             let rate = candidate_fee * 1_000 / vsize;
             if candidate_fee >= 8_000 + vsize && (1_000..=2_000).contains(&rate) {
                 found = Some((candidate, candidate_fee));
@@ -864,7 +855,7 @@ fn sendrawtransaction_rejects_a_crossing_replacement_diagram() -> Result<(), Box
 
     // Direct pool outcome: the same candidate fails check_replacement with
     // the same rule.
-    let vsize = u32::try_from(replacement.vsize()).unwrap_or(u32::MAX);
+    let vsize = u32_saturated(replacement.vsize());
     let candidate = ReplacementCandidate::new(Arc::new(replacement), vsize, fee, 1_000);
     assert_eq!(
         ctx.mempool.gateway.read().check_replacement(&candidate),
@@ -923,7 +914,7 @@ fn assert_both_rpcs_agree_on_replacement_rejection(
 
     // Direct pool cross-check: the exact RbfError variant must match so a
     // fee-increment fixture cannot pass on an eviction-limit rejection.
-    let vsize = u32::try_from(tx.vsize()).unwrap_or(u32::MAX);
+    let vsize = u32_saturated(tx.vsize());
     let fee = {
         // WHY: the fee is the input value minus output value; for a
         // single-input single-output tx funded at 100 000 with output
@@ -1541,36 +1532,6 @@ fn null_prevout() -> OutPoint {
     OutPoint::new(Txid::default(), u32::MAX)
 }
 
-/// Minimal script push of a small integer, mirroring rust-bitcoin
-/// `Builder::push_int`: `OP_0` for zero, `OP_N` for 1..=16, otherwise a
-/// length-prefixed little-endian payload (BIP34 heights).
-fn script_push_int(value: i64) -> Vec<u8> {
-    match value {
-        0 => vec![0x00],
-        // `value` is pinned to 1..=16 by the match arm.
-        1..=16 => vec![0x50 + u8::try_from(value).unwrap_or_default()],
-        _ => {
-            let mut payload = Vec::new();
-            let mut magnitude = value.unsigned_abs();
-            while magnitude > 0 {
-                // Low byte only; the shift below consumes it fully.
-                payload.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
-                magnitude >>= 8;
-            }
-            let mut out = Vec::with_capacity(payload.len() + 1);
-            // A small-int push never exceeds 8 payload bytes.
-            out.push(u8::try_from(payload.len()).unwrap_or_default());
-            out.extend(payload);
-            out
-        }
-    }
-}
-
-/// Core `IsCoinBase` shape: exactly one input spending the null prevout.
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && tx.inputs[0].previous_output == null_prevout()
-}
-
 fn reorg_seed_coinbase(height: u32) -> Tx {
     Tx {
         version: 2,
@@ -1578,9 +1539,7 @@ fn reorg_seed_coinbase(height: u32) -> Tx {
             previous_output: null_prevout(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: Script::from_bytes(
-                [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-            ),
+            script_sig: Script::from_bytes([push_int(i64::from(height)), push_int(0)].concat()),
             sequence: Sequence::from_consensus(0xffff_ffff),
             witness: Witness::new(),
         }],
@@ -1722,7 +1681,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
     {
         let mempool = state.mempool();
         let mut guard = mempool.write();
-        let vsize = u32::try_from(spend.vsize()).unwrap_or(u32::MAX);
+        let vsize = u32_saturated(spend.vsize());
         guard.insert_entry(MempoolEntry::new(
             Arc::new(spend.clone()),
             vsize,
@@ -1784,7 +1743,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
         mined_block
             .txs
             .iter()
-            .filter(|tx| !is_coinbase(tx))
+            .filter(|tx| !is_coinbase_tx(tx))
             .map(|tx| Arc::new(tx.clone())),
     );
     assert_eq!(committed.len(), 1, "one admitted candidate: the spend");
