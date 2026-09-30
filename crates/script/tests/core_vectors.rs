@@ -1,8 +1,10 @@
 //! Differential vector harness over Bitcoin Core's script consensus test data.
 //!
-//! Feeds Core's `script_tests.json`, `tx_valid.json`, `tx_invalid.json`, and
-//! `sighash.json` through the native [`Interpreter`] and (when `--features kernel`
-//! is enabled) the bitcoinkernel oracle, then compares verdicts.
+//! Feeds Core's `script_tests.json`, `tx_valid.json` and `tx_invalid.json`
+//! through the native [`Interpreter`] and (when `--features kernel` is enabled)
+//! the bitcoinkernel oracle, then compares verdicts. `sighash.json` is graded
+//! by `checker::tests::sighash_json_corpus_legacy_path`, which reaches the
+//! crate-private `remove_codeseparators` this harness cannot call.
 //!
 //! ## Anti-vacuity
 //!
@@ -34,8 +36,7 @@ use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::taproot::{LeafVersion, TaprootBuilder};
 use bitcoin_rs_primitives::tapleaf_hash;
 use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid,
-    Witness, deserialize,
+    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, deserialize,
 };
 use bitcoin_rs_script::{
     Interpreter, ScriptError, VerifyFlags, opcode, push_data, push_int, taproot,
@@ -1343,166 +1344,8 @@ fn run_tx_vectors_kernel(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<Strin
 }
 
 // ===========================================================================
-// Corpus 4: sighash.json
-// ===========================================================================
-
-struct SighashRow {
-    tx: Tx,
-    script_code: Vec<u8>,
-    input_index: usize,
-    hash_type: u32,
-    expected_hash: Hash256,
-    row_index: usize,
-}
-
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "test vector indices and hash types are small non-negative integers stored as i64"
-)]
-fn load_sighash_vectors(counts: &mut Counts) -> Result<Vec<SighashRow>, String> {
-    let path = reference_path("sighash.json");
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("sighash.json unreadable: {e}"))?;
-    let root: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("sighash.json parse: {e}"))?;
-    let arr = root.as_array().ok_or("sighash.json root is not an array")?;
-
-    let mut rows = Vec::new();
-    for (index, row) in arr.iter().enumerate() {
-        let Some(arr) = row.as_array() else {
-            continue;
-        };
-        if arr.len() < 5 {
-            continue;
-        }
-        counts.parsed += 1;
-
-        let tx_hex = arr[0]
-            .as_str()
-            .ok_or_else(|| format!("sighash row {index}: tx hex is not a string"))?;
-        let script_hex = arr[1].as_str().unwrap_or("");
-        let input_index = arr[2]
-            .as_i64()
-            .ok_or_else(|| format!("sighash row {index}: input_index is not an integer"))?;
-        let input_index = input_index as usize;
-        let hash_type_i32 = arr[3]
-            .as_i64()
-            .ok_or_else(|| format!("sighash row {index}: hashType is not an integer"))?
-            as i32;
-        let hash_type = hash_type_i32 as u32;
-        let expected_hex = arr[4]
-            .as_str()
-            .ok_or_else(|| format!("sighash row {index}: expected hash is not a string"))?;
-
-        let tx_bytes =
-            hex_to_bytes(tx_hex).map_err(|e| format!("sighash row {index}: bad tx hex: {e}"))?;
-        let tx = deserialize::<Tx>(&tx_bytes)
-            .map_err(|e| format!("sighash row {index}: tx deserialize: {e}"))?;
-        let script_code = if script_hex.is_empty() {
-            Vec::new()
-        } else {
-            hex_to_bytes(script_hex)
-                .map_err(|e| format!("sighash row {index}: bad script hex: {e}"))?
-        };
-        let expected_hash = Hash256::from_str_be(expected_hex)
-            .map_err(|e| format!("sighash row {index}: bad expected hash: {e}"))?;
-
-        rows.push(SighashRow {
-            tx,
-            script_code,
-            input_index,
-            hash_type,
-            expected_hash,
-            row_index: index + 1,
-        });
-    }
-    Ok(rows)
-}
-
-fn run_sighash_vectors(rows: &[SighashRow], counts: &mut Counts) -> Vec<String> {
-    let mut mismatches = Vec::new();
-
-    for row in rows {
-        counts.executed += 1;
-        // Core's SignatureHash calls SerializeScriptCode which strips
-        // OP_CODESEPARATOR (0xab) opcode bytes before hashing. Strip them
-        // here to match, so the sighash rows containing CS can be tested.
-        let script_code = strip_codeseparators(&row.script_code);
-        let cache = SighashCache::new(&row.tx);
-        let result = cache.legacy_signature_hash(row.input_index, &script_code, row.hash_type);
-
-        match result {
-            Ok(actual) => {
-                if actual != row.expected_hash {
-                    counts.failed += 1;
-                    mismatches.push(format!(
-                        "sighash row {}: expected {}, got {}",
-                        row.row_index, row.expected_hash, actual
-                    ));
-                }
-            }
-            Err(e) => {
-                counts.failed += 1;
-                mismatches.push(format!("sighash row {}: engine error: {e}", row.row_index));
-            }
-        }
-    }
-    mismatches
-}
-
-// ===========================================================================
 // Helpers
 // ===========================================================================
-
-/// Removes `OP_CODESEPARATOR` (0xab) opcodes from a script, matching Core's
-/// `CTransactionSignatureSerializer::SerializeScriptCode`. Bytes inside data
-/// pushes are preserved.
-fn strip_codeseparators(script: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(script.len());
-    let mut pos = 0;
-    while pos < script.len() {
-        let op = script[pos];
-        if op == 0xab {
-            pos += 1;
-        } else if (0x01..=0x4b).contains(&op) {
-            let end = pos + 1 + usize::from(op);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4c {
-            let len_pos = pos + 1;
-            let len = script.get(len_pos).copied().unwrap_or(0);
-            let end = len_pos + 1 + usize::from(len);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4d {
-            let len_pos = pos + 1;
-            let len = u16::from_le_bytes([
-                script.get(len_pos).copied().unwrap_or(0),
-                script.get(len_pos + 1).copied().unwrap_or(0),
-            ]);
-            let end = len_pos + 2 + usize::from(len);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4e {
-            let len_pos = pos + 1;
-            let len = u32::from_le_bytes([
-                script.get(len_pos).copied().unwrap_or(0),
-                script.get(len_pos + 1).copied().unwrap_or(0),
-                script.get(len_pos + 2).copied().unwrap_or(0),
-                script.get(len_pos + 3).copied().unwrap_or(0),
-            ]);
-            let end = len_pos + 4 + usize::try_from(len).unwrap_or(usize::MAX);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else {
-            out.push(op);
-            pos += 1;
-        }
-    }
-    out
-}
 
 /// How many mismatch lines to print per corpus.
 ///
@@ -1843,73 +1686,8 @@ fn tx_invalid_kernel_column() {
 }
 
 #[test]
-fn sighash_vectors_match_engine() {
-    let mut counts = Counts::default();
-    let rows = match load_sighash_vectors(&mut counts) {
-        Ok(r) => r,
-        Err(e) => panic!("sighash.json should load: {e}"),
-    };
-    assert!(!rows.is_empty(), "sighash produced zero runnable rows");
-
-    let mismatches = run_sighash_vectors(&rows, &mut counts);
-    println!("sighash: {counts}");
-    assert!(counts.executed > 0, "harness executed zero sighash rows");
-    if !mismatches.is_empty() {
-        println!(
-            "  {}/{} sighash rows mismatched — the engine has a bug or the harness is miswired",
-            mismatches.len(),
-            counts.executed,
-        );
-        for m in mismatches.iter().take(10) {
-            println!("  {m}");
-        }
-    }
-    assert!(
-        mismatches.is_empty(),
-        "sighash engine produced {} mismatches (expected 0):\n{}",
-        mismatches.len(),
-        mismatches
-            .iter()
-            .take(5)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-}
-
-#[test]
 fn broken_expectation_is_detected() {
-    // Deliberately flip one sighash expectation and show the harness catches it.
-    let mut counts = Counts::default();
-    let rows = match load_sighash_vectors(&mut counts) {
-        Ok(r) => r,
-        Err(e) => panic!("sighash should load: {e}"),
-    };
-    assert!(!rows.is_empty());
-
-    let row = &rows[0];
-    let wrong = Hash256::from_le_bytes(&[0xaa; 32]);
-    assert_ne!(
-        wrong, row.expected_hash,
-        "anti-vacuity: the wrong hash must differ from the expected hash"
-    );
-
-    let cache = SighashCache::new(&row.tx);
-    let actual = cache
-        .legacy_signature_hash(row.input_index, &row.script_code, row.hash_type)
-        .unwrap_or_else(|e| panic!("sighash computation should succeed: {e}"));
-
-    let detected = actual != wrong;
-    println!(
-        "broken_expectation_is_detected: sighash row {}, actual={actual}, wrong={wrong}, detected={detected}",
-        row.row_index,
-    );
-    assert!(
-        detected,
-        "anti-vacuity: a deliberately wrong sighash must not match the engine output"
-    );
-
-    // Also verify the script_tests comparison logic detects a flipped expectation.
+    // Flip one script_tests expectation and show the harness catches it.
     let mut st_counts = Counts::default();
     let st_rows = match load_script_tests(&mut st_counts) {
         Ok(r) => r,
