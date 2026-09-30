@@ -8,12 +8,12 @@
 //! little-endian encoding of the consensus target derived from `nBits`.
 
 use bitcoin::block::{Block, Header, Version};
-use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::hashes::Hash as _;
+use bitcoin::hashes::sha256d::Hash as Sha256dHash;
 use bitcoin::pow::CompactTarget;
 use bitcoin::{BlockHash, Sequence, TxMerkleNode};
 use serde_json::Value;
-use stratum_apps::stratum_core::binary_sv2::{B016MOwned, Seq0255Owned, Seq064KOwned, U256Owned};
+use stratum_apps::stratum_core::binary_sv2::{B016MOwned, Seq064KOwned, Seq0255Owned, U256Owned};
 use stratum_apps::stratum_core::bitcoin;
 use stratum_apps::stratum_core::template_distribution_sv2::{
     NewTemplateOwned, SetNewPrevHashOwned, SubmitSolutionOwned,
@@ -138,9 +138,14 @@ impl TemplateState {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
+        // The coinbase occupies leaf 0 of the block's merkle tree but its
+        // txid is unknown until the pool builds it. The index-0 branch only
+        // carries that leaf's siblings, so a placeholder leaf yields the
+        // correct path; without it the first template transaction would take
+        // the coinbase slot and every root would be wrong.
         let merkle_branch = merkle_branch_coinbase(
-            txs.iter()
-                .map(|tx| tx.compute_txid().to_byte_array())
+            std::iter::once([0u8; 32])
+                .chain(txs.iter().map(|tx| tx.compute_txid().to_byte_array()))
                 .collect(),
         );
 
@@ -558,15 +563,13 @@ mod tests {
         assert_eq!(block.txdata[0].compute_txid(), coinbase.compute_txid());
         assert_eq!(&block.txdata[1..], &state.txs[..]);
 
-        let expected_root = fold_branch(
-            coinbase.compute_txid().to_byte_array(),
-            &merkle_branch_coinbase(
-                txs.iter()
-                    .map(|tx| tx.compute_txid().to_byte_array())
-                    .collect(),
-            ),
+        // The assembled header must commit to the block it ships: the
+        // branch folded over the solution coinbase equals the root computed
+        // independently over the full transaction list.
+        assert_eq!(
+            block.header.merkle_root,
+            block.compute_merkle_root().expect("non-empty txdata")
         );
-        assert_eq!(block.header.merkle_root.to_byte_array(), expected_root);
         assert_eq!(
             block.header.prev_blockhash.to_byte_array(),
             state.prev_hash_internal

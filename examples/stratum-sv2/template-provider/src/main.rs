@@ -82,13 +82,24 @@ fn env_or(key: &str, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-/// Shared latest-template slot. The long-poll loop publishes; every pool
-/// connection subscribes and pushes `NewTemplate` + `SetNewPrevHash` on change.
+/// Shared template hub. The long-poll loop publishes; every pool connection
+/// subscribes and pushes `NewTemplate` + `SetNewPrevHash` on change. Recently
+/// issued templates stay addressable by id: a miner working a superseded
+/// template still gets its `SubmitSolution` / `RequestTransactionData`
+/// resolved instead of dropped as unknown.
 #[derive(Clone)]
 pub struct Hub {
     tx: watch::Sender<Option<std::sync::Arc<TemplateState>>>,
     next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    issued: std::sync::Arc<
+        parking_lot::Mutex<std::collections::BTreeMap<u64, std::sync::Arc<TemplateState>>>,
+    >,
 }
+
+/// How many issued templates stay resolvable by id. A mempool refresh issues
+/// a new template while miners keep working the previous one, so one slot is
+/// not enough.
+const RETAINED_TEMPLATES: usize = 16;
 
 impl Hub {
     /// Creates an empty template slot with the first template ID set to one.
@@ -97,6 +108,7 @@ impl Hub {
         Self {
             tx,
             next_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            issued: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::BTreeMap::new())),
         }
     }
 
@@ -111,10 +123,23 @@ impl Hub {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Resolves an issued template by id, including superseded ones still
+    /// within the retention window.
+    pub fn lookup(&self, template_id: u64) -> Option<std::sync::Arc<TemplateState>> {
+        self.issued.lock().get(&template_id).cloned()
+    }
+
     /// Replaces the latest template, notifies subscribers, and returns its
     /// shared handle; the slot retains it even without subscribers.
     fn publish(&self, state: TemplateState) -> std::sync::Arc<TemplateState> {
         let state = std::sync::Arc::new(state);
+        {
+            let mut issued = self.issued.lock();
+            issued.insert(state.id, state.clone());
+            while issued.len() > RETAINED_TEMPLATES {
+                issued.pop_first();
+            }
+        }
         self.tx.send_replace(Some(state.clone()));
         state
     }
@@ -195,6 +220,10 @@ async fn run_template_loop(rpc: std::sync::Arc<RpcClient>, hub: Hub) -> Result<(
                     Err(e) => {
                         error!(template_id = id, error = %e, "failed to convert getblocktemplate response");
                         long_poll_id = None;
+                        // The next fetch has no long-poll id and returns at
+                        // once; without a delay a persistent bad response
+                        // spins the loop and floods the RPC.
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
             }

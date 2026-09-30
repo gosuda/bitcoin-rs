@@ -66,7 +66,7 @@ services:
   # serves SV2 miners on 34255, builds coinbase + block solutions.
   # The mounted TOML is the image's default config path (see README, "Configuration").
   pool:
-    image: stratumv2/pool_sv2:v0.8.0
+    image: stratumv2/pool_sv2:v0.8.0@sha256:679e08ae5dd99bac01394b0c592c97f45982d0d9d24e03f460ccd1c2592d3a00
     stop_signal: SIGINT
     volumes:
       - ./config/pool.toml:/app/pool-config.toml:ro
@@ -80,7 +80,7 @@ services:
   # SRI SV1->SV2 translator. Always on, but idle until an SV1 miner attaches;
   # the default `up` set exercises only the two direct SV2 devices below.
   translator:
-    image: stratumv2/translator_sv2:v0.8.0
+    image: stratumv2/translator_sv2:v0.8.0@sha256:a6b7380999fb6048caa269766afc64541880849cec6c34594e48133ca4d454ef
     stop_signal: SIGINT
     volumes:
       - ./config/translator.toml:/app/translator-config.toml:ro

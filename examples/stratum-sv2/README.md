@@ -8,7 +8,8 @@ thin template-distribution bridge in between. It exists to prove
 node / template source through a documented adapter**, while bitcoin-rs keeps
 mining ownership (transaction selection, fees, coinbase and
 witness-commitment rules, candidate validation, block submission) and no SRI
-dependency lands anywhere below `examples/`.
+dependency lands anywhere outside `examples/` (the bridge's `stratum-apps`
+dependency lives in `template-provider/`).
 
 > **Noise key pinning:** the pool config pins the bridge's Noise public key
 > (`config/pool.toml`, `public_key = "9bWTZifgp9aVa23vtHqGT74UwK9bDRQxm77jf3u2tZ3ysM2ncMW"`).
@@ -50,8 +51,8 @@ SV1 miner connects — see [Optional SV1 leg](#optional-sv1-leg-unpinned).
 |--------------------|-----------------------------------------------------------------|----------------------------------------------------|
 | bitcoin-rs         | this PR's HEAD (branch `example/stratum-sv2`, base `origin/main` `f24b0096`) | built from the repo-root `Dockerfile` by compose |
 | sv2-apps           | tag `v0.8.0` = commit `7f49074357e54da4f5b13acfcc29dc3cbb9e541f` (verified at build time) | device clone; pool/translator images |
-| pool image         | `stratumv2/pool_sv2:v0.8.0`                                     | upstream image, config in `config/pool.toml`       |
-| translator image   | `stratumv2/translator_sv2:v0.8.0`                               | upstream image, config in `config/translator.toml` |
+| pool image         | `stratumv2/pool_sv2:v0.8.0@sha256:679e08ae5dd99bac01394b0c592c97f45982d0d9d24e03f460ccd1c2592d3a00` | upstream image, config in `config/pool.toml`       |
+| translator image   | `stratumv2/translator_sv2:v0.8.0@sha256:a6b7380999fb6048caa269766afc64541880849cec6c34594e48133ca4d454ef` | upstream image, config in `config/translator.toml` |
 | mining device      | `mining_device` built from sv2-apps `v0.8.0` (`cargo build --locked --release --bin mining_device` in `integration-tests/`) | `device/Dockerfile` |
 | bridge Rust deps   | `stratum-apps = "0.8.0"` (pulls `stratum-core 0.6.0`)           | `template-provider/Cargo.toml`                     |
 
@@ -100,7 +101,7 @@ to your machine so a share lands within seconds.
 - The pool pays `coinbase_tx_value_remaining` (subsidy + fees from the
   bitcoin-rs template) to its `coinbase_reward_script`:
   `addr(bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080)`
-  (regtest P2TR, bech32m) — set in `config/pool.toml`.
+  (regtest P2WPKH, bech32) — set in `config/pool.toml`.
 - bitcoin-rs's mining owner owns the coinbase/witness-commitment rules and
   the bridge mirrors them: `coinbase_prefix` is the BIP34 height push only,
   version/sequence/locktime follow bitcoin-rs's coinbase construction, and

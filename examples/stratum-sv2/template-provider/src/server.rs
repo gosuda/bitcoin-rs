@@ -10,15 +10,14 @@ use stratum_apps::network_helpers::accept_noise_connection;
 use stratum_apps::network_helpers::noise_stream::NoiseTcpWriteHalf;
 use stratum_apps::stratum_core::bitcoin;
 use stratum_apps::stratum_core::common_messages_sv2::{
-    Protocol, SetupConnectionErrorOwned, SetupConnectionSuccessOwned,
-    MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS,
+    MESSAGE_TYPE_SETUP_CONNECTION_ERROR, MESSAGE_TYPE_SETUP_CONNECTION_SUCCESS, Protocol,
+    SetupConnectionErrorOwned, SetupConnectionSuccessOwned,
 };
 use stratum_apps::stratum_core::parsers_sv2::{
     AnyMessageOwned, CommonMessagesOwned, TemplateDistribution, TemplateDistributionOwned,
 };
 use stratum_apps::utils::types::OutboundFrame;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use crate::rpc::RpcClient;
@@ -165,19 +164,12 @@ async fn handle_connection(
                         let message = TemplateDistribution::try_from((msg_type, frame.payload()))
                             .map_err(|e| format!("undecodable TDP message type {msg_type}: {e}"))?
                             .into_owned();
-                        handle_tdp(message, &state_snapshot(&templates), &rpc, &mut writer).await?;
+                        handle_tdp(message, &hub, &rpc, &mut writer).await?;
                     }
                 }
             }
         }
     }
-}
-
-/// Clones the latest template handle without retaining the watch borrow.
-fn state_snapshot(
-    templates: &watch::Receiver<Option<Arc<TemplateState>>>,
-) -> Option<Arc<TemplateState>> {
-    templates.borrow().clone()
 }
 
 /// Sends `NewTemplate` followed by `SetNewPrevHash` to activate it,
@@ -204,20 +196,21 @@ async fn push_template(
     Ok(())
 }
 
-/// Serves transaction requests and submits solutions for the current template
+/// Serves transaction requests and submits solutions for issued templates
 /// after assembly and a header PoW check. Unknown or invalid solutions are
 /// logged and dropped; pool coinbase constraints are only logged.
 async fn handle_tdp(
     message: TemplateDistributionOwned,
-    state: &Option<Arc<TemplateState>>,
+    hub: &Hub,
     rpc: &Arc<RpcClient>,
     writer: &mut NoiseTcpWriteHalf,
 ) -> Result<(), String> {
     match message {
         TemplateDistributionOwned::RequestTransactionData(request) => {
             let template_id = request.template_id;
-            match state.as_deref().filter(|s| s.id == template_id) {
+            match hub.lookup(template_id) {
                 Some(template) => {
+                    let template = template.as_ref();
                     send(
                         writer,
                         AnyMessageOwned::TemplateDistribution(
@@ -255,7 +248,7 @@ async fn handle_tdp(
         }
         TemplateDistributionOwned::SubmitSolution(solution) => {
             let template_id = solution.template_id;
-            let template = match state.as_deref().filter(|s| s.id == template_id) {
+            let template = match hub.lookup(template_id) {
                 Some(template) => template,
                 None => {
                     warn!(template_id, "solution for unknown template; dropped");

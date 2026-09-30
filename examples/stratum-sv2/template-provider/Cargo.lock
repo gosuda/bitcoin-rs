@@ -193,6 +193,7 @@ name = "bitcoin-rs-sv2-template-provider"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "parking_lot",
  "reqwest",
  "secp256k1 0.28.2",
  "serde_json",

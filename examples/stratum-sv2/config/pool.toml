@@ -12,7 +12,8 @@ cert_validity_sec = 3600
 # SV2 miner listener (compose-internal).
 listen_address = "0.0.0.0:34255"
 
-# Payout destination for coinbase_tx_value_remaining (regtest P2TR bech32m).
+# Payout destination for coinbase_tx_value_remaining (regtest P2WPKH
+# bech32).
 coinbase_reward_script = "addr(bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080)"
 
 server_id = 1
@@ -25,9 +26,10 @@ monitoring_address = "0.0.0.0:9090"
 monitoring_cache_refresh_secs = 15
 
 # Full-template mode against our template-provider bridge. NOTE: `public_key`
-# pins the bridge's Noise public key (base58-with-check) and MUST be replaced
-# with the value logged by the template-provider container at startup before
-# the pool will start. No [jds] section: the pool runs without a Job
+# pins the bridge's Noise public key (base58-with-check). The shipped value
+# already matches the default example key (EXAMPLE_PRIVATE_KEY_HEX /
+# TP_PRIVATE_KEY_HEX in compose.yaml); replace it only when the key is
+# overridden. No [jds] section: the pool runs without a Job
 # Declaration Server (JDS would require Bitcoin Core IPC, which we do not use).
 [template_provider_type.Sv2Tp]
 address = "template-provider:8442"

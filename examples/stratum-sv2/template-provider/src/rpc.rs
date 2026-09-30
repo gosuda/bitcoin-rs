@@ -1,10 +1,11 @@
 //! Minimal bitcoin-rs JSON-RPC client (HTTP/1.1, basic auth).
 //!
 //! Covers exactly what the bridge needs: `getblocktemplate` (blocking
-//! long-poll), `submitblock`, and `getblockchaininfo`. See
+//! long-poll), `submitblock`, and `getblockcount` (block height for the
+//! BIP34 coinbase prefix in template conversion). See
 //! `docs/contracts/external-api.md` (API-11..API-20) for the wire contract.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
