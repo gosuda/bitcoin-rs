@@ -202,15 +202,18 @@ tests.
 - A rebuild that has already consumed canonical bodies re-uses valid
   prepared work; stale work is discarded.
 
-### `RCV-07`: Missing disconnected body routes to canonical rebuild
+### `RCV-07`: Missing disconnected body fails closed or routes to canonical rebuild
 
-- A rewind whose disconnected body is missing cannot produce exact-identity
-  deletions. The affected capabilities reset and rebuild from canonical
-  bodies instead of failing the worker.
+- A rewind whose disconnected body is transiently unavailable cannot produce
+  exact-identity deletions and stalls without discarding rows. When the
+  storage owner reports the body permanently pruned or corrupt, historical
+  capabilities persist a terminal unavailable state; current-state-only
+  `ScriptLive` resets and rebuilds from authoritative UTXO.
 - The worker does not fabricate missing body bytes or substitute a
   different block at the same height.
-- Rebuild uses retained canonical bodies from the durable `refs` or an
-  explicit archive input. A pruned node reports unavailable history.
+- Historical rebuild uses retained canonical bodies from the durable `refs` or
+  an explicit archive input. A pruned node reports unavailable history with
+  the first required height/hash and owner-provided reason across restart.
 
 ### `RCV-08`: Exact disconnect and reorg
 
@@ -265,7 +268,7 @@ tests.
   increments only when the durable root format changes.
 - The fee estimator carries its own estimator-owned version. The P2P
   discovery store carries its own discovery-owned version. The index
-  carries its own durability marker (`[0x00, b'V']`, currently row-format 5),
+  carries its own durability marker (`[0x00, b'V']`, currently row-format 6),
   which recovery full-resets for rebuild on a mismatch. None of these
   increment `CURRENT_SCHEMA`.
 - A missing or unknown owner-local version does not fail node startup.
@@ -452,11 +455,14 @@ durable.
 - `crates/storage/tests/overhaul_atomic_durability.rs` (existing): tests the
   storage-level prior-or-whole-proposed rule and durable batch completion.
 - `crates/index/src/runtime/recovery_tests.rs` (existing):
+  - `index_ahead_of_restored_tip_is_reported_once_and_rewound` (`RCV-04`);
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
     (`RCV-05`);
-  - `tip_change_during_rebuild_converges_on_new_tip` (`RCV-06`);
-  - `missing_disconnected_body_routes_rewind_to_rebuild` (`RCV-07`);
-  - `selective_rebuild_leg_survives_sibling_rollback` (`RCV-05`).
+  - `pruned_history_fails_terminally_live_reseeds_and_absent_history_waits`,
+    `already_pruned_startup_fails_at_the_first_required_body`, and
+    `corrupt_retained_body_fails_with_its_exact_identity` (`RCV-07`);
+  - `deep_rebuild_with_pruned_history_fails_history_and_reseeds_live`
+    (`RCV-05`, `RCV-07`).
 
 - `crates/node/tests/overhaul_fee_history.rs` (existing):
   - `restart_adopts_persisted_estimator_history`,

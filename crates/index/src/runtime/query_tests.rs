@@ -25,6 +25,7 @@ struct ScanResponse {
 struct QuerySnapshot {
     watermark: IndexWatermark,
     script_history_watermark: ScriptHistoryWatermark,
+    history_failures: Arc<RwLock<crate::IndexHistoryFailures>>,
     scans: Vec<ScanResponse>,
     aba: Option<Arc<AbaMutation>>,
     chain_transition: bitcoin_rs_chain::StableRead,
@@ -92,6 +93,13 @@ impl TxIndexSnapshot for QuerySnapshot {
     ) -> Result<Option<IndexWatermark>, IndexError> {
         let _ = self.script_history_watermark;
         Ok(Some(self.watermark))
+    }
+
+    fn capability_failure(
+        &self,
+        capability: IndexCapability,
+    ) -> Result<Option<crate::IndexHistoryFailure>, IndexError> {
+        Ok(self.history_failures.read().get(capability))
     }
 
     fn transaction_rows(
@@ -211,6 +219,7 @@ struct FixtureConfig {
 struct QueryFixture {
     engine: DerivedIndexQueryEngine,
     runtime: Arc<DerivedIndexRuntime>,
+    history_failures: Arc<RwLock<crate::IndexHistoryFailures>>,
     body: Option<Arc<SingleBlockBody>>,
 }
 
@@ -285,10 +294,12 @@ impl QueryFixture {
             height: tip.height,
             hash: *tip.hash.as_byte_array(),
         });
+        let history_failures = Arc::new(RwLock::new(crate::IndexHistoryFailures::default()));
         let reader = Arc::new(QueryReader {
             snapshot: QuerySnapshot {
                 watermark,
                 script_history_watermark: ScriptHistoryWatermark::MatchTx,
+                history_failures: Arc::clone(&history_failures),
                 scans: config.scans,
                 aba,
                 chain_transition: chain_transition.clone(),
@@ -331,6 +342,7 @@ impl QueryFixture {
         Ok(Self {
             engine,
             runtime,
+            history_failures,
             body,
         })
     }
@@ -379,6 +391,57 @@ fn stopped_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error::
     assert!(matches!(
         fixture.engine.transaction(&txid),
         Err(TxQueryError::Unavailable(reason)) if reason == "txindex worker stopped"
+    ));
+    Ok(())
+}
+
+#[test]
+fn terminal_history_failure_gates_readiness_and_history_queries()
+-> Result<(), Box<dyn std::error::Error>> {
+    let block = Network::Regtest.genesis_block();
+    let txid = block.txs[0].txid();
+    let required = IndexWatermark {
+        height: 0,
+        hash: block.block_hash().0.to_le_bytes(),
+    };
+    let fixture = QueryFixture::new(FixtureConfig {
+        block,
+        retain_body: true,
+        scans: Vec::new(),
+        aba_trigger: None,
+        watermark: None,
+    })?;
+    let failure = IndexHistoryFailure::Pruned { required };
+    *fixture.history_failures.write() = crate::IndexHistoryFailures {
+        tx_lookup: Some(failure),
+        script_history: Some(failure),
+    };
+
+    let expected = failure.reason();
+    let lifecycle = Arc::new(arc_swap::ArcSwap::from_pointee(
+        DerivedIndexLifecycle::Serving(Arc::new(fixture.engine.clone())),
+    ));
+    let status = DerivedIndexCapability::new(
+        Some(lifecycle),
+        Some(Arc::clone(&fixture.runtime)),
+        IndexCapabilities::ALL,
+    )
+    .capability();
+    assert!(matches!(
+        status.state,
+        CapabilityState::Failed { reason } if reason.contains(expected.as_str())
+    ));
+    assert!(matches!(
+        fixture.engine.index_info(),
+        Err(TxQueryError::Unavailable(reason)) if reason.contains(expected.as_str())
+    ));
+    assert!(matches!(
+        fixture.engine.transaction(&txid),
+        Err(TxQueryError::Unavailable(reason)) if reason.contains(expected.as_str())
+    ));
+    assert!(matches!(
+        fixture.engine.history_snapshot(ScriptHash::new(&[])),
+        Err(TxQueryError::Unavailable(reason)) if reason.contains(expected.as_str())
     ));
     Ok(())
 }

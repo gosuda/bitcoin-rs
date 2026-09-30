@@ -596,45 +596,72 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
     Ok(())
 }
 
-/// `anchor_watermark` must stamp both the watermark cursor and the coverage
-/// floor: a rebuilt index knows rows below `floor` were pruned, so queries
-/// answer `Unavailable` instead of `None`. Resetting the capability clears
-/// the floor with it.
+/// A terminal history record preserves the first unavailable identity and
+/// reason, does not affect sibling capabilities, and an explicit selective
+/// reset clears it with the selected derived rows.
 #[test]
-fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
+fn terminal_history_failure_is_selective_and_reset_clears_it()
 -> Result<(), Box<dyn std::error::Error>> {
-    use super::{IndexCapability, IndexReader, IndexWatermark, TxIndexSnapshot};
+    use super::{
+        IndexCapability, IndexHistoryFailure, IndexReader, IndexWatermark, TxIndexSnapshot,
+    };
 
-    let (_dir, writer) = writer()?;
-    let anchor = IndexWatermark {
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(RocksDbStore::open(dir.path())?);
+    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+    let required = IndexWatermark {
         height: 41,
         hash: [7u8; 32],
     };
-    writer.anchor_watermark(crate::IndexCapabilities::TX_LOOKUP, anchor, 42)?;
+    let failure = IndexHistoryFailure::Pruned { required };
+    writer.mark_history_unavailable(crate::IndexCapabilities::TX_LOOKUP, failure)?;
 
     let snapshot = writer.indexer().snapshot()?;
     assert_eq!(
-        snapshot.capability_floor(IndexCapability::TxLookup)?,
-        42,
-        "anchor records the first covered height"
+        snapshot.capability_failure(IndexCapability::TxLookup)?,
+        Some(failure),
+        "the first terminal body identity and owner reason are durable"
     );
     assert_eq!(
-        snapshot.capability_watermark(IndexCapability::TxLookup)?,
-        Some(anchor)
+        snapshot.capability_failure(IndexCapability::ScriptHistory)?,
+        None,
+        "unselected capabilities remain healthy"
     );
+    drop(snapshot);
+
+    writer.mark_history_unavailable(
+        crate::IndexCapabilities::TX_LOOKUP,
+        IndexHistoryFailure::Corrupt {
+            required: IndexWatermark {
+                height: 43,
+                hash: [9u8; 32],
+            },
+        },
+    )?;
+    let snapshot = writer.indexer().snapshot()?;
     assert_eq!(
-        snapshot.capability_floor(IndexCapability::ScriptHistory)?,
-        0,
-        "unselected capabilities keep complete coverage"
+        snapshot.capability_failure(IndexCapability::TxLookup)?,
+        Some(failure),
+        "later failures must not replace the first unavailable identity"
+    );
+    drop(snapshot);
+
+    drop(writer);
+    let writer = IndexWriter::open(Arc::clone(&store), 2)?;
+    let snapshot = writer.indexer().snapshot()?;
+    assert_eq!(
+        snapshot.capability_failure(IndexCapability::TxLookup)?,
+        Some(failure),
+        "restart preserves the terminal capability state"
     );
     drop(snapshot);
 
     writer.reset_capabilities(crate::IndexCapabilities::TX_LOOKUP)?;
     let snapshot = writer.indexer().snapshot()?;
     assert_eq!(
-        snapshot.capability_floor(IndexCapability::TxLookup)?,
-        0,
-        "a reset rebuilds from genesis, so the floor clears"
+        snapshot.capability_failure(IndexCapability::TxLookup)?,
+        None,
+        "an explicit reset clears the selected terminal state"
     );
     Ok(())
 }

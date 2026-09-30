@@ -18,9 +18,10 @@
 //! [`RetentionError::PrunedBelow`] — the defined required-history-is-gone
 //! result (`RCV-08`: optional consumer lag cannot retain unlimited
 //! segments, and missing required history is an unavailable result, never a
-//! partial success). An optional consumer that falls that far behind must
-//! rebuild to follow again; it can never pin rows it already lost, and
-//! releasing its lease always returns pruning to exactly the policy line.
+//! partial success). An optional consumer that falls that far behind becomes
+//! unavailable or rebuilds from another authoritative source; it can never
+//! pin rows it already lost, and releasing its lease always returns pruning
+//! to exactly the policy line.
 //!
 //! One prune pass claims the rows it means to delete through
 //! [`RetentionRegistry::reserve`]. That reservation is the protocol's
@@ -199,15 +200,16 @@ impl RetentionBudget {
 /// has several causes. This is the vocabulary the owner boundary uses:
 /// [`RetentionRegistry::history_from`] answers permanence, and while a
 /// [`HistoryLease`] is live the owner guarantees no row at or above its
-/// floor is deleted, so a read that returns nothing under that grant is
-/// `Missing` and a read that returns damaged bytes is `Corrupt`. A consumer
-/// relays these meanings; it never compares a height against a copied prune
-/// frontier to decide them.
+/// floor is deleted. A store without authoritative locator proof may report
+/// absent bytes as `Missing`; an authoritative missing locator/reference or
+/// damaged body is `Corrupt`. A consumer relays these meanings; it never
+/// compares a height against a copied prune frontier to decide them.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
 pub enum HistoryUnavailable {
     /// Heights below `below` are permanently gone: a committed pass deleted
-    /// them. The defined recovery for an optional consumer is a rebuild from
-    /// what remains, not a retry.
+    /// them. Consumers that require complete history enter terminal failure;
+    /// consumers with another authoritative source may rebuild. Neither case
+    /// retries the deleted range.
     #[error("history below height {below} is pruned")]
     Pruned {
         /// One past the highest row a committed pass deleted.
@@ -226,9 +228,10 @@ pub enum HistoryUnavailable {
     /// appear through backfill or a reconnect. Retry; do not rebuild.
     #[error("retained history is temporarily unavailable")]
     Missing,
-    /// The row is present but damaged. Retrying cannot recover it. Owners
-    /// that verify what they serve answer this; the boundary names it so a
-    /// consumer never has to guess between damage and absence.
+    /// An authoritative retained locator/reference is absent, or its bytes
+    /// are damaged. Retrying cannot recover it. Owners that can prove the
+    /// expected representation answer this; stores without that proof use
+    /// [`Self::Missing`] so a consumer never guesses permanence from `None`.
     #[error("retained history is corrupt")]
     Corrupt,
     /// The node is shutting down, so no new history is granted.
@@ -241,8 +244,8 @@ pub enum HistoryUnavailable {
 pub enum RetentionError {
     /// The requested floor names data pruning has already deleted. The
     /// caller's retention budget was exceeded while it was not holding a
-    /// lease; the defined recovery is to rebuild from what remains, not to
-    /// retry.
+    /// lease; the caller must fail closed or use another authoritative
+    /// recovery source, not retry the deleted range.
     #[error("required history at height {requested} is already pruned (prune line {pruned_below})")]
     PrunedBelow {
         /// Floor the caller asked to pin.
@@ -634,17 +637,18 @@ impl Drop for RetentionLease {
 /// One optional consumer's bounded pin on history, granted by the owner.
 ///
 /// While this lease lives the authority deletes no row at or above its
-/// floor. That guarantee is what types a byte read: a read that returns
-/// nothing under a live grant is transient absence
-/// ([`HistoryUnavailable::Missing`]), never lost history, and a read that
-/// returns damaged bytes is [`HistoryUnavailable::Corrupt`]. The consumer
-/// relays those meanings instead of deciding permanence on its own.
+/// floor. That guarantee is what types a byte read: a store without proof of
+/// an expected row reports transient [`HistoryUnavailable::Missing`], while
+/// an authoritative missing locator/reference or damaged body is
+/// [`HistoryUnavailable::Corrupt`]. The consumer relays those meanings
+/// instead of deciding permanence on its own.
 ///
 /// A pass expires the lease when its floor lags the policy line by more than
 /// the granted [`RetentionBudget`]. Expiry is immediate, the holder learns at
 /// its next request, and that request answers
-/// [`HistoryUnavailable::Pruned`] once the line has crossed it: the
-/// capability is gone and the defined recovery is a rebuild, not a retry.
+/// [`HistoryUnavailable::Pruned`] once the line has crossed it. The consumer
+/// then applies its own complete-history or alternate-source recovery policy;
+/// it does not retry the deleted range.
 ///
 /// Released exactly once, by [`Self::release`] or by `Drop`.
 #[derive(Debug)]

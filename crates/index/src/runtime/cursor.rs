@@ -22,7 +22,7 @@ impl Worker {
     /// publisher briefly lags `applied_tip` inside one commit, so a disagreeing
     /// snapshot simply skips the write; the next caught-up pass retries.
     pub(super) fn persist_chain_cursor(&self) -> Result<CursorCommit, DerivedIndexWorkerError> {
-        let (fence, watermarks) = match self.writer.fenced_watermarks() {
+        let (fence, watermarks, failures) = match self.writer.fenced_state() {
             Ok(snapshot) => snapshot,
             Err(IndexError::ResetInProgress) => return Ok(CursorCommit::ResetRejected),
             Err(error) => return Err(DerivedIndexWorkerError::Index(error)),
@@ -39,11 +39,11 @@ impl Worker {
             height: snapshot.height,
             hash: snapshot.hash.to_le_bytes(),
         };
-        if (self.enabled.contains(IndexCapability::TxLookup)
-            && watermarks.tx_lookup != Some(expected))
-            || (self.enabled.contains(IndexCapability::ScriptHistory)
+        let active = self.enabled.difference(failures.capabilities());
+        if (active.contains(IndexCapability::TxLookup) && watermarks.tx_lookup != Some(expected))
+            || (active.contains(IndexCapability::ScriptHistory)
                 && watermarks.script_history != Some(expected))
-            || (self.enabled.contains(IndexCapability::ScriptLive)
+            || (active.contains(IndexCapability::ScriptLive)
                 && watermarks.script_live != Some(expected))
         {
             return Ok(CursorCommit::NotAligned);
@@ -91,7 +91,7 @@ impl Worker {
         let capabilities = batch
             .capabilities()
             .ok_or(DerivedIndexWorkerError::PendingDurableChanged)?;
-        let cursor = self.cursor_for_result(capabilities, Some(endpoint), watermarks);
+        let cursor = self.cursor_for_result(capabilities, Some(endpoint), watermarks)?;
         let watermark = match self.writer.commit_forward_with_cursor(
             fence,
             batch,
@@ -118,11 +118,13 @@ impl Worker {
         capabilities: IndexCapabilities,
         result: Option<IndexWatermark>,
         mut watermarks: IndexWatermarks,
-    ) -> Option<[u8; crate::reconcile::CURSOR_BYTE_LEN]> {
+    ) -> Result<Option<[u8; crate::reconcile::CURSOR_BYTE_LEN]>, DerivedIndexWorkerError> {
         let snapshot = self.chain_events.cursor();
-        let result = result?;
+        let Some(result) = result else {
+            return Ok(None);
+        };
         if result.height != snapshot.height || result.hash != snapshot.hash.to_le_bytes() {
-            return None;
+            return Ok(None);
         }
         if capabilities.contains(IndexCapability::TxLookup) {
             watermarks.tx_lookup = Some(result);
@@ -133,13 +135,18 @@ impl Worker {
         if capabilities.contains(IndexCapability::ScriptLive) {
             watermarks.script_live = Some(result);
         }
-        let aligned = (!self.enabled.contains(IndexCapability::TxLookup)
+        let (_, _, failures) = self
+            .writer
+            .fenced_state()
+            .map_err(DerivedIndexWorkerError::Index)?;
+        let active = self.enabled.difference(failures.capabilities());
+        let aligned = (!active.contains(IndexCapability::TxLookup)
             || watermarks.tx_lookup == Some(result))
-            && (!self.enabled.contains(IndexCapability::ScriptHistory)
+            && (!active.contains(IndexCapability::ScriptHistory)
                 || watermarks.script_history == Some(result))
-            && (!self.enabled.contains(IndexCapability::ScriptLive)
+            && (!active.contains(IndexCapability::ScriptLive)
                 || watermarks.script_live == Some(result));
-        aligned.then(|| snapshot.to_bytes())
+        Ok(aligned.then(|| snapshot.to_bytes()))
     }
 
     pub(super) fn commit_pending(

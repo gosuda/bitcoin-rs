@@ -20,15 +20,12 @@ pub enum IndexError {
     /// This indexer cannot undo a block, so a reorg cannot be made consistent.
     #[error("this indexer does not support block disconnect")]
     UnsupportedRollback,
-    /// The writer does not implement stamping a durable watermark anchor, so
-    /// a rebuild after pruning cannot be placed on it.
-    #[error("this indexer does not support watermark anchoring")]
-    UnsupportedAnchor,
-    /// `anchor_watermark` covers only capabilities derived from block
-    /// history: `ScriptLive` is reseeded from the authoritative UTXO view
-    /// rather than anchored, and an empty selection stamps nothing.
-    #[error("a watermark anchor cannot cover ScriptLive or an empty capability set")]
-    AnchorUnsupportedSelection,
+    /// The writer does not implement durable terminal history states.
+    #[error("this indexer does not support terminal history failures")]
+    UnsupportedHistoryFailure,
+    /// Terminal body-history failures cover only nonempty historical selections.
+    #[error("a terminal body-history failure cannot cover ScriptLive or an empty capability set")]
+    HistoryFailureUnsupportedSelection,
     /// A block header did not have the consensus 80-byte length.
     #[error("invalid block header length {len}")]
     InvalidHeaderLength {
@@ -63,6 +60,9 @@ pub enum IndexError {
         /// Actual value length observed in storage.
         len: usize,
     },
+    /// A persisted terminal history state had an unknown tag or shape.
+    #[error("invalid persisted index history failure")]
+    InvalidHistoryFailure,
     /// The `TxIndex` format version is not supported.
     #[error("unsupported TxIndex format version {version}")]
     UnsupportedTxIndexFormatVersion {

@@ -116,7 +116,6 @@ impl DerivedIndexQueryEngine {
         tip: &TipSnapshot,
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
-        floor: u32,
     ) -> Result<Option<SpendingRecord>, TxQueryError> {
         let rows = Self::scan_spending_rows(snapshot, budget, outpoint)?;
         let mut last_height = None;
@@ -146,7 +145,7 @@ impl DerivedIndexQueryEngine {
                 }
             }
         }
-        Self::none_below_floor(floor, "script history")
+        Ok(None)
     }
 
     fn spending_input(
@@ -174,13 +173,7 @@ impl DerivedIndexQueryEngine {
         tip: &TipSnapshot,
         budget: &mut QueryBudget,
         scripthash: ScriptHash,
-        floor: u32,
     ) -> Result<ScriptIndexSnapshot, TxQueryError> {
-        if floor > 0 {
-            return Err(TxQueryError::Unavailable(
-                format!("script history coverage starts at height {floor}; history cannot be proven complete").into(),
-            ));
-        }
         let funding_outputs = self.funding_outputs_for(snapshot, tip, budget, scripthash)?;
 
         let mut history = Vec::with_capacity(funding_outputs.len());
@@ -194,7 +187,7 @@ impl DerivedIndexQueryEngine {
                 vout,
             });
             let outpoint = OutPoint { txid, vout };
-            if let Some(spender) = self.spender_for(snapshot, tip, budget, &outpoint, floor)? {
+            if let Some(spender) = self.spender_for(snapshot, tip, budget, &outpoint)? {
                 history.push(ScriptHistoryRecord {
                     txid: spender.txid,
                     height: spender.height,

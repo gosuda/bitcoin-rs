@@ -99,6 +99,11 @@ remove another script's output.
   the query engine refuses the request with `TxQueryError::Retry` or
   `TxQueryError::Unavailable`. Stale, unconfirmed, or torn rows are never
   returned to callers.
+- A durable `IndexHistoryFailure` gates its selected historical capability
+  before watermark or row inspection. RPC and Esplora return typed unavailable
+  errors containing the first required height/hash and reason; capability
+  readiness reports `Failed`, including after restart. `ScriptLive` has no
+  body-history failure key and remains independently queryable when ready.
 - `unspent_outputs` consumes the `ScriptLive` watermark only. The query holds
   chain-transition authority across watermark validation, live locator scan,
   and authoritative UTXO resolution. Apply mutates the UTXO set before
@@ -112,27 +117,28 @@ remove another script's output.
 
 ### `IDX-04`: Selective reset preserves sibling readiness
 
-- When one capability watermark experiences corruption, a missing block body
-  during reorg rollback, or a schema/version mismatch, the worker resets only
-  the degraded capability watermark to `None` and backfills it from the active
-  chain.
+- When one capability watermark experiences corruption or a schema/version
+  mismatch, the worker resets only the degraded capability watermark to `None`
+  and backfills it from the active chain.
 - Surviving sibling capabilities remain ready: resetting and rebuilding
   `ScriptHistory` leaves `TxLookup` and `ScriptLive` online and serving
   queries as long as their own watermarks match the applied tip, and vice versa.
 - Switching `full` → `utxo`, or dropping internal `TxLookup` when explicit
-  `--txindex` is off, resets only leftover persisted families. Configured
-  families are not rebuilt as a side effect.
+  `--txindex` is off, resets only leftover persisted families and their
+  terminal history records. Configured families are not rebuilt as a side
+  effect.
 
 ### `IDX-05`: Restart reconciliation and schema version refusal
 
 - The `data_dir/txindex` namespace maintains
-  durable format versions and capability watermarks (`IndexWatermarks`,
-  `ConsumerCursor`).
+  durable format versions, capability watermarks (`IndexWatermarks`), terminal
+  history failures (`IndexHistoryFailures`), and `ConsumerCursor`.
 - A stored schema or format version foreign to this build refuses start for that
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
   `IndexWriter::open` (`crates/index/src/index.rs`) accepts the current
-  durability marker only (row-format 5: big-endian heights, 43-byte live rows,
-  6-byte positions); every older marker is `IndexError::UnsupportedTxIndexFormatVersion`
+  durability marker only (row-format 6: format 5's big-endian heights,
+  43-byte live rows, and 6-byte positions plus terminal history state); every
+  older marker is `IndexError::UnsupportedTxIndexFormatVersion`
   and recovery full-resets the store for rebuild. No in-place upgrade path
   exists. (`IDX-04` selective reset still covers corrupt watermarks, not versions.)
 - On node startup, index workers read their persisted watermarks and reconcile
@@ -189,6 +195,11 @@ remove another script's output.
   - The worker loads bodies from `BlockBodyStore`, constructs bounded forward
     batches (`PreparedBatchLimits`), and commits row mutations and updated
     watermarks in a single atomic store batch per block or block chunk.
+  - Each historical pass requests one storage-owned bounded `HistoryLease` at
+    its first required height, advances its floor only after durable index
+    progress, and releases it through `Drop` on completion, cancellation, or
+    failure. A transient `Missing`/`Reserved` answer stalls; `Pruned` or a
+    missing/corrupt retained locator/body is terminal for historical families.
   - Live deletes are anchored by the block's authoritative undo scripts;
     same-block create/spend pairs cancel before the anchor is consulted.
     Live inserts use the same admission predicate as the UTXO set, including
@@ -199,10 +210,21 @@ remove another script's output.
 
 ### `IDX-07`: Error isolation and supervised rebuild
 
-- If a required block body is missing during a rollback (e.g. an abandoned
-  branch block pruned before rollback completed), the worker resets the
-  affected capability watermark and initiates a fresh rebuild from the active
-  chain.
+- If storage reports a required block body permanently pruned or corrupt during
+  catch-up or rollback, the worker durably records the first required
+  height/hash and reason for `TxLookup`/`ScriptHistory`. Those capabilities stop
+  reconciling and report failed/unavailable instead of retrying or advertising
+  a retained suffix as complete. Transient retained-body absence still stalls.
+- The terminal record is owner-local derived state in row-format 6. Restart
+  reloads it before reconciliation; an explicit selective capability reset
+  clears it. It stores the required identity and typed failure reason, never a
+  pruning frontier. The index neither copies nor compares the frontier to make
+  the decision—the storage-owned `HistoryAccess` result is authoritative.
+- Every `TxIndexWriter` implementation must capture the exact write fence,
+  all capability watermarks, and all persisted terminal history failures in
+  one coherent `fenced_state` snapshot. Reconciliation uses this required
+  capture even for writers with custom failure persistence; unknown or
+  unreadable history state is an error, never an empty failure set.
 - A missing or unreadable undo record is fatal only for `ScriptLive`. The
   worker resets that capability and reseeds from the authoritative UTXO view;
   `TxLookup` and `ScriptHistory` continue their body-only rollback.
@@ -228,18 +250,20 @@ remove another script's output.
   `commit_golden_blocks_writes_expected_electrs_rows`: electrs family
   occupancy after one atomic `IndexWriter::commit_block` (`IDX-06`).
 - `crates/index/src/runtime/recovery_tests.rs`:
-  - `shallow_reorg_rewinds_to_common_ancestor_then_replays`
-  - `absent_tip_rewinds_index_to_empty`
-  - `missing_disconnected_body_routes_rewind_to_rebuild`
+  - `index_ahead_of_restored_tip_is_reported_once_and_rewound`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
-  - `live_only_index_ahead_is_reported_and_reseeded`
+  - `pruned_history_fails_terminally_live_reseeds_and_absent_history_waits`
+  - `already_pruned_startup_fails_at_the_first_required_body`
+  - `corrupt_retained_body_fails_with_its_exact_identity`
+  - `deep_rebuild_with_pruned_history_fails_history_and_reseeds_live`
 - `crates/index/src/runtime/startup.rs` and
   `crates/index/src/runtime/integration_tests.rs`: lifecycle
   publication, open failure/timeout, and shutdown abandonment.
 - `crates/index/src/runtime/query_tests.rs`: query gating, snapshot
   consistency, revision ABA detection, and
   `failed_worker_makes_queries_unavailable` /
-  `stopped_worker_makes_queries_unavailable` worker-liveness refusal.
+  `stopped_worker_makes_queries_unavailable` worker-liveness refusal, plus
+  `terminal_history_failure_gates_readiness_and_history_queries`.
 - `crates/index/src/index/tests.rs`: confirmed-body
   serving by height/hash (`IDX-03`, `RCV-01`).
 - `crates/chainstate/src/reorg.rs` and the `RCV-08` recovery evidence prove

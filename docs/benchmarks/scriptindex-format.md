@@ -1,6 +1,6 @@
 # Generic index on-disk format
 
-This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes bump the durability marker and keep `CURRENT_SCHEMA` unchanged: the durability marker (`[0x00, b'V']`, currently row-format 5) is the hard open gate with full-reset recovery, and it covers key layout and row-value widths alike. There is no translator and no legacy reader; an unknown durability marker refuses start and recovery unattended-resets the derived namespace for rebuild from retained chainstate (operator cost of a format bump: one derived re-index on first start; authoritative data untouched). A rejected non-derived file is left in place until explicit authorized rebuild.
+This document owns the on-disk format of the generic index in the target node (T30, gate G8). The frozen audit below (2026-09-02, `TxPosition` width, positioned Spending, LE height, per-CF cost, live locator) is retained as candidate evidence; its verdicts remain the baseline the target schema evolves from. Index-only layout changes bump the durability marker and keep `CURRENT_SCHEMA` unchanged: the durability marker (`[0x00, b'V']`, currently row-format 6) is the hard open gate with full-reset recovery, and it covers key layout, row-value widths, and terminal history state. There is no translator and no legacy reader; an unknown durability marker refuses start and recovery unattended-resets the derived namespace for rebuild from retained chainstate (operator cost of a format bump: one derived re-index on first start; authoritative data untouched). A rejected non-derived file is left in place until explicit authorized rebuild.
 
 ## Row families
 
@@ -329,61 +329,61 @@ vout (all `<= U24_MAX`), so injectivity holds; the 43-byte key is current.
 
 ### Versioning: per-capability format and reset
 
-The index tracks two independently versioned capabilities via
+The index tracks three independently versioned capabilities via
 `IndexCapability`:
 
 | Capability | Column families | Watermark key |
 |---|---|---|
-| `TxLookup` | `TxConfirmed`, `BlockHeaders` | `TX_LOOKUP_WATERMARK_KEY` |
+| `TxLookup` | `TxConfirmed` | `TX_LOOKUP_WATERMARK_KEY` |
 | `ScriptHistory` | `Funding`, `Spending` | `SCRIPT_HISTORY_WATERMARK_KEY` |
+| `ScriptLive` | `ScriptLive` | `SCRIPT_LIVE_WATERMARK_KEY` |
 
 **Per-capability format version.** The single durable format marker is the
-durability key `[0x00, b'V']` in `UtxoMeta`, currently row-format 5. The marker
-covers the key layout and the row-value widths alike (format 5: 6-byte u24
-positions). A marker other than the current value refuses start
-(`UnsupportedTxIndexFormatVersion`) and recovery full-resets the store for
-rebuild, so a foreign-format index is rebuilt rather than read in place.
+durability key `[0x00, b'V']` in `UtxoMeta`, currently row-format 6. The marker
+covers the key layout, row-value widths, and terminal history state (format 5:
+6-byte u24 positions; format 6: per-capability history failures). A marker
+other than the current value refuses start (`UnsupportedTxIndexFormatVersion`)
+and recovery full-resets the store for rebuild, so a foreign-format index is
+rebuilt rather than read in place.
 
 **Per-capability reset.** The `IndexCapabilities` mask allows resetting one
-capability without touching the other. `acquire_capability_reset` and
+capability without touching the others. `acquire_capability_reset` and
 `resume_capability_reset` delete only the column families belonging to the
 requested capability and clear only that capability's watermark. The reset
 state is tracked in `RESET_CAPABILITIES_KEY` with a monotonic version that
 prevents ABA across repeated resets.
 
-Every durability marker (`[0x00, b'V']`) older than the current row-format 5
+Every durability marker (`[0x00, b'V']`) older than the current row-format 6
 refuses start (`UnsupportedTxIndexFormatVersion`) and recovery full-resets
-the store for rebuild: format 5 changed every row family, so no in-place
-upgrade path exists.
+the store for rebuild: format 5 changed every row family and format 6 adds
+terminal history state, so no in-place upgrade path exists.
 
-**Adding ScriptLive later must not force a History reindex.** ScriptLive
-rows would occupy a new column family (not one of the existing four). The
-`IndexCapability` enum would gain a `ScriptLive` variant with its own
-watermark key. Because the reset mechanism is per-capability:
+**ScriptLive does not force a History reindex.** ScriptLive rows occupy their
+own column family and the `ScriptLive` capability has its own watermark key.
+Because the reset mechanism is per-capability:
 
-- Adding `ScriptLive` does not touch `Funding`, `Spending`, `TxConfirmed`,
-  or `BlockHeaders` rows.
+- Seeding or resetting `ScriptLive` does not touch `Funding`, `Spending`, or
+  `TxConfirmed` rows.
 - A `ScriptHistory` reset (clearing `Funding` + `Spending`) does not touch
   `ScriptLive` rows.
 - A `ScriptLive` reset clears only the Live CF.
-- The `[0x00, b'V']` durability marker does not change: it governs the
-  row-value format of existing CFs, not the existence of a new CF.
+- The `[0x00, b'V']` durability marker governs all current index families and
+  their durable terminal state.
 
 The only shared state between capabilities is the `ORDINARY_STATE_REVISION`
 counter in `UtxoMeta`, which advances on every ordinary commit regardless of
 which capability wrote. This is by design: the revision fences derived
 writes against concurrent resets, and a new capability's writes must be
 fenced the same way. Adding a capability does not change the revision
-counter's semantics; it just means more writes advance it.
+counter's semantics; each capability's writes advance it.
 
 **No dual-read path.** The reader does not maintain a "read from old format,
 then read from new format" fallback for a capability that has not been
 reset. The row-format gate covers the row-value format
-(positions vs no positions), not the presence or absence of a column
-family. A new CF is either populated (after the first ingest) or empty
-(before it); the reader handles both without a format check.
+(positions vs no positions) plus terminal history metadata. Each current CF
+is either populated after ingest or empty before it; readiness is established
+by that capability's watermark.
 
-**No migration.** Adding a capability is additive: open the new keyspace,
-start ingesting, advance the new watermark. No existing row is rewritten.
-The only operator action is enabling the capability in the ingest
-configuration; the reset mechanism handles the rest.
+**No migration.** A format mismatch resets the disposable derived store and
+rebuilds through the documented recovery path. No existing row is read or
+rewritten in place.

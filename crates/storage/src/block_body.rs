@@ -3,6 +3,7 @@
 use crate::durable_head::BodyExtent;
 use bitcoin_rs_primitives::{Hash256, varint};
 
+use crate::pruning::HistoryUnavailable;
 use crate::{
     BlockFilePosition, FlatFileBlockReader, FlatFileBlockStore, KvSnapshot, KvStore, StorageError,
     block_file_max_height_key, decode_block_file_max_height, encode_block_file_max_height,
@@ -47,6 +48,22 @@ pub trait BlockBodyReader {
         height: u32,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError>;
+
+    /// Loads one body while a caller holds a live history grant.
+    ///
+    /// The default preserves transient absence for stores that cannot prove
+    /// more. Authoritative indexed stores override this method: a missing
+    /// locator or referenced frame for an applied retained block is corrupt,
+    /// not an indefinitely retryable `None`.
+    fn load_retained_block_body(
+        &mut self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Result<Vec<u8>, HistoryUnavailable>, StorageError> {
+        Ok(self
+            .load_block_body(height, hash)?
+            .ok_or(HistoryUnavailable::Missing))
+    }
 }
 
 struct DirectBlockBodyReader<'a, S: BlockBodyStore + ?Sized> {
@@ -210,6 +227,36 @@ struct IndexedBlockBodyReader<'a> {
     positions: PositionLookup,
 }
 
+impl IndexedBlockBodyReader<'_> {
+    fn next_position(
+        &mut self,
+        height: u32,
+        hash: Hash256,
+    ) -> Result<Option<BlockFilePosition>, StorageError> {
+        match &mut self.positions {
+            PositionLookup::Direct => {
+                let key = crate::pruning::block_body_key(height, hash);
+                let encoded = self.index.get(crate::pruning::BLOCK_DATA_CF, &key)?;
+                decode_body_position(height, encoded.as_deref())
+            }
+            PositionLookup::Prefetched { entries, next } => {
+                let Some(&(expected_height, expected_hash, position)) = entries.get(*next) else {
+                    return Err(StorageError::InvalidOperation(
+                        "prefetched body positions are exhausted",
+                    ));
+                };
+                if expected_height != height || expected_hash != hash {
+                    return Err(StorageError::InvalidOperation(
+                        "prefetched body position consumed out of order",
+                    ));
+                }
+                *next += 1;
+                Ok(position)
+            }
+        }
+    }
+}
+
 impl BlockBodyReader for IndexedBlockBodyReader<'_> {
     fn prefetch_positions(&mut self, requests: &[(u32, Hash256)]) -> Result<(), StorageError> {
         if let PositionLookup::Prefetched { entries, next } = &self.positions
@@ -253,31 +300,25 @@ impl BlockBodyReader for IndexedBlockBodyReader<'_> {
         height: u32,
         hash: bitcoin_rs_primitives::Hash256,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        let position = match &mut self.positions {
-            PositionLookup::Direct => {
-                let key = crate::pruning::block_body_key(height, hash);
-                let encoded = self.index.get(crate::pruning::BLOCK_DATA_CF, &key)?;
-                decode_body_position(height, encoded.as_deref())?
-            }
-            PositionLookup::Prefetched { entries, next } => {
-                let Some(&(expected_height, expected_hash, position)) = entries.get(*next) else {
-                    return Err(StorageError::InvalidOperation(
-                        "prefetched body positions are exhausted",
-                    ));
-                };
-                if expected_height != height || expected_hash != hash {
-                    return Err(StorageError::InvalidOperation(
-                        "prefetched body position consumed out of order",
-                    ));
-                }
-                *next += 1;
-                position
-            }
-        };
+        let position = self.next_position(height, hash)?;
         let Some(position) = position else {
             return Ok(None);
         };
         self.files.load(position, height, *hash.as_byte_array())
+    }
+
+    fn load_retained_block_body(
+        &mut self,
+        height: u32,
+        hash: bitcoin_rs_primitives::Hash256,
+    ) -> Result<Result<Vec<u8>, HistoryUnavailable>, StorageError> {
+        let Some(position) = self.next_position(height, hash)? else {
+            return Ok(Err(HistoryUnavailable::Corrupt));
+        };
+        Ok(self
+            .files
+            .load(position, height, *hash.as_byte_array())?
+            .ok_or(HistoryUnavailable::Corrupt))
     }
 }
 
@@ -555,6 +596,35 @@ mod body_position_prefetch_tests {
 
         reader.prefetch_positions(&[(7, hash)])?;
         assert_eq!(reader.load_block_body(7, hash)?, None);
+
+        let mut retained_reader = store.reader()?;
+        retained_reader.prefetch_positions(&[(7, hash)])?;
+        assert!(matches!(
+            retained_reader.load_retained_block_body(7, hash),
+            Ok(Err(HistoryUnavailable::Corrupt))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn missing_referenced_body_is_corrupt_for_a_retained_read()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
+        let index = Arc::new(crate::FjallStore::open(temp.path().join("index"))?);
+        let files = Arc::new(FlatFileBlockStore::open(temp.path())?);
+        let store = IndexedBlockBodyStore::new(index, files);
+        let hash = Hash256::from_le_bytes(&[6_u8; 32]);
+        store.persist_block_body(7, hash, b"body")?;
+        let block_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(temp.path().join("blocks").join("blk00000.dat"))?;
+        block_file.set_len(0)?;
+
+        let mut reader = store.reader()?;
+        assert!(matches!(
+            reader.load_retained_block_body(7, hash),
+            Ok(Err(HistoryUnavailable::Corrupt))
+        ));
         Ok(())
     }
 

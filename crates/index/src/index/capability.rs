@@ -12,22 +12,28 @@ pub(super) const SCRIPT_HISTORY_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 
 pub(super) const SCRIPT_LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
 
-/// `TxLookup` coverage floor: first height with derived rows.
-pub(super) const TX_LOOKUP_FLOOR_KEY: &[u8] = &[0x00, b't'];
+/// Terminal `TxLookup` history failure.
+pub(super) const TX_LOOKUP_FAILURE_KEY: &[u8] = &[0x00, b't'];
 
-/// `ScriptHistory` coverage floor: first height with derived rows.
-pub(super) const SCRIPT_HISTORY_FLOOR_KEY: &[u8] = &[0x00, b's'];
+/// Terminal `ScriptHistory` history failure.
+pub(super) const SCRIPT_HISTORY_FAILURE_KEY: &[u8] = &[0x00, b's'];
 
 pub(super) const WATERMARK_LEN: usize = crate::types::HEIGHT_SIZE + 32;
 
-/// The durable floor key for a capability, when it carries one.
+const HISTORY_FAILURE_LEN: usize = 1 + WATERMARK_LEN;
+
+const HISTORY_FAILURE_PRUNED: u8 = 1;
+
+const HISTORY_FAILURE_CORRUPT: u8 = 2;
+
+/// The durable terminal-failure key for a history-dependent capability.
 ///
 /// `ScriptLive` reseeds from the authoritative UTXO view and can never hold a
-/// pruned-prefix floor, so it has no key.
-pub(super) const fn floor_key(capability: IndexCapability) -> Option<&'static [u8]> {
+/// terminal body-history failure, so it has no key.
+pub(super) const fn failure_key(capability: IndexCapability) -> Option<&'static [u8]> {
     match capability {
-        IndexCapability::TxLookup => Some(TX_LOOKUP_FLOOR_KEY),
-        IndexCapability::ScriptHistory => Some(SCRIPT_HISTORY_FLOOR_KEY),
+        IndexCapability::TxLookup => Some(TX_LOOKUP_FAILURE_KEY),
+        IndexCapability::ScriptHistory => Some(SCRIPT_HISTORY_FAILURE_KEY),
         IndexCapability::ScriptLive => None,
     }
 }
@@ -157,10 +163,8 @@ impl IndexCapabilities {
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptLive.bit());
     /// Every index capability, including the compact live view.
     pub const ALL: Self = Self(0b111);
-    /// Every capability derivable from a block body alone.
-    ///
-    /// Anchorless paths use this, because `ScriptLive` cannot be prepared
-    /// without a spent-coin script source.
+    /// Every capability derivable from a block body alone. `ScriptLive`
+    /// additionally requires a spent-coin script source.
     pub const HISTORICAL: Self =
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptHistory.bit());
 
@@ -192,6 +196,20 @@ impl IndexCapabilities {
     #[must_use]
     pub const fn without(self, capability: IndexCapability) -> Self {
         Self(self.0 & !capability.bit())
+    }
+
+    /// PRE: none.
+    /// POST: only capability bits selected by both operands remain selected.
+    #[must_use]
+    pub const fn intersection(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// PRE: none.
+    /// POST: capability bits selected by `other` are removed from `self`.
+    #[must_use]
+    pub const fn difference(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
     }
 
     /// PRE: none.
@@ -264,6 +282,112 @@ impl IndexWatermarks {
     }
 }
 
+/// Why a history-dependent capability can no longer become complete.
+///
+/// This is durable derived-index state, not pruning policy. The storage owner
+/// supplies the typed availability result; the index records the first block
+/// it required so restart and every query surface preserve the same terminal
+/// answer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum IndexHistoryFailure {
+    /// A committed prune pass permanently deleted the required prefix.
+    Pruned {
+        /// First block the capability still needed.
+        required: IndexWatermark,
+    },
+    /// Retained history had a missing/corrupt locator or referenced body.
+    Corrupt {
+        /// First block whose retained representation could not be read.
+        required: IndexWatermark,
+    },
+}
+
+impl IndexHistoryFailure {
+    /// The first exact active-chain block the capability could not consume.
+    #[must_use]
+    pub const fn required(self) -> IndexWatermark {
+        match self {
+            Self::Pruned { required } | Self::Corrupt { required } => required,
+        }
+    }
+
+    fn to_bytes(self) -> [u8; HISTORY_FAILURE_LEN] {
+        let (tag, required) = match self {
+            Self::Pruned { required } => (HISTORY_FAILURE_PRUNED, required),
+            Self::Corrupt { required } => (HISTORY_FAILURE_CORRUPT, required),
+        };
+        let mut bytes = [0_u8; HISTORY_FAILURE_LEN];
+        bytes[0] = tag;
+        bytes[1..=WATERMARK_LEN].copy_from_slice(&required.to_bytes());
+        bytes
+    }
+
+    pub(super) fn from_bytes(bytes: &[u8]) -> Result<Self, IndexError> {
+        if bytes.len() != HISTORY_FAILURE_LEN {
+            return Err(IndexError::InvalidHistoryFailure);
+        }
+        let required = IndexWatermark::from_bytes(&bytes[1..=WATERMARK_LEN])?;
+        match bytes[0] {
+            HISTORY_FAILURE_PRUNED => Ok(Self::Pruned { required }),
+            HISTORY_FAILURE_CORRUPT => Ok(Self::Corrupt { required }),
+            _ => Err(IndexError::InvalidHistoryFailure),
+        }
+    }
+
+    /// Operator-facing reason including the exact first missing identity.
+    #[must_use]
+    pub fn reason(self) -> String {
+        let required = self.required();
+        let hash = bitcoin_rs_primitives::Hash256::from_le_bytes(&required.hash);
+        match self {
+            Self::Pruned { .. } => format!(
+                "required block body at height {}, hash {} was permanently pruned; rebuild from an unpruned/archive source",
+                required.height, hash
+            ),
+            Self::Corrupt { .. } => format!(
+                "required block body at height {}, hash {} has a missing or corrupt retained locator/body; restore the block store or rebuild from a verified source",
+                required.height, hash
+            ),
+        }
+    }
+}
+
+impl core::fmt::Display for IndexHistoryFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.reason())
+    }
+}
+
+/// Durable terminal states for independently queryable historical families.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct IndexHistoryFailures {
+    /// Transaction-lookup terminal state.
+    pub tx_lookup: Option<IndexHistoryFailure>,
+    /// Script-history terminal state.
+    pub script_history: Option<IndexHistoryFailure>,
+}
+
+impl IndexHistoryFailures {
+    /// Returns one capability's terminal history state.
+    #[must_use]
+    pub const fn get(self, capability: IndexCapability) -> Option<IndexHistoryFailure> {
+        match capability {
+            IndexCapability::TxLookup => self.tx_lookup,
+            IndexCapability::ScriptHistory => self.script_history,
+            IndexCapability::ScriptLive => None,
+        }
+    }
+
+    /// Capabilities carrying a durable terminal history state.
+    #[must_use]
+    pub fn capabilities(self) -> IndexCapabilities {
+        IndexCapability::ALL
+            .into_iter()
+            .filter(|&capability| self.get(capability).is_some())
+            .collect()
+    }
+}
+
 impl IndexWatermark {
     /// Encodes the durable representation as `height (4 LE) || hash (32)`.
     ///
@@ -305,46 +429,41 @@ impl IndexWatermark {
     }
 }
 
-/// Reads one capability's coverage floor: the first height its committed rows
-/// cover. Missing keys mean complete coverage from genesis.
-pub(super) fn read_coverage_floor(
+/// Reads one capability's terminal history state. Missing means the
+/// capability may still reconcile to complete coverage.
+pub(super) fn read_history_failure(
     snapshot: &dyn KvSnapshot,
     capability: IndexCapability,
-) -> Result<u32, IndexError> {
-    let Some(key) = floor_key(capability) else {
-        return Ok(0);
+) -> Result<Option<IndexHistoryFailure>, IndexError> {
+    let Some(key) = failure_key(capability) else {
+        return Ok(None);
     };
-    let Some(raw) = snapshot.get(ColumnFamily::UtxoMeta, key)? else {
-        return Ok(0);
-    };
-    let bytes: [u8; crate::types::HEIGHT_SIZE] = raw.as_slice().try_into().map_err(|_| {
-        IndexError::Storage(bitcoin_rs_storage::StorageError::IncompatibleData(
-            "coverage floor is not a height".into(),
-        ))
-    })?;
-    Ok(u32::from_le_bytes(bytes))
+    snapshot
+        .get(ColumnFamily::UtxoMeta, key)?
+        .as_deref()
+        .map(IndexHistoryFailure::from_bytes)
+        .transpose()
 }
 
-/// Stamps `floor` as the first covered height for each selected capability in
-/// `batch`. Only history-derived capabilities carry a floor.
-pub(super) fn put_selected_floors(
+/// Records the first permanent history failure for each selected capability.
+pub(super) fn put_selected_history_failures(
     batch: &mut BufferedWriteBatch,
     capabilities: IndexCapabilities,
-    floor: u32,
+    observed: IndexHistoryFailures,
+    failure: IndexHistoryFailure,
 ) {
     for capability in [IndexCapability::TxLookup, IndexCapability::ScriptHistory] {
-        if !capabilities.contains(capability) {
+        if !capabilities.contains(capability) || observed.get(capability).is_some() {
             continue;
         }
-        if let Some(key) = floor_key(capability) {
-            batch.put(ColumnFamily::UtxoMeta, key, &floor.to_le_bytes());
+        if let Some(key) = failure_key(capability) {
+            batch.put(ColumnFamily::UtxoMeta, key, &failure.to_bytes());
         }
     }
 }
 
-/// Drops the coverage-floor records of the selected capabilities; a reset
-/// rebuilds from genesis, which covers everything.
-pub(super) fn delete_selected_floors(
+/// Drops terminal history states for explicitly reset capabilities.
+pub(super) fn delete_selected_history_failures(
     batch: &mut BufferedWriteBatch,
     capabilities: IndexCapabilities,
 ) {
@@ -352,7 +471,7 @@ pub(super) fn delete_selected_floors(
         if !capabilities.contains(capability) {
             continue;
         }
-        if let Some(key) = floor_key(capability) {
+        if let Some(key) = failure_key(capability) {
             batch.delete(ColumnFamily::UtxoMeta, key);
         }
     }

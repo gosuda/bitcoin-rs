@@ -8,8 +8,9 @@ use bitcoin_rs_primitives::OutPoint;
 use parking_lot::RwLock;
 
 use crate::{
-    ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexWatermark, IndexWatermarks,
-    IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock, ScriptHash, SpentCoinScripts,
+    ConsumerCursorUpdate, IndexCapabilities, IndexError, IndexHistoryFailure, IndexHistoryFailures,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, PreparedBatch, PreparedBlock,
+    ScriptHash, SpentCoinScripts,
 };
 
 /// Object-safe `ScriptLive` seed producer used by [`TxIndexWriter`].
@@ -26,8 +27,15 @@ pub type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHa
 /// owned by [`IndexWriter::commit_rollback_one_for_with_cursor_with_spent_scripts`]
 /// (`IDX-06` / `IDX-07`).
 pub trait TxIndexWriter: Send + Sync {
-    /// Captures the exact write fence and all capability watermarks together.
-    fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
+    /// Captures the exact write fence, all capability watermarks, and terminal
+    /// history states together from one coherent snapshot.
+    ///
+    /// Implementations must include every persisted terminal history failure,
+    /// including those written by [`Self::mark_history_unavailable`]. Unknown
+    /// or unreadable state must return an error, never an empty failure set.
+    fn fenced_state(
+        &self,
+    ) -> Result<(IndexWriteFence, IndexWatermarks, IndexHistoryFailures), IndexError>;
     /// Prepares rows using the supplied spent-coin script authority.
     fn prepare_block_with_spent_scripts(
         &self,
@@ -69,17 +77,14 @@ pub trait TxIndexWriter: Send + Sync {
         let _ = capabilities;
         Err(IndexError::UnsupportedRollback)
     }
-    /// Stamps `watermark` on the selected capabilities so a rebuild starts at
-    /// the first surviving height after a prune, without re-deriving deleted
-    /// rows. `floor` is the first covered height.
-    fn anchor_watermark(
+    /// Persists the first terminal body-history failure for selected families.
+    fn mark_history_unavailable(
         &self,
         capabilities: IndexCapabilities,
-        watermark: IndexWatermark,
-        floor: u32,
+        failure: IndexHistoryFailure,
     ) -> Result<(), IndexError> {
-        let _ = (capabilities, watermark, floor);
-        Err(IndexError::UnsupportedAnchor)
+        let _ = (capabilities, failure);
+        Err(IndexError::UnsupportedHistoryFailure)
     }
     /// Reads the opaque durable reconciliation cursor.
     fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError>;
@@ -94,14 +99,16 @@ pub trait TxIndexWriter: Send + Sync {
 /// `RwLock`-backed writer: `prepare_block_with_spent_scripts` and
 /// `consumer_cursor` take a shared read lock so the CPU-bound decode/row-build
 /// can run concurrently across the rayon pool, while `commit_*`,
-/// `fenced_watermarks`, and `reset_capabilities` take an exclusive write lock
+/// `fenced_state`, and `reset_capabilities` take an exclusive write lock
 /// to preserve the single-writer atomic commit and watermark semantics.
 impl<S> TxIndexWriter for RwLock<IndexWriter<S>>
 where
     S: bitcoin_rs_storage::KvStore + Send + Sync + 'static,
 {
-    fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError> {
-        self.write().fenced_watermarks()
+    fn fenced_state(
+        &self,
+    ) -> Result<(IndexWriteFence, IndexWatermarks, IndexHistoryFailures), IndexError> {
+        self.write().fenced_state()
     }
 
     fn prepare_block_with_spent_scripts(
@@ -163,14 +170,12 @@ where
         self.write().reset_capabilities(capabilities)
     }
 
-    fn anchor_watermark(
+    fn mark_history_unavailable(
         &self,
         capabilities: IndexCapabilities,
-        watermark: IndexWatermark,
-        floor: u32,
+        failure: IndexHistoryFailure,
     ) -> Result<(), IndexError> {
-        self.write()
-            .anchor_watermark(capabilities, watermark, floor)
+        self.write().mark_history_unavailable(capabilities, failure)
     }
 
     fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError> {

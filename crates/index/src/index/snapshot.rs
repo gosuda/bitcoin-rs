@@ -1,8 +1,8 @@
 //! Point-in-time, bounded, typed index scans.
 
 use super::{
-    capability::IndexCapability, capability::IndexWatermark, error::IndexError, reader::Indexer,
-    write::IndexWriter,
+    capability::IndexCapability, capability::IndexHistoryFailure, capability::IndexWatermark,
+    error::IndexError, reader::Indexer, write::IndexWriter,
 };
 use crate::{
     types::HashPrefixRow, types::ScriptHash, types::ScriptHashRow, types::SpendingPrefixRow,
@@ -54,11 +54,13 @@ pub trait TxIndexSnapshot: Send + Sync {
         let _ = capability;
         self.watermark()
     }
-    /// Loads one capability's coverage floor: the first height its committed
-    /// rows cover. `0` means complete coverage from genesis.
-    fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
+    /// Loads one capability's durable terminal history state.
+    fn capability_failure(
+        &self,
+        capability: IndexCapability,
+    ) -> Result<Option<IndexHistoryFailure>, IndexError> {
         let _ = capability;
-        Ok(0)
+        Ok(None)
     }
     /// Scans confirmed-transaction rows for `txid`.
     fn transaction_rows(
@@ -133,8 +135,11 @@ impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
         IndexWatermark::read_from_snapshot(self.snapshot.as_ref(), capability)
     }
 
-    fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
-        crate::index::capability::read_coverage_floor(self.snapshot.as_ref(), capability)
+    fn capability_failure(
+        &self,
+        capability: IndexCapability,
+    ) -> Result<Option<IndexHistoryFailure>, IndexError> {
+        crate::index::capability::read_history_failure(self.snapshot.as_ref(), capability)
     }
 
     fn transaction_rows(

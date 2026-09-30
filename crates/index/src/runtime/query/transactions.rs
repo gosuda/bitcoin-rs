@@ -138,10 +138,9 @@ impl DerivedIndexQueryEngine {
         tip: &TipSnapshot,
         budget: &mut QueryBudget,
         txid: &Txid,
-        floor: u32,
     ) -> Result<Option<Tx>, TxQueryError> {
         Ok(self
-            .locate_transaction_for(snapshot, tip, budget, txid, floor)?
+            .locate_transaction_for(snapshot, tip, budget, txid)?
             .map(|(_, transaction)| transaction))
     }
 
@@ -159,7 +158,6 @@ impl DerivedIndexQueryEngine {
         tip: &TipSnapshot,
         budget: &mut QueryBudget,
         txid: &Txid,
-        floor: u32,
     ) -> Result<Option<(u32, Tx)>, TxQueryError> {
         let limit = budget.next_scan_limit()?;
         let scan = snapshot
@@ -167,7 +165,7 @@ impl DerivedIndexQueryEngine {
             .map_err(|error| TxQueryError::Storage(error.to_string().into()))?;
         let rows = budget.accept_scan(scan)?;
         if rows.is_empty() {
-            return Self::none_below_floor(floor, "transaction index");
+            return Ok(None);
         }
 
         for row in rows {
@@ -194,22 +192,7 @@ impl DerivedIndexQueryEngine {
                 }
             }
         }
-        Self::none_below_floor(floor, "transaction index")
-    }
-
-    /// A row's absence is only proven when the index covers the chain from
-    /// genesis; below a pruned prefix, answer `Unavailable` instead.
-    pub(super) fn none_below_floor<T>(floor: u32, family: &str) -> Result<Option<T>, TxQueryError> {
-        if floor > 0 {
-            Err(TxQueryError::Unavailable(
-                format!(
-                    "{family} coverage starts at height {floor}; the pruned prefix is unproven"
-                )
-                .into(),
-            ))
-        } else {
-            Ok(None)
-        }
+        Ok(None)
     }
 
     pub(super) fn outpoint_value_for(
@@ -218,9 +201,8 @@ impl DerivedIndexQueryEngine {
         tip: &TipSnapshot,
         budget: &mut QueryBudget,
         outpoint: &OutPoint,
-        floor: u32,
     ) -> Result<Option<u64>, TxQueryError> {
-        let tx = self.transaction_for(snapshot, tip, budget, &outpoint.txid, floor)?;
+        let tx = self.transaction_for(snapshot, tip, budget, &outpoint.txid)?;
         let Some(tx) = tx else {
             return Ok(None);
         };

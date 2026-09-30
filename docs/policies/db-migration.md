@@ -30,7 +30,7 @@ Estimator, discovery, and index formats evolve outside `CURRENT_SCHEMA`. Each ca
 
 - Fee estimator state carries an estimator-owned version. A corrupt, missing, or unknown version degrades to insufficient-data status. The node starts. It never fabricates a rate or a default confidence.
 - Peer discovery state carries a discovery-owned version. A corrupt, missing, or unknown version degrades to seeded or empty discovery with a typed reseed or rebuild status. The node starts.
-- Index layout carries one durable marker in `UtxoMeta`. The durability marker (`[0x00, b'V']`, currently row-format 5) is the hard gate: a mismatch refuses open and recovery full-resets for rebuild. The marker covers key layout and row-value widths alike; format 5 changed both.
+- Index layout carries one durable marker in `UtxoMeta`. The durability marker (`[0x00, b'V']`, currently row-format 6) is the hard gate: a mismatch refuses open and recovery full-resets for rebuild. The marker covers key layout, row-value widths, and terminal history state; format 5 changed the rows and format 6 added persisted per-capability history failure.
 
 In every case:
 

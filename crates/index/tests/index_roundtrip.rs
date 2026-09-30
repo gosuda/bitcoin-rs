@@ -597,11 +597,11 @@ fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[4, 0, 0, 0],
+        &[5, 0, 0, 0],
     )?;
     assert!(matches!(
         IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
+        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 5 })
     ));
     Ok(())
 }
@@ -674,7 +674,7 @@ fn invalid_watermark_rejected() -> Result<(), Box<dyn std::error::Error>> {
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -1220,8 +1220,8 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
     );
     assert_eq!(
         marker_puts[0].deletes, 3,
-        "the claim atomically deletes the selected watermark, its coverage \
-         floor, and the global cursor"
+        "the claim atomically deletes the selected watermark, its terminal \
+         history state, and the global cursor"
     );
     assert_eq!(
         marker_puts[1].marker_put.as_deref(),
@@ -1554,13 +1554,11 @@ const TX_WATERMARK_KEY: &[u8] = &[0x00, b'T'];
 
 const SCRIPT_WATERMARK_KEY: &[u8] = &[0x00, b'S'];
 
-const LIVE_WATERMARK_KEY: &[u8] = &[0x00, b'L'];
-
 const CURSOR_KEY: &[u8] = &[0x00, b'C'];
 
 const FORMAT_KEY: &[u8] = &[0x00, b'V'];
 
-const FORMAT_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
+const FORMAT_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
 
 /// One complete competing capability-reset claim: exactly what a correct
 /// concurrent writer commits. Injection points run these claims wholesale;
@@ -1864,32 +1862,6 @@ fn reset_index_adopts_a_foreign_fence_as_an_all_capability_reset()
 }
 
 #[test]
-fn format_stays_current_after_reset_and_rebuild() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-
-    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    writer.reset_capabilities(IndexCapabilities::HISTORICAL)?;
-    drop(writer);
-
-    seed_populated_store(&store, 1)?;
-
-    assert_eq!(
-        store.get(ColumnFamily::UtxoMeta, &[0x00, b'V'])?.as_deref(),
-        Some(5u32.to_le_bytes().as_slice()),
-        "the row-format gate survives reset and rebuild"
-    );
-    assert!(
-        store
-            .rows(ColumnFamily::Funding)
-            .into_iter()
-            .any(|(_, value)| !value.is_empty()),
-        "rebuilt rows carry transaction byte positions"
-    );
-    Ok(())
-}
-
-#[test]
 fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
     let writer = IndexWriter::open(Arc::clone(&store), 1)?;
@@ -1969,7 +1941,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -2009,7 +1981,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
         &[0x00, b'V'],
-        &[5, 0, 0, 0],
+        &[6, 0, 0, 0],
     )?;
     store.put(
         bitcoin_rs_storage::ColumnFamily::UtxoMeta,
@@ -2560,78 +2532,6 @@ fn fenced_watermarks_prefers_reset_over_watermark_decode_error()
 }
 
 #[test]
-fn fenced_watermarks_captures_one_coherent_snapshot_across_five_reads()
--> Result<(), Box<dyn std::error::Error>> {
-    let store = populated_idle_tracking_store()?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    store.read_order.lock().clear();
-    store.snapshot_read_order.lock().clear();
-    let snapshots_before = store.snapshots.load(Ordering::Relaxed);
-
-    let (_fence, watermarks) = writer.fenced_watermarks()?;
-
-    assert!(watermarks.tx_lookup.is_some());
-    assert!(watermarks.script_history.is_some());
-    assert!(watermarks.script_live.is_none());
-    assert_eq!(
-        store.snapshots.load(Ordering::Relaxed),
-        snapshots_before + 1,
-        "one successful fence capture must use one storage snapshot"
-    );
-    let captures = store.snapshot_read_order.lock().clone();
-    assert_eq!(
-        captures.len(),
-        5,
-        "one capture reads each fenced key exactly once: {captures:?}"
-    );
-    let mut captured_keys: Vec<&[u8]> = captures.iter().map(|(_cf, key)| key.as_slice()).collect();
-    captured_keys.sort_unstable();
-    let mut expected_keys = [
-        RESET_KEY,
-        ORDINARY_STATE_REVISION_KEY,
-        TX_WATERMARK_KEY,
-        SCRIPT_WATERMARK_KEY,
-        LIVE_WATERMARK_KEY,
-    ];
-    expected_keys.sort_unstable();
-    assert_eq!(captured_keys, expected_keys);
-    let live = store.read_order.lock().clone();
-    assert!(
-        live.iter().all(|(cf, key)| {
-            !(*cf == ColumnFamily::UtxoMeta
-                && (key.as_slice() == TX_WATERMARK_KEY
-                    || key.as_slice() == SCRIPT_WATERMARK_KEY
-                    || key.as_slice() == LIVE_WATERMARK_KEY))
-        }),
-        "watermark state was read outside the capture snapshot: {live:?}"
-    );
-
-    // The next reset completes while the snapshot returns its frozen
-    // pre-reset watermark. The live-reset recheck rejects that capture.
-    *store.snapshot_reset_after_tx_watermark_read.lock() = Some((2, 4));
-    let result = writer.fenced_watermarks();
-    assert!(
-        matches!(result, Err(IndexError::ResetInProgress)),
-        "a capture spanning a concurrent reset discards derived state: {result:?}"
-    );
-
-    assert_eq!(stored_idle_version(&store)?, 2);
-    let (fence, watermarks) = writer.fenced_watermarks()?;
-    assert_eq!(watermarks, IndexWatermarks::default());
-    let body = read_fixture(0)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
-    writer.commit_forward_with_cursor(fence, prepared, ConsumerCursorUpdate::Keep)?;
-    assert_eq!(writer.watermark()?.map(|mark| mark.height), Some(0));
-    Ok(())
-}
-
-#[test]
 fn unchanged_reset_surfaces_malformed_watermark_decode() -> Result<(), Box<dyn std::error::Error>> {
     let store = populated_idle_tracking_store()?;
     let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
@@ -3036,7 +2936,7 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
     );
     assert_eq!(
         markers[0].deletes, 5,
-        "the claim deletes the union watermarks, their coverage floors, and \
+        "the claim deletes the union watermarks, their terminal failures, and \
          the consumer cursor"
     );
     assert_eq!(

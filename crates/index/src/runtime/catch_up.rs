@@ -14,6 +14,7 @@ use super::Worker;
 use crate::IndexCapabilities;
 use crate::IndexCapability;
 use crate::IndexError;
+use crate::IndexHistoryFailure;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
 use crate::IndexWriteFence;
@@ -23,7 +24,7 @@ use crate::PreparedBlock;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
-use bitcoin_rs_storage::block_body::BlockBodyReader;
+use bitcoin_rs_storage::block_body::{BlockBodyReader, BlockBodyStore};
 use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
 use crossbeam_channel::Receiver;
 use rayon::prelude::*;
@@ -83,7 +84,7 @@ impl Worker {
             return Ok(ReconcileAction::Stalled);
         }
 
-        let mut state = pending.take().unwrap_or_else(|| PendingForward {
+        let state = pending.take().unwrap_or_else(|| PendingForward {
             fence,
             watermarks,
             capabilities,
@@ -98,45 +99,18 @@ impl Worker {
             || watermark.map_or(0, |w| w.height.saturating_add(1)),
             |endpoint| endpoint.height.saturating_add(1),
         );
-        // Ask the authority to hold this leg's history. While the grant
-        // lives no row at or above `start_height` is deleted, so a body that
-        // reads back absent is transient absence rather than lost history,
-        // and the pass never has to re-derive a prune line. A refusal is the
-        // owner's typed answer: `Pruned` is permanent and routes to a rebuild
-        // from what remains, while `Reserved` and the transient answers only
-        // wait — a reservation can abort and release its range, and a missing
-        // row can still arrive.
-        let pass_history = match self.history.request_history(start_height) {
-            Ok(lease) => lease,
-            Err(HistoryUnavailable::Pruned { below }) => {
-                tracing::warn!(
-                    below,
-                    start_height,
-                    "derived index needs history the pruning authority deleted"
-                );
-                // Prepared rows belong to the pre-reset position: the rebuild
-                // re-derives from the frontier, so they cannot be carried.
-                *pending = None;
-                return self.rebuild_from_pruned(capabilities, below, target);
-            }
-            Err(error) => {
-                // The grant is deferred, not denied: keep the prepared rows
-                // so the retry continues where this pass left off instead of
-                // re-deriving them.
-                if !state.batch.is_empty() {
-                    *pending = Some(state);
-                }
-                tracing::debug!(%error, "derived index history grant deferred");
-                return Ok(ReconcileAction::Stalled);
-            }
-        };
         if start_height > target.height {
-            return if self.commit_forward(state, &pass_history)?.is_some() {
+            return if self.sync_and_commit(state)?.is_some() {
                 Ok(ReconcileAction::CaughtUp)
             } else {
                 Ok(ReconcileAction::Stalled)
             };
         }
+        let Some((pass_history, mut state)) =
+            self.acquire_history(target, start_height, capabilities, state, pending)?
+        else {
+            return Ok(ReconcileAction::Stalled);
+        };
 
         let chunk_end = start_height
             .saturating_add(IDENTITY_CHUNK_BLOCKS - 1)
@@ -162,9 +136,17 @@ impl Worker {
                     .iter()
                     .map(|identity| (identity.height, Hash256::from_le_bytes(&identity.hash))),
             );
-            body_reader
-                .prefetch_positions(&requests)
-                .map_err(DerivedIndexWorkerError::Storage)?;
+            if let Err(error) = body_reader.prefetch_positions(&requests) {
+                if matches!(error, StorageError::IncompatibleData(_)) {
+                    let required =
+                        first_incompatible_identity(body_store.as_ref(), identities)?.watermark();
+                    return Err(DerivedIndexWorkerError::PermanentHistory {
+                        capabilities,
+                        failure: IndexHistoryFailure::Corrupt { required },
+                    });
+                }
+                return Err(DerivedIndexWorkerError::Storage(error));
+            }
 
             // Sub-chunk: load bodies serially until the count or byte cap
             // (preserving the reader's prefetch state), prepare blocks in
@@ -192,6 +174,64 @@ impl Worker {
         self.finish_catch_up(state, chunk_end, target, &pass_history, pending)
     }
 
+    /// Asks the storage authority to hold this leg's history and preserves a
+    /// prepared batch when that grant is only deferred.
+    fn acquire_history(
+        &self,
+        target: &TipSnapshot,
+        start_height: u32,
+        capabilities: IndexCapabilities,
+        state: PendingForward,
+        pending: &mut Option<PendingForward>,
+    ) -> Result<Option<(HistoryLease, PendingForward)>, DerivedIndexWorkerError> {
+        match self.history.request_history(start_height) {
+            Ok(lease) => Ok(Some((lease, state))),
+            Err(HistoryUnavailable::Pruned { .. }) => {
+                *pending = None;
+                let required = self
+                    .collect_target_chain(target, start_height, start_height)?
+                    .into_iter()
+                    .next()
+                    .ok_or(DerivedIndexWorkerError::MissingTargetChain {
+                        height: start_height,
+                    })?;
+                Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Pruned {
+                        required: required.watermark(),
+                    },
+                })
+            }
+            Err(HistoryUnavailable::Shutdown) => Err(DerivedIndexWorkerError::Stopped),
+            Err(error @ (HistoryUnavailable::Reserved { .. } | HistoryUnavailable::Missing)) => {
+                // The grant is deferred, not denied: keep the prepared rows
+                // so the retry continues where this pass left off instead of
+                // re-deriving them.
+                if !state.batch.is_empty() {
+                    *pending = Some(state);
+                }
+                tracing::debug!(%error, "derived index history grant deferred");
+                Ok(None)
+            }
+            Err(HistoryUnavailable::Corrupt) => {
+                *pending = None;
+                let required = self
+                    .collect_target_chain(target, start_height, start_height)?
+                    .into_iter()
+                    .next()
+                    .ok_or(DerivedIndexWorkerError::MissingTargetChain {
+                        height: start_height,
+                    })?;
+                Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Corrupt {
+                        required: required.watermark(),
+                    },
+                })
+            }
+        }
+    }
+
     /// Loads bodies serially until the count or byte cap, prepares that prefix
     /// in parallel across the rayon pool, then admits them into the batch in
     /// height order on the single writer thread. Advances `identities` past
@@ -213,10 +253,9 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
         // A held optional pin can still expire under a concurrent prune pass
-        // (`floor()` answers `None` once revoked). Reading past it mislabels
-        // deleted rows as transient absence and stalls this pass anyway, so
-        // stop now and let the next `request_history` route the `Pruned`
-        // refusal into the rebuild.
+        // (`floor()` answers `None` once revoked). Stop before another read
+        // and let the next `request_history` route the owner's `Pruned`
+        // refusal into the historical capability's terminal state.
         if history.floor().is_none() {
             if !state.batch.is_empty() {
                 *pending = Some(state.take(self.batch_limits));
@@ -224,15 +263,47 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        let Some(bodies) = load_body_prefix(body_reader.as_mut(), identities, &|| {
+        let bodies = load_body_prefix(body_reader.as_mut(), identities, &|| {
             self.runtime.should_stop()
         })
-        .map_err(DerivedIndexWorkerError::Storage)?
-        else {
-            if !state.batch.is_empty() {
-                *pending = Some(state.take(self.batch_limits));
+        .map_err(DerivedIndexWorkerError::Storage)?;
+        let bodies = match bodies {
+            BodyPrefix::Loaded(bodies) => bodies,
+            BodyPrefix::Unavailable {
+                identity: _,
+                reason: HistoryUnavailable::Missing | HistoryUnavailable::Reserved { .. },
+            } => {
+                if !state.batch.is_empty() {
+                    *pending = Some(state.take(self.batch_limits));
+                }
+                return Ok(ChunkAction::Stalled);
             }
-            return Ok(ChunkAction::Stalled);
+            BodyPrefix::Unavailable {
+                reason: HistoryUnavailable::Shutdown,
+                ..
+            } => return Err(DerivedIndexWorkerError::Stopped),
+            BodyPrefix::Unavailable {
+                identity,
+                reason: HistoryUnavailable::Pruned { .. },
+            } => {
+                return Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Pruned {
+                        required: identity.watermark(),
+                    },
+                });
+            }
+            BodyPrefix::Unavailable {
+                identity,
+                reason: HistoryUnavailable::Corrupt,
+            } => {
+                return Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Corrupt {
+                        required: identity.watermark(),
+                    },
+                });
+            }
         };
         if self.runtime.should_stop() {
             return Ok(ChunkAction::Stalled);
@@ -291,7 +362,18 @@ impl Worker {
         // Push prepared blocks into the batch in height order on the single
         // writer thread.
         for (result, identity) in prepared.into_iter().zip(sub_chunk.iter()) {
-            let prepared = result.map_err(DerivedIndexWorkerError::Index)?;
+            let prepared = match result {
+                Ok(prepared) => prepared,
+                Err(IndexError::BlockParse(_) | IndexError::BlockIdentityMismatch { .. }) => {
+                    return Err(DerivedIndexWorkerError::PermanentHistory {
+                        capabilities,
+                        failure: IndexHistoryFailure::Corrupt {
+                            required: identity.watermark(),
+                        },
+                    });
+                }
+                Err(error) => return Err(DerivedIndexWorkerError::Index(error)),
+            };
             if identity.height > 0 && prepared.parent_hash != identity.parent_hash {
                 return Err(DerivedIndexWorkerError::MissingTargetChain {
                     height: identity.height,
@@ -375,60 +457,14 @@ impl Worker {
         }
         Ok(durable)
     }
+}
 
-    /// The permanent `Pruned` answer: reset `capabilities` and anchor their
-    /// durable watermarks at the frontier so the rebuild starts at the first
-    /// surviving height instead of asking for deleted history forever.
-    ///
-    /// `ScriptLive` needs no anchor: it reseeds from the authoritative UTXO
-    /// view at the tip, so the reset alone sends it through that path.
-    fn rebuild_from_pruned(
-        &self,
-        capabilities: IndexCapabilities,
-        below: u32,
-        target: &TipSnapshot,
-    ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
-        // `below` is at least 1: a refusal requires `floor < below` and no
-        // floor is negative.
-        let anchor_height = below - 1;
-        if anchor_height > target.height {
-            // The frontier has already passed the applied tip, so no
-            // surviving row is indexable: the consumer keeps its derived
-            // rows and waits rather than churning a reset every pass.
-            return Ok(ReconcileAction::Stalled);
-        }
-        let anchored = capabilities.without(IndexCapability::ScriptLive);
-        // Resolve the anchor identity before the durable reset: it is a pure
-        // read — the block tree keeps headers for pruned heights — so a
-        // missing node fails before any derived row is erased, not after.
-        let identity = if anchored.is_empty() {
-            None
-        } else {
-            Some(
-                self.collect_target_chain(target, anchor_height, anchor_height)?
-                    .into_iter()
-                    .next()
-                    .ok_or(DerivedIndexWorkerError::MissingTargetChain {
-                        height: anchor_height,
-                    })?,
-            )
-        };
-        self.reset_for_rebuild(capabilities)?;
-        let Some(identity) = identity else {
-            return Ok(ReconcileAction::Progressed);
-        };
-        self.writer
-            .anchor_watermark(
-                anchored,
-                IndexWatermark {
-                    height: anchor_height,
-                    hash: identity.hash,
-                },
-                below,
-            )
-            .map_err(DerivedIndexWorkerError::Index)?;
-        Ok(ReconcileAction::Progressed)
-    }
+enum BodyPrefix {
+    Loaded(Vec<Vec<u8>>),
+    Unavailable {
+        identity: BlockIdentity,
+        reason: HistoryUnavailable,
+    },
 }
 
 /// Loads bodies for a prefix of `identities` in order, stopping once
@@ -437,12 +473,13 @@ impl Worker {
 /// returned prefix is exactly the set of prefetched positions the reader
 /// consumed; the body that reaches the byte cap may carry the total past it.
 /// Stops early, keeping what was loaded, when `should_stop` reports shutdown.
-/// `Ok(None)` when a body is unavailable.
+/// Returns the storage owner's typed availability result with the exact first
+/// identity that could not be loaded.
 fn load_body_prefix(
     reader: &mut dyn BlockBodyReader,
     identities: &[BlockIdentity],
     should_stop: &dyn Fn() -> bool,
-) -> Result<Option<Vec<Vec<u8>>>, StorageError> {
+) -> Result<BodyPrefix, StorageError> {
     let mut bodies = Vec::new();
     let mut loaded_bytes = 0_usize;
     for identity in identities.iter().take(PREPARE_CHUNK_BLOCKS) {
@@ -450,8 +487,21 @@ fn load_body_prefix(
             break;
         }
         let hash = Hash256::from_le_bytes(&identity.hash);
-        let Some(body) = reader.load_block_body(identity.height, hash)? else {
-            return Ok(None);
+        let body = match reader.load_retained_block_body(identity.height, hash) {
+            Ok(Ok(body)) => body,
+            Ok(Err(reason)) => {
+                return Ok(BodyPrefix::Unavailable {
+                    identity: *identity,
+                    reason,
+                });
+            }
+            Err(StorageError::IncompatibleData(_)) => {
+                return Ok(BodyPrefix::Unavailable {
+                    identity: *identity,
+                    reason: HistoryUnavailable::Corrupt,
+                });
+            }
+            Err(error) => return Err(error),
         };
         loaded_bytes = loaded_bytes.saturating_add(body.len());
         bodies.push(body);
@@ -459,7 +509,34 @@ fn load_body_prefix(
             break;
         }
     }
-    Ok(Some(bodies))
+    Ok(BodyPrefix::Loaded(bodies))
+}
+
+/// Locates the first malformed retained locator after a batched prefetch
+/// reports only an aggregate storage error. This runs only on corruption and
+/// uses ordinary storage-owned reader sessions; it does not infer pruning
+/// policy from rows or a copied frontier.
+fn first_incompatible_identity(
+    store: &dyn BlockBodyStore,
+    identities: &[BlockIdentity],
+) -> Result<BlockIdentity, StorageError> {
+    for identity in identities {
+        let hash = Hash256::from_le_bytes(&identity.hash);
+        let mut reader = store.reader()?;
+        match reader.load_retained_block_body(identity.height, hash) {
+            Ok(Err(HistoryUnavailable::Corrupt)) | Err(StorageError::IncompatibleData(_)) => {
+                return Ok(*identity);
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {}
+        }
+    }
+    identities
+        .first()
+        .copied()
+        .ok_or(StorageError::InvalidOperation(
+            "incompatible body prefetch covered no identities",
+        ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

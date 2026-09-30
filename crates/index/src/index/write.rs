@@ -2,8 +2,9 @@
 
 use super::{
     block::NoSpentScripts, block::SpentCoinScripts, capability::IndexCapabilities,
-    capability::IndexCapability, capability::IndexWatermark, capability::IndexWatermarks,
-    capability::SCRIPT_LIVE_WATERMARK_KEY, capability::put_selected_watermarks,
+    capability::IndexCapability, capability::IndexHistoryFailure, capability::IndexHistoryFailures,
+    capability::IndexWatermark, capability::IndexWatermarks, capability::SCRIPT_LIVE_WATERMARK_KEY,
+    capability::put_selected_history_failures, capability::put_selected_watermarks,
     capability::selected_watermark, error::IndexError, prepared::PreparedBatch,
     prepared::PreparedBatchLimits, reader::Indexer, rows::IndexRowCounts, rows::PendingRows,
     rows::delete_rows, rows::put_rows, state::CONSUMER_CURSOR_KEY, state::ConsumerCursorUpdate,
@@ -31,8 +32,8 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Opens a writer over `store`, rejecting unversioned index tables.
     ///
-    /// Format 5 changed every row family (big-endian heights, 43-byte live
-    /// rows, 6-byte positions), so any older marker is
+    /// Format 6 adds durable terminal body-history state to the format 5 row
+    /// families, so any older marker is
     /// [`IndexError::UnsupportedTxIndexFormatVersion`]; recovery full-resets
     /// the store for rebuild. No in-place upgrade path exists.
     pub fn open(store: std::sync::Arc<S>, generation: u64) -> Result<Self, IndexError> {
@@ -88,6 +89,15 @@ impl<S: KvStore> IndexWriter<S> {
     pub fn fenced_watermarks(&mut self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError> {
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
         Ok((fence, fence.watermarks))
+    }
+
+    /// Captures one coherent fence, all watermarks, and terminal history
+    /// states from one snapshot.
+    pub fn fenced_state(
+        &mut self,
+    ) -> Result<(IndexWriteFence, IndexWatermarks, IndexHistoryFailures), IndexError> {
+        let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        Ok((fence, fence.watermarks, fence.history_failures))
     }
 
     /// Resets every derived capability through the durable exact-claim fence.
@@ -225,42 +235,38 @@ impl<S: KvStore> IndexWriter<S> {
         )
     }
 
-    /// Stamps `watermark` on the selected capabilities without deriving rows.
+    /// Persists the first terminal body-history failure for each selected
+    /// historical capability and clears the advisory consumer cursor.
     ///
-    /// A rebuild from a pruned prefix needs the durable cursor to start at
-    /// the first surviving height, not at genesis: the pruning authority has
-    /// already deleted the bodies below it, so no commit can ever produce
-    /// them. The anchor names the chain identity at that boundary — the
-    /// block tree keeps headers for pruned heights, so the identity is
-    /// always available — and the next prepared block must be its child.
-    ///
-    /// The write is fenced like every ordinary commit, so a reset in flight
-    /// or a moved revision reports `ResetInProgress`/`StaleIndexState`.
-    ///
-    /// `floor` is the first covered height (`anchor.height + 1`): queries that
-    /// cannot prove absence below it answer `Unavailable` rather than `None`.
-    ///
-    /// `capabilities` must name only history-derived indexes: `ScriptLive`
-    /// reseeds from the authoritative UTXO view, so anchoring it would
-    /// publish a live watermark with no rows behind it.
-    pub fn anchor_watermark(
+    /// Existing failure records win, preserving the first required block and
+    /// reason across later wakes and restarts. Rows and watermarks remain as
+    /// disposable diagnostic state, but every query gates on this record and
+    /// reconciliation excludes the failed capability.
+    pub fn mark_history_unavailable(
         &self,
         capabilities: IndexCapabilities,
-        watermark: IndexWatermark,
-        floor: u32,
+        failure: IndexHistoryFailure,
     ) -> Result<(), IndexError> {
-        if capabilities.is_empty() || capabilities.contains(IndexCapability::ScriptLive) {
-            return Err(IndexError::AnchorUnsupportedSelection);
+        if capabilities.is_empty()
+            || capabilities.intersection(IndexCapabilities::HISTORICAL) != capabilities
+        {
+            return Err(IndexError::HistoryFailureUnsupportedSelection);
         }
         let fence = capture_write_fence(self.indexer.store.as_ref(), self.generation)?;
+        if capabilities
+            .iter()
+            .all(|capability| fence.history_failures.get(capability).is_some())
+        {
+            return Ok(());
+        }
         let mut batch = self.indexer.store.new_batch();
         batch.put(
             ColumnFamily::UtxoMeta,
             FORMAT_VERSION_KEY,
             &FORMAT_VERSION_VALUE,
         );
-        put_selected_watermarks(&mut batch, capabilities, Some(watermark));
-        crate::index::capability::put_selected_floors(&mut batch, capabilities, floor);
+        put_selected_history_failures(&mut batch, capabilities, fence.history_failures, failure);
+        batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
         commit_ordinary(self.indexer.store.as_ref(), self.generation, &fence, batch)
     }
 

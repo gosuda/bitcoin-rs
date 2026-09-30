@@ -22,9 +22,9 @@ use arc_swap::ArcSwap;
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader, TipReader, TipSnapshot};
 
 use crate::{
-    BlockSource, IndexCapabilities, IndexCapability, IndexError, IndexReader, IndexWatermark,
-    IndexWatermarks, IndexWriteFence, PreparedBatch, PreparedBatchLimits, ScriptHash,
-    ScriptLiveScan, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
+    BlockSource, IndexCapabilities, IndexCapability, IndexError, IndexHistoryFailure, IndexReader,
+    IndexWatermark, IndexWatermarks, IndexWriteFence, PreparedBatch, PreparedBatchLimits,
+    ScriptHash, ScriptLiveScan, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
     reconcile::{ReconcileLeg, ReconcilePhase},
     types::{TxPosition, TxPositionValue},
     writer::TxIndexWriter,
@@ -626,6 +626,15 @@ struct BlockIdentity {
     parent_hash: [u8; 32],
 }
 
+impl BlockIdentity {
+    const fn watermark(self) -> IndexWatermark {
+        IndexWatermark {
+            height: self.height,
+            hash: self.hash,
+        }
+    }
+}
+
 /// Outcome of one sub-chunk prepare-and-admit step.
 enum ChunkAction {
     Continue,
@@ -678,15 +687,14 @@ pub enum DerivedIndexWorkerError {
     /// to wait and retry, never to rebuild.
     #[error("txindex worker: retained history unavailable: {0}")]
     HistoryUnavailable(#[from] HistoryUnavailable),
-    /// A block body needed for indexing or rollback is permanently gone: the
-    /// pruning authority reported the height outside retained history. The
-    /// defined recovery is a rebuild from what remains.
-    #[error("txindex worker: missing body at height {height}, hash {hash}")]
-    MissingBody {
-        /// Block height whose body is missing.
-        height: u32,
-        /// Active-chain hash of the missing body.
-        hash: Hash256,
+    /// A history-dependent capability cannot become complete. The worker
+    /// persists this state and continues serving independent capabilities.
+    #[error("txindex worker: terminal history loss for {capabilities:?}: {failure}")]
+    PermanentHistory {
+        /// Capabilities consuming the body when loss became terminal.
+        capabilities: IndexCapabilities,
+        /// First exact body and owner-provided reason.
+        failure: IndexHistoryFailure,
     },
     /// A capability requiring bodies was enabled without a body store.
     #[error("txindex worker: body store missing")]
@@ -725,7 +733,7 @@ impl DerivedIndexWorkerError {
     fn requires_capability_rebuild(&self) -> bool {
         matches!(
             self,
-            Self::MissingBody { .. } | Self::Index(IndexError::MissingWatermarkIdentity { .. })
+            Self::Index(IndexError::MissingWatermarkIdentity { .. })
         )
     }
 }

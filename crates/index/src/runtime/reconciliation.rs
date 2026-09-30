@@ -24,6 +24,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+pub(super) type CapturedTargetWatermarks = (
+    Option<Arc<TipSnapshot>>,
+    IndexWriteFence,
+    IndexWatermarks,
+    crate::IndexHistoryFailures,
+);
+
 impl Worker {
     pub(super) fn run(self) -> Result<(), DerivedIndexWorkerError> {
         let mut quiet_armed = false;
@@ -124,7 +131,18 @@ impl Worker {
         &self,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
-        let action = self.reconcile_pass(pending)?;
+        let action = match self.reconcile_pass(pending) {
+            Ok(action) => action,
+            Err(DerivedIndexWorkerError::PermanentHistory {
+                capabilities,
+                failure,
+            }) => {
+                *pending = None;
+                self.handle_permanent_history_loss(capabilities, failure)?;
+                ReconcileAction::Progressed
+            }
+            Err(error) => return Err(error),
+        };
         if !matches!(action, ReconcileAction::CaughtUp) {
             return Ok(action);
         }
@@ -133,13 +151,14 @@ impl Worker {
         // another transition against the current tip; otherwise the pass
         // merely progressed and the remaining legs (and their published
         // phase) carry over.
-        let (target, _, watermarks) = self.capture_target_watermarks()?;
+        let (target, _, watermarks, failures) = self.capture_target_watermarks()?;
+        let active = self.enabled.difference(failures.capabilities());
         if self
-            .rollback_selection(watermarks, target.as_deref())
+            .rollback_selection(active, watermarks, target.as_deref())
             .is_some()
             || target
                 .as_deref()
-                .is_some_and(|target| self.forward_selection(watermarks, target).is_some())
+                .is_some_and(|target| Self::forward_selection(active, watermarks, target).is_some())
         {
             return Ok(ReconcileAction::Progressed);
         }
@@ -151,8 +170,13 @@ impl Worker {
         &self,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
-        let (target, fence, watermarks) = self.capture_target_watermarks()?;
-        let leftover = self.enabled.leftover(watermarks);
+        let (target, fence, watermarks, failures) = self.capture_target_watermarks()?;
+        let active = self.enabled.difference(failures.capabilities());
+        let leftover = failures
+            .capabilities()
+            .iter()
+            .filter(|&capability| !self.enabled.contains(capability))
+            .fold(self.enabled.leftover(watermarks), IndexCapabilities::insert);
         if !leftover.is_empty() {
             // `full` → `utxo` (and dropping internal TxLookup when explicit
             // `txindex` is off) must reset only the families that are no
@@ -171,7 +195,7 @@ impl Worker {
         let mut watermarks = watermarks;
         let mut reported_ahead = false;
         while let Some((capabilities, watermark)) =
-            self.rollback_selection(watermarks, target.as_deref())
+            self.rollback_selection(active, watermarks, target.as_deref())
         {
             // Report once per pass: an 834k-block stale branch would otherwise
             // report once per rolled-back block.
@@ -211,9 +235,9 @@ impl Worker {
             );
             match self.rollback_one(fence, watermarks, capabilities, watermark) {
                 Ok(_) => {
-                    let (next_fence, next_watermarks) = self
+                    let (next_fence, next_watermarks, _) = self
                         .writer
-                        .fenced_watermarks()
+                        .fenced_state()
                         .map_err(DerivedIndexWorkerError::Index)?;
                     fence = next_fence;
                     watermarks = next_watermarks;
@@ -263,7 +287,7 @@ impl Worker {
                 Err(error) => return Err(error),
             }
         }
-        self.finish_reconcile_pass(target, fence, watermarks, pending)
+        self.finish_reconcile_pass(target, fence, watermarks, active, pending)
     }
 
     /// Publishes the rollbacks-finished phase and runs the forward catch-up:
@@ -274,6 +298,7 @@ impl Worker {
         target: Option<Arc<TipSnapshot>>,
         fence: IndexWriteFence,
         watermarks: IndexWatermarks,
+        active: IndexCapabilities,
         pending: &mut Option<PendingForward>,
     ) -> Result<ReconcileAction, DerivedIndexWorkerError> {
         self.runtime
@@ -284,11 +309,12 @@ impl Worker {
         // Live has no watermark after restoration, an interrupted seed, or a
         // same-pass `reset_for_rebuild`. Seed from one stable UTXO view
         // before `forward_selection` would replay it from genesis (`IDX-07`).
-        if self.enabled.contains(IndexCapability::ScriptLive) && watermarks.script_live.is_none() {
+        if active.contains(IndexCapability::ScriptLive) && watermarks.script_live.is_none() {
             self.seed_live_from_utxo()?;
             return Ok(ReconcileAction::Progressed);
         }
-        let Some((capabilities, watermark)) = self.forward_selection(watermarks, &target) else {
+        let Some((capabilities, watermark)) = Self::forward_selection(active, watermarks, &target)
+        else {
             return Ok(ReconcileAction::CaughtUp);
         };
         self.catch_up_to(&target, fence, watermarks, watermark, capabilities, pending)
@@ -363,23 +389,23 @@ impl Worker {
 
     pub(super) fn capture_target_watermarks(
         &self,
-    ) -> Result<(Option<Arc<TipSnapshot>>, IndexWriteFence, IndexWatermarks), DerivedIndexWorkerError>
-    {
-        let (fence, watermarks) = self
+    ) -> Result<CapturedTargetWatermarks, DerivedIndexWorkerError> {
+        let (fence, watermarks, failures) = self
             .writer
-            .fenced_watermarks()
+            .fenced_state()
             .map_err(DerivedIndexWorkerError::Index)?;
         let target = self.applied_tip.load_full();
-        Ok((target, fence, watermarks))
+        Ok((target, fence, watermarks, failures))
     }
 
     pub(super) fn rollback_selection(
         &self,
+        active: IndexCapabilities,
         watermarks: IndexWatermarks,
         target: Option<&TipSnapshot>,
     ) -> Option<(IndexCapabilities, IndexWatermark)> {
         let enabled_watermark = |capability: IndexCapability| {
-            self.enabled
+            active
                 .contains(capability)
                 .then_some(watermarks.get(capability))
                 .flatten()
@@ -400,12 +426,12 @@ impl Worker {
     }
 
     pub(super) fn forward_selection(
-        &self,
+        active: IndexCapabilities,
         watermarks: IndexWatermarks,
         target: &TipSnapshot,
     ) -> Option<(IndexCapabilities, Option<IndexWatermark>)> {
         let enabled_watermark = |capability: IndexCapability| {
-            self.enabled
+            active
                 .contains(capability)
                 .then_some(watermarks.get(capability))
         };

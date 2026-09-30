@@ -6,6 +6,8 @@ use super::Worker;
 use crate::ConsumerCursorUpdate;
 use crate::IndexCapabilities;
 use crate::IndexCapability;
+use crate::IndexError;
+use crate::IndexHistoryFailure;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
 use crate::IndexWriteFence;
@@ -14,6 +16,7 @@ use crate::ScriptHash;
 use crate::reconcile::ReconcileLeg;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::pruning::HistoryUnavailable;
 
 pub(super) fn index_ahead_capability_label(capabilities: IndexCapabilities) -> Option<String> {
@@ -87,9 +90,38 @@ impl Worker {
             .map_err(DerivedIndexWorkerError::Index)?;
         self.runtime
             .publish_leg(capabilities, ReconcileLeg::Rebuilding);
-        self.writer
-            .fenced_watermarks()
-            .map_err(DerivedIndexWorkerError::Index)
+        let (fence, watermarks, _) = self
+            .writer
+            .fenced_state()
+            .map_err(DerivedIndexWorkerError::Index)?;
+        Ok((fence, watermarks))
+    }
+
+    /// Persists terminal loss for body-history families while routing
+    /// `ScriptLive` through its independent authoritative UTXO rebuild.
+    pub(super) fn handle_permanent_history_loss(
+        &self,
+        capabilities: IndexCapabilities,
+        failure: IndexHistoryFailure,
+    ) -> Result<(), DerivedIndexWorkerError> {
+        let historical = capabilities.intersection(IndexCapabilities::HISTORICAL);
+        if !historical.is_empty() {
+            self.writer
+                .mark_history_unavailable(historical, failure)
+                .map_err(DerivedIndexWorkerError::Index)?;
+            self.runtime.publish_leg(historical, ReconcileLeg::Forward);
+        }
+        if capabilities.contains(IndexCapability::ScriptLive) {
+            self.reset_for_rebuild(IndexCapabilities::SCRIPT_LIVE)?;
+        }
+        tracing::warn!(
+            error = %failure,
+            tx_lookup = historical.contains(IndexCapability::TxLookup),
+            script_history = historical.contains(IndexCapability::ScriptHistory),
+            script_live_rebuild = capabilities.contains(IndexCapability::ScriptLive),
+            "derived index cannot recover complete body history"
+        );
+        Ok(())
     }
 
     /// Publishes the index-ahead rollback evidence for a watermark above the
@@ -135,14 +167,25 @@ impl Worker {
         let lease = match self.history.request_history(watermark.height) {
             Ok(lease) => lease,
             Err(HistoryUnavailable::Pruned { .. }) => {
-                return Err(DerivedIndexWorkerError::MissingBody {
-                    height: watermark.height,
-                    hash: watermark_hash,
+                return Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Pruned {
+                        required: watermark,
+                    },
+                });
+            }
+            Err(HistoryUnavailable::Shutdown) => return Err(DerivedIndexWorkerError::Stopped),
+            Err(HistoryUnavailable::Corrupt) => {
+                return Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Corrupt {
+                        required: watermark,
+                    },
                 });
             }
             Err(error) => return Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
         };
-        let body = self.load_body(watermark.height, watermark_hash, &lease)?;
+        let body = self.load_body(watermark.height, watermark_hash, capabilities, &lease)?;
         let anchor = capabilities
             .contains(IndexCapability::ScriptLive)
             .then(|| self.live_anchor(watermark.height, watermark.hash))
@@ -155,16 +198,24 @@ impl Worker {
         let prev = if watermark.height == 0 {
             None
         } else {
-            let prepared = self
-                .writer
-                .prepare_block_with_spent_scripts(
-                    capabilities,
-                    watermark.height,
-                    watermark.hash,
-                    &body,
-                    spent,
-                )
-                .map_err(DerivedIndexWorkerError::Index)?;
+            let prepared = match self.writer.prepare_block_with_spent_scripts(
+                capabilities,
+                watermark.height,
+                watermark.hash,
+                &body,
+                spent,
+            ) {
+                Ok(prepared) => prepared,
+                Err(IndexError::BlockParse(_) | IndexError::BlockIdentityMismatch { .. }) => {
+                    return Err(DerivedIndexWorkerError::PermanentHistory {
+                        capabilities,
+                        failure: IndexHistoryFailure::Corrupt {
+                            required: watermark,
+                        },
+                    });
+                }
+                Err(error) => return Err(DerivedIndexWorkerError::Index(error)),
+            };
             Some(IndexWatermark {
                 height: watermark.height.saturating_sub(1),
                 hash: prepared.parent_hash,
@@ -174,13 +225,14 @@ impl Worker {
         if self.runtime.should_stop() {
             return Err(DerivedIndexWorkerError::Stopped);
         }
-        let cursor = self.cursor_for_result(capabilities, prev, watermarks);
+        let cursor = self.cursor_for_result(capabilities, prev, watermarks)?;
         let cursor = cursor
             .as_ref()
             .map_or(ConsumerCursorUpdate::Clear, |bytes| {
                 ConsumerCursorUpdate::Set(bytes.as_slice())
             });
-        self.writer
+        match self
+            .writer
             .commit_rollback_one_for_with_cursor_with_spent_scripts(
                 fence,
                 capabilities,
@@ -188,15 +240,25 @@ impl Worker {
                 &body,
                 cursor,
                 spent,
-            )
-            .map_err(DerivedIndexWorkerError::Index)?;
+            ) {
+            Ok(()) => {}
+            Err(IndexError::BlockParse(_) | IndexError::BlockIdentityMismatch { .. }) => {
+                return Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Corrupt {
+                        required: watermark,
+                    },
+                });
+            }
+            Err(error) => return Err(DerivedIndexWorkerError::Index(error)),
+        }
         Ok(prev)
     }
 
     /// Loads one body under a live history grant.
     ///
-    /// PRE: `lease` pins `height`, so a body that reads back absent under it
-    /// is transient absence, never lost history.
+    /// PRE: `lease` pins `height`; the body owner classifies an absent read as
+    /// transient `Missing` or as an authoritative locator/frame `Corrupt`.
     ///
     /// POST: `Ok` returns the body. `HistoryUnavailable::Missing` means the
     /// authority granted the height and the row is absent for now: the
@@ -208,18 +270,58 @@ impl Worker {
         &self,
         height: u32,
         hash: Hash256,
+        capabilities: IndexCapabilities,
         lease: &bitcoin_rs_storage::pruning::HistoryLease,
     ) -> Result<Vec<u8>, DerivedIndexWorkerError> {
-        let _ = lease;
+        if lease.floor().is_none() {
+            return Err(DerivedIndexWorkerError::HistoryUnavailable(
+                HistoryUnavailable::Missing,
+            ));
+        }
         let Some(store) = self.body_store.as_ref() else {
             return Err(DerivedIndexWorkerError::NoBodyStore);
         };
-        // The grant pins this height, so an absent body under it is transient
-        // absence, which the boundary types as `Missing`.
-        let body = store.load_block_body(height, hash)?;
-        body.ok_or(DerivedIndexWorkerError::HistoryUnavailable(
-            HistoryUnavailable::Missing,
-        ))
+        let mut reader = store.reader()?;
+        let loaded = match reader.load_retained_block_body(height, hash) {
+            Ok(loaded) => loaded,
+            Err(StorageError::IncompatibleData(_)) => {
+                return Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Corrupt {
+                        required: IndexWatermark {
+                            height,
+                            hash: hash.to_le_bytes(),
+                        },
+                    },
+                });
+            }
+            Err(error) => return Err(DerivedIndexWorkerError::Storage(error)),
+        };
+        match loaded {
+            Ok(body) => Ok(body),
+            Err(HistoryUnavailable::Pruned { .. }) => {
+                Err(DerivedIndexWorkerError::PermanentHistory {
+                    capabilities,
+                    failure: IndexHistoryFailure::Pruned {
+                        required: IndexWatermark {
+                            height,
+                            hash: hash.to_le_bytes(),
+                        },
+                    },
+                })
+            }
+            Err(HistoryUnavailable::Corrupt) => Err(DerivedIndexWorkerError::PermanentHistory {
+                capabilities,
+                failure: IndexHistoryFailure::Corrupt {
+                    required: IndexWatermark {
+                        height,
+                        hash: hash.to_le_bytes(),
+                    },
+                },
+            }),
+            Err(HistoryUnavailable::Shutdown) => Err(DerivedIndexWorkerError::Stopped),
+            Err(error) => Err(DerivedIndexWorkerError::HistoryUnavailable(error)),
+        }
     }
 
     pub(super) fn live_anchor(

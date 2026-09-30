@@ -1,10 +1,11 @@
 //! Coherent write fences and cooperative, versioned capability-reset recovery.
 
 use super::{
-    capability::IndexCapabilities, capability::IndexCapability, capability::IndexWatermark,
-    capability::IndexWatermarks, capability::SCRIPT_HISTORY_WATERMARK_KEY,
-    capability::SCRIPT_LIVE_WATERMARK_KEY, capability::TX_LOOKUP_WATERMARK_KEY,
-    capability::WATERMARK_LEN, error::IndexError,
+    capability::IndexCapabilities, capability::IndexCapability, capability::IndexHistoryFailures,
+    capability::IndexWatermark, capability::IndexWatermarks,
+    capability::SCRIPT_HISTORY_FAILURE_KEY, capability::SCRIPT_HISTORY_WATERMARK_KEY,
+    capability::SCRIPT_LIVE_WATERMARK_KEY, capability::TX_LOOKUP_FAILURE_KEY,
+    capability::TX_LOOKUP_WATERMARK_KEY, capability::WATERMARK_LEN, error::IndexError,
 };
 use bitcoin_rs_storage::{
     BufferedWriteBatch, ColumnFamily, KvStore, PrefixScanLimit, WriteCondition,
@@ -15,11 +16,11 @@ use tracing::debug;
 // TxIndex metadata; data row keys begin with ASCII letters only and can never collide.
 pub(super) const FORMAT_VERSION_KEY: &[u8] = &[0x00, b'V'];
 
-/// On-disk format 5: big-endian height suffixes, 43-byte live rows with u24
-/// `vout`, and 6-byte `TxPosition` values. Any older marker refuses start
+/// On-disk format 6: format 5 rows plus durable per-capability terminal
+/// body-history failures. Any older marker refuses start
 /// (`UnsupportedTxIndexFormatVersion`) so the store fully resets and rebuilds
 /// from chainstate; no in-place upgrade path exists.
-pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x05, 0x00, 0x00, 0x00];
+pub(super) const FORMAT_VERSION_VALUE: [u8; 4] = [0x06, 0x00, 0x00, 0x00];
 
 /// Monotonic revision shared by every ordinary index mutation.
 const ORDINARY_STATE_REVISION_KEY: &[u8] = &[0x00, b'O'];
@@ -80,6 +81,7 @@ pub struct IndexWriteFence {
     state: IndexWriteFenceState,
     revision: Option<u64>,
     pub(super) watermarks: IndexWatermarks,
+    pub(super) history_failures: IndexHistoryFailures,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,6 +187,9 @@ pub(super) fn capture_write_fence<S: KvStore>(
     let observed_script_history =
         snapshot.get(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_WATERMARK_KEY)?;
     let observed_script_live = snapshot.get(ColumnFamily::UtxoMeta, SCRIPT_LIVE_WATERMARK_KEY)?;
+    let observed_tx_lookup_failure = snapshot.get(ColumnFamily::UtxoMeta, TX_LOOKUP_FAILURE_KEY)?;
+    let observed_script_history_failure =
+        snapshot.get(ColumnFamily::UtxoMeta, SCRIPT_HISTORY_FAILURE_KEY)?;
     drop(snapshot);
 
     let state = match observed_reset.as_deref() {
@@ -210,34 +215,46 @@ pub(super) fn capture_write_fence<S: KvStore>(
         },
     };
 
-    let decoded: Result<(Option<u64>, IndexWatermarks), IndexError> = (|| {
-        let revision = observed_revision
-            .as_deref()
-            .map(decode_state_revision)
-            .transpose()?;
-        let watermarks = IndexWatermarks {
-            tx_lookup: observed_tx_lookup
+    let decoded: Result<(Option<u64>, IndexWatermarks, IndexHistoryFailures), IndexError> =
+        (|| {
+            let revision = observed_revision
                 .as_deref()
-                .map(IndexWatermark::from_bytes)
-                .transpose()?,
-            script_history: observed_script_history
-                .as_deref()
-                .map(IndexWatermark::from_bytes)
-                .transpose()?,
-            script_live: observed_script_live
-                .as_deref()
-                .map(IndexWatermark::from_bytes)
-                .transpose()?,
-        };
-        Ok((revision, watermarks))
-    })();
+                .map(decode_state_revision)
+                .transpose()?;
+            let watermarks = IndexWatermarks {
+                tx_lookup: observed_tx_lookup
+                    .as_deref()
+                    .map(IndexWatermark::from_bytes)
+                    .transpose()?,
+                script_history: observed_script_history
+                    .as_deref()
+                    .map(IndexWatermark::from_bytes)
+                    .transpose()?,
+                script_live: observed_script_live
+                    .as_deref()
+                    .map(IndexWatermark::from_bytes)
+                    .transpose()?,
+            };
+            let history_failures = IndexHistoryFailures {
+                tx_lookup: observed_tx_lookup_failure
+                    .as_deref()
+                    .map(super::capability::IndexHistoryFailure::from_bytes)
+                    .transpose()?,
+                script_history: observed_script_history_failure
+                    .as_deref()
+                    .map(super::capability::IndexHistoryFailure::from_bytes)
+                    .transpose()?,
+            };
+            Ok((revision, watermarks, history_failures))
+        })();
     ensure_reset_live(store, generation, &state)?;
-    let (revision, watermarks) = decoded?;
+    let (revision, watermarks, history_failures) = decoded?;
 
     Ok(IndexWriteFence {
         state,
         revision,
         watermarks,
+        history_failures,
     })
 }
 
@@ -567,7 +584,7 @@ fn acquire_capability_reset<S: KvStore>(
         for capability in capabilities.iter() {
             batch.delete(ColumnFamily::UtxoMeta, capability.watermark_key());
         }
-        crate::index::capability::delete_selected_floors(&mut batch, capabilities);
+        crate::index::capability::delete_selected_history_failures(&mut batch, capabilities);
         batch.delete(ColumnFamily::UtxoMeta, CONSUMER_CURSOR_KEY);
         if store.write_durable_if(&conditions, batch)? {
             return Ok(Some(work));
