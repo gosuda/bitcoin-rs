@@ -544,154 +544,104 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
     Ok(())
 }
 
-// CONTRACT: API-19
-#[test]
-fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = fixture()?;
-    mining.publish_generation();
-    let genesis = Network::Regtest.genesis_block();
-    let mut block = mined_child(genesis.block_hash())?;
-    let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
-        panic!("child missing coinbase input");
-    };
-    input.previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0);
+fn remine(block: &mut Block) -> anyhow::Result<()> {
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
-    match propose_block(&mining, block)? {
-        BlockValidationResult::Rejected(reason) => {
-            assert_eq!(reason.as_str(), "bad-cb-missing");
-        }
-        other => panic!("expected bad-cb-missing, got {other:?}"),
-    }
+    regtest_fixture::mine_block_to_declared_target(block)?;
     Ok(())
 }
 
-// CONTRACT: API-19
+/// Every BIP22 proposal refusal reason this node reports, each from a block
+/// that is otherwise valid so the named reason is the only thing under test.
+// CONTRACT: API-19, API-21
 #[test]
-fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = fixture()?;
-    mining.publish_generation();
-    let genesis = Network::Regtest.genesis_block();
-    let mut block = mined_child(genesis.block_hash())?;
-    block.header.merkle_root = Hash256::from_le_bytes(&[0x11; 32]);
-    match propose_block(&mining, block)? {
-        BlockValidationResult::Rejected(reason) => {
-            assert_eq!(reason.as_str(), "bad-txnmrklroot");
-        }
-        other => panic!("expected bad-txnmrklroot, got {other:?}"),
-    }
-    Ok(())
-}
-
-// CONTRACT: API-21
-#[test]
-fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = fixture()?;
-    mining.publish_generation();
-    let mut block = solved_template_block(&mining)?;
-    {
-        let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
-            panic!("solved candidate missing coinbase input");
-        };
-        assert!(
-            !input.witness.is_empty(),
-            "assembled candidate must carry the reserved nonce"
-        );
-        input.witness.clear();
-    }
-    assert!(
-        block.txs.first().is_some_and(|tx| tx
-            .outputs
-            .iter()
-            .any(|output| is_witness_commitment(&output.script_pubkey))),
-        "assembled candidate must carry a BIP141 commitment"
-    );
-    match propose_block(&mining, block)? {
-        BlockValidationResult::Rejected(reason) => {
-            assert_eq!(reason.as_str(), "bad-witness-nonce-size");
-        }
-        other => panic!("expected bad-witness-nonce-size, got {other:?}"),
-    }
-    Ok(())
-}
-
-// CONTRACT: API-21
-#[test]
-fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = fixture()?;
-    mining.publish_generation();
-    let mut block = solved_template_block(&mining)?;
-    {
-        let Some(coinbase) = block.txs.first_mut() else {
-            panic!("solved candidate missing coinbase");
-        };
-        assert!(
+fn proposal_reports_the_bip22_reason_for_each_refusal() -> anyhow::Result<()> {
+    type Build = fn(&MiningCoordinator) -> anyhow::Result<Block>;
+    let cases: [(&str, Build); 5] = [
+        ("bad-cb-missing", |_mining| {
+            let mut block = mined_child(Network::Regtest.genesis_block().block_hash())?;
+            let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
+                panic!("child missing coinbase input");
+            };
+            input.previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x11; 32])), 0);
+            block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
+                .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
+            Ok(block)
+        }),
+        ("bad-txnmrklroot", |_mining| {
+            let mut block = mined_child(Network::Regtest.genesis_block().block_hash())?;
+            block.header.merkle_root = Hash256::from_le_bytes(&[0x11; 32]);
+            Ok(block)
+        }),
+        ("bad-witness-nonce-size", |mining| {
+            let mut block = solved_template_block(mining)?;
+            let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
+                panic!("solved candidate missing coinbase input");
+            };
+            assert!(
+                !input.witness.is_empty(),
+                "assembled candidate must carry the reserved nonce"
+            );
+            input.witness.clear();
+            assert!(
+                block.txs.first().is_some_and(|tx| tx
+                    .outputs
+                    .iter()
+                    .any(|output| is_witness_commitment(&output.script_pubkey))),
+                "assembled candidate must carry a BIP141 commitment"
+            );
+            Ok(block)
+        }),
+        ("unexpected-witness", |mining| {
+            let mut block = solved_template_block(mining)?;
+            let Some(coinbase) = block.txs.first_mut() else {
+                panic!("solved candidate missing coinbase");
+            };
+            assert!(
+                coinbase
+                    .inputs
+                    .first()
+                    .is_some_and(|input| !input.witness.is_empty()),
+                "assembled candidate must carry the reserved nonce"
+            );
             coinbase
-                .inputs
-                .first()
-                .is_some_and(|input| !input.witness.is_empty()),
-            "assembled candidate must carry the reserved nonce"
-        );
-        coinbase
-            .outputs
-            .retain(|output| !is_witness_commitment(&output.script_pubkey));
-        assert!(
-            !coinbase.outputs.is_empty(),
-            "coinbase must keep a payout output after stripping the commitment"
-        );
-    }
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
-    regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    match propose_block(&mining, block)? {
-        BlockValidationResult::Rejected(reason) => {
-            assert_eq!(reason.as_str(), "unexpected-witness");
+                .outputs
+                .retain(|output| !is_witness_commitment(&output.script_pubkey));
+            assert!(
+                !coinbase.outputs.is_empty(),
+                "coinbase must keep a payout output after stripping the commitment"
+            );
+            remine(&mut block)?;
+            Ok(block)
+        }),
+        ("bad-witness-merkle-match", |mining| {
+            let mut block = solved_template_block(mining)?;
+            let Some(output) = block.txs.first_mut().and_then(|tx| {
+                tx.outputs
+                    .iter_mut()
+                    .rev()
+                    .find(|output| is_witness_commitment(&output.script_pubkey))
+            }) else {
+                panic!("solved candidate missing BIP141 commitment");
+            };
+            output.script_pubkey[6] ^= 0xff;
+            remine(&mut block)?;
+            Ok(block)
+        }),
+    ];
+    for (expected, build) in cases {
+        let Fixture {
+            state: _state,
+            mining,
+        } = fixture()?;
+        mining.publish_generation();
+        let block = build(&mining)?;
+        match propose_block(&mining, block)? {
+            BlockValidationResult::Rejected(reason) => {
+                assert_eq!(reason.as_str(), expected);
+            }
+            other => panic!("expected {expected}, got {other:?}"),
         }
-        other => panic!("expected unexpected-witness, got {other:?}"),
-    }
-    Ok(())
-}
-
-// CONTRACT: API-21
-#[test]
-fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = fixture()?;
-    mining.publish_generation();
-    let mut block = solved_template_block(&mining)?;
-    {
-        let Some(output) = block.txs.first_mut().and_then(|tx| {
-            tx.outputs
-                .iter_mut()
-                .rev()
-                .find(|output| is_witness_commitment(&output.script_pubkey))
-        }) else {
-            panic!("solved candidate missing BIP141 commitment");
-        };
-        output.script_pubkey[6] ^= 0xff;
-    }
-    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
-        .ok_or_else(|| anyhow::anyhow!("test block has no merkle root"))?;
-    regtest_fixture::mine_block_to_declared_target(&mut block)?;
-    match propose_block(&mining, block)? {
-        BlockValidationResult::Rejected(reason) => {
-            assert_eq!(reason.as_str(), "bad-witness-merkle-match");
-        }
-        other => panic!("expected bad-witness-merkle-match, got {other:?}"),
     }
     Ok(())
 }
@@ -920,40 +870,31 @@ fn submit_header_requires_the_previous_header() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Header-only submission runs the contextual header checks, so a child that
+/// meets its own declared target is still refused for the field it corrupts.
 #[test]
-fn submit_header_rejects_bad_diffbits() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = fixture()?;
-    let genesis = Network::Regtest.genesis_block();
-    let mut child = mined_child(genesis.block_hash())?;
-    child.header.bits = CompactTarget::from_consensus(0x207f_fffe);
-    regtest_fixture::mine_block_to_declared_target(&mut child)?;
-    match mining.submit_header(child.header) {
-        Err(MiningControlError::Rejected(reason)) => {
-            assert_eq!(reason.as_str(), "bad-diffbits");
+fn submit_header_rejects_contextually_invalid_fields() -> anyhow::Result<()> {
+    type Corrupt = fn(&mut Block);
+    let cases: [(&str, Corrupt); 2] = [
+        ("bad-diffbits", |block| {
+            block.header.bits = CompactTarget::from_consensus(0x207f_fffe);
+        }),
+        ("time-too-new", |block| block.header.time = u32::MAX),
+    ];
+    for (expected, corrupt) in cases {
+        let Fixture {
+            state: _state,
+            mining,
+        } = fixture()?;
+        let mut child = mined_child(Network::Regtest.genesis_block().block_hash())?;
+        corrupt(&mut child);
+        regtest_fixture::mine_block_to_declared_target(&mut child)?;
+        match mining.submit_header(child.header) {
+            Err(MiningControlError::Rejected(reason)) => {
+                assert_eq!(reason.as_str(), expected);
+            }
+            other => panic!("expected {expected}, got {other:?}"),
         }
-        other => panic!("expected bad-diffbits, got {other:?}"),
-    }
-    Ok(())
-}
-
-#[test]
-fn submit_header_rejects_time_too_new() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = fixture()?;
-    let genesis = Network::Regtest.genesis_block();
-    let mut child = mined_child(genesis.block_hash())?;
-    child.header.time = u32::MAX;
-    regtest_fixture::mine_block_to_declared_target(&mut child)?;
-    match mining.submit_header(child.header) {
-        Err(MiningControlError::Rejected(reason)) => {
-            assert_eq!(reason.as_str(), "time-too-new");
-        }
-        other => panic!("expected time-too-new, got {other:?}"),
     }
     Ok(())
 }

@@ -166,92 +166,92 @@ fn consumer_preserves_exact_connection_id() {
     }
 }
 
+/// One admission verdict per inbound transaction: only a newly accepted one
+/// wakes mining, and a resident duplicate stays resident.
 #[test]
-fn rejected_tx_does_not_relay_or_wake_mining() {
-    let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 1_000_000,
-        ..MempoolLimits::default()
-    })));
-    let gateway = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+fn admission_verdict_decides_the_mining_wake() {
+    struct Case {
+        name: &'static str,
+        min_relay_fee_sat_per_kvb: u64,
+        tx: Tx,
+        preinsert: bool,
+        publishes: u64,
+    }
+    let cases = [
+        Case {
+            name: "priced-out coinbase is rejected",
+            min_relay_fee_sat_per_kvb: 1_000_000,
+            tx: coinbase_tx(50_000),
+            preinsert: false,
+            publishes: 0,
+        },
+        Case {
+            name: "resident duplicate is not readmitted",
+            min_relay_fee_sat_per_kvb: 0,
+            tx: coinbase_tx(50_000),
+            preinsert: true,
+            publishes: 0,
+        },
+        Case {
+            name: "new spend is admitted",
+            min_relay_fee_sat_per_kvb: 0,
+            tx: spending_tx(),
+            preinsert: false,
+            publishes: 1,
+        },
+    ];
+    for case in cases {
+        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits {
+            min_relay_fee_sat_per_kvb: case.min_relay_fee_sat_per_kvb,
+            ..MempoolLimits::default()
+        })));
+        let gateway = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
+            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        let txid = case.tx.txid();
+        if case.preinsert {
+            let entry = MempoolEntry::new(Arc::new(case.tx.clone()), 100, 0, 1, 0, 0);
+            gateway
+                .insert_entry(AdmissionOrigin::Rpc, entry)
+                .unwrap_or_else(|error| panic!("{}: seed insert: {error}", case.name));
+        }
 
-    let source = test_source();
-    let tx = coinbase_tx(50_000);
-    let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
+        let mining = FakeMiningControl::unavailable("not implemented");
+        let consumer = make_consumer(&gateway, &mining);
+        consumer.process_one(bitcoin_rs_p2p::InboundTx::new(case.tx, test_source()));
 
-    let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
-
-    consumer.process_one(inbound);
-
-    assert_eq!(mining.publish_count(), 0);
+        assert_eq!(mining.publish_count(), case.publishes, "{}", case.name);
+        assert_eq!(
+            gateway.read().contains_txid(&txid),
+            case.preinsert || case.publishes == 1,
+            "{}",
+            case.name
+        );
+    }
 }
 
+/// A transaction consensus refuses outright is recorded as rejected and never
+/// consumes orphan quota, whatever the refusal reason.
 #[test]
-fn duplicate_tx_does_not_relay_or_wake_mining() {
-    let gateway = zero_fee_gateway();
-
-    let tx = coinbase_tx(50_000);
-    let txid = tx.txid();
-    let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 0, 1, 0, 0);
-    gateway.insert_entry(AdmissionOrigin::Rpc, entry).unwrap();
-
-    let source = test_source();
-    let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
-
-    let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
-
-    consumer.process_one(inbound);
-
-    assert_eq!(mining.publish_count(), 0);
-    assert!(gateway.read().contains_txid(&txid));
-}
-
-#[test]
-fn accepted_tx_relays_and_wakes_mining() {
-    let gateway = zero_fee_gateway();
-
-    let source = test_source();
-    let tx = spending_tx();
-    let inbound = bitcoin_rs_p2p::InboundTx::new(tx, source);
-
-    let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
-
-    consumer.process_one(inbound);
-
-    assert_eq!(mining.publish_count(), 1);
-}
-
-#[test]
-fn coinbase_is_rejected_not_orphaned() {
-    let gateway = MempoolGateway::shared(
-        Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-        ValidationEngine::Native,
-    )
-    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-    let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
-    let coinbase = coinbase_tx(50_000);
-    let txid = coinbase.txid();
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(coinbase, test_source()));
-    assert_eq!(consumer.mempool_gateway.orphan_count(), 0);
-    assert!(consumer.mempool_gateway.is_rejected(Hash256::from(txid)));
-}
-
-#[test]
-fn non_final_tx_is_rejected_not_admitted() {
-    let gateway = zero_fee_gateway();
-    let mining = FakeMiningControl::unavailable("not implemented");
-    let consumer = make_consumer(&gateway, &mining);
-    let mut tx = spending_tx();
-    tx.lock_time = LockTime::from_consensus(100);
-    tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
-    let txid = tx.txid();
-    consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
-    assert!(!gateway.read().contains_txid(&txid));
-    assert!(consumer.mempool_gateway.is_rejected(Hash256::from(txid)));
+fn outright_refusals_are_rejected_not_orphaned() {
+    let non_final = {
+        let mut tx = spending_tx();
+        tx.lock_time = LockTime::from_consensus(100);
+        tx.inputs[0].sequence = Sequence::from_consensus(0xFFFF_FFFE);
+        tx
+    };
+    for (name, tx) in [("coinbase", coinbase_tx(50_000)), ("non-final", non_final)] {
+        let gateway = zero_fee_gateway();
+        let mining = FakeMiningControl::unavailable("not implemented");
+        let consumer = make_consumer(&gateway, &mining);
+        let txid = tx.txid();
+        consumer.process_one(bitcoin_rs_p2p::InboundTx::new(tx, test_source()));
+        assert_eq!(consumer.mempool_gateway.orphan_count(), 0, "{name}");
+        assert!(
+            consumer.mempool_gateway.is_rejected(Hash256::from(txid)),
+            "{name}"
+        );
+        assert!(!gateway.read().contains_txid(&txid), "{name}");
+    }
 }
 
 #[test]
