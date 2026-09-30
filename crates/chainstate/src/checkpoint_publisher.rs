@@ -67,6 +67,10 @@ pub(crate) enum DisconnectRetirement {
     /// state coherent, so neither phase refuses publication, and the marker
     /// retires unconditionally after the checkpoint lands.
     Recovered,
+    /// Boot replay is still below the durable head. Publish a compaction base
+    /// without retiring either recovery marker; a crash must resume recovery,
+    /// not treat this progress checkpoint as a completed repair.
+    RecoveryProgress,
 }
 
 /// All the shared handles needed to publish a checkpoint from a background
@@ -121,6 +125,15 @@ impl CheckpointPublisher {
         self.publish_transaction(DisconnectRetirement::Recovered)
     }
 
+    /// Publishes a marker-preserving checkpoint while boot replay is still in
+    /// progress, allowing journal compaction before the maintenance worker
+    /// exists.
+    pub(crate) fn publish_recovery_progress(
+        &self,
+    ) -> core::result::Result<CheckpointWrite, CheckpointError> {
+        self.publish_transaction(DisconnectRetirement::RecoveryProgress)
+    }
+
     fn publish_transaction(
         &self,
         retirement: DisconnectRetirement,
@@ -141,6 +154,8 @@ impl CheckpointPublisher {
             .as_ref()
             .map_or(0, |tip| tip.chain_tx_count.to_wire());
         let mut result = self.publish_frozen(applied_tip.as_deref(), retirement);
+        let retire_full_revalidation_marker =
+            !matches!(retirement, DisconnectRetirement::RecoveryProgress);
 
         if let (Ok(CheckpointWrite::Published { generation }), Some(tip), Some(writer)) =
             (&result, applied_tip.as_ref(), journal.as_mut())
@@ -153,6 +168,7 @@ impl CheckpointPublisher {
                         tip.hash.to_le_bytes(),
                         tip_prev_hash.to_le_bytes(),
                         chain_tx_count,
+                        retire_full_revalidation_marker,
                     )
                     .map_err(|error| {
                         CheckpointError::Store(
@@ -180,13 +196,15 @@ impl CheckpointPublisher {
         }
         // The disconnect marker is the recovery latch: it retires only once
         // the checkpoint, the journal compaction, and the journal resume all
-        // succeeded. Recovery retires unconditionally — reconstruction
-        // already made the state coherent — while an ordinary publish merely
-        // disarms an `InFlight`-free marker.
+        // succeeded. Completed recovery retires unconditionally —
+        // reconstruction already made the state coherent — while an ordinary
+        // publish merely disarms an `InFlight`-free marker. A progress
+        // checkpoint leaves the latch armed until replay reaches the head.
         if result.is_ok()
             && let Err(error) = match retirement {
                 DisconnectRetirement::Ordinary => self.undo_store.disarm_disconnect(),
                 DisconnectRetirement::Recovered => self.undo_store.retire_disconnect_marker(),
+                DisconnectRetirement::RecoveryProgress => Ok(()),
             }
         {
             result = Err(CheckpointError::from(error));
@@ -314,7 +332,9 @@ impl CheckpointPublisher {
         // Marker retirement is a second durability step after `CURRENT`.
         // Propagate failure so the worker retries next tick; the published
         // checkpoint stays, and the marker stays until unlink+dirsync commits.
-        if matches!(written, CheckpointWrite::Published { .. }) {
+        if matches!(written, CheckpointWrite::Published { .. })
+            && !matches!(retirement, DisconnectRetirement::RecoveryProgress)
+        {
             retire_full_revalidation_marker(&self.data_dir)?;
         }
         // Everything up to this tip is now recoverable, so undo records below

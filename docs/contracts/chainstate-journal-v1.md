@@ -14,7 +14,7 @@ contract.
 - **JW-REC-1**: on reopen, bytes after the durable head are ignored or
   truncated; an incomplete append can be retried without duplicating a record.
 - **JW-ORDER-1**: appends are contiguous and failed or out-of-order appends
-  block further apply until the gap is resolved.
+  block further apply and checkpoint compaction until the gap is resolved.
 - **JW-DUR-1**: the head advances only after the required storage flush and
   filesystem synchronization succeed; failed boundaries are retryable.
 - **JW-ROT-1**: rotation preserves cursor invariants and a published head never
@@ -25,6 +25,9 @@ contract.
   retryable state and successful lifecycle transitions preserve the contract.
 - **JW-MARK-1**: clearing the full-revalidation marker is idempotent and a
   failed directory sync is retried.
+- **JW-MARK-2**: checkpoint compaction performed only to advance boot replay
+  preserves the full-revalidation marker; only a completed recovery or an
+  ordinary replacement checkpoint may retire it.
 - **JW-FAIL-1**: documented failpoints fail their named boundary without
   publishing an advanced head.
 

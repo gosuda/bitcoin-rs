@@ -715,6 +715,7 @@ impl<'a> ChainTransition<'a> {
                 (
                     PublishMode::Replay {
                         receipt: durable::DurableReceipt::from_head(head),
+                        certify_head: true,
                     },
                     proven,
                 )
@@ -1312,6 +1313,33 @@ impl Chainstate {
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
                 Err(invalid("recovery found no applied tip to checkpoint"))
             }
+            crate::checkpoint::CheckpointWrite::Published { .. } => Ok(()),
+        }
+    }
+
+    /// Publishes a marker-preserving checkpoint to relieve journal pressure
+    /// while boot replay is still below the durable head.
+    ///
+    /// The caller must release its transition first because publication takes
+    /// the exclusive apply-admission barrier. Success compacts the journal but
+    /// deliberately leaves recovery markers armed.
+    pub(crate) fn publish_recovery_progress_checkpoint(
+        &self,
+    ) -> core::result::Result<(), CheckpointError> {
+        let invalid = |reason: &str| {
+            CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(
+                reason.to_owned(),
+            ))
+        };
+        let Some(publisher) = &self.checkpoint_publisher else {
+            return Err(invalid(
+                "journal backpressure recovery requires a configured checkpoint publisher",
+            ));
+        };
+        match publisher.publish_recovery_progress()? {
+            crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => Err(invalid(
+                "journal backpressure recovery found no applied tip to checkpoint",
+            )),
             crate::checkpoint::CheckpointWrite::Published { .. } => Ok(()),
         }
     }

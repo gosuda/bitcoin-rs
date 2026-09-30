@@ -573,12 +573,18 @@ pub(super) fn apply_block_admitted<'b>(
         }
         // The gap block's durable batch committed before the crash: the
         // stored head receipt covers its body, undo, and locator rows.
-        // Replay redoes only what publication owed — the journal tail
-        // and the coherent tip — and carries the receipt's commit id, and
-        // the published tip carries the count the durable head certified.
-        PublishMode::Replay { receipt } => {
+        // Replay redoes only what publication owed — the journal tail and the
+        // coherent tip — and carries the receipt's commit id. Intermediate
+        // tips retain their reconstructed cumulative count; only the landing
+        // tip takes the durable head's certified count.
+        PublishMode::Replay {
+            receipt,
+            certify_head,
+        } => {
             let commit_id = receipt.commit_id;
-            outcome.tip = receipt.certify(outcome.tip);
+            if certify_head {
+                outcome.tip = receipt.certify(outcome.tip);
+            }
             commit_id
         }
         PublishMode::Grouped(group) => {

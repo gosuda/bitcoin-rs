@@ -130,6 +130,23 @@ seconds at IBD rates, and a crash-redo bound of at most 64 body re-applies.
 This is the ordered commit protocol. It is also called the durable root
 recovery contract.
 
+Boot-time durable-head replay runs before the journal maintenance worker is
+started. If journal backpressure refuses a replay block, recovery releases its
+transition, publishes a marker-preserving progress checkpoint to compact the
+journal, reacquires the transition, verifies that the applied tip is unchanged,
+and retries that same block once. The progress checkpoint does not retire the
+disconnect or full-revalidation marker. Intermediate replay tips retain the
+cumulative transaction count reconstructed from their parent; only the landing
+tip adopts the durable head's certified count, so every progress checkpoint
+agrees with CoinStats. Failure to publish the checkpoint, reacquire the
+transition, preserve the captured tip, or apply the retry fails closed.
+Before genesis, no progress checkpoint is possible. If an empty cold writer
+hits retention pressure while the full-revalidation marker is present, it
+removes only invalidated, non-active journal segment generations and syncs
+the journal directory. It preserves the marker, head, and active cursor;
+append-gap admission and filesystem errors still fail closed.
+
+
 ### `RCV-03`: Prior-or-whole-proposed and orphan tails
 
 - The storage engine resolves an outstanding atomic batch to the prior root
@@ -413,6 +430,21 @@ durable.
   `restart_without_periodic_publication_restores_tip_and_commit_id` proves
   the durable head replays past the last checkpoint with `commit_id`
   preserved across restarts (`RCV-10`).
+  `cold_revalidation_relieves_journal_pressure_and_retries` proves boot replay
+  compacts retention pressure and retries the refused block with a coherent
+  cumulative transaction count, preserves the full-revalidation marker, and
+  restarts at the retention limit before genesis without an applied tip
+  (`RCV-02`).
+- `crates/storage/src/chainstate_journal/writer/tests/behavior_1.rs`:
+  - `recovery_progress_compaction_preserves_full_revalidation_marker` proves
+    progress compaction leaves the sticky marker armed (`RCV-02`, `JW-MARK-2`);
+  - `recovery_compaction_cannot_clear_an_append_gap` proves compaction cannot
+    bypass append-gap admission or clear a gap on a frozen writer
+    (`RCV-02`, `JW-ORDER-1`);
+  - `cold_retention_removes_all_invalidated_generations_and_preserves_recovery`
+    proves pre-genesis retention relief removes all invalidated generations
+    across a large, sparse directory while preserving the marker, head,
+    active segment, unrelated files, and append/reopen continuity (`RCV-02`).
 - `crates/chainstate/src/reorg.rs` and `crates/chainstate/src/disconnect.rs`
   cover `RCV-05` and bounded disconnect/reorg memory; `RCV-08`'s bounded
   stream windows and retention leases are exercised by the node sync/recovery

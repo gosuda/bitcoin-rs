@@ -792,14 +792,95 @@ fn replay_committed_gap(
     replay_gap_chain(handles, head, chain, restored, load_body)
 }
 
+fn apply_replayed_gap_block(
+    handles: &Chainstate,
+    head: &DurableHead,
+    restored: Option<&TipSnapshot>,
+    block: &Block,
+    bytes: &bytes::Bytes,
+    height: u32,
+    hash: Hash256,
+) -> Result<super::ConnectOutcome, ApplyError> {
+    let proven = match load_block_undo(handles.undo_store.as_ref(), height, hash) {
+        Ok(undo) => Some(ProvenApply::AssumeValidSkipped(
+            super::prepare::prepare_apply(
+                block,
+                Some(bytes.clone()),
+                &UndoRowSpends(&undo),
+                handles.validation_engine,
+            )?,
+        )),
+        Err(UndoLoadError::Missing { .. }) => None,
+        Err(_) => {
+            return Err(ApplyError::DurableHeadGapUnrecoverable {
+                head_tip: head.tip,
+                head_height: head.height,
+                restored_tip: restored.map(|tip| tip.hash),
+                restored_height: restored.map(|tip| tip.height),
+                reason: "a committed gap undo record does not load",
+            });
+        }
+    };
+    super::connect::apply_committed_block_admitted(
+        handles,
+        block,
+        Some(bytes.clone()),
+        proven,
+        BlockProvenance::LocalReplay,
+        PublishMode::Replay {
+            receipt: DurableReceipt::from_head(head),
+            certify_head: height == head.height && hash == head.tip,
+        },
+    )
+}
+
+fn relieve_replay_journal_backpressure<'a>(
+    handles: &'a Chainstate,
+    head: &DurableHead,
+    restored: Option<&TipSnapshot>,
+    transition: &mut Option<super::ChainTransition<'a>>,
+    height: u32,
+    hash: Hash256,
+) -> Result<(), ApplyError> {
+    let refused_tip = handles.applied_tip.load_full();
+    drop(transition.take());
+    handles
+        .publish_recovery_progress_checkpoint()
+        .map_err(|error| ApplyError::RecoveryPublication(Box::new(error)))?;
+    let resumed = handles.begin_transition()?;
+    if handles.applied_tip.load_full().as_deref() != refused_tip.as_deref() {
+        return Err(ApplyError::DurableHeadGapUnrecoverable {
+            head_tip: head.tip,
+            head_height: head.height,
+            restored_tip: restored.map(|tip| tip.hash),
+            restored_height: restored.map(|tip| tip.height),
+            reason: "the applied tip moved while recovery relieved journal backpressure",
+        });
+    }
+    *transition = Some(resumed);
+    metrics::counter!("node.durable_head.recovery_backpressure_reliefs").increment(1);
+    tracing::info!(
+        height,
+        hash = %hash.to_string_be(),
+        "compacted the chainstate journal during boot replay; retrying the refused block"
+    );
+    Ok(())
+}
+
 /// Re-applies the walked head chain through the ordinary commit path under
 /// one transition and publishes the state the head already certified.
 ///
-/// One transition across the gap: the replay is recovery itself, so a
-/// failure must leave the fence closed rather than half-served. The gap
-/// blocks re-apply idempotently on the next boot — their durable facts
-/// are unchanged — so a failed replay stays exactly the gap it started
-/// as, and the next restart retries it from the same durable state.
+/// Replay normally holds one transition across the gap. Journal backpressure
+/// is the exception: the refused block has not mutated state, so replay drops
+/// the transition, publishes a marker-preserving progress checkpoint to
+/// compact the journal, reacquires the transition, verifies the published tip
+/// did not move, and retries that same block once. The maintenance worker does
+/// not exist yet at this boot stage, so recovery itself owns that relief.
+///
+/// Any failure leaves the fence closed rather than half-served. The gap blocks
+/// re-apply idempotently on the next boot — their durable facts are unchanged
+/// — so a failed replay stays exactly the gap it started as, and the next
+/// restart retries it from the same durable state.
 fn replay_gap_chain(
     handles: &Chainstate,
     head: DurableHead,
@@ -814,7 +895,7 @@ fn replay_gap_chain(
         restored_height: restored.map(|tip| tip.height),
         reason,
     };
-    let transition = handles.begin_transition()?;
+    let mut transition = Some(handles.begin_transition()?);
     // A length always fits u64; the metrics counter counts in u64.
     let replayed_blocks = u64::try_from(chain.len()).unwrap_or(u64::MAX);
     let replayed = (|| {
@@ -822,36 +903,25 @@ fn replay_gap_chain(
         for (height, hash) in chain {
             let (block, bytes) = load_body(height, hash)?;
             let bytes = bytes::Bytes::from(bytes);
-            // The head batch certifies the undo row in the same receipt as
-            // the body, so the coins it restores are exactly the inputs the
-            // committed block saw: resolving replay against it redoes the
-            // committed mutation even on a cold chainstate, where the live
-            // set has not been rebuilt. A missing row falls back to the live
-            // set a restored tip still carries; an unreadable one fails closed.
-            let proven = match load_block_undo(handles.undo_store.as_ref(), height, hash) {
-                Ok(undo) => Some(ProvenApply::AssumeValidSkipped(
-                    super::prepare::prepare_apply(
-                        &block,
-                        Some(bytes.clone()),
-                        &UndoRowSpends(&undo),
-                        handles.validation_engine,
-                    )?,
-                )),
-                Err(UndoLoadError::Missing { .. }) => None,
-                Err(_) => {
-                    return Err(unrecoverable("a committed gap undo record does not load"));
+            // The head receipt certifies the body and undo inputs. Rebuild the
+            // proof for the retry because the first call consumes it even
+            // when journal admission refuses before mutation.
+            let outcome = match apply_replayed_gap_block(
+                handles, &head, restored, &block, &bytes, height, hash,
+            ) {
+                Err(ApplyError::JournalBackpressure(_)) => {
+                    relieve_replay_journal_backpressure(
+                        handles,
+                        &head,
+                        restored,
+                        &mut transition,
+                        height,
+                        hash,
+                    )?;
+                    apply_replayed_gap_block(handles, &head, restored, &block, &bytes, height, hash)
                 }
-            };
-            let outcome = super::connect::apply_committed_block_admitted(
-                handles,
-                &block,
-                Some(bytes),
-                proven,
-                BlockProvenance::LocalReplay,
-                PublishMode::Replay {
-                    receipt: DurableReceipt::from_head(&head),
-                },
-            )?;
+                result => result,
+            }?;
             commit_id = outcome.commit_id;
             tracing::debug!(height, hash = %hash.to_string_be(), "replayed committed gap block");
         }

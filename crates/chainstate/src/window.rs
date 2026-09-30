@@ -56,9 +56,12 @@ pub(super) enum PublishMode<'a> {
     /// committed. The stored head receipt covers it, so nothing syncs and
     /// nothing re-commits: replay rebuilds the derived state the crash
     /// lost — coins, bookkeeping, journal tail — and publishes under the
-    /// receipt the head already issued.
+    /// receipt the head already issued. Only the final replayed block takes
+    /// the head's certified chain-transaction count; intermediate tips keep
+    /// their reconstructed count so a progress checkpoint remains coherent.
     Replay {
         receipt: super::durable::DurableReceipt,
+        certify_head: bool,
     },
 }
 

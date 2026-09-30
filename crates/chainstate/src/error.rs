@@ -181,10 +181,11 @@ pub enum ApplyError {
         /// Why the gap is not a replayable publication lag.
         reason: &'static str,
     },
-    /// Disconnect-marker recovery reconstructed the state but could not
-    /// publish its clean checkpoint, so the marker stays armed and startup
-    /// fails closed. The underlying publication failure rides as source.
-    #[error("disconnect recovery checkpoint publication failed: {0}")]
+    /// Recovery reconstructed a coherent state but could not publish the
+    /// checkpoint required by its current phase, so its marker stays armed
+    /// and startup fails closed. The underlying publication failure rides as
+    /// source.
+    #[error("recovery checkpoint publication failed: {0}")]
     RecoveryPublication(#[source] Box<crate::checkpoint::CheckpointError>),
     /// Rewinding the block-level coinstats failed.
     ///

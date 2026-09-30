@@ -43,6 +43,7 @@ fn restored_chainstate() -> Result<(Chainstate, Block), Box<dyn std::error::Erro
     handles
         .applied_tip
         .store(Some(Arc::new(genesis_tip.clone())));
+    handles.coin_stats.finish_block(0, 1);
 
     let tx = Tx {
         version: 2,
@@ -259,6 +260,7 @@ fn committed_gap_with_missing_body_fails_closed() -> Result<(), Box<dyn std::err
 fn cold_chainstate_replays_head_chain_from_genesis() -> Result<(), Box<dyn std::error::Error>> {
     let (mut handles, child) = restored_chainstate()?;
     handles.applied_tip.store(None);
+    handles.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let genesis = Network::Regtest.genesis_block();
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
@@ -297,6 +299,7 @@ fn cold_chainstate_with_missing_genesis_body_fails_closed() -> Result<(), Box<dy
 {
     let (mut handles, child) = restored_chainstate()?;
     handles.applied_tip.store(None);
+    handles.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
         1,
@@ -472,6 +475,7 @@ fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::e
         (landed.height, landed.hash, landed.chain_tx_count.to_wire()),
         certified
     );
+    assert_eq!(handles.coin_stats.snapshot().tx_count, certified.2);
     assert_eq!(
         handles.durable_head.load()?.map(|head| head.commit_id),
         Some(5),
