@@ -67,10 +67,7 @@ pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 9] = [
 /// table cannot drift silently.
 pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
-        "bitcoin-rs-primitives"
-        | "bitcoin-rs-script"
-        | "bitcoin-rs-consensus"
-        | "bitcoin-rs-trace" => 0,
+        "bitcoin-rs-primitives" | "bitcoin-rs-script" | "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
         "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
         | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,

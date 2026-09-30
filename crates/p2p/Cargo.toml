@@ -15,8 +15,6 @@ workspace = true
 # which propagates the selection into `bitcoin-rs-storage`; p2p itself holds
 # no storage handle (ARCH-03).
 [features]
-# USDT tracepoints (Bitcoin Core-compatible probe ABI); empty unless enabled.
-usdt = ["bitcoin-rs-trace/usdt"]
 # Worker injection for cross-crate teardown tests; never enabled in release
 # builds.
 test-seam = []
@@ -42,7 +40,6 @@ metrics.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sha2.workspace = true
-bitcoin-rs-trace.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }

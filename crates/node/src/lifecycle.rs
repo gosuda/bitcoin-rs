@@ -486,7 +486,7 @@ pub(crate) fn start_node(
     // tracer so consumers (bpftrace, BCC, DTrace) can discover them — shared
     // startup, so daemon (`run`) and embedded (`Node::start`) nodes are
     // equally discoverable. A no-op without the `usdt` feature.
-    bitcoin_rs_trace::register_probes();
+    crate::trace::register_probes();
     cap_global_thread_pool();
     let injected_shutdown = runtime.shutdown;
     let state = NodeState::open(config, runtime.mempool_observer.as_ref())?;
@@ -571,6 +571,7 @@ pub(crate) fn start_node(
     let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
     let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> = gateway.clone();
     let listener_extras = bitcoin_rs_p2p::ListenerExtras {
+        net_trace: crate::trace::p2p_sink(),
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),

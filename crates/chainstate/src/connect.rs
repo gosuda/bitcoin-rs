@@ -471,6 +471,7 @@ pub(super) fn apply_block_admitted<'b>(
     // point. A grouped publish still counts as connected here: the block's
     // consensus state is applied to the chainstate before publication.
     emit_block_connected(
+        handles.trace_sink.as_ref(),
         block,
         &block_hash,
         height,
@@ -610,6 +611,7 @@ pub(super) fn apply_block_admitted<'b>(
 /// inside `prepare`, so a build without the `usdt` feature — or a node with
 /// no consumer attached — does none of it.
 fn emit_block_connected(
+    trace_sink: Option<&Arc<dyn crate::TraceSink>>,
     block: &Block,
     block_hash: &Hash256,
     height: u32,
@@ -618,11 +620,14 @@ fn emit_block_connected(
     flags: bitcoin_rs_script::VerifyFlags,
     elapsed: std::time::Duration,
 ) {
+    let Some(trace_sink) = trace_sink else {
+        return;
+    };
     // `block_hash` borrows the caller's already-computed hash local, which
     // outlives this call: the probe argument must not point into a value the
     // prepare closure owns, because the generated macro fires only after the
     // closure has returned.
-    bitcoin_rs_trace::block_connected(move || {
+    trace_sink.block_connected(&mut move || {
         let mut view = BlockLocalUtxoView::new(Arc::clone(resolved), &block.txs, height, 0);
         let mut inputs: u32 = 0;
         let mut sigops: u64 = 0;

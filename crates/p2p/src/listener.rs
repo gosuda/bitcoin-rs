@@ -58,6 +58,8 @@ type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
 /// instead of adding another entry point.
 #[derive(Clone, Default)]
 pub struct ListenerExtras {
+    /// Node-owned network trace sink. Absent when USDT is not compiled in.
+    pub net_trace: Option<Arc<dyn crate::NetTraceSink>>,
     /// Mempool / orphan / recent-rejects view for the `inv` filter and
     /// transaction `getdata` serving.
     pub tx_inventory: TxInventoryHandle,
@@ -127,6 +129,8 @@ pub struct ConnectionShared {
     pub ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
     /// Block-download orchestrator for this start epoch.
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
+    /// Node-owned network trace sink for this start epoch.
+    pub net_trace: Option<Arc<dyn crate::NetTraceSink>>,
     /// Inbound connection capacity: the automatic-connection maximum minus
     /// the outbound slot counts. The listener refuses inbound admission at
     /// this count and never evicts (Core `m_max_inbound`, `net.h:1127`,
@@ -178,6 +182,7 @@ impl ConnectionShared {
             inbound_tx: extras.inbound_tx,
             ibd: extras.ibd,
             block_sync: extras.block_sync,
+            net_trace: extras.net_trace,
             max_inbound: crate::service::P2pServiceConfig::default().max_inbound(),
             local_services: ServiceFlags::NETWORK | ServiceFlags::WITNESS,
         }
@@ -675,12 +680,15 @@ fn run_outbound_connection(
     let addr_bind = stream.local_addr().map_err(crate::wire::PeerError::Io)?;
     let counters = std::sync::Arc::clone(stream.counters());
     let mut peer = Peer::new(stream, shared.magic);
-    peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
-        lease.node_id(),
-        addr,
-        role,
-        manual,
-    ));
+    if let Some(trace_sink) = &shared.net_trace {
+        peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
+            Arc::clone(trace_sink),
+            lease.node_id(),
+            addr,
+            role,
+            manual,
+        ));
+    }
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     let best_block_depth = shared.approximate_best_block_depth();
     if let Err(error) = run_outbound_handshake(
@@ -884,10 +892,13 @@ fn run_handshake(
 
     let nonce = generate_nonce(peer_addr);
     let mut peer = Peer::new(stream, shared.magic);
-    peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
-        lease.node_id(),
-        peer_addr,
-    ));
+    if let Some(trace_sink) = &shared.net_trace {
+        peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
+            Arc::clone(trace_sink),
+            lease.node_id(),
+            peer_addr,
+        ));
+    }
     let handshake_deadline = Instant::now() + HANDSHAKE_TIMEOUT;
     if let Err(error) = run_inbound_handshake(
         &mut peer,
@@ -969,7 +980,7 @@ fn run_connected_session(
             lease.close_signal(),
             lease.budget_handle(),
             peer_addr,
-            peer.net_trace,
+            peer.net_trace.clone(),
         )
         .map_err(crate::wire::PeerError::Io)
     })();

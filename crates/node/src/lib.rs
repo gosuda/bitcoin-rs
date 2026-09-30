@@ -42,6 +42,8 @@ pub mod storage_footprint;
 /// Adapter between the P2P block-download executor and Chainstate.
 #[path = "p2p_chain_adapter.rs"]
 pub mod sync;
+/// Bitcoin Core-compatible USDT providers and node-owned probe sinks.
+pub mod trace;
 /// P2P transaction ingress consumer.
 pub mod tx_ingress;
 pub use bitcoin_rs_primitives::Network;

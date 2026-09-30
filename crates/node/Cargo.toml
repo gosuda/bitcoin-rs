@@ -12,8 +12,8 @@ description = "bitcoin-rs :: node"
 workspace = true
 
 [features]
-# USDT tracepoints (Bitcoin Core-compatible probe ABI); empty unless enabled.
-usdt = ["bitcoin-rs-trace/usdt", "bitcoin-rs-chainstate/usdt", "bitcoin-rs-mempool/usdt", "bitcoin-rs-p2p/usdt"]
+# Bitcoin Core-compatible USDT providers, registration, and emission.
+usdt = ["dep:usdt"]
 
 # A node is non-functional without a storage backend, and its `NodeStorage` /
 # `TxIndexStorage` enums are entirely backend-cfg-gated — with zero backends the
@@ -90,7 +90,7 @@ anyhow.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 cap-std.workspace = true
-bitcoin-rs-trace.workspace = true
+usdt = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = ">=3.20.0, <4"

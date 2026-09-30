@@ -13,7 +13,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use bitcoin_rs_trace::probe_abi;
+use bitcoin_rs_node::trace::probe_abi;
 
 /// One parsed `SystemTap` SDT note.
 struct SdtNote {
@@ -238,10 +238,10 @@ fn probe_table_matches_core_argument_layout() {
 fn instantiate_probes() {
     if std::hint::black_box(false) {
         let hash = [0u8; 32];
-        bitcoin_rs_trace::block_connected(|| (hash.as_ptr(), 0, 0, 0, 0, 0));
-        bitcoin_rs_trace::added(|| (hash.as_ptr(), 0, 0));
-        bitcoin_rs_trace::removed(|| (hash.as_ptr(), "block", 0, 0, 0));
-        bitcoin_rs_trace::inbound_message(|| {
+        bitcoin_rs_node::trace::block_connected(|| (hash.as_ptr(), 0, 0, 0, 0, 0));
+        bitcoin_rs_node::trace::added(|| (hash.as_ptr(), 0, 0));
+        bitcoin_rs_node::trace::removed(|| (hash.as_ptr(), "block", 0, 0, 0));
+        bitcoin_rs_node::trace::inbound_message(|| {
             (
                 0,
                 String::new(),
@@ -251,7 +251,7 @@ fn instantiate_probes() {
                 hash.as_ptr(),
             )
         });
-        bitcoin_rs_trace::outbound_message(|| {
+        bitcoin_rs_node::trace::outbound_message(|| {
             (
                 0,
                 String::new(),

@@ -12,9 +12,6 @@ description = "bitcoin-rs :: authoritative chainstate"
 workspace = true
 
 [features]
-# USDT tracepoints (Bitcoin Core-compatible probe ABI); empty unless enabled.
-usdt = ["bitcoin-rs-trace/usdt"]
-
 # `kernel` is capability ("bitcoinkernel support is compiled in"), not
 # selection; the engine a run uses is `validation.engine` at runtime. The
 # library default stays kernel-free so a plain `cargo build` needs no C++
@@ -64,7 +61,6 @@ rustix.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-bitcoin-rs-trace.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

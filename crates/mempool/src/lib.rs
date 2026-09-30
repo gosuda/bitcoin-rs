@@ -60,8 +60,9 @@ pub use mutation::{
 pub(crate) use pareto::ParetoFront;
 pub use policy::{MempoolLimits, MempoolPolicySnapshot, PolicyError};
 pub use pool::{
-    Mempool, MempoolChunk, MempoolError, MempoolMiningSnapshot, MempoolStats, PrioritiseError,
-    PrioritisedTransaction, ScriptHash, SnapshotEntry,
+    AddedTraceArgs, Mempool, MempoolChunk, MempoolError, MempoolMiningSnapshot, MempoolStats,
+    PrioritiseError, PrioritisedTransaction, RemovedTraceArgs, ScriptHash, SnapshotEntry,
+    TraceSink,
 };
 pub use rbf::{RbfError, ReplacementCandidate, ReplacementPlan};
 pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};

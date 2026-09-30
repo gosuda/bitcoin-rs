@@ -459,6 +459,15 @@ pub enum HeaderAdmissionError {
     Rejected(ChainError),
 }
 
+/// Prepared arguments for the node-owned `validation:block_connected` probe.
+pub type BlockConnectedTraceArgs = (*const u8, i32, u64, i32, i64, i64);
+
+/// Optional instrumentation supplied by the composing node.
+pub trait TraceSink: Send + Sync {
+    /// Emits one committed-block record, evaluating `prepare` only when needed.
+    fn block_connected(&self, prepare: &mut dyn FnMut() -> BlockConnectedTraceArgs);
+}
+
 /// In-process facade for authoritative applied-chain mutation.
 ///
 /// See `ARCH-07` in `docs/contracts/architecture.md`. Construction and
@@ -530,6 +539,8 @@ pub struct Chainstate {
     /// their own, so `initialblockdownload` and the transaction-relay gate
     /// can never disagree (Core `ChainstateManager::m_cached_is_ibd`).
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    /// Optional node-owned instrumentation. It is absent in non-USDT builds.
+    pub(crate) trace_sink: Option<Arc<dyn TraceSink>>,
 }
 
 /// Construction inputs for one authoritative chainstate service.
@@ -585,6 +596,8 @@ pub struct ChainstateParts {
     /// rather than from the requested prune height. Chainstate acquires and
     /// releases pins through it; it carries no reserve/commit/shutdown path.
     pub retention: bitcoin_rs_storage::MandatoryRetention,
+    /// Optional instrumentation installed by the composing node.
+    pub trace_sink: Option<Arc<dyn TraceSink>>,
 }
 
 /// Held while new chain mutations are blocked.
@@ -814,6 +827,7 @@ impl Chainstate {
             capture_block_bytes: parts.capture_block_bytes,
             retention: parts.retention,
             ibd,
+            trace_sink: parts.trace_sink,
         }
     }
 
@@ -1184,6 +1198,7 @@ impl Chainstate {
             capture_block_bytes: false,
             retention: bitcoin_rs_storage::MandatoryRetention::in_memory(),
             ibd,
+            trace_sink: None,
         }
     }
 

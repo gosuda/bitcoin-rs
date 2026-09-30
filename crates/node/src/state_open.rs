@@ -185,7 +185,9 @@ impl NodeState {
         };
         let utxo = Arc::new(utxo_set);
         let coin_stats = Arc::new(coin_stats_listener);
-        let mempool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
+        let mut mempool = Mempool::new(MempoolLimits::default());
+        mempool.set_trace_sink(crate::trace::mempool_sink());
+        let mempool = Arc::new(RwLock::new(mempool));
         // Owner-local fee-estimator history: adopt the persisted
         // confirmation history before any admission can run. A corrupt or
         // unknown-version file degrades to insufficient data (docs/policies/db-migration.md).
@@ -227,6 +229,7 @@ impl NodeState {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
+            trace_sink: crate::trace::chainstate_sink(),
         });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;

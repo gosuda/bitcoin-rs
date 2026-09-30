@@ -22,9 +22,9 @@ volatile semaphore load per probe site; with the feature off, the call sites
 are empty functions and the payload preparation is skipped.
 
 The machine-readable ABI table lives in
-[`crates/trace/src/probe_abi.rs`](../crates/trace/src/probe_abi.rs) and is
+[`crates/node/src/trace/probe_abi.rs`](../crates/node/src/trace/probe_abi.rs) and is
 asserted against the built binary's SystemTap SDT notes by
-`crates/trace/tests/sdt_notes.rs`.
+`crates/node/tests/sdt_notes.rs`.
 
 ## Compatibility table
 
@@ -55,10 +55,10 @@ Core's hash/message buffer arguments bind as *pointers by value* (`8@%reg`):
 the consumer receives the buffer address. The `usdt` crate's `uint8_t*`
 declaration instead generates the dereferencing operand `8@(%reg)`, which
 would hand the consumer the buffer's first bytes. bitcoin-rs therefore
-declares those arguments `uint64_t` in `crates/trace/probes.d` and feeds the
+declares those arguments `uint64_t` in `crates/node/probes.d` and feeds the
 buffer address, reproducing Core's operand form exactly. String arguments
 (`char*`) need no workaround: the `usdt` crate's `char*` generates Core's
-by-value pointer operand. `crates/trace/tests/sdt_notes.rs` asserts the
+by-value pointer operand. `crates/node/tests/sdt_notes.rs` asserts the
 artifact's argument-layout strings (via `SDT_ELF=<binary>`) against this
 table: the full `size@operand` strings on x86-64, where the register
 spellings are verified, and the `size@` prefix sequence on other ELF
@@ -119,14 +119,14 @@ the file script and fires `validation:block_connected` but delivered no
 `net:*` events.
 
 The static evidence shipped alongside the live run is the SDT note
-assertion in `crates/trace/tests/sdt_notes.rs`, which reads the built
+assertion in `crates/node/tests/sdt_notes.rs`, which reads the built
 binary's `.note.stapsdt` section and checks provider, probe name, and the
 full `size@operand` argument layout strings against `probe_abi.rs` on the
 verified x86-64 architecture. It passes against the node binary built with
-`--features usdt` (cargo runs the test binary from `crates/trace`, so the
+`--features usdt` (cargo runs the test binary from `crates/node`, so the
 path must reach the artifact from there):
 
 ```bash
 cargo build --release --features usdt -p bitcoin-rs
-SDT_ELF=$PWD/target/release/bitcoin-rs cargo test -p bitcoin-rs-trace --features usdt
+SDT_ELF=$PWD/target/release/bitcoin-rs cargo test -p bitcoin-rs-node --no-default-features --features fjall,usdt --test sdt_notes
 ```

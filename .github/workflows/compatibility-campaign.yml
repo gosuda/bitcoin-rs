@@ -77,8 +77,8 @@ jobs:
       # built artifact's notes against `probe_abi::PROBES`), and that a
       # feature-off build embeds none.
       - run: |
-          cargo test --locked -p bitcoin-rs-trace --no-default-features --test sdt_notes
-          cargo test --locked -p bitcoin-rs-trace --features usdt --test sdt_notes
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall --test sdt_notes
+          cargo test --locked -p bitcoin-rs-node --no-default-features --features fjall,usdt --test sdt_notes
         if: matrix.lane == 'pure'
 
   # Compile-only MSRV gate: the policy promise is that workspace crates build

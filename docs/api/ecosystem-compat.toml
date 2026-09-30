@@ -124,7 +124,7 @@ surface = "USDT tracepoints (validation/mempool/net providers)"
 core_reference = "Bitcoin Core doc/tracing.md probe ABI"
 status = "implemented"
 representative_consumer = "planned: bpftrace/BCC or bitcoin-dev-tools/usdt-dash workflow (issue #1122, #1121)"
-evidence = "in-tree only: crates/trace/src/probe_abi.rs table asserted against built SDT notes by crates/trace/tests/sdt_notes.rs; docs/tracing/smoke.bt is adapted from Core's contrib/tracing script but no external-tool run is recorded. ABI table alone is not external verification (ECO-08)."
+evidence = "in-tree only: crates/node/src/trace/probe_abi.rs table asserted against built SDT notes by crates/node/tests/sdt_notes.rs; docs/tracing/smoke.bt is adapted from Core's contrib/tracing script but no external-tool run is recorded. ABI table alone is not external verification (ECO-08)."
 
 [[row]]
 surface = "Observability via bpftrace/BCC and bitcoin-dev-tools"

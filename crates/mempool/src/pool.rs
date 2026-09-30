@@ -119,6 +119,20 @@ struct FeeRateAggregate {
     vsize: u64,
 }
 
+/// Prepared arguments for the node-owned `mempool:added` probe.
+pub type AddedTraceArgs = (*const u8, i32, i64);
+
+/// Prepared arguments for the node-owned `mempool:removed` probe.
+pub type RemovedTraceArgs = (*const u8, &'static str, i32, i64, u64);
+
+/// Optional instrumentation supplied by the composing node.
+pub trait TraceSink: core::fmt::Debug + Send + Sync {
+    /// Emits one accepted-entry record, evaluating `prepare` only when needed.
+    fn added(&self, prepare: &mut dyn FnMut() -> AddedTraceArgs);
+    /// Emits one removed-entry record, evaluating `prepare` only when needed.
+    fn removed(&self, prepare: &mut dyn FnMut() -> RemovedTraceArgs);
+}
+
 /// In-memory transaction pool with txid, funding, spending, and fee-priority indexes.
 #[derive(Debug)]
 pub struct Mempool {
@@ -157,6 +171,8 @@ pub struct Mempool {
     /// mempool component. Failed inserts, no-op removals, clear-on-empty, and
     /// in-pool prioritisation move nothing.
     mempool_sequence: u64,
+    /// Optional node-owned instrumentation. It is absent in non-USDT builds.
+    trace_sink: Option<Arc<dyn TraceSink>>,
 }
 
 /// The index and total state derived from `entries`: everything a mutation
@@ -625,7 +641,13 @@ impl Mempool {
             fee_delta_sequence: 0,
             estimator: FeeEstimator::new(),
             mempool_sequence: 0,
+            trace_sink: None,
         }
+    }
+
+    /// Installs the composing node's instrumentation before the pool is shared.
+    pub fn set_trace_sink(&mut self, trace_sink: Option<Arc<dyn TraceSink>>) {
+        self.trace_sink = trace_sink;
     }
 
     /// Removes all entries from the pool, clears every index and the
@@ -648,15 +670,17 @@ impl Mempool {
         // `unknown`, Core's `MemPoolRemovalReason::UNKNOWN` string.
         let mut txids = Vec::with_capacity(self.entries.len());
         for (_id, entry) in self.entries.iter() {
-            bitcoin_rs_trace::removed(|| {
-                (
-                    entry.txid.as_bytes().as_ptr(),
-                    "unknown",
-                    i32::try_from(entry.vsize).unwrap_or(i32::MAX),
-                    i64::try_from(entry.fee).unwrap_or(i64::MAX),
-                    entry.time,
-                )
-            });
+            if let Some(trace_sink) = &self.trace_sink {
+                trace_sink.removed(&mut || {
+                    (
+                        entry.txid.as_bytes().as_ptr(),
+                        "unknown",
+                        i32::try_from(entry.vsize).unwrap_or(i32::MAX),
+                        i64::try_from(entry.fee).unwrap_or(i64::MAX),
+                        entry.time,
+                    )
+                });
+            }
             txids.push(entry.txid);
         }
         self.entries.clear();
@@ -891,13 +915,15 @@ impl Mempool {
         // Core fires `mempool:added` from `CTxMemPool::addUnchecked`, the
         // pool-internal install funnel, after the entry is linked into the
         // pool. `prepare` runs only while a consumer is attached.
-        bitcoin_rs_trace::added(|| {
-            (
-                txid.as_bytes().as_ptr(),
-                i32::try_from(added_vsize).unwrap_or(i32::MAX),
-                i64::try_from(added_fee).unwrap_or(i64::MAX),
-            )
-        });
+        if let Some(trace_sink) = &self.trace_sink {
+            trace_sink.added(&mut || {
+                (
+                    txid.as_bytes().as_ptr(),
+                    i32::try_from(added_vsize).unwrap_or(i32::MAX),
+                    i64::try_from(added_fee).unwrap_or(i64::MAX),
+                )
+            });
+        }
         self.finish_mutation(changes)
     }
 
@@ -1952,15 +1978,17 @@ impl Mempool {
             // Core fires `mempool:removed` from `CTxMemPool::removeUnchecked`,
             // the pool-internal retire funnel, per entry as it leaves the
             // pool. `prepare` runs only while a consumer is attached.
-            bitcoin_rs_trace::removed(|| {
-                (
-                    entry.txid.as_bytes().as_ptr(),
-                    Self::core_removal_reason(*reason),
-                    i32::try_from(entry.vsize).unwrap_or(i32::MAX),
-                    i64::try_from(entry.fee).unwrap_or(i64::MAX),
-                    entry.time,
-                )
-            });
+            if let Some(trace_sink) = &self.trace_sink {
+                trace_sink.removed(&mut || {
+                    (
+                        entry.txid.as_bytes().as_ptr(),
+                        Self::core_removal_reason(*reason),
+                        i32::try_from(entry.vsize).unwrap_or(i32::MAX),
+                        i64::try_from(entry.fee).unwrap_or(i64::MAX),
+                        entry.time,
+                    )
+                });
+            }
             // The component shrinks by exactly this member; the survivors may
             // still be one component, or several, and that is settled once
             // every removal has been applied.

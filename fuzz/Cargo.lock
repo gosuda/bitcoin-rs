@@ -149,7 +149,6 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
- "bitcoin-rs-trace",
  "bytemuck",
  "hashbrown",
  "metrics",
@@ -169,7 +168,6 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
- "bitcoin-rs-trace",
  "bytes",
  "crossbeam-channel",
  "hashbrown",
@@ -225,10 +223,6 @@ dependencies = [
  "thiserror",
  "tracing",
 ]
-
-[[package]]
-name = "bitcoin-rs-trace"
-version = "0.9.0"
 
 [[package]]
 name = "bitcoin-rs-utxo"

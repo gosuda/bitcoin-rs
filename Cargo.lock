@@ -228,7 +228,6 @@ dependencies = [
  "bitcoin-rs-node",
  "bitcoin-rs-rpc",
  "bitcoin-rs-storage",
- "bitcoin-rs-trace",
  "clap",
  "mimalloc",
  "parking_lot",
@@ -268,7 +267,6 @@ dependencies = [
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
  "bitcoin-rs-storage",
- "bitcoin-rs-trace",
  "bitcoin-rs-utxo",
  "bytes",
  "cap-fs-ext",
@@ -370,7 +368,6 @@ dependencies = [
  "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
- "bitcoin-rs-trace",
  "bytemuck",
  "hashbrown 0.17.1",
  "metrics",
@@ -417,7 +414,6 @@ dependencies = [
  "bitcoin-rs-rpc",
  "bitcoin-rs-script",
  "bitcoin-rs-storage",
- "bitcoin-rs-trace",
  "bitcoin-rs-utxo",
  "bytes",
  "cap-std",
@@ -441,6 +437,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+ "usdt",
 ]
 
 [[package]]
@@ -453,7 +450,6 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
- "bitcoin-rs-trace",
  "bytes",
  "crossbeam-channel",
  "hashbrown 0.17.1",
@@ -558,14 +554,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
-]
-
-[[package]]
-name = "bitcoin-rs-trace"
-version = "0.9.0"
-dependencies = [
- "tracing",
- "usdt",
 ]
 
 [[package]]

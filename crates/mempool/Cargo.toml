@@ -12,9 +12,6 @@ description = "bitcoin-rs :: mempool"
 workspace = true
 
 [features]
-# USDT tracepoints (Bitcoin Core-compatible probe ABI); empty unless enabled.
-usdt = ["bitcoin-rs-trace/usdt"]
-
 default = []
 test-seam = []
 
@@ -29,7 +26,6 @@ metrics.workspace = true
 bytemuck.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-bitcoin-rs-trace.workspace = true
 
 [dev-dependencies]
 bitcoin.workspace = true
