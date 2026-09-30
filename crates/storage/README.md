@@ -18,6 +18,74 @@ write boundary, so competing writers cannot both observe the same pre-image
 and no backend releases its lock or transaction between condition evaluation
 and commit.
 
+## Backend durability guarantees
+
+The trait states one contract; each retained backend meets it with its own
+WAL and sync mechanics, and some are stronger than the contract requires.
+"Visible" means a later read in the same process observes the whole batch;
+"durable" means the whole batch survives a reopen after a crash. Per the
+trait, `write` and `write_deferred` promise visibility only, while
+`write_durable`, `write_durable_if` (on `true`), and a successful `flush`
+promise durability; the table records how each engine gets there.
+
+| backend | `write` / `write_deferred` | `write_durable` / `write_durable_if(true)` | `flush` | reopen |
+|---|---|---|---|---|
+| `FjallStore` | one engine write batch at the default (buffered) journal tier: visible, not fsynced | the same batch committed at `PersistMode::SyncAll`: journal and keyspace synced before `Ok` returns | `db.persist(PersistMode::SyncAll)`: every earlier completed commit becomes durable | journal replay restores every committed batch whole; a batch whose sync never completed may be wholly absent, never half present |
+| `RedbStore` | `write`: one `Durability::Immediate` transaction (stronger than visibility alone); `write_deferred`: one `Durability::None` transaction, visible but not crash-durable until a successful `flush` or later durable receipt | the same single immediate commit, one write transaction per batch | one empty `Durability::Immediate` commit, which carries every earlier `Durability::None` commit across the durability boundary | redb's recovery replays its commit log to the last durable transaction; a deferred commit not yet flushed may be wholly absent |
+| `RocksDbStore` | one `WriteBatch` written to the WAL without sync: visible, not durable | the same `WriteBatch` written with `WriteOptions::set_sync(true)` | `flush_wal(true)`: the WAL's earlier records reach stable storage | WAL replay restores whole write batches up to the last synced record; an unsynced tail may be wholly absent |
+| redb transaction index (`open_redb_tx_index_store`) | as `RedbStore` | as `RedbStore` | as `RedbStore` | as `RedbStore`, over its six fixed-width families |
+
+Two rules sit under the table. First, every backend applies one batch inside
+one engine-level atomic commit (fjall write batch, redb write transaction,
+`RocksDB` `WriteBatch`), so "previous complete state or next complete state,
+never a mix" is a fact the adapters rely on from their engine, not a claim
+the adapters re-implement. Second, a backend that cannot provide a requested
+guarantee rejects the request with `StorageError::InvalidOperation` rather
+than quietly weakening it: the fixed-width transaction index rejects
+unsupported families and wrong-width keys on read and write, `ScriptLive`
+rows are validated to their locator schema on the generic redb path too, and
+`KvSnapshot::get_many_sorted` rejects keys that are not strictly ascending.
+
+## Limits of the test model
+
+The suites in `tests/` — `backend_equivalence.rs`, `overhaul_atomic_durability.rs`,
+`redb_txindex.rs`, and the reopen laws — prove the software contract stated
+above under injected persistence faults (`PersistFault`: failed, lost, and
+partial applies; failed and lost sync completions; failed and lost flushes)
+and under concurrent readers. A green run proves that the backend adapters
+uphold the documented semantics **assuming each engine's own durability
+promises hold** — that the fsync the engine issues really reaches stable
+storage as that engine documents.
+
+That boundary is kept separate from filesystem and hardware guarantees on
+purpose. These tests do not write torn sectors, drop a volatile write cache,
+cut power mid-fsync, or exercise any particular filesystem, disk firmware,
+or controller: `PersistFault` models uncertainty at the storage API's own
+boundaries (the batch applied but its completion was lost), which is exactly
+the uncertainty the contract tells callers to reconcile, not a simulation of
+any device. Whether a given filesystem or device honours `fsync`, flush
+barriers, or atomic sector writes is outside this crate and outside these
+tests; the recovery contract in
+[`docs/contracts/recovery.md`](../../docs/contracts/recovery.md) is the layer
+that assumes those properties, and the durability ladder here is the layer
+that makes their use explicit.
+
+## Benchmarks
+
+Benchmarks that compare storage paths compare equal durability settings.
+There is no retained synthetic storage microbenchmark by policy (CONCEPTS.md,
+"Retained benchmark contract"): storage durability is measured only through
+the retained product benchmarks, whose evidence samples carry a mandatory
+durability identity — backend, batch mode (`write`, `write_deferred`,
+`write_durable`), flush and sync posture (`docs/benchmarks/end-to-end-sync.md`,
+sample identity; `crates/node/benches/evidence.rs`, whose ledger rejects a
+sample missing that field). A sample with a different durability identity is
+not comparable to another and is rejected rather than silently mixed
+(`docs/contracts/hot-path-attribution.md`, `HPA-12`), and the attribution
+ledger forbids the `weaken_durability` probe outright. Any future storage
+benchmark must record the same identity and compare only runs taken at the
+same durability setting.
+
 ## Pruning
 
 `pruning` deletes historical block bodies and undo records once the active chain no longer needs them. It is here rather than in a crate of its own (issue #164) because it is a retention policy over rows this crate already owns -- the former `bitcoin-rs-pruning` declared `bitcoin-rs-utxo`, `bitcoin-rs-chain` and `bitcoin` and referenced none of them.

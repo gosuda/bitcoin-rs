@@ -1,6 +1,29 @@
 //! Cross-backend equivalence tests for the storage abstraction.
+//!
+//! What these tests prove, and what they deliberately do not (#630): the
+//! suites here and in `overhaul_atomic_durability.rs` exercise the *software
+//! contract* — atomic multi-family batches, the durability ladder's receipts
+//! and error semantics, coherent snapshots, and conditional-commit laws —
+//! under injected persistence faults (`PersistFault`) and concurrent
+//! readers. A green run proves that the backend adapters uphold those
+//! semantics when the engine and the filesystem behave as documented. It
+//! does not prove anything about a particular filesystem's or hardware's
+//! power-loss behaviour: no test here writes a real torn sector, loses a
+//! volatile write cache, or cuts power mid-`fsync`, and the fault model
+//! cannot — see `README.md` ("Backend durability guarantees" and "Limits of
+//! the test model") for that boundary, kept separately from the code.
 
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvPair, KvStore, StorageError, WriteCondition};
+
+// The law module is backend-neutral and compiles in every feature set; with
+// no backend enabled nothing calls it, which is the same dead-code seam
+// `PersistFaultSlot::take_at` guards in the library.
+#[path = "support/backend_contract_laws.rs"]
+#[cfg_attr(
+    not(any(feature = "fjall", feature = "redb", feature = "rocksdb")),
+    allow(dead_code)
+)]
+mod backend_contract_laws;
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -650,5 +673,110 @@ fn rocksdb_rejects_second_writable_primary_open_on_same_path() -> TestResult<()>
         "a second writable primary open must fail while the first store owns the database"
     );
     drop(first);
+    Ok(())
+}
+
+/// Multi-key batch atomicity, coherent concurrent reads, and explicit
+/// uncertain-commit handling for the fjall backend.
+#[cfg(feature = "fjall")]
+#[test]
+fn fjall_atomic_batch_and_reader_version_laws() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::FjallStore::open(temp.path())?;
+    backend_contract_laws::run_reader_sees_one_committed_version(
+        &store,
+        ColumnFamily::BlockBodies,
+        &[b"reader-a", b"reader-b"],
+        b"reader-",
+    )?;
+    backend_contract_laws::run_uncertain_commit_outcome_laws(
+        &store,
+        ColumnFamily::BlockBodies,
+        b"uncertain-key",
+        b"uncertain-other",
+    )?;
+    Ok(())
+}
+
+/// Multi-key batch atomicity, coherent concurrent reads, and explicit
+/// uncertain-commit handling for the `RocksDB` backend.
+#[cfg(feature = "rocksdb")]
+#[test]
+fn rocksdb_atomic_batch_and_reader_version_laws() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::RocksDbStore::open(temp.path())?;
+    backend_contract_laws::run_reader_sees_one_committed_version(
+        &store,
+        ColumnFamily::BlockBodies,
+        &[b"reader-a", b"reader-b"],
+        b"reader-",
+    )?;
+    backend_contract_laws::run_uncertain_commit_outcome_laws(
+        &store,
+        ColumnFamily::BlockBodies,
+        b"uncertain-key",
+        b"uncertain-other",
+    )?;
+    Ok(())
+}
+
+/// Multi-key batch atomicity, coherent concurrent reads, and explicit
+/// uncertain-commit handling for the redb backend.
+#[cfg(feature = "redb")]
+#[test]
+fn redb_atomic_batch_and_reader_version_laws() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::RedbStore::open(temp.path())?;
+    backend_contract_laws::run_reader_sees_one_committed_version(
+        &store,
+        ColumnFamily::BlockBodies,
+        &[b"reader-a", b"reader-b"],
+        b"reader-",
+    )?;
+    backend_contract_laws::run_uncertain_commit_outcome_laws(
+        &store,
+        ColumnFamily::BlockBodies,
+        b"uncertain-key",
+        b"uncertain-other",
+    )?;
+    Ok(())
+}
+
+/// The specialized redb transaction index passes the same laws on its
+/// byte-addressed `UtxoMeta` family, and its fixed-width limitations are
+/// explicit: an unsupported family (`BlockBodies`) and a wrong-width key are
+/// both rejected with `InvalidOperation`, never quietly weakened.
+#[cfg(feature = "redb")]
+#[test]
+fn redb_txindex_atomic_batch_and_reader_version_laws() -> TestResult<()> {
+    let temp = tempfile::TempDir::new()?;
+    let store = bitcoin_rs_storage::open_redb_tx_index_store(temp.path())?;
+    backend_contract_laws::run_reader_sees_one_committed_version(
+        &store,
+        ColumnFamily::UtxoMeta,
+        &[b"reader-a", b"reader-b"],
+        b"reader-",
+    )?;
+    backend_contract_laws::run_uncertain_commit_outcome_laws(
+        &store,
+        ColumnFamily::UtxoMeta,
+        b"uncertain-key",
+        b"uncertain-other",
+    )?;
+
+    // Unsupported families are rejected. Key-width validation applies to
+    // fixed-width families such as TxConfirmed, not byte-addressed UtxoMeta.
+    let unsupported = store.get(ColumnFamily::BlockBodies, b"key");
+    assert!(
+        matches!(&unsupported, Err(StorageError::InvalidOperation(_))),
+        "an unsupported family must be rejected explicitly: {unsupported:?}"
+    );
+    let mut wrong_width = store.new_batch();
+    wrong_width.put(ColumnFamily::TxConfirmed, b"short", b"value");
+    let rejected = store.write_durable(wrong_width);
+    assert!(
+        matches!(&rejected, Err(StorageError::InvalidOperation(_))),
+        "a wrong-width fixed key must be rejected explicitly: {rejected:?}"
+    );
     Ok(())
 }
