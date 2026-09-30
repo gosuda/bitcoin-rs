@@ -1,12 +1,15 @@
 # Stratum V2 regtest example
 #
-# bitcoin-rs (sv2 feature) acts as the template provider.
-# SRI pool connects directly to bitcoin-rs over SV2 TDP.
+# bitcoin-rs runs as the mining owner (regtest).
+# An SRI pool connects to bitcoin-rs via the SV2 template-provider bridge.
 # Two CPU miners connect to the pool.
+#
+# The bridge (template-provider) translates between bitcoin-rs's
+# getblocktemplate/submitblock RPC and the SV2 Template Distribution Protocol.
 #
 # Usage:
 #   docker compose up -d
-#   docker compose logs -f miner-1   # watch shares/blocks
+#   docker compose logs -f miner-1
 
 name: stratum-sv2
 
@@ -15,8 +18,6 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
-      args:
-        FEATURES: "fjall,sv2"
     command:
       - --network=regtest
       - --data-dir=/data
@@ -24,7 +25,6 @@ services:
       - --rpc-user=bitcoin-rs
       - --rpc-password=bitcoin-rs
       - --mining-payout-address=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080
-      - --sv2-listen=0.0.0.0:8442
     volumes:
       - bitcoin-rs-data:/data
     ports:
@@ -51,19 +51,28 @@ services:
     image: stratumv2/pool_sv2:v0.8.0
     stop_signal: SIGINT
     environment:
-      # Pool connects to bitcoin-rs SV2 template provider
-      SV2_TP_ADDR: "bitcoin-rs:8442"
-      # Regtest payout address (BIP173 test vector)
-      COINBASE_REWARD_SCRIPT: "0014751e76e8199196d454941c45d1b3a323f1433bd6"
+      SV2_TP_ADDR: "template-provider:8442"
     ports:
       - "127.0.0.1:9090:9090"
+    depends_on:
+      template-provider:
+        condition: service_started
+    restart: unless-stopped
+
+  template-provider:
+    image: ghcr.io/stratum-mining/sv2-tp:main
+    environment:
+      BITCOIN_RPC_URL: "http://bitcoin-rs:18443"
+      BITCOIN_RPC_USER: "bitcoin-rs"
+      BITCOIN_RPC_PASS: "bitcoin-rs"
+      SV2_LISTEN_ADDR: "0.0.0.0:8442"
     depends_on:
       bitcoin-rs:
         condition: service_healthy
     restart: unless-stopped
 
   miner-1:
-    image: stratumv2/mining_device_sv2:v0.8.0
+    image: ghcr.io/stratum-mining/sv2-mining-device:main
     command:
       - --address-pool=pool:34255
       - --id-user=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080.worker1
@@ -74,7 +83,7 @@ services:
     restart: unless-stopped
 
   miner-2:
-    image: stratumv2/mining_device_sv2:v0.8.0
+    image: ghcr.io/stratum-mining/sv2-mining-device:main
     command:
       - --address-pool=pool:34255
       - --id-user=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080.worker2
