@@ -1,0 +1,125 @@
+# examples/stratum-sv2 — bitcoin-rs as the mining owner behind a pinned SRI Stratum V2 stack.
+#
+#   devices -> pool (SRI) -> template-provider bridge (this repo) -> bitcoin-rs (regtest)
+#
+# One bridge network; only read-only debug ports are published to 127.0.0.1.
+name: stratum-sv2-example
+
+services:
+  bitcoin-rs:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    # The image ENTRYPOINT is the bitcoin-rs binary and `command` replaces CMD
+    # wholesale, so repeat the image's default config path (kernel validation
+    # engine) in addition to the regtest mining-owner arguments.
+    command:
+      - --config
+      - /etc/bitcoin-rs/default.toml
+      - --network=regtest
+      - --data-dir=/data
+      - --rpc-bind=0.0.0.0:18443
+      - --rpc-user=bitcoin-rs
+      - --rpc-password=bitcoin-rs
+      - --p2p-listen=0.0.0.0:18444
+      - --mining-payout-address=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080
+    volumes:
+      - bitcoin-rs-data:/data
+    ports:
+      # Read-only evidence port: getblockchaininfo / getblockcount from the host.
+      - "127.0.0.1:18443:18443"
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -sf
+        - -u
+        - bitcoin-rs:bitcoin-rs
+        - -H
+        - "content-type: text/plain"
+        - --data-binary
+        - '{"jsonrpc":"1.0","id":"hc","method":"getblockchaininfo","params":[]}'
+        - http://127.0.0.1:18443/
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  # Template Distribution bridge (standalone crate in ./template-provider).
+  # Translates bitcoin-rs getblocktemplate/submitblock into the SRI Sv2
+  # template-distribution protocol and submits pool solutions via submitblock.
+  template-provider:
+    build: ./template-provider
+    environment:
+      TP_LISTEN: 0.0.0.0:8442
+      BITCOINRS_RPC_URL: http://bitcoin-rs:18443
+      BITCOINRS_RPC_USER: bitcoin-rs
+      BITCOINRS_RPC_PASS: bitcoin-rs
+      RUST_LOG: info
+    depends_on:
+      bitcoin-rs:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # SRI pool in full-template (Sv2Tp) mode: pulls templates from the bridge,
+  # serves SV2 miners on 34255, builds coinbase + block solutions.
+  # The mounted TOML is the image's default config path (see README, "Configuration").
+  pool:
+    image: stratumv2/pool_sv2:v0.8.0
+    stop_signal: SIGINT
+    volumes:
+      - ./config/pool.toml:/app/pool-config.toml:ro
+    ports:
+      # Pool monitoring API: per-channel data (channel-open evidence).
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - template-provider
+    restart: unless-stopped
+
+  # SRI SV1->SV2 translator. Always on, but idle until an SV1 miner attaches;
+  # the default `up` set exercises only the two direct SV2 devices below.
+  translator:
+    image: stratumv2/translator_sv2:v0.8.0
+    stop_signal: SIGINT
+    volumes:
+      - ./config/translator.toml:/app/translator-config.toml:ro
+    ports:
+      # Optional SV1 attach point for a host-run legacy miner (unpinned leg,
+      # see README "Optional SV1 leg").
+      - "127.0.0.1:3333:3333"
+      - "127.0.0.1:9092:9092"
+    depends_on:
+      - pool
+    restart: unless-stopped
+
+  # Two SV2 CPU miners (SRI integration-tests mining_device) connecting
+  # straight to the pool — this is the "at least two simultaneous channels"
+  # leg. --cores 32 --handicap 0 on an ~80-thread host lands a share every
+  # few seconds at the regtest difficulty floor; scale --cores to your host.
+  device-direct-1:
+    build: ./device
+    command:
+      - --address-pool=pool:34255
+      - --id-user=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080.worker1
+      - --id-device=device-direct-1
+      - --cores=32
+      - --handicap=0
+    depends_on:
+      - pool
+    restart: unless-stopped
+
+  device-direct-2:
+    build: ./device
+    command:
+      - --address-pool=pool:34255
+      - --id-user=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080.worker2
+      - --id-device=device-direct-2
+      - --cores=32
+      - --handicap=0
+    depends_on:
+      - pool
+    restart: unless-stopped
+
+volumes:
+  bitcoin-rs-data:
