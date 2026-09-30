@@ -999,34 +999,31 @@ fn shutdown_ends_long_poll_without_wake() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `getmininginfo` carries the signet challenge exactly on Signet and nowhere
+/// else.
 #[test]
-fn mining_info_reports_default_signet_challenge() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = network_fixture(Network::Signet)?;
-    let info = mining.mining_info()?;
-    let Some(signet) = info.signet.as_ref() else {
-        panic!("default Signet did not expose challenge metadata");
-    };
-    assert_eq!(
-        to_lower_hex(&signet.challenge),
-        concat!(
-            "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430",
-            "210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
-        )
+fn mining_info_reports_signet_challenge_only_on_signet() -> anyhow::Result<()> {
+    const DEFAULT_SIGNET_CHALLENGE: &str = concat!(
+        "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430",
+        "210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
     );
-    Ok(())
-}
-
-#[test]
-fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
-    let Fixture {
-        state: _state,
-        mining,
-    } = fixture()?;
-    let info = mining.mining_info()?;
-    assert!(info.signet.is_none());
+    for (network, expected) in [
+        (Network::Signet, Some(DEFAULT_SIGNET_CHALLENGE)),
+        (Network::Regtest, None),
+    ] {
+        let Fixture {
+            state: _state,
+            mining,
+        } = network_fixture(network)?;
+        let info = mining.mining_info()?;
+        assert_eq!(
+            info.signet
+                .as_ref()
+                .map(|signet| to_lower_hex(&signet.challenge)),
+            expected.map(str::to_owned),
+            "{network:?}"
+        );
+    }
     Ok(())
 }
 
@@ -1296,57 +1293,42 @@ fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A proposal whose header is already in the tree reports the verdict that the
+/// recorded node status justifies, without re-validating the block.
 // CONTRACT: API-18
 #[test]
-fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
+fn proposal_of_a_known_header_reports_the_status_verdict() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::Hash256;
 
-    let Fixture { state, mining } = fixture()?;
-    mining.publish_generation();
-    let genesis = Network::Regtest.genesis_block();
-    let genesis_hash = genesis.block_hash();
-    let invalid = mined_child_labeled(genesis.block_hash(), 2)?;
-    {
-        let tree = state.chainstate().block_tree_reader();
-        let genesis_id = tree
-            .read()
-            .lookup(Hash256::from(genesis_hash))
-            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
-        tree.write()
-            .insert_node(Some(genesis_id), invalid.header, NodeStatus::Invalid)?;
+    let cases = [
+        (
+            NodeStatus::Invalid,
+            BlockValidationResult::DuplicateInvalid,
+            2_i64,
+        ),
+        (
+            NodeStatus::HeaderValid,
+            BlockValidationResult::DuplicateInconclusive,
+            3_i64,
+        ),
+    ];
+    for (status, expected, label) in cases {
+        let Fixture { state, mining } = fixture()?;
+        mining.publish_generation();
+        let genesis = Network::Regtest.genesis_block();
+        let genesis_hash = Hash256::from(genesis.block_hash());
+        let block = mined_child_labeled(genesis.block_hash(), label)?;
+        {
+            let tree = state.chainstate().block_tree_reader();
+            let genesis_id = tree
+                .read()
+                .lookup(genesis_hash)
+                .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
+            tree.write()
+                .insert_node(Some(genesis_id), block.header, status)?;
+        }
+        assert_eq!(propose_block(&mining, block)?, expected, "{status:?}");
     }
-    assert_eq!(
-        propose_block(&mining, invalid)?,
-        BlockValidationResult::DuplicateInvalid
-    );
-    Ok(())
-}
-
-// CONTRACT: API-18
-#[test]
-fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result<()> {
-    use bitcoin_rs_chain::NodeStatus;
-    use bitcoin_rs_primitives::Hash256;
-
-    let Fixture { state, mining } = fixture()?;
-    mining.publish_generation();
-    let genesis = Network::Regtest.genesis_block();
-    let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_bytes());
-    let side = mined_child_labeled(genesis.block_hash(), 3)?;
-    {
-        let tree = state.chainstate().block_tree_reader();
-        let genesis_id = tree
-            .read()
-            .lookup(genesis_hash)
-            .ok_or_else(|| anyhow::anyhow!("missing genesis"))?;
-        tree.write()
-            .insert_node(Some(genesis_id), side.header, NodeStatus::HeaderValid)?;
-    }
-    assert_eq!(
-        propose_block(&mining, side)?,
-        BlockValidationResult::DuplicateInconclusive
-    );
     Ok(())
 }
 
