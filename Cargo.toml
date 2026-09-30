@@ -179,18 +179,6 @@ clap       = { version = ">=4.6, <5",   default-features = false, features = [
     "derive", "env", "wrap_help",
 ] }
 
-# --- Stratum V2 (optional; only behind mining `sv2` feature) ------------------
-# Individual SV2 protocol crates — narrowest possible dependency surface.
-# stratum-apps was too heavy (config, key utils, fallback coordination).
-# stratum-core pulls bitcoin duplicates. Individual crates avoid both.
-template_distribution_sv2 = "=7.0.0"
-noise_sv2                  = "=2.0.0"
-framing_sv2                = "=8.0.0"
-codec_sv2                  = "=7.0.0"
-tokio                      = { version = ">=1, <2", default-features = false, features = [
-    "rt-multi-thread", "net", "macros", "time", "sync", "signal",
-] }
-
 # --- Observability ------------------------------------------------------------
 tracing            = { version = ">=0.1.44, <0.2", default-features = false, features = ["std", "attributes"] }
 # USDT probe emission for crates/trace (optional; pulled in only by the `usdt`

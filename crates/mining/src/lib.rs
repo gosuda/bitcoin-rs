@@ -17,9 +17,6 @@ mod generation_signal;
 mod network_hashps;
 /// Transaction selection policy.
 pub mod policy;
-/// Stratum V2 template-provider bridge (behind `sv2` feature).
-#[cfg(feature = "sv2")]
-pub mod sv2;
 /// Transport-neutral candidate assembly.
 mod template;
 
