@@ -27,20 +27,18 @@ fn rpc_network_handles_borrow_p2p_service_state() -> anyhow::Result<()> {
     let p2p = state.p2p();
     let handles = rpc_network_handles(&state);
 
-    assert!(Arc::ptr_eq(
-        &handles.network_active,
-        &p2p.network_active_handle()
-    ));
-    assert!(Arc::ptr_eq(&handles.peer_table, &p2p.table()));
-    assert!(Arc::ptr_eq(&handles.banned, &p2p.banned_handle()));
-    assert!(Arc::ptr_eq(&handles.added_nodes, &p2p.added_nodes_handle()));
-    assert!(
-        handles
-            .p2p_outbound_sender
-            .as_ref()
-            .is_some_and(|sender| sender.same_channel(&p2p.outbound_sender()))
+    handles.control().set_network_active(false);
+    assert!(!p2p.network_active());
+    assert!(!handles.query().network_active());
+
+    let addr = "127.0.0.1:8333".parse()?;
+    handles.control().add_node(addr, true)?;
+    assert_eq!(handles.query().added_nodes(), vec![addr]);
+    assert_eq!(p2p.added_nodes(), vec![addr]);
+    assert_eq!(
+        handles.query().local_services(),
+        p2p.local_services().to_u64()
     );
-    assert_eq!(handles.local_services, p2p.local_services().to_u64());
     Ok(())
 }
 

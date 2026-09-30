@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin_rs_primitives::Hash256;
 use hashbrown::HashMap;
@@ -105,6 +106,10 @@ impl PeerTable {
     /// published metadata.
     pub fn register(&self, addr: SocketAddr, lease: PeerLease) -> bool {
         let mut entries = self.entries.write();
+        Self::register_into(&mut entries, addr, lease)
+    }
+
+    fn register_into(entries: &mut TableView, addr: SocketAddr, lease: PeerLease) -> bool {
         match entries.get(&addr) {
             Some(current) if current.lease.same_connection(&lease) => false,
             Some(_) => {
@@ -119,7 +124,7 @@ impl PeerTable {
                 );
                 if let Some(prior) = prior {
                     prior.lease.cancel();
-                    Self::retain_traffic(&mut entries, &prior);
+                    Self::retain_traffic(entries, &prior);
                 }
                 true
             }
@@ -182,6 +187,15 @@ impl PeerTable {
     ) -> Option<PeerLease> {
         debug_assert!(lease.is_inbound(), "only inbound leases reserve here");
         let mut entries = self.entries.write();
+        Self::register_inbound_into(&mut entries, addr, lease, max_inbound)
+    }
+
+    fn register_inbound_into(
+        entries: &mut TableView,
+        addr: SocketAddr,
+        lease: PeerLease,
+        max_inbound: usize,
+    ) -> Option<PeerLease> {
         let grows_count = match entries.get(&addr) {
             Some(current) => {
                 if current.lease.same_connection(&lease) {
@@ -195,7 +209,7 @@ impl PeerTable {
             }
             None => true,
         };
-        if grows_count && Self::live_inbound_count_of(&entries) >= max_inbound {
+        if grows_count && Self::live_inbound_count_of(entries) >= max_inbound {
             return None;
         }
         let prior = entries.insert(
@@ -209,9 +223,46 @@ impl PeerTable {
         );
         if let Some(prior) = prior {
             prior.lease.cancel();
-            Self::retain_traffic(&mut entries, &prior);
+            Self::retain_traffic(entries, &prior);
         }
         Some(lease)
+    }
+
+    /// Admits a live connection only while the service's activity switch is on.
+    /// Inbound capacity and same-address replacement use the same table lock
+    /// as the service's activity transition; socket I/O stays outside it.
+    /// `activity` must share the flag this table's service passes to
+    /// [`Self::apply_network_active`].
+    pub(crate) fn try_admit(
+        &self,
+        activity: &crate::NetworkActivity,
+        addr: SocketAddr,
+        lease: PeerLease,
+        max_inbound: usize,
+    ) -> Option<PeerLease> {
+        let mut entries = self.entries.write();
+        if !activity.is_active() {
+            return None;
+        }
+        if lease.is_inbound() {
+            Self::register_inbound_into(&mut entries, addr, lease, max_inbound)
+        } else {
+            Self::register_into(&mut entries, addr, lease.clone());
+            Some(lease)
+        }
+    }
+
+    /// Applies the service-owned activity transition at the admission boundary.
+    /// Disabling cancels all admitted leases before another admission can run;
+    /// connection owners retain responsibility for identity-checked removal.
+    pub(crate) fn apply_network_active(&self, flag: &AtomicBool, active: bool) {
+        let entries = self.entries.write();
+        flag.store(active, Ordering::Release);
+        if !active {
+            for entry in entries.values() {
+                entry.lease.cancel();
+            }
+        }
     }
 
     /// Publishes handshake metadata for the connection `lease` refers to.

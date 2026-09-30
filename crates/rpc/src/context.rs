@@ -386,20 +386,32 @@ pub struct IndexHandles {
 /// Network capability handles.
 #[derive(Clone)]
 pub struct NetworkHandles {
-    /// Whether the node accepts or starts P2P connections.
-    pub network_active: Arc<core::sync::atomic::AtomicBool>,
-    /// Authoritative live peer sessions.
-    pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
-    /// Channel that requests outbound P2P connections, tagged with the
-    /// origin that asked for each one.
-    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>>,
-    /// Manual IP/CIDR bans.
-    pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
-    /// Persisted `addnode add` entries.
-    pub added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
-    /// Service flags the node advertises, as resolved at P2P startup —
-    /// `NETWORK` on an unpruned node, `NETWORK_LIMITED` on a pruned one.
-    pub local_services: u64,
+    /// Read-only snapshots from the P2P runtime owner.
+    query: Arc<dyn bitcoin_rs_p2p::P2pQuery>,
+    /// Network-control verbs implemented by the P2P runtime owner.
+    control: Arc<dyn bitcoin_rs_p2p::P2pControl>,
+}
+
+impl NetworkHandles {
+    /// Splits one P2P service into its read-only and mutation capabilities.
+    #[must_use]
+    pub fn from_p2p(service: Arc<bitcoin_rs_p2p::P2pService>) -> Self {
+        let query: Arc<dyn bitcoin_rs_p2p::P2pQuery> = service.clone();
+        let control: Arc<dyn bitcoin_rs_p2p::P2pControl> = service;
+        Self { query, control }
+    }
+
+    /// Returns read-only P2P snapshots and values.
+    #[must_use]
+    pub fn query(&self) -> &dyn bitcoin_rs_p2p::P2pQuery {
+        self.query.as_ref()
+    }
+
+    /// Returns the P2P owner's network-control verbs.
+    #[must_use]
+    pub fn control(&self) -> &dyn bitcoin_rs_p2p::P2pControl {
+        self.control.as_ref()
+    }
 }
 
 /// Mining capability handles.
@@ -521,14 +533,10 @@ impl Default for MempoolHandles {
 impl Default for NetworkHandles {
     #[allow(clippy::arc_with_non_send_sync)]
     fn default() -> Self {
-        Self {
-            network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
-            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
-            p2p_outbound_sender: None,
-            banned: Arc::new(RwLock::new(Vec::new())),
-            added_nodes: Arc::new(RwLock::new(Vec::new())),
-            local_services: 0x09,
-        }
+        Self::from_p2p(Arc::new(bitcoin_rs_p2p::P2pService::new(
+            bitcoin_rs_p2p::P2pServiceConfig::default(),
+            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+        )))
     }
 }
 
@@ -1662,9 +1670,10 @@ mod tests {
             bitcoin_rs_utxo::stats::CoinStats::default(),
         ));
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
-        let banned = Arc::new(RwLock::new(Vec::<bitcoin_rs_p2p::BannedSubnet>::new()));
-        let added_nodes = Arc::new(RwLock::new(Vec::new()));
-        let network_active = Arc::new(core::sync::atomic::AtomicBool::new(true));
+        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
+            bitcoin_rs_p2p::P2pServiceConfig::default(),
+            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+        ));
         let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
@@ -1686,13 +1695,7 @@ mod tests {
                 )
                 .unwrap_or_else(|error| panic!("mempool gateway intern: {error}")),
             },
-            network: NetworkHandles {
-                network_active: Arc::clone(&network_active),
-                banned: Arc::clone(&banned),
-                added_nodes: Arc::clone(&added_nodes),
-                local_services: 0x09,
-                ..NetworkHandles::default()
-            },
+            network: NetworkHandles::from_p2p(Arc::clone(&p2p)),
             ..ContextHandles::default()
         });
         // Identity is not observable: the two roles are distinct types with no
@@ -1758,18 +1761,11 @@ mod tests {
                 "block_tree must be shared with caller"
             );
         }
-        assert!(
-            Arc::ptr_eq(&ctx.network.network_active, &network_active),
-            "network activity must be shared with caller"
-        );
-        assert!(
-            Arc::ptr_eq(&ctx.network.banned, &banned),
-            "banned must be shared with caller"
-        );
-        assert!(
-            Arc::ptr_eq(&ctx.network.added_nodes, &added_nodes),
-            "added_nodes must be shared with caller"
-        );
+        ctx.network.control().set_network_active(false);
+        assert!(!p2p.network_active());
+        assert!(!ctx.network.query().network_active());
+        ctx.network.control().set_network_active(true);
+        assert!(p2p.network_active());
     }
 
     /// One retained publication answers a whole status response: after the
@@ -2270,14 +2266,7 @@ mod tests {
                 script_index: None,
                 derived_index_status: Some(Arc::clone(&status)),
             },
-            network: NetworkHandles {
-                network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
-                peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
-                p2p_outbound_sender: None,
-                banned: Arc::new(RwLock::new(Vec::new())),
-                added_nodes: Arc::new(RwLock::new(Vec::new())),
-                local_services: 0x09,
-            },
+            network: NetworkHandles::default(),
             mining: MiningHandles {
                 mining_control: None,
             },

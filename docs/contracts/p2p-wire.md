@@ -490,8 +490,8 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
 
 ### `P2P-08`: Inbound admission and the outbound service gate
 
-- **Owner**: `PeerTable::try_register_inbound` (`crates/p2p/src/peer_table.rs`)
-  owns the capacity decision, and the accept loop in `serve`
+- **Owner**: `PeerTable::try_admit` (`crates/p2p/src/peer_table.rs`) owns
+  live admission and its inbound capacity decision; the accept loop in `serve`
   (`crates/p2p/src/listener.rs`) is its only inbound caller.
   `has_all_desirable_service_flags` (`crates/p2p/src/listener.rs`) is the only
   outbound service predicate.
@@ -503,9 +503,12 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
   `bitcoin-core/src/net.h:1124-1127` and applies it at `net.cpp:1838-1845`). A
   replacement at an address already in the table is admitted: it takes the slot
   its predecessor held. The live count is always derived from the live entry
-  set, so no independent counter can drift from it. Ban, inactive-network,
-  session-cancellation, and accept-backoff behaviour are unchanged, and a
-  failed spawn releases the reservation it took.
+  set, so no independent counter can drift from it. Activity is rechecked under
+  that same lock for both inbound and outbound admission. The service's disable
+  transition takes the lock to change its activity flag and cancel every admitted
+  lease. In-flight TCP connects remain outside the lock and cannot register while
+  inactive. Ban, session-cancellation, and accept-backoff behaviour are unchanged,
+  and a failed spawn releases the reservation it took.
 - `run_outbound_handshake` ends the connection when the remote `version` does
   not offer the desirable set (`net_processing.cpp:1857-1872`, read for
   an outbound connection at `:3864-3871`): `NETWORK | WITNESS`, or
@@ -517,6 +520,12 @@ tests `permanent_consensus_body_disconnects_delivering_source` and
   `WITNESS | NETWORK` normally, `WITNESS | NETWORK_LIMITED` when
   `storage.prune_target_mb > 0`, and both handshake paths use the same set from
   `P2pServiceConfig::local_services`.
+
+Proof: `crates/p2p/src/service.rs` tests
+`network_disable_between_precheck_and_admission_rejects_both_directions`,
+`network_disable_and_reenable_preserve_same_address_lease_ownership`, and
+`apply_network_active_cancels_leases_only_when_disabled` cover admission
+serialization, exact lease identity, and cancellation.
 
 ### `P2P-09`: Block-body service eligibility
 

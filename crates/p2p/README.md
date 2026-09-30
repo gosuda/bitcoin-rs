@@ -9,9 +9,10 @@ identified by a `ConnectionId`, cleaned up through a `PeerLease`, and tracked wi
 ready metadata by the shared `PeerTable`. Inbound accept and outbound connect
 share one socket policy in `socket::configure_peer_stream` (`TCP_NODELAY`,
 blocking I/O, handshake/poll timeouts). `P2pService` owns workers and the
-session store. `BlockSync` owns the only production download window; the service
-does not hold a second copy. The node supplies chain queries and coordinates
-chain application. A connection
+session store, manual bans, persistent added nodes, network activity, and the
+outbound dial queue. `BlockSync` owns the only production download window; the
+service does not hold a second copy. The node supplies chain queries and
+coordinates chain application. A connection
 negotiates version/verack in `handshake`, then runs the peer finite-state machine
 in `fsm`; `wire` is the protocol codec. The per-connection writer coalesces a ready
 burst of control messages into one `write_messages` writev; blocks and transactions
@@ -29,6 +30,7 @@ connection control leases (`PeerLease`), and post-handshake metadata (`PeerInfo`
 A connected TCP stream enters that world only through `CountingStream::from_connected`,
 which owns `TCP_NODELAY` and forwards vectored writes so `wire::write_message` stays
 one `writev` on the socket. It enforces key invariants across the node:
+
 - **Single connection per address**: Exactly one live session per remote `SocketAddr`.
 - **Atomic predecessor cancellation**: Registering a new lease at an existing address
   atomically cancels and replaces the predecessor.
@@ -37,11 +39,17 @@ one `writev` on the socket. It enforces key invariants across the node:
   cancel a newer session.
 - **Identity-bound metadata**: Post-handshake `PeerInfo` publication succeeds only if
   the publishing connection remains the active session for that address.
+- **Serialized network disable**: Live inbound and outbound admission rechecks the
+  service-owned activity switch under the table's registration lock. Disabling
+  takes that same lock and cancels every admitted lease; an outbound TCP connect
+  already in flight may finish, but cannot register while inactive. Socket I/O
+  never runs under the table lock.
 
-All consumers — the inbound TCP `listener`, outbound connection threads, the block
-download scheduler, outbound transaction relay, and RPC methods (`getpeerinfo`,
-`getnetworkinfo`, `disconnectnode`) — observe and mutate live connections exclusively
-through `PeerTable`.
+P2P workers — the inbound TCP `listener`, outbound connection threads, block
+download scheduler, and outbound transaction relay — use `PeerTable` through
+the owning service. RPC receives read-only `P2pQuery` snapshots and invokes
+network mutations through `P2pControl`; it never receives the table or another
+writable P2P handle.
 
 Transaction inventory, parent requests, and outbound relay are P2P consumers of the
 shared transaction lifecycle. The authoritative cross-crate ownership split is
@@ -74,6 +82,7 @@ exclude whole subnets as a `BannedSubnet` built from an `IpSubnet`, held in memo
 `wire` decodes BIP155 `addrv2` messages, and BIP339 wtxid-relay state lives in `wtxid`.
 
 ## Features
+
 - `default` (enables `fjall`): build with the fjall storage backend selected.
 - `rocksdb`: forward the rocksdb storage backend to `bitcoin-rs-storage`.
 - `fjall`: forward the fjall storage backend to `bitcoin-rs-storage`.

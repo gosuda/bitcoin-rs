@@ -13,12 +13,14 @@ use bitcoin_rs_chain::{BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapsh
 use bitcoin_rs_index::block_log::BlockRecord;
 use bitcoin_rs_mempool::MempoolEntry;
 use bitcoin_rs_mining::FakeMiningControl;
-use bitcoin_rs_p2p::{PeerInfo, PeerLease, PeerTable};
+use bitcoin_rs_p2p::{P2pService, P2pServiceConfig, PeerInfo, PeerLease};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
     Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, encode::double_sha256,
 };
-use bitcoin_rs_rpc::context::{ChainControl, ChainControlError, Context};
+use bitcoin_rs_rpc::context::{
+    ChainControl, ChainControlError, Context, ContextHandles, NetworkHandles,
+};
 use bitcoin_rs_rpc::{Handler, RpcError};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
@@ -489,7 +491,11 @@ fn chain_rpcs_report_applied_tip_separately_from_headers() -> Result<(), Box<dyn
 
 #[test]
 fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::error::Error>> {
-    let peer_table = Arc::new(PeerTable::new());
+    let p2p = Arc::new(P2pService::new(
+        P2pServiceConfig::default(),
+        Arc::new(AtomicBool::new(false)),
+    ));
+    let peer_table = p2p.table();
     let info = PeerInfo {
         wtxid_relay: false,
         compact_block_relay: false,
@@ -509,7 +515,7 @@ fn network_peer_methods_read_shared_peer_table() -> Result<(), Box<dyn std::erro
     let lease = PeerLease::new(tx);
     peer_table.register(info.addr, lease.clone());
     peer_table.publish_info(info.addr, &lease, info);
-    let ctx = context_with_peers(peer_table);
+    let ctx = context_with_p2p(p2p);
     let handler = Handler::new(ctx);
     let result = handler.dispatch("getpeerinfo", &json!([]))?;
     let array = result
@@ -799,10 +805,11 @@ impl Fixture {
         })
     }
 }
-fn context_with_peers(peer_table: Arc<PeerTable>) -> Arc<Context> {
-    let mut ctx = Context::new();
-    ctx.network.peer_table = peer_table;
-    Arc::new(ctx)
+fn context_with_p2p(p2p: Arc<P2pService>) -> Arc<Context> {
+    Arc::new(Context::from_handles(ContextHandles {
+        network: NetworkHandles::from_p2p(p2p),
+        ..ContextHandles::default()
+    }))
 }
 
 fn tx(label: u8, script_pubkey: Vec<u8>) -> Tx {

@@ -597,7 +597,7 @@ fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
     if ctx.chain.chain_network != Network::Mainnet {
         return Ok(());
     }
-    if ctx.network.peer_table.is_empty() {
+    if ctx.network.query().connection_count() == 0 {
         return Err(RpcError::ClientNotConnected(
             "bitcoin-rs is not connected!".to_owned(),
         ));
@@ -906,14 +906,22 @@ mod tests {
         assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
     }
 
-    fn register_dummy_peer(ctx: &Context) {
+    fn context_with_dummy_peer() -> Context {
+        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
+            bitcoin_rs_p2p::P2pServiceConfig::default(),
+            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+        ));
         let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::Message>(1);
-        ctx.network.peer_table.register(
+        p2p.table().register(
             "127.0.0.1:8333"
                 .parse()
                 .unwrap_or_else(|error| panic!("dummy peer addr: {error}")),
             bitcoin_rs_p2p::PeerLease::new(tx),
         );
+        Context::from_handles(crate::context::ContextHandles {
+            network: crate::context::NetworkHandles::from_p2p(p2p),
+            ..crate::context::ContextHandles::default()
+        })
     }
 
     // API-08: mainnet GBT requires a connected peer.
@@ -933,8 +941,7 @@ mod tests {
     #[test]
     fn getblocktemplate_rejects_mainnet_during_ibd() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
-        let ctx = Context::new().with_mining_control(control);
-        register_dummy_peer(&ctx);
+        let ctx = context_with_dummy_peer().with_mining_control(control);
         let ctx = Arc::new(ctx);
         let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
             .expect_err("mainnet IBD must fail");

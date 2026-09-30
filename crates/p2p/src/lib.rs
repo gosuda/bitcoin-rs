@@ -11,6 +11,8 @@ pub mod compact_blocks;
 pub mod compat;
 /// Per-connection identity and cancellation.
 pub mod connection;
+/// Narrow read and mutation capabilities exposed by the P2P runtime owner.
+pub mod control;
 /// Per-connection traffic counters.
 pub mod counters;
 /// Inbound message dispatcher.
@@ -56,6 +58,7 @@ pub use chain_query::ActiveChainQuery;
 pub use compact_blocks::{CompactBlockHints, Reconstruction};
 pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, Command, CommandStatus, PINNED_CORE_VERSION};
 pub use connection::{ConnectionId, PeerLease, PeerSource, ReadyPeer};
+pub use control::{P2pControl, P2pQuery, PeerSnapshot};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
@@ -69,7 +72,6 @@ pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{
     OutboundDial, P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
-    apply_network_active,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use tx_relay::{

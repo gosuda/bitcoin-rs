@@ -74,14 +74,7 @@ struct RpcChainControl {
 }
 
 fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
-    NetworkHandles {
-        network_active: state.network_active(),
-        peer_table: state.peer_table(),
-        p2p_outbound_sender: Some(state.p2p_outbound_sender()),
-        banned: state.banned_subnets(),
-        added_nodes: state.added_nodes(),
-        local_services: state.p2p().local_services().to_u64(),
-    }
+    NetworkHandles::from_p2p(state.p2p())
 }
 
 impl ChainControl for RpcChainControl {

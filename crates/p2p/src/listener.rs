@@ -530,13 +530,14 @@ fn accept_connections(
                 // performs (`net.cpp:1838-1845`, eviction cut to refusal).
                 let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded::<crate::Message>();
                 let lease = crate::PeerLease::new_inbound(outbound_tx);
-                let Some(lease) =
-                    shared
-                        .peer_table
-                        .try_register_inbound(peer_addr, lease, shared.max_inbound)
-                else {
+                let Some(lease) = shared.peer_table.try_admit(
+                    &shared.activity,
+                    peer_addr,
+                    lease,
+                    shared.max_inbound,
+                ) else {
                     drop(stream);
-                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: at capacity");
+                    tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: inactive or at capacity");
                     continue;
                 };
                 spawn_handshake_thread(stream, peer_addr, shared.clone(), lease, outbound_rx);
@@ -662,7 +663,13 @@ fn run_outbound_connection(
         }
         (_, true) => crate::PeerLease::new_manual(outbound_tx, role),
     };
-    shared.peer_table.register(addr, lease.clone());
+    let Some(lease) =
+        shared
+            .peer_table
+            .try_admit(&shared.activity, addr, lease, shared.max_inbound)
+    else {
+        return Err(crate::wire::PeerError::Protocol("network inactive"));
+    };
     if shared.is_session_cancelled() {
         shared.peer_table.remove_current(addr, &lease);
         lease.cancel();

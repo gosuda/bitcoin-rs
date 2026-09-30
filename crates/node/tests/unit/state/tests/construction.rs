@@ -10,17 +10,8 @@ fn runtime_accessors_borrow_their_subsystem_owner() -> anyhow::Result<()> {
     let p2p = state.p2p();
     let followers = state.chain_followers();
 
+    assert!(Arc::ptr_eq(&state.p2p(), &p2p));
     assert!(Arc::ptr_eq(&state.peer_table(), &p2p.table()));
-    assert!(Arc::ptr_eq(
-        &state.network_active(),
-        &p2p.network_active_handle()
-    ));
-    assert!(Arc::ptr_eq(&state.banned_subnets(), &p2p.banned_handle()));
-    assert!(
-        state
-            .p2p_outbound_sender()
-            .same_channel(&p2p.outbound_sender())
-    );
     assert!(
         state
             .inbound_blocks_sender()

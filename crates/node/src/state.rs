@@ -230,18 +230,6 @@ impl NodeState {
         Ok(Arc::new(StoredBlockBodySource::new(store)))
     }
 
-    /// Returns the shared P2P admission switch exposed to RPC and P2P workers.
-    #[must_use]
-    pub fn network_active(&self) -> Arc<AtomicBool> {
-        self.p2p.network_active_handle()
-    }
-
-    /// Returns the shared manual IP/subnet ban list exposed to RPC and P2P.
-    #[must_use]
-    pub fn banned_subnets(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>> {
-        self.p2p.banned_handle()
-    }
-
     /// Returns the P2P runtime that owns workers and the session table.
     #[must_use]
     pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
@@ -252,17 +240,6 @@ impl NodeState {
     /// Returns the authoritative table of live peer sessions.
     pub fn peer_table(&self) -> Arc<bitcoin_rs_p2p::PeerTable> {
         self.p2p.table()
-    }
-
-    /// Returns the service-owned persistent addnode view.
-    #[must_use]
-    pub fn added_nodes(&self) -> Arc<RwLock<Vec<std::net::SocketAddr>>> {
-        self.p2p.added_nodes_handle()
-    }
-    /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
-    #[must_use]
-    pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial> {
-        self.p2p.outbound_sender()
     }
 
     /// Returns a cloned `Sender` that the P2P listener pushes inbound
