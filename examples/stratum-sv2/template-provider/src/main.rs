@@ -34,6 +34,8 @@ pub struct Config {
 }
 
 impl Config {
+    /// Reads environment overrides with regtest defaults, rejecting invalid
+    /// listener addresses, certificate lifetimes, and Noise private keys.
     fn from_env() -> Result<Self, String> {
         let listen = env_or("TP_LISTEN", "0.0.0.0:8442")
             .parse()
@@ -71,6 +73,8 @@ impl Config {
     }
 }
 
+/// Returns the environment value unchanged, or the default if absent,
+/// non-Unicode, or blank after trimming.
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key)
         .ok()
@@ -87,6 +91,7 @@ pub struct Hub {
 }
 
 impl Hub {
+    /// Creates an empty template slot with the first template ID set to one.
     fn new() -> Self {
         let (tx, _) = watch::channel(None);
         Self {
@@ -95,15 +100,19 @@ impl Hub {
         }
     }
 
+    /// Subscribes to the latest template and subsequent replacements.
     fn subscribe(&self) -> watch::Receiver<Option<std::sync::Arc<TemplateState>>> {
         self.tx.subscribe()
     }
 
+    /// Allocates the next template ID from the counter shared by hub clones.
     fn next_id(&self) -> u64 {
         self.next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Replaces the latest template, notifies subscribers, and returns its
+    /// shared handle; the slot retains it even without subscribers.
     fn publish(&self, state: TemplateState) -> std::sync::Arc<TemplateState> {
         let state = std::sync::Arc::new(state);
         self.tx.send_replace(Some(state.clone()));
@@ -111,6 +120,8 @@ impl Hub {
     }
 }
 
+/// Starts the template polling loop and pool listener, then aborts both tasks
+/// when Ctrl-C is received. Invalid configuration exits with status two.
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()

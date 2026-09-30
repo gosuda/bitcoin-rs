@@ -29,6 +29,8 @@ pub struct RpcClient {
 }
 
 impl RpcClient {
+    /// Creates a basic-auth RPC client without a total request timeout so
+    /// template long-poll requests can remain open.
     pub fn new(url: String, user: String, pass: String) -> Self {
         Self {
             url,
@@ -41,6 +43,8 @@ impl RpcClient {
         }
     }
 
+    /// Sends an authenticated JSON-RPC request and extracts its result,
+    /// returning transport, decoding, RPC, or missing-result errors.
     async fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let body = json!({
             "jsonrpc": "1.0",
@@ -105,6 +109,8 @@ impl RpcClient {
         }
     }
 
+    /// Reads the current tip height via `getblockcount`, rejecting results
+    /// that cannot be represented as an unsigned integer.
     pub async fn block_count(&self) -> Result<u64, RpcError> {
         self.call("getblockcount", json!([]))
             .await?

@@ -25,6 +25,8 @@ use crate::rpc::RpcClient;
 use crate::template::{TemplateError, TemplateState};
 use crate::{Config, Hub};
 
+/// Binds the TDP listener and spawns a handler for each pool connection.
+/// A bind failure exits the process with status one.
 pub async fn run(config: Config, hub: Hub) {
     let rpc = Arc::new(RpcClient::new(
         config.rpc_url.clone(),
@@ -67,6 +69,8 @@ pub async fn run(config: Config, hub: Hub) {
     }
 }
 
+/// Completes Noise and TDP version-two setup, then streams template updates
+/// and handles pool messages until a transport or protocol error occurs.
 async fn handle_connection(
     stream: TcpStream,
     hub: Hub,
@@ -169,12 +173,15 @@ async fn handle_connection(
     }
 }
 
+/// Clones the latest template handle without retaining the watch borrow.
 fn state_snapshot(
     templates: &watch::Receiver<Option<Arc<TemplateState>>>,
 ) -> Option<Arc<TemplateState>> {
     templates.borrow().clone()
 }
 
+/// Sends `NewTemplate` followed by `SetNewPrevHash` to activate it,
+/// propagating frame encoding or transport errors.
 async fn push_template(
     writer: &mut NoiseTcpWriteHalf,
     state: &TemplateState,
@@ -197,6 +204,9 @@ async fn push_template(
     Ok(())
 }
 
+/// Serves transaction requests and submits solutions for the current template
+/// after assembly and a header PoW check. Unknown or invalid solutions are
+/// logged and dropped; pool coinbase constraints are only logged.
 async fn handle_tdp(
     message: TemplateDistributionOwned,
     state: &Option<Arc<TemplateState>>,
@@ -318,6 +328,7 @@ async fn handle_tdp(
     }
 }
 
+/// Decodes a frame as an owned common message, returning `None` on failure.
 fn parse_common(
     frame: &mut stratum_apps::utils::types::InboundFrame,
 ) -> Option<CommonMessagesOwned> {
@@ -331,6 +342,7 @@ fn parse_common(
     Some(message)
 }
 
+/// Encodes and writes one SV2 message, returning encoding or transport errors.
 async fn send(writer: &mut NoiseTcpWriteHalf, message: AnyMessageOwned) -> Result<(), String> {
     let frame = OutboundFrame::from_message(message).map_err(|e| format!("frame encode: {e}"))?;
     writer

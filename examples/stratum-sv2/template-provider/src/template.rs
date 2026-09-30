@@ -48,6 +48,8 @@ pub struct TemplateState {
 }
 
 impl TemplateState {
+    /// Parses the required GBT fields and transactions into a template with
+    /// the supplied ID, reporting missing fields or invalid field encodings.
     pub fn from_gbt(id: u64, gbt: &Value) -> Result<Self, TemplateError> {
         let field = |name: &'static str| {
             gbt.get(name).ok_or_else(|| TemplateError::Field {
@@ -170,6 +172,8 @@ impl TemplateState {
         })
     }
 
+    /// Builds a future template carrying the coinbase requirements and merkle
+    /// path; the paired `SetNewPrevHash` message activates it for the pool.
     pub fn new_template_msg(&self) -> NewTemplateOwned {
         NewTemplateOwned {
             template_id: self.id,
@@ -202,6 +206,8 @@ impl TemplateState {
         }
     }
 
+    /// Builds the activation message with the previous hash in internal byte
+    /// order and the target derived from `bits` in little-endian byte order.
     pub fn set_new_prev_hash_msg(&self) -> SetNewPrevHashOwned {
         let target = bitcoin::pow::Target::from(CompactTarget::from_consensus(self.bits));
         SetNewPrevHashOwned {
@@ -213,6 +219,8 @@ impl TemplateState {
         }
     }
 
+    /// Serializes non-coinbase transactions in GBT order for a transaction-data
+    /// response. Panics if a transaction or the list exceeds SV2 size limits.
     pub fn transaction_data(&self) -> Seq064KOwned<B016MOwned> {
         let list = self
             .txs
@@ -271,6 +279,7 @@ impl TemplateState {
     }
 }
 
+/// Describes a required GBT field that is absent or has an invalid type or range.
 fn missing(field: &'static str) -> TemplateError {
     TemplateError::Field {
         field,
