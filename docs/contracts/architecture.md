@@ -333,6 +333,14 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   reads run under `with_stable_view` (`UtxoSetView`), which also serves the
   `hash_serialized_3` commitment, script scans, and memory accounting.
   Windowed apply reads through `WindowOverlay` over the same `OutputSource`.
+- **Distribution**: production consumers receive `UtxoReader`, never the
+  set. It answers `get`, `get_entry`, `has_live_outputs_for_txid`,
+  `scan_script_pubkeys`, and the two stable whole-set reads, and carries no
+  route to `utxo::contract`. `Chainstate::utxo` and
+  `Chainstate::utxo_handle` are fixture-only seams, and
+  `UtxoReader::fixture_set` — the one route back to the set — is compiled
+  out of production builds, so the g17 facade gate can deny all three from
+  an isolated production consumer.
 - Shard, record, commit-event, and undo-codec machinery is crate-private.
   Rollback sequencing is split at the marker fence, which is exactly where
   the crate boundary runs: `utxo::contract::rollback_block` owns the fenced
@@ -344,11 +352,11 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   publishing the rolled-back set. Chainstate owns this surrounding order and
   durability policy (`ARCH-07`).
 - The contract surface is `bitcoin_rs_utxo::contract`; the crate root keeps
-  only read, snapshot, and statistics names. RPC is a read consumer of the
-  root read types (`UtxoCoin`, `UtxoScan`); index is the read consumer that
-  decodes the contract's `UndoBatch`. Neither assembles mutations outside
+  only read, snapshot, and statistics names. RPC and P2P admission read
+  through `UtxoReader` (`UtxoCoin`, `UtxoScan`); index is the read consumer
+  that decodes the contract's `UndoBatch`. None assembles mutations outside
   tests, which build fixture sets through
-  `BlockChanges` + `commit_block_changes`.
+  `BlockChanges` + `commit_block_changes` on `fixture_set()`.
 
 ### `ARCH-08`: Durable pruning and reorg retention
 
@@ -392,9 +400,12 @@ composition seam.
     mutable tip-cell access through a read guard, and `SyncChain` fixture
     methods must fail with the intended compiler diagnostics. Removing an
     obsolete accessor or private field remains allowed, and the deleted
-    `Chainstate::retention_handle` and `Chainstate::read_fence` accessors stay
-    deleted: retained-history authority and the transition domain are owned
-    elsewhere and chainstate must not broker either.
+    `Chainstate::retention_handle`, `Chainstate::read_fence`,
+    `Chainstate::utxo`, and `Chainstate::utxo_handle` accessors stay deleted:
+    retained-history authority, the transition domain, and the authoritative
+    UTXO set are owned elsewhere and chainstate must not broker any of them.
+    The same consumer asserts `UtxoReader::fixture_set` is unavailable, so a
+    production reader cannot reach the set `utxo::contract` mutates.
 - Manifest enforcement:
   - Root `Cargo.toml`: workspace member list and package versions.
   - `crates/storage/Cargo.toml`: engine dependency definitions.

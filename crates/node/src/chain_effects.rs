@@ -411,7 +411,7 @@ impl ChainFollowers {
                     (mempool_change.as_ref(), self.mempool_gateway())
                 {
                     let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
-                        handles.utxo_handle(),
+                        handles.utxo_reader(),
                         handles.applied_tip_reader(),
                         handles.block_tree_reader(),
                         handles.network(),

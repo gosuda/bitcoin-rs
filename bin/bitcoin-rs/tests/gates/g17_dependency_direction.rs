@@ -24,6 +24,9 @@ pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
     let _ = state.chain_snapshot();
     let _ = tree.read().tip();
     let _ = state.read_block_tree().tip_height();
+    // The read-only UTXO capability is what production consumers receive;
+    // it must compile without the fixture seam.
+    let _ = state.utxo_reader();
     (applied.load_full(), tree.clone().read().len())
 }
 
@@ -127,6 +130,10 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         // The transition domain is minted by composition and split into roles;
         // chainstate holds one role and must not republish a fence.
         "read_fence",
+        // The authoritative UTXO set stays with its mutation owner; consumers
+        // take `UtxoReader`, which carries no `utxo::contract` path.
+        "utxo",
+        "utxo_handle",
         "apply_block",
         "apply_block_with_serialized",
         "disconnect_block",
@@ -145,5 +152,15 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
             method,
         )?;
     }
+    // `UtxoReader::fixture_set` is the only route from a read capability back
+    // to the set `utxo::contract` mutates. It is compiled out of production
+    // builds, so a production consumer must not be able to name it.
+    consumer.deny(
+        &format!(
+            "{READ_CONTROL}\npub fn denied(reader: &bitcoin_rs_utxo::UtxoReader) {{ let _ = reader.fixture_set(); }}"
+        ),
+        &["E0599"],
+        "fixture_set",
+    )?;
     Ok(())
 }

@@ -235,7 +235,7 @@ impl NodeState {
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
         let derived_index_parts = match derived_index_open_spec {
             Some(mut spec) => {
-                spec.utxo = Some(Arc::clone(&utxo));
+                spec.utxo = Some(bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&utxo)));
                 spec.chain_transition = Some(transition.stable_read());
                 let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
                 let runtime =

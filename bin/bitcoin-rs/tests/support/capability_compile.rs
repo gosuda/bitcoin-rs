@@ -18,6 +18,7 @@ impl ProductionConsumer {
         let chain = serde_json::to_string(&root.join("crates/chain"))?;
         let chainstate = serde_json::to_string(&root.join("crates/chainstate"))?;
         let p2p = serde_json::to_string(&root.join("crates/p2p"))?;
+        let utxo = serde_json::to_string(&root.join("crates/utxo"))?;
         std::fs::create_dir(directory.path().join("src"))?;
         std::fs::write(
             directory.path().join("Cargo.toml"),
@@ -37,6 +38,7 @@ name = "capability_consumer"
 bitcoin-rs-chain = {{ path = {chain}, default-features = false }}
 bitcoin-rs-chainstate = {{ path = {chainstate}, default-features = false }}
 bitcoin-rs-p2p = {{ path = {p2p}, default-features = false }}
+bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
 "#
             ),
         )?;

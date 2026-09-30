@@ -11,7 +11,6 @@ use bitcoin_rs_primitives::{
     Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
-use bitcoin_rs_utxo::UtxoSet;
 
 use super::*;
 
@@ -324,7 +323,7 @@ impl QueryFixture {
             bitcoin_rs_chain::TipReader::new(applied_tip),
             body_source,
             QueryEngineLive {
-                utxo: None::<Arc<UtxoSet>>,
+                utxo: None::<bitcoin_rs_utxo::UtxoReader>,
                 chain_transition: Some(chain_transition),
                 enabled: IndexCapabilities::ALL,
             },

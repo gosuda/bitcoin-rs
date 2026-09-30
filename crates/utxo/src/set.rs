@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{borrow::Borrow, io, time::Instant};
 
 use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut, Txid};
@@ -576,6 +577,78 @@ impl UtxoSet {
 impl Default for UtxoSet {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Read-only capability over the authoritative [`UtxoSet`].
+///
+/// The set itself is never handed out: [`crate::contract`] mutates through
+/// `&UtxoSet`, so a consumer that held the set would hold the mutation path
+/// too. This type exposes the reads an admission preview, a live index query,
+/// or a mining candidate needs, and nothing that can change a coin.
+#[derive(Clone)]
+pub struct UtxoReader {
+    set: Arc<UtxoSet>,
+}
+
+impl UtxoReader {
+    /// Wraps the owner's set into a read capability.
+    #[must_use]
+    pub fn new(set: Arc<UtxoSet>) -> Self {
+        Self { set }
+    }
+
+    /// Looks up one live output.
+    #[must_use]
+    pub fn get(&self, op: &OutPoint) -> Option<TxOut> {
+        self.set.get(op)
+    }
+
+    /// Looks up one live output with its confirmation metadata.
+    #[must_use]
+    pub fn get_entry(&self, op: &OutPoint) -> Option<UtxoCoin> {
+        self.set.get_entry(op)
+    }
+
+    /// Reports whether `txid` still owns at least one live output.
+    #[must_use]
+    pub fn has_live_outputs_for_txid(&self, txid: &Hash256) -> bool {
+        self.set.has_live_outputs_for_txid(txid)
+    }
+
+    /// Scans a stable whole-set view for exact `scriptPubKey` matches.
+    pub fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoError> {
+        self.set.scan_script_pubkeys(scripts)
+    }
+
+    /// Runs `read` against a stable whole-set view, blocking commits meanwhile.
+    ///
+    /// The view borrows the owner's set for the closure only: the set itself
+    /// never escapes, so the closure still carries no mutation path.
+    pub fn with_stable_view<R>(&self, read: impl FnOnce(&UtxoSetView<'_>) -> R) -> R {
+        self.set.with_stable_view(read)
+    }
+
+    /// Locks a stable whole-set view until the returned guard is dropped.
+    ///
+    /// Commits take the matching write lock, so a caller that must hold one
+    /// coherent set across a multi-step scan takes this instead of calling
+    /// [`Self::get`] repeatedly. Acquire any chain-transition authority first
+    /// when both are needed, matching block apply.
+    #[must_use]
+    pub fn lock_stable_view(&self) -> UtxoSetView<'_> {
+        self.set.lock_stable_view()
+    }
+
+    /// Reveals the owner's set so a fixture can commit through `crate::contract`.
+    ///
+    /// Not present in production builds: a production reader must never reach
+    /// the set, because `contract::commit_block_changes` takes `&UtxoSet` as
+    /// its mutation surface.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn fixture_set(&self) -> Arc<UtxoSet> {
+        Arc::clone(&self.set)
     }
 }
 

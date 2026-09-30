@@ -410,7 +410,7 @@ pub struct DerivedIndexOpenSpec {
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
     /// Authoritative UTXO set used to seed and resolve the compact live view.
     /// Test-only open specs may leave this unset; live queries then fail closed.
-    pub utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
+    pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     /// Serializes a live-view query or seed against a chain transition.
     ///
     /// Production node composition passes the read role over the same
@@ -581,7 +581,7 @@ struct Worker {
     /// at any depth (pre-cutover behavior).
     rollback_rebuild_cutover: u32,
     /// Authoritative UTXO source for live-view seeding.
-    utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
+    utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     /// Read role over the transition domain shared with apply and RPC reads.
     chain_transition: Option<bitcoin_rs_chain::StableRead>,
 }

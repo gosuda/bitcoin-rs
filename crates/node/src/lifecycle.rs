@@ -118,7 +118,7 @@ fn bind_rpc(
             applied_tip: chainstate.applied_tip_reader(),
             ibd: Arc::clone(ibd),
             blocks: state.blocks(),
-            utxo: chainstate.utxo_handle(),
+            utxo: chainstate.utxo_reader(),
             coin_stats: chainstate.coin_stats_handle(),
             block_tree: chainstate.block_tree_reader(),
             chain_network: state.config().network,

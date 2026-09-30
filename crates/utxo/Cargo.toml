@@ -16,6 +16,9 @@ default = []
 rocksdb = ["bitcoin-rs-storage/rocksdb"]
 fjall = ["bitcoin-rs-storage/fjall"]
 redb = ["bitcoin-rs-storage/redb"]
+# Exposes `UtxoReader::fixture_set` so a test fixture can commit through
+# `utxo::contract`. Production readers never reach the set.
+test-seam = []
 
 [dependencies]
 bitcoin-rs-primitives.workspace = true

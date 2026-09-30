@@ -185,7 +185,7 @@ impl QueryBudget {
 /// the chain-transition lock Live composition requires.
 pub struct QueryEngineLive {
     /// Authoritative UTXO set for the compact live view.
-    pub utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
+    pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     /// Serializes live-view work against a chain transition.
     pub chain_transition: Option<bitcoin_rs_chain::StableRead>,
     /// Capability set this engine serves.
@@ -219,7 +219,7 @@ pub struct DerivedIndexQueryEngine {
     block_tree: bitcoin_rs_chain::BlockTreeReader,
     applied_tip: bitcoin_rs_chain::TipReader,
     body_source: Option<Arc<dyn BlockBodySource>>,
-    utxo: Option<Arc<bitcoin_rs_utxo::UtxoSet>>,
+    utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     chain_transition: Option<bitcoin_rs_chain::StableRead>,
     enabled: IndexCapabilities,
 }

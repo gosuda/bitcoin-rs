@@ -2771,6 +2771,12 @@ mod writer_shutdown_tests {
         let (done_tx, done_rx) = crossbeam_channel::bounded(1);
         let budget = lease.budget_handle();
         let close_rx = lease.close_signal();
+        let net_trace = crate::net_trace::NetTrace::outbound(
+            9,
+            "127.0.0.1:18444".parse().expect("valid socket address"),
+            crate::peer_info::PeerRole::BlockRelayOnly,
+            false,
+        );
         let worker = std::thread::spawn(move || {
             run_writer_loop(
                 &outbound_rx,
@@ -2778,7 +2784,7 @@ mod writer_shutdown_tests {
                 &budget,
                 &mut writer,
                 Magic::BITCOIN,
-                None,
+                Some(&net_trace),
             );
             let _ = done_tx.send(());
         });

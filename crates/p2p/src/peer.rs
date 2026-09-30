@@ -323,4 +323,51 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn traced_send_emits_a_parseable_frame_of_the_reported_length() -> Result<(), PeerError> {
+        use std::io::Cursor;
+
+        let mut peer = Peer::new(Cursor::new(Vec::new()), Magic::BITCOIN);
+        peer.attach_net_trace(crate::net_trace::NetTrace::outbound(
+            4,
+            SocketAddr::from(([127, 0, 0, 1], 8333)),
+            crate::peer_info::PeerRole::FullRelay,
+            false,
+        ));
+
+        let written = peer.send(&Message::Ping(9))?;
+
+        let mut buffer = peer.stream;
+        buffer.set_position(0);
+        assert_eq!(
+            buffer.get_ref().len(),
+            written,
+            "returned length is the framed bytes that landed"
+        );
+        let (message, payload) = crate::wire::read_message(&mut buffer, Magic::BITCOIN)?;
+        assert_eq!(message, Message::Ping(9));
+        assert!(!payload.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn traced_read_returns_the_checksum_validated_message() -> Result<(), PeerError> {
+        use std::io::Cursor;
+
+        let mut frame = Vec::new();
+        write_message(&mut frame, Magic::BITCOIN, &Message::Pong(2))?;
+
+        let mut peer = Peer::new(Cursor::new(frame), Magic::BITCOIN);
+        peer.attach_net_trace(crate::net_trace::NetTrace::inbound(
+            2,
+            SocketAddr::from(([127, 0, 0, 1], 8333)),
+        ));
+
+        let (message, payload) = peer.read_message()?;
+
+        assert_eq!(message, Message::Pong(2));
+        assert!(!payload.is_empty());
+        Ok(())
+    }
 }

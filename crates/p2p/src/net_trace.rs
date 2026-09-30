@@ -121,7 +121,14 @@ fn message_args(trace: &NetTrace, command: &str, payload: &[u8]) -> MessageTrace
         trace.connection_type.to_owned(),
         command.to_owned(),
         payload_len_u64(payload.len()),
-        payload.as_ptr(),
+        // A zero-length payload has no addressable bytes; hand the tracer a
+        // null pointer rather than a dangling non-null one. Argument 6 pairs
+        // with argument 5, which is 0 here.
+        if payload.is_empty() {
+            std::ptr::null()
+        } else {
+            payload.as_ptr()
+        },
     )
 }
 
@@ -134,4 +141,66 @@ fn node_id_i64(node_id: u64) -> i64 {
 /// Payload lengths are `usize`; the ABI publishes `uint64`.
 fn payload_len_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn loopback() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 8333))
+    }
+
+    #[test]
+    fn message_args_matches_core_abi_positions() {
+        let trace = NetTrace::inbound(7, loopback());
+        let payload: &[u8] = b"abc";
+
+        let (node_id, addr, conn_type, msg_type, size, pointer) =
+            message_args(&trace, "ping", payload);
+
+        assert_eq!(node_id, 7);
+        assert_eq!(addr, "127.0.0.1:8333");
+        assert_eq!(conn_type, "inbound");
+        assert_eq!(msg_type, "ping");
+        assert_eq!(size, 3);
+        assert_eq!(pointer, payload.as_ptr());
+    }
+
+    #[test]
+    fn message_args_nulls_the_pointer_of_an_empty_payload() {
+        let trace = NetTrace::inbound(1, loopback());
+
+        let (_, _, _, _, size, pointer) = message_args(&trace, "ping", &[]);
+
+        assert_eq!(size, 0);
+        assert!(pointer.is_null());
+    }
+
+    #[test]
+    fn node_ids_above_i64_max_clamp_instead_of_wrapping() {
+        let max_i64 = i64::MAX.unsigned_abs();
+        assert_eq!(node_id_i64(u64::MAX), i64::MAX);
+        assert_eq!(node_id_i64(max_i64), i64::MAX);
+        assert_eq!(node_id_i64(0), 0);
+    }
+
+    #[test]
+    fn connection_types_follow_core_connection_type_as_string() {
+        let addr = loopback();
+
+        assert_eq!(NetTrace::inbound(1, addr).connection_type, "inbound");
+        assert_eq!(
+            NetTrace::outbound(1, addr, PeerRole::FullRelay, false).connection_type,
+            "outbound-full-relay"
+        );
+        assert_eq!(
+            NetTrace::outbound(1, addr, PeerRole::BlockRelayOnly, false).connection_type,
+            "block-relay-only"
+        );
+        assert_eq!(
+            NetTrace::outbound(1, addr, PeerRole::FullRelay, true).connection_type,
+            "manual"
+        );
+    }
 }

@@ -19,6 +19,13 @@ computes the Core `hash_serialized_3` commitment, and scans for exact
 scriptPubKey matches; `track_coin_stats` attaches the single
 `CoinStatsListener` whose MuHash and accounting follow every commit.
 
+`UtxoReader` is what a consumer receives instead of the set. It carries the
+coin lookups, the `has_live_outputs_for_txid` duplicate-spend predicate, and
+both stable whole-set reads (`with_stable_view`, `lock_stable_view`), and it
+cannot reach `contract`: the set stays with its mutation owner. Under the
+`test-seam` feature `UtxoReader::fixture_set` reveals the set so a fixture
+can commit through `contract`; production builds do not compile it.
+
 `UtxoAdd<T>` and `BlockChanges<T>` use `TxOut` by default and `&TxOut` for
 zero-copy block application. Both commit through `commit_block_changes`; there is no separate
 borrowed mutation API. Removal-only batches specify `BlockChanges` explicitly
