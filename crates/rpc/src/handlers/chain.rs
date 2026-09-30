@@ -1811,9 +1811,10 @@ mod tests {
         }
     }
 
-    /// The fixture block plus a second transaction that spends the coinbase
-    /// with a different input and output count, so per-transaction projections
-    /// cannot pass by repeating the coinbase.
+    /// The fixture block plus a second transaction with an input and output
+    /// count that differs from the coinbase, so per-transaction projections
+    /// cannot pass by repeating the coinbase. `getblock` decodes a stored body
+    /// without resolving inputs, so the outpoints need not be spendable.
     fn fixture_block_with_spend() -> Block {
         let mut block = fixture_genesis();
         let Some(coinbase) = block.txs.first() else {
@@ -1829,7 +1830,7 @@ mod tests {
                     witness: Witness::new(),
                 },
                 TxIn {
-                    previous_output: OutPoint::new(coinbase.txid(), 1),
+                    previous_output: OutPoint::new(Txid::default(), 7),
                     script_sig: Script::new(),
                     sequence: Sequence::MAX,
                     witness: Witness::new(),
