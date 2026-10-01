@@ -1334,11 +1334,7 @@ impl MempoolGateway {
     /// mutation change, so there is nothing to order.
     pub fn prioritise(&self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
         let mut pool = self.pool.write();
-        pool.prioritise(txid, fee_delta)?;
-        if fee_delta != 0 {
-            self.lifecycle.lock().clear_rejects();
-        }
-        Ok(())
+        self.apply_prioritise(&mut pool, txid, fee_delta)
     }
 
     /// Atomically rejects pooled dust before applying a fee overlay.
@@ -1354,11 +1350,23 @@ impl MempoolGateway {
         {
             return Ok(false);
         }
+        self.apply_prioritise(&mut pool, txid, fee_delta)?;
+        Ok(true)
+    }
+
+    /// Applies the overlay and clears peer-reject evidence the new fee
+    /// ordering may have invalidated.
+    fn apply_prioritise(
+        &self,
+        pool: &mut Mempool,
+        txid: Txid,
+        fee_delta: i64,
+    ) -> Result<(), PrioritiseError> {
         pool.prioritise(txid, fee_delta)?;
         if fee_delta != 0 {
             self.lifecycle.lock().clear_rejects();
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Reads the stored fee-delta overlay map.
