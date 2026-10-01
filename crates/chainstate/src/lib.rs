@@ -42,9 +42,9 @@ mod checkpoint;
 pub use checkpoint::CheckpointError;
 pub use checkpoint::headers::HeaderCheckpointError;
 /// Typed chainstate mutation failures.
-pub mod error;
+mod error;
 pub mod events;
-pub mod journal;
+mod journal;
 mod maintenance;
 pub mod recovery;
 pub mod reorg;
