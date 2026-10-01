@@ -591,7 +591,7 @@ pub(crate) fn start_node(
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
-                        .expect("sv2 tokio runtime");
+                        .unwrap_or_else(|e| panic!("sv2 tokio runtime: {e}"));
                     rt.block_on(async move {
                         if let Err(e) = server.run().await {
                             tracing::error!(error = %e, "sv2 server failed");
@@ -601,12 +601,6 @@ pub(crate) fn start_node(
                 .map_err(|e| anyhow::anyhow!("failed to spawn sv2 server: {e}"))?,
         );
         tracing::info!(addr = %sv2_listen, "SV2 TDP server spawned");
-    }
-
-    // Fail explicitly if sv2_listen is set but the sv2 feature is disabled.
-    #[cfg(not(feature = "sv2"))]
-    if state.config().mining.sv2_listen.is_some() {
-        anyhow::bail!("--sv2-listen requires the `sv2` feature to be enabled at build time");
     }
 
     let gateway = state.mempool_gateway();
