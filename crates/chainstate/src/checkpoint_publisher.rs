@@ -6,8 +6,8 @@ use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 
 use bitcoin_rs_primitives::Hash256;
 
-use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::DisconnectPhase;
+use bitcoin_rs_storage::block_body::BlockBodyStore;
 
 use bitcoin_rs_utxo::{UtxoSet, stats::CoinStatsListener};
 
@@ -41,7 +41,7 @@ fn retire_full_revalidation_marker(data_dir: &std::path::Path) -> Result<(), Che
 
 /// How a checkpoint publication treats the disconnect marker.
 #[derive(Clone, Copy)]
-pub(crate) enum DisconnectRetirement {
+enum DisconnectRetirement {
     /// Ordinary publication: an `InFlight` marker refuses, and only a
     /// completed rollback's `RolledBack` marker is disarmed after `CURRENT`.
     Ordinary,

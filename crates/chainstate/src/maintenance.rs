@@ -10,7 +10,7 @@ use crate::checkpoint::{CheckpointError, CheckpointWrite};
 /// Poll interval for the maintenance loop. Short enough to flush soon after
 /// a journal boundary passes and to drain retention pressure soon after it
 /// appears; long enough to avoid busy-waiting.
-pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Spawns the chainstate maintenance worker thread.
 fn spawn_chainstate_maintenance_worker(

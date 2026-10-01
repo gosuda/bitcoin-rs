@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Blocks per durable group commit on the windowed IBD path.
-const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
+pub(super) const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
 
 /// Serialized block bytes one group may hold before it must commit.
 const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
@@ -100,7 +100,7 @@ impl WindowGroup {
     /// Commits and publishes the staged prefix, returning its outcomes with
     /// the group's `commit_id`. On error nothing is drained: the prefix
     /// stays staged for the caller to retry or report.
-    pub(super) fn flush(
+    fn flush(
         &mut self,
         handles: &Chainstate,
     ) -> core::result::Result<Vec<ConnectOutcome>, ApplyError> {
@@ -191,7 +191,7 @@ impl WindowGroup {
     /// Drops the staged prefix without committing it. Only for fatal
     /// dispositions, where the state is torn and recovery owns the
     /// reconciliation; the prefix was never published.
-    pub(super) fn abandon(&mut self) {
+    fn abandon(&mut self) {
         self.pending.clear();
         self.staged_bytes = 0;
         self.first_prev = None;
@@ -394,7 +394,7 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
 /// Prepares consecutive blocks against one overlay and verifies all their input
 /// scripts in a single dispatch.
 #[allow(clippy::too_many_lines)]
-pub(super) fn prove_window<'a>(
+fn prove_window<'a>(
     handles: &Chainstate,
     blocks: &[&'a Block],
     serialized: &[bytes::Bytes],

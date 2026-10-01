@@ -9,7 +9,7 @@ use bitcoin_rs_storage::StorageError;
 
 /// Maximum number of disconnect-side block bodies held in memory at once
 /// during the streaming execution pass.
-pub(crate) const DISCONNECT_STREAM_WINDOW: usize = 8;
+const DISCONNECT_STREAM_WINDOW: usize = 8;
 const CONNECT_STREAM_WINDOW: usize = DISCONNECT_STREAM_WINDOW;
 
 /// Node-owned work that follows committed reorg steps.

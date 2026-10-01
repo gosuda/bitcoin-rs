@@ -632,7 +632,7 @@ fn emit_block_connected(
     });
 }
 
-pub(super) fn check_coinbase_maturity(
+fn check_coinbase_maturity(
     block: &Block,
     tx_plan: &BlockTxPlan,
     txids: &[Txid],
@@ -677,7 +677,7 @@ pub(super) fn check_coinbase_maturity(
     Ok(())
 }
 
-pub(super) fn check_bip68_sequence_locks(
+fn check_bip68_sequence_locks(
     handles: &Chainstate,
     block: &Block,
     tx_plan: &BlockTxPlan,
@@ -769,7 +769,7 @@ pub(super) fn check_bip68_sequence_locks(
     Ok(())
 }
 
-pub(super) fn check_bip30_and_bip34(
+fn check_bip30_and_bip34(
     handles: &Chainstate,
     block: &Block,
     height: u32,
@@ -836,7 +836,7 @@ fn validate_contextual_block_header(
     .map_err(ApplyError::Chain)
 }
 
-pub(super) fn applied_predecessor(
+fn applied_predecessor(
     handles: &Chainstate,
     block_hash: bitcoin_rs_primitives::Hash256,
     prev_hash: bitcoin_rs_primitives::Hash256,
@@ -912,7 +912,7 @@ pub(super) fn applied_header_tip(
 }
 
 /// Converts UTXO connect accounting errors into apply errors.
-pub(super) fn map_block_change_error(error: &BlockChangeError) -> ApplyError {
+fn map_block_change_error(error: &BlockChangeError) -> ApplyError {
     match error {
         BlockChangeError::BlockValueOverflow => ApplyError::BlockValueOverflow,
         BlockChangeError::VoutOverflow { txid } => ApplyError::VoutOverflow { txid: *txid },

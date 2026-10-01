@@ -22,7 +22,7 @@ pub(super) struct DurableReceipt {
 impl DurableReceipt {
     /// The receipt of an already committed head. Replay never mints a commit:
     /// it republishes under this receipt.
-    pub(super) fn from_head(head: &DurableHead) -> Self {
+    fn from_head(head: &DurableHead) -> Self {
         Self {
             commit_id: head.commit_id,
             chain_tx_count: ChainTxCount::from_wire(head.chain_tx_count),
@@ -155,7 +155,7 @@ pub(super) fn commit_disconnect_head(
 /// Resolves one replayed block's spends from its own durable undo row. The
 /// head certifies undo record and body in one batch, so the restored coins
 /// are exactly the inputs the committed block saw.
-pub(super) struct UndoRowSpends<'a>(pub(super) &'a bitcoin_rs_utxo::contract::UndoBatch);
+struct UndoRowSpends<'a>(&'a bitcoin_rs_utxo::contract::UndoBatch);
 
 impl OutputSource for UndoRowSpends<'_> {
     fn get_entry(&self, outpoint: &OutPoint) -> Option<UtxoCoin> {
@@ -260,7 +260,7 @@ pub fn recover_disconnect_marker(handles: &Chainstate) -> Result<(), ApplyError>
 /// ancestor the tree knows, found by walking the self-authenticating durable
 /// body chain down from `head.tip`.
 #[derive(Debug)]
-pub(super) struct HeadChainAnchor {
+struct HeadChainAnchor {
     pub(super) anchor_height: u32,
     pub(super) anchor: Hash256,
     /// Head-chain `(height, hash)` pairs strictly above the anchor, ascending
@@ -272,7 +272,7 @@ impl HeadChainAnchor {
     /// Whether `tip` lies on the head chain the anchor certifies: at or below
     /// the anchor it must be its ancestor; above it the tip must equal the
     /// descriptor the body walk recorded at that height.
-    pub(super) fn contains_tip(&self, handles: &Chainstate, tip: &TipSnapshot) -> bool {
+    fn contains_tip(&self, handles: &Chainstate, tip: &TipSnapshot) -> bool {
         if tip.height <= self.anchor_height {
             let tree = handles.block_tree.read();
             return tree.lookup(self.anchor).is_some_and(|anchor_id| {
@@ -287,7 +287,7 @@ impl HeadChainAnchor {
 }
 
 /// Resolves the deepest head-chain point the restored block tree knows.
-pub(super) fn resolve_head_anchor(
+fn resolve_head_anchor(
     handles: &Chainstate,
     head: &DurableHead,
 ) -> Result<HeadChainAnchor, ApplyError> {

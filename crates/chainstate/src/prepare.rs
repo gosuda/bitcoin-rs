@@ -236,7 +236,7 @@ pub(super) fn resolve_block_prevouts(
 )]
 /// Runs every non-script transaction check for a block whose scripts are
 /// verified upstream: assume-valid or local replay.
-pub(super) fn run_non_script_checks_only(
+fn run_non_script_checks_only(
     block: &Block,
     tx_plan: &BlockTxPlan,
     resolved: Arc<ResolvedUtxoView>,
