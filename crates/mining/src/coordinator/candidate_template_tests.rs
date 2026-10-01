@@ -117,7 +117,6 @@ fn template_for(
         Arc::new(candidate),
         submit_old,
         Vec::new(),
-        0,
     )
 }
 
@@ -170,7 +169,6 @@ fn signet_template_carries_challenge_and_mandatory_rule() {
         )),
         None,
         Vec::new(),
-        0,
     );
     assert!(
         template

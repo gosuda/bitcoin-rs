@@ -399,14 +399,12 @@ impl MiningService {
                 continue;
             }
             let submit_old = waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
-            // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
             let version_bits_available = self.chain.signalling_rules(&tip, candidate.height);
             return Ok(template_from_candidate(
                 self.network,
                 candidate,
                 submit_old,
                 version_bits_available,
-                0,
             ));
         }
         Err(generation_race())
@@ -705,7 +703,6 @@ fn template_from_candidate(
     candidate: Arc<Candidate>,
     submit_old: Option<bool>,
     version_bits_available: Vec<AvailableMiningRule>,
-    version_bits_required: u32,
 ) -> BlockTemplate {
     let mut rules = Vec::new();
     if candidate.segwit_active {
@@ -722,11 +719,12 @@ fn template_from_candidate(
         rules.push(MiningRule::new("signet"));
     }
     // API-11 advertises producer capabilities, never client-requested names.
+    // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
     BlockTemplate {
         rules,
         candidate,
         version_bits_available,
-        version_bits_required,
+        version_bits_required: 0,
         capabilities: vec![
             MiningCapability::new("proposal"),
             MiningCapability::new("longpoll"),
