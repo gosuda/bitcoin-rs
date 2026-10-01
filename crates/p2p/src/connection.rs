@@ -68,24 +68,25 @@ impl From<PeerSource> for bitcoin_rs_mempool::PeerToken {
 }
 
 /// Maximum queued messages for one peer connection.
-pub const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
+pub(crate) const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
 
 /// Maximum queued full wire bytes for one peer connection.
 ///
 /// Admission tests usage before adding, so sixteen worst-case block messages
 /// fit: after fifteen, 60,000,360 bytes remain below this 64 MiB high-water.
-pub const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Consensus maximum serialized block size. `peer` owns the value
-/// ([`crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE`]); `connection` references it
+/// ([`crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE`]); `connection` references it
 /// rather than carrying an independent copy.
-const BLOCK_SERIALIZED_SIZE: usize = crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
+const BLOCK_SERIALIZED_SIZE: usize = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
 
 /// Full framed-wire bytes reserved before loading a worst-case block body.
 ///
 /// Equals `HEADER_LEN + MAX_BLOCK_SERIALIZED_SIZE_USIZE`: the full encoded wire
 /// byte count that `wire_len` charges and `write_message` releases.
-pub const BLOCK_PRODUCTION_RESERVE_BYTES: usize = crate::wire::HEADER_LEN + BLOCK_SERIALIZED_SIZE;
+pub(crate) const BLOCK_PRODUCTION_RESERVE_BYTES: usize =
+    crate::wire::HEADER_LEN + BLOCK_SERIALIZED_SIZE;
 
 const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES > 15 * BLOCK_PRODUCTION_RESERVE_BYTES);
 
@@ -131,7 +132,7 @@ impl Drop for BlockForwardCredit {
 /// connection remains live. Producer pacing may shrink the cap later, but the
 /// pre-load block-production gate is what bounds materialization.
 #[derive(Debug)]
-pub struct OutboundBudget {
+pub(crate) struct OutboundBudget {
     max_messages: usize,
     max_bytes: usize,
     block_reserve: usize,
@@ -142,7 +143,7 @@ pub struct OutboundBudget {
 impl OutboundBudget {
     /// Builds a production budget with the block-production reserve.
     #[must_use]
-    pub fn new(max_messages: usize, max_bytes: usize) -> Self {
+    pub(crate) fn new(max_messages: usize, max_bytes: usize) -> Self {
         Self::with_reserve(max_messages, max_bytes, BLOCK_PRODUCTION_RESERVE_BYTES)
     }
 
@@ -159,7 +160,11 @@ impl OutboundBudget {
     #[cfg(test)]
     /// Builds a test budget with a reduced block-production reserve.
     #[must_use]
-    pub fn with_block_reserve(max_messages: usize, max_bytes: usize, block_reserve: usize) -> Self {
+    pub(crate) fn with_block_reserve(
+        max_messages: usize,
+        max_bytes: usize,
+        block_reserve: usize,
+    ) -> Self {
         Self::with_reserve(max_messages, max_bytes, block_reserve)
     }
 
@@ -191,8 +196,9 @@ impl OutboundBudget {
     }
 
     /// Returns the charged `(messages, full wire bytes)` awaiting release.
+    #[cfg(test)]
     #[must_use]
-    pub fn pending(&self) -> (usize, usize) {
+    pub(crate) fn pending(&self) -> (usize, usize) {
         (
             self.pending_messages.load(Ordering::Acquire),
             self.pending_bytes.load(Ordering::Acquire),
@@ -204,7 +210,7 @@ impl OutboundBudget {
     /// This gate is evaluated immediately before each body load. The empty
     /// queue arm preserves progress for a block larger than a configured cap.
     #[must_use]
-    pub fn has_block_production_headroom(&self) -> bool {
+    pub(crate) fn has_block_production_headroom(&self) -> bool {
         self.pending_messages.load(Ordering::Acquire) == 0
             || self
                 .pending_bytes
@@ -212,20 +218,6 @@ impl OutboundBudget {
                 .saturating_add(self.block_reserve)
                 <= self.max_bytes
     }
-}
-
-/// A ready peer snapshot that keeps the connection identity beside its
-/// handshake metadata.
-///
-/// The source must be carried through selection to the eventual send or
-/// disconnect; resolving its address again can target a same-address
-/// replacement.
-#[derive(Clone, Debug)]
-pub struct ReadyPeer {
-    /// Identity of the connection that supplied `info`.
-    pub source: PeerSource,
-    /// Handshake metadata published by that connection.
-    pub info: crate::PeerInfo,
 }
 
 /// Cloneable handle for one live peer connection.
@@ -273,7 +265,7 @@ impl PeerLease {
     ///   carries blocks and headers only, in either direction.
     /// INVARIANT: the role is fixed for the life of the lease.
     #[must_use]
-    pub fn new_block_relay(outbound: Sender<crate::Message>) -> Self {
+    pub(crate) fn new_block_relay(outbound: Sender<crate::Message>) -> Self {
         Self::with_direction(
             outbound,
             false,
@@ -292,7 +284,10 @@ impl PeerLease {
     ///   replacing a hand-pinned connection would undo an explicit
     ///   instruction, so the flag must outlive every policy check.
     #[must_use]
-    pub fn new_manual(outbound: Sender<crate::Message>, role: crate::peer_info::PeerRole) -> Self {
+    pub(crate) fn new_manual(
+        outbound: Sender<crate::Message>,
+        role: crate::peer_info::PeerRole,
+    ) -> Self {
         Self::with_direction(outbound, false, role, true)
     }
 
@@ -538,7 +533,7 @@ impl PeerLease {
 
     /// Returns whether both handles refer to the same connection.
     #[must_use]
-    pub fn same_connection(&self, other: &Self) -> bool {
+    pub(crate) fn same_connection(&self, other: &Self) -> bool {
         self.id == other.id
     }
 
@@ -691,7 +686,7 @@ mod tests {
         let replacement = PeerLease::new(replacement_tx);
         table.register(addr, replacement.clone());
 
-        assert!(table.lease_source(snapshot.source).is_none());
+        assert!(table.lease_source(snapshot).is_none());
         assert!(table.lease_source(replacement.source(addr)).is_some());
     }
 
