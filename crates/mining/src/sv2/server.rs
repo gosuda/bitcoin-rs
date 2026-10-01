@@ -37,9 +37,8 @@ pub struct Sv2TpServer {
 }
 
 impl Sv2TpServer {
-    /// Creates a new server.
-    pub fn new(listen: SocketAddr, hub: TemplateHub) -> Self {
-        let authority_secret = [0x42u8; 32];
+    /// Creates a new server with a custom authority key.
+    pub fn new(listen: SocketAddr, hub: TemplateHub, authority_secret: [u8; 32]) -> Self {
         Self {
             listen,
             hub: Arc::new(Mutex::new(hub)),

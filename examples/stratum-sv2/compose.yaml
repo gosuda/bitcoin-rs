@@ -54,8 +54,8 @@ services:
   pool:
     image: stratumv2/pool_sv2:v0.8.0
     stop_signal: SIGINT
-    environment:
-      SV2_TP_ADDR: "bitcoin-rs:8442"
+    volumes:
+      - ./config/pool.toml:/app/pool-config.toml:ro
     ports:
       - "127.0.0.1:9090:9090"
     depends_on:
@@ -64,7 +64,7 @@ services:
     restart: unless-stopped
 
   miner-1:
-    image: ghcr.io/stratum-mining/sv2-mining-device:main
+    image: stratumv2/mining_device_sv2:v0.8.0
     command:
       - --address-pool=pool:34255
       - --id-user=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080.worker1
@@ -75,7 +75,7 @@ services:
     restart: unless-stopped
 
   miner-2:
-    image: ghcr.io/stratum-mining/sv2-mining-device:main
+    image: stratumv2/mining_device_sv2:v0.8.0
     command:
       - --address-pool=pool:34255
       - --id-user=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080.worker2

@@ -209,6 +209,10 @@ pub struct MiningConfig {
     /// When set, the node runs an internal SV2 TP server.
     #[cfg(feature = "sv2")]
     pub sv2_listen: Option<std::net::SocketAddr>,
+    /// SV2 Noise authority secret key (32 bytes).
+    /// Required when `sv2_listen` is set.
+    #[cfg(feature = "sv2")]
+    pub sv2_authority_key: [u8; 32],
 }
 
 /// Fully resolved, validated node configuration consumed by the runtime.

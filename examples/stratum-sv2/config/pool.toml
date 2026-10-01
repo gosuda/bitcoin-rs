@@ -1,0 +1,27 @@
+# SRI Pool configuration for bitcoin-rs SV2 regtest example.
+#
+# The pool connects to bitcoin-rs's native SV2 Template Distribution
+# Protocol endpoint. Authority keys are the SRI reference example keys —
+# do not reuse outside regtest.
+
+# ── Template Provider ─────────────────────────────────────────────
+[template_provider_type.Sv2Tp]
+address = "bitcoin-rs:8442"
+
+# ── Pool ──────────────────────────────────────────────────────────
+[pool]
+listen_address = "0.0.0.0:34255"
+# SRI reference example authority keypair (regtest only).
+authority_public_key = "9bWTZifgp9aVa23vtHqGT74UwK9bDRQxm77jf3u2tZ3ysM2ncMW"
+cert_validity_sec = 3600
+pool_signature = "bitcoin-rs-sv2-example"
+
+# ── Coinbase / Payout ─────────────────────────────────────────────
+[pool.coinbase]
+# Regtest P2WPKH payout address (BIP173 test vector).
+coinbase_reward_script = "0014751e76e8199196d454941c45d1b3a323f1433bd6"
+
+# ── Share difficulty ──────────────────────────────────────────────
+[pool.difficulty]
+# Regtest difficulty floor — shares are trivially valid.
+minimum_share_difficulty = 1

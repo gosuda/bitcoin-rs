@@ -574,9 +574,16 @@ pub(crate) fn start_node(
             &mining_control,
         )));
         let hub = bitcoin_rs_mining::sv2::TemplateHub::new(source);
-        let server = bitcoin_rs_mining::sv2::Sv2TpServer::new(sv2_listen, hub);
-        // Bind eagerly so startup fails fast on address-in-use.
-        // The server runs its own tokio runtime inside a dedicated thread.
+        // Bind synchronously so startup fails fast on address-in-use.
+        match std::net::TcpListener::bind(sv2_listen) {
+            Ok(listener) => drop(listener), // Release; the server thread rebinds.
+            Err(e) => anyhow::bail!("sv2 listen on {sv2_listen} failed: {e}"),
+        }
+        let server = bitcoin_rs_mining::sv2::Sv2TpServer::new(
+            sv2_listen,
+            hub,
+            state.config().mining.sv2_authority_key,
+        );
         guard.services.sv2_server = Some(
             std::thread::Builder::new()
                 .name("bitcoin-rs-sv2".into())
@@ -594,6 +601,12 @@ pub(crate) fn start_node(
                 .map_err(|e| anyhow::anyhow!("failed to spawn sv2 server: {e}"))?,
         );
         tracing::info!(addr = %sv2_listen, "SV2 TDP server spawned");
+    }
+
+    // Fail explicitly if sv2_listen is set but the sv2 feature is disabled.
+    #[cfg(not(feature = "sv2"))]
+    if state.config().mining.sv2_listen.is_some() {
+        anyhow::bail!("--sv2-listen requires the `sv2` feature to be enabled at build time");
     }
 
     let gateway = state.mempool_gateway();

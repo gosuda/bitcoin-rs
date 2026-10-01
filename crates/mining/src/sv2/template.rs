@@ -162,13 +162,12 @@ impl TemplateHub {
 
         // Build SetNewPrevHash payload (NO frame header, NO message-type byte).
         let target = target_from_bits(n_bits);
-        let mut prev_hash_payload = Vec::with_capacity(48);
+        let mut prev_hash_payload = Vec::with_capacity(44);
         prev_hash_payload.extend_from_slice(&template_id.to_le_bytes());
         prev_hash_payload.extend_from_slice(&prev_hash);
         prev_hash_payload.extend_from_slice(&template.candidate.current_time.to_le_bytes());
         prev_hash_payload.extend_from_slice(&n_bits.to_le_bytes());
         prev_hash_payload.extend_from_slice(&target);
-        prev_hash_payload.extend_from_slice(&template.candidate.height.to_le_bytes());
 
         // Per TDP: NewTemplate is sent first, then SetNewPrevHash activates it.
         Ok(Some(TemplateUpdate {
@@ -184,7 +183,7 @@ impl TemplateHub {
     pub fn reconstruct_block(
         &self,
         template_id: u64,
-        _header_version: u32,
+        header_version: u32,
         header_timestamp: u32,
         nonce: u32,
         coinbase_tx_bytes: &[u8],
@@ -211,7 +210,7 @@ impl TemplateHub {
 
         // Use the cached version from the template, not the solution's version
         let header = Header {
-            version: cached.version,
+            version: i32::try_from(header_version).unwrap_or(0),
             prev_blockhash: bitcoin_rs_primitives::BlockHash::from(Hash256::from_le_bytes(
                 &cached.previous_block_hash,
             )),
