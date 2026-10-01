@@ -575,7 +575,6 @@ pub(crate) fn start_node(
         )));
         let hub = bitcoin_rs_mining::sv2::TemplateHub::new(source);
         let server = bitcoin_rs_mining::sv2::Sv2TpServer::new(sv2_listen, hub);
-        let sv2_shutdown = Arc::clone(&shutdown);
         guard.services.sv2_server = Some(tokio::task::spawn(async move {
             if let Err(e) = server.run().await {
                 tracing::error!(error = %e, "sv2 server failed");
