@@ -7,7 +7,7 @@
 
 use crate::context::TxQueryError;
 use crate::rest::{
-    Response, bad_request_owned, internal_error_owned, not_found, service_unavailable_owned,
+    Response, bad_request, internal_error, not_found, service_unavailable,
 };
 
 pub(super) fn query_limit(query: &str, name: &str) -> Option<usize> {
@@ -20,9 +20,9 @@ pub(super) fn query_limit(query: &str, name: &str) -> Option<usize> {
 pub(super) fn query_error(e: TxQueryError) -> Response {
     match e {
         TxQueryError::Retry | TxQueryError::Unavailable(_) => {
-            service_unavailable_owned(e.to_string())
+            service_unavailable(e.to_string())
         }
-        TxQueryError::Storage(_) => internal_error_owned(e.to_string()),
+        TxQueryError::Storage(_) => internal_error(e.to_string()),
     }
 }
 
@@ -43,7 +43,7 @@ pub(super) fn dispatch_error(e: crate::RpcError) -> Response {
         | crate::RpcError::InvalidType(_)
         | crate::RpcError::Deserialization(_)
         | crate::RpcError::TxRejected(_)
-        | crate::RpcError::TxVerifyError(_) => bad_request_owned(e.to_string()),
-        _ => service_unavailable_owned(e.to_string()),
+        | crate::RpcError::TxVerifyError(_) => bad_request(e.to_string()),
+        _ => service_unavailable(e.to_string()),
     }
 }
