@@ -231,12 +231,6 @@ pub struct PhysicalLedger {
 }
 
 impl PhysicalLedger {
-    /// Data-directory budget figure: the physical total, never a logical sum.
-    #[must_use]
-    pub const fn data_directory_allocated_bytes(&self) -> u64 {
-        self.allocated_bytes
-    }
-
     /// Peak used by a budget gate: high-water when present, otherwise the snapshot.
     #[must_use]
     pub fn budget_bytes(&self) -> u64 {

@@ -114,10 +114,6 @@ fn physical_ledger_uses_allocated_blocks_not_apparent_length() {
         "sparse hole must not enter the physical budget as apparent length ({apparent} apparent, {} allocated)",
         blocks.allocated_bytes
     );
-    assert_eq!(
-        ledger.data_directory_allocated_bytes(),
-        ledger.allocated_bytes
-    );
 }
 
 #[test]
@@ -253,11 +249,6 @@ fn logical_flat_files_count_complete_frames_only() {
         blocks.allocated_bytes > 0,
         "block files occupy allocated blocks"
     );
-    assert_eq!(
-        physical.data_directory_allocated_bytes(),
-        physical.allocated_bytes,
-        "the budget figure is the physical total, not a mix with framed bytes"
-    );
 }
 
 fn mkfifo(dir: &std::path::Path, name: &str) {
@@ -325,10 +316,8 @@ fn ledgers_are_not_summed_by_the_physical_total() {
         measure_physical_tree(dir.path()).unwrap_or_else(|error| panic!("physical: {error}"));
     let logical_total = 3_u64;
     assert_ne!(
-        physical.data_directory_allocated_bytes(),
-        physical
-            .data_directory_allocated_bytes()
-            .saturating_add(logical_total),
+        physical.allocated_bytes,
+        physical.allocated_bytes.saturating_add(logical_total),
         "adding logical bytes must not be how the budget is formed"
     );
 }
