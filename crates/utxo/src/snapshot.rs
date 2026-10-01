@@ -408,11 +408,6 @@ impl UtxoSetView<'_> {
     }
 }
 
-/// Computes a deterministic aggregate hash over sorted live UTXO entries.
-pub fn aggregate_hash(set: &UtxoSet) -> Result<Hash256, UtxoError> {
-    hash_serialized_3(set)
-}
-
 struct HashSerializedEntry<'a> {
     txid_le: [u8; 32],
     output: OneUtxoOut<'a>,
