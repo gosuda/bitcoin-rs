@@ -126,7 +126,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     hub: Arc<Mutex<TemplateHub>>,
     authority_secret: [u8; 32],
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // ── Noise handshake ──────────────────────────────────────────
     let secret_key = secp256k1_sv2::SecretKey::from_slice(&authority_secret)
         .map_err(|e| format!("invalid authority key: {e}"))?;
@@ -259,14 +259,59 @@ async fn handle_connection(
                                     let header_timestamp =
                                         u32::from_le_bytes(payload[12..16].try_into()?);
                                     let nonce = u32::from_le_bytes(payload[16..20].try_into()?);
+                                    let coinbase_tx = &payload[20..];
                                     tracing::info!(
                                         template_id,
                                         version,
                                         header_timestamp,
                                         nonce,
+                                        coinbase_len = coinbase_tx.len(),
                                         "SubmitSolution received"
                                     );
-                                    // TODO: decode full block and submit via MiningSource
+
+                                    // Reconstruct the full block and submit
+                                    let result = {
+                                        let h = hub.lock();
+                                        h.reconstruct_block(
+                                            template_id,
+                                            version,
+                                            header_timestamp,
+                                            nonce,
+                                            coinbase_tx,
+                                        )
+                                    };
+
+                                    match result {
+                                        Ok(block) => {
+                                            let h = hub.lock();
+                                            // Access the source through the template hub
+                                            // The source is stored in TemplateHub
+                                            match h.submit_block(block) {
+                                                Ok(validation) => {
+                                                    tracing::info!(
+                                                        template_id,
+                                                        ?validation,
+                                                        "block submitted successfully"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!(
+                                                        template_id,
+                                                        error = %e,
+                                                        "block submission failed"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                template_id,
+                                                error = %e,
+                                                "block reconstruction failed"
+                                            );
+                                        }
+                                    }
+
                                     let frame = encode_frame(
                                         MSG_SUBMIT_SOLUTION,
                                         &build_submit_solution_success(),

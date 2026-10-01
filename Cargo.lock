@@ -462,6 +462,7 @@ dependencies = [
  "bitcoin-rs-mempool",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
+ "bitcoin_hashes 0.14.101",
  "codec_sv2",
  "compact_str",
  "criterion",
