@@ -83,11 +83,7 @@ mod tests {
     fn every_command_name_is_unique_and_fits_the_v1_field() {
         let names: BTreeSet<&str> = COMMANDS.iter().copied().collect();
         assert_eq!(names.len(), COMMANDS.len(), "command names must be unique");
-        for name in COMMANDS
-            .iter()
-            .chain(CORE_UNTYPED_COMMANDS.iter())
-            .copied()
-        {
+        for name in COMMANDS.iter().chain(CORE_UNTYPED_COMMANDS.iter()) {
             assert!(
                 !name.is_empty() && name.len() <= 12,
                 "{name} does not fit the 12-byte v1 command field"
