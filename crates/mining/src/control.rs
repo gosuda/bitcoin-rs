@@ -8,7 +8,6 @@
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::vec::Vec;
 
 use bitcoin_rs_mempool::SnapshotEntry;
 #[cfg(any(test, feature = "test-seam"))]
