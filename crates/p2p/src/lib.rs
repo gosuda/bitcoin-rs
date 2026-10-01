@@ -54,7 +54,7 @@ pub mod wtxid;
 
 pub use chain_query::ActiveChainQuery;
 pub use compact_blocks::{CompactBlockHints, Reconstruction};
-pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, Command, CommandStatus, PINNED_CORE_VERSION};
+pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, PINNED_CORE_VERSION};
 pub use connection::{ConnectionId, PeerLease, PeerSource, ReadyPeer};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};

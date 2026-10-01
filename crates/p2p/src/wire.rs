@@ -534,7 +534,7 @@ fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
     // COMMANDS is the allow-list for typed decoding. Keep this gate before the
     // dispatch table so a decoder arm cannot silently create an unlisted
     // typed command.
-    if crate::compat::command(command).is_none() {
+    if !crate::compat::is_typed_command(command) {
         return Ok(Message::Unknown {
             command: command_string(command)?,
             payload: payload.to_vec(),
@@ -582,7 +582,7 @@ fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
         "sendaddrv2" => empty_payload(payload, Message::SendAddrV2)?,
         _ => {
             debug_assert!(
-                crate::compat::command(command).is_none(),
+                !crate::compat::is_typed_command(command),
                 "typed command {command} is missing from decode_payload"
             );
             Message::Unknown {

@@ -398,12 +398,11 @@ fn our_frame(message: &Message) -> Result<Vec<u8>, Box<dyn Error>> {
 fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), Box<dyn Error>> {
     let magic = Magic::REGTEST;
     for spec in COMMANDS {
-        let frame = raw_frame(magic, &command_field(spec.name)?, &[]);
+        let frame = raw_frame(magic, &command_field(spec)?, &[]);
         match read_message(&mut Cursor::new(frame), magic) {
             Ok((Message::Unknown { command, .. }, _)) => {
                 return Err(format!(
-                    "{} is in COMMANDS but decoded as Unknown ({command})",
-                    spec.name
+                    "{spec} is in COMMANDS but decoded as Unknown ({command})"
                 )
                 .into());
             }
@@ -415,7 +414,7 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
                 | PeerError::Varint(_),
             ) => {}
             Err(error) => {
-                return Err(format!("{}: unexpected decode error {error}", spec.name).into());
+                return Err(format!("{spec}: unexpected decode error {error}").into());
             }
         }
     }
