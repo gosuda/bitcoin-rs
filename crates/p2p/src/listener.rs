@@ -242,7 +242,7 @@ impl ConnectionShared {
     /// INVARIANT: reads the shared chain view once; no per-handshake block
     ///   tree walk exists.
     #[must_use]
-    pub fn approximate_best_block_depth(&self) -> u64 {
+    pub(crate) fn approximate_best_block_depth(&self) -> u64 {
         let Some(tip_time) = self
             .chain_query
             .as_ref()
@@ -590,7 +590,7 @@ pub fn spawn_outbound_connection(
 /// INVARIANT: The lease records the pinned origin at spawn, and the eviction
 ///   rules read it back from there.
 #[must_use]
-pub fn spawn_pinned_outbound_connection(
+pub(crate) fn spawn_pinned_outbound_connection(
     addr: SocketAddr,
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
@@ -1856,7 +1856,7 @@ mod outbound_tests {
         clippy::expect_used,
         reason = "a helper that cannot build its fixture has nothing to report"
     )]
-    fn registered_session(dial: Dial) -> crate::PeerSession {
+    fn registered_session(dial: Dial) -> crate::peer_table::PeerSession {
         use std::time::{Duration, Instant};
 
         let listener =
@@ -2939,8 +2939,6 @@ mod writer_shutdown_tests {
                 // advertisement alone must not switch the remote preference.
                 if peer_requested_wtxid {
                     peer.wtxid_relay.mark_peer_supported();
-                } else {
-                    peer.wtxid_relay.mark_local_advertised();
                 }
                 let result =
                     run_connected_session(&mut peer, peer_addr, &shared, lease, outbound_rx, info);

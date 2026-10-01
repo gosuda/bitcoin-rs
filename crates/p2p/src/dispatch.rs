@@ -1634,15 +1634,12 @@ mod tests {
                         .is_ok()
                 );
             }
-            for (local_requested, remote_requested, item) in [
-                (true, false, Inventory::WTx(wtxid)),
-                (false, true, Inventory::Transaction(txid)),
-                (false, true, Inventory::WitnessTransaction(txid)),
+            for (remote_requested, item) in [
+                (false, Inventory::WTx(wtxid)),
+                (true, Inventory::Transaction(txid)),
+                (true, Inventory::WitnessTransaction(txid)),
             ] {
                 let mut peer = ready_peer();
-                if local_requested {
-                    peer.wtxid_relay.mark_local_advertised();
-                }
                 if remote_requested {
                     peer.wtxid_relay.mark_peer_supported();
                 }
