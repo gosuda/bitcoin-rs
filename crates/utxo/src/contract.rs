@@ -113,14 +113,6 @@ impl<T> BlockChanges<T> {
     pub fn spent_outpoints(&self) -> &[OutPoint] {
         &self.removes
     }
-
-    pub(crate) fn adds_slice(&self) -> &[UtxoAdd<T>] {
-        &self.adds
-    }
-
-    pub(crate) fn removes_slice(&self) -> &[OutPoint] {
-        &self.removes
-    }
 }
 
 /// Inverse mutations needed to disconnect one block.
@@ -170,12 +162,6 @@ impl UndoBatch {
     /// Crate-visible on purpose: see [`Self::restore`].
     pub(crate) fn remove(&mut self, outpoint: OutPoint) {
         self.removes.push(outpoint);
-    }
-
-    /// Returns true when the undo batch is empty.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.restores.is_empty() && self.removes.is_empty()
     }
 
     /// Rebuilds a batch from its decoded parts.

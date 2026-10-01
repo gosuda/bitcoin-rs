@@ -193,12 +193,6 @@ impl UtxoSetView<'_> {
         self.set.shards.iter().map(Shard::output_count).sum()
     }
 
-    /// Returns true when this stable view has no live outpoint entries.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// Returns the number of transaction-level records in this stable view.
     #[must_use]
     pub fn record_count(&self) -> usize {
@@ -327,7 +321,7 @@ impl UtxoSet {
             removes = changes.remove_count(),
             "commit utxo block"
         );
-        self.commit_adds_and_removes(changes.adds_slice(), changes.removes_slice())
+        self.commit_adds_and_removes(changes.adds(), changes.spent_outpoints())
     }
 
     /// Returns an owned transaction output if the outpoint is live.
