@@ -193,6 +193,12 @@ impl UtxoSetView<'_> {
         self.set.shards.iter().map(Shard::output_count).sum()
     }
 
+    /// Returns true when this stable view has no live outpoint entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Returns the number of transaction-level records in this stable view.
     #[must_use]
     pub fn record_count(&self) -> usize {
