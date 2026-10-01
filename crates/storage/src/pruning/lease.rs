@@ -38,7 +38,7 @@
 //! expires that pin once it lags the policy line by more than the granted
 //! [`RetentionBudget`]. An optional consumer therefore cannot retain history
 //! indefinitely, and the answer it receives — granted, pruned, reserved,
-//! missing, corrupt, or shutting down — is the owner's decision, not its
+//! missing, or shutting down — is the owner's decision, not its
 //! own guess.
 
 use crate::pruning::ExecutedFrontier;
@@ -200,7 +200,7 @@ impl RetentionBudget {
 /// [`RetentionRegistry::history_from`] answers permanence, and while a
 /// [`HistoryLease`] is live the owner guarantees no row at or above its
 /// floor is deleted, so a read that returns nothing under that grant is
-/// `Missing` and a read that returns damaged bytes is `Corrupt`. A consumer
+/// `Missing`. A consumer
 /// relays these meanings; it never compares a height against a copied prune
 /// frontier to decide them.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
@@ -226,11 +226,6 @@ pub enum HistoryUnavailable {
     /// appear through backfill or a reconnect. Retry; do not rebuild.
     #[error("retained history is temporarily unavailable")]
     Missing,
-    /// The row is present but damaged. Retrying cannot recover it. Owners
-    /// that verify what they serve answer this; the boundary names it so a
-    /// consumer never has to guess between damage and absence.
-    #[error("retained history is corrupt")]
-    Corrupt,
     /// The node is shutting down, so no new history is granted.
     #[error("history is unavailable while the node shuts down")]
     Shutdown,
@@ -636,8 +631,7 @@ impl Drop for RetentionLease {
 /// While this lease lives the authority deletes no row at or above its
 /// floor. That guarantee is what types a byte read: a read that returns
 /// nothing under a live grant is transient absence
-/// ([`HistoryUnavailable::Missing`]), never lost history, and a read that
-/// returns damaged bytes is [`HistoryUnavailable::Corrupt`]. The consumer
+/// ([`HistoryUnavailable::Missing`]), never lost history. The consumer
 /// relays those meanings instead of deciding permanence on its own.
 ///
 /// A pass expires the lease when its floor lags the policy line by more than
