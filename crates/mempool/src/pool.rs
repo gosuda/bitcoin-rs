@@ -1732,7 +1732,7 @@ impl Mempool {
         changes: &mut Vec<MutationChange>,
     ) {
         let mut ids = Vec::new();
-        self.collect_descendants_inclusive(id, &mut ids);
+        self.collect_descendants(id, &mut ids, true);
         ids.sort_unstable();
         ids.dedup();
         let removals = ids.into_iter().map(|id| (id, reason)).collect::<Vec<_>>();
@@ -1869,7 +1869,7 @@ impl Mempool {
     pub(crate) fn descendants_of_conflicts(&self, direct: &[EntryId]) -> Vec<EntryId> {
         let mut conflicts = direct.to_vec();
         for &id in direct {
-            self.collect_descendants_exclusive(id, &mut conflicts);
+            self.collect_descendants(id, &mut conflicts, false);
         }
         conflicts.sort_unstable();
         conflicts.dedup();
@@ -1907,8 +1907,7 @@ impl Mempool {
     #[must_use]
     pub fn descendant_ids_for_entry(&self, id: EntryId) -> Vec<EntryId> {
         let mut ids = Vec::new();
-        self.collect_descendants_inclusive(id, &mut ids);
-        ids.retain(|other| *other != id);
+        self.collect_descendants(id, &mut ids, false);
         ids.sort_unstable();
         ids.dedup();
         ids
@@ -2399,32 +2398,19 @@ impl Mempool {
         ancestors
     }
 
-    fn collect_descendants_inclusive(&self, id: EntryId, out: &mut Vec<EntryId>) {
-        let mut seen = VisitSet::new();
-        seen.insert(id);
-        let mut stack = vec![id];
-        while let Some(current) = stack.pop() {
-            out.push(current);
-            let Some(links) = self.links(current) else {
-                continue;
-            };
-            for child in links.children.iter().copied() {
-                if seen.insert(child) {
-                    stack.push(child);
-                }
-            }
-        }
-    }
-
-    /// Descendants of `id` appended to `out`, skipping anything already in
-    /// it. Iterative over the child links, so depth follows membership, not
+    /// Descendants of `id` appended to `out`, including `id` itself when
+    /// `include_root` holds, and skipping anything already in `out`.
+    /// Iterative over the child links, so depth follows membership, not
     /// the recursion stack.
-    fn collect_descendants_exclusive(&self, id: EntryId, out: &mut Vec<EntryId>) {
+    fn collect_descendants(&self, id: EntryId, out: &mut Vec<EntryId>, include_root: bool) {
         let mut seen = VisitSet::new();
         for existing in out.iter() {
             seen.insert(*existing);
         }
         seen.insert(id);
+        if include_root {
+            out.push(id);
+        }
         let mut stack = vec![id];
         while let Some(current) = stack.pop() {
             let Some(links) = self.links(current) else {
@@ -2464,7 +2450,7 @@ impl Mempool {
     #[must_use]
     pub fn descendant_count_inclusive(&self, id: EntryId) -> u32 {
         let mut descendants = Vec::new();
-        self.collect_descendants_inclusive(id, &mut descendants);
+        self.collect_descendants(id, &mut descendants, true);
         u32::try_from(descendants.len()).unwrap_or(u32::MAX)
     }
 
