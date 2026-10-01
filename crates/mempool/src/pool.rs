@@ -1882,22 +1882,11 @@ impl Mempool {
     /// edges between them — not a per-input txid lookup per step.
     #[must_use]
     pub fn ancestor_ids_for_entry(&self, id: EntryId) -> Vec<EntryId> {
-        let mut seen = VisitSet::new();
-        let mut stack: Vec<EntryId> = Vec::new();
-        if let Some(links) = self.links(id) {
-            stack.extend_from_slice(&links.parents);
-        }
-        while let Some(ancestor) = stack.pop() {
-            if !seen.insert(ancestor) {
-                continue;
-            }
-            if let Some(links) = self.links(ancestor) {
-                stack.extend_from_slice(&links.parents);
-            }
-        }
-        let mut ancestors = seen.members().to_vec();
-        ancestors.sort_unstable();
-        ancestors
+        self.collect_ancestors(
+            self.links(id)
+                .map(|links| links.parents.clone())
+                .unwrap_or_default(),
+        )
     }
 
     /// Returns all descendant entry ids for `id`, EXCLUDING `id` itself.
@@ -2372,25 +2361,23 @@ impl Mempool {
     }
 
     fn ancestor_ids_for_tx(&self, tx: &Tx) -> Vec<EntryId> {
-        // For a candidate that has no entry yet: resolve parents through the
-        // txid index, one step per in-pool ancestor, with the visited set as
-        // a growing bitset rather than a scanned Vec.
+        // For a candidate that has no entry yet: resolve its direct parents
+        // through the txid index, then walk the cached links like any entry.
+        self.collect_ancestors(self.in_pool_parents(tx))
+    }
+
+    /// Transitive in-pool ancestors of `seeds`, deduplicated and in `EntryId`
+    /// order. Iterative over the cached parent links, so depth follows
+    /// membership, not the recursion stack.
+    fn collect_ancestors(&self, seeds: Vec<EntryId>) -> Vec<EntryId> {
         let mut seen = VisitSet::new();
-        let mut stack = tx
-            .inputs
-            .iter()
-            .filter_map(|input| self.entry_id_by_txid(&input.previous_output.txid))
-            .collect::<Vec<_>>();
+        let mut stack = seeds;
         while let Some(id) = stack.pop() {
             if !seen.insert(id) {
                 continue;
             }
-            if let Some(entry) = self.entry(id) {
-                for input in &entry.tx.inputs {
-                    if let Some(parent) = self.entry_id_by_txid(&input.previous_output.txid) {
-                        stack.push(parent);
-                    }
-                }
+            if let Some(links) = self.links(id) {
+                stack.extend_from_slice(&links.parents);
             }
         }
         let mut ancestors = seen.members().to_vec();
