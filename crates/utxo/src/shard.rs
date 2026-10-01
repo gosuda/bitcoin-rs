@@ -255,39 +255,25 @@ fn commit_batch_collect_events<'a>(
 ) -> (UtxoChangeEvents<'a>, Result<(), UtxoError>) {
     let mut events = UtxoChangeEvents::with_capacity_hint(adds.len(), removes.len());
 
-    let mut remaining_removes = removes;
-    while let Some((first, rest)) = remaining_removes.split_first() {
-        let run_len = rest
-            .iter()
-            .take_while(|remove| remove.key == first.key && remove.txid == first.txid)
-            .count()
-            .saturating_add(1);
-        if let Err(error) =
-            apply_remove_run_collect_events(table, &remaining_removes[..run_len], &mut events)
-        {
-            return (events, Err(error));
-        }
-        remaining_removes = &remaining_removes[run_len..];
+    let result = for_each_run(
+        removes,
+        |remove, first| remove.key == first.key && remove.txid == first.txid,
+        |run| apply_remove_run_collect_events(table, run, &mut events),
+    );
+    if let Err(error) = result {
+        return (events, Err(error));
     }
 
-    reserve_add_runs(table, coalesced_add_run_count(adds));
-    let mut remaining_adds = adds;
-    while let Some((first, rest)) = remaining_adds.split_first() {
-        let run_len = rest
-            .iter()
-            .take_while(|(key, txid, _payload)| *key == first.0 && *txid == first.1)
-            .count()
-            .saturating_add(1);
-        if let Err(error) = apply_add_run_collect_events(
-            table,
-            first.0,
-            first.1,
-            &remaining_adds[..run_len],
-            &mut events,
-        ) {
-            return (events, Err(error));
-        }
-        remaining_adds = &remaining_adds[run_len..];
+    let same_add = |add: &(UtxoKey, Hash256, BuildPayload<'_>),
+                    first: &(UtxoKey, Hash256, BuildPayload<'_>)| {
+        add.0 == first.0 && add.1 == first.1
+    };
+    reserve_add_runs(table, run_count(adds, same_add));
+    let result = for_each_run(adds, same_add, |run| {
+        apply_add_run_collect_events(table, run[0].0, run[0].1, run, &mut events)
+    });
+    if let Err(error) = result {
+        return (events, Err(error));
     }
     (events, Ok(()))
 }
@@ -457,41 +443,31 @@ fn commit_single_shard_with_listener<T: Borrow<TxOut>>(
     shard_idx: usize,
     listener: &(dyn UtxoChangeListener + Send + Sync),
 ) -> Result<(), UtxoError> {
-    let mut remaining_removes = removes;
-    while let Some((first, rest)) = remaining_removes.split_first() {
-        let key = UtxoKey::from_txid(&first.txid);
-        debug_assert_eq!(usize::from(key.shard()), shard_idx);
-        let run_len = rest
-            .iter()
-            .take_while(|remove| remove.txid == first.txid)
-            .count()
-            .saturating_add(1);
-        let run = spend_payloads(&remaining_removes[..run_len]);
-        apply_remove_run_with_listener(table, &run, listener)?;
-        remaining_removes = &remaining_removes[run_len..];
-    }
+    for_each_run(
+        removes,
+        |remove, first| remove.txid == first.txid,
+        |run| {
+            let key = UtxoKey::from_txid(&run[0].txid);
+            debug_assert_eq!(usize::from(key.shard()), shard_idx);
+            let spends = spend_payloads(run);
+            apply_remove_run_with_listener(table, &spends, listener)
+        },
+    )?;
 
-    reserve_add_runs(table, utxo_add_run_count(adds));
-    let mut remaining_adds = adds;
-    while let Some((first, rest)) = remaining_adds.split_first() {
-        let key = UtxoKey::from_txid(&first.outpoint.txid);
+    let same_add = |add: &UtxoAdd<T>, first: &UtxoAdd<T>| add.outpoint.txid == first.outpoint.txid;
+    reserve_add_runs(table, run_count(adds, same_add));
+    for_each_run(adds, same_add, |run| {
+        let key = UtxoKey::from_txid(&run[0].outpoint.txid);
         debug_assert_eq!(usize::from(key.shard()), shard_idx);
-        let run_len = rest
-            .iter()
-            .take_while(|add| add.outpoint.txid == first.outpoint.txid)
-            .count()
-            .saturating_add(1);
-        let payloads = build_payloads(&remaining_adds[..run_len]);
+        let payloads = build_payloads(run);
         apply_add_payload_run_with_listener(
             table,
             key,
-            first.outpoint.txid.into(),
+            run[0].outpoint.txid.into(),
             &payloads,
             listener,
-        )?;
-        remaining_adds = &remaining_adds[run_len..];
-    }
-    Ok(())
+        )
+    })
 }
 
 fn reserve_add_runs(table: &mut ShardTable, additional_runs: usize) {
@@ -502,36 +478,34 @@ fn reserve_add_runs(table: &mut ShardTable, additional_runs: usize) {
     }
 }
 
-fn coalesced_add_run_count(adds: &[(UtxoKey, Hash256, BuildPayload<'_>)]) -> usize {
-    let mut run_count = 0usize;
-    let mut remaining_adds = adds;
-    while let Some((first, rest)) = remaining_adds.split_first() {
+/// Invokes `apply` once per maximal run of consecutive items sharing the
+/// run's identity under `same_run` (each item compared to the run's first).
+/// Runs are adjacent groups in caller order; the stream is not sorted first.
+fn for_each_run<'a, T: 'a, E>(
+    mut items: &'a [T],
+    same_run: impl Fn(&T, &T) -> bool,
+    mut apply: impl FnMut(&'a [T]) -> Result<(), E>,
+) -> Result<(), E> {
+    while let Some((first, rest)) = items.split_first() {
         let run_len = rest
             .iter()
-            .take_while(|(next_key, next_txid, _payload)| {
-                *next_key == first.0 && *next_txid == first.1
-            })
+            .take_while(|item| same_run(item, first))
             .count()
             .saturating_add(1);
-        run_count = run_count.saturating_add(1);
-        remaining_adds = &remaining_adds[run_len..];
+        apply(&items[..run_len])?;
+        items = &items[run_len..];
     }
-    run_count
+    Ok(())
 }
 
-fn utxo_add_run_count<T: Borrow<TxOut>>(adds: &[UtxoAdd<T>]) -> usize {
-    let mut run_count = 0usize;
-    let mut remaining_adds = adds;
-    while let Some((first, rest)) = remaining_adds.split_first() {
-        let run_len = rest
-            .iter()
-            .take_while(|add| add.outpoint.txid == first.outpoint.txid)
-            .count()
-            .saturating_add(1);
-        run_count = run_count.saturating_add(1);
-        remaining_adds = &remaining_adds[run_len..];
-    }
-    run_count
+/// Counts the runs `for_each_run` would yield, for table pre-reservation.
+fn run_count<T>(items: &[T], same_run: impl Fn(&T, &T) -> bool) -> usize {
+    let mut count = 0usize;
+    let _: Result<(), core::convert::Infallible> = for_each_run(items, same_run, |_| {
+        count += 1;
+        Ok(())
+    });
+    count
 }
 
 fn spend_payloads(removes: &[OutPoint]) -> Vec<SpendPayload<'_>> {
