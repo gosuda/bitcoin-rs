@@ -58,7 +58,7 @@ const GENERATION_RACE: &str = "generation key changed during candidate assembly"
 const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
 
 /// Applied-tip hash plus mempool sequence that identify one candidate generation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GenerationKey {
     /// Applied tip hash in consensus little-endian storage order.
     pub tip_hash: Hash256,
