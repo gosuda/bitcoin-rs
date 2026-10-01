@@ -1287,6 +1287,7 @@ where
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::PeerSource;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 
     fn idle_ready() -> Arc<dyn Fn(PeerSource) + Send + Sync> {
