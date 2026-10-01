@@ -366,10 +366,7 @@ impl NodeState {
         if !self.config.indexes.txindex {
             return None;
         }
-        self.derived_index.adapter().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
-            q
-        })
+        self.esplora_derived_index_query()
     }
 
     /// Returns transaction lookup for internal Esplora projections.
