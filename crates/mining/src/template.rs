@@ -74,18 +74,6 @@ impl TemplateId {
     }
 }
 
-impl AsRef<str> for TemplateId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl core::fmt::Display for TemplateId {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
 /// One non-coinbase transaction selected into a candidate.
 #[derive(Clone, Debug)]
 pub struct CandidateTransaction {
