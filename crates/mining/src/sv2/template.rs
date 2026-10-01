@@ -91,6 +91,7 @@ impl TemplateHub {
             set_new_prev_hash: prev_hash_msg,
             template_id,
             height: template.candidate.height,
+            txids,
         }))
     }
 }
@@ -105,6 +106,8 @@ pub struct TemplateUpdate {
     pub template_id: u64,
     /// Block height.
     pub height: u32,
+    /// Candidate transaction IDs.
+    pub txids: Vec<[u8; 32]>,
 }
 
 /// Builds a BIP34 coinbase prefix (height push).

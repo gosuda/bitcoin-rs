@@ -1,11 +1,12 @@
 # Stratum V2 regtest example
 #
-# bitcoin-rs runs as the mining owner (regtest).
-# An SRI pool connects to bitcoin-rs via the SV2 template-provider bridge.
+# bitcoin-rs runs as the mining owner (regtest) with its native SV2
+# Template Distribution Protocol server enabled.
+# An SRI pool connects directly to bitcoin-rs via SV2.
 # Two CPU miners connect to the pool.
 #
-# The bridge (template-provider) translates between bitcoin-rs's
-# getblocktemplate/submitblock RPC and the SV2 Template Distribution Protocol.
+# Architecture:
+#   miner-1, miner-2 → pool (SRI) → bitcoin-rs (native SV2 TP)
 #
 # Usage:
 #   docker compose up -d
@@ -18,6 +19,8 @@ services:
     build:
       context: ../..
       dockerfile: Dockerfile
+      args:
+        FEATURES: "fjall,kernel,sv2"
     command:
       - --network=regtest
       - --data-dir=/data
@@ -25,6 +28,7 @@ services:
       - --rpc-user=bitcoin-rs
       - --rpc-password=bitcoin-rs
       - --mining-payout-address=bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080
+      - --sv2-listen=0.0.0.0:8442
     volumes:
       - bitcoin-rs-data:/data
     ports:
@@ -51,21 +55,9 @@ services:
     image: stratumv2/pool_sv2:v0.8.0
     stop_signal: SIGINT
     environment:
-      SV2_TP_ADDR: "template-provider:8442"
+      SV2_TP_ADDR: "bitcoin-rs:8442"
     ports:
       - "127.0.0.1:9090:9090"
-    depends_on:
-      template-provider:
-        condition: service_started
-    restart: unless-stopped
-
-  template-provider:
-    image: ghcr.io/stratum-mining/sv2-tp:main
-    environment:
-      BITCOIN_RPC_URL: "http://bitcoin-rs:18443"
-      BITCOIN_RPC_USER: "bitcoin-rs"
-      BITCOIN_RPC_PASS: "bitcoin-rs"
-      SV2_LISTEN_ADDR: "0.0.0.0:8442"
     depends_on:
       bitcoin-rs:
         condition: service_healthy

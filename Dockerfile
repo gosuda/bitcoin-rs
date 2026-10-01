@@ -20,8 +20,9 @@ COPY . .
 # leaving the other storage engines out of the runtime image. `kernel` is a
 # capability ("bitcoinkernel support is compiled in"); the shipped image then
 # selects it in its default config file below.
+ARG FEATURES="fjall,kernel"
 RUN cargo build --locked --release -p bitcoin-rs \
-    --no-default-features --features fjall,kernel
+    --no-default-features --features "${FEATURES}"
 
 FROM debian:bookworm-slim AS runtime
 
