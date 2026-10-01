@@ -80,15 +80,6 @@ pub trait UtxoView {
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut>;
 }
 
-impl<T> UtxoView for &T
-where
-    T: UtxoView + ?Sized,
-{
-    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
-        (*self).lookup(outpoint)
-    }
-}
-
 /// The engine that rejected a script.
 ///
 /// The two backends disagree about what a rejection means, and the difference
