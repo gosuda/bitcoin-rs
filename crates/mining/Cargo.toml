@@ -24,10 +24,12 @@ thiserror.workspace = true
 
 # Optional Stratum V2 dependencies (behind `sv2` feature).
 network_helpers = { workspace = true, optional = true }
+noise_sv2 = { workspace = true, optional = true }
 template_distribution_sv2 = { workspace = true, optional = true }
 binary_sv2 = { workspace = true, optional = true }
 codec_sv2 = { workspace = true, optional = true }
 secp256k1 = { workspace = true, optional = true }
+secp256k1-sv2 = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 
@@ -35,9 +37,9 @@ tracing = { workspace = true, optional = true }
 default = []
 test-seam = []
 sv2 = [
-    "dep:network_helpers", "dep:template_distribution_sv2",
+    "dep:network_helpers", "dep:noise_sv2", "dep:template_distribution_sv2",
     "dep:binary_sv2", "dep:codec_sv2",
-    "dep:secp256k1", "dep:tokio", "dep:tracing",
+    "dep:secp256k1", "dep:secp256k1-sv2", "dep:tokio", "dep:tracing",
 ]
 
 [dev-dependencies]

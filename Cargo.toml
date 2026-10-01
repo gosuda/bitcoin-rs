@@ -183,6 +183,10 @@ clap       = { version = ">=4.6, <5",   default-features = false, features = [
 # network_helpers wraps the Noise handshake + connection lifecycle.
 # Version pinned to match its SV2 ecosystem (noise_sv2 1.4.x, codec_sv2 1.3.x).
 network_helpers           = { version = "=1.0.0", features = ["tokio"] }
+noise_sv2                 = "=2.0.0"
+# secp256k1 v0.28 — required by noise_sv2 v2.0.0 (separate from workspace v0.29)
+secp256k1-sv2             = { package = "secp256k1", version = "=0.28.2" }
+# secp256k1 v0.28 — required by noise_sv2 v2.0.0 (separate from workspace v0.29)
 template_distribution_sv2 = "=4.0.2"
 binary_sv2                = "=3.0.2"
 codec_sv2                 = "=1.3.1"

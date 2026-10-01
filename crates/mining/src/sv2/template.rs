@@ -1,7 +1,7 @@
 //! Block template conversion to SV2 TDP messages.
 //!
-//! Converts the node-owned [`BlockTemplate`] into raw SV2 TDP message
-//! bytes (NewTemplate + SetNewPrevHash) ready for transmission.
+//! Converts the node-owned [`BlockTemplate`](crate::BlockTemplate) into raw
+//! SV2 TDP message bytes (`NewTemplate` + `SetNewPrevHash`) ready for transmission.
 
 use std::sync::Arc;
 
@@ -33,7 +33,7 @@ impl TemplateHub {
         let template = self.source.current_template()?;
 
         let prev_hash: [u8; 32] = *template.candidate.previous_block_hash.as_byte_array();
-        let tip_changed = self.last_prev_hash.map_or(true, |h| h != prev_hash);
+        let tip_changed = self.last_prev_hash.is_none_or(|h| h != prev_hash);
 
         self.last_template_id += 1;
         let template_id = self.last_template_id;
@@ -65,10 +65,14 @@ impl TemplateHub {
         new_template_msg.push(0x71); // MESSAGE_TYPE_NEW_TEMPLATE
         new_template_msg.extend_from_slice(&template_id.to_le_bytes());
         new_template_msg.push(u8::from(tip_changed));
-        new_template_msg.extend_from_slice(&(template.candidate.version as u32).to_le_bytes());
+        new_template_msg.extend_from_slice(
+            &u32::try_from(template.candidate.version)
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
         new_template_msg.extend_from_slice(&template.candidate.current_time.to_le_bytes());
         new_template_msg.extend_from_slice(&n_bits.to_le_bytes());
-        new_template_msg.push(coinbase_prefix.len() as u8);
+        new_template_msg.push(u8::try_from(coinbase_prefix.len()).unwrap_or(0));
         new_template_msg.extend_from_slice(&coinbase_prefix);
         new_template_msg.extend_from_slice(&2u32.to_le_bytes()); // coinbase_tx_version
         new_template_msg.extend_from_slice(&0u32.to_le_bytes()); // coinbase_prefix_location
@@ -77,7 +81,7 @@ impl TemplateHub {
         new_template_msg.push(0u8); // coinbase_tx_outputs_count
         new_template_msg.extend_from_slice(&0u32.to_le_bytes()); // coinbase_tx_locktime
         new_template_msg.extend_from_slice(&0u32.to_le_bytes()); // merkle_path len
-        new_template_msg.extend_from_slice(&(txids.len() as u32).to_le_bytes());
+        new_template_msg.extend_from_slice(&u32::try_from(txids.len()).unwrap_or(0).to_le_bytes());
         for txid in &txids {
             new_template_msg.extend_from_slice(txid);
         }
@@ -93,9 +97,9 @@ impl TemplateHub {
 
 /// A template update to send to connected pools.
 pub struct TemplateUpdate {
-    /// Raw NewTemplate message bytes.
+    /// Raw `NewTemplate` message bytes.
     pub new_template: Vec<u8>,
-    /// Raw SetNewPrevHash message bytes.
+    /// Raw `SetNewPrevHash` message bytes.
     pub set_new_prev_hash: Vec<u8>,
     /// Template ID.
     pub template_id: u64,
@@ -104,6 +108,7 @@ pub struct TemplateUpdate {
 }
 
 /// Builds a BIP34 coinbase prefix (height push).
+#[allow(clippy::as_conversions)]
 fn coinbase_prefix(height: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut h = height;
@@ -112,12 +117,13 @@ fn coinbase_prefix(height: u32) -> Vec<u8> {
         h >>= 8;
     }
     let mut prefix = Vec::with_capacity(1 + bytes.len());
-    prefix.push(bytes.len() as u8);
+    prefix.push(u8::try_from(bytes.len()).unwrap_or(0));
     prefix.extend_from_slice(&bytes);
     prefix
 }
 
 /// Converts compact bits to a 256-bit target.
+#[allow(clippy::as_conversions)]
 fn target_from_bits(bits: u32) -> [u8; 32] {
     let mut target = [0u8; 32];
     let exponent = ((bits >> 24) & 0xff) as usize;
