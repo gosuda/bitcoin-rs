@@ -401,10 +401,9 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
         let frame = raw_frame(magic, &command_field(spec)?, &[]);
         match read_message(&mut Cursor::new(frame), magic) {
             Ok((Message::Unknown { command, .. }, _)) => {
-                return Err(format!(
-                    "{spec} is in COMMANDS but decoded as Unknown ({command})"
-                )
-                .into());
+                return Err(
+                    format!("{spec} is in COMMANDS but decoded as Unknown ({command})").into(),
+                );
             }
             Ok(_)
             | Err(

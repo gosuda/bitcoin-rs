@@ -116,7 +116,7 @@ impl PeerInfo {
 
     /// Constructs a `PeerInfo` for an outbound peer from the captured remote `VersionMessage`.
     #[must_use]
-    pub fn outbound_from_version(
+    pub(crate) fn outbound_from_version(
         addr: SocketAddr,
         addr_bind: SocketAddr,
         version: &VersionMessage,

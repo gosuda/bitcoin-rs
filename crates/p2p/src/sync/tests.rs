@@ -37,7 +37,8 @@ use super::chain::{
 };
 use super::receive::unrequested_body_admissible;
 use super::{BlockSync, Inventory};
-use crate::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable, StagedBlock};
+use crate::block_stager::StagedBlock;
+use crate::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable};
 
 /// One-shot scripted branch switch: `connected` hashes are reported as
 /// committed (applied tip advanced, `connected_body` fired) before `error`

@@ -668,7 +668,7 @@ impl HeadersSyncState {
     /// INVARIANT: locator progress is monotonic within a phase: the cursor is
     ///   the deepest header this sync has accepted.
     #[must_use]
-    pub fn next_locator(&self) -> Vec<Hash256> {
+    pub(crate) fn next_locator(&self) -> Vec<Hash256> {
         if self.phase == HeadersSyncPhase::Final {
             return Vec::new();
         }

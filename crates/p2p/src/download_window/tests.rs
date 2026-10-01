@@ -102,7 +102,7 @@ fn stage_body(
     let block = padded_regtest_block(total_bytes);
     let serialized = bytes::Bytes::from(consensus_bytes(&block));
     match stager.insert(hash, None, block, serialized, source, now) {
-        crate::StagedBlock::Memory { .. } => {}
+        crate::block_stager::StagedBlock::Memory { .. } => {}
         other => panic!("stage_body refused: {other:?}"),
     }
 }

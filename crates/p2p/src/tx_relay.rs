@@ -318,7 +318,8 @@ fn transaction_is_live(gateway: &MempoolGateway, request: &RelayRequest) -> bool
 /// whose transaction left the mempool — or was re-admitted under a
 /// different wtxid — produces no announcement.
 /// INVARIANT: no mempool guard is held while `sink` sends to peers.
-pub fn drain_relay_queue(
+#[cfg(test)]
+pub(crate) fn drain_relay_queue(
     rx: &Receiver<RelayRequest>,
     sink: &dyn RelaySink,
     gateway: &MempoolGateway,

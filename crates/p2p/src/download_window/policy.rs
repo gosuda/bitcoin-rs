@@ -54,13 +54,13 @@ pub(super) const NETWORK_LIMITED: u64 = 1_u64 << 10;
 /// peers exist, so a full outbound set does not deepen per-peer pipelines.
 pub const PENDING_BUDGET: usize = 256;
 /// Time after which a received out-of-order block is discarded.
-pub const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
+pub(crate) const RECEIVED_BLOCK_TIMEOUT: Duration = Duration::from_mins(1);
 /// Maximum number of received blocks waiting for their predecessor.
 pub const RECEIVED_BLOCK_BUDGET: usize = 256;
 /// Mainnet-oriented block-size estimate for sizing the in-flight request window.
-pub const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
+pub(crate) const PENDING_BLOCK_BYTE_ESTIMATE: usize = 2 * 1024 * 1024;
 /// Maximum estimated bytes in the in-flight request window.
-pub const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
+pub(crate) const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIMATE;
 /// Maximum serialized bytes staged in memory while waiting for predecessors.
 ///
 /// Defined as [`PENDING_BYTE_BUDGET`] so the in-flight and staged byte bounds
@@ -68,10 +68,10 @@ pub const PENDING_BYTE_BUDGET: usize = PENDING_BUDGET * PENDING_BLOCK_BYTE_ESTIM
 /// at the high-height `PENDING_BLOCK_BYTE_ESTIMATE`) always fits in staging
 /// without eviction. At the 150k acceptance window this bound rarely binds —
 /// blocks there are far below the per-slot estimate.
-pub const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
+pub(crate) const RECEIVED_BLOCK_BYTE_BUDGET: usize = PENDING_BYTE_BUDGET;
 /// Consensus-maximum serialized block size in bytes: a witness-serialized
 /// block cannot exceed its 4,000,000 weight, so no valid block is larger.
-pub const MAX_SERIALIZED_BLOCK_SIZE: usize = crate::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
+pub(crate) const MAX_SERIALIZED_BLOCK_SIZE: usize = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
 // Staller-arming reachability invariant (Phase 1 of the staller arming
 // redesign): the stall episode arms on a staged-count fraction
 // (`received >= max_received_blocks / 2`, `window_blocked_on` term 3), so the
@@ -88,7 +88,7 @@ const _: () = assert!(
 );
 /// Maximum decoded inbound blocks held before handing them to `BlockStager`,
 /// sized from the same byte budget that bounds retained staged blocks.
-pub const INBOUND_BLOCK_STAGE_CHUNK: usize =
+pub(crate) const INBOUND_BLOCK_STAGE_CHUNK: usize =
     at_least_one(RECEIVED_BLOCK_BYTE_BUDGET / PENDING_BLOCK_BYTE_ESTIMATE);
 /// Maximum block requests one peer may own at once outside fan-out.
 ///
@@ -96,7 +96,7 @@ pub const INBOUND_BLOCK_STAGE_CHUNK: usize =
 /// scheduler needs only one healthy peer to fill the whole window — this IS
 /// the shipped single-peer behavior and stays bit-identical when fewer than
 /// [`MIN_PEERS_FOR_FANOUT`] eligible peers exist.
-pub const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
+pub(crate) const PEER_INFLIGHT_BUDGET: usize = PENDING_BUDGET;
 /// Per-peer in-flight cap while fan-out is active.
 ///
 /// Mirrors Bitcoin Core's `MAX_BLOCKS_IN_TRANSIT_PER_PEER` (16,
@@ -122,10 +122,10 @@ pub const MINIMUM_CONNECT_TIME: Duration = Duration::from_secs(30);
 
 /// Fast-sync per-peer stripe floor. Half the Core cap so the window spreads
 /// across a larger outbound set; opt-in, not measured against the default.
-pub const FAST_BLOCKS_IN_TRANSIT_PER_PEER: usize = 8;
+pub(crate) const FAST_BLOCKS_IN_TRANSIT_PER_PEER: usize = 8;
 /// Fast-sync fan-out threshold: stripe as soon as a second eligible peer
 /// exists instead of waiting for a full outbound set.
-pub const FAST_MIN_PEERS_FOR_FANOUT: usize = 2;
+pub(crate) const FAST_MIN_PEERS_FOR_FANOUT: usize = 2;
 /// Fast-sync outbound peer target.
 ///
 /// The peer count that fully stripes [`PENDING_BUDGET`] (and thus
@@ -140,7 +140,7 @@ pub const FAST_OUTBOUND_PEER_TARGET: usize = PENDING_BUDGET / FAST_BLOCKS_IN_TRA
 /// peer this long with the apply frontier idle and no other download
 /// progress possible, that peer is disconnected and its blocks re-queued
 /// (R8).
-pub const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
 /// Adaptive ceiling for the stalling threshold.
 ///
 /// Mirrors Core's `BLOCK_STALLING_TIMEOUT_MAX` (64s): the threshold doubles
@@ -148,7 +148,7 @@ pub const BLOCK_STALLING_TIMEOUT: Duration = Duration::from_secs(2);
 /// disconnecting every peer at the 2s floor, and decays by x0.85 per
 /// window-front arrival (never snapping back) so the elevation survives a
 /// peer rotation.
-pub const BLOCK_STALLING_TIMEOUT_MAX: Duration = Duration::from_secs(64);
+pub(crate) const BLOCK_STALLING_TIMEOUT_MAX: Duration = Duration::from_secs(64);
 /// How long a disconnected staller stays excluded from fan-out eligibility
 /// and non-last-resort block requests.
 ///
@@ -157,7 +157,7 @@ pub const BLOCK_STALLING_TIMEOUT_MAX: Duration = Duration::from_secs(64);
 /// (window-global) doubled threshold bounds each capture — Core has no
 /// equivalent only because its reconnecting peer cannot re-acquire in-flight
 /// assignments this cheaply.
-pub const STALLER_COOLDOWN: Duration = BLOCK_STALLING_TIMEOUT_MAX;
+pub(crate) const STALLER_COOLDOWN: Duration = BLOCK_STALLING_TIMEOUT_MAX;
 
 // The apply-side cache horizon (`expected_apply_horizon`) stays within the
 // inline capacity below only because the staging budget equals the in-flight
@@ -180,7 +180,7 @@ const _: () = assert!(
 /// Keep the private default at the full pending window so a healthy peer can
 /// fill it in one tick; [`DownloadWindow`] still caps requests by pending bytes,
 /// block budget, and per-peer inflight budget.
-pub const GETDATA_BATCH_SIZE: usize = PENDING_BUDGET;
+pub(crate) const GETDATA_BATCH_SIZE: usize = PENDING_BUDGET;
 
 /// Clamp a `usize` to at least 1, preventing zero-sized budgets.
 pub const fn at_least_one(value: usize) -> usize {
@@ -273,7 +273,7 @@ pub struct BlockDownloadPolicy {
 ///   requested height is ineligible.
 /// INVARIANT: every body-selection path applies this clause; a peer that
 ///   cannot serve the range is never asked for it.
-pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
+pub(crate) fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> bool {
     let network = ServiceFlags::NETWORK.to_u64();
     let witness = ServiceFlags::WITNESS.to_u64();
     if peer.services & witness == 0 {
@@ -309,7 +309,7 @@ pub fn serves_requested_height(peer: &PeerInfo, policy: &BlockDownloadPolicy) ->
 /// `floor..=best` so a limited peer is never sent a height outside the
 /// window [`serves_requested_height`] certified at selection time.
 #[must_use]
-pub fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u32 {
+pub(crate) fn servable_floor(peer: &PeerInfo, policy: &BlockDownloadPolicy) -> u32 {
     let network = ServiceFlags::NETWORK.to_u64();
     if peer.services & network != 0
         || policy
@@ -374,7 +374,7 @@ pub(crate) fn peer_can_serve_height(
 ///   clauses.
 /// INVARIANT: a candidate soft-blocked by the window never counts toward
 ///   fan-out.
-pub fn configure_request_mode(
+pub(crate) fn configure_request_mode(
     window: &mut DownloadWindow,
     candidates: &[FanoutCandidate],
     now: Instant,

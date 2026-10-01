@@ -448,7 +448,7 @@ impl BlockSync {
     /// POST: [`Self::owns_body_fetch`] answers `true` for the pair.
     /// INVARIANT: bounded by `MAX_DEFERRED_OWNED_FETCHES`; a stale source's
     /// mark is dropped at resolve time, never attributed to a replacement.
-    pub fn record_owned_body_fetch(&self, source: PeerSource, hash: Hash256) {
+    pub(crate) fn record_owned_body_fetch(&self, source: PeerSource, hash: Hash256) {
         if !self.peer_table.is_current(source) {
             return;
         }
@@ -579,7 +579,7 @@ impl BlockSync {
     /// INVARIANT: the connection manager is the only reader, because it is the
     ///   only part of the node that can dial.
     #[must_use]
-    pub fn allow_extra_full_relay_dial(&self) -> bool {
+    pub(crate) fn allow_extra_full_relay_dial(&self) -> bool {
         self.scheduler.lock().stale_tip.extra_dial_allowed
     }
 
@@ -591,7 +591,7 @@ impl BlockSync {
     /// INVARIANT: the answer comes from the same window the fetch budget
     ///   reads, so a peer never both downloads and is retired as idle.
     #[must_use]
-    pub fn is_downloading_bodies(&self, source: PeerSource) -> bool {
+    pub(crate) fn is_downloading_bodies(&self, source: PeerSource) -> bool {
         self.scheduler.lock().window.is_downloading(source)
     }
 

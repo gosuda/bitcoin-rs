@@ -129,7 +129,7 @@ impl BlockStager {
 
     /// Number of currently staged bodies.
     #[must_use]
-    pub fn received_len(&self) -> usize {
+    pub(crate) fn received_len(&self) -> usize {
         self.received.len()
     }
 
@@ -154,7 +154,7 @@ impl BlockStager {
     /// Staged count when the apply frontier is present, or `None` if empty or
     /// the next expected hash is not staged.
     #[must_use]
-    pub fn ready_received_len(&self, next_expected_hash: Option<Hash256>) -> Option<usize> {
+    pub(crate) fn ready_received_len(&self, next_expected_hash: Option<Hash256>) -> Option<usize> {
         let received_len = self.received.len();
         if received_len == 0 {
             return None;
@@ -172,7 +172,7 @@ impl BlockStager {
     ///       order.
     /// INVARIANT: yields no heights; the block tree is the only height
     ///       source.
-    pub fn staged_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
+    pub(crate) fn staged_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
         self.received.keys().copied()
     }
 
@@ -248,13 +248,13 @@ impl BlockStager {
 
     /// The connection that delivered the staged body, or `None` for a
     /// locally injected one; `None` also when `hash` is not staged.
-    pub fn staged_source(&self, hash: &Hash256) -> Option<PeerSource> {
+    pub(crate) fn staged_source(&self, hash: &Hash256) -> Option<PeerSource> {
         self.received.get(hash).and_then(|entry| entry.source)
     }
 
     /// How many staged bodies still owe the admission clauses because their
     /// hash was unresolvable at arrival.
-    pub fn gate_pending_count(&self) -> usize {
+    pub(crate) fn gate_pending_count(&self) -> usize {
         self.gate_pending_count
     }
 
@@ -262,7 +262,7 @@ impl BlockStager {
     /// body. The sync executor retries header admission for bodies whose
     /// headers are still absent from the tree: a staged body can never
     /// become expected until its header lands.
-    pub fn staged_headers(
+    pub(crate) fn staged_headers(
         &self,
     ) -> impl Iterator<Item = (Hash256, Header, Option<PeerSource>)> + '_ {
         self.received
@@ -280,7 +280,7 @@ impl BlockStager {
     }
 
     /// Releases one body after that exact block commits during a branch switch.
-    pub fn retire_applied(&mut self, hash: &Hash256) -> bool {
+    pub(crate) fn retire_applied(&mut self, hash: &Hash256) -> bool {
         let removed = self.take_entry(hash).is_some();
         if self.received.is_empty() {
             self.received_order.clear();
@@ -291,7 +291,10 @@ impl BlockStager {
 
     /// Removes the contiguous prefix of `expected_hashes` that is currently
     /// staged. Stops at the first missing hash.
-    pub fn drain_expected_prefix(&mut self, expected_hashes: &[Hash256]) -> Vec<DrainedBlock> {
+    pub(crate) fn drain_expected_prefix(
+        &mut self,
+        expected_hashes: &[Hash256],
+    ) -> Vec<DrainedBlock> {
         let mut drained = Vec::with_capacity(expected_hashes.len());
         for hash in expected_hashes {
             let Some(block) = self.take_entry(hash) else {
@@ -307,7 +310,7 @@ impl BlockStager {
     }
 
     /// Restores previously drained bodies after a partial apply.
-    pub fn restore_many(&mut self, drained: impl IntoIterator<Item = DrainedBlock>) {
+    pub(crate) fn restore_many(&mut self, drained: impl IntoIterator<Item = DrainedBlock>) {
         for drained in drained {
             let gate_pending = drained.gate_pending;
             let previous = self.received.insert(
@@ -356,7 +359,7 @@ impl BlockStager {
     }
 
     /// Drops staged bodies whose received deadline has passed.
-    pub fn prune_expired(&mut self, now: Instant) -> Vec<DroppedBlock> {
+    pub(crate) fn prune_expired(&mut self, now: Instant) -> Vec<DroppedBlock> {
         if self.received.is_empty() {
             self.next_received_deadline = None;
             return Vec::new();
@@ -454,7 +457,7 @@ impl BlockStager {
     /// Flags a freshly staged body as still owing the unrequested-admission
     /// clauses: it staged while the tree could not resolve its hash, so the
     /// arrival gate's missing-header arm passed it without evaluating them.
-    pub fn set_gate_pending(&mut self, hash: &Hash256) {
+    pub(crate) fn set_gate_pending(&mut self, hash: &Hash256) {
         if let Some(entry) = self.received.get_mut(hash)
             && !entry.gate_pending
         {
@@ -466,7 +469,7 @@ impl BlockStager {
     /// Staged bodies that arrived before their headers were tree-known and
     /// have neither faced the admission clauses nor earned request evidence
     /// since.
-    pub fn gate_pending_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
+    pub(crate) fn gate_pending_hashes(&self) -> impl Iterator<Item = Hash256> + '_ {
         self.received
             .iter()
             .filter(|(_, entry)| entry.gate_pending)
@@ -475,7 +478,7 @@ impl BlockStager {
 
     /// Settles the owed gate: the clauses held against the resolved node, or
     /// request evidence (a resolved owned fetch) exempted the body.
-    pub fn clear_gate_pending(&mut self, hash: &Hash256) {
+    pub(crate) fn clear_gate_pending(&mut self, hash: &Hash256) {
         if let Some(entry) = self.received.get_mut(hash)
             && entry.gate_pending
         {
@@ -488,7 +491,7 @@ impl BlockStager {
     /// finds none must not displace already-staged work for a delivery
     /// nobody asked for.
     #[must_use]
-    pub fn count_headroom(&self) -> usize {
+    pub(crate) fn count_headroom(&self) -> usize {
         self.budget
             .max_received_blocks
             .saturating_sub(self.received.len())

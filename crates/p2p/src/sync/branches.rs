@@ -24,7 +24,7 @@ impl BlockSync {
     /// this as one authority avoids a pre-check that can disagree with the
     /// transition witness.
     #[doc(hidden)]
-    pub fn switch_branch_if_outweighed(&self) {
+    pub(crate) fn switch_branch_if_outweighed(&self) {
         let Some(target) = self.outweighed_branch_target() else {
             return;
         };
@@ -125,7 +125,7 @@ impl BlockSync {
     }
 
     #[doc(hidden)]
-    pub fn retire_applied_reorg_body(&self, hash: Hash256) {
+    pub(crate) fn retire_applied_reorg_body(&self, hash: Hash256) {
         let mut scheduler = self.scheduler.lock();
         scheduler.stager.retire_applied(&hash);
     }
@@ -166,7 +166,7 @@ impl BlockSync {
     /// The applied tip is on the branch exactly when the header tip's ancestor
     /// at the applied height is the applied block itself.
     #[doc(hidden)]
-    pub fn outweighed_branch_target(&self) -> Option<NodeId> {
+    pub(crate) fn outweighed_branch_target(&self) -> Option<NodeId> {
         let chain_tip = self.chain.chain_tip()?;
         let applied = self.chain.applied_tip()?;
         if chain_tip.hash == applied.hash {

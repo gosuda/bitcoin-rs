@@ -37,16 +37,16 @@ use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Header, Tx, Txid, Wtxid};
 pub use crate::peer::COMPACT_BLOCK_VERSION;
 
 /// Concurrent pending reconstructions per peer connection.
-pub const MAX_PENDING_RECONSTRUCTIONS: usize = 4;
+pub(crate) const MAX_PENDING_RECONSTRUCTIONS: usize = 4;
 /// Approximate retained bytes across all pending entries before new
 /// `cmpctblock` messages are refused in favor of the full-block fallback.
-pub const MAX_PENDING_RETAINED_BYTES: usize = 8 * 1_024 * 1_024;
+pub(crate) const MAX_PENDING_RETAINED_BYTES: usize = 8 * 1_024 * 1_024;
 /// A pending entry older than this is dropped; a chain change cannot strand
 /// memory longer than one deadline.
-pub const PENDING_DEADLINE: Duration = Duration::from_mins(1);
+pub(crate) const PENDING_DEADLINE: Duration = Duration::from_mins(1);
 /// Above this many missing transactions the `getblocktxn` round trip is
 /// skipped: a full-block `getdata` is then the cheaper request.
-pub const MAX_REQUESTED_MISSING: usize = 128;
+pub(crate) const MAX_REQUESTED_MISSING: usize = 128;
 /// Sanity bound on the transaction count a `cmpctblock` may declare.
 const MAX_BLOCK_TX_COUNT: usize = 100_000;
 

@@ -479,7 +479,7 @@ impl DownloadWindow {
     /// behavior resume unchanged. `now` is injected (not read here) so the
     /// tick/selection path controls the clock; see [`Self::advance_stall`]
     /// for the same discipline.
-    pub fn set_fanout_eligible_peers(&mut self, count: usize, now: Instant) {
+    pub(crate) fn set_fanout_eligible_peers(&mut self, count: usize, now: Instant) {
         let was_engaged = self.fanout_engaged;
         self.fanout_eligible_peers = count;
         let would_engage = count >= self.budget.min_peers_for_fanout;
@@ -536,7 +536,7 @@ impl DownloadWindow {
     }
 
     /// Returns the number of blocks currently pending (requested, not yet received).
-    pub fn pending_len(&self) -> usize {
+    pub(crate) fn pending_len(&self) -> usize {
         self.pending.len()
     }
 
@@ -563,7 +563,7 @@ impl DownloadWindow {
     ///      estimated block.
     /// INVARIANT: staged-body counts and bytes are read from `stager`,
     ///      never from a window-local copy.
-    pub fn has_request_capacity(&self, stager: &BlockStager) -> bool {
+    pub(crate) fn has_request_capacity(&self, stager: &BlockStager) -> bool {
         self.pending.len() < self.budget.max_pending_blocks
             && self.pending_bytes.saturating_add(self.ewma_block_bytes)
                 <= self.budget.max_pending_bytes
@@ -671,7 +671,7 @@ impl DownloadWindow {
     /// POST: the per-peer scan bound derived from the pending budgets and
     ///      the stager's staged byte and slot headroom.
     /// INVARIANT: staged totals are read from `stager`.
-    pub fn request_peer_scan_limit(&self, stager: &BlockStager, now: Instant) -> usize {
+    pub(crate) fn request_peer_scan_limit(&self, stager: &BlockStager, now: Instant) -> usize {
         if self.staged_bytes_exhausted(stager) {
             return 0;
         }
@@ -734,7 +734,7 @@ impl DownloadWindow {
     /// the soft-demotion signal: such a peer gets no new front-of-window
     /// requests unless it is the last-resort peer, and it does not count as
     /// fan-out-eligible (KTD6's "not currently soft-demoted" clause).
-    pub fn peer_has_expired_pending(&self, source: PeerSource, now: Instant) -> bool {
+    pub(crate) fn peer_has_expired_pending(&self, source: PeerSource, now: Instant) -> bool {
         self.owner_download_expired(source, self.active_downloading_peers(), now)
     }
 
@@ -758,7 +758,7 @@ impl DownloadWindow {
     /// INVARIANT: while `ctx.apply_side_busy` holds, no stall, timeout, or
     ///      hedge action returns; only the apply-side bound can return
     ///      [`BlockedDecision::EvictStaged`].
-    pub fn observe_blocked(
+    pub(crate) fn observe_blocked(
         &mut self,
         ctx: BlockedContext,
         stager: &BlockStager,
@@ -1218,7 +1218,7 @@ impl DownloadWindow {
     /// peer delivering each front block just under the adaptive threshold is
     /// never disconnected (same exposure as Core) but is visible here and on
     /// the `node.sync.stall_seconds` gauge.
-    pub fn stalling_peer(&self) -> Option<(SocketAddr, Instant)> {
+    pub(crate) fn stalling_peer(&self) -> Option<(SocketAddr, Instant)> {
         self.stall
             .map(|episode| (episode.owner.addr, episode.since))
     }
@@ -1278,7 +1278,7 @@ impl DownloadWindow {
     }
 
     /// Records a successfully sent cold-front duplicate request.
-    pub fn confirm_cold_front_hedge(
+    pub(crate) fn confirm_cold_front_hedge(
         &mut self,
         owner: PeerSource,
         alternate: PeerSource,
@@ -1318,11 +1318,11 @@ impl DownloadWindow {
     }
 
     /// Clears a preferred peer that is no longer serviceable.
-    pub fn clear_preferred_peer(&mut self) {
+    pub(crate) fn clear_preferred_peer(&mut self) {
         self.preferred_peer = None;
     }
     /// Builds the one-shot common-prefix probe after a deep fallback request.
-    pub fn prefix_probe_plan(
+    pub(crate) fn prefix_probe_plan(
         &self,
     ) -> Option<(
         PeerSource,
@@ -1370,7 +1370,7 @@ impl DownloadWindow {
     }
 
     /// Starts the prefix race after at least one alternate accepted the probe.
-    pub fn confirm_prefix_probe(
+    pub(crate) fn confirm_prefix_probe(
         &mut self,
         owner: PeerSource,
         hashes: SmallVec<[Hash256; PREFIX_PROBE_BLOCK_LIMIT]>,
@@ -1407,7 +1407,7 @@ impl DownloadWindow {
     }
 
     /// Starts the re-acquisition cooldown for an unresponsive peer.
-    pub fn mark_peer_unresponsive(&mut self, peer_addr: SocketAddr, now: Instant) {
+    pub(crate) fn mark_peer_unresponsive(&mut self, peer_addr: SocketAddr, now: Instant) {
         let cooldown = self.budget.staller_cooldown;
         self.recent_stallers
             .retain(|_, fired_at| now.duration_since(*fired_at) < cooldown);
@@ -1419,24 +1419,25 @@ impl DownloadWindow {
     /// it is the last-resort peer — without this, a staller reconnecting on
     /// the same address immediately re-acquires the window front and restarts
     /// the cycle (the RE-ADV-2 recurrence).
-    pub fn peer_in_staller_cooldown(&self, peer_addr: SocketAddr, now: Instant) -> bool {
+    pub(crate) fn peer_in_staller_cooldown(&self, peer_addr: SocketAddr, now: Instant) -> bool {
         self.recent_stallers
             .get(&peer_addr)
             .is_some_and(|fired_at| now.duration_since(*fired_at) < self.budget.staller_cooldown)
     }
 
     /// Returns `true` if `hash` is currently pending.
-    pub fn contains_pending(&self, hash: &Hash256) -> bool {
+    pub(crate) fn contains_pending(&self, hash: &Hash256) -> bool {
         self.pending.contains_key(hash)
     }
 
     /// The exact connection owning the pending request for `hash`.
-    pub fn pending_owner(&self, hash: &Hash256) -> Option<PeerSource> {
+    pub(crate) fn pending_owner(&self, hash: &Hash256) -> Option<PeerSource> {
         self.pending.get(hash).map(|pending| pending.owner)
     }
 
     /// Returns the start time of the active prefix probe, if any. Test-only.
-    pub fn active_prefix_probe_started_at(&self) -> Option<Instant> {
+    #[cfg(test)]
+    pub(crate) fn active_prefix_probe_started_at(&self) -> Option<Instant> {
         self.prefix_probe.as_ref().map(|probe| probe.started_at)
     }
 
@@ -1447,7 +1448,7 @@ impl DownloadWindow {
     /// POST: equals the population of `owner_downloading_since`.
     /// INVARIANT: announced or merely-assigned peers never count; only
     ///      ownership of at least one pending block does.
-    pub fn active_downloading_peers(&self) -> usize {
+    pub(crate) fn active_downloading_peers(&self) -> usize {
         self.owner_downloading_since.len()
     }
 
@@ -1459,7 +1460,7 @@ impl DownloadWindow {
     /// INVARIANT: the answer is the same fact the fan-out budget reads, so a
     ///   peer counted as downloading is never retired as idle.
     #[must_use]
-    pub fn is_downloading(&self, owner: PeerSource) -> bool {
+    pub(crate) fn is_downloading(&self, owner: PeerSource) -> bool {
         self.owner_downloading_since.contains_key(&owner)
     }
 
@@ -1576,7 +1577,7 @@ impl DownloadWindow {
     /// INVARIANT: no fact here is compared by address alone.
     ///   `recent_stallers` is the one address-keyed fact and stays exempt;
     ///   `stall` is untouched because the conviction paths own its release.
-    pub fn retain_owned_by(&mut self, owns: impl Fn(&PeerSource) -> bool) {
+    pub(crate) fn retain_owned_by(&mut self, owns: impl Fn(&PeerSource) -> bool) {
         let cold_front_owned = match self.cold_front {
             Some(ColdFrontState::Waiting { owner, .. }) => owns(&owner),
             Some(ColdFrontState::Racing {
@@ -1640,7 +1641,7 @@ impl DownloadWindow {
     ///      every height the scan offered.
     /// INVARIANT: staged membership, count, and bytes are read from `stager`.
     #[allow(clippy::too_many_arguments)]
-    pub fn next_peer_request(
+    pub(crate) fn next_peer_request(
         &mut self,
         stager: &mut BlockStager,
         source: PeerSource,
@@ -2024,7 +2025,7 @@ impl DownloadWindow {
     /// POST: every entry is pending under `owner`; the return value states
     ///      whether the window still has request capacity.
     /// INVARIANT: staged membership is read from `stager`.
-    pub fn mark_requested(
+    pub(crate) fn mark_requested(
         &mut self,
         stager: &BlockStager,
         request: &PeerRequest,
@@ -2070,7 +2071,7 @@ impl DownloadWindow {
     /// The source-attributed credit runs through [`Self::credit_delivery_from`];
     /// callers proving the source's connection is still current may also call
     /// it directly after an unattributed `mark_received_from(hash, bytes, None, _)`.
-    pub fn mark_received_from(
+    pub(crate) fn mark_received_from(
         &mut self,
         hash: Hash256,
         bytes: usize,
@@ -2103,7 +2104,7 @@ impl DownloadWindow {
     ///   one the pending recorded at request time); a body of unknown height
     ///   with no pending never moves the cursor, so the height-0 rewind to
     ///   genesis is unrepresentable.
-    pub fn requeue_for_retry(&mut self, hash: &Hash256, height: Option<u32>, now: Instant) {
+    pub(crate) fn requeue_for_retry(&mut self, hash: &Hash256, height: Option<u32>, now: Instant) {
         let pending_height = self.remove_pending(hash, now).map(|pending| pending.height);
         let target = match (height, pending_height) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -2132,7 +2133,7 @@ impl DownloadWindow {
     /// all under the delivering connection's exact identity. `pending_height`
     /// is the height the pending carried at removal — `None` for an
     /// unsolicited delivery, which carries no progress credit.
-    pub fn credit_delivery_from(
+    pub(crate) fn credit_delivery_from(
         &mut self,
         hash: Hash256,
         source: PeerSource,
@@ -2155,7 +2156,7 @@ impl DownloadWindow {
     /// Credits a duplicate after the first copy was already staged.
     ///
     /// The first copy owns all byte, EWMA, cold-front and probe accounting.
-    pub fn credit_duplicate_delivery(&mut self, hash: Hash256, source: PeerSource) {
+    pub(crate) fn credit_duplicate_delivery(&mut self, hash: Hash256, source: PeerSource) {
         if self
             .pending_timeout_observation
             .is_some_and(|observation| observation.hash == hash && observation.owner == source)
@@ -2261,7 +2262,7 @@ impl DownloadWindow {
     /// preserved — the original owner may still supply the correct body.
     ///
     /// The malformed body was never staged, so the stager is not touched.
-    pub fn reject_delivery(
+    pub(crate) fn reject_delivery(
         &mut self,
         hash: Hash256,
         source_peer: Option<PeerSource>,

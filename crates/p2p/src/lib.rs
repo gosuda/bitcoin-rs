@@ -55,32 +55,25 @@ pub mod wtxid;
 pub use chain_query::ActiveChainQuery;
 pub use compact_blocks::{CompactBlockHints, Reconstruction};
 pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, PINNED_CORE_VERSION};
-pub use connection::{ConnectionId, PeerLease, PeerSource, ReadyPeer};
+pub use connection::{PeerLease, PeerSource};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::ListenerExtras;
-pub use peer::{
-    DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerManager, PeerState,
-    SystemDnsResolver,
-};
+pub use peer::{NetworkActivity, Peer, PeerState};
 pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
-pub use peer_table::{PeerSession, PeerTable};
-pub use service::{
-    OutboundDial, P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
-    apply_network_active,
-};
+pub use peer_table::PeerTable;
+pub use service::{OutboundDial, P2pService, P2pServiceConfig, apply_network_active};
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use tx_relay::{
-    DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
-    RelayRequest, RelaySink, TxRelayQueue, drain_relay_queue, spawn_tx_relay_worker,
+    DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, TxRelayQueue,
+    spawn_tx_relay_worker,
 };
 pub use wire::{Message, PeerError};
 
-pub use block_stager::{BlockStager, DrainedBlock, DroppedBlock, StagedBlock};
+pub use block_stager::BlockStager;
 pub use download_window::{
-    BlameReason, BlockDownloadPolicy, BlockedContext, BlockedDecision, DownloadWindow,
-    FanoutCandidate, RejectDelivery, SyncBudget, SyncPeer, SyncPeerSelection,
-    configure_request_mode, default_sync_budget, statically_fanout_eligible,
+    BlockDownloadPolicy, DownloadWindow, FanoutCandidate, SyncBudget, default_sync_budget,
+    statically_fanout_eligible,
 };

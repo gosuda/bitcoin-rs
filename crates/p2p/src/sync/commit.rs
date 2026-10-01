@@ -15,7 +15,7 @@ use bitcoin_rs_primitives::Hash256;
 use std::time::Instant;
 use std::vec::Vec;
 
-use crate::DrainedBlock;
+use crate::block_stager::DrainedBlock;
 
 /// Where restoration of un-applied drained blocks must start.
 ///
@@ -99,7 +99,10 @@ impl BlockSync {
 
     #[allow(clippy::too_many_lines)]
     #[doc(hidden)]
-    pub fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
+    pub(crate) fn apply_buffered_blocks(
+        &self,
+        next_expected_hash: Option<Hash256>,
+    ) -> (usize, usize) {
         // A latched Fatal settlement left the implementation's admission
         // closed: starting another transition would bounce off the same
         // refusal and churn staged state every tick. Staged blocks stay
