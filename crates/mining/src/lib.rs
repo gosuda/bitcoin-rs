@@ -16,7 +16,7 @@ mod generation_signal;
 /// Network hash-rate estimation.
 mod network_hashps;
 /// Transaction selection policy.
-pub mod policy;
+mod policy;
 /// Transport-neutral candidate assembly.
 mod template;
 
