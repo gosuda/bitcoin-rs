@@ -183,15 +183,6 @@ pub fn block_merkle_root_matches_txids(block: &Block, txids: &[Txid]) -> bool {
     }
 }
 
-/// Returns `true` when any transaction input carries witness data (Core's
-/// `CBlock::HasWitness`).
-fn block_has_witness(block: &Block) -> bool {
-    block
-        .txs
-        .iter()
-        .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()))
-}
-
 /// Double-SHA256 over `left || right`, the Merkle parent of two nodes.
 fn hash_merkle_pair(left: Txid, right: Txid) -> Txid {
     Txid(hash_merkle_bytes(left.as_bytes(), right.as_bytes()))
@@ -399,7 +390,7 @@ fn check_witness_malleation(
             return Ok(());
         }
     }
-    if block_has_witness(block) {
+    if block.txs.iter().any(Tx::has_witness) {
         return Err(ConsensusError::UnexpectedWitness);
     }
     Ok(())
@@ -446,7 +437,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     verify_merkle_root_with_txids(block, &txids)?;
 
     let commitment = witness_commitment(block);
-    if commitment.is_none() && !block_has_witness(block) {
+    if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
         return Ok(());
     }
     // Early shape check: hoisted first branch of check_witness_malleation.

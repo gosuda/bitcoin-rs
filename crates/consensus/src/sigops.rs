@@ -4,6 +4,7 @@
 //! by consensus verification and mempool preparation. Script-level counters
 //! remain owned by `bitcoin-rs-script`.
 
+use crate::verify_tx::is_coinbase;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::script::{
@@ -30,7 +31,7 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: Ve
     let flags = flags.filled();
     let mut cost = count_tx_legacy(tx).saturating_mul(4);
     // Core's coinbase cost never includes previous-output or witness sigops.
-    if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
+    if is_coinbase(tx) {
         return cost;
     }
     let mut cursor = 0;

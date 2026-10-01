@@ -79,9 +79,7 @@ impl BlockFacts {
             txids.len(),
             "block facts need one txid per transaction"
         );
-        let has_witness = txs
-            .iter()
-            .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()));
+        let has_witness = txs.iter().any(Tx::has_witness);
         let weight = decoded_block_weight(txs);
         let (merkle_root, merkle_mutated) = merkle_root_and_mutation(&txids);
 
