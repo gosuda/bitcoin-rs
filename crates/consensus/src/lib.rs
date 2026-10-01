@@ -49,8 +49,8 @@ pub mod verify_block;
 pub mod verify_tx;
 
 pub use bip9::{
-    BIP9_PERIOD, CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState,
-    SEGWIT_DEPLOYMENT_ID, SoftforkState, compute_state, deployment_params,
+    CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState, SEGWIT_DEPLOYMENT_ID,
+    SoftforkState, compute_state, deployment_params,
 };
 pub use bip113::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
 pub use block_view::BlockView;

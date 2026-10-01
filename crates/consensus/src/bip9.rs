@@ -1,7 +1,7 @@
 use bitcoin_rs_primitives::Network;
 
 /// BIP9 signalling period length in blocks.
-pub const BIP9_PERIOD: u32 = 2016;
+pub(crate) const BIP9_PERIOD: u32 = 2016;
 /// Deployment id for CSV (BIP68/112/113).
 pub const CSV_DEPLOYMENT_ID: u32 = 0;
 /// Deployment id for Segwit (BIP141/143).
