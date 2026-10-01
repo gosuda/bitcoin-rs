@@ -62,12 +62,6 @@ impl<S: KvStore> BlockPruner<S> {
         Self { store, policy }
     }
 
-    /// Returns this pruner's policy.
-    #[must_use]
-    pub const fn policy(&self) -> PrunePolicy {
-        self.policy
-    }
-
     /// Deletes block-body rows below the effective reorg-safety horizon until the target is met.
     pub fn prune_step(&mut self, current_tip_height: u32) -> Result<PruneOutcome, PruneError> {
         if self.policy.is_full_node() {
