@@ -399,14 +399,14 @@ impl MiningService {
                 continue;
             }
             let submit_old = waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
-            let (version_bits_available, version_bits_required) =
-                self.version_bits_for(&candidate, &tip);
+            // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
+            let version_bits_available = self.chain.signalling_rules(&tip, candidate.height);
             return Ok(template_from_candidate(
                 self.network,
                 candidate,
                 submit_old,
                 version_bits_available,
-                version_bits_required,
+                0,
             ));
         }
         Err(generation_race())
@@ -663,18 +663,6 @@ impl MiningService {
                 MiningControlError::Failed(CompactString::from(error.to_string()))
             }
         })
-    }
-
-    fn version_bits_for(
-        &self,
-        candidate: &Candidate,
-        tip: &TipSnapshot,
-    ) -> (Vec<AvailableMiningRule>, u32) {
-        if tip.hash != candidate.previous_block_hash {
-            return (Vec::new(), 0);
-        }
-        // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
-        (self.chain.signalling_rules(tip, candidate.height), 0)
     }
 }
 
