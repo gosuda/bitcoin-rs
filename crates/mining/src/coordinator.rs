@@ -691,12 +691,6 @@ impl MiningService {
     }
 }
 
-impl MempoolSequenceWake for MiningService {
-    fn publish_generation_from(&self, sequence: u64) {
-        Self::publish_generation_from(self, sequence);
-    }
-}
-
 /// Clears an abandoned single-flight slot if candidate assembly unwinds.
 ///
 /// Release/quickstart builds abort on panic, but test, development, and other
