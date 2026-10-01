@@ -46,17 +46,13 @@ pub mod sync;
 pub mod tx_ingress;
 pub use bitcoin_rs_primitives::Network;
 
-pub use bitcoin_rs_rpc::zmq::{
-    NoOpZmqPublisher, SequenceEvent, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
-};
+pub use bitcoin_rs_rpc::zmq::{NoOpZmqPublisher, ZmqEndpointConfig, ZmqPublisher};
 
-pub use chain_effects::{ChainFollowers, ConnectMutationError, DisconnectMutationError};
+pub use chain_effects::{ChainFollowers, ConnectMutationError};
 
 pub use bitcoin_rs_consensus::ValidationEngine;
 pub use config::{
-    Auth, IndexConfig, MiningConfig, NetworkSelection, NodeConfig, NotificationConfig,
-    ObservabilityConfig, P2pConfig, RpcConfig, RuntimeInputs, ScriptIndexMode, StorageConfig,
-    ValidationConfig, resolve,
+    Auth, NetworkSelection, NodeConfig, NotificationConfig, RuntimeInputs, ScriptIndexMode, resolve,
 };
 
 pub use options::{
@@ -64,15 +60,14 @@ pub use options::{
     P2pOverrides, RpcOverrides, StorageOverrides, UserConfig, ValidationOverrides,
 };
 
-pub use embed::{Node, NodeError, SyncProgress};
+pub use embed::{Node, NodeError};
 
 pub use mining::MiningCoordinator;
 
 pub use run::run;
 
 pub use storage_footprint::{
-    MeasureStorageRequest, StorageFootprintEvidence, measure_storage_footprint,
-    storage_footprint_json,
+    MeasureStorageRequest, measure_storage_footprint, storage_footprint_json,
 };
 
 pub use sync::BlockSync;

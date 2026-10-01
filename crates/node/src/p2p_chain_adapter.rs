@@ -19,7 +19,7 @@ use bitcoin_rs_primitives::{Block, Hash256, Header, Network};
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
 
-pub use bitcoin_rs_p2p::sync::{BlockSync, SyncBudget, default_sync_budget};
+pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
 
 /// The [`SyncChain`] implementation over [`bitcoin_rs_chainstate::Chainstate`]:
 /// applied-tip mutation behind the chain-transition lock plus the derived
