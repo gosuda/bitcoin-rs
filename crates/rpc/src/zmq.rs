@@ -40,7 +40,7 @@ pub enum ZmqTopic {
 }
 
 /// Default outbound queue limit for one ZMQ PUB endpoint.
-pub const DEFAULT_ZMQ_HWM: u32 = 1_000;
+const DEFAULT_ZMQ_HWM: u32 = 1_000;
 
 /// Configuration for one ZMQ PUB socket.
 ///

@@ -64,7 +64,7 @@ impl Auth {
 
     /// Returns true when `Authorization` contains valid HTTP Basic credentials.
     #[must_use]
-    pub fn validate_header(&self, header: Option<&str>) -> bool {
+    pub(crate) fn validate_header(&self, header: Option<&str>) -> bool {
         let Some(header) = header else {
             return false;
         };

@@ -63,7 +63,7 @@ impl SurfaceKind {
 
     /// Section heading used in the generated reference.
     #[must_use]
-    pub const fn heading(self) -> &'static str {
+    const fn heading(self) -> &'static str {
         match self {
             Self::Rpc => "JSON-RPC methods",
             Self::Rest => "REST endpoints",
@@ -118,7 +118,7 @@ impl Status {
     /// table contents: a "no row claims this" clause would rot silently the
     /// day a row does.
     #[must_use]
-    pub const fn legend(self) -> &'static str {
+    const fn legend(self) -> &'static str {
         match self {
             Self::Supported => {
                 "differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `crates/rpc/core-compat.toml`."
@@ -184,7 +184,7 @@ impl Entry {
 }
 
 /// Core contract version every row is declared against.
-pub const CORE_VERSION: &str = "31.x";
+pub(crate) const CORE_VERSION: &str = "31.x";
 
 /// No-wallet policy note shared by every wallet-class row; the crate refuses
 /// to hold private key material (see `crates/rpc/src/lib.rs`).
