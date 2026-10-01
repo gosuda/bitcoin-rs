@@ -10,7 +10,7 @@ use crate::{
     UtxoError, UtxoKey,
     contract::UtxoAdd,
     listener::{UtxoChangeEvents, UtxoChangeListener, UtxoInserted, UtxoRemoved},
-    record::{OutputParts, OwnedUtxoOut, RemovedRecord, UtxoRecord},
+    record::{OutputParts, OwnedUtxoOut, RemovedRecord, UtxoRecord, vouts_are_strictly_increasing},
     set::{BuildPayload, SpendPayload},
     set::{UtxoCoin, UtxoScan},
 };
@@ -612,7 +612,10 @@ fn apply_add_by_parts(
     parts: &[OutputParts<'_>],
 ) -> Result<(), UtxoError> {
     let existing = find_record(table, key, txid);
-    let add_unique = parts_are_increasing_unique(existing, parts);
+    let add_unique = vouts_are_strictly_increasing(
+        existing.and_then(UtxoRecord::max_vout),
+        parts.iter().map(|part| part.vout),
+    );
     let replacement = UtxoRecord::add_run_replacement(existing, txid, parts, add_unique, None)?;
     replace_record(table, key, txid, replacement);
     Ok(())
@@ -636,7 +639,7 @@ fn apply_combined_run(
             RemovedRecord::Replaced(replacement) => RecordMutation::Replace(replacement),
         }
     } else {
-        let add_unique = parts_are_increasing_unique(None, parts);
+        let add_unique = vouts_are_strictly_increasing(None, parts.iter().map(|part| part.vout));
         let fresh = UtxoRecord::add_run_replacement(None, txid, parts, add_unique, None)?;
         // A remove against a record born in this same run nets against the
         // additions: the output dies at birth instead of staying live. An
@@ -650,17 +653,6 @@ fn apply_combined_run(
     };
     apply_record_mutation(table, key, txid, mutation);
     Ok(())
-}
-
-fn parts_are_increasing_unique(record: Option<&UtxoRecord>, parts: &[OutputParts<'_>]) -> bool {
-    let mut previous = record.and_then(UtxoRecord::max_vout);
-    for part in parts {
-        if previous.is_some_and(|vout| part.vout <= vout) {
-            return false;
-        }
-        previous = Some(part.vout);
-    }
-    true
 }
 
 fn apply_add_payload_run_with_listener(
@@ -734,7 +726,10 @@ fn stage_add(
 ) -> Result<StagedAdd, UtxoError> {
     let parts: SmallVec<[OutputParts<'_>; 8]> = payloads.iter().map(payload_parts).collect();
     let existing = find_record(table, key, txid);
-    let add_unique = adds_are_increasing_unique(existing, payloads);
+    let add_unique = vouts_are_strictly_increasing(
+        existing.and_then(UtxoRecord::max_vout),
+        parts.iter().map(|part| part.vout),
+    );
     let mut overwritten = Vec::with_capacity(payloads.len());
     let replacement = UtxoRecord::add_run_replacement(
         existing,
@@ -764,17 +759,6 @@ fn payload_parts<'a>(payload: &BuildPayload<'a>) -> OutputParts<'a> {
         payload.coinbase,
         payload.height,
     )
-}
-
-fn adds_are_increasing_unique(record: Option<&UtxoRecord>, payloads: &[BuildPayload<'_>]) -> bool {
-    let mut previous = record.and_then(UtxoRecord::max_vout);
-    for payload in payloads {
-        if previous.is_some_and(|vout| payload.vout <= vout) {
-            return false;
-        }
-        previous = Some(payload.vout);
-    }
-    true
 }
 
 fn apply_record_mutation(
