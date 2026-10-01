@@ -19,7 +19,6 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
-use crate::connection::PeerSource;
 use crate::listener::ListenerError;
 
 /// Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
@@ -699,12 +698,6 @@ impl P2pService {
         Arc::clone(&self.network_active)
     }
 
-    /// Returns a snapshot of manual bans.
-    #[must_use]
-    pub fn banned(&self) -> Vec<crate::BannedSubnet> {
-        self.banned.read().clone()
-    }
-
     /// Returns the service-owned manual ban list handle.
     #[must_use]
     pub fn banned_handle(&self) -> Arc<RwLock<Vec<crate::BannedSubnet>>> {
@@ -717,30 +710,10 @@ impl P2pService {
         self.outbound_tx.clone()
     }
 
-    /// Returns configured addnode add addresses.
-    #[must_use]
-    pub fn added_nodes(&self) -> Vec<SocketAddr> {
-        self.added_nodes.read().clone()
-    }
-
     /// Returns the service-owned persistent addnode view.
     #[must_use]
     pub fn added_nodes_handle(&self) -> Arc<RwLock<Vec<SocketAddr>>> {
         Arc::clone(&self.added_nodes)
-    }
-
-    /// Sends a message only to the connection identified by source.
-    ///
-    /// The message is returned when the source is stale or its writer has
-    /// gone away, allowing callers to keep ownership of retry decisions.
-    #[allow(clippy::result_large_err)]
-    pub fn send(&self, source: PeerSource, message: crate::Message) -> Result<(), crate::Message> {
-        self.peer_table.send(source, message)
-    }
-
-    /// Disconnects only the connection identified by source.
-    pub fn disconnect(&self, source: PeerSource) -> bool {
-        self.peer_table.disconnect_source(source)
     }
 
     /// Returns a cloned inbound headers receiver for the node sync coordinator.
