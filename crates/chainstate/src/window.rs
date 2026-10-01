@@ -18,10 +18,10 @@ use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Blocks per durable group commit on the windowed IBD path.
-pub const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
+const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
 
 /// Serialized block bytes one group may hold before it must commit.
-pub const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
+const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
 
 /// How a committed block reaches its durable head and the published tip.
 pub(super) enum PublishMode<'a> {

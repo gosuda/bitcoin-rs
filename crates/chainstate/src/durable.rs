@@ -173,7 +173,7 @@ impl OutputSource for UndoRowSpends<'_> {
 }
 
 /// Boot-time reconciliation of the stored head against the restored tip.
-pub fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> {
+pub(crate) fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> {
     let stored = handles
         .durable_head
         .load()

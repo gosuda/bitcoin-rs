@@ -9,7 +9,6 @@ use bitcoin_rs_chain::{
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::{Block, Network, OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_primitives::{Hash256, Header};
-pub use bitcoin_rs_storage::DisconnectPhase;
 pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
@@ -18,15 +17,12 @@ use bitcoin_rs_utxo::contract::{SpentOutputLookup, is_coinbase_tx};
 use bitcoin_rs_utxo::{UtxoCoin, UtxoSet};
 use connect::{apply_block_admitted, apply_committed_block_admitted};
 use disconnect::disconnect_block_admitted;
-pub use durable::reconcile_at_boot;
 pub use durable::recover_disconnect_marker;
 use hashbrown::HashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use scratch::{ApplyScratchCapacities, SameBlockSpentSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-pub use window::DURABLE_HEAD_GROUP_BLOCKS;
-pub use window::DURABLE_HEAD_GROUP_MAX_BYTES;
 use window::{PublishMode, apply_window_admitted};
 
 mod connect;
@@ -247,7 +243,7 @@ impl PruneGuard<'_> {
 
 /// Hash-pinned assume-valid trust gate (Bitcoin Core `-assumevalid` semantics).
 #[derive(Debug)]
-pub struct AssumeValidGate {
+pub(crate) struct AssumeValidGate {
     /// Pinned `(height, hash)` anchor, or `None` when no pin applies.
     anchor: Option<(u32, Hash256)>,
     /// Whether the active chain is currently verified to contain the anchor.
@@ -259,7 +255,7 @@ pub struct AssumeValidGate {
 impl AssumeValidGate {
     /// Builds the gate for `network` gated on `configured_height`.
     #[must_use]
-    pub fn new(network: Network, configured_height: u32) -> Self {
+    fn new(network: Network, configured_height: u32) -> Self {
         let anchor = network
             .assume_valid_anchor()
             .filter(|(height, _)| *height == configured_height);
@@ -271,8 +267,9 @@ impl AssumeValidGate {
     }
 
     /// Builds a gate directly from an optional pinned anchor.
+    #[cfg(test)]
     #[must_use]
-    pub fn with_anchor(anchor: Option<(u32, Hash256)>) -> Self {
+    fn with_anchor(anchor: Option<(u32, Hash256)>) -> Self {
         Self {
             trusted: AtomicBool::new(anchor.is_none()),
             warned: AtomicBool::new(false),
@@ -282,12 +279,12 @@ impl AssumeValidGate {
 
     /// Returns whether historical script verification may currently be skipped.
     #[must_use]
-    pub fn trusted(&self) -> bool {
+    fn trusted(&self) -> bool {
         self.trusted.load(Ordering::Relaxed)
     }
 
     /// Re-evaluates trust against `tree`'s active chain.
-    pub fn evaluate(&self, tree: &BlockTree) {
+    fn evaluate(&self, tree: &BlockTree) {
         let Some((pinned_height, pinned_hash)) = self.anchor else {
             return;
         };
@@ -315,7 +312,7 @@ impl AssumeValidGate {
 
 /// Where a block being applied came from. Decides whether its scripts execute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlockProvenance {
+pub(crate) enum BlockProvenance {
     /// Untrusted input (peer delivery, submitblock, file import): scripts run
     /// unless the assume-valid gate covers the height.
     Network,
@@ -1127,10 +1124,10 @@ struct DisconnectPlan {
 }
 
 /// How many consecutive blocks share one script-verification dispatch.
-pub const SCRIPT_BATCH_WINDOW: usize = 1024;
+const SCRIPT_BATCH_WINDOW: usize = 1024;
 
 /// How many bytes of block data one window may hold.
-pub const SCRIPT_BATCH_MAX_BYTES: usize = 64 << 20;
+const SCRIPT_BATCH_MAX_BYTES: usize = 64 << 20;
 
 /// Returns how many of `sizes` fit in one window.
 pub fn window_len(sizes: impl IntoIterator<Item = usize>) -> usize {
