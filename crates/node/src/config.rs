@@ -205,6 +205,10 @@ pub struct MiningConfig {
     /// Coinbase `scriptPubKey` bytes. Empty means transport-only GBT assembly:
     /// the coordinator does not own a miner payout.
     pub payout_script: Vec<u8>,
+    /// SV2 Template Distribution Protocol listen address.
+    /// When set, the node runs an internal SV2 TP server.
+    #[cfg(feature = "sv2")]
+    pub sv2_listen: Option<std::net::SocketAddr>,
 }
 
 /// Fully resolved, validated node configuration consumed by the runtime.
@@ -392,6 +396,10 @@ pub fn resolve(layers: &[&UserConfig]) -> Result<NodeConfig> {
     let mut config = NodeConfig::materialize(&settings, selection);
     if let Some(address) = settings.mining.payout_address {
         config.mining.payout_script = decode_payout_script(config.network, &address)?;
+    }
+    #[cfg(feature = "sv2")]
+    {
+        config.mining.sv2_listen = settings.mining.sv2_listen;
     }
     config.validate()?;
     Ok(config)

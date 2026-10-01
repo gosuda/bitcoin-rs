@@ -234,6 +234,9 @@ pub(crate) struct NodeServices {
     readiness_sampler: Option<std::thread::JoinHandle<()>>,
     tx_relay: Option<std::thread::JoinHandle<()>>,
     signal_handler: Option<crate::signal::ShutdownHandler>,
+    /// SV2 TDP server task (behind `sv2` feature).
+    #[cfg(feature = "sv2")]
+    sv2_server: Option<tokio::task::JoinHandle<()>>,
     teardown_started: bool,
 }
 
@@ -563,6 +566,24 @@ pub(crate) fn start_node(
     // The signal holds a Weak reference; the RPC context owns the coordinator.
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
+
+    // SV2 Template Distribution Protocol server (behind `sv2` feature).
+    #[cfg(feature = "sv2")]
+    if let Some(sv2_listen) = state.config().mining.sv2_listen {
+        let source = Arc::new(bitcoin_rs_mining::sv2::InProcessSource::new(Arc::clone(
+            &mining_control,
+        )));
+        let hub = bitcoin_rs_mining::sv2::TemplateHub::new(source);
+        let server = bitcoin_rs_mining::sv2::Sv2TpServer::new(sv2_listen, hub);
+        let sv2_shutdown = Arc::clone(&shutdown);
+        guard.services.sv2_server = Some(tokio::task::spawn(async move {
+            if let Err(e) = server.run().await {
+                tracing::error!(error = %e, "sv2 server failed");
+            }
+        }));
+        tracing::info!(addr = %sv2_listen, "SV2 TDP server spawned");
+    }
+
     let gateway = state.mempool_gateway();
     // The node's one latch, built with the chainstate at open and already
     // held by the block-download executor: `initialblockdownload`, the

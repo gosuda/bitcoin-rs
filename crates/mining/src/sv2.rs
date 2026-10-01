@@ -50,19 +50,19 @@ pub trait MiningSource: Send + Sync {
 }
 
 /// In-process adapter wrapping any [`MiningControl`](crate::MiningControl).
-pub struct InProcessSource<C: crate::MiningControl> {
-    control: Arc<C>,
+pub struct InProcessSource {
+    control: Arc<dyn crate::MiningControl>,
 }
 
-impl<C: crate::MiningControl> InProcessSource<C> {
+impl InProcessSource {
     /// Creates a new adapter wrapping the given mining control.
     #[must_use]
-    pub fn new(control: Arc<C>) -> Self {
+    pub fn new(control: Arc<dyn crate::MiningControl>) -> Self {
         Self { control }
     }
 }
 
-impl<C: crate::MiningControl> MiningSource for InProcessSource<C> {
+impl MiningSource for InProcessSource {
     fn current_template(&self) -> Result<Arc<BlockTemplate>, MiningControlError> {
         use crate::{BlockTemplateMode, BlockTemplateRequest};
 

@@ -58,11 +58,12 @@ redb = [
 ]
 kernel = ["bitcoin-rs-chainstate/kernel", "bitcoin-rs-consensus/kernel"]
 zmq = ["bitcoin-rs-rpc/zmq"]
-sv2 = ["bitcoin-rs-mining/sv2"]
+sv2 = ["bitcoin-rs-mining/sv2", "dep:tokio"]
 
 [dependencies]
 hashbrown.workspace = true
 bitcoin-rs-primitives.workspace = true
+tokio = { workspace = true, optional = true }
 bitcoin-rs-consensus.workspace = true
 bitcoin-rs-storage.workspace = true
 bitcoin-rs-utxo.workspace = true
