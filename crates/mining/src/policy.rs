@@ -151,10 +151,6 @@ fn chunk_package(
 ) -> Result<SelectedPackage, MiningError> {
     #[cfg(test)]
     CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
-    if indices.len() == 1 {
-        let index = indices[0];
-        return Ok(single_entry_package(&snapshot.entries[index], index));
-    }
     let mut fee = 0_u64;
     let mut weight = 0_u64;
     let mut size = 0_u64;
@@ -182,16 +178,6 @@ fn chunk_package(
         size,
         sigop_cost,
     })
-}
-
-fn single_entry_package(entry: &SnapshotEntry, index: usize) -> SelectedPackage {
-    SelectedPackage {
-        indices: vec![index],
-        fee: entry.fee,
-        weight: entry.weight,
-        size: u64::from(entry.size),
-        sigop_cost: u64::from(entry.sigop_cost),
-    }
 }
 
 fn package_is_final(
