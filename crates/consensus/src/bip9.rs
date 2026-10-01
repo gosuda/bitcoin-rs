@@ -86,40 +86,33 @@ pub struct SoftforkState {
 /// (height-gated networks, or an unknown id).
 #[must_use]
 pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<DeploymentParams> {
-    let threshold = match network {
-        Network::Mainnet => MAINNET_THRESHOLD,
-        Network::Testnet3 => TESTNET3_THRESHOLD,
+    let (threshold, csv_start_time, segwit_start_time, segwit_timeout) = match network {
+        Network::Mainnet => (
+            MAINNET_THRESHOLD,
+            1_462_060_800,
+            1_479_168_000,
+            1_510_704_000,
+        ),
+        Network::Testnet3 => (
+            TESTNET3_THRESHOLD,
+            1_456_790_400,
+            1_462_060_800,
+            1_493_596_800,
+        ),
         Network::Testnet4 | Network::Signet | Network::Regtest => return None,
     };
-    match deployment_id {
-        CSV_DEPLOYMENT_ID => Some(DeploymentParams {
-            bit: 0,
-            start_time: match network {
-                Network::Mainnet => 1_462_060_800,
-                Network::Testnet3 => 1_456_790_400,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            timeout: 1_493_596_800,
-            period: BIP9_PERIOD,
-            threshold,
-        }),
-        SEGWIT_DEPLOYMENT_ID => Some(DeploymentParams {
-            bit: 1,
-            start_time: match network {
-                Network::Mainnet => 1_479_168_000,
-                Network::Testnet3 => 1_462_060_800,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            timeout: match network {
-                Network::Mainnet => 1_510_704_000,
-                Network::Testnet3 => 1_493_596_800,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            period: BIP9_PERIOD,
-            threshold,
-        }),
-        _ => None,
-    }
+    let (bit, start_time, timeout) = match deployment_id {
+        CSV_DEPLOYMENT_ID => (0, csv_start_time, 1_493_596_800),
+        SEGWIT_DEPLOYMENT_ID => (1, segwit_start_time, segwit_timeout),
+        _ => return None,
+    };
+    Some(DeploymentParams {
+        bit,
+        start_time,
+        timeout,
+        period: BIP9_PERIOD,
+        threshold,
+    })
 }
 
 /// Read-only chain context the state machine queries.
