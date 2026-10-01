@@ -103,19 +103,6 @@ struct CoordinatorState {
 }
 
 impl CoordinatorState {
-    /// Creates the empty lifecycle state.
-    #[must_use]
-    fn new() -> Self {
-        Self {
-            published: None,
-            cache: HashMap::new(),
-            cache_order: VecDeque::new(),
-            in_flight: None,
-            next_flight_id: 0,
-            last_candidate: None,
-        }
-    }
-
     /// Returns the cached candidate for `id`, if one is retained.
     fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
         self.cache.get(id).cloned()
@@ -276,7 +263,7 @@ impl MiningService {
             chain,
             coinbase_script,
             shutdown,
-            state: Mutex::new(CoordinatorState::new()),
+            state: Mutex::default(),
             wake: Condvar::new(),
         }
     }
