@@ -1,13 +1,14 @@
 //! Block template conversion to SV2 TDP messages.
 //!
 //! Converts the node-owned [`BlockTemplate`](crate::BlockTemplate) into raw
-//! SV2 TDP message bytes (`NewTemplate` + `SetNewPrevHash`) ready for transmission.
+//! SV2 TDP message payloads (`NewTemplate` + `SetNewPrevHash`) ready for
+//! transmission. Payloads do NOT include the 6-byte frame header.
 
 use std::sync::Arc;
 
 use bitcoin_hashes::{Hash as _, sha256d};
 use bitcoin_rs_primitives::encode::{consensus_bytes, deserialize};
-use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Header, Tx};
+use bitcoin_rs_primitives::{Block, CompactTarget, Hash256, Header, Tx, Txid};
 
 use super::MiningSource;
 
@@ -22,9 +23,23 @@ pub struct CachedTemplate {
     pub previous_block_hash: [u8; 32],
     /// Compact target bits.
     pub bits: u32,
-    /// Candidate transactions (serialized).
+    /// Candidate transaction serialized blobs.
     pub transactions: Vec<Vec<u8>>,
-    /// Transaction IDs.
+    /// Candidate transaction IDs (txid, LE).
+    pub txids: Vec<[u8; 32]>,
+}
+
+/// A template update to send to connected pools.
+pub struct TemplateUpdate {
+    /// `NewTemplate` payload (without frame header).
+    pub new_template: Vec<u8>,
+    /// `SetNewPrevHash` payload (without frame header).
+    pub set_new_prev_hash: Vec<u8>,
+    /// Template ID.
+    pub template_id: u64,
+    /// Block height.
+    pub height: u32,
+    /// Candidate transaction IDs.
     pub txids: Vec<[u8; 32]>,
 }
 
@@ -63,7 +78,7 @@ impl TemplateHub {
         self.source.submit_block(block)
     }
 
-    /// Returns the current template as SV2 TDP message bytes.
+    /// Returns a template update only when the mining generation changes.
     pub fn check_for_update(
         &mut self,
     ) -> Result<Option<TemplateUpdate>, super::MiningControlError> {
@@ -71,6 +86,21 @@ impl TemplateHub {
 
         let prev_hash: [u8; 32] = *template.candidate.previous_block_hash.as_byte_array();
         let tip_changed = self.last_prev_hash.is_none_or(|h| h != prev_hash);
+
+        // Only issue a new template when the generation actually changes.
+        if !tip_changed && self.last_template_id > 0 {
+            let current_txids: Vec<[u8; 32]> = template
+                .candidate
+                .transactions
+                .iter()
+                .map(|tx| *tx.txid.as_bytes())
+                .collect();
+            if let Some(cached) = self.template_cache.last() {
+                if cached.txids == current_txids {
+                    return Ok(None);
+                }
+            }
+        }
 
         self.last_template_id += 1;
         let template_id = self.last_template_id;
@@ -83,7 +113,6 @@ impl TemplateHub {
             .map(|tx| *tx.txid.as_bytes())
             .collect();
 
-        // Serialize candidate transactions for block reconstruction
         let transactions: Vec<Vec<u8>> = template
             .candidate
             .transactions
@@ -91,7 +120,6 @@ impl TemplateHub {
             .map(|tx| consensus_bytes(&*tx.tx))
             .collect();
 
-        // Cache the template for SubmitSolution block reconstruction
         let cached = CachedTemplate {
             template_id,
             version: template.candidate.version,
@@ -107,47 +135,45 @@ impl TemplateHub {
 
         let coinbase_prefix = coinbase_prefix(template.candidate.height);
         let n_bits = template.candidate.bits.to_consensus();
-        let target = target_from_bits(n_bits);
 
-        // Build SetNewPrevHash message bytes
-        let mut prev_hash_msg = Vec::with_capacity(49);
-        prev_hash_msg.push(0x72); // MESSAGE_TYPE_SET_NEW_PREV_HASH
-        prev_hash_msg.extend_from_slice(&template_id.to_le_bytes());
-        prev_hash_msg.extend_from_slice(&prev_hash);
-        prev_hash_msg.extend_from_slice(&template.candidate.current_time.to_le_bytes());
-        prev_hash_msg.extend_from_slice(&n_bits.to_le_bytes());
-        prev_hash_msg.extend_from_slice(&target);
-        prev_hash_msg.extend_from_slice(&template.candidate.height.to_le_bytes());
-
-        // Build NewTemplate message bytes
-        let mut new_template_msg = Vec::with_capacity(256);
-        new_template_msg.push(0x71); // MESSAGE_TYPE_NEW_TEMPLATE
-        new_template_msg.extend_from_slice(&template_id.to_le_bytes());
-        new_template_msg.push(u8::from(tip_changed));
-        new_template_msg.extend_from_slice(
+        // Build NewTemplate payload (NO frame header, NO message-type byte).
+        let mut new_template_payload = Vec::with_capacity(256);
+        new_template_payload.extend_from_slice(&template_id.to_le_bytes());
+        new_template_payload.push(u8::from(tip_changed));
+        new_template_payload.extend_from_slice(
             &u32::try_from(template.candidate.version)
                 .unwrap_or(0)
                 .to_le_bytes(),
         );
-        new_template_msg.extend_from_slice(&template.candidate.current_time.to_le_bytes());
-        new_template_msg.extend_from_slice(&n_bits.to_le_bytes());
-        new_template_msg.push(u8::try_from(coinbase_prefix.len()).unwrap_or(0));
-        new_template_msg.extend_from_slice(&coinbase_prefix);
-        new_template_msg.extend_from_slice(&2u32.to_le_bytes()); // coinbase_tx_version
-        new_template_msg.extend_from_slice(&0u32.to_le_bytes()); // coinbase_prefix_location
-        new_template_msg.extend_from_slice(&0u32.to_le_bytes()); // coinbase_tx_input_sequence
-        new_template_msg.extend_from_slice(&0u64.to_le_bytes()); // coinbase_tx_value_remaining
-        new_template_msg.push(0u8); // coinbase_tx_outputs_count
-        new_template_msg.extend_from_slice(&0u32.to_le_bytes()); // coinbase_tx_locktime
-        new_template_msg.extend_from_slice(&0u32.to_le_bytes()); // merkle_path len
-        new_template_msg.extend_from_slice(&u32::try_from(txids.len()).unwrap_or(0).to_le_bytes());
+        new_template_payload.extend_from_slice(&2u32.to_le_bytes());
+        new_template_payload.push(u8::try_from(coinbase_prefix.len()).unwrap_or(0));
+        new_template_payload.extend_from_slice(&coinbase_prefix);
+        new_template_payload.extend_from_slice(&0u32.to_le_bytes());
+        new_template_payload.extend_from_slice(&0u64.to_le_bytes());
+        new_template_payload.extend_from_slice(&0u32.to_le_bytes());
+        new_template_payload.extend_from_slice(&0u32.to_le_bytes());
+        new_template_payload.extend_from_slice(&0u32.to_le_bytes());
+        new_template_payload.extend_from_slice(&0u32.to_le_bytes());
+        new_template_payload
+            .extend_from_slice(&u32::try_from(txids.len()).unwrap_or(0).to_le_bytes());
         for txid in &txids {
-            new_template_msg.extend_from_slice(txid);
+            new_template_payload.extend_from_slice(txid);
         }
 
+        // Build SetNewPrevHash payload (NO frame header, NO message-type byte).
+        let target = target_from_bits(n_bits);
+        let mut prev_hash_payload = Vec::with_capacity(48);
+        prev_hash_payload.extend_from_slice(&template_id.to_le_bytes());
+        prev_hash_payload.extend_from_slice(&prev_hash);
+        prev_hash_payload.extend_from_slice(&template.candidate.current_time.to_le_bytes());
+        prev_hash_payload.extend_from_slice(&n_bits.to_le_bytes());
+        prev_hash_payload.extend_from_slice(&target);
+        prev_hash_payload.extend_from_slice(&template.candidate.height.to_le_bytes());
+
+        // Per TDP: NewTemplate is sent first, then SetNewPrevHash activates it.
         Ok(Some(TemplateUpdate {
-            new_template: new_template_msg,
-            set_new_prev_hash: prev_hash_msg,
+            new_template: new_template_payload,
+            set_new_prev_hash: prev_hash_payload,
             template_id,
             height: template.candidate.height,
             txids,
@@ -158,32 +184,43 @@ impl TemplateHub {
     pub fn reconstruct_block(
         &self,
         template_id: u64,
-        _version: u32,
+        _header_version: u32,
         header_timestamp: u32,
         nonce: u32,
-        coinbase_tx: &[u8],
+        coinbase_tx_bytes: &[u8],
     ) -> Result<Block, Box<dyn std::error::Error + Send + Sync>> {
         let cached = self
             .get_template(template_id)
             .ok_or_else(|| format!("template {template_id} not found"))?;
 
-        // Deserialize the coinbase transaction
-        let coinbase: Tx =
-            deserialize(coinbase_tx).map_err(|e| format!("invalid coinbase tx: {e}"))?;
+        // Decode the coinbase transaction (B064K-prefixed in TDP).
+        if coinbase_tx_bytes.len() < 2 {
+            return Err("coinbase_tx too short".into());
+        }
+        let tx_len = usize::from(u16::from_le_bytes([
+            coinbase_tx_bytes[0],
+            coinbase_tx_bytes[1],
+        ]));
+        if coinbase_tx_bytes.len() < 2 + tx_len {
+            return Err("coinbase_tx truncated".into());
+        }
+        let tx_bytes = &coinbase_tx_bytes[2..2 + tx_len];
 
-        // Build the header
+        let coinbase: Tx =
+            deserialize(tx_bytes).map_err(|e| format!("invalid coinbase tx: {e}"))?;
+
+        // Use the cached version from the template, not the solution's version
         let header = Header {
             version: cached.version,
             prev_blockhash: bitcoin_rs_primitives::BlockHash::from(Hash256::from_le_bytes(
                 &cached.previous_block_hash,
             )),
-            merkle_root: compute_merkle_root(coinbase_tx, &cached.transactions),
+            merkle_root: compute_merkle_root_from_txids(&coinbase.txid(), &cached.txids),
             time: header_timestamp,
             bits: CompactTarget::from_consensus(cached.bits),
             nonce,
         };
 
-        // Build the block
         let txs = {
             let mut txs = vec![coinbase];
             for tx_bytes in &cached.transactions {
@@ -198,55 +235,38 @@ impl TemplateHub {
     }
 }
 
-/// Computes the merkle root from the coinbase and candidate transactions.
+/// Computes the merkle root from txids (txid, LE byte order).
+///
+/// The merkle tree is built over txids only (not full tx bytes), which is
+/// correct for witness transactions. Odd nodes are duplicated at every level.
 #[allow(clippy::unwrap_used)]
-fn compute_merkle_root(coinbase_tx: &[u8], candidate_txs: &[Vec<u8>]) -> Hash256 {
-    let coinbase_hash = sha256d::Hash::hash(coinbase_tx);
+fn compute_merkle_root_from_txids(coinbase_txid: &Txid, candidate_txids: &[[u8; 32]]) -> Hash256 {
+    let coinbase_hash = coinbase_txid.as_bytes().to_vec();
 
-    if candidate_txs.is_empty() {
-        // Single transaction: merkle root is the tx hash doubled
-        let mut combined = Vec::with_capacity(64);
-        combined.extend_from_slice(&coinbase_hash[..32]);
-        combined.extend_from_slice(&coinbase_hash[..32]);
-        return Hash256::from_le_bytes(&sha256d::Hash::hash(&combined)[..32].try_into().unwrap());
+    if candidate_txids.is_empty() {
+        // Single transaction: merkle root IS the txid (no doubling).
+        return Hash256::from_le_bytes(&coinbase_hash[..32].try_into().unwrap());
     }
 
-    // Build the merkle tree
     let mut hashes: Vec<[u8; 32]> = vec![coinbase_hash[..32].try_into().unwrap()];
-    for tx_bytes in candidate_txs {
-        hashes.push(sha256d::Hash::hash(tx_bytes)[..32].try_into().unwrap());
+    for txid in candidate_txids {
+        hashes.push(*txid);
     }
 
-    // Duplicate the last hash if odd number of transactions
-    if !hashes.len().is_multiple_of(2) {
-        hashes.push(*hashes.last().unwrap());
-    }
-
-    // Compute pairwise hashes until one remains
+    // Merkle tree: duplicate last node at EVERY odd level
     while hashes.len() > 1 {
+        if !hashes.len().is_multiple_of(2) {
+            hashes.push(*hashes.last().unwrap());
+        }
         let mut new_hashes = Vec::with_capacity(hashes.len() / 2);
         for pair in hashes.chunks(2) {
             let combined = [pair[0], pair[1]].concat();
-            new_hashes.push(sha256d::Hash::hash(&combined)[..32].try_into().unwrap());
+            new_hashes.push(<[u8; 32]>::try_from(&sha256d::Hash::hash(&combined)[..32]).unwrap());
         }
         hashes = new_hashes;
     }
 
     Hash256::from_le_bytes(&hashes[0])
-}
-
-/// A template update to send to connected pools.
-pub struct TemplateUpdate {
-    /// Raw `NewTemplate` message bytes.
-    pub new_template: Vec<u8>,
-    /// Raw `SetNewPrevHash` message bytes.
-    pub set_new_prev_hash: Vec<u8>,
-    /// Template ID.
-    pub template_id: u64,
-    /// Block height.
-    pub height: u32,
-    /// Candidate transaction IDs.
-    pub txids: Vec<[u8; 32]>,
 }
 
 /// Builds a BIP34 coinbase prefix (height push).

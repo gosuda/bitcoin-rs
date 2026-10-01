@@ -1,24 +1,23 @@
 # Stratum V2 example: bitcoin-rs as the mining owner behind the SRI stack
 
-This example runs bitcoin-rs (regtest) together with the SRI pool and CPU
-mining devices. The SRI template-provider bridge connects to bitcoin-rs's
-JSON-RPC interface (`getblocktemplate`/`submitblock`).
+This example runs bitcoin-rs (regtest) with its native SV2 Template
+Distribution Protocol server enabled. An SRI pool connects directly to
+bitcoin-rs via SV2 — no external bridge container.
 
 ## Architecture
 
 ```text
-miner-1 (SV2)          miner-2 (SV2)
-    | SV2                   | SV2
-    +-----------+-----------+
-                |
-                v
-         pool (SRI upstream)
-                | templates / solutions (Noise)
-                v
-    template-provider (SRI upstream)
-                | JSON-RPC: getblocktemplate / submitblock
-                v
-         bitcoin-rs (regtest)
+miner-1 (SV2)    miner-2 (SV2)
+    | SV2             | SV2
+    +---------+-------+
+              v
+       pool (SRI upstream)
+              | SV2 TDP (Noise)
+              v
+  bitcoin-rs native SV2 TP (crates/mining/src/sv2/)
+              | MiningControl
+              v
+       bitcoin-rs regtest node
 ```
 
 ## Run
@@ -29,17 +28,16 @@ docker compose up -d
 docker compose logs -f miner-1 pool
 ```
 
-bitcoin-rs starts first (healthcheck: `getblockchaininfo`). The
-template-provider connects to bitcoin-rs via RPC, then the pool connects
-to the template-provider via Noise. Devices open channels and mine.
+bitcoin-rs starts first (healthcheck: `getblockchaininfo`). The SRI pool
+connects to bitcoin-rs's SV2 endpoint via Noise. Devices open channels
+and mine.
 
 ## Pinned images
 
 | Component | Image |
 |-----------|-------|
-| bitcoin-rs | built from repo-root `Dockerfile` |
+| bitcoin-rs | built from repo-root `Dockerfile` with `FEATURES=fjall,kernel,sv2` |
 | pool | `stratumv2/pool_sv2:v0.8.0` |
-| template-provider | SRI upstream template provider |
 | miners | SRI upstream mining device |
 
 ## Verify

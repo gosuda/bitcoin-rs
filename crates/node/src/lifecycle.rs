@@ -234,9 +234,9 @@ pub(crate) struct NodeServices {
     readiness_sampler: Option<std::thread::JoinHandle<()>>,
     tx_relay: Option<std::thread::JoinHandle<()>>,
     signal_handler: Option<crate::signal::ShutdownHandler>,
-    /// SV2 TDP server task (behind `sv2` feature).
+    /// SV2 TDP server thread (behind `sv2` feature).
     #[cfg(feature = "sv2")]
-    sv2_server: Option<tokio::task::JoinHandle<()>>,
+    sv2_server: Option<std::thread::JoinHandle<()>>,
     teardown_started: bool,
 }
 
@@ -575,11 +575,24 @@ pub(crate) fn start_node(
         )));
         let hub = bitcoin_rs_mining::sv2::TemplateHub::new(source);
         let server = bitcoin_rs_mining::sv2::Sv2TpServer::new(sv2_listen, hub);
-        guard.services.sv2_server = Some(tokio::task::spawn(async move {
-            if let Err(e) = server.run().await {
-                tracing::error!(error = %e, "sv2 server failed");
-            }
-        }));
+        // Bind eagerly so startup fails fast on address-in-use.
+        // The server runs its own tokio runtime inside a dedicated thread.
+        guard.services.sv2_server = Some(
+            std::thread::Builder::new()
+                .name("bitcoin-rs-sv2".into())
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("sv2 tokio runtime");
+                    rt.block_on(async move {
+                        if let Err(e) = server.run().await {
+                            tracing::error!(error = %e, "sv2 server failed");
+                        }
+                    });
+                })
+                .map_err(|e| anyhow::anyhow!("failed to spawn sv2 server: {e}"))?,
+        );
         tracing::info!(addr = %sv2_listen, "SV2 TDP server spawned");
     }
 
