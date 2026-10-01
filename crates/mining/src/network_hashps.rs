@@ -67,12 +67,7 @@ pub fn estimate_network_hashps(
         return 0.0;
     };
     let mut walk = if lookup == -1 {
-        let interval = i64::from(network.retarget_interval());
-        if interval <= 0 {
-            1
-        } else {
-            i64::from(start_node.height) % interval + 1
-        }
+        i64::from(start_node.height) % i64::from(network.retarget_interval()) + 1
     } else {
         lookup
     };
