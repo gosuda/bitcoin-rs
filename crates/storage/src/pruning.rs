@@ -60,7 +60,7 @@ pub use lease::{
     RetentionBudget, RetentionError, RetentionLease, RetentionRegistry,
 };
 pub use policy::PrunePolicy;
-pub use undo_pruner::{UndoPruner, block_undo_key};
+pub use undo_pruner::block_undo_key;
 
 use crate::{BufferedWriteBatch, StorageError};
 use thiserror::Error;
