@@ -2055,34 +2055,11 @@ impl Mempool {
         let own_fee = entry.fee;
         let own_delta = i128::from(entry.fee_delta);
 
-        let (ancestor_size, ancestor_fee, ancestor_fee_delta) = self
-            .ancestor_ids_for_entry(id)
-            .into_iter()
-            .filter_map(|ancestor| self.entry(ancestor))
-            .fold(
-                (own_size, own_fee, own_delta),
-                |(size, fee, delta), ancestor| {
-                    (
-                        size.saturating_add(u64::from(ancestor.vsize)),
-                        fee.saturating_add(ancestor.fee),
-                        delta.saturating_add(i128::from(ancestor.fee_delta)),
-                    )
-                },
-            );
-        let (descendant_size, descendant_fee, descendant_fee_delta) = self
-            .descendant_ids_for_entry(id)
-            .into_iter()
-            .filter_map(|descendant| self.entry(descendant))
-            .fold(
-                (own_size, own_fee, own_delta),
-                |(size, fee, delta), descendant| {
-                    (
-                        size.saturating_add(u64::from(descendant.vsize)),
-                        fee.saturating_add(descendant.fee),
-                        delta.saturating_add(i128::from(descendant.fee_delta)),
-                    )
-                },
-            );
+        let own = (own_size, own_fee, own_delta);
+        let (ancestor_size, ancestor_fee, ancestor_fee_delta) =
+            self.package_totals(self.ancestor_ids_for_entry(id), own);
+        let (descendant_size, descendant_fee, descendant_fee_delta) =
+            self.package_totals(self.descendant_ids_for_entry(id), own);
 
         if let Some(entry) = self.entry_mut(id) {
             entry.ancestor_size = ancestor_size;
@@ -2092,6 +2069,19 @@ impl Mempool {
             entry.descendant_fee = descendant_fee;
             entry.descendant_fee_delta = descendant_fee_delta;
         }
+    }
+
+    /// The vsize, fee, and fee-delta sums of `own` plus every live id.
+    fn package_totals(&self, ids: Vec<EntryId>, own: (u64, u64, i128)) -> (u64, u64, i128) {
+        ids.into_iter()
+            .filter_map(|id| self.entry(id))
+            .fold(own, |(size, fee, delta), entry| {
+                (
+                    size.saturating_add(u64::from(entry.vsize)),
+                    fee.saturating_add(entry.fee),
+                    delta.saturating_add(i128::from(entry.fee_delta)),
+                )
+            })
     }
 
     /// Every entry whose totals a change at `seeds` can have altered.
