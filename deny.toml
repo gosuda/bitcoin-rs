@@ -151,6 +151,7 @@ skip = [
     { crate = "hex-conservative@1.3.0", reason = "SV2 protocol crates (sv2 feature)" },
     { crate = "secp256k1@0.29.1", reason = "SV2 protocol crates (sv2 feature)" },
     { crate = "secp256k1-sys@0.10.1", reason = "SV2 protocol crates (sv2 feature)" },
+    { crate = "noise_sv2@1.4.2", reason = "network_helpers uses noise_sv2 1.4.x" },
 ]
 
 [sources]
