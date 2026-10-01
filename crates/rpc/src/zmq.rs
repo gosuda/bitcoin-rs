@@ -718,7 +718,10 @@ mod tests {
                 Ok(frames) => {
                     assert_eq!(frames.len(), 3);
                     assert_eq!(frames[0].as_slice(), b"hashblock");
-                    assert_eq!(frames[1].as_slice(), reversed_hash_body(hash.to_le_bytes()).as_slice());
+                    assert_eq!(
+                        frames[1].as_slice(),
+                        reversed_hash_body(hash.to_le_bytes()).as_slice()
+                    );
                     assert_eq!(frames[2].len(), 4);
                     return Ok(());
                 }
@@ -770,7 +773,10 @@ mod tests {
         assert_eq!(connected[1].len(), 33);
         assert_eq!(connected[1][..32], reversed_hash_body(hash.to_le_bytes()));
         assert_eq!(connected[1][32], b'C');
-        assert_eq!(disconnected[1][..32], reversed_hash_body(hash.to_le_bytes()));
+        assert_eq!(
+            disconnected[1][..32],
+            reversed_hash_body(hash.to_le_bytes())
+        );
         assert_eq!(disconnected[1][32], b'D');
         let connected_sequence = u32::from_le_bytes(connected[2].as_slice().try_into()?);
         let disconnected_sequence = u32::from_le_bytes(disconnected[2].as_slice().try_into()?);

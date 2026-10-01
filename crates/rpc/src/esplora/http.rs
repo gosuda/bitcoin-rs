@@ -6,9 +6,7 @@
 //! construction for the crate.
 
 use crate::context::TxQueryError;
-use crate::rest::{
-    Response, bad_request, internal_error, not_found, service_unavailable,
-};
+use crate::rest::{Response, bad_request, internal_error, not_found, service_unavailable};
 
 pub(super) fn query_limit(query: &str, name: &str) -> Option<usize> {
     query.split('&').find_map(|pair| {
@@ -19,9 +17,7 @@ pub(super) fn query_limit(query: &str, name: &str) -> Option<usize> {
 
 pub(super) fn query_error(e: TxQueryError) -> Response {
     match e {
-        TxQueryError::Retry | TxQueryError::Unavailable(_) => {
-            service_unavailable(e.to_string())
-        }
+        TxQueryError::Retry | TxQueryError::Unavailable(_) => service_unavailable(e.to_string()),
         TxQueryError::Storage(_) => internal_error(e.to_string()),
     }
 }
