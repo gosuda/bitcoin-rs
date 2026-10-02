@@ -34,7 +34,16 @@ pub mod reorg;
 mod run;
 /// Signal handling.
 mod signal;
-/// Shared node state.
+/// Internal node composition root.
+#[cfg(not(feature = "test-seam"))]
+#[allow(
+    unreachable_pub,
+    reason = "the public shape is exposed only by the explicit test seam"
+)]
+mod state;
+/// Integration-test and benchmark access to the internal node composition root.
+#[cfg(feature = "test-seam")]
+#[doc(hidden)]
 pub mod state;
 mod storage_backend;
 /// Custody-grade data-directory storage-footprint evidence.

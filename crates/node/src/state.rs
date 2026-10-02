@@ -1,8 +1,10 @@
-//! Shared node runtime state and capability handles.
+//! Internal node runtime composition root and capability handles.
 //!
 //! Shared handles, checkpoint publication, and index lifecycle live with
 //! `NodeState`. Construction, recovery, storage, events, and pruning retain
-//! separate private implementations.
+//! separate private implementations. Production embedders enter through
+//! [`crate::Node`]; the module is public only under the explicit `test-seam`
+//! feature used by integration tests and benchmarks.
 
 use crate::NodeConfig;
 use anyhow::Context as _;
@@ -83,7 +85,7 @@ pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
 // the same connection under normal load.
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
-/// Aggregate handle to a running node.
+/// Internal aggregate handle to a running node.
 pub struct NodeState {
     config: NodeConfig,
     #[cfg(test)]

@@ -46,7 +46,7 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
 
-    // --- seed chain state on the same datadir through the public types ------
+    // --- seed chain state on the same datadir through the test seam --------
     // The height-1 coinbase (anyone-can-spend OP_1) becomes spendable by the
     // next block once the tip reaches height 100 — the same fixture shape
     // the mining e2e test uses.

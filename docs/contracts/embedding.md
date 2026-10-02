@@ -32,8 +32,12 @@ the first embedder — there is one lifecycle implementation, not two.
   `async fn` running on the caller's Tokio runtime; the node never
   creates, enters, or retains a runtime. Startup and shutdown drive the
   node's own threads synchronously. Owner: `crates/node/src/embed.rs`.
-- **EMB-03 — No storage in signatures.** No public embedding signature
-  names a storage backend, `NodeStorage`, or index internals. Owner:
+- **EMB-03 — Internal composition root.** No public embedding signature
+  names a storage backend, `NodeStorage`, index internals, or `NodeState`.
+  The `state` module is private in production builds; its explicit
+  `test-seam` feature exists only for integration tests and benchmarks.
+  Embedders use operation-oriented `Node` methods instead of receiving raw
+  writable locks, subsystem services, channels, or runtime handles. Owner:
   `crates/node/src/embed.rs`.
 - **EMB-04 — Typed reads mirror the RPC facts.** `snapshot()` returns the
   coherent `ChainSnapshot`; `sync_progress()` derives the
