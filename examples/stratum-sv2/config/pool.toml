@@ -1,0 +1,35 @@
+# SRI pool_sv2 v0.8.0 config, mounted read-only at the image's default config
+# path /app/pool-config.toml (the binary's `-c` default; POOL__* env vars are
+# an override layer we do not use).
+#
+# EXAMPLE-ONLY keys: this is the SRI reference authority keypair shared by
+# every stratum-mining/sv2-apps config example. Never use it anywhere real.
+
+authority_public_key = "9auqWEzQDVyd2oe1JVGFLMLHZtCo2FFqZwtKA5gd9xbuEu7PH72"
+authority_secret_key = "mkDLTBBRxdBv998612qipDYoTK3YUrqLe8uWw7gu3iXbSrn2n"
+cert_validity_sec = 3600
+
+# SV2 miner listener (compose-internal).
+listen_address = "0.0.0.0:34255"
+
+# Payout destination for coinbase_tx_value_remaining (regtest P2WPKH bech32).
+coinbase_reward_script = "addr(bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080)"
+
+server_id = 1
+pool_signature = "Stratum V2 SRI Pool"
+
+shares_per_minute = 6.0
+share_batch_size = 10
+
+monitoring_address = "0.0.0.0:9090"
+monitoring_cache_refresh_secs = 15
+
+# Full-template mode against our template-provider bridge. NOTE: `public_key`
+# pins the bridge's Noise public key (base58-with-check). The shipped value
+# already matches the default example key (EXAMPLE_PRIVATE_KEY_HEX /
+# TP_PRIVATE_KEY_HEX in template-provider/src/main.rs); replace it only when
+# the key is overridden. No [jds] section: the pool runs without a Job
+# Declaration Server (JDS would require Bitcoin Core IPC, which we do not use).
+[template_provider_type.Sv2Tp]
+address = "template-provider:8442"
+public_key = "9bWTZifgp9aVa23vtHqGT74UwK9bDRQxm77jf3u2tZ3ysM2ncMW"
