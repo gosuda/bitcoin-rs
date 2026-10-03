@@ -1,10 +1,14 @@
-- `Interpreter::execute_with_prevouts` in
+- `Interpreter::execute_with_prevouts` and `PreparedTransaction::verify_input` in
   `crates/script/src/interpreter.rs` verify every consensus spend class:
   legacy and P2SH through `eval::eval_script`, SegWit v0 through BIP143,
   Taproot key-path and script-path through local BIP341/BIP342.
 - `crates/consensus/src/verify_tx.rs` routes that path through
   `verify_input_script_native`, which is compiled in every build — including
   `kernel` builds, where `validation.engine = "native"` still reaches it.
+- Block and transaction verification retain one native sighash cache and ordered
+  prevout set per prepared transaction. Transaction aggregates initialize once
+  across parallel input checks; script, input index, hash mode, annex and
+  code-separator context remain local to each check.
 - Core `script_tests.json`, `tx_valid.json`, and `tx_invalid.json` native
   columns pin zero mismatches on **runnable** rows in
   `crates/script/tests/core_vectors.rs`, and pin skip counts **and**
@@ -40,6 +44,9 @@
 - `crates/script/tests/core_vectors.rs`: `script_tests_native_column`,
   `tx_valid_native_column`, `tx_invalid_native_column`
   (`NATIVE_*_FAILURES = 0`, pinned skip counts and skip-reason allow-lists).
+- `crates/consensus/tests/shared_sighash.rs`: concurrent transaction aggregates
+  against independent digests, independently signed mixed-input checks through
+  transaction and block preparation, and typed count/index failure precedence.
 - `crates/consensus/tests/kernel_block_parity.rs`:
   `script_verdict_parity` (Taproot key-path differential),
   `differential_is_non_vacuous` (script-path non-vacuity).

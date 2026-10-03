@@ -6,6 +6,8 @@
 //! vectors and published hash values; this crate does not take a `rust-bitcoin`
 //! oracle dependency.
 
+use std::sync::OnceLock;
+
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -170,18 +172,20 @@ impl EcdsaType {
 /// Lazily cached signature hashes for one transaction.
 ///
 /// The taproot amount/scriptPubKey midstates assume the same prevout set is supplied to
-/// every call on this cache (the same assumption the `bitcoin` crate's cache makes);
-/// construct a fresh cache when the prevout set changes.
+/// every call on this cache, including concurrent calls (the same assumption the `bitcoin` crate's cache makes);
+/// construct a fresh cache when the prevout set changes. Aggregate hashes initialize
+/// once and can be shared across parallel input checks. Script code, input index,
+/// hash type, annex and code-separator position remain arguments of each digest.
 pub struct SighashCache<'t> {
     tx: &'t Tx,
-    segwit_prevouts: Option<Hash256>,
-    segwit_sequences: Option<Hash256>,
-    segwit_outputs: Option<Hash256>,
-    taproot_prevouts: Option<Hash256>,
-    taproot_amounts: Option<Hash256>,
-    taproot_scriptpubkeys: Option<Hash256>,
-    taproot_sequences: Option<Hash256>,
-    taproot_outputs: Option<Hash256>,
+    segwit_prevouts: OnceLock<Hash256>,
+    segwit_sequences: OnceLock<Hash256>,
+    segwit_outputs: OnceLock<Hash256>,
+    taproot_prevouts: OnceLock<Hash256>,
+    taproot_amounts: OnceLock<Hash256>,
+    taproot_scriptpubkeys: OnceLock<Hash256>,
+    taproot_sequences: OnceLock<Hash256>,
+    taproot_outputs: OnceLock<Hash256>,
 }
 
 impl<'t> SighashCache<'t> {
@@ -190,14 +194,14 @@ impl<'t> SighashCache<'t> {
     pub fn new(tx: &'t Tx) -> Self {
         Self {
             tx,
-            segwit_prevouts: None,
-            segwit_sequences: None,
-            segwit_outputs: None,
-            taproot_prevouts: None,
-            taproot_amounts: None,
-            taproot_scriptpubkeys: None,
-            taproot_sequences: None,
-            taproot_outputs: None,
+            segwit_prevouts: OnceLock::new(),
+            segwit_sequences: OnceLock::new(),
+            segwit_outputs: OnceLock::new(),
+            taproot_prevouts: OnceLock::new(),
+            taproot_amounts: OnceLock::new(),
+            taproot_scriptpubkeys: OnceLock::new(),
+            taproot_sequences: OnceLock::new(),
+            taproot_outputs: OnceLock::new(),
         }
     }
 
@@ -288,7 +292,7 @@ impl<'t> SighashCache<'t> {
     /// SINGLE blanking of individual outputs, and no uint256-one bug — those are
     /// legacy-only (see [`Self::legacy_signature_hash`]).
     pub fn segwit_v0_signature_hash(
-        &mut self,
+        &self,
         input_index: usize,
         script_code: &[u8],
         value: crate::Amount,
@@ -307,7 +311,7 @@ impl<'t> SighashCache<'t> {
     /// API's taproot-only [`Sighash::Default`]. The caller supplies the selected
     /// script-code suffix verbatim.
     pub fn segwit_v0_signature_hash_raw(
-        &mut self,
+        &self,
         input_index: usize,
         script_code: &[u8],
         value: crate::Amount,
@@ -375,7 +379,7 @@ impl<'t> SighashCache<'t> {
     /// for key-path spends and `Some((leaf_hash, code_separator_position))` for script
     /// path spends (BIP342). The tagged hash includes Core's zero epoch byte.
     pub fn taproot_signature_hash(
-        &mut self,
+        &self,
         input_index: usize,
         prevouts: &[TxOut],
         annex: Option<&[u8]>,
@@ -461,9 +465,9 @@ impl<'t> SighashCache<'t> {
         Ok(tagged_hash(b"TapSighash", &msg))
     }
 
-    fn segwit_prevouts(&mut self) -> Hash256 {
+    fn segwit_prevouts(&self) -> Hash256 {
         let tx = self.tx;
-        *self.segwit_prevouts.get_or_insert_with(|| {
+        *self.segwit_prevouts.get_or_init(|| {
             double_sha256_over(|writer| {
                 for input in &tx.inputs {
                     input.previous_output.consensus_encode(writer);
@@ -472,9 +476,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn segwit_sequences(&mut self) -> Hash256 {
+    fn segwit_sequences(&self) -> Hash256 {
         let tx = self.tx;
-        *self.segwit_sequences.get_or_insert_with(|| {
+        *self.segwit_sequences.get_or_init(|| {
             double_sha256_over(|writer| {
                 for input in &tx.inputs {
                     writer.write_all(&input.sequence.to_le_bytes());
@@ -483,9 +487,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn segwit_outputs(&mut self) -> Hash256 {
+    fn segwit_outputs(&self) -> Hash256 {
         let tx = self.tx;
-        *self.segwit_outputs.get_or_insert_with(|| {
+        *self.segwit_outputs.get_or_init(|| {
             double_sha256_over(|writer| {
                 for output in &tx.outputs {
                     output.consensus_encode(writer);
@@ -494,9 +498,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_prevouts(&mut self) -> Hash256 {
+    fn taproot_prevouts(&self) -> Hash256 {
         let tx = self.tx;
-        *self.taproot_prevouts.get_or_insert_with(|| {
+        *self.taproot_prevouts.get_or_init(|| {
             sha256_over(|writer| {
                 for input in &tx.inputs {
                     input.previous_output.consensus_encode(writer);
@@ -505,8 +509,8 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_amounts(&mut self, prevouts: &[TxOut]) -> Hash256 {
-        *self.taproot_amounts.get_or_insert_with(|| {
+    fn taproot_amounts(&self, prevouts: &[TxOut]) -> Hash256 {
+        *self.taproot_amounts.get_or_init(|| {
             sha256_over(|writer| {
                 for prevout in prevouts {
                     writer.write_all(&prevout.value.to_le_bytes());
@@ -515,8 +519,8 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_scriptpubkeys(&mut self, prevouts: &[TxOut]) -> Hash256 {
-        *self.taproot_scriptpubkeys.get_or_insert_with(|| {
+    fn taproot_scriptpubkeys(&self, prevouts: &[TxOut]) -> Hash256 {
+        *self.taproot_scriptpubkeys.get_or_init(|| {
             sha256_over(|writer| {
                 for prevout in prevouts {
                     write_script(writer, &prevout.script_pubkey);
@@ -525,9 +529,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_sequences(&mut self) -> Hash256 {
+    fn taproot_sequences(&self) -> Hash256 {
         let tx = self.tx;
-        *self.taproot_sequences.get_or_insert_with(|| {
+        *self.taproot_sequences.get_or_init(|| {
             sha256_over(|writer| {
                 for input in &tx.inputs {
                     writer.write_all(&input.sequence.to_le_bytes());
@@ -536,9 +540,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_outputs(&mut self) -> Hash256 {
+    fn taproot_outputs(&self) -> Hash256 {
         let tx = self.tx;
-        *self.taproot_outputs.get_or_insert_with(|| {
+        *self.taproot_outputs.get_or_init(|| {
             sha256_over(|writer| {
                 for output in &tx.outputs {
                     output.consensus_encode(writer);

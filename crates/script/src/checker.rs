@@ -52,7 +52,7 @@ pub(crate) struct TxSignatureChecker<'a> {
     input_index: usize,
     amount: Amount,
     prevouts: &'a [TxOut],
-    cache: SighashCache<'a>,
+    cache: &'a SighashCache<'a>,
     /// Raw taproot annex bytes, when present (BIP341). Used by
     /// `check_schnorr_signature` to commit the annex to the sighash.
     annex: Option<Vec<u8>>,
@@ -67,13 +67,14 @@ impl<'a> TxSignatureChecker<'a> {
         input_index: usize,
         amount: Amount,
         prevouts: &'a [TxOut],
+        cache: &'a SighashCache<'a>,
     ) -> Self {
         Self {
             tx,
             input_index,
             amount,
             prevouts,
-            cache: SighashCache::new(tx),
+            cache,
             annex: None,
         }
     }
@@ -97,7 +98,7 @@ impl<'a> TxSignatureChecker<'a> {
     /// empty (clean failure), and `Err` when encoding or verification fails
     /// under the active flags.
     pub(crate) fn check_ecdsa_signature(
-        &mut self,
+        &self,
         sig: &[u8],
         pubkey: &[u8],
         script_code: &[u8],
@@ -195,7 +196,7 @@ impl<'a> TxSignatureChecker<'a> {
     /// (tapscript empty-sig convention), and `Err` for size/hashtype/verification
     /// failures.
     pub(crate) fn check_schnorr_signature(
-        &mut self,
+        &self,
         sig: &[u8],
         pubkey: &[u8],
         leaf_hash: Option<&Hash256>,
@@ -649,7 +650,9 @@ mod tests {
     fn der_flag_rejects_non_der_signature() {
         let tx = make_tx(2, 0, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let mut checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // A non-DER signature: just random bytes with a hashtype appended.
         let bad_sig = [0x00, 0x01, 0x02, 0x03, 0x01_u8];
@@ -684,7 +687,9 @@ mod tests {
     fn der_flag_accepts_empty_signature() {
         let tx = make_tx(2, 0, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let mut checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         let result = checker.check_ecdsa_signature(
             &[],
@@ -705,7 +710,9 @@ mod tests {
     fn low_s_flag_rejects_high_s_signature() {
         let tx = make_tx(2, 0, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let mut checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // Construct a DER-encoded signature with a high S value that is
         // still valid DER (positive integer). S = 0x80...00 (32 bytes) is
@@ -755,7 +762,9 @@ mod tests {
     fn strictenc_rejects_undefined_hashtype() {
         let tx = make_tx(2, 0, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let mut checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // Build a valid DER signature with an undefined hashtype (0x05).
         let sig: Vec<u8> = [0x30, 0x44, 0x02, 0x20]
@@ -793,7 +802,9 @@ mod tests {
     fn strictenc_rejects_invalid_pubkey() {
         let tx = make_tx(2, 0, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let mut checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // A valid DER sig with low S.
         let sig: Vec<u8> = [0x30, 0x44, 0x02, 0x20]
@@ -834,7 +845,9 @@ mod tests {
     fn witness_pubkeytype_rejects_uncompressed_in_segwit() {
         let tx = make_tx(2, 0, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let mut checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // Uncompressed pubkey (0x04 prefix, 65 bytes).
         let uncompressed = [0x04_u8; 65];
@@ -874,7 +887,9 @@ mod tests {
     fn nullfail_rejects_nonempty_failing_signature() {
         let tx = make_tx(2, 0, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let mut checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // Valid DER, low S, valid hashtype — but the signature won't verify
         // against this random pubkey, so without NULLFAIL it would be Ok(false).
@@ -903,7 +918,9 @@ mod tests {
         // With NULLFAIL: check_ecdsa_signature returns Ok(false) — NULLFAIL
         // enforcement is the caller's job (eval_checksig / check_multisig
         // cleanup), not the checker's.
-        let mut checker2 = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker2_cache = SighashCache::new(&tx);
+        let checker2 =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker2_cache);
         let result_nullfail = checker2.check_ecdsa_signature(
             &sig,
             &pubkey,
@@ -924,7 +941,9 @@ mod tests {
     fn nullfail_allows_empty_signature() {
         let tx = make_tx(2, 0, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let mut checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         let result = checker.check_ecdsa_signature(
             &[],
@@ -945,7 +964,9 @@ mod tests {
     fn check_locktime_satisfied_when_types_match_and_locktime_le_tx() {
         let tx = make_tx(2, 100, 0);
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // locktime 50 <= tx locktime 100, both block height, input not finalized.
         assert!(checker.check_locktime(50));
@@ -956,7 +977,9 @@ mod tests {
     fn check_locktime_fails_when_locktime_exceeds_tx() {
         let tx = make_tx(2, 100, 0);
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         assert!(!checker.check_locktime(101));
     }
@@ -965,7 +988,9 @@ mod tests {
     fn check_locktime_fails_on_type_mismatch() {
         let tx = make_tx(2, 100, 0); // tx locktime = block height
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // Timestamp locktime vs block-height tx locktime.
         let timestamp = i64::from(LOCKTIME_THRESHOLD) + 100;
@@ -976,7 +1001,9 @@ mod tests {
     fn check_locktime_fails_when_input_finalized() {
         let tx = make_tx(2, 100, SEQUENCE_FINAL);
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // Even though locktime 50 <= 100 and types match, the input is finalized.
         assert!(!checker.check_locktime(50));
@@ -992,7 +1019,9 @@ mod tests {
         let sequence = 100_u32; // block-height type, value 100
         let tx = make_tx(2, 0, sequence);
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // Required sequence 50 <= input sequence 100, same type.
         assert!(checker.check_sequence(50));
@@ -1004,7 +1033,9 @@ mod tests {
         let sequence = 100_u32;
         let tx = make_tx(2, 0, sequence);
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         assert!(!checker.check_sequence(101));
     }
@@ -1013,7 +1044,9 @@ mod tests {
     fn check_sequence_fails_when_tx_version_too_low() {
         let tx = make_tx(1, 0, 100);
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         assert!(!checker.check_sequence(50));
     }
@@ -1023,7 +1056,9 @@ mod tests {
         let sequence = 0x64_u32 | SEQUENCE_LOCKTIME_DISABLE_FLAG;
         let tx = make_tx(2, 0, sequence);
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         assert!(!checker.check_sequence(50));
     }
@@ -1033,7 +1068,9 @@ mod tests {
         // Input sequence: block-height type (value < TYPE_FLAG).
         let tx = make_tx(2, 0, 100);
         let prevouts = make_prevouts();
-        let checker = TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts);
+        let checker_cache = SighashCache::new(&tx);
+        let checker =
+            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
 
         // Required: time-based type (value >= TYPE_FLAG).
         let time_based = i64::from(SEQUENCE_LOCKTIME_TYPE_FLAG) + 50;

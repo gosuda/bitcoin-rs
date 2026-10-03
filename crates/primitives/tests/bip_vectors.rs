@@ -85,7 +85,7 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
         let value_sats = example["value_sats"].as_u64().expect("value sats");
         let input_index = usize::try_from(example["input_index"].as_u64().expect("input index"))
             .expect("input index fits usize");
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
 
         for vector in example["vectors"].as_array().expect("vectors array") {
             let hash_type = u32::try_from(vector["hash_type"].as_u64().expect("hash type"))
@@ -157,7 +157,7 @@ fn bip341_keypath_vectors_match_spec_digests() -> Result<()> {
             })
             .collect();
 
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
         for input in case["inputSpending"]
             .as_array()
             .expect("inputSpending array")
