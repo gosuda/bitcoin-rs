@@ -1,14 +1,9 @@
 //! Storage-footprint evidence record format and default-lane budget verdict.
-//!
-//! The measurement orchestration and identity projection live in the node
-//! crate; this module owns the emitted record shape and the FP-04 verdict
-//! policy.
 
 use serde::Serialize;
 
-use crate::footprint::{
-    LogicalLedger, LogicalOwner, PhysicalLedger, PhysicalNamespace, PhysicalObservationKind,
-};
+use crate::logical::{LogicalLedger, LogicalOwner};
+use crate::physical_types::{PhysicalLedger, PhysicalNamespace, PhysicalObservationKind};
 
 /// Default unpruned, no-index mainnet peak budget: `1_000_000_000_000` allocated bytes.
 pub const DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES: u64 = 1_000_000_000_000;
@@ -211,88 +206,4 @@ pub fn storage_footprint_json(
     evidence: &StorageFootprintEvidence,
 ) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(evidence)
-}
-
-#[cfg(test)]
-#[expect(clippy::expect_used)]
-mod tests {
-    // CONTRACT: `docs/contracts/storage-footprint.md` FP-01 owns the evidence
-    // record shape and FP-04 owns the default-lane budget verdict policy;
-    // these tests are proof, not policy.
-    use super::*;
-
-    fn identity(network: &str, stop_pinned: bool) -> EvidenceIdentity {
-        EvidenceIdentity {
-            pkg_version: "0.0.0".to_owned(),
-            git_commit: None,
-            rustc_release: None,
-            rustc_commit: None,
-            cargo_lock_sha256: "00".to_owned(),
-            binary_path: None,
-            binary_sha256: None,
-            features: Vec::new(),
-            network: network.to_owned(),
-            backend: "fjall".to_owned(),
-            dbcache_mb: 0,
-            cache_budget_bytes: 0,
-            chainstate_cache_bytes: 0,
-            txindex_cache_bytes: 0,
-            prune_target_mb: 0,
-            txindex: false,
-            script_index: "disabled".to_owned(),
-            blockfilterindex: false,
-            index_lane: "default".to_owned(),
-            stop_height: 0,
-            stop_hash: "00".to_owned(),
-            stop_pinned,
-            index_watermarks: IndexWatermarkEvidence {
-                tx_lookup: None,
-                script_history: None,
-                script_live: None,
-            },
-        }
-    }
-
-    #[test]
-    fn budget_verdict_orders_fail_snapshot_pin_pass() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let snapshot = crate::footprint::measure_physical_tree(dir.path()).expect("measure");
-        let allocated = snapshot.allocated_bytes;
-        // Off the default lane the verdict is inapplicable.
-        let budget = BudgetEvidence::evaluate(&identity("regtest", true), &snapshot);
-        assert!(!budget.applies_to_this_record);
-        assert_eq!(budget.verdict, "inapplicable");
-
-        // A non-default index lane is inapplicable even when every other
-        // field is default-shaped (FP-04 names the lane explicitly).
-        let mut off_lane = identity("mainnet", true);
-        off_lane.index_lane = "txindex".to_owned();
-        let budget = BudgetEvidence::evaluate(&off_lane, &snapshot);
-        assert!(!budget.applies_to_this_record);
-        assert_eq!(budget.verdict, "inapplicable");
-
-        // Snapshot alone cannot satisfy a peak gate.
-        let budget = BudgetEvidence::evaluate(&identity("mainnet", true), &snapshot);
-        assert!(budget.applies_to_this_record);
-        assert_eq!(budget.verdict, "snapshot_insufficient");
-
-        // High-water below budget but no pinned stop.
-        let high_water = snapshot
-            .clone()
-            .with_high_water(allocated)
-            .expect("high water");
-        let budget = BudgetEvidence::evaluate(&identity("mainnet", false), &high_water);
-        assert_eq!(budget.verdict, "tip_unpinned");
-
-        // High-water below budget and pinned stop passes.
-        let budget = BudgetEvidence::evaluate(&identity("mainnet", true), &high_water);
-        assert_eq!(budget.verdict, "pass");
-
-        // Over-budget fails regardless of pin state.
-        let over = snapshot
-            .with_high_water(DEFAULT_UNPRUNED_PEAK_BUDGET_BYTES + 1)
-            .expect("high water");
-        let budget = BudgetEvidence::evaluate(&identity("mainnet", true), &over);
-        assert_eq!(budget.verdict, "fail");
-    }
 }

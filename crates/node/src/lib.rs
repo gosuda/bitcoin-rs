@@ -37,8 +37,7 @@ mod signal;
 /// Shared node state.
 pub mod state;
 mod storage_backend;
-/// Custody-grade data-directory storage-footprint evidence.
-mod storage_footprint;
+pub use storage_backend::{StoreConsumer, open_store_inspection};
 /// Adapter between the P2P block-download executor and Chainstate.
 #[path = "p2p_chain_adapter.rs"]
 pub mod sync;
@@ -67,10 +66,6 @@ pub use embed::{Node, NodeError};
 pub use mining::MiningCoordinator;
 
 pub use run::run;
-
-pub use storage_footprint::{
-    MeasureStorageRequest, measure_storage_footprint, storage_footprint_json,
-};
 
 pub use sync::BlockSync;
 

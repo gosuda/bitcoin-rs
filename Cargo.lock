@@ -540,6 +540,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitcoin-rs-storage-footprint"
+version = "0.11.0"
+dependencies = [
+ "anyhow",
+ "bitcoin-rs-index",
+ "bitcoin-rs-node",
+ "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
+ "clap",
+ "libc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
 name = "bitcoin-rs-utxo"
 version = "0.11.0"
 dependencies = [

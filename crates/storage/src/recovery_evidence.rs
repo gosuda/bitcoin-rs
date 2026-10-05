@@ -86,7 +86,7 @@ impl AppliedTipWitness {
     }
 
     /// Decodes bounded bytes; rejects wrong format or foreign genesis.
-    fn decode(data: &[u8], genesis_hash: &str) -> Option<Self> {
+    pub fn decode(data: &[u8], genesis_hash: &str) -> Option<Self> {
         if data.len() > MAX_FILE_BYTES {
             return None;
         }
@@ -165,7 +165,7 @@ impl ChainRollbackEvent {
     }
 
     /// Decodes bounded bytes; rejects wrong format or foreign genesis.
-    fn decode(data: &[u8], genesis_hash: &str) -> Option<Self> {
+    pub(crate) fn decode(data: &[u8], genesis_hash: &str) -> Option<Self> {
         if data.len() > MAX_FILE_BYTES {
             return None;
         }
@@ -275,22 +275,6 @@ pub fn checkpoint_fallback(
     restored_height: u32,
 ) -> bool {
     witness.writer_epoch < current_epoch && witness.height > restored_height
-}
-
-/// Reads the applied-tip witness through an opened data-dir anchor (current,
-/// then `.prev`); `(0, genesis)` when absent/invalid.
-pub fn read_witness_from_anchor(
-    anchor: &crate::footprint::DataDirAnchor,
-    genesis: &str,
-) -> Result<(u32, String), crate::footprint::FootprintError> {
-    for name in [WITNESS_FILE, &format!("{WITNESS_FILE}.prev")] {
-        if let Some(bytes) = anchor.read_child_file(name, MAX_FILE_BYTES)?
-            && let Some(witness) = AppliedTipWitness::decode(&bytes, genesis)
-        {
-            return Ok((witness.height, witness.block_hash));
-        }
-    }
-    Ok((0, genesis.to_owned()))
 }
 
 #[derive(Clone, Default)]

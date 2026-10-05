@@ -16,6 +16,7 @@ members = [
     "crates/rpc",
     "crates/node",
     "bin/bitcoin-rs",
+    "tools/storage-footprint",
     "e2e",
 ]
 
@@ -51,6 +52,7 @@ bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.11.0" }
 bitcoin-rs-mining     = { path = "crates/mining",     version = "0.11.0" }
 bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.11.0" }
 bitcoin-rs-node       = { path = "crates/node",       version = "0.11.0", default-features = false }
+bitcoin-rs-storage-footprint = { path = "tools/storage-footprint", version = "0.11.0" }
 bitcoin-rs-e2e        = { path = "e2e",               version = "0.11.0" }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.

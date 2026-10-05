@@ -18,12 +18,6 @@ pub use column_families::ColumnFamily;
 
 pub use error::StorageError;
 
-pub use footprint::{
-    DataDirAnchor, FootprintError, LogicalLedger, LogicalOwner, PhysicalLedger, PhysicalNamespace,
-    PhysicalObservationKind, dir_has_entries, logical_store_owners, measure_physical_tree,
-    opened_fd_path, opened_path_matches_fd,
-};
-
 pub use trait_::{
     KvIter, KvPair, KvSnapshot, KvStore, PersistFault, PrefixScan, PrefixScanLimit, WriteCondition,
 };
@@ -106,7 +100,7 @@ mod batch;
 /// Indexed authoritative block bodies and read sessions.
 pub mod block_body;
 /// Append-only flat files for immutable block bodies.
-mod block_file;
+pub mod block_file;
 /// Process cache-budget division shared by the storage backends.
 pub mod cache_budget;
 /// Logical column-family names shared by all storage backends.
@@ -115,8 +109,7 @@ mod column_families;
 pub mod durable_head;
 /// Storage error type.
 mod error;
-/// Custody-grade logical and physical storage-footprint ledgers.
-pub mod footprint;
+
 /// Retention and deletion of block bodies and undo rows.
 pub mod pruning;
 /// Durable rollback-evidence sidecars and the warning snapshot.

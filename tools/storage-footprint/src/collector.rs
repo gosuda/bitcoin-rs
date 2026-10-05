@@ -1,49 +1,30 @@
-//! Custody-grade data-directory storage-footprint evidence.
-//!
-//! Explicit measurement command surface. Not an RPC method, background scanner,
-//! or dashboard. Physical collection is anchored at one opened data-directory
-//! descriptor; logical collection reads key-value owners afterwards.
-//!
-//! The evidence record format and budget verdict are owned by
-//! `bitcoin_rs_storage::footprint::evidence`; this module owns measurement
-//! orchestration and identity projection only.
+//! Storage footprint measurement collector and identity projection.
 
-use crate::config::NodeConfig;
-use crate::config::ScriptIndexMode;
-use anyhow::Context;
-use anyhow::Result;
-use anyhow::bail;
-use bitcoin_rs_index::IndexWatermark;
-use bitcoin_rs_index::Indexer;
+use anyhow::{Context, Result, bail};
+use bitcoin_rs_index::{IndexWatermark, Indexer};
+use bitcoin_rs_node::config::{NodeConfig, ScriptIndexMode};
+use bitcoin_rs_node::{StoreConsumer, open_store_inspection};
 use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_storage::DataDirAnchor;
-use bitcoin_rs_storage::FootprintError;
-use bitcoin_rs_storage::LogicalLedger;
-use bitcoin_rs_storage::LogicalOwner;
-#[cfg(test)]
-use bitcoin_rs_storage::PhysicalObservationKind;
-use bitcoin_rs_storage::StorageBackend;
-use bitcoin_rs_storage::clamp_dbcache_bytes;
-use bitcoin_rs_storage::dir_has_entries;
-use bitcoin_rs_storage::footprint::evidence::BudgetEvidence;
-use bitcoin_rs_storage::footprint::evidence::EVIDENCE_FORMAT;
-use bitcoin_rs_storage::footprint::evidence::EvidenceIdentity;
-use bitcoin_rs_storage::footprint::evidence::IndexWatermarkEvidence;
-use bitcoin_rs_storage::footprint::evidence::LogicalEvidence;
-use bitcoin_rs_storage::footprint::evidence::PhysicalEvidence;
-pub(crate) use bitcoin_rs_storage::footprint::evidence::StorageFootprintEvidence;
-use bitcoin_rs_storage::footprint::evidence::WatermarkEvidence;
-pub use bitcoin_rs_storage::footprint::evidence::storage_footprint_json;
-use bitcoin_rs_storage::logical_store_owners;
-use bitcoin_rs_storage::split_cache_budget;
-use bitcoin_rs_storage::{opened_fd_path, opened_path_matches_fd};
-use sha2::Digest;
-use sha2::Sha256;
-use std::io;
-use std::io::Read;
-use std::os::fd::AsFd;
+use bitcoin_rs_storage::cache_budget::{clamp_dbcache_bytes, split_cache_budget};
+use bitcoin_rs_storage::recovery_evidence::{AppliedTipWitness, MAX_FILE_BYTES};
+use bitcoin_rs_storage::{KvStore, StorageBackend};
+use sha2::{Digest, Sha256};
+use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::fd::AsFd;
+
+use crate::evidence::{
+    BudgetEvidence, EVIDENCE_FORMAT, EvidenceIdentity, IndexWatermarkEvidence, LogicalEvidence,
+    PhysicalEvidence, StorageFootprintEvidence, WatermarkEvidence,
+};
+use crate::logical::{LogicalLedger, LogicalOwner, logical_store_owners};
+
+use crate::physical::{DataDirAnchor, dir_has_entries, opened_fd_path, opened_path_matches_fd};
+#[cfg(unix)]
+use crate::physical_types::FootprintError;
 
 /// Optional overrides for one measurement invocation.
 #[derive(Clone, Debug, Default)]
@@ -56,6 +37,17 @@ pub struct MeasureStorageRequest {
     pub stop_hash: Option<String>,
 }
 
+#[cfg(not(unix))]
+pub fn measure_storage_footprint(
+    _config: &NodeConfig,
+    _request: &MeasureStorageRequest,
+) -> Result<StorageFootprintEvidence> {
+    bail!(
+        "physical storage-footprint measurement requires POSIX st_blocks and is only supported on Unix/Linux platforms"
+    )
+}
+
+#[cfg(unix)]
 /// Collects both ledgers for `config.data_dir` without starting the node.
 pub fn measure_storage_footprint(
     config: &NodeConfig,
@@ -93,13 +85,13 @@ struct LogicalScan<'a> {
     namespace: &'a str,
 }
 
-impl crate::storage_backend::StoreConsumer for LogicalScan<'_> {
+impl StoreConsumer for LogicalScan<'_> {
     type Output = Vec<LogicalOwner>;
     type Error = anyhow::Error;
 
     fn consume<S>(self, store: Arc<S>) -> Result<Self::Output>
     where
-        S: bitcoin_rs_storage::KvStore,
+        S: KvStore,
     {
         Ok(logical_store_owners(&*store, self.namespace)?)
     }
@@ -107,13 +99,13 @@ impl crate::storage_backend::StoreConsumer for LogicalScan<'_> {
 
 struct TxIndexScan;
 
-impl crate::storage_backend::StoreConsumer for TxIndexScan {
+impl StoreConsumer for TxIndexScan {
     type Output = (Vec<LogicalOwner>, IndexWatermarkEvidence);
     type Error = anyhow::Error;
 
     fn consume<S>(self, store: Arc<S>) -> Result<Self::Output>
     where
-        S: bitcoin_rs_storage::KvStore,
+        S: KvStore,
     {
         let owners = logical_store_owners(&*store, "txindex")?;
         let watermarks = watermark_evidence(
@@ -125,6 +117,7 @@ impl crate::storage_backend::StoreConsumer for TxIndexScan {
     }
 }
 
+#[cfg(unix)]
 fn evidence_identity(
     config: &NodeConfig,
     request: &MeasureStorageRequest,
@@ -135,9 +128,7 @@ fn evidence_identity(
     let cache_budget = clamp_dbcache_bytes(config.storage.dbcache_mb);
     let shares = split_cache_budget(cache_budget, indexes_enabled);
     let genesis = config.network.genesis_block_hash().to_string_be();
-    let (witness_height, witness_hash) =
-        bitcoin_rs_storage::recovery_evidence::read_witness_from_anchor(anchor, &genesis)
-            .map_err(|error| io_from_footprint(&error))?;
+    let (witness_height, witness_hash) = read_witness_from_anchor(anchor, &genesis)?;
     let (stop_height, stop_hash, stop_pinned) =
         resolve_stop(request, witness_height, witness_hash)?;
     Ok(EvidenceIdentity {
@@ -169,6 +160,21 @@ fn evidence_identity(
         stop_pinned,
         index_watermarks: watermarks,
     })
+}
+
+#[cfg(unix)]
+fn read_witness_from_anchor(anchor: &DataDirAnchor, genesis: &str) -> Result<(u32, String)> {
+    for name in ["applied-tip-witness.json", "applied-tip-witness.json.prev"] {
+        if let Some(data) = anchor
+            .read_child_file(name, MAX_FILE_BYTES)
+            .map_err(|e| io_from_footprint(&e))?
+        {
+            if let Some(witness) = AppliedTipWitness::decode(&data, genesis) {
+                return Ok((witness.height, witness.block_hash));
+            }
+        }
+    }
+    Ok((0, genesis.to_owned()))
 }
 
 fn resolve_stop(
@@ -215,21 +221,16 @@ fn script_index_name(mode: ScriptIndexMode) -> &'static str {
 
 fn compiled_features() -> Vec<String> {
     let mut features = Vec::new();
-    if cfg!(feature = "fjall") {
+    if StorageBackend::Fjall.is_compiled_in() {
         features.push("fjall".to_owned());
     }
-    if cfg!(feature = "redb") {
+    if StorageBackend::Redb.is_compiled_in() {
         features.push("redb".to_owned());
     }
-    if cfg!(feature = "rocksdb") {
+    if StorageBackend::RocksDb.is_compiled_in() {
         features.push("rocksdb".to_owned());
     }
-    if cfg!(feature = "kernel") {
-        features.push("kernel".to_owned());
-    }
-    if cfg!(feature = "zmq") {
-        features.push("zmq".to_owned());
-    }
+    features.sort();
     features
 }
 
@@ -254,6 +255,7 @@ fn sha256_file(path: &Path) -> io::Result<String> {
     ))
 }
 
+#[cfg(unix)]
 fn collect_logical(
     anchor: &DataDirAnchor,
     backend: StorageBackend,
@@ -271,11 +273,7 @@ fn collect_logical(
     {
         if dir_has_entries(chainstate.as_fd()).map_err(|error| io_from_footprint(&error))? {
             let path = opened_fd_path(chainstate.as_fd());
-            // Hold `chainstate` until the backend has opened the store and the
-            // pathname is verified to still resolve to the held inode: a
-            // rename-and-replace would leave this ledger reading a different
-            // store than the physical ledger's anchored inode.
-            let owners = crate::storage_backend::open_store_inspection(
+            let owners = open_store_inspection(
                 backend,
                 &path,
                 LogicalScan {
@@ -303,10 +301,7 @@ fn collect_logical(
     {
         if dir_has_entries(txindex.as_fd()).map_err(|error| io_from_footprint(&error))? {
             let path = opened_fd_path(txindex.as_fd());
-            // Hold `txindex` until the backend has opened the store and the
-            // pathname is verified to still resolve to the held inode.
-            let (owners, found) =
-                crate::storage_backend::open_store_inspection(backend, &path, TxIndexScan)?;
+            let (owners, found) = open_store_inspection(backend, &path, TxIndexScan)?;
             if !opened_path_matches_fd(txindex.as_fd(), &path)? {
                 bail!("txindex store directory replaced during footprint scan");
             }
@@ -320,6 +315,7 @@ fn collect_logical(
     Ok((logical, watermarks))
 }
 
+#[cfg(unix)]
 fn io_from_footprint(error: &FootprintError) -> anyhow::Error {
     anyhow::Error::msg(error.to_string())
 }
@@ -338,7 +334,3 @@ fn watermark_json(watermark: IndexWatermark) -> WatermarkEvidence {
         hash: Hash256::from_le_bytes(&watermark.hash).to_string_be(),
     }
 }
-
-#[cfg(test)]
-#[path = "../tests/unit/storage_footprint/tests.rs"]
-mod tests;

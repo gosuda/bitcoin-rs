@@ -53,12 +53,9 @@ startup.
 
 ## Storage footprint
 
-`crates/storage/src/footprint.rs` owns the two measurement ledgers used by
-`bitcoin-rs --measure-storage`. The logical ledger sums serialized key and
-value bytes per column family. The physical ledger walks an opened
-data-directory descriptor, counts allocated blocks, rejects symlinks and
-mount crossings, and deduplicates hard links. The ledgers are independent
-and must not be summed; the physical total is the data-directory budget.
+Physical and custody-grade storage footprint measurement is isolated in
+`tools/storage-footprint` (`bitcoin-rs-storage-footprint`). `crates/storage`
+provides the underlying storage backends, flat files, and durability primitives.
 See [`docs/contracts/storage-footprint.md`](../../docs/contracts/storage-footprint.md).
 
 ## Features
