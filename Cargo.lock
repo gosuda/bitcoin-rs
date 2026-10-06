@@ -477,6 +477,7 @@ dependencies = [
  "bitcoin-rs-node",
  "bitcoin-rs-p2p",
  "bitcoin-rs-primitives",
+ "bitcoin-rs-rpc",
  "bitcoin-rs-script",
  "bitcoin-rs-utxo",
  "compact_str",

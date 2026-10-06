@@ -302,6 +302,7 @@ pub(crate) fn load_corpus() -> Result<BTreeMap<String, Fixture>, LoadError> {
     load_corpus_from(&corpus_dir(), &reference.release)
 }
 
+#[cfg(not(windows))]
 fn load_corpus_from(
     dir: &Path,
     release: &reference_set::ReleaseIdentity,
@@ -393,6 +394,94 @@ fn load_corpus_from(
     Ok(fixtures)
 }
 
+#[cfg(windows)]
+fn load_corpus_from(
+    dir: &Path,
+    release: &reference_set::ReleaseIdentity,
+) -> Result<BTreeMap<String, Fixture>, LoadError> {
+    let entries = std::fs::read_dir(dir).map_err(|error| {
+        LoadError::Violation(format!(
+            "{}: corpus directory could not be enumerated: {error}",
+            dir.display()
+        ))
+    })?;
+    let mut fixture_count = 0_usize;
+    let mut corpus_bytes = 0_u64;
+    let mut fixtures = BTreeMap::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            LoadError::Violation(format!(
+                "{}: corpus directory entry could not be read: {error}",
+                dir.display()
+            ))
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "." || name == ".." {
+            continue;
+        }
+        fixture_count += 1;
+        if fixture_count > MAX_FIXTURE_COUNT {
+            return Err(LoadError::Violation(format!(
+                "corpus holds more than the ceiling of {MAX_FIXTURE_COUNT} entries"
+            )));
+        }
+        let path = entry.path();
+        if path
+            .extension()
+            .is_none_or(|ext| ext.to_string_lossy() != "json")
+        {
+            return Err(LoadError::Violation(format!(
+                "{}: the corpus carries fixtures only; non-JSON entries are refused",
+                path.display()
+            )));
+        }
+        let file_type = entry.file_type().map_err(LoadError::Io)?;
+        if !file_type.is_file() {
+            return Err(LoadError::Violation(format!(
+                "{}: only regular files may carry fixtures; symlinks and directories are refused",
+                path.display()
+            )));
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(&path)
+            .map_err(LoadError::Io)?
+            .take(MAX_FIXTURE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(LoadError::Io)?;
+        if len_u64(bytes.len()) > MAX_FIXTURE_BYTES {
+            return Err(LoadError::Violation(format!(
+                "{} is above the per-fixture ceiling of {MAX_FIXTURE_BYTES} bytes",
+                path.display()
+            )));
+        }
+        let actual = len_u64(bytes.len());
+        corpus_bytes += actual;
+        if corpus_bytes > MAX_CORPUS_BYTES {
+            return Err(LoadError::Violation(format!(
+                "corpus exceeds the total ceiling of {MAX_CORPUS_BYTES} actual bytes"
+            )));
+        }
+        let text = String::from_utf8(bytes).map_err(|error| {
+            LoadError::Violation(format!("{}: not valid utf-8: {error}", path.display()))
+        })?;
+        enforce_depth(&text, &path)?;
+        let mut fixture: Fixture = sonic_rs::from_str(&text)
+            .map_err(|error| LoadError::Violation(format!("{}: {error}", path.display())))?;
+        settle_body_lengths(&mut fixture);
+        validate_fixture(&fixture, &path, release)?;
+        if fixtures.insert(fixture.id.clone(), fixture).is_some() {
+            return Err(LoadError::Violation(format!(
+                "duplicate fixture id in {}",
+                path.display()
+            )));
+        }
+    }
+    if fixtures.is_empty() {
+        return Err(LoadError::Violation("corpus is empty".to_owned()));
+    }
+    Ok(fixtures)
+}
+
 /// Reads one fixture from the corpus directory descriptor with no window
 /// between the type check and the read: `openat` refuses to follow a final
 /// symlink, `fstat` interrogates the *same* descriptor the bytes come from,
@@ -402,6 +491,7 @@ fn load_corpus_from(
 /// # Errors
 /// [`LoadError::Violation`] when the entry is not a regular file or exceeds
 /// the per-fixture ceiling.
+#[cfg(not(windows))]
 pub(crate) fn read_regular_bounded(
     dir_fd: &rustix::fd::OwnedFd,
     name: &str,
