@@ -2,9 +2,11 @@
 
 use super::JournalWriter;
 use super::JournalWriterError;
+#[cfg(any(test, feature = "test-seam"))]
 use super::JournalWriterFailpoint;
 use crate::KvStore;
 
+#[cfg(any(test, feature = "test-seam"))]
 impl<S: KvStore> JournalWriter<S> {
     // --- failpoint plumbing (mirrors checkpoint.rs) ---
 
@@ -50,8 +52,51 @@ impl<S: KvStore> JournalWriter<S> {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn inject_failpoint(&mut self, failpoint: JournalWriterFailpoint) {
         self.failpoint = Some(failpoint);
+    }
+}
+
+#[cfg(not(any(test, feature = "test-seam")))]
+impl<S: KvStore> JournalWriter<S> {
+    #[inline(always)]
+    pub(super) fn fail_segment_append(&self) -> Result<(), JournalWriterError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn fail_segment_sync(&self) -> Result<(), JournalWriterError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn fail_storage_flush(&self) -> Result<(), JournalWriterError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn fail_rewind_truncate(&self) -> Result<(), JournalWriterError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn fail_head_temp_write(&self) -> Result<(), JournalWriterError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn fail_head_temp_sync(&self) -> Result<(), JournalWriterError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn fail_head_rename(&self) -> Result<(), JournalWriterError> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    pub(super) fn fail_head_dir_sync(&self) -> Result<(), JournalWriterError> {
+        Ok(())
     }
 }

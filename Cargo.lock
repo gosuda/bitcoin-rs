@@ -261,6 +261,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "bitcoin-rs-chain",
+ "bitcoin-rs-chainstate",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",

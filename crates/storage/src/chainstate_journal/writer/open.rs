@@ -104,6 +104,7 @@ impl<S: KvStore> JournalWriter<S> {
             append_gap_height: None,
             durability_retry_required: false,
             state: WriterState::Open,
+            #[cfg(any(test, feature = "test-seam"))]
             failpoint: None,
         };
         writer.recover_active_segment()?;

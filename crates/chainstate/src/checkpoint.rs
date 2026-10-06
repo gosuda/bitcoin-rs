@@ -13,6 +13,7 @@ pub(crate) use bitcoin_rs_storage::checkpoint::COINSTATS_VERSION;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_storage::checkpoint::CURRENT_FILE;
 use bitcoin_rs_storage::checkpoint::CheckpointError as StoreError;
+#[cfg(any(test, feature = "test-seam"))]
 pub(crate) use bitcoin_rs_storage::checkpoint::CheckpointFailpoint;
 use bitcoin_rs_storage::checkpoint::CheckpointIdentity;
 pub(crate) use bitcoin_rs_storage::checkpoint::CheckpointLoadError;
@@ -233,12 +234,13 @@ pub(crate) fn load_checkpoint(
     load_checkpoint_from_dir(&data_dir, config)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-seam"))]
 std::thread_local! {
     static NEXT_CHECKPOINT_FAILPOINT: std::cell::Cell<Option<CheckpointFailpoint>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-seam"))]
+#[cfg_attr(not(test), expect(dead_code))]
 fn inject_next_checkpoint_failpoint(failpoint: CheckpointFailpoint) {
     NEXT_CHECKPOINT_FAILPOINT.with(|slot| slot.set(Some(failpoint)));
 }
@@ -488,17 +490,38 @@ pub(crate) fn write_checkpoint_from_dir(
     // The tip carries the count it was published with: a checkpoint can
     // never name a total its applied tip disagrees with.
     let chain_tx_count = applied_tip.chain_tx_count;
-    #[cfg(test)]
-    let failpoint = NEXT_CHECKPOINT_FAILPOINT.with(std::cell::Cell::take);
-    #[cfg(not(test))]
-    let failpoint = None;
-    let stage = begin_publication(data_dir, failpoint).map_err(CheckpointError::Store)?;
+    macro_rules! write_stage_artifact {
+        ($stage:expr, $name:expr, $write_fp:ident, $sync_fp:ident, $write:expr) => {{
+            #[cfg(any(test, feature = "test-seam"))]
+            {
+                $stage.write_artifact(
+                    $name,
+                    CheckpointFailpoint::$write_fp,
+                    CheckpointFailpoint::$sync_fp,
+                    $write,
+                )
+            }
+            #[cfg(not(any(test, feature = "test-seam")))]
+            {
+                $stage.write_artifact($name, $write)
+            }
+        }};
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    let stage = begin_publication(
+        data_dir,
+        NEXT_CHECKPOINT_FAILPOINT.with(std::cell::Cell::take),
+    )
+    .map_err(CheckpointError::Store)?;
+    #[cfg(not(any(test, feature = "test-seam")))]
+    let stage = begin_publication(data_dir).map_err(CheckpointError::Store)?;
     let (headers_meta, headers_digest) = {
         let tree = block_tree.read();
-        let (meta, digest) = stage.write_artifact(
+        let (meta, digest) = write_stage_artifact!(
+            stage,
             HEADERS_FILE,
-            CheckpointFailpoint::HeadersWrite,
-            CheckpointFailpoint::HeadersSync,
+            HeadersWrite,
+            HeadersSync,
             |writer| {
                 let best_tip_id = checkpoint_best_tip_id(&tree, applied_tip)?;
                 let point = headers::HeaderCheckpointPoint {
@@ -511,14 +534,15 @@ pub(crate) fn write_checkpoint_from_dir(
                     headers::write_selected_headers(writer, &tree, config, best_tip_id, point)?
                 };
                 Ok::<_, CheckpointError>(metadata)
-            },
+            }
         )?;
         (meta, digest)
     };
-    let (utxo_result, utxo_digest) = stage.write_artifact(
+    let (utxo_result, utxo_digest) = write_stage_artifact!(
+        stage,
         UTXO_FILE,
-        CheckpointFailpoint::UtxoWrite,
-        CheckpointFailpoint::UtxoSync,
+        UtxoWrite,
+        UtxoSync,
         |writer| {
             let (trailer, acc) = write_snapshot_observed(
                 utxo,
@@ -528,7 +552,7 @@ pub(crate) fn write_checkpoint_from_dir(
                 CoinStatsAccumulator::with_parallel_muhash(applied_tip.height),
             )?;
             Ok::<_, CheckpointError>((trailer, acc))
-        },
+        }
     )?;
     let (trailer, accumulator) = utxo_result;
     let listener_stats = coin_stats.snapshot();
@@ -548,17 +572,18 @@ pub(crate) fn write_checkpoint_from_dir(
         )));
     }
     let persisted_stats = fused_stats;
-    let ((), stats_digest) = stage.write_artifact(
+    let ((), stats_digest) = write_stage_artifact!(
+        stage,
         COINSTATS_FILE,
-        CheckpointFailpoint::CoinStatsWrite,
-        CheckpointFailpoint::CoinStatsSync,
+        CoinStatsWrite,
+        CoinStatsSync,
         |writer| {
             writer.write_all(&COINSTATS_MAGIC)?;
             writer.write_all(&COINSTATS_VERSION.to_le_bytes())?;
             writer.write_all(&COINSTATS_PAYLOAD_LEN.to_le_bytes())?;
             writer.write_all(&persisted_stats.to_bytes())?;
             Ok::<_, CheckpointError>(())
-        },
+        }
     )?;
     let tree = block_tree.read();
     let best_tip_id = checkpoint_best_tip_id(&tree, applied_tip)?;

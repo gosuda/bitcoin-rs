@@ -288,5 +288,6 @@ pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<
             dir.remove_file(file_name)?;
         }
     }
+    drop(dir);
     root.remove_dir(name)
 }

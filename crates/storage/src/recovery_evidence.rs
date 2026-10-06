@@ -233,6 +233,12 @@ fn write_sidecar(
             }
         }
         std::fs::rename(&tmp, &current)?;
+        #[cfg(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox"
+        ))]
         std::fs::File::open(dir)?.sync_all()?;
         Ok(())
     })();

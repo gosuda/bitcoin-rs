@@ -11,8 +11,10 @@ use super::fs::{CheckpointRoot, create_file, remove_known_dir};
 use super::io::rename_generation;
 use super::io::{rename_current, sync_checkpoint_dir, sync_file, sync_root, write_file};
 use super::load::read_current;
+#[cfg(any(test, feature = "test-seam"))]
+use super::CheckpointFailpoint;
 use super::{
-    CHECKPOINT_ROOT, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointFailpoint,
+    CHECKPOINT_ROOT, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError,
     CheckpointManifestV1, CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
 };
 use cap_std::fs::Dir;
@@ -32,6 +34,7 @@ pub struct CheckpointStage {
     pub(crate) staging: Dir,
     pub(crate) generation: u64,
     pub(crate) paths: GenerationPaths,
+    #[cfg(any(test, feature = "test-seam"))]
     pub(crate) failpoint: Option<CheckpointFailpoint>,
 }
 impl CheckpointStage {
@@ -40,6 +43,7 @@ impl CheckpointStage {
         self.generation
     }
     /// Writes, hashes, and synchronizes one staged artifact.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn write_artifact<T, E: From<CheckpointError>>(
         &self,
         name: &str,
@@ -57,8 +61,27 @@ impl CheckpointStage {
         sync_file(&file, self.failpoint, sync_failpoint).map_err(|e| E::from(e))?;
         Ok((value, ArtifactDigest { bytes, sha256 }))
     }
+
+    /// Writes, hashes, and synchronizes one staged artifact.
+    #[cfg(not(any(test, feature = "test-seam")))]
+    pub fn write_artifact<T, E: From<CheckpointError>>(
+        &self,
+        name: &str,
+        write: impl FnOnce(&mut dyn std::io::Write) -> Result<T, E>,
+    ) -> Result<(T, ArtifactDigest), E> {
+        let mut file =
+            create_file(&self.staging, name).map_err(|e| E::from(CheckpointError::from(e)))?;
+        let mut writer = HashingWriter::new(&mut file);
+        let value = write(&mut writer)?;
+        let (bytes, sha256) = writer
+            .finish()
+            .map_err(|e| E::from(CheckpointError::from(e)))?;
+        sync_file(&file).map_err(|e| E::from(e))?;
+        Ok((value, ArtifactDigest { bytes, sha256 }))
+    }
 }
 /// Reserves a new generation directory and opens its staging transaction.
+#[cfg(any(test, feature = "test-seam"))]
 pub fn begin_publication(
     data_dir: &Dir,
     failpoint: Option<CheckpointFailpoint>,
@@ -77,7 +100,28 @@ pub fn begin_publication(
         failpoint,
     })
 }
+
+/// Reserves a new generation directory and opens its staging transaction.
+#[cfg(not(any(test, feature = "test-seam")))]
+pub fn begin_publication(
+    data_dir: &Dir,
+) -> Result<CheckpointStage, CheckpointError> {
+    let root = CheckpointRoot::open_or_create(data_dir, CHECKPOINT_ROOT)?;
+    let current_generation = match read_current(&root)? {
+        Some(current) => current.generation,
+        None => 0,
+    };
+    let (generation, paths, staging) = allocate_generation(&root, current_generation)?;
+    Ok(CheckpointStage {
+        root,
+        staging,
+        generation,
+        paths,
+    })
+}
+
 /// Atomically publishes a staged generation through CURRENT.
+#[cfg(any(test, feature = "test-seam"))]
 pub fn commit_publication(
     stage: CheckpointStage,
     manifest: &CheckpointManifestV1,
@@ -153,6 +197,58 @@ pub fn commit_publication(
         CheckpointFailpoint::CurrentRename,
     )?;
     sync_root(&root, failpoint, CheckpointFailpoint::CurrentRootSync)?;
+    cleanup_after_publication(&root, &paths.directory);
+    Ok(generation)
+}
+
+/// Atomically publishes a staged generation through CURRENT.
+#[cfg(not(any(test, feature = "test-seam")))]
+pub fn commit_publication(
+    stage: CheckpointStage,
+    manifest: &CheckpointManifestV1,
+) -> Result<u64, CheckpointError> {
+    let CheckpointStage {
+        root,
+        staging,
+        generation,
+        paths,
+    } = stage;
+    // Caller built the manifest for a different generation than the stage
+    // reserved; publishing it would make CURRENT point at an unreadable checkpoint.
+    if manifest.generation != generation {
+        return Err(CheckpointError::Invalid(format!(
+            "manifest generation {} does not match staged generation {generation}",
+            manifest.generation
+        )));
+    }
+    let manifest_bytes = serde_json::to_vec(manifest)?;
+    let mut mf = create_file(&staging, MANIFEST_FILE)?;
+    write_file(&mut mf, &manifest_bytes)?;
+    mf.flush()?;
+    sync_file(&mf)?;
+    sync_checkpoint_dir(&staging)?;
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "redox"
+    ))]
+    rename_generation(&root, &paths.staging, &paths.final_dir)?;
+    sync_root(&root)?;
+    let current = CurrentV1 {
+        format: CURRENT_FORMAT.to_owned(),
+        version: CURRENT_VERSION,
+        generation,
+        directory: paths.directory.clone(),
+        manifest_sha256: super::format::hex_encode(&Sha256::digest(&manifest_bytes)),
+    };
+    let current_bytes = serde_json::to_vec(&current)?;
+    let mut cf = root.create_file(&paths.current_temp)?;
+    write_file(&mut cf, &current_bytes)?;
+    cf.flush()?;
+    sync_file(&cf)?;
+    rename_current(&root, &paths.current_temp)?;
+    sync_root(&root)?;
     cleanup_after_publication(&root, &paths.directory);
     Ok(generation)
 }

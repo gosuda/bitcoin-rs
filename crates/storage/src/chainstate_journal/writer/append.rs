@@ -5,6 +5,7 @@ use super::super::record::encode_record;
 use super::DurableCursor;
 use super::JournalWriter;
 use super::JournalWriterError;
+#[cfg(any(test, feature = "test-seam"))]
 use super::JournalWriterFailpoint;
 use super::PendingRecordMeta;
 use super::segment_name;
@@ -112,6 +113,7 @@ impl<S: KvStore> JournalWriter<S> {
             Ok(file) => file,
             Err(error) => return self.fail_append(height, error.into()),
         };
+        #[cfg(any(test, feature = "test-seam"))]
         let write_result = if self.failpoint == Some(JournalWriterFailpoint::SegmentAppendPartial) {
             let prefix_len = (bytes.len() / 2).max(1);
             file.write_all(&bytes[..prefix_len]).and_then(|()| {
@@ -122,10 +124,20 @@ impl<S: KvStore> JournalWriter<S> {
         } else {
             file.write_all(bytes)
         };
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let write_result = file.write_all(bytes);
         if let Err(append_error) = write_result {
-            let rollback_result = file
-                .set_len(known_good_offset)
-                .and_then(|()| file.sync_all());
+            drop(file);
+            let rollback_result = self
+                .dir
+                .open_with(
+                    &name,
+                    cap_std::fs::OpenOptions::new().write(true),
+                )
+                .and_then(|file| {
+                    file.set_len(known_good_offset)?;
+                    file.sync_all()
+                });
             if let Err(rollback_error) = rollback_result {
                 return self.fail_append(
                     height,
