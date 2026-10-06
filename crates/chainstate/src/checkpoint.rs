@@ -517,12 +517,8 @@ pub(crate) fn write_checkpoint_from_dir(
     let stage = begin_publication(data_dir).map_err(CheckpointError::Store)?;
     let (headers_meta, headers_digest) = {
         let tree = block_tree.read();
-        let (meta, digest) = write_stage_artifact!(
-            stage,
-            HEADERS_FILE,
-            HeadersWrite,
-            HeadersSync,
-            |writer| {
+        let (meta, digest) =
+            write_stage_artifact!(stage, HEADERS_FILE, HeadersWrite, HeadersSync, |writer| {
                 let best_tip_id = checkpoint_best_tip_id(&tree, applied_tip)?;
                 let point = headers::HeaderCheckpointPoint {
                     height: applied_tip.height,
@@ -534,16 +530,11 @@ pub(crate) fn write_checkpoint_from_dir(
                     headers::write_selected_headers(writer, &tree, config, best_tip_id, point)?
                 };
                 Ok::<_, CheckpointError>(metadata)
-            }
-        )?;
+            })?;
         (meta, digest)
     };
-    let (utxo_result, utxo_digest) = write_stage_artifact!(
-        stage,
-        UTXO_FILE,
-        UtxoWrite,
-        UtxoSync,
-        |writer| {
+    let (utxo_result, utxo_digest) =
+        write_stage_artifact!(stage, UTXO_FILE, UtxoWrite, UtxoSync, |writer| {
             let (trailer, acc) = write_snapshot_observed(
                 utxo,
                 &applied_tip.hash,
@@ -552,8 +543,7 @@ pub(crate) fn write_checkpoint_from_dir(
                 CoinStatsAccumulator::with_parallel_muhash(applied_tip.height),
             )?;
             Ok::<_, CheckpointError>((trailer, acc))
-        }
-    )?;
+        })?;
     let (trailer, accumulator) = utxo_result;
     let listener_stats = coin_stats.snapshot();
     if listener_stats.height != applied_tip.height {

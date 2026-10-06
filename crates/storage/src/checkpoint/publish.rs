@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "test-seam"))]
+use super::CheckpointFailpoint;
 use super::format::{
     generation_name, valid_current_temp_name, valid_generation_name, valid_staging_name,
 };
@@ -11,11 +13,9 @@ use super::fs::{CheckpointRoot, create_file, remove_known_dir};
 use super::io::rename_generation;
 use super::io::{rename_current, sync_checkpoint_dir, sync_file, sync_root, write_file};
 use super::load::read_current;
-#[cfg(any(test, feature = "test-seam"))]
-use super::CheckpointFailpoint;
 use super::{
-    CHECKPOINT_ROOT, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError,
-    CheckpointManifestV1, CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
+    CHECKPOINT_ROOT, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointManifestV1,
+    CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
 };
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
@@ -103,9 +103,7 @@ pub fn begin_publication(
 
 /// Reserves a new generation directory and opens its staging transaction.
 #[cfg(not(any(test, feature = "test-seam")))]
-pub fn begin_publication(
-    data_dir: &Dir,
-) -> Result<CheckpointStage, CheckpointError> {
+pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointError> {
     let root = CheckpointRoot::open_or_create(data_dir, CHECKPOINT_ROOT)?;
     let current_generation = match read_current(&root)? {
         Some(current) => current.generation,

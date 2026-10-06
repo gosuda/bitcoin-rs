@@ -130,10 +130,7 @@ impl<S: KvStore> JournalWriter<S> {
             drop(file);
             let rollback_result = self
                 .dir
-                .open_with(
-                    &name,
-                    cap_std::fs::OpenOptions::new().write(true),
-                )
+                .open_with(&name, cap_std::fs::OpenOptions::new().write(true))
                 .and_then(|file| {
                     file.set_len(known_good_offset)?;
                     file.sync_all()

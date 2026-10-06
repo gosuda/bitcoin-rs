@@ -34,10 +34,7 @@ pub(crate) fn write_file(
 }
 
 #[cfg(not(any(test, feature = "test-seam")))]
-pub(crate) fn write_file(
-    file: &mut File,
-    bytes: &[u8],
-) -> Result<(), CheckpointError> {
+pub(crate) fn write_file(file: &mut File, bytes: &[u8]) -> Result<(), CheckpointError> {
     file.write_all(bytes)?;
     Ok(())
 }
@@ -54,9 +51,7 @@ pub(crate) fn sync_file(
 }
 
 #[cfg(not(any(test, feature = "test-seam")))]
-pub(crate) fn sync_file(
-    file: &File,
-) -> Result<(), CheckpointError> {
+pub(crate) fn sync_file(file: &File) -> Result<(), CheckpointError> {
     file.sync_all()?;
     Ok(())
 }
@@ -73,9 +68,7 @@ pub(crate) fn sync_checkpoint_dir(
 }
 
 #[cfg(not(any(test, feature = "test-seam")))]
-pub(crate) fn sync_checkpoint_dir(
-    dir: &Dir,
-) -> Result<(), CheckpointError> {
+pub(crate) fn sync_checkpoint_dir(dir: &Dir) -> Result<(), CheckpointError> {
     sync_dir(dir)?;
     Ok(())
 }
@@ -92,9 +85,7 @@ pub(crate) fn sync_root(
 }
 
 #[cfg(not(any(test, feature = "test-seam")))]
-pub(crate) fn sync_root(
-    root: &CheckpointRoot,
-) -> Result<(), CheckpointError> {
+pub(crate) fn sync_root(root: &CheckpointRoot) -> Result<(), CheckpointError> {
     root.sync()?;
     Ok(())
 }
@@ -151,10 +142,7 @@ pub(crate) fn rename_current(
 }
 
 #[cfg(not(any(test, feature = "test-seam")))]
-pub(crate) fn rename_current(
-    root: &CheckpointRoot,
-    from: &str,
-) -> Result<(), CheckpointError> {
+pub(crate) fn rename_current(root: &CheckpointRoot, from: &str) -> Result<(), CheckpointError> {
     root.rename(from, CURRENT_FILE)?;
     Ok(())
 }

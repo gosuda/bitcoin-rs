@@ -1,8 +1,8 @@
 //! Storage footprint measurement collector and identity projection.
 
+use crate::evidence::StorageFootprintEvidence;
 use anyhow::Result;
 use bitcoin_rs_node::config::NodeConfig;
-use crate::evidence::StorageFootprintEvidence;
 
 /// Optional overrides for one measurement invocation.
 #[derive(Clone, Debug, Default)]

@@ -1,8 +1,8 @@
 //! CLI entry point for custody-grade storage-footprint evidence collection.
 
-use anyhow::Result;
 #[cfg(unix)]
 use anyhow::Context;
+use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -67,19 +67,21 @@ fn main() -> Result<()> {
         let mut config = if let Some(config_path) = &cli.config {
             let text = std::fs::read_to_string(config_path)
                 .with_context(|| format!("failed to read config file {}", config_path.display()))?;
-            let user_config: bitcoin_rs_node::UserConfig = toml::from_str(&text)
-                .with_context(|| format!("failed to parse TOML config {}", config_path.display()))?;
+            let user_config: bitcoin_rs_node::UserConfig =
+                toml::from_str(&text).with_context(|| {
+                    format!("failed to parse TOML config {}", config_path.display())
+                })?;
             bitcoin_rs_node::resolve(&[&user_config])?
         } else {
             let net_name = cli.network.as_deref().unwrap_or("mainnet");
-            let net = parse_network(net_name)
-                .map_err(|e| anyhow::anyhow!("invalid network: {e}"))?;
+            let net =
+                parse_network(net_name).map_err(|e| anyhow::anyhow!("invalid network: {e}"))?;
             NodeConfig::default_for_network(net.consensus_network())
         };
 
         if let Some(net_name) = &cli.network {
-            let net = parse_network(net_name)
-                .map_err(|e| anyhow::anyhow!("invalid network: {e}"))?;
+            let net =
+                parse_network(net_name).map_err(|e| anyhow::anyhow!("invalid network: {e}"))?;
             config.network = net.consensus_network();
         }
         if let Some(data_dir) = cli.data_dir {

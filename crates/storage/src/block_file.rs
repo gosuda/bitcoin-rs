@@ -861,7 +861,7 @@ fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
         if parse_block_file_name(name).is_none() {
             continue;
         }
-        total = total.saturating_add(entry.metadata()?.len());
+        total = total.saturating_add(fs::metadata(entry.path())?.len());
     }
     Ok(total)
 }

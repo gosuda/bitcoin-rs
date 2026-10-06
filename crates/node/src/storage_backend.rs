@@ -39,9 +39,10 @@ where
     open_generic("chainstate", backend, path, cache_bytes, consumer)
 }
 
-/// Opens a generic store view for custody-grade logical inspection. The redb
-/// txindex keeps using its specialized runtime representation; this view is
-/// read for the backend-neutral column-family ledger only.
+/// Opens a generic store view for custody-grade logical inspection.
+///
+/// The redb txindex keeps using its specialized runtime representation; this
+/// view is read for the backend-neutral column-family ledger only.
 pub fn open_store_inspection<C>(
     backend: StorageBackend,
     path: &Path,

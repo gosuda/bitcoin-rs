@@ -7,7 +7,6 @@
 use std::time::Duration;
 
 use bitcoin_rs_e2e::helpers::{genesis_block, mine_bare_blocks, submit_genesis};
-use bitcoin_rs_e2e::node::{bitcoin_rs_binary, workspace};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, SpawnOptions, ValueExt};
 use serde_json::json;
 

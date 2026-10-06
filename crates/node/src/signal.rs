@@ -78,6 +78,7 @@ impl ShutdownHandler {
 
 #[cfg(windows)]
 impl ShutdownHandler {
+    #[expect(clippy::unnecessary_wraps)]
     pub(crate) fn install(_shutdown: Arc<AtomicBool>, _shutdown_tx: Sender<()>) -> Result<Self> {
         #[cfg(test)]
         testing::note_installed();
