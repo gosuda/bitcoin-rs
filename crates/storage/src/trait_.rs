@@ -65,6 +65,7 @@ impl WriteCondition<'_> {
 }
 
 /// Persistence boundary used by fault-injection tests.
+#[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PersistBoundary {
@@ -77,6 +78,7 @@ pub(crate) enum PersistBoundary {
 }
 
 /// One-shot persistence fault used by storage proof tests.
+#[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PersistFault {
@@ -96,6 +98,7 @@ pub enum PersistFault {
     LostFlush,
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl PersistFault {
     /// Returns the boundary at which this fault fires.
     pub(crate) const fn boundary(self) -> PersistBoundary {
@@ -120,10 +123,12 @@ impl PersistFault {
 }
 
 /// One-shot persistence fault slot used by storage backends.
+#[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Default)]
 pub(crate) struct PersistFaultSlot(parking_lot::Mutex<Option<PersistFault>>);
 
+#[cfg(any(test, feature = "test-seam"))]
 impl PersistFaultSlot {
     /// Arms one fault, replacing any previously armed fault.
     #[cfg_attr(
@@ -258,7 +263,10 @@ pub trait KvStore: Send + Sync + 'static {
 
     /// Arms a one-shot persistence fault for storage proof tests.
     #[doc(hidden)]
-    fn arm_persist_fault(&self, fault: PersistFault);
+    #[cfg(any(test, feature = "test-seam"))]
+    fn arm_persist_fault(&self, fault: PersistFault) {
+        let _ = fault;
+    }
 }
 
 /// Compile-time proof that [`KvStore`] stays object-safe: the trait carries

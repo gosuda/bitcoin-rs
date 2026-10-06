@@ -1,4 +1,6 @@
-use crate::batch::{BatchOp, BufferedWriteBatch, prefix_ops};
+#[cfg(any(test, feature = "test-seam"))]
+use crate::batch::prefix_ops;
+use crate::batch::{BatchOp, BufferedWriteBatch};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -16,6 +18,7 @@ pub struct FjallStore {
     keyspaces: Vec<Keyspace>,
     // Non-reentrant: public mutators hold this lock while calling the lock-free batch helper.
     write_lock: parking_lot::Mutex<()>,
+    #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
 }
 
@@ -61,6 +64,7 @@ impl FjallStore {
             db,
             keyspaces,
             write_lock: parking_lot::Mutex::new(()),
+            #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
         })
     }
@@ -101,26 +105,29 @@ impl FjallStore {
         metrics::histogram!("storage.write_bytes", "backend" => "fjall")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
 
-        // Apply boundary: the engine commit that lands the batch atomically.
-        if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
-            if fault == crate::PersistFault::PartialApply {
-                // A strict prefix is staged into the engine batch and the
-                // boundary then faults: the never-committed batch leaves
-                // no family with a partial view.
-                let mut fjall_batch = self.db.batch();
-                self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops).collect())?;
-            }
-            return Err(fault.injected_error());
-        }
-
-        if durability == Some(PersistMode::SyncAll) {
-            if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
-                // The batch applies without the durability mode; completion
-                // faults or is lost after that.
-                let mut fjall_batch = self.db.batch();
-                self.stage_ops(&mut fjall_batch, batch.ops)?;
-                fjall_batch.commit().map_err(StorageError::backend)?;
+        #[cfg(any(test, feature = "test-seam"))]
+        {
+            // Apply boundary: the engine commit that lands the batch atomically.
+            if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
+                if fault == crate::PersistFault::PartialApply {
+                    // A strict prefix is staged into the engine batch and the
+                    // boundary then faults: the never-committed batch leaves
+                    // no family with a partial view.
+                    let mut fjall_batch = self.db.batch();
+                    self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops).collect())?;
+                }
                 return Err(fault.injected_error());
+            }
+
+            if durability == Some(PersistMode::SyncAll) {
+                if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
+                    // The batch applies without the durability mode; completion
+                    // faults or is lost after that.
+                    let mut fjall_batch = self.db.batch();
+                    self.stage_ops(&mut fjall_batch, batch.ops)?;
+                    fjall_batch.commit().map_err(StorageError::backend)?;
+                    return Err(fault.injected_error());
+                }
             }
         }
 
@@ -261,6 +268,7 @@ impl KvStore for FjallStore {
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "fjall").increment(1);
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Flush) {
             return Err(fault.injected_error());
         }
@@ -277,6 +285,7 @@ impl KvStore for FjallStore {
         }))
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
     fn arm_persist_fault(&self, fault: crate::PersistFault) {
         self.faults.arm(fault);
     }

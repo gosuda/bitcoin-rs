@@ -89,6 +89,7 @@ signal-hook = { workspace = true, features = ["iterator"] }
 [dev-dependencies]
 tempfile.workspace = true
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true

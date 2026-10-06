@@ -16,6 +16,7 @@ default = ["fjall"]
 rocksdb = ["dep:rust-rocksdb"]
 fjall = ["dep:fjall"]
 redb = ["dep:redb"]
+test-seam = []
 
 [dependencies]
 arc-swap.workspace = true
@@ -40,6 +41,7 @@ redb = { workspace = true, optional = true }
 rustix = { workspace = true }
 
 [dev-dependencies]
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 libc = ">=0.2.189, <0.3"
 proptest.workspace = true
 tempfile.workspace = true
