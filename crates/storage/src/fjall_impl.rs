@@ -7,7 +7,7 @@ use std::path::Path;
 use fjall::config::CompressionPolicy;
 use fjall::{CompressionType, Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable};
 
-use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
+use crate::{ColumnFamily, KvSnapshot, KvStore, KvVisitor, StorageError, WriteCondition};
 
 /// Fjall's default block-cache capacity for unbudgeted opens.
 pub const FJALL_DEFAULT_CACHE_BYTES: u64 = 32 * 1024 * 1024;
@@ -226,6 +226,19 @@ impl KvStore for FjallStore {
         Ok(Box::new(iterator))
     }
 
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for guard in self.keyspace(cf)?.prefix(prefix) {
+            let (key, value) = guard.into_inner().map_err(StorageError::backend)?;
+            f(key.as_ref(), value.as_ref())?;
+        }
+        Ok(())
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
@@ -333,5 +346,18 @@ impl KvSnapshot for FjallSnapshot<'_> {
                     .map_err(StorageError::backend)
             });
         Ok(Box::new(iterator))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for guard in self.snapshot.prefix(self.store.keyspace(cf)?, prefix) {
+            let (key, value) = guard.into_inner().map_err(StorageError::backend)?;
+            f(key.as_ref(), value.as_ref())?;
+        }
+        Ok(())
     }
 }

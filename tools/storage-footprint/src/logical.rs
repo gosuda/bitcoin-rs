@@ -80,11 +80,11 @@ fn logical_column_family_named<S: KvStore>(
     let mut rows = 0_u64;
     let mut key_bytes = 0_u64;
     let mut value_bytes = 0_u64;
-    for item in store.iter_prefix(cf, &[])? {
-        let (key, value) = item?;
+    store.for_each_prefix(cf, &[], &mut |key, value| {
         rows = rows.saturating_add(1);
         key_bytes = key_bytes.saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX));
         value_bytes = value_bytes.saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
-    }
+        Ok(())
+    })?;
     Ok(LogicalOwner::new(name, rows, key_bytes, value_bytes))
 }

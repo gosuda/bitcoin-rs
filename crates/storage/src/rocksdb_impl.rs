@@ -6,7 +6,7 @@ use rust_rocksdb::{
     Options, ReadOptions, WriteBatch as RocksWriteBatch, WriteOptions,
 };
 
-use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
+use crate::{ColumnFamily, KvSnapshot, KvStore, KvVisitor, StorageError, WriteCondition};
 
 const BLOCK_SIZE: usize = 4 * 1024 * 1024;
 /// `RocksDB`'s block-cache capacity for unbudgeted opens.
@@ -181,6 +181,28 @@ impl KvStore for RocksDbStore {
         ))
     }
 
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        let handle = self.cf_handle(cf)?;
+        let iterator = self.db.iterator_cf_opt(
+            handle,
+            ReadOptions::default(),
+            IteratorMode::From(prefix, Direction::Forward),
+        );
+        for item in iterator {
+            let (key, value) = item.map_err(StorageError::backend)?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            f(&key, &value)?;
+        }
+        Ok(())
+    }
+
     fn new_batch(&self) -> BufferedWriteBatch {
         BufferedWriteBatch::default()
     }
@@ -335,5 +357,27 @@ impl KvSnapshot for RocksDbSnapshot<'_> {
                     Err(_) => true,
                 }),
         ))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        let handle = self.db.cf_handle(cf)?;
+        let iterator = self.snapshot.iterator_cf_opt(
+            handle,
+            ReadOptions::default(),
+            IteratorMode::From(prefix, Direction::Forward),
+        );
+        for item in iterator {
+            let (key, value) = item.map_err(StorageError::backend)?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            f(&key, &value)?;
+        }
+        Ok(())
     }
 }

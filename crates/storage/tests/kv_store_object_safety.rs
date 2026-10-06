@@ -23,5 +23,12 @@ fn kv_store_dispatches_through_a_trait_object() -> Result<(), Box<dyn std::error
         store.get(ColumnFamily::BlockBodies, b"dispatch-key")?,
         Some(b"v".to_vec())
     );
+
+    let mut visited = Vec::new();
+    store.for_each_prefix(ColumnFamily::BlockBodies, b"dispatch-key", &mut |k, v| {
+        visited.push((k.to_vec(), v.to_vec()));
+        Ok(())
+    })?;
+    assert_eq!(visited, vec![(b"dispatch-key".to_vec(), b"v".to_vec())]);
     Ok(())
 }

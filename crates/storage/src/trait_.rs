@@ -8,6 +8,9 @@ pub type KvPair = (Vec<u8>, Vec<u8>);
 /// Boxed portable key-value iterator.
 pub type KvIter<'a> = Box<dyn Iterator<Item = Result<KvPair, StorageError>> + 'a>;
 
+/// Callback invoked for each matching key-value pair during prefix visitation.
+pub type KvVisitor<'a> = dyn FnMut(&[u8], &[u8]) -> Result<(), StorageError> + 'a;
+
 /// Limits for one bounded prefix scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrefixScanLimit {
@@ -175,6 +178,20 @@ pub trait KvStore: Send + Sync + 'static {
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError>;
 
+    /// Visits matching key-value pairs in key order without materializing an owned iterator.
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for item in self.iter_prefix(cf, prefix)? {
+            let (key, value) = item?;
+            f(&key, &value)?;
+        }
+        Ok(())
+    }
+
     /// Collects matching rows within `limit`.
     fn scan_prefix_bounded(
         &self,
@@ -301,6 +318,20 @@ pub trait KvSnapshot: Send + Sync {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError>;
+
+    /// Visits matching snapshot key-value pairs in key order without materializing an owned iterator.
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for item in self.iter_prefix(cf, prefix)? {
+            let (key, value) = item?;
+            f(&key, &value)?;
+        }
+        Ok(())
+    }
 
     /// Collects matching snapshot rows within `limit`.
     fn scan_prefix_bounded(

@@ -18,11 +18,11 @@ pub use column_families::ColumnFamily;
 
 pub use error::StorageError;
 
-pub use trait_::{
-    KvIter, KvPair, KvSnapshot, KvStore, PrefixScan, PrefixScanLimit, WriteCondition,
-};
 #[cfg(any(test, feature = "test-seam"))]
 pub use trait_::PersistFault;
+pub use trait_::{
+    KvIter, KvPair, KvSnapshot, KvStore, KvVisitor, PrefixScan, PrefixScanLimit, WriteCondition,
+};
 
 pub use undo::{DisconnectMarker, DisconnectPhase, InMemoryUndoStore, KvUndoStore, UndoStore};
 

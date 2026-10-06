@@ -7,7 +7,7 @@ use redb::{
     Database, Durability, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition,
 };
 
-use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
+use crate::{ColumnFamily, KvSnapshot, KvStore, KvVisitor, StorageError, WriteCondition};
 
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 type FixedTable<const N: usize> = TableDefinition<'static, &'static [u8; N], ()>;
@@ -156,6 +156,16 @@ impl KvStore for RedbStore {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
         let rows = collect_prefix(&read_txn, table_for(cf), prefix)?;
         Ok(Box::new(rows.into_iter().map(Ok)))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
+        for_each_table_prefix(&read_txn, table_for(cf), prefix, f)
     }
 
     fn scan_prefix_bounded(
@@ -450,6 +460,16 @@ impl KvStore for RedbTxIndexStore {
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
+        for_each_txindex_prefix(&read_txn, cf, prefix, f)
+    }
+
     fn scan_prefix_bounded(
         &self,
         cf: ColumnFamily,
@@ -684,6 +704,15 @@ impl KvSnapshot for RedbSnapshot {
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for_each_table_prefix(&self.read_txn, table_for(cf), prefix, f)
+    }
+
     fn scan_prefix_bounded(
         &self,
         cf: ColumnFamily,
@@ -730,6 +759,15 @@ impl KvSnapshot for RedbTxIndexSnapshot {
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
         let rows = collect_txindex_prefix(&self.read_txn, cf, prefix)?;
         Ok(Box::new(rows.into_iter().map(Ok)))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for_each_txindex_prefix(&self.read_txn, cf, prefix, f)
     }
 
     fn scan_prefix_bounded(
@@ -831,15 +869,15 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
     }
 }
 
-fn collect_prefix(
+fn for_each_table_prefix(
     read_txn: &ReadTransaction,
     table_def: ByteTable,
     prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
+    f: &mut KvVisitor<'_>,
+) -> Result<(), StorageError> {
     let table = read_txn
         .open_table(table_def)
         .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
     match prefix_end(prefix) {
         Some(end) => {
             for item in table
@@ -847,7 +885,7 @@ fn collect_prefix(
                 .map_err(StorageError::backend)?
             {
                 let (key, value) = item.map_err(StorageError::backend)?;
-                rows.push((key.value().to_vec(), value.value().to_vec()));
+                f(key.value(), value.value())?;
             }
         }
         None => {
@@ -856,10 +894,23 @@ fn collect_prefix(
                 if !key.value().starts_with(prefix) {
                     break;
                 }
-                rows.push((key.value().to_vec(), value.value().to_vec()));
+                f(key.value(), value.value())?;
             }
         }
     }
+    Ok(())
+}
+
+fn collect_prefix(
+    read_txn: &ReadTransaction,
+    table_def: ByteTable,
+    prefix: &[u8],
+) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
+    let mut rows = Vec::new();
+    for_each_table_prefix(read_txn, table_def, prefix, &mut |key, value| {
+        rows.push((key.to_vec(), value.to_vec()));
+        Ok(())
+    })?;
     Ok(rows)
 }
 
@@ -989,32 +1040,33 @@ fn byte_get(
         .map_err(StorageError::backend)
 }
 
-fn fixed_prefix_collect<const N: usize>(
+fn fixed_for_each_prefix<const N: usize>(
     read_txn: &ReadTransaction,
     table_def: FixedTable<N>,
     prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
+    f: &mut KvVisitor<'_>,
+) -> Result<(), StorageError> {
     let (start, end) = fixed_prefix_bounds::<N>(prefix)?;
     let table = read_txn
         .open_table(table_def)
         .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
     for item in table
         .range::<&[u8; N]>(&start..=&end)
         .map_err(StorageError::backend)?
     {
         let (key, _) = item.map_err(StorageError::backend)?;
-        rows.push((key.value().to_vec(), Vec::new()));
+        f(key.value(), &[])?;
     }
-    Ok(rows)
+    Ok(())
 }
 
-fn fixed_value_prefix_collect(
+fn fixed_value_for_each_prefix(
     read_txn: &ReadTransaction,
     main_def: FixedTable<12>,
     value_def: TxIndexValueTable,
     prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
+    f: &mut KvVisitor<'_>,
+) -> Result<(), StorageError> {
     let (start, end) = fixed_prefix_bounds::<12>(prefix)?;
     let main = read_txn
         .open_table(main_def)
@@ -1022,20 +1074,17 @@ fn fixed_value_prefix_collect(
     let values = read_txn
         .open_table(value_def)
         .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
     for item in main
         .range::<&[u8; 12]>(&start..=&end)
         .map_err(StorageError::backend)?
     {
         let (key, _) = item.map_err(StorageError::backend)?;
-        let key = key.value();
-        let value = values
-            .get(key)
-            .map_err(StorageError::backend)?
-            .map_or_else(Vec::new, |bytes| bytes.value().to_vec());
-        rows.push((key.to_vec(), value));
+        let key_bytes = key.value();
+        let value = values.get(key_bytes).map_err(StorageError::backend)?;
+        let value_bytes = value.as_ref().map_or([].as_slice(), |bytes| bytes.value());
+        f(key_bytes, value_bytes)?;
     }
-    Ok(rows)
+    Ok(())
 }
 
 fn fixed_prefix_scan<const N: usize>(
@@ -1107,33 +1156,56 @@ fn fixed_value_prefix_scan(
     })
 }
 
+fn for_each_txindex_prefix(
+    read_txn: &ReadTransaction,
+    cf: ColumnFamily,
+    prefix: &[u8],
+    f: &mut KvVisitor<'_>,
+) -> Result<(), StorageError> {
+    match cf {
+        ColumnFamily::TxConfirmed => fixed_value_for_each_prefix(
+            read_txn,
+            TXINDEX_TX_CONFIRMED,
+            TXINDEX_TX_CONFIRMED_VALUES,
+            prefix,
+            f,
+        ),
+        ColumnFamily::Funding => fixed_value_for_each_prefix(
+            read_txn,
+            TXINDEX_FUNDING,
+            TXINDEX_FUNDING_VALUES,
+            prefix,
+            f,
+        ),
+        ColumnFamily::Spending => fixed_value_for_each_prefix(
+            read_txn,
+            TXINDEX_SPENDING,
+            TXINDEX_SPENDING_VALUES,
+            prefix,
+            f,
+        ),
+        ColumnFamily::BlockHeaders => {
+            fixed_for_each_prefix::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, f)
+        }
+        ColumnFamily::ScriptLive => {
+            fixed_for_each_prefix::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix, f)
+        }
+        ColumnFamily::UtxoMeta => for_each_table_prefix(read_txn, TXINDEX_META, prefix, f),
+        _ => Err(invalid_txindex_cf()),
+    }
+}
+
 fn collect_txindex_prefix(
     read_txn: &ReadTransaction,
     cf: ColumnFamily,
     prefix: &[u8],
 ) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
-    match cf {
-        ColumnFamily::TxConfirmed => fixed_value_prefix_collect(
-            read_txn,
-            TXINDEX_TX_CONFIRMED,
-            TXINDEX_TX_CONFIRMED_VALUES,
-            prefix,
-        ),
-        ColumnFamily::Funding => {
-            fixed_value_prefix_collect(read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, prefix)
-        }
-        ColumnFamily::Spending => {
-            fixed_value_prefix_collect(read_txn, TXINDEX_SPENDING, TXINDEX_SPENDING_VALUES, prefix)
-        }
-        ColumnFamily::BlockHeaders => {
-            fixed_prefix_collect::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix)
-        }
-        ColumnFamily::ScriptLive => {
-            fixed_prefix_collect::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix)
-        }
-        ColumnFamily::UtxoMeta => collect_prefix(read_txn, TXINDEX_META, prefix),
-        _ => Err(invalid_txindex_cf()),
-    }
+    let mut rows = Vec::new();
+    for_each_txindex_prefix(read_txn, cf, prefix, &mut |key, value| {
+        rows.push((key.to_vec(), value.to_vec()));
+        Ok(())
+    })?;
+    Ok(rows)
 }
 
 fn scan_txindex_prefix(
