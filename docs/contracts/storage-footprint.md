@@ -59,7 +59,7 @@ Owners:
   peak can hide between samples.
 - A passing sub-1-TB result requires a pinned stop identity,
   `observation_kind = conservative_high_water` from an isolated filesystem or
-  project quota (`--storage-high-water-bytes`), and that peak must be at least
+  project quota (`--high-water-bytes` / `--storage-high-water-bytes`), and that peak must be at least
   the snapshot. The conservative high-water must cover compaction, restart,
   reorg, and migration where applicable.
 
@@ -75,10 +75,11 @@ Owners:
 - Logical key-value scans open `chainstate/` and index directories as child
   directory descriptors of the same anchor. Backends that still take a pathname
   are pointed at the already-opened descriptor (`/proc/self/fd/N` on Linux).
-- `--measure-storage-stop-height` and `--measure-storage-stop-hash` must be
-  supplied together. The hash is a 64-character RPC big-endian hex block hash.
-  The pair pins the intended stop identity for this run; it does not itself
-  prove that the data directory reached that tip.
+- `--stop-height` and `--stop-hash` (or `--measure-storage-stop-height` and
+  `--measure-storage-stop-hash`) must be supplied together. The hash is a
+  64-character RPC big-endian hex block hash. The pair pins the intended stop
+  identity for this run; it does not itself prove that the data directory reached
+  that tip.
 - Each record uses format `bitcoin-rs-storage-footprint-v1` and includes the
   resolved configuration, network, stop height and hash, whether that stop was
   pinned, backend, enabled indexes, cache budget, compiled feature set,

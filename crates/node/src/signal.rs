@@ -1,9 +1,13 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(not(windows))]
+use std::sync::atomic::Ordering;
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
+
+#[cfg(not(windows))]
 use signal_hook::{
     consts::signal::{SIGINT, SIGTERM},
     iterator::Signals,
@@ -16,11 +20,18 @@ use signal_hook::{
 /// handle would leak a process-level signal worker. The lifecycle service
 /// graph owns this handler from install until the shared teardown closes and
 /// joins it, so no lifecycle leaks — or double-joins — the forwarding thread.
+#[cfg(not(windows))]
 pub(crate) struct ShutdownHandler {
     handle: signal_hook::iterator::Handle,
     thread: Option<JoinHandle<()>>,
 }
 
+#[cfg(windows)]
+pub(crate) struct ShutdownHandler {
+    thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(not(windows))]
 impl ShutdownHandler {
     /// Installs SIGINT/SIGTERM handling on a dedicated forwarding thread.
     pub(crate) fn install(shutdown: Arc<AtomicBool>, shutdown_tx: Sender<()>) -> Result<Self> {
@@ -52,6 +63,30 @@ impl ShutdownHandler {
     /// closed either way, so SIGINT/SIGTERM handling is released.
     pub(crate) fn close_and_join(&mut self) -> Result<()> {
         self.handle.close();
+        match self.thread.take() {
+            Some(thread) => {
+                #[cfg(test)]
+                testing::note_closed();
+                thread
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("signal forwarding thread panicked"))
+            }
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl ShutdownHandler {
+    pub(crate) fn install(_shutdown: Arc<AtomicBool>, _shutdown_tx: Sender<()>) -> Result<Self> {
+        #[cfg(test)]
+        testing::note_installed();
+        Ok(Self {
+            thread: Some(thread::spawn(|| {})),
+        })
+    }
+
+    pub(crate) fn close_and_join(&mut self) -> Result<()> {
         match self.thread.take() {
             Some(thread) => {
                 #[cfg(test)]

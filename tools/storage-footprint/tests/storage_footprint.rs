@@ -587,3 +587,66 @@ fn ledgers_are_not_summed_by_the_physical_total() {
         "adding logical bytes must not be how the budget is formed"
     );
 }
+
+#[test]
+fn cli_runs_and_measures_datadir() -> Result<()> {
+    let dir = tempdir()?;
+    std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
+    let out_file = dir.path().join("footprint.json");
+
+    let bin_path = env!("CARGO_BIN_EXE_storage-footprint");
+    let output = std::process::Command::new(bin_path)
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("--output")
+        .arg(&out_file)
+        .output()?;
+
+    assert!(output.status.success(), "CLI failed: {output:?}");
+    assert!(out_file.exists(), "output file must be written");
+
+    let text = std::fs::read_to_string(&out_file)?;
+    let parsed: serde_json::Value = serde_json::from_str(&text)?;
+    assert_eq!(parsed["format"], EVIDENCE_FORMAT);
+    assert_eq!(parsed["identity"]["network"], "mainnet");
+    assert_eq!(parsed["budget"]["verdict"], "snapshot_insufficient");
+    Ok(())
+}
+
+#[test]
+fn cli_aliases_and_config_layering() -> Result<()> {
+    let dir = tempdir()?;
+    std::fs::write(dir.path().join("CURRENT_SCHEMA"), b"0\n")?;
+    let config_file = dir.path().join("test_config.toml");
+    std::fs::write(
+        &config_file,
+        format!(
+            "network = \"regtest\"\ndata_dir = \"{}\"\n",
+            dir.path().display().to_string().replace('\\', "\\\\")
+        ),
+    )?;
+
+    let bin_path = env!("CARGO_BIN_EXE_storage-footprint");
+    let output = std::process::Command::new(bin_path)
+        .arg("--config")
+        .arg(&config_file)
+        .arg("--stop-height")
+        .arg("0")
+        .arg("--stop-hash")
+        .arg(Network::Regtest.genesis_block_hash().to_string_be())
+        .arg("--high-water-bytes")
+        .arg("1000000000")
+        .output()?;
+
+    assert!(output.status.success(), "CLI failed: {output:?}");
+    let parsed: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(parsed["identity"]["network"], "regtest");
+    assert_eq!(parsed["identity"]["stop_pinned"], true);
+    assert_eq!(parsed["identity"]["stop_height"], 0);
+    assert_eq!(
+        parsed["physical"]["observation_kind"],
+        "conservative_high_water"
+    );
+    Ok(())
+}
+

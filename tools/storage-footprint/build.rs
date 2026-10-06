@@ -1,4 +1,4 @@
-//! Compile-time identity for storage-footprint evidence: git commit and rustc.
+//! Compile-time identity for storage-footprint evidence: git commit, rustc, and Cargo.lock.
 
 fn main() {
     let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") else {
