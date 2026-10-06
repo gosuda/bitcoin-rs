@@ -162,12 +162,7 @@ fn invalid_stop_hash_is_rejected() -> Result<()> {
         Err(error) => error,
         Ok(_) => bail!("expected hash parse rejection"),
     };
-    assert!(
-        error
-            .to_string()
-            .contains("invalid --measure-storage-stop-hash"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("invalid --stop-hash"), "{error}");
     Ok(())
 }
 
@@ -323,7 +318,7 @@ fn logical_owner_bytes_are_exact_key_plus_value() {
     let store = FjallStore::open(dir.path()).unwrap_or_else(|error| panic!("open: {error}"));
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::UndoData, b"abc", b"12345");
-    batch.put(ColumnFamily::UndoData, b"de", &vec![0; 10]);
+    batch.put(ColumnFamily::UndoData, b"de", &[0; 10]);
     store
         .write(batch)
         .unwrap_or_else(|error| panic!("write: {error}"));
@@ -524,6 +519,7 @@ fn mkfifo(dir: &std::path::Path, name: &str) {
 
     let path = std::ffi::CString::new(dir.join(name).as_os_str().as_bytes())
         .unwrap_or_else(|error| panic!("fifo path: {error}"));
+    // SAFETY: `path` is a valid null-terminated C string pointing to a path inside a temporary test directory.
     let status = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
     assert_eq!(status, 0, "mkfifo: {}", std::io::Error::last_os_error());
 }

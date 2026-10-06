@@ -1,7 +1,6 @@
 //! Storage footprint measurement collector and identity projection.
 
 use crate::evidence::StorageFootprintEvidence;
-use anyhow::Result;
 use bitcoin_rs_node::config::NodeConfig;
 
 /// Optional overrides for one measurement invocation.
@@ -22,7 +21,7 @@ pub struct MeasureStorageRequest {
 pub fn measure_storage_footprint(
     _config: &NodeConfig,
     _request: &MeasureStorageRequest,
-) -> Result<StorageFootprintEvidence> {
+) -> anyhow::Result<StorageFootprintEvidence> {
     anyhow::bail!(
         "physical storage-footprint measurement requires POSIX st_blocks and is only supported on Unix/Linux platforms"
     )
@@ -33,8 +32,8 @@ pub use unix::measure_storage_footprint;
 
 #[cfg(unix)]
 mod unix {
-    use super::{MeasureStorageRequest, StorageFootprintEvidence};
-    use anyhow::{Context, bail};
+    use super::{MeasureStorageRequest, NodeConfig, StorageFootprintEvidence};
+    use anyhow::{Context, Result, bail};
     use bitcoin_rs_index::{IndexWatermark, Indexer};
     use bitcoin_rs_node::config::ScriptIndexMode;
     use bitcoin_rs_node::{StoreConsumer, open_store_inspection};
