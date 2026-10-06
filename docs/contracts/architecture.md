@@ -189,7 +189,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   its configuration slot, its text grammar, and its spelling on the command
   line, in the environment, in the TOML file, and in `bitcoin.conf`. The
   `bitcoin-rs` binary holds no option name or grammar of its own beyond the two
-  configuration-file selectors and the storage-measurement flags.
+  configuration-file selectors (`--config`, `--bitcoin-conf`). Storage-measurement
+  flags are owned exclusively by the standalone `bitcoin-rs-storage-footprint` tool.
 - `resolve` folds every layer through `UserConfig::overlay` in precedence order,
   lowest first: a set field replaces the earlier value, an unset field leaves
   it, and nested override structs merge the same way, including

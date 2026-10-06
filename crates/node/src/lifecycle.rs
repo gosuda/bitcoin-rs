@@ -276,6 +276,7 @@ impl NodeServices {
         if let Some(state) = state {
             bitcoin_rs_mempool::fee_history::save(state.data_dir(), &state.mempool());
         }
+        crate::signal::notify_teardown_completed();
         if let Some(error) = first_error {
             return Err(error);
         }

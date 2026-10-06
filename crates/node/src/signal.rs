@@ -75,6 +75,9 @@ impl ShutdownHandler {
     }
 }
 
+#[cfg(not(windows))]
+pub(crate) const fn notify_teardown_completed() {}
+
 #[cfg(windows)]
 static NEXT_HANDLER_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
@@ -83,17 +86,49 @@ static ACTIVE_HANDLERS: parking_lot::Mutex<Vec<(usize, Sender<u32>)>> =
     parking_lot::Mutex::new(Vec::new());
 
 #[cfg(windows)]
+static TEARDOWN_COMPLETIONS: parking_lot::Mutex<Vec<crossbeam_channel::Sender<()>>> =
+    parking_lot::Mutex::new(Vec::new());
+
+#[cfg(windows)]
+pub(crate) fn notify_teardown_completed() {
+    let mut completions = TEARDOWN_COMPLETIONS.lock();
+    for tx in completions.drain(..) {
+        let _ = tx.try_send(());
+    }
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn win_console_ctrl_handler(ctrl_type: u32) -> i32 {
     use windows_sys::Win32::System::Console::{
         CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
     };
     match ctrl_type {
-        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT
-        | CTRL_SHUTDOWN_EVENT => {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
             let handlers = ACTIVE_HANDLERS.lock();
+            if handlers.is_empty() {
+                return 0;
+            }
             for (_id, tx) in handlers.iter() {
                 let _ = tx.try_send(ctrl_type);
             }
+            1
+        }
+        CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+            let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
+            {
+                let handlers = ACTIVE_HANDLERS.lock();
+                if handlers.is_empty() {
+                    return 0;
+                }
+                for (_id, tx) in handlers.iter() {
+                    let _ = tx.try_send(ctrl_type);
+                }
+                TEARDOWN_COMPLETIONS.lock().push(done_tx);
+            }
+            // Windows terminates the process once console close/logoff/shutdown
+            // handlers return. Wait for lifecycle teardown to complete clean
+            // checkpoint publication, bounded within Windows' ~5 second close deadline.
+            let _ = done_rx.recv_timeout(std::time::Duration::from_millis(4500));
             1
         }
         _ => 0,
@@ -140,16 +175,20 @@ impl ShutdownHandler {
     pub(crate) fn close_and_join(&mut self) -> Result<()> {
         use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
 
+        let mut unregister_error = None;
         {
             let mut handlers = ACTIVE_HANDLERS.lock();
             handlers.retain(|(id, _)| *id != self.id);
             if handlers.is_empty() {
                 // SAFETY: unregistering the previously registered win_console_ctrl_handler function pointer.
-                let _ = unsafe { SetConsoleCtrlHandler(Some(win_console_ctrl_handler), 0) };
+                let success = unsafe { SetConsoleCtrlHandler(Some(win_console_ctrl_handler), 0) };
+                if success == 0 {
+                    unregister_error = Some(std::io::Error::last_os_error());
+                }
             }
         }
 
-        match self.thread.take() {
+        let join_result = match self.thread.take() {
             Some(thread) => {
                 #[cfg(test)]
                 testing::note_closed();
@@ -158,7 +197,12 @@ impl ShutdownHandler {
                     .map_err(|_| anyhow::anyhow!("signal forwarding thread panicked"))
             }
             None => Ok(()),
+        };
+
+        if let Some(error) = unregister_error {
+            return Err(error.into());
         }
+        join_result
     }
 }
 
@@ -278,6 +322,54 @@ mod tests {
         );
 
         handler.close_and_join()?;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_console_ctrl_close_waits_for_completion() -> Result<()> {
+        use windows_sys::Win32::System::Console::CTRL_CLOSE_EVENT;
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
+        let mut handler = ShutdownHandler::install(Arc::clone(&shutdown), shutdown_tx)?;
+
+        let (handler_done_tx, handler_done_rx) = crossbeam_channel::bounded::<i32>(1);
+        std::thread::spawn(move || {
+            // SAFETY: simulating a console close event callback.
+            let handled = unsafe { win_console_ctrl_handler(CTRL_CLOSE_EVENT) };
+            let _ = handler_done_tx.send(handled);
+        });
+
+        assert!(
+            shutdown_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_ok(),
+            "CTRL_CLOSE_EVENT must wake shutdown channel"
+        );
+        assert!(
+            handler_done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "handler must wait for teardown completion"
+        );
+
+        notify_teardown_completed();
+
+        let Ok(handled) = handler_done_rx.recv_timeout(std::time::Duration::from_secs(1)) else {
+            panic!("handler must return after teardown completion");
+        };
+        assert_eq!(handled, 1, "handler must return 1 for CTRL_CLOSE_EVENT");
+
+        handler.close_and_join()?;
+
+        // SAFETY: simulating console event callback with no active handlers.
+        let handled_empty = unsafe { win_console_ctrl_handler(CTRL_CLOSE_EVENT) };
+        assert_eq!(
+            handled_empty, 0,
+            "console control handler must return 0 when no handlers are active"
+        );
+
         Ok(())
     }
 }

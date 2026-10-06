@@ -861,7 +861,20 @@ fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
         if parse_block_file_name(name).is_none() {
             continue;
         }
-        total = total.saturating_add(fs::metadata(entry.path())?.len());
+        let meta = fs::symlink_metadata(entry.path())?;
+        if meta.file_type().is_symlink() {
+            return Err(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "symlink in blocks directory is rejected: {}",
+                    entry.path().display()
+                ),
+            )));
+        }
+        if !meta.is_file() {
+            continue;
+        }
+        total = total.saturating_add(meta.len());
     }
     Ok(total)
 }
@@ -1550,6 +1563,32 @@ mod tests {
             store.load(replacement, 11, hash(2))?.as_deref(),
             Some(b"expected".as_slice())
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn measure_blocks_dir_rejects_symlinks() -> Result<(), crate::StorageError> {
+        let dir = tempdir()?;
+        let blocks_dir = dir.path().join("blocks");
+        std::fs::create_dir_all(&blocks_dir)?;
+        let target_file = dir.path().join("target.dat");
+        std::fs::write(&target_file, b"payload")?;
+        std::os::unix::fs::symlink(&target_file, blocks_dir.join("blk00000.dat"))?;
+
+        let Err(error) = super::measure_blocks_dir(&blocks_dir) else {
+            panic!("symlink in blocks dir must be rejected");
+        };
+        match error {
+            crate::StorageError::Io(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+                assert!(
+                    err.to_string()
+                        .contains("symlink in blocks directory is rejected")
+                );
+            }
+            other => panic!("expected Io(InvalidData), got: {other:?}"),
+        }
         Ok(())
     }
 }

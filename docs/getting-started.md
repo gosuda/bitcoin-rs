@@ -133,7 +133,7 @@ The durable-root recovery model and its evidence status are owned by [contracts/
 
 ## Measure storage
 
-The standalone `bitcoin-rs-storage-footprint` tool records logical and physical datadir accounting and exits:
+The standalone `bitcoin-rs-storage-footprint` tool records logical and physical datadir accounting and exits. Physical measurement requires POSIX `st_blocks` filesystem semantics, so the tool is currently supported only on Unix/Linux (`cfg(unix)`) and exits with an error on non-Unix platforms:
 
 ```sh
 cargo run --locked --release -p bitcoin-rs-storage-footprint -- \

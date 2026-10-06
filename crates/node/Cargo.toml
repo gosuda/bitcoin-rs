@@ -87,10 +87,7 @@ cap-std.workspace = true
 signal-hook = { workspace = true, features = ["iterator"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true, features = [
-    "Win32_Foundation",
-    "Win32_System_Console",
-] }
+windows-sys = { workspace = true, features = ["Win32_System_Console"] }
 
 [dev-dependencies]
 tempfile.workspace = true
