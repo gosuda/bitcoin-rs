@@ -33,7 +33,7 @@ pub use unix::measure_storage_footprint;
 
 #[cfg(unix)]
 mod unix {
-    use super::*;
+    use super::{MeasureStorageRequest, StorageFootprintEvidence};
     use anyhow::{Context, bail};
     use bitcoin_rs_index::{IndexWatermark, Indexer};
     use bitcoin_rs_node::config::ScriptIndexMode;
@@ -191,13 +191,11 @@ mod unix {
         match (request.stop_height, request.stop_hash.as_deref()) {
             (None, None) => Ok((witness_height, witness_hash, false)),
             (Some(_), None) | (None, Some(_)) => {
-                bail!(
-                    "--measure-storage-stop-height and --measure-storage-stop-hash must be supplied together"
-                );
+                bail!("--stop-height and --stop-hash must be supplied together");
             }
             (Some(height), Some(hash)) => {
                 let parsed = Hash256::from_str_be(hash)
-                    .with_context(|| format!("invalid --measure-storage-stop-hash {hash:?}"))?;
+                    .with_context(|| format!("invalid --stop-hash {hash:?}"))?;
                 Ok((height, parsed.to_string_be(), true))
             }
         }

@@ -72,7 +72,6 @@ fn dir_listing(data_dir: &std::path::Path) -> String {
     }
 }
 
-#[cfg(not(windows))]
 #[test]
 fn process_epoch_allocation_is_unique_across_processes() -> anyhow::Result<()> {
     const CHILD_DIR_ENV: &str = "BITCOIN_RS_TEST_EPOCH_CHILD_DIR";

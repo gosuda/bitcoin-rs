@@ -1,7 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-#[cfg(not(windows))]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
@@ -28,6 +26,7 @@ pub(crate) struct ShutdownHandler {
 
 #[cfg(windows)]
 pub(crate) struct ShutdownHandler {
+    id: usize,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -77,17 +76,79 @@ impl ShutdownHandler {
 }
 
 #[cfg(windows)]
+static NEXT_HANDLER_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+#[cfg(windows)]
+static ACTIVE_HANDLERS: parking_lot::Mutex<Vec<(usize, Sender<u32>)>> =
+    parking_lot::Mutex::new(Vec::new());
+
+#[cfg(windows)]
+unsafe extern "system" fn win_console_ctrl_handler(ctrl_type: u32) -> i32 {
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    };
+    match ctrl_type {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT
+        | CTRL_SHUTDOWN_EVENT => {
+            let handlers = ACTIVE_HANDLERS.lock();
+            for (_id, tx) in handlers.iter() {
+                let _ = tx.try_send(ctrl_type);
+            }
+            1
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(windows)]
 impl ShutdownHandler {
-    #[expect(clippy::unnecessary_wraps)]
-    pub(crate) fn install(_shutdown: Arc<AtomicBool>, _shutdown_tx: Sender<()>) -> Result<Self> {
+    pub(crate) fn install(shutdown: Arc<AtomicBool>, shutdown_tx: Sender<()>) -> Result<Self> {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+        let id = NEXT_HANDLER_ID.fetch_add(1, Ordering::Relaxed);
+        let (ctrl_tx, ctrl_rx) = crossbeam_channel::bounded::<u32>(1);
+
+        {
+            let mut handlers = ACTIVE_HANDLERS.lock();
+            if handlers.is_empty() {
+                // SAFETY: win_console_ctrl_handler is an extern "system" function pointer with the PHANDLER_ROUTINE signature.
+                let success = unsafe { SetConsoleCtrlHandler(Some(win_console_ctrl_handler), 1) };
+                if success == 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+            }
+            handlers.push((id, ctrl_tx));
+        }
+
+        let thread = thread::spawn(move || {
+            for _ctrl in ctrl_rx {
+                let _ =
+                    shutdown.compare_exchange(false, true, Ordering::Release, Ordering::Acquire);
+                if shutdown_tx.try_send(()).is_err() {
+                    break;
+                }
+            }
+        });
         #[cfg(test)]
         testing::note_installed();
         Ok(Self {
-            thread: Some(thread::spawn(|| {})),
+            id,
+            thread: Some(thread),
         })
     }
 
     pub(crate) fn close_and_join(&mut self) -> Result<()> {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+
+        {
+            let mut handlers = ACTIVE_HANDLERS.lock();
+            handlers.retain(|(id, _)| *id != self.id);
+            if handlers.is_empty() {
+                // SAFETY: unregistering the previously registered win_console_ctrl_handler function pointer.
+                let _ = unsafe { SetConsoleCtrlHandler(Some(win_console_ctrl_handler), 0) };
+            }
+        }
+
         match self.thread.take() {
             Some(thread) => {
                 #[cfg(test)]
@@ -186,6 +247,37 @@ mod tests {
             closed_before + 2,
             "each lifecycle must close and join its handler"
         );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_console_ctrl_triggers_shutdown() -> Result<()> {
+        use windows_sys::Win32::System::Console::CTRL_C_EVENT;
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
+        let mut handler = ShutdownHandler::install(Arc::clone(&shutdown), shutdown_tx)?;
+
+        // SAFETY: simulating a console event callback into the registered handler.
+        let handled = unsafe { win_console_ctrl_handler(CTRL_C_EVENT) };
+        assert_eq!(
+            handled, 1,
+            "console control handler must handle CTRL_C_EVENT"
+        );
+
+        assert!(
+            shutdown_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_ok(),
+            "CTRL_C_EVENT must wake shutdown channel"
+        );
+        assert!(
+            shutdown.load(Ordering::Acquire),
+            "CTRL_C_EVENT must set shutdown atomic"
+        );
+
+        handler.close_and_join()?;
         Ok(())
     }
 }

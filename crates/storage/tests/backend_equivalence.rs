@@ -206,12 +206,34 @@ fn verify_for_each_prefix(store: &impl KvStore) -> Result<(), StorageError> {
             })
             .collect::<Vec<_>>();
         expected.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let iso_key = [PREFIX, b"snapshot-isolation"].concat();
+        let iso_val = cf_value(cf, "isolation-val");
+        store.put(cf, &iso_key, &iso_val)?;
+
+        let mut live_actual = Vec::new();
+        store.for_each_prefix(cf, PREFIX, &mut |key, value| {
+            live_actual.push((key.to_vec(), value.to_vec()));
+            Ok(())
+        })?;
+        assert!(
+            live_actual.iter().any(|(k, _)| k == &iso_key),
+            "live store must observe post-snapshot mutation"
+        );
+
         let mut actual = Vec::new();
         snapshot.for_each_prefix(cf, PREFIX, &mut |key, value| {
             actual.push((key.to_vec(), value.to_vec()));
             Ok(())
         })?;
-        assert_eq!(actual, expected);
+        assert_eq!(
+            actual, expected,
+            "snapshot must remain isolated from post-snapshot mutation"
+        );
+
+        let mut del_batch = store.new_batch();
+        del_batch.delete(cf, &iso_key);
+        store.write(del_batch)?;
     }
     Ok(())
 }
