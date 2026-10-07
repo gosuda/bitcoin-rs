@@ -44,19 +44,49 @@ impl CheckpointStage {
     pub fn generation(&self) -> u64 {
         self.generation
     }
-    /// Writes, hashes, and synchronizes one staged artifact. The two
-    /// failpoint parameters exist only under `test`/`test-seam`.
+    /// Writes, hashes, and synchronizes one staged artifact.
     pub fn write_artifact<T, E: From<CheckpointError>>(
         &self,
         name: &str,
-        #[cfg(any(test, feature = "test-seam"))] write_failpoint: CheckpointFailpoint,
-        #[cfg(any(test, feature = "test-seam"))] sync_failpoint: CheckpointFailpoint,
+        write: impl FnOnce(&mut dyn std::io::Write) -> Result<T, E>,
+    ) -> Result<(T, ArtifactDigest), E> {
+        self.write_artifact_inner(
+            name,
+            #[cfg(any(test, feature = "test-seam"))]
+            None,
+            write,
+        )
+    }
+
+    /// Writes an artifact while arming its test-only write and sync boundaries.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn write_artifact_with_failpoints<T, E: From<CheckpointError>>(
+        &self,
+        name: &str,
+        write_failpoint: CheckpointFailpoint,
+        sync_failpoint: CheckpointFailpoint,
+        write: impl FnOnce(&mut dyn std::io::Write) -> Result<T, E>,
+    ) -> Result<(T, ArtifactDigest), E> {
+        self.write_artifact_inner(name, Some((write_failpoint, sync_failpoint)), write)
+    }
+
+    fn write_artifact_inner<T, E: From<CheckpointError>>(
+        &self,
+        name: &str,
+        #[cfg(any(test, feature = "test-seam"))] failpoints: Option<(
+            CheckpointFailpoint,
+            CheckpointFailpoint,
+        )>,
         write: impl FnOnce(&mut dyn std::io::Write) -> Result<T, E>,
     ) -> Result<(T, ArtifactDigest), E> {
         let mut file =
             create_file(&self.staging, name).map_err(|e| E::from(CheckpointError::from(e)))?;
         #[cfg(any(test, feature = "test-seam"))]
-        let mut writer = HashingWriter::new(&mut file, self.failpoint, write_failpoint);
+        let mut writer = HashingWriter::new(
+            &mut file,
+            self.failpoint,
+            failpoints.map(|(write_failpoint, _)| write_failpoint),
+        );
         #[cfg(not(any(test, feature = "test-seam")))]
         let mut writer = HashingWriter::new(&mut file);
         let value = write(&mut writer)?;
@@ -64,15 +94,33 @@ impl CheckpointStage {
             .finish()
             .map_err(|e| E::from(CheckpointError::from(e)))?;
         #[cfg(any(test, feature = "test-seam"))]
-        injected_io(self.failpoint, sync_failpoint)
-            .map_err(|e| E::from(CheckpointError::from(e)))?;
+        if let Some((_, sync_failpoint)) = failpoints {
+            injected_io(self.failpoint, sync_failpoint)
+                .map_err(|e| E::from(CheckpointError::from(e)))?;
+        }
         sync_file(&file).map_err(|e| E::from(e))?;
         Ok((value, ArtifactDigest { bytes, sha256 }))
     }
 }
 /// Reserves a new generation directory and opens its staging transaction.
-/// The `failpoint` parameter exists only under `test`/`test-seam`.
-pub fn begin_publication(
+pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointError> {
+    begin_publication_inner(
+        data_dir,
+        #[cfg(any(test, feature = "test-seam"))]
+        None,
+    )
+}
+
+/// Reserves a staging transaction with an optional test-only failure boundary.
+#[cfg(any(test, feature = "test-seam"))]
+pub fn begin_publication_with_failpoint(
+    data_dir: &Dir,
+    failpoint: Option<CheckpointFailpoint>,
+) -> Result<CheckpointStage, CheckpointError> {
+    begin_publication_inner(data_dir, failpoint)
+}
+
+fn begin_publication_inner(
     data_dir: &Dir,
     #[cfg(any(test, feature = "test-seam"))] failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointStage, CheckpointError> {

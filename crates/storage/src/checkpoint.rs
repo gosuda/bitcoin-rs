@@ -277,14 +277,14 @@ impl<'a> HashingWriter<'a> {
     pub(crate) fn new(
         file: &'a mut File,
         #[cfg(any(test, feature = "test-seam"))] configured: Option<CheckpointFailpoint>,
-        #[cfg(any(test, feature = "test-seam"))] boundary: CheckpointFailpoint,
+        #[cfg(any(test, feature = "test-seam"))] boundary: Option<CheckpointFailpoint>,
     ) -> Self {
         Self {
             file: BufWriter::with_capacity(CHECKPOINT_WRITE_BUFFER_SIZE, file),
             hasher: Sha256::new(),
             bytes: 0,
             #[cfg(any(test, feature = "test-seam"))]
-            fail: configured == Some(boundary),
+            fail: configured.is_some() && configured == boundary,
         }
     }
 
@@ -325,4 +325,6 @@ pub use load::{
     CheckpointOpen, classify_checkpoint_error, classify_checkpoint_io, coinstats_artifact_payload,
     corrupt_checkpoint, open_current_checkpoint, read_manifest, require_filename, verify_artifact,
 };
+#[cfg(any(test, feature = "test-seam"))]
+pub use publish::begin_publication_with_failpoint;
 pub use publish::{ArtifactDigest, CheckpointStage, begin_publication, commit_publication};

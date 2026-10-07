@@ -12,7 +12,7 @@ fn publish_fixture(
     data_dir: &cap_std::fs::Dir,
     failpoint: Option<CheckpointFailpoint>,
 ) -> Result<u64, CheckpointError> {
-    let stage = begin_publication(data_dir, failpoint)?;
+    let stage = begin_publication_with_failpoint(data_dir, failpoint)?;
     let headers = b"headers";
     let utxo = b"utxo";
     let coinstats = {
@@ -24,7 +24,7 @@ fn publish_fixture(
         bytes.resize(coinstats_len, 0);
         bytes
     };
-    let ((), headers_digest) = stage.write_artifact(
+    let ((), headers_digest) = stage.write_artifact_with_failpoints(
         HEADERS_FILE,
         CheckpointFailpoint::HeadersWrite,
         CheckpointFailpoint::HeadersSync,
@@ -33,7 +33,7 @@ fn publish_fixture(
             Ok::<_, CheckpointError>(())
         },
     )?;
-    let ((), utxo_digest) = stage.write_artifact(
+    let ((), utxo_digest) = stage.write_artifact_with_failpoints(
         UTXO_FILE,
         CheckpointFailpoint::UtxoWrite,
         CheckpointFailpoint::UtxoSync,
@@ -42,7 +42,7 @@ fn publish_fixture(
             Ok::<_, CheckpointError>(())
         },
     )?;
-    let ((), coinstats_digest) = stage.write_artifact(
+    let ((), coinstats_digest) = stage.write_artifact_with_failpoints(
         COINSTATS_FILE,
         CheckpointFailpoint::CoinStatsWrite,
         CheckpointFailpoint::CoinStatsSync,
@@ -357,7 +357,7 @@ fn unknown_entries_and_symlinks_are_never_deleted() -> Result<(), Box<dyn std::e
 fn commit_rejects_manifest_for_wrong_generation() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
-    let stage = begin_publication(&data, None)?;
+    let stage = begin_publication_with_failpoint(&data, None)?;
     let generation = stage.generation();
     let manifest: CheckpointManifestV1 = serde_json::from_value(serde_json::json!({
         "format": MANIFEST_FORMAT,
