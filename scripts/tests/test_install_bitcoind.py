@@ -1,17 +1,36 @@
-"""Offline checks for accepting or replacing a pinned Core installation cache."""
+"""Offline checks for accepting or replacing a pinned Core installation cache.
+
+Requires a tomllib-capable interpreter (Python >=3.11): the archive digest is
+resolved from core-compat.toml exactly as the installer does.
+"""
 
 import os
-import re
+import platform
 import subprocess
+import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "install-bitcoind.sh"
-PIN = re.search(r'^readonly TARBALL_SHA256="([0-9a-f]{64})"$', SCRIPT.read_text(), re.M)
-if PIN is None:
-    raise RuntimeError("Installer must declare its pinned archive digest")
+MANIFEST = Path(__file__).resolve().parents[2] / "crates/rpc/core-compat.toml"
+
+TARGETS = {
+    ("linux", "x86_64"): "x86_64-linux-gnu",
+    ("linux", "aarch64"): "aarch64-linux-gnu",
+    ("darwin", "arm64"): "arm64-apple-darwin",
+    ("darwin", "x86_64"): "x86_64-apple-darwin",
+}
+with MANIFEST.open("rb") as stream:
+    release = tomllib.load(stream)["reference"]["release"]
+ARTIFACTS = {row["target"]: row for row in release.get("platforms", [])}
+ARTIFACTS[release["target"]] = release
+target = TARGETS.get((sys.platform, platform.machine()))
+if target is None or target not in ARTIFACTS:
+    raise RuntimeError(f"no pinned Core artifact for {sys.platform}-{platform.machine()}")
+PIN = ARTIFACTS[target]["archive_sha256"]
 
 
 class InstallBitcoindTest(unittest.TestCase):
@@ -33,7 +52,7 @@ class InstallBitcoindTest(unittest.TestCase):
                     f"exit {version_exit}\n"
                 )
                 binary.chmod(0o755)
-                (prefix / ".bitcoin-rs-core-tarball-sha256").write_text(PIN.group(1) + "\n")
+                (prefix / ".bitcoin-rs-core-tarball-sha256").write_text(PIN + "\n")
                 shims = root / "bin"
                 shims.mkdir()
                 curl = shims / "curl"
