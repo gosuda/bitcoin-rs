@@ -36,7 +36,12 @@ with (root / "crates/rpc/core-compat.toml").open("rb") as stream:
 
 if mode == "core":
     release = reference["release"]
-    artifacts = {row["target"]: row for row in release.get("platforms", [])}
+    platform_rows = release.get("platforms", [])
+    targets = [release["target"], *(row["target"] for row in platform_rows)]
+    # Fail closed like load_reference_set's DuplicateArtifactTarget.
+    if len(targets) != len(set(targets)):
+        raise SystemExit("duplicate Core artifact target")
+    artifacts = {row["target"]: row for row in platform_rows}
     artifacts[release["target"]] = release
     pin = artifacts.get(TARGETS.get((sys.platform, platform.machine())))
     if pin is None:
