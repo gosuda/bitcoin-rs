@@ -460,24 +460,20 @@ impl FlatFileBlockStore {
             ));
         }
         let blocks_dir = data_dir.join(BLOCK_FILE_DIRECTORY);
+        fs::create_dir_all(&blocks_dir)?;
+        reject_symlinks_in_dir(&blocks_dir)?;
         // Admit authority before opening any file with create/write permissions.
         // Even when a checkpoint already matches the head, these bytes must
         // survive: an apparent torn tail can instead be a damaged committed frame.
         if let Some(extent) = committed {
             validate_committed_extent(&blocks_dir, extent)?;
         }
-        fs::create_dir_all(&blocks_dir)?;
         // Persist the blocks-directory entry in its parent. This runs once per
         // store open, not on the append path.
         sync_blocks_dir(data_dir)?;
         let file_no = highest_block_file_number(&blocks_dir)?.unwrap_or(0);
         let path = block_file_path(&blocks_dir, file_no);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path)?;
+        let mut file = open_block_file_for_append(&path)?;
         // The file may have been created above; persist its directory entry.
         sync_blocks_dir(&blocks_dir)?;
         let file_len = file.metadata()?.len();
@@ -784,6 +780,7 @@ pub fn complete_framed_stats(file: &mut File) -> Result<(u64, u64), StorageError
 
 fn validate_committed_extent(blocks_dir: &Path, extent: BodyExtent) -> Result<(), StorageError> {
     let path = block_file_path(blocks_dir, extent.file_no);
+    ensure_not_symlink(&path)?;
     let corrupt = || {
         StorageError::IncompatibleData(format!(
             "committed block-file extent {}:{} is missing or malformed; preserving block files",
@@ -879,6 +876,123 @@ fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
     Ok(total)
 }
 
+fn reject_symlinks_in_dir(blocks_dir: &Path) -> Result<(), StorageError> {
+    for entry in fs::read_dir(blocks_dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if parse_block_file_name(name).is_none() {
+            continue;
+        }
+        let meta = fs::symlink_metadata(entry.path())?;
+        if meta.file_type().is_symlink() {
+            return Err(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "symlink in blocks directory is rejected: {}",
+                    entry.path().display()
+                ),
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_not_symlink(path: &Path) -> Result<(), StorageError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "symlink in blocks directory is rejected: {}",
+                        path.display()
+                    ),
+                )));
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn open_block_file_for_append(path: &Path) -> Result<File, StorageError> {
+    ensure_not_symlink(path)?;
+
+    #[cfg(any(
+        target_vendor = "apple",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "redox"
+    ))]
+    let mut options = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = OpenOptions::new();
+        opts.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+        opts
+    };
+    #[cfg(all(
+        unix,
+        not(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "redox"
+        ))
+    ))]
+    let mut options = OpenOptions::new();
+    #[cfg(windows)]
+    let mut options = {
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut opts = OpenOptions::new();
+        // FILE_FLAG_OPEN_REPARSE_POINT (0x0020_0000) prevents following reparse points / symlinks.
+        opts.custom_flags(0x0020_0000);
+        opts
+    };
+    #[cfg(not(any(unix, windows)))]
+    let mut options = OpenOptions::new();
+
+    options.create(true).truncate(false).read(true).write(true);
+
+    let file = match options.open(path) {
+        Ok(file) => {
+            let meta = file.metadata()?;
+            if meta.file_type().is_symlink() {
+                return Err(StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "symlink in blocks directory is rejected: {}",
+                        path.display()
+                    ),
+                )));
+            }
+            file
+        }
+        Err(err) => {
+            #[cfg(any(
+                target_vendor = "apple",
+                target_os = "linux",
+                target_os = "android",
+                target_os = "redox"
+            ))]
+            if err.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+                return Err(StorageError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "symlink in blocks directory is rejected: {}",
+                        path.display()
+                    ),
+                )));
+            }
+            return Err(err.into());
+        }
+    };
+    Ok(file)
+}
+
 fn highest_block_file_number(blocks_dir: &Path) -> Result<Option<u32>, StorageError> {
     let mut highest = None;
     for entry in fs::read_dir(blocks_dir)? {
@@ -918,11 +1032,13 @@ fn block_file_path(blocks_dir: &Path, file_no: u32) -> PathBuf {
 }
 
 fn open_new_block_file(blocks_dir: &Path, file_no: u32) -> Result<File, StorageError> {
+    let path = block_file_path(blocks_dir, file_no);
+    ensure_not_symlink(&path)?;
     OpenOptions::new()
         .create_new(true)
         .read(true)
         .write(true)
-        .open(block_file_path(blocks_dir, file_no))
+        .open(path)
         .map_err(StorageError::from)
 }
 
@@ -1589,6 +1705,39 @@ mod tests {
             }
             other => panic!("expected Io(InvalidData), got: {other:?}"),
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_rejects_symlink_before_mutating_target() -> Result<(), crate::StorageError> {
+        let dir = tempdir()?;
+        let blocks_dir = dir.path().join("blocks");
+        std::fs::create_dir_all(&blocks_dir)?;
+        let target_file = dir.path().join("sensitive_target.dat");
+        let original_content = b"sensitive immutable data that must not be truncated";
+        std::fs::write(&target_file, original_content)?;
+        std::os::unix::fs::symlink(&target_file, blocks_dir.join("blk00000.dat"))?;
+
+        let res = FlatFileBlockStore::open(dir.path());
+        assert!(res.is_err(), "open must fail when block file is a symlink");
+        match res.unwrap_err() {
+            crate::StorageError::Io(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+                assert!(
+                    err.to_string()
+                        .contains("symlink in blocks directory is rejected")
+                );
+            }
+            other => panic!("expected Io(InvalidData), got: {other:?}"),
+        }
+
+        // Verify target file was not mutated or truncated before startup rejected it
+        let content_after = std::fs::read(&target_file)?;
+        assert_eq!(
+            content_after, original_content,
+            "target file must remain intact and untruncated"
+        );
         Ok(())
     }
 }
