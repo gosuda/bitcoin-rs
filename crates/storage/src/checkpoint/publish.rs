@@ -4,6 +4,8 @@ use super::format::{
     generation_name, valid_current_temp_name, valid_generation_name, valid_staging_name,
 };
 use super::fs::{CheckpointRoot, create_file, remove_known_dir};
+#[cfg(any(test, feature = "test-seam"))]
+use super::io::injected_io;
 #[cfg(any(
     target_vendor = "apple",
     target_os = "linux",
@@ -11,8 +13,6 @@ use super::fs::{CheckpointRoot, create_file, remove_known_dir};
     target_os = "redox"
 ))]
 use super::io::rename_generation;
-#[cfg(any(test, feature = "test-seam"))]
-use super::io::injected_io;
 use super::io::{rename_current, sync_checkpoint_dir, sync_file, sync_root, write_file};
 use super::load::read_current;
 use super::{
@@ -64,7 +64,8 @@ impl CheckpointStage {
             .finish()
             .map_err(|e| E::from(CheckpointError::from(e)))?;
         #[cfg(any(test, feature = "test-seam"))]
-        injected_io(self.failpoint, sync_failpoint).map_err(|e| E::from(CheckpointError::from(e)))?;
+        injected_io(self.failpoint, sync_failpoint)
+            .map_err(|e| E::from(CheckpointError::from(e)))?;
         sync_file(&file).map_err(|e| E::from(e))?;
         Ok((value, ArtifactDigest { bytes, sha256 }))
     }

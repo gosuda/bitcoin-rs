@@ -498,7 +498,10 @@ fn read_regular_bounded(path: &Path) -> Result<Vec<u8>, LoadError> {
     if file
         .metadata()
         .map_err(|error| {
-            LoadError::Violation(format!("{}: could not be inspected: {error}", path.display()))
+            LoadError::Violation(format!(
+                "{}: could not be inspected: {error}",
+                path.display()
+            ))
         })?
         .file_type()
         .is_symlink()

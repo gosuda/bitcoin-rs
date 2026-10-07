@@ -282,17 +282,20 @@ mod unix {
             }
         }
 
-        let mut watermarks = IndexWatermarkEvidence {
-            tx_lookup: None,
-            script_history: None,
-            script_live: None,
-        };
-        if let Some((owners, found)) = scan_store_dir(anchor, "txindex", backend, TxIndexScan)? {
+        let watermarks = if let Some((owners, found)) =
+            scan_store_dir(anchor, "txindex", backend, TxIndexScan)?
+        {
             for owner in owners {
                 logical.push(owner);
             }
-            watermarks = found;
-        }
+            found
+        } else {
+            IndexWatermarkEvidence {
+                tx_lookup: None,
+                script_history: None,
+                script_live: None,
+            }
+        };
         Ok((logical, watermarks))
     }
 

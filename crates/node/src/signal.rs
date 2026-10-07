@@ -412,10 +412,7 @@ mod tests {
             let _ = handler_done_tx.send(handled);
         });
 
-        for (rx, flag) in [
-            (&shutdown_rx_a, &shutdown_a),
-            (&shutdown_rx_b, &shutdown_b),
-        ] {
+        for (rx, flag) in [(&shutdown_rx_a, &shutdown_a), (&shutdown_rx_b, &shutdown_b)] {
             assert!(
                 rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok(),
                 "CTRL_CLOSE_EVENT must wake every dispatched shutdown channel"

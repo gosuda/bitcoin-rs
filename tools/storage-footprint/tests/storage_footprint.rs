@@ -515,10 +515,8 @@ fn logical_flat_files_count_complete_frames_only() {
         .unwrap_or_else(|error| panic!("write: {error}"));
     drop(file);
     complete_only(&anchor);
-    let header: Vec<u8> = fs::read(&blk)
-        .unwrap_or_else(|error| panic!("read: {error}"))
-        [..44]
-        .to_vec();
+    let header: Vec<u8> =
+        fs::read(&blk).unwrap_or_else(|error| panic!("read: {error}"))[..44].to_vec();
     let file = OpenOptions::new()
         .write(true)
         .open(&blk)
