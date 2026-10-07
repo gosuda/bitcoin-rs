@@ -221,8 +221,8 @@ amplification claim is supported by matched evidence.**
 
 | Column family | Logical bytes/row |
 |---|---:|
-| TxConfirmed | 20 (12 key + 8 value) |
-| Funding | 20 (12 key + 8 value) |
+| TxConfirmed | 12 + 6n (12 key + positioned value) |
+| Funding | 12 + 6n (12 key + positioned value) |
 | Spending | 12 + 6n (12 key + positioned value) |
 | BlockHeaders | 80 (80 key + empty value) |
 
