@@ -233,12 +233,10 @@ fn write_sidecar(
             }
         }
         std::fs::rename(&tmp, &current)?;
-        #[cfg(any(
-            target_vendor = "apple",
-            target_os = "linux",
-            target_os = "android",
-            target_os = "redox"
-        ))]
+        // Opening a directory for fsync is a POSIX-only capability; on every
+        // other target the rename above is the last durability barrier we can
+        // take. Same predicate as `block_file::sync_blocks_dir`.
+        #[cfg(unix)]
         std::fs::File::open(dir)?.sync_all()?;
         Ok(())
     })();
