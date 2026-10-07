@@ -1,4 +1,8 @@
-//! Failpoint-aware checkpoint writes and filesystem durability barriers.
+//! Checkpoint writes and filesystem durability barriers.
+//!
+//! Under `test`/`test-seam`, publication call sites arm named boundaries
+//! through [`injected_io`] before each plain helper, so the barrier sequence
+//! below is exactly what a failpoint run exercises.
 
 use super::CURRENT_FILE;
 use super::CheckpointError;
@@ -10,6 +14,8 @@ use cap_std::fs::Dir;
 use cap_std::fs::File;
 use std::io::Write;
 
+/// Fails with `ENOSPC` when `configured` armed `boundary`; called by the
+/// publication sequence immediately before the boundary it names.
 #[cfg(any(test, feature = "test-seam"))]
 pub(crate) fn injected_io(
     configured: Option<CheckpointFailpoint>,
@@ -21,104 +27,31 @@ pub(crate) fn injected_io(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-seam"))]
-pub(crate) fn write_file(
-    file: &mut File,
-    bytes: &[u8],
-    configured: Option<CheckpointFailpoint>,
-    boundary: CheckpointFailpoint,
-) -> Result<(), CheckpointError> {
-    injected_io(configured, boundary)?;
-    file.write_all(bytes)?;
-    Ok(())
-}
-
-#[cfg(not(any(test, feature = "test-seam")))]
 pub(crate) fn write_file(file: &mut File, bytes: &[u8]) -> Result<(), CheckpointError> {
     file.write_all(bytes)?;
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-seam"))]
-pub(crate) fn sync_file(
-    file: &File,
-    configured: Option<CheckpointFailpoint>,
-    boundary: CheckpointFailpoint,
-) -> Result<(), CheckpointError> {
-    injected_io(configured, boundary)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(any(test, feature = "test-seam")))]
 pub(crate) fn sync_file(file: &File) -> Result<(), CheckpointError> {
     file.sync_all()?;
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-seam"))]
-pub(crate) fn sync_checkpoint_dir(
-    dir: &Dir,
-    configured: Option<CheckpointFailpoint>,
-    boundary: CheckpointFailpoint,
-) -> Result<(), CheckpointError> {
-    injected_io(configured, boundary)?;
-    sync_dir(dir)?;
-    Ok(())
-}
-
-#[cfg(not(any(test, feature = "test-seam")))]
 pub(crate) fn sync_checkpoint_dir(dir: &Dir) -> Result<(), CheckpointError> {
     sync_dir(dir)?;
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-seam"))]
-pub(crate) fn sync_root(
-    root: &CheckpointRoot,
-    configured: Option<CheckpointFailpoint>,
-    boundary: CheckpointFailpoint,
-) -> Result<(), CheckpointError> {
-    injected_io(configured, boundary)?;
-    root.sync()?;
-    Ok(())
-}
-
-#[cfg(not(any(test, feature = "test-seam")))]
 pub(crate) fn sync_root(root: &CheckpointRoot) -> Result<(), CheckpointError> {
     root.sync()?;
     Ok(())
 }
 
-#[cfg(all(
-    any(
-        target_vendor = "apple",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "redox"
-    ),
-    any(test, feature = "test-seam")
-))]
-pub(crate) fn rename_generation(
-    root: &CheckpointRoot,
-    from: &str,
-    to: &str,
-    configured: Option<CheckpointFailpoint>,
-    boundary: CheckpointFailpoint,
-) -> Result<(), CheckpointError> {
-    injected_io(configured, boundary)?;
-    root.rename_noreplace(from, to)?;
-    Ok(())
-}
-
-#[cfg(all(
-    any(
-        target_vendor = "apple",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "redox"
-    ),
-    not(any(test, feature = "test-seam"))
+#[cfg(any(
+    target_vendor = "apple",
+    target_os = "linux",
+    target_os = "android",
+    target_os = "redox"
 ))]
 pub(crate) fn rename_generation(
     root: &CheckpointRoot,
@@ -129,19 +62,6 @@ pub(crate) fn rename_generation(
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-seam"))]
-pub(crate) fn rename_current(
-    root: &CheckpointRoot,
-    from: &str,
-    configured: Option<CheckpointFailpoint>,
-    boundary: CheckpointFailpoint,
-) -> Result<(), CheckpointError> {
-    injected_io(configured, boundary)?;
-    root.rename(from, CURRENT_FILE)?;
-    Ok(())
-}
-
-#[cfg(not(any(test, feature = "test-seam")))]
 pub(crate) fn rename_current(root: &CheckpointRoot, from: &str) -> Result<(), CheckpointError> {
     root.rename(from, CURRENT_FILE)?;
     Ok(())

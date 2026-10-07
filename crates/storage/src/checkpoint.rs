@@ -272,26 +272,19 @@ pub(crate) struct HashingWriter<'a> {
     fail: bool,
 }
 impl<'a> HashingWriter<'a> {
-    #[cfg(any(test, feature = "test-seam"))]
+    /// The `configured`/`boundary` parameters exist only under
+    /// `test`/`test-seam` and arm the write-failure injection.
     pub(crate) fn new(
         file: &'a mut File,
-        configured: Option<CheckpointFailpoint>,
-        boundary: CheckpointFailpoint,
+        #[cfg(any(test, feature = "test-seam"))] configured: Option<CheckpointFailpoint>,
+        #[cfg(any(test, feature = "test-seam"))] boundary: CheckpointFailpoint,
     ) -> Self {
         Self {
             file: BufWriter::with_capacity(CHECKPOINT_WRITE_BUFFER_SIZE, file),
             hasher: Sha256::new(),
             bytes: 0,
+            #[cfg(any(test, feature = "test-seam"))]
             fail: configured == Some(boundary),
-        }
-    }
-
-    #[cfg(not(any(test, feature = "test-seam")))]
-    pub(crate) fn new(file: &'a mut File) -> Self {
-        Self {
-            file: BufWriter::with_capacity(CHECKPOINT_WRITE_BUFFER_SIZE, file),
-            hasher: Sha256::new(),
-            bytes: 0,
         }
     }
 
