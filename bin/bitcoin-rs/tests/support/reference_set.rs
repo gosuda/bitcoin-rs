@@ -13,7 +13,7 @@ const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
 /// manifest remains their value owner; changing any value requires reviewing
 /// the external artifact evidence and deliberately updating its fingerprint.
 const RELEASE_CUSTODY_SHA256: &str =
-    "12e58454e41bb8d15c6998b999c25c8ce407e513cb4ce7d09ccb494b321d24be";
+    "f7baea0195d80fe2813b02b848142755728744b3607c84d7f1ba66aa7f8a5846";
 const KERNEL_CUSTODY_SHA256: &str =
     "567455b412b76af4b394b371defc42f7e01c2a4e1dd2cdd1b891ca549c775f3b";
 
@@ -77,8 +77,35 @@ pub(crate) struct ReleaseIdentity {
     pub(crate) archive_sha256: [u8; 32],
     /// SHA-256 of the `bitcoind` binary inside the archive.
     pub(crate) bitcoind_sha256: [u8; 32],
+    /// Release archive carrying the win64 build.
+    pub(crate) archive_win64: String,
+    /// SHA-256 of the win64 release archive.
+    pub(crate) archive_win64_sha256: [u8; 32],
+    /// SHA-256 of the `bitcoind.exe` binary inside the win64 archive.
+    pub(crate) bitcoind_win64_sha256: [u8; 32],
     /// The exact `bitcoind -version` line the pinned binary must print.
     pub(crate) version_output: String,
+}
+
+// The shared module is compiled into several test targets; the spawn-side
+// digest pick is read only where a reference process is actually launched.
+#[allow(dead_code)]
+impl ReleaseIdentity {
+    /// The binary digest a spawned reference process must match on this
+    /// platform: the win64 build on Windows, the linux-gnu build elsewhere.
+    /// `bitcoind_sha256` always names the capture platform's binary, which
+    /// every checked-in corpus records — it does not vary per host.
+    #[cfg(windows)]
+    pub(crate) fn spawned_bitcoind_sha256(&self) -> [u8; 32] {
+        self.bitcoind_win64_sha256
+    }
+
+    /// The binary digest a spawned reference process must match on this
+    /// platform: the win64 build on Windows, the linux-gnu build elsewhere.
+    #[cfg(not(windows))]
+    pub(crate) fn spawned_bitcoind_sha256(&self) -> [u8; 32] {
+        self.bitcoind_sha256
+    }
 }
 
 /// The Core development tree the oracle lane links.
@@ -206,6 +233,9 @@ pub(crate) fn load_reference_set(manifest: &str) -> Result<ReferenceSet, Referen
         archive: required_str(release_table, "archive")?,
         archive_sha256: required_sha256(release_table, "archive_sha256")?,
         bitcoind_sha256: required_sha256(release_table, "bitcoind_sha256")?,
+        archive_win64: required_str(release_table, "archive_win64")?,
+        archive_win64_sha256: required_sha256(release_table, "archive_win64_sha256")?,
+        bitcoind_win64_sha256: required_sha256(release_table, "bitcoind_win64_sha256")?,
         version_output: required_str(release_table, "version_output")?,
     };
 
@@ -243,14 +273,21 @@ fn check_custody_bindings(
 ) -> Result<(), ReferenceError> {
     let release_archive = sha256::Hash::from_byte_array(release.archive_sha256).to_string();
     let release_binary = sha256::Hash::from_byte_array(release.bitcoind_sha256).to_string();
+    let release_archive_win64 =
+        sha256::Hash::from_byte_array(release.archive_win64_sha256).to_string();
+    let release_binary_win64 =
+        sha256::Hash::from_byte_array(release.bitcoind_win64_sha256).to_string();
     let release_tuple = [
-        "bitcoin-rs/reference-release/v1",
+        "bitcoin-rs/reference-release/v2",
         release.core_version.as_str(),
         release.git_tag.as_str(),
         release.source_commit.as_str(),
         release.archive.as_str(),
         release_archive.as_str(),
         release_binary.as_str(),
+        release.archive_win64.as_str(),
+        release_archive_win64.as_str(),
+        release_binary_win64.as_str(),
         release.version_output.as_str(),
     ]
     .join("\0");

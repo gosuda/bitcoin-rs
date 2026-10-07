@@ -153,9 +153,13 @@ impl<S: KvStore> JournalWriter<S> {
             if parse_segment_name(entry.file_name().to_string_lossy().as_ref()).is_none() {
                 return Ok(total);
             }
-            total.checked_add(entry.metadata()?.len()).ok_or_else(|| {
-                JournalWriterError::CursorMismatch("journal segment size overflow".to_owned())
-            })
+            // `DirEntry::metadata` reuses the stale size cached by directory
+            // enumeration on Windows; a fresh stat sees the live length.
+            total
+                .checked_add(entry.open()?.metadata()?.len())
+                .ok_or_else(|| {
+                    JournalWriterError::CursorMismatch("journal segment size overflow".to_owned())
+                })
         })
     }
 

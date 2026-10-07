@@ -232,8 +232,16 @@ fn write_sidecar(
                 let _ = std::fs::remove_file(&current);
             }
         }
+        // Windows `rename` cannot replace an existing destination the way
+        // POSIX rename does; removing `current` first gives both platforms
+        // the same last-writer-wins semantics even when `current` exists but
+        // could not be read above.
+        let _ = std::fs::remove_file(&current);
         std::fs::rename(&tmp, &current)?;
-        std::fs::File::open(dir)?.sync_all()?;
+        // std cannot open a directory on Windows; the checkpoint fsync
+        // primitive carries the platform rules for flushing the entry.
+        let capability = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;
+        crate::checkpoint::fs::sync_dir(&capability)?;
         Ok(())
     })();
     if result.is_err() {

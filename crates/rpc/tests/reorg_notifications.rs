@@ -76,8 +76,10 @@ fn spawn_sequence_subscriber() -> Result<(tempfile::TempDir, ProcessNode, zmq::C
         "ipc://{}",
         socket_dir.path().join("sequence.sock").display()
     );
+    // TOML literal string: a Windows path's backslashes are escapes in a
+    // basic string, so the endpoint must be quoted verbatim.
     let toml_extra = format!(
-        "[[notifications.zmq]]\nendpoint = \"{endpoint}\"\ntopics = [\"sequence\"]\nhwm = 1000\n"
+        "[[notifications.zmq]]\nendpoint = '{endpoint}'\ntopics = [\"sequence\"]\nhwm = 1000\n"
     );
     let mut node = ProcessNode::spawn_with(
         Kind::BitcoinRs,

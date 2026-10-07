@@ -8,3 +8,11 @@
 # never sees any of it, so the failure looks like a broken checkout rather
 # than a missing attribute -- and the message points nowhere near the cause.
 *.sh text eol=lf
+
+# Generated file compared byte-identically by manifest_coverage; same CRLF
+# checkout hazard as the scripts above.
+docs/rpc-reference.md text eol=lf
+
+# Corpus seeds are binary fuzz inputs; even byte-identical
+# text-looking seeds must survive checkout unconverted.
+fuzz/corpus/** -text

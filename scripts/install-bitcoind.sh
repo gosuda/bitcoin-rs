@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Install the pinned Bitcoin Core 31.1 bitcoind used by the live differential.
 #
-# Downloads the official x86_64 Linux tarball from bitcoincore.org, checks it
-# against the hardcoded SHA-256, and extracts bitcoind. Prints the bitcoind
-# path on stdout (log lines go to stderr).
+# Downloads the official release artifact for the host platform — the
+# x86_64 Linux tarball or, under MSYS/MINGW/CYGWIN on Windows, the win64
+# zip — checks it against the hardcoded SHA-256, and extracts bitcoind.
+# Prints the bitcoind path on stdout (log lines go to stderr).
 #
 #   scripts/install-bitcoind.sh --print-path
 #   eval "$(scripts/install-bitcoind.sh --export)"   # exports BITCOIND_COMMAND
@@ -13,11 +14,24 @@
 set -euo pipefail
 
 readonly CORE_VERSION="31.1"
-readonly TARBALL="bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz"
-readonly TARBALL_SHA256="b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    TARBALL="bitcoin-${CORE_VERSION}-win64.zip"
+    TARBALL_SHA256="c99ef173471c58e6766d9eebd12e6c35349082eeed3939bc99eed58ef57db587"
+    BITCOIND_NAME="bitcoind.exe"
+    BITCOIN_CLI_NAME="bitcoin-cli.exe"
+    ;;
+  *)
+    TARBALL="bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz"
+    TARBALL_SHA256="b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+    BITCOIND_NAME="bitcoind"
+    BITCOIN_CLI_NAME="bitcoin-cli"
+    ;;
+esac
+readonly TARBALL TARBALL_SHA256 BITCOIND_NAME BITCOIN_CLI_NAME
 readonly TARBALL_URL="https://bitcoincore.org/bin/bitcoin-core-${CORE_VERSION}/${TARBALL}"
 readonly PREFIX="${BITCOIND_PREFIX:-${HOME}/bitcoin-core-${CORE_VERSION}}"
-readonly BITCOIND="${PREFIX}/bin/bitcoind"
+readonly BITCOIND="${PREFIX}/bin/${BITCOIND_NAME}"
 
 usage() {
   printf '%s\n' 'usage: scripts/install-bitcoind.sh [--print-path|--export]'
@@ -72,10 +86,15 @@ else
     exit 1
   fi
   mkdir -p "${PREFIX}/bin"
-  tar -xzf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}"
-  install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoind" "${BITCOIND}"
-  if [[ -f "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli" ]]; then
-    install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli" "${PREFIX}/bin/bitcoin-cli"
+  # GNU tar cannot read zip archives, so the win64 artifact extracts with
+  # unzip while the linux tarball keeps tar.
+  case "${TARBALL}" in
+    *.zip) unzip -o -q "${WORKDIR}/${TARBALL}" -d "${WORKDIR}" ;;
+    *) tar -xzf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}" ;;
+  esac
+  install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/${BITCOIND_NAME}" "${BITCOIND}"
+  if [[ -f "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/${BITCOIN_CLI_NAME}" ]]; then
+    install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/${BITCOIN_CLI_NAME}" "${PREFIX}/bin/${BITCOIN_CLI_NAME}"
   fi
   printf '%s\n' "${TARBALL_SHA256}" > "${STAMP}"
   log "installed ${BITCOIND}"

@@ -163,9 +163,10 @@ pub fn bitcoin_rs_binary() -> Result<PathBuf> {
                 }
             },
         );
+    let binary_name = format!("bitcoin-rs{}", std::env::consts::EXE_SUFFIX);
     let newest = ["debug", "release"]
         .iter()
-        .map(|profile| target_dir.join(profile).join("bitcoin-rs"))
+        .map(|profile| target_dir.join(profile).join(&binary_name))
         .filter(|path| path.is_file())
         .max_by_key(|path| {
             path.metadata()
@@ -187,13 +188,21 @@ fn core_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("BITCOIN_RS_REFERENCE_BITCOIND") {
         return PathBuf::from(path);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let path = Path::new(&home).join("bitcoin-core-31.1/bin/bitcoind");
+    let binary_name = format!("bitcoind{}", std::env::consts::EXE_SUFFIX);
+    for home in [std::env::var_os("HOME"), std::env::var_os("USERPROFILE")]
+        .into_iter()
+        .flatten()
+    {
+        let path = Path::new(&home)
+            .join("bitcoin-core-31.1/bin")
+            .join(&binary_name);
         if path.is_file() {
             return path;
         }
     }
-    workspace().join("target/reference-core-31.1/bitcoin-31.1/bin/bitcoind")
+    workspace()
+        .join("target/reference-core-31.1/bitcoin-31.1/bin")
+        .join(&binary_name)
 }
 
 /// Verify the resolved bitcoind matches the pinned digest in the compiled
@@ -219,7 +228,18 @@ fn verified_core_binary() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins.
+/// The release field naming the binary digest a spawned reference process
+/// must match on this platform: the win64 build on Windows (the linux-gnu
+/// binary cannot execute there), the capture platform's binary elsewhere.
+#[cfg(windows)]
+const RELEASE_BINARY_FIELD: &str = "bitcoind_win64_sha256";
+/// The release field naming the binary digest a spawned reference process
+/// must match on this platform.
+#[cfg(not(windows))]
+const RELEASE_BINARY_FIELD: &str = "bitcoind_sha256";
+
+/// Read the binary digest the compiled `core-compat.toml` manifest pins for
+/// a spawned reference process on this platform.
 pub(crate) fn manifest_reference_sha256() -> Result<String> {
     let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
         .parse()
@@ -227,10 +247,14 @@ pub(crate) fn manifest_reference_sha256() -> Result<String> {
     table
         .get("reference")
         .and_then(|r| r.get("release"))
-        .and_then(|r| r.get("bitcoind_sha256"))
+        .and_then(|r| r.get(RELEASE_BINARY_FIELD))
         .and_then(|v| v.as_str())
         .map(str::to_owned)
-        .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))
+        .ok_or_else(|| {
+            Error::Assertion(format!(
+                "{RELEASE_BINARY_FIELD} missing in core-compat.toml"
+            ))
+        })
 }
 
 /// Hash one file with SHA256; callers shape the error vocabulary.
@@ -322,6 +346,15 @@ fn launch_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        // Give the child its own console process group so
+        // GenerateConsoleCtrlEvent can deliver a graceful stop to it
+        // specifically; group 0 delivery would hit every test process
+        // sharing this console.
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    }
     Ok((command, clock))
 }
 
@@ -336,6 +369,11 @@ fn exited_on_busy_port(evidence: &Path) -> bool {
         || stderr.contains("os error 98")
         || stderr.contains("Unable to bind")
         || stderr.contains("Failed to bind")
+        // Windows: WSAEADDRINUSE and WSAEACCES (excluded/blocked port).
+        || stderr.contains("Only one usage of each socket address")
+        || stderr.contains("os error 10048")
+        || stderr.contains("An attempt was made to access a socket")
+        || stderr.contains("os error 10013")
 }
 
 impl ProcessNode {
@@ -739,15 +777,50 @@ impl ProcessNode {
     }
 
     /// Send SIGTERM to the child.
+    #[cfg(unix)]
     fn send_sigterm(&self) {
         let pid = self.pid().to_string();
         let _ = Command::new("kill").args(["-TERM", pid.as_str()]).status();
     }
 
+    /// Deliver the Windows equivalent of a graceful stop: `CTRL_BREAK_EVENT`
+    /// is the only console event another process can aim at a specific
+    /// process group, and the node maps it through its CRT SIGBREAK
+    /// registration onto the shared shutdown flag. The child was spawned
+    /// with `CREATE_NEW_PROCESS_GROUP` so the group id is its pid.
+    #[cfg(windows)]
+    fn send_sigterm(&self) {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+        // SAFETY: GenerateConsoleCtrlEvent is safe to call for any process
+        // group id; a stale pid simply makes the call a no-op.
+        unsafe {
+            let _ = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid());
+        }
+    }
+
     /// Send SIGKILL to the child.
+    #[cfg(unix)]
     pub fn send_sigkill(&self) {
         let pid = self.pid().to_string();
         let _ = Command::new("kill").args(["-KILL", pid.as_str()]).status();
+    }
+
+    /// Forcibly terminate the child, the Windows counterpart of SIGKILL.
+    #[cfg(windows)]
+    pub fn send_sigkill(&self) {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+        };
+        // SAFETY: OpenProcess is safe with any pid, and TerminateProcess /
+        // CloseHandle are only invoked on the non-null handle it returns.
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, self.pid());
+            if !handle.is_null() {
+                let _ = TerminateProcess(handle, 1);
+                let _ = CloseHandle(handle);
+            }
+        }
     }
 
     fn finish_output(&mut self) {
