@@ -149,7 +149,7 @@ pub struct PhysicalLedger {
     pub residual: PhysicalNamespace,
     /// Allocated bytes of the whole tree, hard links counted once.
     pub allocated_bytes: u64,
-    /// Distinct non-directory inodes counted.
+    /// Distinct inodes counted; directories are counted too.
     pub inode_count: u64,
     /// Snapshot versus conservative high-water.
     pub observation_kind: PhysicalObservationKind,

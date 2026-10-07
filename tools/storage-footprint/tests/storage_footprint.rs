@@ -364,8 +364,8 @@ fn physical_ledger_uses_allocated_blocks_not_apparent_length() {
         PhysicalObservationKind::SnapshotLowerBound
     );
     assert!(
-        ledger.allocated_bytes <= apparent.saturating_add(ledger.allocated_bytes),
-        "sanity: allocated is a real byte count"
+        ledger.allocated_bytes > 0,
+        "sanity: a written file must allocate blocks"
     );
     let blocks = ledger
         .namespaces
@@ -492,13 +492,48 @@ fn logical_flat_files_count_complete_frames_only() {
     drop(store);
 
     let anchor = DataDirAnchor::open(dir.path()).unwrap_or_else(|error| panic!("anchor: {error}"));
-    let owner = anchor
-        .logical_flat_block_files()
-        .unwrap_or_else(|error| panic!("logical blocks: {error}"));
-    assert_eq!(owner.name, "blocks.flat_files");
-    assert_eq!(owner.rows, 1);
-    assert_eq!(owner.key_bytes, 0);
-    assert_eq!(owner.serialized_bytes, 44 + 10);
+    let complete_only = |anchor: &DataDirAnchor| {
+        let owner = anchor
+            .logical_flat_block_files()
+            .unwrap_or_else(|error| panic!("logical blocks: {error}"));
+        assert_eq!(owner.name, "blocks.flat_files");
+        assert_eq!(owner.rows, 1);
+        assert_eq!(owner.key_bytes, 0);
+        assert_eq!(owner.serialized_bytes, 44 + 10);
+    };
+    complete_only(&anchor);
+
+    // A truncated tail must not inflate the ledger. First a tail shorter
+    // than a record header, then a valid header whose body was never
+    // written — both must stop the frame walk at the same byte extent.
+    let blk = dir.path().join("blocks/blk00000.dat");
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&blk)
+        .unwrap_or_else(|error| panic!("open: {error}"));
+    file.write_all(&[0xff; 17])
+        .unwrap_or_else(|error| panic!("write: {error}"));
+    drop(file);
+    complete_only(&anchor);
+    let header: Vec<u8> = fs::read(&blk)
+        .unwrap_or_else(|error| panic!("read: {error}"))
+        [..44]
+        .to_vec();
+    let file = OpenOptions::new()
+        .write(true)
+        .open(&blk)
+        .unwrap_or_else(|error| panic!("open: {error}"));
+    file.set_len(44 + 10)
+        .unwrap_or_else(|error| panic!("truncate: {error}"));
+    drop(file);
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(&blk)
+        .unwrap_or_else(|error| panic!("open: {error}"));
+    file.write_all(&header)
+        .unwrap_or_else(|error| panic!("write: {error}"));
+    drop(file);
+    complete_only(&anchor);
 
     let physical = anchor
         .measure_physical()
@@ -572,15 +607,26 @@ fn fifo_block_file_is_rejected() {
 fn ledgers_are_not_summed_by_the_physical_total() {
     let dir = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
     fs::create_dir(dir.path().join("chainstate")).unwrap_or_else(|error| panic!("mkdir: {error}"));
-    fs::write(dir.path().join("chainstate/note"), b"abc")
-        .unwrap_or_else(|error| panic!("write: {error}"));
-    let physical =
+    let note = dir.path().join("chainstate/note");
+    fs::write(&note, b"abc").unwrap_or_else(|error| panic!("write: {error}"));
+    std::fs::File::open(&note)
+        .unwrap_or_else(|error| panic!("open: {error}"))
+        .sync_all()
+        .unwrap_or_else(|error| panic!("sync: {error}"));
+    let before =
         measure_physical_tree(dir.path()).unwrap_or_else(|error| panic!("physical: {error}"));
-    let logical_total = 3_u64;
-    assert_ne!(
-        physical.allocated_bytes,
-        physical.allocated_bytes.saturating_add(logical_total),
-        "adding logical bytes must not be how the budget is formed"
+    // Seven more logical bytes land inside the same allocated block; if the
+    // physical budget folded logical bytes in, the total would move.
+    fs::write(&note, b"0123456789").unwrap_or_else(|error| panic!("write: {error}"));
+    std::fs::File::open(&note)
+        .unwrap_or_else(|error| panic!("open: {error}"))
+        .sync_all()
+        .unwrap_or_else(|error| panic!("sync: {error}"));
+    let after =
+        measure_physical_tree(dir.path()).unwrap_or_else(|error| panic!("physical: {error}"));
+    assert_eq!(
+        after.allocated_bytes, before.allocated_bytes,
+        "logical bytes inside one allocated block must not move the physical budget"
     );
 }
 
@@ -628,7 +674,9 @@ fn cli_aliases_and_config_layering() -> Result<()> {
         .arg(&config_file)
         .arg("--stop-height")
         .arg("0")
-        .arg("--stop-hash")
+        // The canonical flag is covered above; this run exercises the legacy
+        // spelling alongside it so the compatibility alias keeps working.
+        .arg("--measure-storage-stop-hash")
         .arg(Network::Regtest.genesis_block_hash().to_string_be())
         .arg("--high-water-bytes")
         .arg("1000000000")

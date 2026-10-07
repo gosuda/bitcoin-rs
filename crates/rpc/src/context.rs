@@ -244,7 +244,7 @@ pub struct ChainHandles {
     /// Excludes authoritative chain transitions while a read runs.
     ///
     /// Production supplies the role minted alongside chainstate's mutation
-    /// role. [`Self::with_transition`] accepts a caller-supplied role but cannot
+    /// role. `Self::with_transition` accepts a caller-supplied role but cannot
     /// verify its provenance; callers can mint an unrelated domain through
     /// [`bitcoin_rs_chain::TransitionDomain::new`].
     pub chain_transition: bitcoin_rs_chain::StableRead,
@@ -593,7 +593,7 @@ impl Context {
     /// post-hoc attachment, which only test fixtures use.
     /// INVARIANT: production wiring supplies the chain owner's barrier
     /// (e.g. `chainstate.transition_barrier()`); the synthetic
-    /// [`ContextHandles::default`] path builds a private barrier for tests.
+    /// `ContextHandles::default` path builds a private barrier for tests.
     #[must_use]
     pub fn from_handles(handles: ContextHandles) -> Self {
         let ContextHandles {
