@@ -302,6 +302,79 @@ pub(crate) fn load_corpus() -> Result<BTreeMap<String, Fixture>, LoadError> {
     load_corpus_from(&corpus_dir(), &reference.release)
 }
 
+/// Corpus accumulation shared by both platform walkers. Every ceiling,
+/// shape, and provenance rule lives here exactly once so the loaders cannot
+/// drift apart.
+#[derive(Default)]
+struct CorpusLoad {
+    fixture_count: usize,
+    corpus_bytes: u64,
+    fixtures: BTreeMap<String, Fixture>,
+}
+
+impl CorpusLoad {
+    /// Counts one directory entry and resolves its path. Every entry counts
+    /// against the ceiling BEFORE any name-shape filtering: unlimited
+    /// non-JSON junk cannot bypass the cap.
+    fn next_path(&mut self, dir: &Path, name: &str) -> Result<PathBuf, LoadError> {
+        self.fixture_count += 1;
+        if self.fixture_count > MAX_FIXTURE_COUNT {
+            return Err(LoadError::Violation(format!(
+                "corpus holds more than the ceiling of {MAX_FIXTURE_COUNT} entries"
+            )));
+        }
+        let path = dir.join(name);
+        if path
+            .extension()
+            .is_none_or(|ext| ext.to_string_lossy() != "json")
+        {
+            return Err(LoadError::Violation(format!(
+                "{}: the corpus carries fixtures only; non-JSON entries are refused",
+                path.display()
+            )));
+        }
+        Ok(path)
+    }
+
+    /// Applies the total-byte ceiling, strict parse, and provenance
+    /// validation to one fixture body read by the platform walker.
+    fn absorb(
+        &mut self,
+        path: &Path,
+        bytes: Vec<u8>,
+        release: &reference_set::ReleaseIdentity,
+    ) -> Result<(), LoadError> {
+        self.corpus_bytes += len_u64(bytes.len());
+        if self.corpus_bytes > MAX_CORPUS_BYTES {
+            return Err(LoadError::Violation(format!(
+                "corpus exceeds the total ceiling of {MAX_CORPUS_BYTES} actual bytes"
+            )));
+        }
+        let text = String::from_utf8(bytes).map_err(|error| {
+            LoadError::Violation(format!("{}: not valid utf-8: {error}", path.display()))
+        })?;
+        enforce_depth(&text, path)?;
+        let mut fixture: Fixture = sonic_rs::from_str(&text)
+            .map_err(|error| LoadError::Violation(format!("{}: {error}", path.display())))?;
+        settle_body_lengths(&mut fixture);
+        validate_fixture(&fixture, path, release)?;
+        if self.fixtures.insert(fixture.id.clone(), fixture).is_some() {
+            return Err(LoadError::Violation(format!(
+                "duplicate fixture id in {}",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<BTreeMap<String, Fixture>, LoadError> {
+        if self.fixtures.is_empty() {
+            return Err(LoadError::Violation("corpus is empty".to_owned()));
+        }
+        Ok(self.fixtures)
+    }
+}
+
 #[cfg(not(windows))]
 fn load_corpus_from(
     dir: &Path,
@@ -331,9 +404,7 @@ fn load_corpus_from(
             dir.display()
         ))
     })?;
-    let mut fixture_count = 0_usize;
-    let mut corpus_bytes = 0_u64;
-    let mut fixtures = BTreeMap::new();
+    let mut load = CorpusLoad::default();
     // One dirfd walk does both custody accounting and reading: there is no
     // second pathname-based pass whose view could disagree with this one.
     for entry in entries {
@@ -347,51 +418,11 @@ fn load_corpus_from(
         if name == "." || name == ".." {
             continue;
         }
-        // Every entry counts against the ceiling BEFORE any name-shape
-        // filtering: unlimited non-JSON junk can no longer bypass the cap.
-        fixture_count += 1;
-        if fixture_count > MAX_FIXTURE_COUNT {
-            return Err(LoadError::Violation(format!(
-                "corpus holds more than the ceiling of {MAX_FIXTURE_COUNT} entries"
-            )));
-        }
-        let path = dir.join(&name);
-        if path
-            .extension()
-            .is_none_or(|ext| ext.to_string_lossy() != "json")
-        {
-            return Err(LoadError::Violation(format!(
-                "{}: the corpus carries fixtures only; non-JSON entries are refused",
-                path.display()
-            )));
-        }
+        let path = load.next_path(dir, &name)?;
         let bytes = read_regular_bounded(&dir_fd, &name, &path)?;
-        let actual = len_u64(bytes.len());
-        corpus_bytes += actual;
-        if corpus_bytes > MAX_CORPUS_BYTES {
-            return Err(LoadError::Violation(format!(
-                "corpus exceeds the total ceiling of {MAX_CORPUS_BYTES} actual bytes"
-            )));
-        }
-        let text = String::from_utf8(bytes).map_err(|error| {
-            LoadError::Violation(format!("{}: not valid utf-8: {error}", path.display()))
-        })?;
-        enforce_depth(&text, &path)?;
-        let mut fixture: Fixture = sonic_rs::from_str(&text)
-            .map_err(|error| LoadError::Violation(format!("{}: {error}", path.display())))?;
-        settle_body_lengths(&mut fixture);
-        validate_fixture(&fixture, &path, release)?;
-        if fixtures.insert(fixture.id.clone(), fixture).is_some() {
-            return Err(LoadError::Violation(format!(
-                "duplicate fixture id in {}",
-                path.display()
-            )));
-        }
+        load.absorb(&path, bytes, release)?;
     }
-    if fixtures.is_empty() {
-        return Err(LoadError::Violation("corpus is empty".to_owned()));
-    }
-    Ok(fixtures)
+    load.finish()
 }
 
 #[cfg(windows)]
@@ -399,15 +430,15 @@ fn load_corpus_from(
     dir: &Path,
     release: &reference_set::ReleaseIdentity,
 ) -> Result<BTreeMap<String, Fixture>, LoadError> {
+    // Windows has no dirfd-relative open: enumeration carries the names and
+    // `read_regular_bounded` performs the regular-file custody itself.
     let entries = std::fs::read_dir(dir).map_err(|error| {
         LoadError::Violation(format!(
             "{}: corpus directory could not be enumerated: {error}",
             dir.display()
         ))
     })?;
-    let mut fixture_count = 0_usize;
-    let mut corpus_bytes = 0_u64;
-    let mut fixtures = BTreeMap::new();
+    let mut load = CorpusLoad::default();
     for entry in entries {
         let entry = entry.map_err(|error| {
             LoadError::Violation(format!(
@@ -419,67 +450,72 @@ fn load_corpus_from(
         if name == "." || name == ".." {
             continue;
         }
-        fixture_count += 1;
-        if fixture_count > MAX_FIXTURE_COUNT {
-            return Err(LoadError::Violation(format!(
-                "corpus holds more than the ceiling of {MAX_FIXTURE_COUNT} entries"
-            )));
-        }
-        let path = entry.path();
-        if path
-            .extension()
-            .is_none_or(|ext| ext.to_string_lossy() != "json")
-        {
-            return Err(LoadError::Violation(format!(
-                "{}: the corpus carries fixtures only; non-JSON entries are refused",
+        let path = load.next_path(dir, &name)?;
+        let bytes = read_regular_bounded(&path)?;
+        load.absorb(&path, bytes, release)?;
+    }
+    load.finish()
+}
+
+/// Windows counterpart of the dirfd `read_regular_bounded` below:
+/// `symlink_metadata` refuses non-regular entries without following them,
+/// `OpenOptions::follow_symlinks(false)` keeps a swapped path from
+/// redirecting the open, and the same-descriptor metadata re-check closes
+/// the residual window between the two.
+///
+/// # Errors
+/// [`LoadError::Violation`] when the entry is not a regular file or exceeds
+/// the per-fixture ceiling.
+#[cfg(windows)]
+fn read_regular_bounded(path: &Path) -> Result<Vec<u8>, LoadError> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let refuse = |why: &str| {
+        LoadError::Violation(format!(
+            "{}: only regular files may carry fixtures; symlinks and directories are \
+             refused ({why})",
+            path.display()
+        ))
+    };
+    let file_type = std::fs::symlink_metadata(path)
+        .map_err(|error| {
+            LoadError::Violation(format!(
+                "{}: could not be inspected: {error}",
                 path.display()
-            )));
-        }
-        let file_type = entry.file_type().map_err(LoadError::Io)?;
-        if !file_type.is_file() {
-            return Err(LoadError::Violation(format!(
-                "{}: only regular files may carry fixtures; symlinks and directories are refused",
-                path.display()
-            )));
-        }
-        let mut bytes = Vec::new();
-        std::fs::File::open(&path)
-            .map_err(LoadError::Io)?
-            .take(MAX_FIXTURE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(LoadError::Io)?;
-        if len_u64(bytes.len()) > MAX_FIXTURE_BYTES {
-            return Err(LoadError::Violation(format!(
-                "{} is above the per-fixture ceiling of {MAX_FIXTURE_BYTES} bytes",
-                path.display()
-            )));
-        }
-        let actual = len_u64(bytes.len());
-        corpus_bytes += actual;
-        if corpus_bytes > MAX_CORPUS_BYTES {
-            return Err(LoadError::Violation(format!(
-                "corpus exceeds the total ceiling of {MAX_CORPUS_BYTES} actual bytes"
-            )));
-        }
-        let text = String::from_utf8(bytes).map_err(|error| {
-            LoadError::Violation(format!("{}: not valid utf-8: {error}", path.display()))
+            ))
+        })?
+        .file_type();
+    if !file_type.is_file() || file_type.is_symlink() {
+        return Err(refuse("is not a regular file"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .follow_symlinks(false)
+        .open(path)
+        .map_err(|error| {
+            LoadError::Violation(format!("{}: could not be opened: {error}", path.display()))
         })?;
-        enforce_depth(&text, &path)?;
-        let mut fixture: Fixture = sonic_rs::from_str(&text)
-            .map_err(|error| LoadError::Violation(format!("{}: {error}", path.display())))?;
-        settle_body_lengths(&mut fixture);
-        validate_fixture(&fixture, &path, release)?;
-        if fixtures.insert(fixture.id.clone(), fixture).is_some() {
-            return Err(LoadError::Violation(format!(
-                "duplicate fixture id in {}",
-                path.display()
-            )));
-        }
+    if file
+        .metadata()
+        .map_err(|error| {
+            LoadError::Violation(format!("{}: could not be inspected: {error}", path.display()))
+        })?
+        .file_type()
+        .is_symlink()
+    {
+        return Err(refuse("is a symbolic link"));
     }
-    if fixtures.is_empty() {
-        return Err(LoadError::Violation("corpus is empty".to_owned()));
+    let mut bytes = Vec::new();
+    file.take(MAX_FIXTURE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(LoadError::Io)?;
+    if len_u64(bytes.len()) > MAX_FIXTURE_BYTES {
+        return Err(LoadError::Violation(format!(
+            "{} is above the per-fixture ceiling of {MAX_FIXTURE_BYTES} bytes",
+            path.display()
+        )));
     }
-    Ok(fixtures)
+    Ok(bytes)
 }
 
 /// Reads one fixture from the corpus directory descriptor with no window
