@@ -107,9 +107,10 @@ impl VerifyFlags {
 
     /// Rebuilds flags from raw bits previously returned by [`Self::bits`].
     /// Bits that match no defined flag are carried through unchanged; they
-    /// select no check this crate runs.
+    /// select no check this crate runs. Named after `bitflags`'
+    /// `from_bits_retain`: infallible, retaining unknown bits.
     #[must_use]
-    pub const fn from_bits(bits: u32) -> Self {
+    pub const fn from_bits_retain(bits: u32) -> Self {
         Self(bits)
     }
 

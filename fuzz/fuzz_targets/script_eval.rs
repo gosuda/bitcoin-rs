@@ -77,7 +77,7 @@ fuzz_target!(|data: &[u8]| {
         let Some(bits) = take(&mut rest, 4) else {
             return;
         };
-        VerifyFlags::from_bits(u32::from_le_bytes(bits.try_into().unwrap_or([0; 4])))
+        VerifyFlags::from_bits_retain(u32::from_le_bytes(bits.try_into().unwrap_or([0; 4])))
     } else {
         FLAGS[usize::from(selector_byte) % FLAGS.len()]
     };
