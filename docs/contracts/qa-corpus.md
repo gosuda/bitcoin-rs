@@ -38,8 +38,9 @@ end-state evidence roles.
 
 - G0 pins: the pinned `rust-bitcoin/qa-assets`, `bitcoin/bitcoin`, and
   `btcsuite/btcd` commits and the minimized seed set are recorded in
-  `fuzz/CORPUS_PROVENANCE.md` and mirrored by the reference set. The identity
-  is a commit hash and a manifest digest, not a repository tag alone.
+  `fuzz/CORPUS_PROVENANCE.md`; the reference-set digests identify replay
+  corpora separately. The fuzz-source identity is its upstream commit pins,
+  not a repository tag alone.
 - G5 replay and parity arms: the QA corpus feeds parser, transaction, block,
   P2P message, and script-evaluation fuzz targets. Invalid and
   nonstandard-but-consensus-valid inputs are counted and classified.

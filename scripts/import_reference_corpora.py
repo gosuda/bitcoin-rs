@@ -775,16 +775,17 @@ def map_bip341(
     flags_bits_map: dict[str, int],
     contract: tuple[int, int, int],
     max_bytes: int,
-    emitted: Emitted,
+    tx_emitted: Emitted,
+    script_emitted: Emitted,
 ) -> None:
     txs, spks = bip341_vectors(path)
     for blob in txs:
-        _object_seed(tx_out, blob, max_bytes, emitted, truncate=False)
+        _object_seed(tx_out, blob, max_bytes, tx_emitted, truncate=False)
     element_limit, witness_max, explicit = contract
     for spk in spks:
         _script_seed(
             script_out, flags_bits_map, explicit, element_limit, witness_max,
-            "TAPROOT", b"", spk, [], max_bytes, emitted,
+            "TAPROOT", b"", spk, [], max_bytes, script_emitted,
         )
 
 
@@ -875,7 +876,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     map_hex_tx_file(btcd_data / "many_inputs_tx.hex", tx_out, max_bytes, emitted_tx)
     map_bip341(
         core_data / "bip341_wallet_vectors.json",
-        tx_out, script_out, flags_bits_map, contract, max_bytes, emitted_tx,
+        tx_out, script_out, flags_bits_map, contract, max_bytes,
+        emitted_tx, emitted_script,
     )
 
     map_taproot_ref(

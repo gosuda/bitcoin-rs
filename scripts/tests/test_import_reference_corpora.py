@@ -63,14 +63,15 @@ dir="$2"; sub="$3"
 case "${sub%% *}" in
     remote) ;;
     sparse-checkout) ;;
-    fetch) ;;
-    checkout) cp -a "$TEST_ROOT/source-$(basename "$dir")/." "$dir/" ;;
-    rev-parse)
-        case "$(basename "$dir")" in
-            bitcoin) printf '%s\\n' "$BITCOIN_PIN" ;;
-            btcd) printf '%s\\n' "$BTCD_PIN" ;;
-            *) exit 99 ;;
-        esac ;;
+    # The fetched ref is what checkout pins as HEAD, so a driver that fetches
+    # or verifies the wrong commit fails the pin check instead of passing.
+    fetch)
+        printf '%s' "${!#}" > "$dir/.fetched_ref"
+        printf '%s %s\n' "$(basename "$dir")" "${!#}" >> "$TEST_ROOT/fetch.log" ;;
+    checkout)
+        cp -a "$TEST_ROOT/source-$(basename "$dir")/." "$dir/"
+        cp "$dir/.fetched_ref" "$dir/.head" ;;
+    rev-parse) cat "$dir/.head" ;;
     *) exit 99 ;;
 esac
 ''',
@@ -125,6 +126,13 @@ printf '%s\\n' "${!#}" >> "$TEST_ROOT/cmin.log"
         self.assertEqual(
             (self.root / "cmin.log").read_text().splitlines(),
             ["p2p_message", "block_validate", "tx_validate", "script_eval", "utxo_snapshot"],
+        )
+        self.assertEqual(
+            sorted((self.root / "fetch.log").read_text().splitlines()),
+            sorted([
+                f"bitcoin {self.pins['BITCOIN_PIN']}",
+                f"btcd {self.pins['BTCD_PIN']}",
+            ]),
         )
         record = self.provenance.read_text()
         self.assertIn(self.pins["BITCOIN_PIN"], record)
