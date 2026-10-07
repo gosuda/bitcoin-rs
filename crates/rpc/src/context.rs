@@ -221,12 +221,14 @@ pub struct ChainHandles {
     pub chain_tip: TipReader,
     /// Best fully-applied block tip. Read-only: only Chainstate publishes.
     pub applied_tip: TipReader,
-    /// Process-wide initial-block-download latch over the applied chain,
-    /// shared with P2P so both surfaces answer identically.
-    pub ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    /// Chainstate-owned synchronization progress, including the
+    /// process-wide initial-block-download latch shared with P2P so both
+    /// surfaces answer identically.
+    pub progress: bitcoin_rs_chain::ChainProgressReader,
     /// Chain-mutation admission latch: the same fact
     /// `Chainstate::is_closed_for_recovery` publishes, exposed read-only and
-    /// kept separate from [`Self::ibd`] by that fact's invariant.
+    /// kept separate from the initial-block-download decision in
+    /// [`Self::progress`] by that fact's invariant.
     pub closed_for_recovery: LatchReader,
     /// Applied block metadata log.
     pub blocks: Arc<RwLock<BlockLog>>,
@@ -464,23 +466,31 @@ impl ChainHandles {
         );
         let mut utxo = bitcoin_rs_utxo::UtxoSet::new();
         utxo.track_coin_stats(coin_stats_listener.clone());
-        let applied_tip = Arc::new(ArcSwapOption::empty());
-        let block_tree = Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new()));
-        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-            TipReader::new(Arc::clone(&applied_tip)),
-            BlockTreeReader::new(Arc::clone(&block_tree)),
-        ));
+        let chain_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
+        let applied_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
+        let block_tree = BlockTreeReader::new(Arc::new(parking_lot::RwLock::new(
+            bitcoin_rs_chain::BlockTree::new(),
+        )));
+        let progress = bitcoin_rs_chain::ChainProgressReader::new(
+            chain_tip.clone(),
+            applied_tip.clone(),
+            block_tree.clone(),
+            Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+                applied_tip.clone(),
+                block_tree.clone(),
+            )),
+        );
         Self {
-            chain_tip: TipReader::new(Arc::new(ArcSwapOption::empty())),
-            applied_tip: TipReader::new(applied_tip),
-            ibd,
+            chain_tip,
+            applied_tip,
+            progress,
             closed_for_recovery: LatchReader::new(Arc::new(core::sync::atomic::AtomicBool::new(
                 false,
             ))),
             blocks: Arc::new(RwLock::new(BlockLog::new())),
             utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(utxo)),
             coin_stats: Arc::new(coin_stats_listener),
-            block_tree: BlockTreeReader::new(block_tree),
+            block_tree,
             chain_network: Network::Mainnet,
             chain_transition,
             block_body_source: None,
@@ -719,81 +729,42 @@ impl ChainHandles {
     /// Synchronization progress projected from a retained applied publication.
     ///
     /// PRE: `applied` is the view this response is built from.
-    /// POST: applied fields use that view's tip and count; the header height is
-    ///   sampled separately, so best-header may lead applied.
+    /// POST: the chain facts are Chainstate's [`bitcoin_rs_chain::ChainProgress`]
+    ///   at that view; this adds Core's difficulty rendering and the storage
+    ///   facts. The header height is sampled separately, so best-header may
+    ///   lead applied.
     /// INVARIANT: the projection never reloads the applied publication.
     #[must_use]
     pub(crate) fn sync_progress_at(&self, applied: &AppliedView) -> SyncProgress {
-        let height = applied.height();
-        let headers = self.height();
-        let (difficulty, time, median_time) = applied.tip().map_or((0.0, 0_u64, 0_u64), |tip| {
-            let tree = self.block_tree.read();
-            tree.node(tip.tip_id).map_or((0.0, 0, 0), |node| {
-                (
-                    self.difficulty_for_bits(node.header.bits),
-                    u64::from(node.header.time),
-                    u64::from(tree.median_time_past_at(tip.tip_id).unwrap_or(0)),
-                )
-            })
-        });
-        let now = unix_time_secs();
-        // Core's estimate when the verified-transaction count is known, the
-        // height ratio when it is not; `None` is a pre-tracking datadir and
-        // means unknown, never zero.
-        let verification_progress = applied.chain_tx_count().map_or_else(
-            || {
-                if headers > 0 {
-                    (f64::from(height) / f64::from(headers)).min(1.0)
-                } else {
-                    0.0
-                }
-            },
-            |chain_tx_count| {
-                crate::handlers::chain::verification_progress(
-                    self.chain_network,
-                    chain_tx_count,
-                    height,
-                    headers,
-                    time,
-                    now,
-                )
-            },
-        );
+        let chain = self
+            .progress
+            .progress_at(applied.tip(), self.chain_network, unix_time_secs());
         let prune_status = self.prune_status();
         SyncProgress {
             network: self.chain_network,
-            blocks: height,
-            headers,
-            best_block_hash: applied.hash(self.chain_network),
-            difficulty,
-            time,
-            median_time,
-            verification_progress,
-            initial_block_download: self.ibd.is_active(now, self.chain_network),
-            // The applied chain's work once one block is connected; before the
-            // first applied tip, the header chain's, which is all such a node has.
-            chain_work: match applied.tip() {
-                Some(_) => applied.chainwork_hex(),
-                None => self.chainwork_hex(),
-            },
+            blocks: chain.blocks,
+            headers: chain.headers,
+            best_block_hash: chain.best_block_hash,
+            difficulty: chain
+                .bits
+                .map_or(0.0, |bits| self.difficulty_for_bits(bits)),
+            time: chain.time,
+            median_time: chain.median_time,
+            verification_progress: chain.verification_progress,
+            initial_block_download: chain.initial_block_download,
+            chain_work: chain.chain_work.map_or_else(
+                || "00".to_owned(),
+                |work| {
+                    let bytes: [u8; 32] = work.to_be_bytes();
+                    bytes.to_lower_hex_string()
+                },
+            ),
             size_on_disk: self
                 .block_storage_disk_usage()
                 .unwrap_or_else(|| self.blocks.read().size_on_disk()),
             pruned: prune_status.pruned,
             prune_height: prune_status.pruneheight,
         }
-    }
-
-    /// Big-endian hex of one tip snapshot's chainwork.
-    fn tip_chainwork_hex(tip: &TipSnapshot) -> String {
-        let bytes: [u8; 32] = tip.chainwork.to_be_bytes();
-        let mut out = String::with_capacity(bytes.len() * 2);
-        for byte in bytes {
-            use core::fmt::Write as _;
-
-            let _: fmt::Result = write!(&mut out, "{byte:02x}");
-        }
-        out
     }
 
     /// Returns the f64 difficulty for `bits` using Bitcoin Core's calculation.
@@ -822,13 +793,7 @@ impl ChainHandles {
         )
     }
 
-    /// Returns the current tip height, or zero before initial sync publishes one.
-    #[must_use]
-    fn height(&self) -> u32 {
-        self.chain_tip.load_full().map_or(0, |tip| tip.height)
-    }
-
-    /// Returns the current best-applied-block height (lags `height()` when
+    /// Returns the current best-applied-block height (lags the header tip when
     /// headers are ahead of downloaded blocks).
     #[must_use]
     pub(crate) fn applied_height(&self) -> u32 {
@@ -844,16 +809,6 @@ impl ChainHandles {
     #[must_use]
     pub(crate) fn applied_hash(&self) -> Hash256 {
         self.applied_view().hash(self.chain_network)
-    }
-
-    /// Returns the current best-chain chainwork as a 64-character lowercase
-    /// big-endian hex string. Returns "00" when no tip is published yet (a
-    /// 2-char placeholder matching `bitcoind`'s pre-genesis behavior).
-    #[must_use]
-    fn chainwork_hex(&self) -> String {
-        self.chain_tip
-            .load_full()
-            .map_or_else(|| "00".to_owned(), |tip| Self::tip_chainwork_hex(&tip))
     }
 
     fn hash_at_height_from_tip(&self, tip: &TipSnapshot, height: u32) -> Option<Hash256> {
@@ -1151,19 +1106,6 @@ impl AppliedView {
     pub(crate) fn chain_tx_count(&self) -> Option<u64> {
         self.tip.as_ref().and_then(|tip| tip.chain_tx_count.get())
     }
-
-    /// The applied chain work as big-endian hex, `"00"` with no tip.
-    ///
-    /// PRE: use a captured view.
-    /// POST: the captured tip's chain work, or the two-character placeholder
-    ///   for a chain with no applied block yet.
-    /// INVARIANT: does not reload a publisher.
-    #[must_use]
-    pub(crate) fn chainwork_hex(&self) -> String {
-        self.tip
-            .as_deref()
-            .map_or_else(|| "00".to_owned(), ChainHandles::tip_chainwork_hex)
-    }
 }
 
 #[cfg(test)]
@@ -1246,7 +1188,6 @@ mod tests {
             empty.hash(Network::Mainnet),
             Network::Mainnet.genesis_block_hash()
         );
-        assert_eq!(empty.chainwork_hex(), "00");
         assert_eq!(empty.chain_tx_count(), None);
 
         let a = tip(10, 0xaa, 7, ChainTxCount::established(100));
@@ -1263,8 +1204,8 @@ mod tests {
             "hash must stay at the capture"
         );
         assert_eq!(
-            view.chainwork_hex(),
-            format!("{:064x}", ChainWork::from(7_u64)),
+            view.tip().map(|tip| tip.chainwork),
+            Some(ChainWork::from(7_u64)),
             "work must stay at the capture"
         );
         assert_eq!(view.chain_tx_count(), Some(100), "count must stay");
@@ -1481,15 +1422,20 @@ mod tests {
 
         let chain_tip = Arc::new(ArcSwapOption::empty());
         let applied_tip = Arc::new(ArcSwapOption::empty());
-        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-            TipReader::new(Arc::clone(&applied_tip)),
-            BlockTreeReader::new(Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()))),
-        ));
         let utxo = Arc::new(bitcoin_rs_utxo::UtxoSet::new());
         let coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::default(),
         ));
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
+        let progress = bitcoin_rs_chain::ChainProgressReader::new(
+            TipReader::new(Arc::clone(&chain_tip)),
+            TipReader::new(Arc::clone(&applied_tip)),
+            BlockTreeReader::new(Arc::clone(&block_tree)),
+            Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+                TipReader::new(Arc::clone(&applied_tip)),
+                BlockTreeReader::new(Arc::clone(&block_tree)),
+            )),
+        );
         let banned = Arc::new(RwLock::new(Vec::<bitcoin_rs_p2p::BannedSubnet>::new()));
         let added_nodes = Arc::new(RwLock::new(Vec::new()));
         let network_active = Arc::new(core::sync::atomic::AtomicBool::new(true));
@@ -1498,7 +1444,7 @@ mod tests {
             chain: ChainHandles {
                 chain_tip: TipReader::new(Arc::clone(&chain_tip)),
                 applied_tip: TipReader::new(Arc::clone(&applied_tip)),
-                ibd: Arc::clone(&ibd),
+                progress,
                 blocks: Arc::new(RwLock::new(BlockLog::new())),
                 utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&utxo)),
                 coin_stats: Arc::clone(&coin_stats),
@@ -1559,9 +1505,11 @@ mod tests {
         assert_eq!(ctx.chain.applied_view().chain_tx_count(), Some(1));
         applied_tip.store(Some(snapshot(42)));
         assert_eq!(ctx.chain.applied_view().chain_tx_count(), Some(42));
-        assert!(
-            Arc::ptr_eq(&ctx.chain.ibd, &ibd),
-            "ibd must be shared with caller"
+        let progress = ctx.chain.progress.progress(Network::Mainnet, 0);
+        assert_eq!(
+            (progress.blocks, progress.headers),
+            (7, 7),
+            "progress must read the caller's tips"
         );
         assert!(
             Arc::ptr_eq(&ctx.chain.utxo.fixture_set(), &utxo),
@@ -2058,19 +2006,25 @@ mod tests {
             }
         }
 
+        let chain_tip = TipReader::new(Arc::new(ArcSwapOption::empty()));
         let applied_tip = Arc::new(ArcSwapOption::empty());
 
         let block_tree = Arc::new(RwLock::new(bitcoin_rs_chain::BlockTree::new()));
         let status: Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> = Arc::new(ReadySource);
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
-                chain_tip: TipReader::new(Arc::new(ArcSwapOption::empty())),
+                chain_tip: chain_tip.clone(),
                 applied_tip: TipReader::new(Arc::clone(&applied_tip)),
                 chain_transition: bitcoin_rs_chain::TransitionDomain::new().stable_read(),
-                ibd: Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+                progress: bitcoin_rs_chain::ChainProgressReader::new(
+                    chain_tip,
                     TipReader::new(Arc::clone(&applied_tip)),
                     BlockTreeReader::new(Arc::clone(&block_tree)),
-                )),
+                    Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+                        TipReader::new(Arc::clone(&applied_tip)),
+                        BlockTreeReader::new(Arc::clone(&block_tree)),
+                    )),
+                ),
                 blocks: Arc::new(RwLock::new(BlockLog::new())),
                 utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(bitcoin_rs_utxo::UtxoSet::new())),
                 coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
@@ -2120,7 +2074,9 @@ mod tests {
         let tip = insert_recent_tip(&ctx, now);
         ctx.chain.applied_tip.store(Some(Arc::new(tip)));
         assert!(
-            !ctx.chain.ibd.is_active(now, Network::Regtest),
+            !ctx.chain
+                .progress
+                .initial_block_download(now, Network::Regtest),
             "the latch must judge the tip it reaches through the context's tree"
         );
         assert!(

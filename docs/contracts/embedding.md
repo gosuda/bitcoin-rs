@@ -36,11 +36,17 @@ the first embedder — there is one lifecycle implementation, not two.
   names a storage backend, `NodeStorage`, or index internals. Owner:
   `crates/node/src/embed.rs`.
 - **EMB-04 — Typed reads mirror the RPC facts.** `snapshot()` returns the
-  coherent `ChainSnapshot`; `sync_progress()` derives the
-  `getblockchaininfo` fields from the same handles without RPC JSON. The
-  calculation is `ChainHandles::sync_progress` in `crates/rpc/src/context.rs`, the
-  identical computation `getblockchaininfo` runs. `capabilities()` returns
-  the node's concrete-service `CapabilitySnapshot`. Owners:
+  coherent `ChainSnapshot`; `sync_progress()` returns the
+  `getblockchaininfo` fields without RPC JSON through
+  `ChainHandles::sync_progress` in `crates/rpc/src/context.rs`, the identical
+  projection `getblockchaininfo` runs. The chain facts in it — heights, best
+  hash, tip time and median time past, verification progress, the
+  initial-block-download decision, and chain work — come from the
+  Chainstate-minted `ChainProgressReader` (`crates/chain/src/progress.rs`).
+  The projection adds the network, the rendered difficulty and chain work,
+  and the storage facts; `getblockchaininfo` adds its wire-only fields
+  (`bits`, `target`, warnings, recovery status) on top. `capabilities()`
+  returns the node's concrete-service `CapabilitySnapshot`. Owners:
   `crates/node/src/embed.rs` and `crates/rpc/src/context.rs`; wire types:
   `crates/index/src/capabilities.rs`.
 - **EMB-05 — Broadcast is the shared admission.** `Node::broadcast`,

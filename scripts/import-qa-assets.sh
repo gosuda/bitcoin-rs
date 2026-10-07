@@ -10,7 +10,7 @@
 # which target and why. Update that document, not this script, when the
 # mapping changes.
 #
-# Disk discipline (repo AGENTS.md): the worst-case footprint of the clone is
+# Disk discipline: the worst-case footprint of the clone is
 # declared below (shallow clone ~= corpus size, assumed <= 2 GiB); free space
 # is verified to cover footprint + reserve BEFORE cloning; the clone is
 # deleted after cmin — only minimized corpora under fuzz/corpus/ are kept.
@@ -27,7 +27,7 @@ readonly QA_ASSETS_URL="https://github.com/rust-bitcoin/qa-assets.git"
 readonly FOOTPRINT_ASSUME_MB=2048  # worst-case shallow-clone footprint
 readonly RESERVE_MB=1024           # free-space reserve on top of the footprint
 
-# cargo env hygiene for this repo (see repo AGENTS.md); fuzzing needs nightly
+# cargo env hygiene for this repo: fuzzing needs nightly
 # for -Zsanitizer, and an explicit host triple because cargo-fuzz 0.13
 # defaults to the musl target.
 HOST_TRIPLE="$(rustc +nightly -vV | sed -n 's/^host: //p')"

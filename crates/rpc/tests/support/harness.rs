@@ -106,13 +106,12 @@ impl ServerHarness {
     pub(crate) fn start(node: &NodeHarness) -> GateResult<Self> {
         let state = &node.state;
         let chainstate = state.chainstate();
-        let ibd = chainstate.ibd_latch();
         let transition = state.stable_read();
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
                 chain_tip: chainstate.header_tip_reader(),
                 applied_tip: chainstate.applied_tip_reader(),
-                ibd,
+                progress: chainstate.chain_progress_reader(),
                 blocks: state.blocks(),
                 utxo: chainstate.utxo_reader(),
                 coin_stats: chainstate.coin_stats_handle(),

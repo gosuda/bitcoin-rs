@@ -686,6 +686,18 @@ impl Chainstate {
         Arc::clone(&self.ibd)
     }
 
+    /// Returns the chainstate-owned synchronization progress, over this
+    /// chainstate's tips, block tree, and initial-block-download latch.
+    #[must_use]
+    pub fn chain_progress_reader(&self) -> bitcoin_rs_chain::ChainProgressReader {
+        bitcoin_rs_chain::ChainProgressReader::new(
+            self.header_tip_reader(),
+            self.applied_tip_reader(),
+            self.block_tree_reader(),
+            self.ibd_latch(),
+        )
+    }
+
     /// Fixture-only writable header-tip cell. Not present in production builds.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]

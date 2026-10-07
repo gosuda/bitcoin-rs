@@ -23,6 +23,11 @@ off-best-chain), and every failure surfaces as a structured `ChainError` variant
 latch over the published applied-tip and block-tree handles; the node builds
 one `Arc` shared by RPC and P2P, so both surfaces answer identically
 (Core `IsInitialBlockDownload` / `m_cached_is_ibd` semantics).
+`ChainProgressReader` (in `progress`) derives synchronization progress beside
+it: heights, best hash, tip time and median time past, Core's
+`GuessVerificationProgress`, that latch's decision, and chain work. Chainstate
+mints it from its own handles, so RPC and the embedding API report progress
+without rebuilding it.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

@@ -15,6 +15,8 @@ pub mod header_sync;
 mod ibd;
 /// Block-tree node types.
 pub mod node;
+/// Synchronization progress of the applied chain.
+mod progress;
 /// Regtest block and proof-of-work builders shared by cross-crate test
 /// harnesses. Compiled only under the `test-seam` feature.
 #[cfg(feature = "test-seam")]
@@ -47,6 +49,7 @@ pub use header_sync::{
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
+pub use progress::{ChainProgress, ChainProgressReader};
 pub use reorg::{ReorgPlan, plan_reorg};
 pub use tip::TipSnapshot;
 pub use transition::{

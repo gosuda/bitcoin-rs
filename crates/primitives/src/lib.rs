@@ -59,3 +59,59 @@ pub fn unix_time_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
 }
+
+/// `u64` to `f64` without a silent `as` cast, which the workspace forbids.
+///
+/// Exact for every input up to `2^53`; above that the low half rounds, which is
+/// inherent to `f64` and is what Bitcoin Core accepts for its estimates too.
+#[must_use]
+pub fn u64_to_f64(value: u64) -> f64 {
+    const TWO_POW_32: f64 = 4_294_967_296.0;
+
+    let high = u32::try_from(value >> 32).unwrap_or(u32::MAX);
+    let low = u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX);
+    f64::from(high).mul_add(TWO_POW_32, f64::from(low))
+}
+
+/// [`u64_to_f64`] with a sign, for elapsed times that can run either way.
+#[must_use]
+pub fn i64_to_f64(value: i64) -> f64 {
+    let magnitude = u64_to_f64(value.unsigned_abs());
+    if value < 0 { -magnitude } else { magnitude }
+}
+
+#[cfg(test)]
+mod float_conversion_tests {
+    use super::{i64_to_f64, u64_to_f64};
+
+    #[test]
+    // suboptimal_flops fires on 1.99 clippy but not 1.97 — toolchain-dependent
+    // suppression, so expect's self-audit can't be used here.
+    #[allow(clippy::suboptimal_flops)]
+    fn u64_to_f64_is_exact_below_two_to_the_fifty_third() {
+        for value in [
+            0_u64,
+            1,
+            4_294_967_295,
+            4_294_967_296,
+            1_315_805_869,
+            1 << 52,
+        ] {
+            // Independently derived: the halves recombined by hand.
+            let expected = f64::from(u32::try_from(value >> 32).unwrap_or(u32::MAX))
+                * 4_294_967_296.0_f64
+                + f64::from(u32::try_from(value & 0xffff_ffff).unwrap_or(u32::MAX));
+            assert!(
+                (u64_to_f64(value) - expected).abs() < f64::EPSILON,
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn i64_to_f64_carries_the_sign() {
+        assert!((i64_to_f64(-3_600) + 3_600.0).abs() < f64::EPSILON);
+        assert!((i64_to_f64(3_600) - 3_600.0).abs() < f64::EPSILON);
+        assert!((i64_to_f64(0) - 0.0).abs() < f64::EPSILON);
+    }
+}

@@ -108,7 +108,6 @@ fn bind_rpc(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-    ibd: &Arc<bitcoin_rs_chain::InitialBlockDownload>,
 ) -> Result<(Arc<Context>, RpcServer)> {
     let rpc_auth = Arc::new(state.config().rpc.auth.to_rpc_auth()?);
     let chainstate = state.chainstate();
@@ -116,7 +115,7 @@ fn bind_rpc(
         chain: ChainHandles {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),
-            ibd: Arc::clone(ibd),
+            progress: chainstate.chain_progress_reader(),
             blocks: state.blocks(),
             utxo: chainstate.utxo_reader(),
             coin_stats: chainstate.coin_stats_handle(),
@@ -561,17 +560,16 @@ pub(crate) fn start_node(
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
     let gateway = state.mempool_gateway();
-    // The node's one latch, built with the chainstate at open and already
-    // held by the block-download executor: `initialblockdownload`, the
-    // transaction-relay gate, and block-peer eligibility read one signal.
-    let ibd = state.ibd();
     let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
     let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> = gateway.clone();
     let listener_extras = bitcoin_rs_p2p::ListenerExtras {
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
-        ibd: Some((Arc::clone(&ibd), state.config().network)),
+        // The node's one latch, built with the chainstate at open and already
+        // held by the block-download executor: `initialblockdownload`, the
+        // transaction-relay gate, and block-peer eligibility read one signal.
+        ibd: Some((state.ibd(), state.config().network)),
         // One orchestrator: the listener announces block inventory to the
         // same sync loop the event loop drives.
         block_sync: Some(Arc::clone(&peer_ready_sync)),
@@ -602,7 +600,7 @@ pub(crate) fn start_node(
         )
         .map_err(anyhow::Error::msg)?;
 
-    let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source, &ibd)?;
+    let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source)?;
     let rpc_local_addr = rpc_server.local_addr()?;
     tracing::info!(addr = %rpc_local_addr, "rpc listener bound");
     let rpc_shutdown = Arc::clone(&shutdown);

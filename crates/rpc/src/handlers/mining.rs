@@ -605,7 +605,11 @@ fn ensure_template_ready(ctx: &Context) -> Result<(), RpcError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    if ctx.chain.ibd.is_active(now, ctx.chain.chain_network) {
+    if ctx
+        .chain
+        .progress
+        .initial_block_download(now, ctx.chain.chain_network)
+    {
         return Err(RpcError::ClientInInitialDownload(
             "bitcoin-rs is in initial sync and waiting for blocks...".to_owned(),
         ));

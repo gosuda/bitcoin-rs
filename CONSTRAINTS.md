@@ -2,7 +2,9 @@
 
 These invariants apply across the repository. Detailed behavior, numeric limits,
 tool pins, and verification procedures belong with their code, contract, policy,
-or CI workflow; this file is not a gate ledger or task checklist.
+or CI workflow; this file is not a gate ledger or task checklist. Only durable
+project invariants belong here: historical plans, implementation shapes, and
+redundant safeguards are not invariants.
 
 ## Consensus correctness
 
