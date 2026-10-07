@@ -31,6 +31,8 @@ use metrics::Unit;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 
+mod historical;
+
 use super::chain::{
     BranchSwitchError, HeaderAdmission, SyncChain, SyncChainError, WindowCommitDisposition,
     WindowCommitError,
@@ -113,6 +115,10 @@ impl TestChain {
 }
 
 impl SyncChain for TestChain {
+    fn historical_base(&self) -> Option<Hash256> {
+        self.historical.lock().back().map(|(_, hash)| *hash)
+    }
+
     fn advance_historical(&self) -> Result<Option<(u32, Hash256)>, SyncChainError> {
         Ok(self.historical.lock().front().copied())
     }
@@ -1937,10 +1943,6 @@ fn sync_with_mined_chain(count: u32) -> Result<MinedChainFixture, Box<dyn std::e
 }
 
 #[test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "One delivery lifecycle covers corruption, retry backoff, peer rotation and concurrent foreground progress"
-)]
 fn historical_delivery_retries_corruption_and_does_not_rewind_foreground()
 -> Result<(), Box<dyn std::error::Error>> {
     let (tree, blocks) = mined_chain(3, 0)?;
@@ -1993,27 +1995,20 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground()
         3
     );
     assert!(
-        harness
+        !harness
             .sync
             .owns_body_fetch(source, blocks[0].block_hash().0)
     );
+    assert!(
+        harness
+            .sync
+            .historical
+            .lock()
+            .window
+            .peer_in_staller_cooldown(addr, Instant::now())
+    );
     let retry_addr = test_addr(28001, 0)?;
     let retry_rx = connect_peer(&harness.peers, synthetic_peer(retry_addr, 3));
-    harness.sync.advance_historical();
-    assert!(
-        retry_rx
-            .try_iter()
-            .all(|message| !matches!(message, Message::GetData(_)))
-    );
-    harness
-        .sync
-        .historical_request
-        .lock()
-        .as_mut()
-        .ok_or("missing retry lease")?
-        .sent = Instant::now()
-        .checked_sub(Duration::from_secs(31))
-        .ok_or("clock range")?;
     harness.sync.advance_historical();
     let retry_source = current_source(&harness.peers, retry_addr);
     assert!(
@@ -2045,7 +2040,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground()
             .height,
         3
     );
-    assert!(harness.sync.historical_request.lock().is_none());
+    assert_eq!(harness.sync.historical.lock().window.pending_len(), 0);
     Ok(())
 }
 
@@ -2072,7 +2067,7 @@ fn historical_requests_use_archive_peers_and_replace_disconnected_leases()
     let limited_rx = connect_peer(&harness.peers, limited);
     harness.sync.advance_historical();
     assert!(limited_rx.try_recv().is_err());
-    assert!(harness.sync.historical_request.lock().is_none());
+    assert_eq!(harness.sync.historical.lock().window.pending_len(), 0);
     let addr = test_addr(28100, 1)?;
     let old_rx = connect_peer(&harness.peers, synthetic_peer(addr, 1000));
     harness.sync.advance_historical();

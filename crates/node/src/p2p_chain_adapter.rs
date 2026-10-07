@@ -157,6 +157,15 @@ pub(crate) fn fixture_insert_header_node(
 }
 
 impl SyncChain for NodeSyncChain {
+    fn historical_base(&self) -> Option<Hash256> {
+        match self.handles.role() {
+            bitcoin_rs_chainstate::assumeutxo::ChainstateRole::AssumedActive {
+                base_hash, ..
+            } => Some(base_hash),
+            _ => None,
+        }
+    }
+
     fn advance_historical(&self) -> Result<Option<(u32, Hash256)>, SyncChainError> {
         let Some(manager) = &self.assumeutxo else {
             return Ok(None);

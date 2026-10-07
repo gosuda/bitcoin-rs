@@ -179,9 +179,9 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 /// applied-chain seam. See `docs/contracts/architecture.md` for the
 /// download-window ownership contract.
 pub struct BlockSync {
-    /// One bounded historical body request, independent of the foreground
+    /// Bounded historical downloads, independent of the foreground
     /// download window. This short-held lock is also read by peer ingress.
-    historical_request: Mutex<Option<historical::HistoricalRequest>>,
+    historical: Mutex<historical::HistoricalDownload>,
     /// Serializes historical replay and delivery without holding the ingress lock.
     historical_work: Mutex<()>,
     /// Applied-chain seam: header admission, window commit, branch switch,
@@ -387,7 +387,7 @@ impl BlockSync {
     ) -> Self {
         let budget = default_sync_budget(chain.network());
         Self {
-            historical_request: Mutex::new(None),
+            historical: Mutex::new(historical::HistoricalDownload::new(budget)),
             historical_work: Mutex::new(()),
             chain,
             peer_table,
@@ -414,6 +414,7 @@ impl BlockSync {
     /// the fast-sync opt-in at node open, and tests and benchmarks that
     /// exercise non-default capacity limits.
     pub fn install_budget(&self, budget: SyncBudget) {
+        *self.historical.lock() = historical::HistoricalDownload::new(budget);
         *self.scheduler.lock() = SchedulerState {
             window: DownloadWindow::new(budget),
             stager: BlockStager::new(budget),
@@ -472,12 +473,7 @@ impl BlockSync {
     ///   predecessor's request.
     #[must_use]
     pub(crate) fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
-        if self
-            .historical_request
-            .lock()
-            .as_ref()
-            .is_some_and(|request| request.source == source && request.hash == hash)
-        {
+        if self.historical.lock().window.pending_owner(&hash) == Some(source) {
             return true;
         }
         let scheduler = self.scheduler.lock();
@@ -498,6 +494,7 @@ impl BlockSync {
         self.reconcile_peer_sessions();
         self.advance_historical();
         self.drain_inbound_blocks();
+        self.advance_historical();
 
         let now = Instant::now();
         // One frontier observation feeds recovery, selection, and planning;

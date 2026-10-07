@@ -141,9 +141,9 @@ impl BlockSync {
             let Ok(inbound) = receiver.try_recv() else {
                 return true;
             };
-            if self.receive_historical(&inbound) {
+            let Some(inbound) = self.receive_historical(inbound) else {
                 continue;
-            }
+            };
             if !*saw_block {
                 *next_expected_hash = self.next_expected_block_hash();
                 *apply_head_check = next_expected_hash

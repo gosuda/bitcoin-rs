@@ -416,12 +416,21 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   completes the check before returning node state. A mismatch cannot be forgotten
   by restarting after a failed `Failed` write. Finalization is durable before the
   role becomes `Ordinary`; unresolved storage errors close both admissions.
-  The production sync tick replays at most eight retained historical blocks and
-  requests one missing body on the pinned base ancestry. It uses archive-capable
-  peers, retries expired/replaced connections, and validates body binding before
-  historical admission. Foreground and historical deliveries have separate owners.
-  This initial runner does not pipeline historical downloads; throughput and
-  restart-latency optimization remain explicit follow-ups to #1288.
+  Production sync pipelines bodies on the pinned base ancestry through a separate
+  instance of the existing download window and block stager: at most 32 pending
+  and staged bodies in total, 16 in flight per peer, and 64 MiB of staged wire
+  payload (plus the stager's one-front-body allowance to avoid a full-tail deadlock).
+  Decoded bodies also occupy bounded memory alongside their wire payloads.
+  Smaller configured budgets still apply. Archive-capable peers supply batches;
+  connection leases, timeouts, retry and backpressure use the shared download policy.
+  Body binding is checked before staging. Each historical pass makes at most nine
+  chain-owner calls, each replaying at most eight retained blocks, and admits at most
+  eight staged bodies in pinned ancestry order, refilling the window while later
+  bodies remain staged. A sync tick runs a pass before and
+  after draining deliveries. Replay retires overtaken downloads; completion clears
+  transient staging. Only validation publishes body locators and lifecycle progress.
+  Foreground and historical deliveries have separate owners. Mainnet throughput and
+  restart-latency guarantees remain unproven follow-ups to #1288.
 - **Reorg and pruning constraints**:
   - Reorgs on the `AssumedActive` chainstate cannot disconnect blocks at or below the
     snapshot base height (`ApplyError::DisconnectBelowSnapshotBase`).
