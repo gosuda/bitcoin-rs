@@ -9,19 +9,50 @@ case "$mode" in
   *) echo "usage: $0 {core|formal}" >&2; exit 2 ;;
 esac
 
-mapfile -t identity < <(python3 - "$mode" <<'PY'
+# tomllib needs Python >=3.11; the system python3 on macOS is older, so
+# probe the versioned interpreters before falling back to plain python3.
+PYTHON=""
+for candidate in python3.13 python3.12 python3.11 python3; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import tomllib' 2>/dev/null; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+[[ -n "$PYTHON" ]] || { echo "a Python >=3.11 interpreter (tomllib) is required" >&2; exit 1; }
+
+# Exact-match digest gate; macOS /sbin/sha256sum has no --check --strict.
+sha256_check() {
+  local got
+  got="$(sha256sum < "$2" | awk '{print $1}')"
+  [[ "$got" == "$1" ]] || { printf 'sha256 mismatch for %s\n' "$2" >&2; exit 1; }
+}
+
+mapfile -t identity < <("$PYTHON" - "$mode" <<'PY'
 from pathlib import Path
+import platform
 import re
 import sys
 import tomllib
 
+TARGETS = {
+    ("linux", "x86_64"): "x86_64-linux-gnu",
+    ("linux", "aarch64"): "aarch64-linux-gnu",
+    ("darwin", "arm64"): "arm64-apple-darwin",
+    ("darwin", "x86_64"): "x86_64-apple-darwin",
+}
 with Path("crates/rpc/core-compat.toml").open("rb") as stream:
     reference = tomllib.load(stream)["reference"]
 if sys.argv[1] == "core":
-    pin = reference["release"]
-    values = tuple(pin[key] for key in (
-        "core_version", "archive", "archive_sha256", "bitcoind_sha256", "version_output"
-    ))
+    release = reference["release"]
+    target = TARGETS.get((sys.platform, platform.machine()))
+    artifacts = {row["target"]: row for row in release.get("platforms", [])}
+    artifacts[release["target"]] = release
+    pin = artifacts.get(target)
+    if pin is None:
+        raise SystemExit(f"no pinned Core artifact for {sys.platform}-{platform.machine()}")
+    values = (release["core_version"],) + tuple(
+        pin[key] for key in ("archive", "archive_sha256", "bitcoind_sha256")
+    ) + (release["version_output"],)
 else:
     pin = reference["formal_tool"]
     if pin["name"] != "apalache-mc":
@@ -90,13 +121,13 @@ else
 fi
 
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --output "$download" "$url"
-printf '%s  %s\n' "$archive_hash" "$download" | sha256sum --check --strict
+sha256_check "$archive_hash" "$download"
 # Only the named, ignored fixture install is replaced, after archive custody.
 rm -rf -- "$install"
 if [[ "$mode" == core ]]; then
   mkdir -p "$install"
   tar --extract --gzip --file "$download" --directory "$install"
-  printf '%s  %s\n' "$binary_hash" "$binary" | sha256sum --check --strict
+  sha256_check "$binary_hash" "$binary"
   probe="$(mktemp -d target/ci-reference-downloads/core-version.XXXXXX)"
   trap 'rm -rf -- "$probe"' EXIT
   # The probe result is the version report, so capture stderr too; without a
@@ -114,7 +145,7 @@ if [[ "$mode" == core ]]; then
 else
   mkdir -p "$(dirname "$install")"
   unzip -q "$download" -d "$(dirname "$install")"
-  printf '%s  %s\n' "$binary_hash" "$install/lib/apalache.jar" | sha256sum --check --strict
+  sha256_check "$binary_hash" "$install/lib/apalache.jar"
   APALACHE_HOME="$install" python3 scripts/check_models.py --check-only
 fi
 printf 'Provisioned %s\n' "$binary"

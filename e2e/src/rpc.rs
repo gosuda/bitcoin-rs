@@ -223,17 +223,28 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
     let wire = request_wire(addr, request, Some(("parity", "parity")))?;
     let remaining = || remaining_time(deadline, Instant::now(), "RPC deadline reached");
     let mut stream = TcpStream::connect_timeout(&addr, remaining()?.min(Duration::from_secs(2)))?;
+    // Nonblocking writes: a blocked send may ignore SO_SNDTIMEO on macOS
+    // (its timeout is documented as best-effort), so the deadline must
+    // interleave between calls rather than rely on the syscall bound.
+    stream.set_nonblocking(true).map_err(Error::Io)?;
     let mut pending = wire.as_slice();
     while !pending.is_empty() {
-        stream.set_write_timeout(Some(remaining()?))?;
-        let written = stream.write(pending)?;
-        if written == 0 {
-            return Err(Error::Protocol("closed HTTP writer".into()));
+        match stream.write(pending) {
+            Ok(0) => return Err(Error::Protocol("closed HTTP writer".into())),
+            Ok(written) => {
+                pending = pending
+                    .get(written..)
+                    .ok_or_else(|| Error::Protocol("invalid write size".into()))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                remaining()?;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) => return Err(Error::Io(error)),
         }
-        pending = pending
-            .get(written..)
-            .ok_or_else(|| Error::Protocol("invalid write size".into()))?;
     }
+    // Blocking reads honor SO_RCVTIMEO on both supported platforms.
+    stream.set_nonblocking(false).map_err(Error::Io)?;
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {

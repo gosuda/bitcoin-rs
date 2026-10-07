@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Install the pinned Bitcoin Core 31.1 bitcoind used by the live differential.
 #
-# Downloads the official x86_64 Linux tarball from bitcoincore.org, checks it
-# against the hardcoded SHA-256, and extracts bitcoind. Prints the bitcoind
-# path on stdout (log lines go to stderr).
+# Downloads the official tarball for this platform from bitcoincore.org,
+# checks it against the SHA-256 pinned in crates/rpc/core-compat.toml, and
+# extracts bitcoind. Prints the bitcoind path on stdout (log lines go to
+# stderr).
 #
 #   scripts/install-bitcoind.sh --print-path
 #   eval "$(scripts/install-bitcoind.sh --export)"   # exports BITCOIND_COMMAND
@@ -11,10 +12,50 @@
 # Owner: docs/contracts/core-differential.md (CORE-01).
 
 set -euo pipefail
+cd "$(dirname "$0")/.."
 
-readonly CORE_VERSION="31.1"
-readonly TARBALL="bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz"
-readonly TARBALL_SHA256="b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+# tomllib needs Python >=3.11; the system python3 on macOS is older, so
+# probe the versioned interpreters before falling back to plain python3.
+PYTHON=""
+for candidate in python3.13 python3.12 python3.11 python3; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import tomllib' 2>/dev/null; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+[[ -n "$PYTHON" ]] || { echo "a Python >=3.11 interpreter (tomllib) is required" >&2; exit 1; }
+
+# The manifest owns the pinned digests; this selects the artifact row for
+# the host platform's release target.
+mapfile -t pin < <("$PYTHON" - <<'PY'
+from pathlib import Path
+import platform
+import sys
+import tomllib
+
+TARGETS = {
+    ("linux", "x86_64"): "x86_64-linux-gnu",
+    ("linux", "aarch64"): "aarch64-linux-gnu",
+    ("darwin", "arm64"): "arm64-apple-darwin",
+    ("darwin", "x86_64"): "x86_64-apple-darwin",
+}
+target = TARGETS.get((sys.platform, platform.machine()))
+with Path("crates/rpc/core-compat.toml").open("rb") as stream:
+    release = tomllib.load(stream)["reference"]["release"]
+artifacts = {row["target"]: row for row in release.get("platforms", [])}
+artifacts[release["target"]] = release
+row = artifacts.get(target)
+if row is None:
+    raise SystemExit(f"no pinned Core artifact for {sys.platform}-{platform.machine()}")
+print(release["core_version"])
+print(row["archive"])
+print(row["archive_sha256"])
+PY
+)
+[[ "${#pin[@]}" -eq 3 ]] || { echo "incomplete Core artifact pin" >&2; exit 1; }
+readonly CORE_VERSION="${pin[0]}"
+readonly TARBALL="${pin[1]}"
+readonly TARBALL_SHA256="${pin[2]}"
 readonly TARBALL_URL="https://bitcoincore.org/bin/bitcoin-core-${CORE_VERSION}/${TARBALL}"
 readonly PREFIX="${BITCOIND_PREFIX:-${HOME}/bitcoin-core-${CORE_VERSION}}"
 readonly BITCOIND="${PREFIX}/bin/bitcoind"
