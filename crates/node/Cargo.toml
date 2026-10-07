@@ -15,6 +15,10 @@ workspace = true
 
 [features]
 
+# Exposes the internal `NodeState` composition root to integration tests and
+# benchmarks. Production embedders use the typed `Node` surface instead.
+test-seam = []
+
 # A node is non-functional without a storage backend, and its `NodeStorage` /
 # `TxIndexStorage` enums are entirely backend-cfg-gated — with zero backends the
 # `match self` arms are non-exhaustive and the crate fails to compile.  fjall
@@ -86,6 +90,9 @@ cap-std.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# Own integration tests and benchmarks are separate crates, so they opt into
+# the same explicit seam used by the subsystem crates below.
+bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }

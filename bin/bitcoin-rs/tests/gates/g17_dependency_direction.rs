@@ -66,6 +66,38 @@ fn workspace_dependency_direction_is_one_way() {
     }
 }
 
+/// EMB-03: a real production embedder must not inherit fixture visibility
+/// through Cargo's workspace dev-feature unification.
+#[test]
+fn node_composition_root_is_not_a_production_embedding_api() -> anyhow::Result<()> {
+    let manifest = dependency_graph::workspace_root_manifest();
+    let root = manifest
+        .parent()
+        .ok_or_else(|| std::io::Error::other("workspace root"))?
+        .canonicalize()?;
+    let consumer = capability_compile::ProductionConsumer::with_node(&root)?;
+    let control = r"
+use bitcoin_rs_node::Node;
+pub fn observe(node: &Node) {
+    let _ = node.snapshot();
+    let _ = node.sync_progress();
+    let _ = node.mempool_info();
+}
+";
+    consumer.allow_reads(control)?;
+    consumer.deny(
+        &format!("{control}\nuse bitcoin_rs_node::state::NodeState;"),
+        &["E0603"],
+        "state",
+    )?;
+    consumer.deny(
+        &format!("{control}\nuse bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;"),
+        &["E0603"],
+        "tx_ingress",
+    )?;
+    Ok(())
+}
+
 #[test]
 fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Result<()> {
     let manifest = dependency_graph::workspace_root_manifest();

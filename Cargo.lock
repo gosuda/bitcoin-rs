@@ -391,6 +391,7 @@ dependencies = [
  "bitcoin-rs-consensus",
  "bitcoin-rs-index",
  "bitcoin-rs-mempool",
+ "bitcoin-rs-node",
  "bitcoin-rs-mining",
  "bitcoin-rs-p2p",
  "bitcoin-rs-primitives",
