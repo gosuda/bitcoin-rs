@@ -269,26 +269,16 @@ mod unix {
                 .map_err(|error| io_from_footprint(&error))?,
         );
 
-        if let Some(chainstate) = anchor
-            .open_child_dir("chainstate")
-            .map_err(|error| io_from_footprint(&error))?
-        {
-            if dir_has_entries(chainstate.as_fd()).map_err(|error| io_from_footprint(&error))? {
-                let path = opened_fd_path(chainstate.as_fd());
-                let owners = open_store_inspection(
-                    backend,
-                    &path,
-                    LogicalScan {
-                        namespace: "chainstate",
-                    },
-                )?;
-                if !opened_path_matches_fd(chainstate.as_fd(), &path)? {
-                    bail!("chainstate store directory replaced during footprint scan");
-                }
-                drop(chainstate);
-                for owner in owners {
-                    logical.push(owner);
-                }
+        if let Some(owners) = scan_store_dir(
+            anchor,
+            "chainstate",
+            backend,
+            LogicalScan {
+                namespace: "chainstate",
+            },
+        )? {
+            for owner in owners {
+                logical.push(owner);
             }
         }
 
@@ -297,24 +287,44 @@ mod unix {
             script_history: None,
             script_live: None,
         };
-        if let Some(txindex) = anchor
-            .open_child_dir("txindex")
-            .map_err(|error| io_from_footprint(&error))?
-        {
-            if dir_has_entries(txindex.as_fd()).map_err(|error| io_from_footprint(&error))? {
-                let path = opened_fd_path(txindex.as_fd());
-                let (owners, found) = open_store_inspection(backend, &path, TxIndexScan)?;
-                if !opened_path_matches_fd(txindex.as_fd(), &path)? {
-                    bail!("txindex store directory replaced during footprint scan");
-                }
-                drop(txindex);
-                for owner in owners {
-                    logical.push(owner);
-                }
-                watermarks = found;
+        if let Some((owners, found)) = scan_store_dir(anchor, "txindex", backend, TxIndexScan)? {
+            for owner in owners {
+                logical.push(owner);
             }
+            watermarks = found;
         }
         Ok((logical, watermarks))
+    }
+
+    /// Scans one store under the anchor's custody: the namespace directory is
+    /// opened no-follow, the store opens against the *path of that
+    /// descriptor*, and the descriptor is re-verified after the scan so a
+    /// directory swapped mid-scan is caught, not measured. `None` means the
+    /// namespace is absent or empty.
+    fn scan_store_dir<C>(
+        anchor: &DataDirAnchor,
+        name: &str,
+        backend: StorageBackend,
+        consumer: C,
+    ) -> Result<Option<C::Output>>
+    where
+        C: StoreConsumer<Error = anyhow::Error>,
+    {
+        let Some(dir) = anchor
+            .open_child_dir(name)
+            .map_err(|error| io_from_footprint(&error))?
+        else {
+            return Ok(None);
+        };
+        if !dir_has_entries(dir.as_fd()).map_err(|error| io_from_footprint(&error))? {
+            return Ok(None);
+        }
+        let path = opened_fd_path(dir.as_fd());
+        let output = open_store_inspection(backend, &path, consumer)?;
+        if !opened_path_matches_fd(dir.as_fd(), &path)? {
+            bail!("{name} store directory replaced during footprint scan");
+        }
+        Ok(Some(output))
     }
 
     fn io_from_footprint(error: &FootprintError) -> anyhow::Error {

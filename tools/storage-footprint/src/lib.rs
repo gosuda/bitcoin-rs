@@ -18,7 +18,4 @@ pub use physical_types::{
 };
 
 #[cfg(unix)]
-pub use physical::{
-    DataDirAnchor, complete_flat_file_stats, dir_has_entries, measure_physical_tree,
-    opened_fd_path, opened_path_matches_fd,
-};
+pub use physical::{DataDirAnchor, measure_physical_tree};

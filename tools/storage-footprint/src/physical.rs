@@ -83,16 +83,9 @@ impl DataDirAnchor {
     }
 }
 
-/// Alias for `complete_framed_stats`.
-pub fn complete_flat_file_stats(
-    file: &mut File,
-) -> Result<(u64, u64), bitcoin_rs_storage::StorageError> {
-    complete_framed_stats(file)
-}
-
 /// Filesystem path that refers to an already-opened descriptor.
 #[must_use]
-pub fn opened_fd_path(fd: BorrowedFd<'_>) -> std::path::PathBuf {
+pub(crate) fn opened_fd_path(fd: BorrowedFd<'_>) -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
     {
         std::path::PathBuf::from(format!("/proc/self/fd/{}", fd.as_raw_fd()))
@@ -113,7 +106,7 @@ pub fn opened_fd_path(fd: BorrowedFd<'_>) -> std::path::PathBuf {
 }
 
 /// Whether `path` currently resolves to the same inode `fd` holds.
-pub fn opened_path_matches_fd(fd: BorrowedFd<'_>, path: &Path) -> io::Result<bool> {
+pub(crate) fn opened_path_matches_fd(fd: BorrowedFd<'_>, path: &Path) -> io::Result<bool> {
     let held = rfs::fstat(fd)?;
     let resolved = rfs::open(
         path,
@@ -126,7 +119,7 @@ pub fn opened_path_matches_fd(fd: BorrowedFd<'_>, path: &Path) -> io::Result<boo
 }
 
 /// Whether `dir` contains any entry other than `.` and `..`.
-pub fn dir_has_entries(dir: BorrowedFd<'_>) -> Result<bool, FootprintError> {
+pub(crate) fn dir_has_entries(dir: BorrowedFd<'_>) -> Result<bool, FootprintError> {
     let mut entries = rfs::Dir::read_from(dir)?;
     for entry in &mut entries {
         let entry = entry?;
