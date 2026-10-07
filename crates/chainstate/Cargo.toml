@@ -64,5 +64,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
-serde_json.workspace = true
 tempfile.workspace = true

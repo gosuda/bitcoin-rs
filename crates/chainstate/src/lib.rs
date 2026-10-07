@@ -217,13 +217,22 @@ pub struct PruneAuthority {
     admission: Arc<ApplyAdmission>,
     chain_transition: TransitionAuthority,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    role: Arc<RwLock<ChainstateRole>>,
 }
 
 impl PruneAuthority {
     /// Acquires exclusive chain-mutation authority for one pruning pass.
     pub fn begin(&self) -> core::result::Result<PruneGuard<'_>, ApplyError> {
+        let transition = begin_chain_transition(&self.admission, &self.chain_transition)?;
+        // Pruning removes a prefix, so a requested height above the snapshot
+        // base still removes the history needed to validate that base. Check
+        // under the same transition lock that publishes role changes.
+        let role = *self.role.read();
+        if let Some(base_height) = role.base_height() {
+            return Err(ApplyError::PruneDuringHistoricalValidation { base_height });
+        }
         Ok(PruneGuard {
-            _transition: begin_chain_transition(&self.admission, &self.chain_transition)?,
+            _transition: transition,
             applied_tip: &self.applied_tip,
         })
     }
@@ -616,7 +625,8 @@ impl Chainstate {
     }
 
     /// Sets the operational role of this chainstate instance.
-    pub fn set_role(&self, role: ChainstateRole) {
+    pub(crate) fn set_role(&self, role: ChainstateRole) {
+        let _transition = self.chain_transition.lock();
         *self.role.write() = role;
     }
 
@@ -625,58 +635,58 @@ impl Chainstate {
     ///
     /// # Errors
     ///
-    /// Returns [`ApplyError`] if admission or transition lock cannot be acquired.
-    pub fn install_snapshot(
+    /// Refuses missing or inconsistent base headers, closed admission, or a
+    /// lifecycle record that cannot be persisted.
+    fn install_snapshot(
         &self,
-        snapshot_set: &bitcoin_rs_utxo::UtxoSet,
-        height: u32,
-        block_hash: Hash256,
-        chain_tx_count: u64,
-    ) -> Result<(), ApplyError> {
+        snapshot_set: bitcoin_rs_utxo::UtxoSet,
+        mut stats: bitcoin_rs_utxo::stats::CoinStats,
+        pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+        persist: impl FnOnce() -> Result<(), AssumeUtxoError>,
+    ) -> Result<(), AssumeUtxoError> {
         let _guard = self.admission.enter()?;
         let _transition = self.chain_transition.lock();
-
-        // 1. Install snapshot UTXO set
-        self.utxo.replace_from(snapshot_set);
-
-        // 2. Lookup or resolve node in block tree for snapshot base
-        let node_id = {
-            let mut tree = self.block_tree.write();
-            let id = tree.lookup(block_hash).unwrap_or_else(|| {
-                tree.tip()
-                    .map_or_else(|| bitcoin_rs_chain::NodeId::new(height), |tip| tip.tip_id)
+        let mut tree = self.block_tree.write();
+        let node_id = tree
+            .lookup(pinned.block_hash)
+            .ok_or(AssumeUtxoError::SnapshotHeaderMissing(pinned.block_hash))?;
+        let node = tree.node(node_id).map_err(ApplyError::from)?;
+        if node.height != pinned.height {
+            return Err(AssumeUtxoError::SnapshotHeaderHeightMismatch {
+                expected: pinned.height,
+                found: node.height,
             });
-            let _ = tree.restore_chain_tx_count(
-                id,
-                bitcoin_rs_chain::ChainTxCount::established(chain_tx_count),
-            );
-            id
-        };
-
-        // 3. Store applied tip
+        }
         let tip_snapshot = TipSnapshot {
             tip_id: node_id,
-            height,
-            chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-            hash: block_hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(chain_tx_count),
+            height: pinned.height,
+            chainwork: node.chainwork,
+            hash: pinned.block_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(pinned.chain_tx_count),
         };
+        // All refusals precede publication. The transition stays held across the
+        // lifecycle record and the whole coin/statistics/tip installation.
+        persist().inspect_err(|_| self.fail_closed_for_recovery())?;
+        tree.restore_chain_tx_count(node_id, tip_snapshot.chain_tx_count)
+            .map_err(ApplyError::from)?;
+        self.utxo.replace_from(snapshot_set);
+        stats.tx_count = pinned.chain_tx_count;
+        self.coin_stats.reset(stats);
         self.applied_tip.store(Some(Arc::new(tip_snapshot)));
-
-        // 4. Update role
-        self.set_role(ChainstateRole::AssumedActive {
-            base_height: height,
-            base_hash: block_hash,
-        });
+        *self.role.write() = ChainstateRole::AssumedActive {
+            base_height: pinned.height,
+            base_hash: pinned.block_hash,
+        };
 
         Ok(())
     }
 
     /// Constructs an isolated historical chainstate from this chainstate.
     /// The historical chainstate has an independent UTXO set, detached events,
-    /// no active journal, and no external follower side-effects.
+    /// separate transient undo/head stores, no body writer or active journal,
+    /// and no external follower side-effects. Reopening replays from genesis.
     #[must_use]
-    pub fn create_historical_counterpart(&self, base_height: u32, base_hash: Hash256) -> Arc<Self> {
+    fn create_historical_counterpart(&self, base_height: u32, base_hash: Hash256) -> Arc<Self> {
         let mut historical_utxo = bitcoin_rs_utxo::UtxoSet::new();
         let historical_coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::new(),
@@ -698,9 +708,9 @@ impl Chainstate {
             chain_events: Arc::new(crate::events::ChainEventPublisher::detached(
                 self.chain_events.epoch(),
             )),
-            block_body_store: self.block_body_store.clone(),
-            undo_store: Arc::clone(&self.undo_store),
-            durable_head: Arc::clone(&self.durable_head),
+            block_body_store: None,
+            undo_store: Arc::new(InMemoryUndoStore::default()),
+            durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             shutdown,
             chain_transition: transition.authority(),
             assume_valid_height: 0,
@@ -987,6 +997,7 @@ impl Chainstate {
             admission: Arc::clone(&self.admission),
             chain_transition: self.chain_transition.clone(),
             applied_tip: Arc::clone(&self.applied_tip),
+            role: Arc::clone(&self.role),
         }
     }
 
@@ -1582,7 +1593,3 @@ mod checkpoint_debt_tests;
 #[cfg(test)]
 #[path = "../tests/unit/recovery_marker_order_tests.rs"]
 mod recovery_marker_order_tests;
-
-#[cfg(test)]
-#[path = "../tests/unit/assumeutxo_tests.rs"]
-mod assumeutxo_tests;

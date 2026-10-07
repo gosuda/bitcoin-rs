@@ -164,7 +164,6 @@ pub(super) trait DeferredChainstateServices: Send + Sync {
         authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
-        assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
     ) -> Result<Arc<dyn PruneService>>;
     fn journal_writer(
         &self,
@@ -184,7 +183,6 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
         authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
-        assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
     ) -> Result<Arc<dyn PruneService>> {
         Ok(Arc::new(NodePruneService::new(
             Arc::clone(&self.store),
@@ -192,7 +190,6 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
             authority,
             durable_tip_height,
             retention,
-            assumeutxo,
         )?))
     }
 
@@ -311,8 +308,6 @@ pub(super) struct NodePruneService<S: KvStore> {
     /// Registry the prune line is recorded into after a committed pass, and
     /// whose live leases clamp this pass's line below every pinned floor.
     retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
-    /// `AssumeUTXO` coordinator managing role-based pruning constraints.
-    assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
 }
 
 impl<S: KvStore> NodePruneService<S> {
@@ -323,7 +318,6 @@ impl<S: KvStore> NodePruneService<S> {
         authority: bitcoin_rs_chainstate::PruneAuthority,
         durable_tip_height: Arc<AtomicU32>,
         retention: Arc<bitcoin_rs_storage::RetentionRegistry>,
-        assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
     ) -> anyhow::Result<Self> {
         let pruneheight = bitcoin_rs_storage::pruning::load_pruneheight(&*store)?;
         Ok(Self {
@@ -333,7 +327,6 @@ impl<S: KvStore> NodePruneService<S> {
             pruneheight: Mutex::new(pruneheight),
             durable_tip_height,
             retention,
-            assumeutxo,
         })
     }
 }
@@ -343,13 +336,6 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
         &self,
         requested_height: u32,
     ) -> core::result::Result<PruneResult, PruneServiceError> {
-        if let Some(ref assumeutxo) = self.assumeutxo {
-            if !assumeutxo.can_prune_height(requested_height) {
-                return Err(PruneServiceError::failed(format!(
-                    "cannot prune block at height {requested_height} at or below assumeutxo base height while validating"
-                )));
-            }
-        }
         let authority = self
             .authority
             .begin()

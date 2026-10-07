@@ -81,9 +81,10 @@ pub(super) fn apply_block_admitted<'b>(
             });
         }
         if height == base_height && block_hash != base_hash {
-            return Err(ApplyError::PrevHashMismatch {
-                tip: base_hash,
-                prev: block_hash,
+            return Err(ApplyError::HistoricalTargetHashMismatch {
+                base_height,
+                expected: base_hash,
+                found: block_hash,
             });
         }
     }

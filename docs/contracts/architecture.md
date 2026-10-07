@@ -376,28 +376,52 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   mempool, mining, RPC, ZMQ, or indexers.
 - **Snapshot activation and pinned metadata**:
   Activation of an AssumeUTXO snapshot is coordinated exclusively by `AssumeUtxoManager`.
-  Snapshot height, block hash, serialized UTXO commitment (`MuHash`), and transaction
-  count must match hardcoded, pinned network metadata (`AssumeUtxoData`). Activating an
-  untrusted or mismatched snapshot fails immediately without modifying chainstate.
+  Snapshot height and block hash must match pinned network metadata (`AssumeUtxoData`).
+  The manager consumes the imported set and computes its `hash_serialized_3` commitment;
+  caller-supplied digests and snapshot trailers do not establish trust. This is Core's
+  `HASH_SERIALIZED` commitment, not MuHash. The pinned transaction count seeds the
+  active tip; it is independently checked during historical finalization. The base
+  header must already exist at the pinned height. Coin statistics are rebuilt from
+  the imported coins, and the resolved header supplies chainwork. Installation and
+  role changes serialize with chain transitions; failed validation publishes nothing.
 - **Background validation and convergence**:
   The historical chainstate validates blocks up to the snapshot base height. It refuses
   to connect blocks past the base height or blocks that diverge from the expected target
-  hash (`ApplyError::ConnectPastHistoricalTarget`). When validation reaches the base height,
-  the accumulated `MuHash` is compared against the expected snapshot commitment:
+  hash (`ApplyError::ConnectPastHistoricalTarget` and
+  `ApplyError::HistoricalTargetHashMismatch`, respectively). When validation reaches
+  the base height, the reconstructed `hash_serialized_3` and cumulative transaction
+  count must match the pinned metadata:
   - If valid, the active chainstate transitions from `AssumedActive` to `Ordinary`, the
     historical chainstate is retired, and disk status is marked `Finalized`.
   - If invalid, the manager persists `AssumeUtxoDiskStatus::Failed`, marks the active
-    chainstate permanently closed for recovery (`Chainstate::close_for_recovery`), and
+    chainstate permanently closed for recovery (`Chainstate::fail_closed_for_recovery`), and
     refuses subsequent restarts to protect operator data.
+  Historical replay uses its own in-memory durable-head and undo stores, no body
+  writer, and a detached event publisher. It cannot advance the active durable head
+  or publish active-chain notifications. Its persisted progress is diagnostic only:
+  reopening starts historical validation from genesis with empty coins and statistics,
+  rather than attaching an advanced tip to an empty set. The caller must replay the
+  retained history. Lifecycle operations serialize with each other. Finalized status
+  is synced before retiring the historical role; an I/O failure after historical
+  mutation closes both admissions. A detected mismatch closes admission even if its
+  diagnostic status cannot be persisted.
 - **Reorg and pruning constraints**:
   - Reorgs on the `AssumedActive` chainstate cannot disconnect blocks at or below the
     snapshot base height (`ApplyError::DisconnectBelowSnapshotBase`).
-  - Blocks at or below the snapshot base height are protected from pruning while
-    historical validation is in progress (`AssumeUtxoManager::can_prune_height`).
+  - `PruneAuthority::begin` refuses prefix pruning while either chainstate has a
+    snapshot role. Even a requested height above the base would delete required
+    history. The role check shares the chain-transition lock with activation and
+    finalization, so pruning cannot race a role change.
 - **Operator observability**:
   `AssumeUtxoManager::chainstates_summary` provides a unified read projection of both
   active and background chainstates, reporting roles, tips, validation progress, and
   commitments without exposing internal lock primitives.
+- **Current integration limits**:
+  `step_historical` is a caller-driven API; the node runtime does not yet schedule
+  historical downloads or replay. Active snapshot installation is in memory and
+  does not establish a durable snapshot anchor in the active commit/recovery path.
+  Persisted lifecycle metadata therefore does not provide full active-chainstate
+  crash recovery. These remain requirements of #1288 before the feature is complete.
 
 ### `ARCH-08`: Durable pruning and reorg retention
 

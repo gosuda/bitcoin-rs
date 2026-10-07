@@ -215,7 +215,6 @@ fn prune_to_height_advances_published_height() -> anyhow::Result<()> {
         authority_state.chainstate().prune_authority(),
         Arc::new(AtomicU32::new(11 + CORE_REORG_SAFETY_MARGIN)),
         Arc::new(bitcoin_rs_storage::RetentionRegistry::new()),
-        None,
     )?);
 
     let lower_result = service
@@ -232,10 +231,10 @@ fn prune_to_height_advances_published_height() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pruning at or below snapshot base height is rejected while `AssumeUTXO` is validating.
+/// Every prefix prune includes history needed by a validating `AssumeUTXO` snapshot.
 #[cfg(feature = "fjall")]
 #[test]
-fn assumeutxo_validating_blocks_pruning_below_base_height() -> anyhow::Result<()> {
+fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyhow::Result<()> {
     use bitcoin_rs_chainstate::AssumeUtxoManager;
     use bitcoin_rs_primitives::Network;
     use bitcoin_rs_rpc::context::PruneService;
@@ -254,23 +253,28 @@ fn assumeutxo_validating_blocks_pruning_below_base_height() -> anyhow::Result<()
     )?);
     let block_files = Arc::new(FlatFileBlockStore::open(dir.path())?);
 
-    let assumeutxo = Arc::new(AssumeUtxoManager::open(
-        Network::Regtest,
-        state.chainstate(),
-        Some(dir.path().to_path_buf()),
-    )?);
-
-    // Simulate activating snapshot at height 110
+    // Exercise the pruning policy of a recovered validating lifecycle. Snapshot
+    // authenticity is covered at the chainstate activation boundary.
     let pinned = Network::Regtest
         .assume_utxo_for_height(110)
         .ok_or_else(|| anyhow::anyhow!("pinned 110 missing"))?;
-    let dummy_load = bitcoin_rs_utxo::SnapshotLoad {
-        set: bitcoin_rs_utxo::UtxoSet::new(),
-        tip_hash: pinned.block_hash,
-        height: 110,
-        muhash_trailer: [0; 384],
+    let status = bitcoin_rs_chainstate::AssumeUtxoDiskStatus::Validating {
+        base_height: pinned.height,
+        base_hash: pinned.block_hash,
+        expected_hash_serialized: pinned.hash_serialized,
+        chain_tx_count: pinned.chain_tx_count,
+        historical_height: 0,
+        historical_hash: Network::Regtest.genesis_block_hash(),
     };
-    assumeutxo.activate_snapshot(&dummy_load, pinned.hash_serialized)?;
+    std::fs::write(
+        dir.path().join("assumeutxo.json"),
+        serde_json::to_vec(&status)?,
+    )?;
+    let _assumeutxo = AssumeUtxoManager::open(
+        Network::Regtest,
+        state.chainstate(),
+        Some(dir.path().to_path_buf()),
+    )?;
 
     let service = Arc::new(super::super::storage::NodePruneService::new(
         store,
@@ -278,20 +282,19 @@ fn assumeutxo_validating_blocks_pruning_below_base_height() -> anyhow::Result<()
         state.chainstate().prune_authority(),
         Arc::new(AtomicU32::new(200 + CORE_REORG_SAFETY_MARGIN)),
         Arc::new(bitcoin_rs_storage::RetentionRegistry::new()),
-        Some(Arc::clone(&assumeutxo)),
     )?);
 
-    // Pruning at base height 110 must fail
-    let Err(err_110) = service.prune_to_height(110) else {
-        anyhow::bail!("expected prune failure at base height");
-    };
-    let err_msg = err_110.to_string();
-    assert!(err_msg.contains("at or below assumeutxo base height while validating"));
-
-    // Pruning below base height must fail
-    let Err(_) = service.prune_to_height(100) else {
-        anyhow::bail!("expected prune failure below base height");
-    };
+    for height in [100, 110, 111, 200] {
+        let Err(error) = service.prune_to_height(height) else {
+            anyhow::bail!("expected prune failure at height {height}");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("historical validation is required")
+        );
+        assert_eq!(service.status().pruneheight, None);
+    }
 
     Ok(())
 }

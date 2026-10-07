@@ -1,598 +1,484 @@
+//! ARCH-07b: verified installation, isolated replay, and fail-closed convergence.
 use std::fs;
+use std::io::Cursor;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_primitives::{Block, Hash256, Header, Network};
-use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::snapshot::SnapshotLoad;
+use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus};
+use bitcoin_rs_primitives::{AssumeUtxoData, Block, Hash256, Network};
+use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
+use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snapshot_observed};
 use parking_lot::RwLock;
 
-use crate::Chainstate;
-use crate::assumeutxo::{
-    ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager,
-    ChainstateRole, ChainstatesSummary, HistoricalChainstateSummary,
-};
-use crate::error::ApplyError;
+use super::{AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole};
+use crate::{ApplyError, Chainstate};
 
-fn make_test_chainstate(network: Network, role: ChainstateRole) -> Arc<Chainstate> {
-    let cs = Arc::new(Chainstate::new(
-        network,
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+fn chainstate() -> Arc<Chainstate> {
+    let stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
+    let mut utxo = UtxoSet::new();
+    utxo.track_coin_stats((*stats).clone());
+    Arc::new(Chainstate::new(
+        Network::Regtest,
         Arc::new(ArcSwapOption::empty()),
         Arc::new(ArcSwapOption::empty()),
         Arc::new(RwLock::new(BlockTree::new())),
-        Arc::new(UtxoSet::new()),
-        Arc::new(CoinStatsListener::new(CoinStats::default())),
+        Arc::new(utxo),
+        stats,
         Arc::new(crate::events::ChainEventPublisher::detached(0)),
-    ));
-    cs.set_role(role);
-    cs
+    ))
 }
 
-fn dummy_snapshot_load(height: u32, tip_hash: Hash256) -> SnapshotLoad {
-    SnapshotLoad {
-        set: UtxoSet::new(),
-        tip_hash,
-        height,
-        muhash_trailer: [0_u8; 384],
+struct Fixture {
+    active: Arc<Chainstate>,
+    blocks: Vec<Block>,
+    pinned: AssumeUtxoData,
+    snapshot: Vec<u8>,
+    stats: CoinStats,
+}
+
+impl Fixture {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let source = chainstate();
+        let mut blocks = vec![Network::Regtest.genesis_block()];
+        for height in 1..=2 {
+            blocks.push(bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
+                blocks.last().ok_or("missing predecessor")?.block_hash(),
+                height,
+            )?);
+        }
+        for block in &blocks {
+            source
+                .lock_transition()?
+                .into_transition()
+                .connect(block, None)?;
+        }
+        let tip = source.applied_tip_snapshot().ok_or("missing source tip")?;
+        let pinned = AssumeUtxoData {
+            height: tip.height,
+            block_hash: tip.hash,
+            hash_serialized: source.utxo.lock_stable_view().hash_serialized_3()?,
+            chain_tx_count: tip.chain_tx_count.to_wire(),
+        };
+        let mut snapshot = Cursor::new(Vec::new());
+        write_snapshot_observed(&source.utxo, &tip.hash, tip.height, &mut snapshot, ())?;
+        let active = chainstate();
+        for block in &blocks {
+            active
+                .block_tree
+                .write()
+                .insert_header(block.header, NodeStatus::HeaderValid)?;
+        }
+        Ok(Self {
+            active,
+            blocks,
+            pinned,
+            snapshot: snapshot.into_inner(),
+            stats: source.coin_stats.snapshot(),
+        })
+    }
+
+    fn load(&self) -> Result<SnapshotLoad, bitcoin_rs_utxo::UtxoError> {
+        read_snapshot_strict_v4(&mut Cursor::new(&self.snapshot))
+    }
+
+    fn manager(&self, dir: &std::path::Path) -> Result<AssumeUtxoManager, AssumeUtxoError> {
+        AssumeUtxoManager::open(
+            Network::Regtest,
+            Arc::clone(&self.active),
+            Some(dir.to_path_buf()),
+        )
+    }
+
+    fn activate(&self, manager: &AssumeUtxoManager) -> TestResult {
+        manager.activate_pinned_snapshot(self.load()?, &self.pinned)?;
+        Ok(())
     }
 }
 
-#[test]
-fn chainstate_role_predicates() {
-    let ordinary = ChainstateRole::Ordinary;
-    assert!(ordinary.is_ordinary());
-    assert!(!ordinary.is_assumed_active());
-    assert!(!ordinary.is_historical());
-
-    let dummy_hash = Hash256::from_le_bytes(&[0x42; 32]);
-    let assumed = ChainstateRole::AssumedActive {
-        base_height: 110,
-        base_hash: dummy_hash,
-    };
-    assert!(!assumed.is_ordinary());
-    assert!(assumed.is_assumed_active());
-    assert!(!assumed.is_historical());
-
-    let historical = ChainstateRole::Historical {
-        base_height: 110,
-        base_hash: dummy_hash,
-    };
-    assert!(!historical.is_ordinary());
-    assert!(!historical.is_assumed_active());
-    assert!(historical.is_historical());
+fn disk_status(dir: &std::path::Path) -> Result<AssumeUtxoDiskStatus, Box<dyn std::error::Error>> {
+    Ok(serde_json::from_slice(&fs::read(
+        dir.join("assumeutxo.json"),
+    )?)?)
 }
 
 #[test]
-fn pinned_metadata_available_for_networks() -> Result<(), Box<dyn std::error::Error>> {
-    let mainnet_data = Network::Mainnet.assume_utxo_data();
-    assert_eq!(mainnet_data.len(), 2);
-    assert_eq!(mainnet_data[0].height, 840_000);
-    assert_eq!(mainnet_data[1].height, 880_000);
-
-    let testnet_data = Network::Testnet4.assume_utxo_data();
-    assert_eq!(testnet_data.len(), 1);
-    assert_eq!(testnet_data[0].height, 90_000);
-
-    let regtest_data = Network::Regtest.assume_utxo_data();
-    assert_eq!(regtest_data.len(), 2);
-    assert_eq!(regtest_data[0].height, 110);
-    assert_eq!(regtest_data[1].height, 200);
-
-    let pinned_110 = Network::Regtest
+fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
+    let active = chainstate();
+    let manager = AssumeUtxoManager::open(Network::Regtest, Arc::clone(&active), None)?;
+    let pinned = Network::Regtest
         .assume_utxo_for_height(110)
-        .ok_or("regtest 110 pinned data missing")?;
-    assert_eq!(pinned_110.height, 110);
-    assert_eq!(
-        Network::Regtest
-            .assume_utxo_for_hash(pinned_110.block_hash)
-            .ok_or("regtest 110 block hash lookup failed")?
-            .height,
-        110
-    );
-
-    assert!(Network::Regtest.assume_utxo_for_height(999).is_none());
-    assert!(
-        Network::Regtest
-            .assume_utxo_for_hash(Hash256::default())
-            .is_none()
-    );
-    Ok(())
-}
-
-#[test]
-fn assumeutxo_manager_open_fresh() -> Result<(), Box<dyn std::error::Error>> {
-    let temp_dir = tempfile::tempdir()?;
-    let network = Network::Regtest;
-    let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-
-    let manager = AssumeUtxoManager::open(network, active, Some(temp_dir.path().to_path_buf()))?;
-
-    assert_eq!(manager.status(), AssumeUtxoDiskStatus::Uninitialized);
-    assert!(manager.can_prune_height(0));
-    assert!(manager.can_prune_height(110));
-
-    let summary = manager.chainstates_summary();
-    assert_eq!(summary.active_chainstate.role, ChainstateRole::Ordinary);
-    assert!(summary.active_chainstate.validated);
-    assert!(summary.historical_chainstate.is_none());
-    assert_eq!(summary.status, AssumeUtxoDiskStatus::Uninitialized);
-    Ok(())
-}
-
-#[test]
-fn activate_snapshot_validation_failures() -> Result<(), Box<dyn std::error::Error>> {
-    let temp_dir = tempfile::tempdir()?;
-    let network = Network::Regtest;
-    let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-
-    let manager = AssumeUtxoManager::open(network, active, Some(temp_dir.path().to_path_buf()))?;
-
-    let pinned = network
-        .assume_utxo_for_height(110)
-        .ok_or("pinned 110 missing")?;
-
-    // 1. Untrusted height
-    let untrusted_load = dummy_snapshot_load(1234, pinned.block_hash);
-    let Err(err) = manager.activate_snapshot(&untrusted_load, pinned.hash_serialized) else {
-        return Err("expected UntrustedSnapshotHeight".into());
-    };
-    assert!(matches!(
-        err,
-        AssumeUtxoError::UntrustedSnapshotHeight(1234)
-    ));
-
-    // 2. Mismatched block hash
-    let wrong_hash_load = dummy_snapshot_load(110, Hash256::from_le_bytes(&[0x99; 32]));
-    let Err(err) = manager.activate_snapshot(&wrong_hash_load, pinned.hash_serialized) else {
-        return Err("expected SnapshotBlockHashMismatch".into());
-    };
-    assert!(matches!(
-        err,
-        AssumeUtxoError::SnapshotBlockHashMismatch { .. }
-    ));
-
-    // 3. Mismatched commitment (MuHash)
-    let valid_load = dummy_snapshot_load(110, pinned.block_hash);
-    let wrong_muhash = Hash256::from_le_bytes(&[0xee; 32]);
-    let Err(err) = manager.activate_snapshot(&valid_load, wrong_muhash) else {
-        return Err("expected SnapshotCommitmentMismatch".into());
-    };
-    assert!(matches!(
-        err,
-        AssumeUtxoError::SnapshotCommitmentMismatch { .. }
-    ));
-    Ok(())
-}
-
-#[test]
-fn activate_snapshot_success_and_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
-    let temp_dir = tempfile::tempdir()?;
-    let network = Network::Regtest;
-    let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-
-    let manager = AssumeUtxoManager::open(
-        network,
-        Arc::clone(&active),
-        Some(temp_dir.path().to_path_buf()),
-    )?;
-
-    let pinned = network
-        .assume_utxo_for_height(110)
-        .ok_or("pinned 110 missing")?;
-    let valid_load = dummy_snapshot_load(110, pinned.block_hash);
-
-    manager.activate_snapshot(&valid_load, pinned.hash_serialized)?;
-
-    // Verify active chainstate role
-    assert_eq!(
-        active.role(),
-        ChainstateRole::AssumedActive {
-            base_height: 110,
-            base_hash: pinned.block_hash,
+        .ok_or("missing pin")?;
+    for (height, hash) in [
+        (1234, pinned.block_hash),
+        (110, Hash256::default()),
+        (110, pinned.block_hash),
+    ] {
+        let load = SnapshotLoad {
+            set: UtxoSet::new(),
+            height,
+            tip_hash: hash,
+            muhash_trailer: [0xff; 384],
+        };
+        let Err(error) = manager.activate_snapshot(load) else {
+            return Err("untrusted snapshot accepted".into());
+        };
+        match height {
+            1234 => assert!(matches!(
+                error,
+                AssumeUtxoError::UntrustedSnapshotHeight(1234)
+            )),
+            _ if hash == pinned.block_hash => assert!(matches!(
+                error,
+                AssumeUtxoError::SnapshotCommitmentMismatch { .. }
+            )),
+            _ => assert!(matches!(
+                error,
+                AssumeUtxoError::SnapshotBlockHashMismatch { .. }
+            )),
         }
+        assert_eq!(manager.status(), AssumeUtxoDiskStatus::Uninitialized);
+        assert!(active.applied_tip_snapshot().is_none());
+        assert_eq!(active.role(), ChainstateRole::Ordinary);
+    }
+    Ok(())
+}
+
+#[test]
+fn snapshot_installs_coins_statistics_and_resolved_header_together() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let active = &fixture.active;
+    let tip = active
+        .applied_tip_snapshot()
+        .ok_or("missing snapshot tip")?;
+    let tree = active.block_tree.read();
+    let node = tree.node(tip.tip_id)?;
+    assert_eq!(
+        (tip.hash, tip.height, tip.chainwork),
+        (node.hash, node.height, node.chainwork)
     );
+    assert_ne!(tip.chainwork, ChainWork::ZERO);
+    assert_eq!(tip.chain_tx_count.to_wire(), fixture.pinned.chain_tx_count);
+    assert_eq!(active.coin_stats.snapshot(), fixture.stats);
+    assert_eq!(
+        active.utxo.lock_stable_view().hash_serialized_3()?,
+        fixture.pinned.hash_serialized
+    );
+    assert!(active.role().is_assumed_active());
+    assert_eq!(manager.status(), disk_status(dir.path())?);
+    assert!(matches!(
+        active.prune_authority().begin(),
+        Err(ApplyError::PruneDuringHistoricalValidation { .. })
+    ));
+    assert!(matches!(
+        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        Err(AssumeUtxoError::AlreadyActive)
+    ));
+    Ok(())
+}
 
-    // Verify applied tip is installed on active chainstate
-    let active_tip = active.applied_tip_snapshot().ok_or("active tip missing")?;
-    assert_eq!(active_tip.height, 110);
-    assert_eq!(active_tip.hash, pinned.block_hash);
-    assert_eq!(active_tip.chain_tx_count.to_wire(), pinned.chain_tx_count);
+#[test]
+fn snapshot_refuses_missing_or_wrong_height_header_before_persistence() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let active = chainstate();
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        Arc::clone(&active),
+        Some(dir.path().to_path_buf()),
+    )?;
+    assert!(matches!(
+        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        Err(AssumeUtxoError::SnapshotHeaderMissing(_))
+    ));
+    assert!(!dir.path().join("assumeutxo.json").exists());
+    let manager = fixture.manager(dir.path())?;
+    let mut wrong_height = fixture.pinned;
+    wrong_height.height += 1;
+    assert!(matches!(
+        manager.activate_pinned_snapshot(fixture.load()?, &wrong_height),
+        Err(AssumeUtxoError::SnapshotHeaderHeightMismatch { .. })
+    ));
+    assert!(fixture.active.applied_tip_snapshot().is_none());
+    assert!(!dir.path().join("assumeutxo.json").exists());
+    Ok(())
+}
 
-    // Verify historical chainstate is created with Historical role
+#[test]
+fn activation_io_failure_does_not_publish_snapshot() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fs::create_dir(dir.path().join("assumeutxo.json"))?;
+    assert!(matches!(
+        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        Err(AssumeUtxoError::Io(_))
+    ));
+    assert_eq!(manager.status(), AssumeUtxoDiskStatus::Uninitialized);
+    assert!(fixture.active.applied_tip_snapshot().is_none());
+    assert_eq!(fixture.active.coin_stats.snapshot(), CoinStats::default());
+    assert!(fixture.active.role().is_ordinary());
+    assert!(fixture.active.is_closed_for_recovery());
+    Ok(())
+}
+
+#[test]
+fn historical_replay_preserves_active_durable_head_and_notifications() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let active_head = DurableHead {
+        commit_id: 10,
+        height: fixture.pinned.height,
+        tip: fixture.pinned.block_hash,
+        chain_tx_count: fixture.pinned.chain_tx_count,
+        body_extent: None,
+        undo_extent: None,
+    };
+    fixture
+        .active
+        .durable_head
+        .commit(None, &active_head, &CommitRecords::default())?;
+    let events = fixture.active.chain_events.snapshot();
     let historical = manager
         .historical_chainstate()
-        .ok_or("historical chainstate missing")?;
-    assert_eq!(
-        historical.role(),
-        ChainstateRole::Historical {
-            base_height: 110,
-            base_hash: pinned.block_hash,
-        }
-    );
-
-    // Verify disk status
+        .ok_or("historical missing")?;
+    assert!(!Arc::ptr_eq(
+        &historical.undo_store,
+        &fixture.active.undo_store
+    ));
+    assert!(!Arc::ptr_eq(
+        &historical.durable_head,
+        &fixture.active.durable_head
+    ));
+    assert!(historical.block_body_store.is_none());
+    assert!(matches!(
+        historical.prune_authority().begin(),
+        Err(ApplyError::PruneDuringHistoricalValidation { .. })
+    ));
+    for block in &fixture.blocks {
+        manager.step_historical(block, None)?;
+        assert_eq!(fixture.active.durable_head.load()?, Some(active_head));
+        assert_eq!(fixture.active.chain_events.snapshot(), events);
+        assert_eq!(fixture.active.coin_stats.snapshot(), fixture.stats);
+    }
+    assert!(fixture.active.role().is_ordinary());
+    assert!(fixture.active.prune_authority().begin().is_ok());
+    assert!(manager.historical_chainstate().is_none());
     assert!(matches!(
         manager.status(),
-        AssumeUtxoDiskStatus::Validating {
-            base_height: 110,
-            ..
-        }
+        AssumeUtxoDiskStatus::Finalized { .. }
     ));
-
-    // Pruning rules: disallow <= base_height, allow > base_height
-    assert!(!manager.can_prune_height(0));
-    assert!(!manager.can_prune_height(109));
-    assert!(!manager.can_prune_height(110));
-    assert!(manager.can_prune_height(111));
-
-    // Summary reporting
-    let summary = manager.chainstates_summary();
-    assert_eq!(
-        summary.active_chainstate.role,
-        ChainstateRole::AssumedActive {
-            base_height: 110,
-            base_hash: pinned.block_hash,
-        }
-    );
-    assert!(!summary.active_chainstate.validated);
-    assert!(summary.historical_chainstate.is_some());
-    let hist_summary = summary
-        .historical_chainstate
-        .as_ref()
-        .ok_or("historical chainstate summary missing")?;
-    assert_eq!(hist_summary.base_height, 110);
-    assert_eq!(hist_summary.base_hash, pinned.block_hash);
-
-    // Re-activating snapshot fails with AlreadyActive
-    let re_load = dummy_snapshot_load(110, pinned.block_hash);
-    let Err(err) = manager.activate_snapshot(&re_load, pinned.hash_serialized) else {
-        return Err("expected AlreadyActive error".into());
-    };
-    assert!(matches!(err, AssumeUtxoError::AlreadyActive));
+    assert_eq!(manager.status(), disk_status(dir.path())?);
     Ok(())
 }
 
 #[test]
-fn reorg_constraint_refuses_disconnect_at_or_below_snapshot_base() {
-    let network = Network::Regtest;
-    let base_hash = Hash256::from_le_bytes(&[0x33; 32]);
-    let active = make_test_chainstate(
-        network,
-        ChainstateRole::AssumedActive {
-            base_height: 110,
-            base_hash,
-        },
-    );
-
-    let dummy_block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: Hash256::default().into(),
-            merkle_root: Hash256::default(),
-            time: 0,
-            bits: 0.into(),
-            nonce: 0,
-        },
-        txs: Vec::new(),
-    };
-
-    // Synthesize applied tip at height 110 matching block hash
-    let dummy_tip = bitcoin_rs_chain::TipSnapshot {
-        height: 110,
-        hash: base_hash,
-        tip_id: bitcoin_rs_chain::NodeId::new(1),
-        chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(10),
-    };
-    active.applied_tip.store(Some(Arc::new(dummy_tip)));
-
-    // Attempting to disconnect at base height 110 must fail with DisconnectBelowSnapshotBase
-    let plan_result = crate::disconnect::plan_disconnect(&active, &dummy_block, base_hash);
-    match plan_result {
-        Err(ApplyError::DisconnectBelowSnapshotBase {
-            height,
-            base_height,
-        }) => {
-            assert_eq!(height, 110);
-            assert_eq!(base_height, 110);
-        }
-        other => panic!("expected DisconnectBelowSnapshotBase, got {other:?}"),
+fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    for block in &fixture.blocks[..2] {
+        manager.step_historical(block, None)?;
     }
-
-    // Now test Ordinary role does not refuse with DisconnectBelowSnapshotBase
-    active.set_role(ChainstateRole::Ordinary);
-    let plan_result_ordinary = crate::disconnect::plan_disconnect(&active, &dummy_block, base_hash);
-    assert!(!matches!(
-        plan_result_ordinary,
-        Err(ApplyError::DisconnectBelowSnapshotBase { .. })
+    assert!(
+        manager
+            .historical_chainstate()
+            .ok_or("missing historical")?
+            .coin_stats
+            .snapshot()
+            .utxo_count
+            > 0
+    );
+    drop(manager);
+    let reopened = fixture.manager(dir.path())?;
+    let historical = reopened
+        .historical_chainstate()
+        .ok_or("missing historical after restart")?;
+    assert!(historical.applied_tip_snapshot().is_none());
+    assert_eq!(historical.coin_stats.snapshot(), CoinStats::default());
+    for block in &fixture.blocks {
+        reopened.step_historical(block, None)?;
+    }
+    assert!(matches!(
+        reopened.status(),
+        AssumeUtxoDiskStatus::Finalized { .. }
     ));
-}
-
-#[test]
-fn historical_refuses_connect_past_target_height() -> Result<(), Box<dyn std::error::Error>> {
-    let network = Network::Regtest;
-    let base_hash = Hash256::from_le_bytes(&[0x55; 32]);
-    let historical = make_test_chainstate(
-        network,
-        ChainstateRole::Historical {
-            base_height: 110,
-            base_hash,
-        },
-    );
-
-    // Tip at height 110: next connected block would be at height 111
-    let dummy_tip = bitcoin_rs_chain::TipSnapshot {
-        height: 110,
-        hash: base_hash,
-        tip_id: bitcoin_rs_chain::NodeId::new(1),
-        chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(10),
-    };
-    historical.applied_tip.store(Some(Arc::new(dummy_tip)));
-
-    let block_111 = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: base_hash.into(),
-            merkle_root: Hash256::default(),
-            time: 0,
-            bits: 0.into(),
-            nonce: 0,
-        },
-        txs: Vec::new(),
-    };
-
-    let transition = historical
-        .lock_transition()
-        .map_err(|e| format!("{e:?}"))?
-        .into_transition();
-    let outcome = transition.connect(&block_111, None);
-
-    match outcome {
-        Err(ApplyError::ConnectPastHistoricalTarget {
-            height,
-            base_height,
-        }) => {
-            assert_eq!(height, 111);
-            assert_eq!(base_height, 110);
-        }
-        other => panic!("expected ConnectPastHistoricalTarget, got {other:?}"),
-    }
-    drop(transition);
-
-    // Tip at height 109: next block is at height 110, but block hash does not match target base_hash
-    let prev_109 = Hash256::from_le_bytes(&[0x44; 32]);
-    let tip_109 = bitcoin_rs_chain::TipSnapshot {
-        height: 109,
-        hash: prev_109,
-        tip_id: bitcoin_rs_chain::NodeId::new(1),
-        chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(9),
-    };
-    historical.applied_tip.store(Some(Arc::new(tip_109)));
-
-    let wrong_hash_block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: prev_109.into(),
-            merkle_root: Hash256::default(),
-            time: 0,
-            bits: 0.into(),
-            nonce: 0,
-        },
-        txs: Vec::new(),
-    };
-
-    let transition2 = historical
-        .lock_transition()
-        .map_err(|e| format!("{e:?}"))?
-        .into_transition();
-    let outcome_wrong = transition2.connect(&wrong_hash_block, None);
-
-    match outcome_wrong {
-        Err(ApplyError::PrevHashMismatch { tip, prev }) => {
-            assert_eq!(tip, base_hash);
-            assert_eq!(prev, wrong_hash_block.block_hash().0);
-        }
-        other => panic!("expected PrevHashMismatch, got {other:?}"),
-    }
-    drop(transition2);
     Ok(())
 }
 
 #[test]
-fn fail_closed_for_recovery_behavior() -> Result<(), Box<dyn std::error::Error>> {
-    let temp_dir = tempfile::tempdir()?;
-    let network = Network::Regtest;
-    let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-
-    let pinned = network
-        .assume_utxo_for_height(110)
-        .ok_or("pinned 110 missing")?;
-    let status_file = temp_dir.path().join("assumeutxo.json");
-
-    // Write a Failed status file directly
-    let failed_status = AssumeUtxoDiskStatus::Failed {
-        base_height: 110,
-        base_hash: pinned.block_hash,
-        expected_muhash: pinned.hash_serialized,
-        actual_muhash: Hash256::from_le_bytes(&[0xaa; 32]),
-    };
-    let json = serde_json::to_string_pretty(&failed_status)?;
-    fs::write(&status_file, json)?;
-
-    // Reopen manager: must fail closed immediately
-    let res = AssumeUtxoManager::open(
-        network,
-        Arc::clone(&active),
-        Some(temp_dir.path().to_path_buf()),
-    );
-    match res {
-        Err(AssumeUtxoError::PreviouslyFailed {
-            base_height,
-            expected_muhash,
-            actual_muhash,
-        }) => {
-            assert_eq!(base_height, 110);
-            assert_eq!(expected_muhash, pinned.hash_serialized);
-            assert_eq!(actual_muhash, Hash256::from_le_bytes(&[0xaa; 32]));
-        }
-        other => panic!("expected PreviouslyFailed, got {other:?}"),
-    }
-
-    // Active chainstate must be locked down
-    assert!(active.is_closed_for_recovery());
-    assert!(active.lock_transition().is_err());
-    Ok(())
-}
-
-#[test]
-fn crash_recovery_across_phases() -> Result<(), Box<dyn std::error::Error>> {
-    let temp_dir = tempfile::tempdir()?;
-    let network = Network::Regtest;
-    let pinned = network
-        .assume_utxo_for_height(110)
-        .ok_or("pinned 110 missing")?;
-
-    // Phase 1: Uninitialized
-    {
-        let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-        let manager = AssumeUtxoManager::open(
-            network,
-            Arc::clone(&active),
-            Some(temp_dir.path().to_path_buf()),
-        )?;
-        assert_eq!(manager.status(), AssumeUtxoDiskStatus::Uninitialized);
-        assert_eq!(active.role(), ChainstateRole::Ordinary);
-    }
-
-    // Phase 2: Validating
-    {
-        let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-        let manager = AssumeUtxoManager::open(
-            network,
-            Arc::clone(&active),
-            Some(temp_dir.path().to_path_buf()),
-        )?;
-
-        let valid_load = dummy_snapshot_load(110, pinned.block_hash);
-        manager.activate_snapshot(&valid_load, pinned.hash_serialized)?;
-
-        assert_eq!(
-            active.role(),
-            ChainstateRole::AssumedActive {
-                base_height: 110,
-                base_hash: pinned.block_hash,
-            }
-        );
-    }
-
-    // Simulate node crash and restart during Phase 2
-    {
-        let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-        let manager = AssumeUtxoManager::open(
-            network,
-            Arc::clone(&active),
-            Some(temp_dir.path().to_path_buf()),
-        )?;
-
-        // Must restore AssumedActive role and Validating status
-        assert_eq!(
-            active.role(),
-            ChainstateRole::AssumedActive {
-                base_height: 110,
-                base_hash: pinned.block_hash,
-            }
-        );
-        assert!(matches!(
-            manager.status(),
-            AssumeUtxoDiskStatus::Validating {
-                base_height: 110,
+fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> TestResult {
+    for wrong_count in [false, true] {
+        let fixture = Fixture::new()?;
+        let dir = tempfile::tempdir()?;
+        let manager = fixture.manager(dir.path())?;
+        fixture.activate(&manager)?;
+        {
+            let mut status = manager.status.write();
+            if let AssumeUtxoDiskStatus::Validating {
+                ref mut expected_hash_serialized,
+                ref mut chain_tx_count,
                 ..
+            } = *status
+            {
+                if wrong_count {
+                    *chain_tx_count += 1;
+                } else {
+                    *expected_hash_serialized = Hash256::default();
+                }
             }
-        ));
-
-        // Historical chainstate must be restored and present
+        }
+        for block in &fixture.blocks[..2] {
+            manager.step_historical(block, None)?;
+        }
         let historical = manager
             .historical_chainstate()
-            .ok_or("historical chainstate missing on restart")?;
-        assert_eq!(
-            historical.role(),
-            ChainstateRole::Historical {
-                base_height: 110,
-                base_hash: pinned.block_hash,
-            }
-        );
-    }
-
-    // Phase 3: Finalized
-    {
-        let finalized_status = AssumeUtxoDiskStatus::Finalized {
-            base_height: 110,
-            base_hash: pinned.block_hash,
-            validated_muhash: pinned.hash_serialized,
+            .ok_or("missing historical")?;
+        let Err(error) = manager.step_historical(&fixture.blocks[2], None) else {
+            return Err("divergence finalized".into());
         };
-        let status_file = temp_dir.path().join("assumeutxo.json");
-        let json = serde_json::to_string_pretty(&finalized_status)?;
-        fs::write(&status_file, json)?;
-
-        let active = make_test_chainstate(
-            network,
-            ChainstateRole::AssumedActive {
-                base_height: 110,
-                base_hash: pinned.block_hash,
-            },
-        );
-        let manager = AssumeUtxoManager::open(
-            network,
-            Arc::clone(&active),
-            Some(temp_dir.path().to_path_buf()),
-        )?;
-
-        assert_eq!(manager.status(), finalized_status);
-        assert_eq!(active.role(), ChainstateRole::Ordinary);
-        assert!(manager.can_prune_height(110));
+        if wrong_count {
+            assert!(matches!(
+                error,
+                AssumeUtxoError::HistoricalTransactionCountMismatch { .. }
+            ));
+        } else {
+            assert!(matches!(error, AssumeUtxoError::CommitmentMismatch { .. }));
+        }
+        assert!(fixture.active.is_closed_for_recovery());
+        assert!(historical.is_closed_for_recovery());
+        assert!(matches!(
+            disk_status(dir.path())?,
+            AssumeUtxoDiskStatus::Failed { .. }
+        ));
+        assert!(matches!(
+            fixture.manager(dir.path()),
+            Err(AssumeUtxoError::PreviouslyFailed { .. })
+        ));
     }
     Ok(())
 }
 
 #[test]
-fn chainstates_summary_serde_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
-    let dummy_hash = Hash256::from_le_bytes(&[0x12; 32]);
-    let muhash = Hash256::from_le_bytes(&[0x34; 32]);
+fn target_hash_divergence_is_classified_and_persisted() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    for block in &fixture.blocks[..2] {
+        manager.step_historical(block, None)?;
+    }
+    let mut wrong = fixture.blocks[2].clone();
+    wrong.header.nonce = wrong.header.nonce.wrapping_add(1);
+    assert!(matches!(
+        manager.step_historical(&wrong, None),
+        Err(AssumeUtxoError::HistoricalTargetHashMismatch { .. })
+    ));
+    assert!(fixture.active.is_closed_for_recovery());
+    assert!(matches!(
+        disk_status(dir.path())?,
+        AssumeUtxoDiskStatus::Failed { .. }
+    ));
+    Ok(())
+}
 
-    let summary = ChainstatesSummary {
-        active_chainstate: ActiveChainstateSummary {
-            role: ChainstateRole::AssumedActive {
-                base_height: 840_000,
-                base_hash: dummy_hash,
-            },
-            height: Some(845_000),
-            hash: Some(dummy_hash),
-            validated: false,
-        },
-        historical_chainstate: Some(HistoricalChainstateSummary {
-            base_height: 840_000,
-            base_hash: dummy_hash,
-            current_height: 500_000,
-            current_hash: dummy_hash,
-            expected_muhash: muhash,
-            validated_utxo_count: 123_456,
-        }),
-        status: AssumeUtxoDiskStatus::Validating {
-            base_height: 840_000,
-            base_hash: dummy_hash,
-            expected_muhash: muhash,
-            chain_tx_count: 1_000_000_000,
-            historical_height: 500_000,
-            historical_hash: dummy_hash,
-        },
-    };
+#[test]
+fn mismatch_closes_admission_even_when_failure_record_cannot_be_written() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    for block in &fixture.blocks[..2] {
+        manager.step_historical(block, None)?;
+    }
+    fs::remove_file(dir.path().join("assumeutxo.json"))?;
+    fs::create_dir(dir.path().join("assumeutxo.json"))?;
+    let mut wrong = fixture.blocks[2].clone();
+    wrong.header.nonce = wrong.header.nonce.wrapping_add(1);
+    assert!(matches!(
+        manager.step_historical(&wrong, None),
+        Err(AssumeUtxoError::Io(_))
+    ));
+    assert!(fixture.active.lock_transition().is_err());
+    assert!(
+        manager
+            .historical_chainstate()
+            .ok_or("missing historical")?
+            .lock_transition()
+            .is_err()
+    );
+    Ok(())
+}
 
-    let serialized = serde_json::to_string_pretty(&summary)?;
-    let deserialized: ChainstatesSummary = serde_json::from_str(&serialized)?;
-    assert_eq!(summary, deserialized);
+#[test]
+fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    for block in &fixture.blocks[..2] {
+        manager.step_historical(block, None)?;
+    }
+    fs::remove_file(dir.path().join("assumeutxo.json"))?;
+    fs::create_dir(dir.path().join("assumeutxo.json"))?;
+    assert!(matches!(
+        manager.step_historical(&fixture.blocks[2], None),
+        Err(AssumeUtxoError::Io(_))
+    ));
+    assert!(fixture.active.role().is_assumed_active());
+    assert!(matches!(
+        manager.status(),
+        AssumeUtxoDiskStatus::Validating { .. }
+    ));
+    assert!(fixture.active.lock_transition().is_err());
+    assert!(
+        manager
+            .historical_chainstate()
+            .ok_or("missing historical")?
+            .lock_transition()
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn assumed_reorg_and_historical_height_guards_remain_enforced() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    assert!(matches!(
+        crate::disconnect::plan_disconnect(
+            &fixture.active,
+            &fixture.blocks[2],
+            fixture.pinned.block_hash
+        ),
+        Err(ApplyError::DisconnectBelowSnapshotBase { .. })
+    ));
+    let historical = manager
+        .historical_chainstate()
+        .ok_or("missing historical")?;
+    for block in &fixture.blocks {
+        manager.step_historical(block, None)?;
+    }
+    let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
+        fixture.blocks[2].block_hash(),
+        3,
+    )?;
+    assert!(matches!(
+        historical
+            .lock_transition()?
+            .into_transition()
+            .connect(&child, None),
+        Err(ApplyError::ConnectPastHistoricalTarget { .. })
+    ));
     Ok(())
 }

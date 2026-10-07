@@ -623,7 +623,9 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         | ApplyError::RecoveryPublication(_)
         | ApplyError::CoinStatsRewind(_)
         | ApplyError::DisconnectBelowSnapshotBase { .. }
-        | ApplyError::ConnectPastHistoricalTarget { .. } => {
+        | ApplyError::PruneDuringHistoricalValidation { .. }
+        | ApplyError::ConnectPastHistoricalTarget { .. }
+        | ApplyError::HistoricalTargetHashMismatch { .. } => {
             return Err(MiningControlError::Failed(CompactString::from(
                 error.to_string(),
             )));

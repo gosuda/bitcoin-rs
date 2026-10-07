@@ -154,6 +154,14 @@ pub enum ApplyError {
         /// Snapshot base height.
         base_height: u32,
     },
+    /// Prefix pruning must retain the history needed to validate a snapshot.
+    #[error(
+        "cannot prune while historical validation is required through assumeutxo base height {base_height}"
+    )]
+    PruneDuringHistoricalValidation {
+        /// Snapshot base whose history is still required.
+        base_height: u32,
+    },
     /// Historical chainstate cannot connect blocks past the `AssumeUTXO` snapshot base.
     #[error(
         "historical chainstate cannot connect block at height {height} past target height {base_height}"
@@ -163,6 +171,16 @@ pub enum ApplyError {
         height: u32,
         /// Target base height.
         base_height: u32,
+    },
+    /// The historical chain reached a different block at the pinned base height.
+    #[error("historical target at height {base_height} is {found}, expected {expected}")]
+    HistoricalTargetHashMismatch {
+        /// Snapshot base height.
+        base_height: u32,
+        /// Pinned base hash.
+        expected: bitcoin_rs_primitives::Hash256,
+        /// Reconstructed block hash.
+        found: bitcoin_rs_primitives::Hash256,
     },
 }
 

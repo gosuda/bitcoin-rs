@@ -17,7 +17,7 @@
 //!
 //! 3. **Finalization & Single Authority**:
 //!    When the historical chainstate connects `base_height`, its reconstructed
-//!    UTXO commitment (`MuHash`) is compared against the pinned commitment.
+//!    UTXO commitment (`hash_serialized_3`) is compared against the pinned commitment.
 //!    - On match: the active chainstate transitions to [`ChainstateRole::Ordinary`],
 //!      the historical chainstate is retired, and the node converges to a single
 //!      ordinary chainstate.
@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use bitcoin_rs_primitives::{Block, Hash256, Network};
 use bitcoin_rs_utxo::snapshot::SnapshotLoad;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::error::{ApplyError, DisconnectError};
 use crate::{Chainstate, ConnectOutcome};
@@ -143,6 +143,8 @@ impl ChainstateRole {
 }
 
 /// The persistent lifecycle status of `AssumeUTXO` coordination.
+/// The on-disk `*_muhash` field spellings are retained; the commitment is
+/// Bitcoin Core's serialized-set hash, as named by the Rust fields below.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AssumeUtxoDiskStatus {
     /// No `AssumeUTXO` snapshot has been activated.
@@ -154,9 +156,9 @@ pub enum AssumeUtxoDiskStatus {
         /// Block hash of the snapshot base.
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
-        /// Pinned expected UTXO commitment (`MuHash`) at `base_height`.
-        #[serde(with = "serde_hash256")]
-        expected_muhash: Hash256,
+        /// Pinned expected UTXO commitment (`hash_serialized_3`) at `base_height`.
+        #[serde(with = "serde_hash256", rename = "expected_muhash")]
+        expected_hash_serialized: Hash256,
         /// Cumulative transaction count through `base_height`.
         chain_tx_count: u64,
         /// Historical chainstate validated tip height.
@@ -173,9 +175,9 @@ pub enum AssumeUtxoDiskStatus {
         /// Block hash of the validated snapshot base.
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
-        /// Verified UTXO commitment (`MuHash`) at `base_height`.
-        #[serde(with = "serde_hash256")]
-        validated_muhash: Hash256,
+        /// Verified UTXO commitment (`hash_serialized_3`) at `base_height`.
+        #[serde(with = "serde_hash256", rename = "validated_muhash")]
+        validated_hash_serialized: Hash256,
     },
     /// Background validation failed (e.g. commitment mismatch). The node must fail closed.
     Failed {
@@ -184,18 +186,37 @@ pub enum AssumeUtxoDiskStatus {
         /// Block hash of the snapshot base.
         #[serde(with = "serde_hash256")]
         base_hash: Hash256,
-        /// Expected UTXO commitment (`MuHash`).
-        #[serde(with = "serde_hash256")]
-        expected_muhash: Hash256,
-        /// Reconstructed actual UTXO commitment (`MuHash`).
-        #[serde(with = "serde_hash256")]
-        actual_muhash: Hash256,
+        /// Expected UTXO commitment (`hash_serialized_3`).
+        #[serde(with = "serde_hash256", rename = "expected_muhash")]
+        expected_hash_serialized: Hash256,
+        /// Reconstructed actual UTXO commitment (`hash_serialized_3`).
+        #[serde(with = "serde_hash256", rename = "actual_muhash")]
+        actual_hash_serialized: Hash256,
     },
 }
 
 /// Errors produced by `AssumeUTXO` management and validation.
 #[derive(Debug, thiserror::Error)]
 pub enum AssumeUtxoError {
+    /// The snapshot base must resolve to an admitted header before installation.
+    #[error("snapshot base header {0} is not present")]
+    SnapshotHeaderMissing(Hash256),
+    /// A known base header must have the pinned height.
+    #[error("snapshot base header height {found} does not match pinned height {expected}")]
+    SnapshotHeaderHeightMismatch {
+        /// Pinned height.
+        expected: u32,
+        /// Header height.
+        found: u32,
+    },
+    /// Historical validation must reproduce the pinned cumulative transaction count.
+    #[error("historical transaction count {found} does not match pinned count {expected}")]
+    HistoricalTransactionCountMismatch {
+        /// Pinned count.
+        expected: u64,
+        /// Reconstructed count.
+        found: u64,
+    },
     /// Snapshot height is not pinned in the network parameters.
     #[error("snapshot height {0} is not pinned in AssumeUtxoData for this network")]
     UntrustedSnapshotHeight(u32),
@@ -207,7 +228,7 @@ pub enum AssumeUtxoError {
         /// Hash declared by the snapshot.
         found: Hash256,
     },
-    /// Snapshot commitment (`MuHash`) does not match the pinned commitment.
+    /// Snapshot commitment (`hash_serialized_3`) does not match the pinned commitment.
     #[error("snapshot commitment {found} does not match pinned hash {expected}")]
     SnapshotCommitmentMismatch {
         /// Pinned commitment.
@@ -217,20 +238,20 @@ pub enum AssumeUtxoError {
     },
     /// Node was previously marked as failed; refuses to start to protect operator data.
     #[error(
-        "node previously failed assumeutxo validation at base height {base_height}: expected {expected_muhash}, found {actual_muhash}; failing closed"
+        "node previously failed assumeutxo validation at base height {base_height}: expected {expected_hash_serialized}, found {actual_hash_serialized}; failing closed"
     )]
     PreviouslyFailed {
         /// Base height of failed validation.
         base_height: u32,
         /// Expected commitment.
-        expected_muhash: Hash256,
+        expected_hash_serialized: Hash256,
         /// Actual commitment encountered.
-        actual_muhash: Hash256,
+        actual_hash_serialized: Hash256,
     },
     /// Snapshot activation attempted while another `AssumeUTXO` operation is active.
     #[error("cannot activate assumeutxo snapshot: assumeutxo validation is already in progress")]
     AlreadyActive,
-    /// Background validation reached base height but the reconstructed `MuHash` did not match.
+    /// Background validation reached base height but the reconstructed commitment did not match.
     #[error(
         "assumeutxo commitment mismatch at base height {base_height}: expected {expected}, actual {actual}"
     )]
@@ -312,9 +333,9 @@ pub struct HistoricalChainstateSummary {
     /// Current validated tip block hash.
     #[serde(with = "serde_hash256")]
     pub current_hash: Hash256,
-    /// Expected UTXO commitment (`MuHash`) at `base_height`.
+    /// Expected UTXO commitment (`hash_serialized_3`) at `base_height`.
     #[serde(with = "serde_hash256")]
-    pub expected_muhash: Hash256,
+    pub expected_hash_serialized: Hash256,
     /// Validated UTXO record count in the historical chainstate.
     pub validated_utxo_count: u64,
 }
@@ -324,6 +345,8 @@ const STATUS_TMP_FILENAME: &str = "assumeutxo.json.tmp";
 
 /// Single authority managing `AssumeUTXO` roles and lifecycle progression.
 pub struct AssumeUtxoManager {
+    /// Serializes activation, historical progress, and finalization.
+    lifecycle: Mutex<()>,
     network: Network,
     active_chainstate: Arc<Chainstate>,
     historical_chainstate: Arc<RwLock<Option<Arc<Chainstate>>>>,
@@ -353,7 +376,7 @@ impl AssumeUtxoManager {
         active_chainstate: Arc<Chainstate>,
         data_dir: Option<PathBuf>,
     ) -> Result<Self, AssumeUtxoError> {
-        let loaded_status = if let Some(dir) = &data_dir {
+        let mut loaded_status = if let Some(dir) = &data_dir {
             let path = dir.join(STATUS_FILENAME);
             if path.exists() {
                 let content = fs::read_to_string(&path)?;
@@ -369,22 +392,22 @@ impl AssumeUtxoManager {
         match loaded_status {
             AssumeUtxoDiskStatus::Failed {
                 base_height,
-                expected_muhash,
-                actual_muhash,
+                expected_hash_serialized,
+                actual_hash_serialized,
                 ..
             } => {
                 active_chainstate.fail_closed_for_recovery();
                 return Err(AssumeUtxoError::PreviouslyFailed {
                     base_height,
-                    expected_muhash,
-                    actual_muhash,
+                    expected_hash_serialized,
+                    actual_hash_serialized,
                 });
             }
             AssumeUtxoDiskStatus::Validating {
                 base_height,
                 base_hash,
-                historical_height,
-                historical_hash,
+                expected_hash_serialized,
+                chain_tx_count,
                 ..
             } => {
                 active_chainstate.set_role(ChainstateRole::AssumedActive {
@@ -393,21 +416,17 @@ impl AssumeUtxoManager {
                 });
                 let hist_cs =
                     active_chainstate.create_historical_counterpart(base_height, base_hash);
-                if historical_height > 0 {
-                    let node_id = hist_cs
-                        .block_tree
-                        .read()
-                        .lookup(historical_hash)
-                        .unwrap_or_else(|| bitcoin_rs_chain::NodeId::new(historical_height));
-                    let tip = bitcoin_rs_chain::TipSnapshot {
-                        tip_id: node_id,
-                        height: historical_height,
-                        chainwork: bitcoin_rs_chain::ChainWork::ZERO,
-                        hash: historical_hash,
-                        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
-                    };
-                    hist_cs.applied_tip.store(Some(Arc::new(tip)));
-                }
+                // The historical store is deliberately transient. A progress
+                // marker is not a coin set: restart validation from genesis,
+                // never attach an advanced tip to empty coins and statistics.
+                loaded_status = AssumeUtxoDiskStatus::Validating {
+                    base_height,
+                    base_hash,
+                    expected_hash_serialized,
+                    chain_tx_count,
+                    historical_height: 0,
+                    historical_hash: network.genesis_block_hash(),
+                };
                 historical = Some(hist_cs);
             }
             AssumeUtxoDiskStatus::Finalized { .. } | AssumeUtxoDiskStatus::Uninitialized => {
@@ -416,6 +435,7 @@ impl AssumeUtxoManager {
         }
 
         Ok(Self {
+            lifecycle: Mutex::new(()),
             network,
             active_chainstate,
             historical_chainstate: Arc::new(RwLock::new(historical)),
@@ -429,16 +449,8 @@ impl AssumeUtxoManager {
     ///
     /// # Errors
     ///
-    /// Rejects untrusted heights, mismatched block hashes, or mismatched `MuHash` commitments.
-    pub fn activate_snapshot(
-        &self,
-        snapshot_load: &SnapshotLoad,
-        calculated_muhash: Hash256,
-    ) -> Result<(), AssumeUtxoError> {
-        if matches!(*self.status.read(), AssumeUtxoDiskStatus::Validating { .. }) {
-            return Err(AssumeUtxoError::AlreadyActive);
-        }
-
+    /// Rejects untrusted heights, mismatched block hashes, or mismatched serialized UTXO commitments.
+    pub fn activate_snapshot(&self, snapshot_load: SnapshotLoad) -> Result<(), AssumeUtxoError> {
         let pinned = self
             .network
             .assume_utxo_for_height(snapshot_load.height)
@@ -446,6 +458,20 @@ impl AssumeUtxoManager {
                 snapshot_load.height,
             ))?;
 
+        self.activate_pinned_snapshot(snapshot_load, pinned)
+    }
+
+    // Only network-pinned metadata reaches this boundary in production. Tests
+    // use a small consensus-valid chain to exercise lifecycle transitions.
+    fn activate_pinned_snapshot(
+        &self,
+        snapshot_load: SnapshotLoad,
+        pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+    ) -> Result<(), AssumeUtxoError> {
+        let _lifecycle = self.lifecycle.lock();
+        if !matches!(*self.status.read(), AssumeUtxoDiskStatus::Uninitialized) {
+            return Err(AssumeUtxoError::AlreadyActive);
+        }
         if pinned.block_hash != snapshot_load.tip_hash {
             return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
                 expected: pinned.block_hash,
@@ -453,10 +479,19 @@ impl AssumeUtxoManager {
             });
         }
 
-        if calculated_muhash != pinned.hash_serialized {
+        // Core's AssumeutxoHash is HASH_SERIALIZED, not MuHash. Derive it
+        // from the owned imported coins; neither a caller nor a trailer can
+        // assert the commitment on behalf of the verifier.
+        let (commitment, stats) = snapshot_load.set.with_stable_view(|view| {
+            Ok::<_, bitcoin_rs_utxo::UtxoError>((
+                view.hash_serialized_3()?,
+                bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)?,
+            ))
+        })?;
+        if commitment != pinned.hash_serialized {
             return Err(AssumeUtxoError::SnapshotCommitmentMismatch {
                 expected: pinned.hash_serialized,
-                found: calculated_muhash,
+                found: commitment,
             });
         }
 
@@ -464,22 +499,18 @@ impl AssumeUtxoManager {
         let new_status = AssumeUtxoDiskStatus::Validating {
             base_height: pinned.height,
             base_hash: pinned.block_hash,
-            expected_muhash: pinned.hash_serialized,
+            expected_hash_serialized: pinned.hash_serialized,
             chain_tx_count: pinned.chain_tx_count,
             historical_height: 0,
             historical_hash: genesis_hash,
         };
 
-        // 1. Transactionally persist status to disk FIRST
-        self.persist_status(new_status)?;
-
-        // 2. Install snapshot UTXO and applied tip onto active chainstate
-        self.active_chainstate.install_snapshot(
-            &snapshot_load.set,
-            pinned.height,
-            pinned.block_hash,
-            pinned.chain_tx_count,
-        )?;
+        // Header validation and lifecycle persistence run under the same
+        // transition as installation, before exposing any snapshot state.
+        self.active_chainstate
+            .install_snapshot(snapshot_load.set, stats, pinned, || {
+                self.persist_status(new_status)
+            })?;
 
         // 3. Create isolated historical chainstate with detached events
         let historical = self
@@ -495,7 +526,7 @@ impl AssumeUtxoManager {
     /// Connects one block to the historical chainstate in the background.
     ///
     /// When the connected block reaches `base_height`:
-    /// - Reconstructs the UTXO commitment and compares with `expected_muhash`.
+    /// - Reconstructs the UTXO commitment and compares with `expected_hash_serialized`.
     /// - On match: transitions active chainstate to [`ChainstateRole::Ordinary`],
     ///   retires historical chainstate, and persists [`AssumeUtxoDiskStatus::Finalized`].
     /// - On mismatch: fails closed immediately, sets both chainstates to closed,
@@ -505,22 +536,38 @@ impl AssumeUtxoManager {
         block: &Block,
         serialized: Option<bytes::Bytes>,
     ) -> Result<ConnectOutcome, AssumeUtxoError> {
+        let _lifecycle = self.lifecycle.lock();
         let historical = self
             .historical_chainstate
             .read()
             .clone()
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
 
-        let outcome = {
+        let result = {
             let transition = historical.lock_transition()?.into_transition();
-            transition.connect(block, serialized)?
+            transition.connect(block, serialized)
+        };
+        let outcome = match result {
+            Err(ApplyError::HistoricalTargetHashMismatch {
+                base_height,
+                expected,
+                found,
+            }) => {
+                self.fail_historical(&historical)?;
+                return Err(AssumeUtxoError::HistoricalTargetHashMismatch {
+                    base_height,
+                    expected,
+                    found,
+                });
+            }
+            result => result?,
         };
 
         let current_status = *self.status.read();
         if let AssumeUtxoDiskStatus::Validating {
             base_height,
             base_hash,
-            expected_muhash,
+            expected_hash_serialized,
             chain_tx_count,
             ..
         } = current_status
@@ -529,15 +576,19 @@ impl AssumeUtxoManager {
                 let updated = AssumeUtxoDiskStatus::Validating {
                     base_height,
                     base_hash,
-                    expected_muhash,
+                    expected_hash_serialized,
                     chain_tx_count,
                     historical_height: outcome.height,
                     historical_hash: outcome.hash,
                 };
+                self.persist_status(updated).inspect_err(|_| {
+                    self.active_chainstate.fail_closed_for_recovery();
+                    historical.fail_closed_for_recovery();
+                })?;
                 *self.status.write() = updated;
-                self.persist_status(updated)?;
             } else if outcome.height == base_height {
                 if outcome.hash != base_hash {
+                    self.fail_historical(&historical)?;
                     return Err(AssumeUtxoError::HistoricalTargetHashMismatch {
                         base_height,
                         expected: base_hash,
@@ -545,55 +596,43 @@ impl AssumeUtxoManager {
                     });
                 }
 
-                let actual_muhash = historical
-                    .coin_stats_handle()
-                    .snapshot()
-                    .muhash
-                    .finalize_hash();
-                if actual_muhash == expected_muhash {
-                    self.active_chainstate.set_role(ChainstateRole::Ordinary);
-                    *self.historical_chainstate.write() = None;
+                let actual_hash_serialized =
+                    historical.utxo.lock_stable_view().hash_serialized_3()?;
+                let actual_count = historical
+                    .applied_tip_snapshot()
+                    .map_or(0, |tip| tip.chain_tx_count.to_wire());
+                if actual_count != chain_tx_count {
+                    self.fail_historical(&historical)?;
+                    return Err(AssumeUtxoError::HistoricalTransactionCountMismatch {
+                        expected: chain_tx_count,
+                        found: actual_count,
+                    });
+                }
+                if actual_hash_serialized == expected_hash_serialized {
                     let finalized = AssumeUtxoDiskStatus::Finalized {
                         base_height,
                         base_hash,
-                        validated_muhash: actual_muhash,
+                        validated_hash_serialized: actual_hash_serialized,
                     };
+                    self.persist_status(finalized).inspect_err(|_| {
+                        self.active_chainstate.fail_closed_for_recovery();
+                        historical.fail_closed_for_recovery();
+                    })?;
+                    self.active_chainstate.set_role(ChainstateRole::Ordinary);
+                    *self.historical_chainstate.write() = None;
                     *self.status.write() = finalized;
-                    self.persist_status(finalized)?;
                 } else {
-                    let failed = AssumeUtxoDiskStatus::Failed {
-                        base_height,
-                        base_hash,
-                        expected_muhash,
-                        actual_muhash,
-                    };
-                    self.persist_status(failed)?;
-                    *self.status.write() = failed;
-                    self.active_chainstate.fail_closed_for_recovery();
-                    historical.fail_closed_for_recovery();
+                    self.fail_historical(&historical)?;
                     return Err(AssumeUtxoError::CommitmentMismatch {
                         base_height,
-                        expected: expected_muhash,
-                        actual: actual_muhash,
+                        expected: expected_hash_serialized,
+                        actual: actual_hash_serialized,
                     });
                 }
             }
         }
 
         Ok(outcome)
-    }
-
-    /// Evaluates whether a block at `height` may be pruned.
-    ///
-    /// While `AssumeUTXO` is validating, pruning blocks at or below `base_height`
-    /// is disallowed so the background validator can read their bodies.
-    #[must_use]
-    pub fn can_prune_height(&self, height: u32) -> bool {
-        let status = *self.status.read();
-        match status {
-            AssumeUtxoDiskStatus::Validating { base_height, .. } => height > base_height,
-            _ => true,
-        }
     }
 
     /// Produces a summary of active and historical chainstates for operator reporting.
@@ -614,7 +653,7 @@ impl AssumeUtxoManager {
                 AssumeUtxoDiskStatus::Validating {
                     base_height,
                     base_hash,
-                    expected_muhash,
+                    expected_hash_serialized,
                     ..
                 },
                 Some(historical),
@@ -627,7 +666,7 @@ impl AssumeUtxoManager {
                     current_hash: hist_applied
                         .as_ref()
                         .map_or_else(|| self.network.genesis_block_hash(), |t| t.hash),
-                    expected_muhash,
+                    expected_hash_serialized,
                     validated_utxo_count: u64::try_from(historical.utxo.record_count())
                         .unwrap_or(u64::MAX),
                 })
@@ -654,15 +693,34 @@ impl AssumeUtxoManager {
         self.historical_chainstate.read().clone()
     }
 
-    /// Sets or attaches the historical chainstate handle directly (e.g. on restart recovery).
-    pub fn set_historical_chainstate(&self, historical: Arc<Chainstate>) {
-        *self.historical_chainstate.write() = Some(historical);
-    }
-
     /// Returns the current `AssumeUTXO` lifecycle status.
     #[must_use]
     pub fn status(&self) -> AssumeUtxoDiskStatus {
         *self.status.read()
+    }
+
+    fn fail_historical(&self, historical: &Chainstate) -> Result<(), AssumeUtxoError> {
+        // Close admission even when the diagnostic record cannot be written.
+        self.active_chainstate.fail_closed_for_recovery();
+        historical.fail_closed_for_recovery();
+        if let AssumeUtxoDiskStatus::Validating {
+            base_height,
+            base_hash,
+            expected_hash_serialized,
+            ..
+        } = self.status()
+        {
+            let actual_hash_serialized = historical.utxo.lock_stable_view().hash_serialized_3()?;
+            let failed = AssumeUtxoDiskStatus::Failed {
+                base_height,
+                base_hash,
+                expected_hash_serialized,
+                actual_hash_serialized,
+            };
+            *self.status.write() = failed;
+            self.persist_status(failed)?;
+        }
+        Ok(())
     }
 
     fn persist_status(&self, status: AssumeUtxoDiskStatus) -> Result<(), AssumeUtxoError> {
@@ -677,10 +735,13 @@ impl AssumeUtxoManager {
                 file.sync_all()?;
             }
             fs::rename(&tmp_path, &target_path)?;
-            if let Ok(dir_file) = fs::File::open(dir) {
-                let _ = dir_file.sync_all();
-            }
+            let directory = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir)?;
+            bitcoin_rs_storage::checkpoint::fs::sync_dir(&directory)?;
         }
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/assumeutxo_tests.rs"]
+mod tests;

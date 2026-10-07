@@ -425,7 +425,6 @@ impl NodeState {
                 chainstate.prune_authority(),
                 Arc::clone(&durable_tip_height),
                 storage.retention(),
-                Some(Arc::clone(&assumeutxo)),
             )?)
         } else {
             None

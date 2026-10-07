@@ -40,7 +40,7 @@ pub struct HeadersSyncParams {
 /// Mirrors Bitcoin Core's `AssumeutxoData` structure:
 /// - `height`: Block height of the snapshot base.
 /// - `block_hash`: Block hash of the snapshot base.
-/// - `hash_serialized`: Expected serialized UTXO commitment (`MuHash`) at `height`.
+/// - `hash_serialized`: Expected serialized UTXO commitment (`hash_serialized_3`) at `height`.
 /// - `chain_tx_count`: Cumulative transaction count through `height`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AssumeUtxoData {
@@ -48,7 +48,7 @@ pub struct AssumeUtxoData {
     pub height: u32,
     /// Block hash of the snapshot base.
     pub block_hash: Hash256,
-    /// Expected serialized UTXO commitment (`MuHash`) at `height`.
+    /// Expected serialized UTXO commitment (`hash_serialized_3`) at `height`.
     pub hash_serialized: Hash256,
     /// Cumulative transaction count through `height`.
     pub chain_tx_count: u64,
