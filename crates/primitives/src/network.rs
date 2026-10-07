@@ -35,6 +35,25 @@ pub struct HeadersSyncParams {
     pub redownload_buffer_size: usize,
 }
 
+/// Pinned assumeutxo parameters for a specific block height.
+///
+/// Mirrors Bitcoin Core's `AssumeutxoData` structure:
+/// - `height`: Block height of the snapshot base.
+/// - `block_hash`: Block hash of the snapshot base.
+/// - `hash_serialized`: Expected serialized UTXO commitment (`MuHash`) at `height`.
+/// - `chain_tx_count`: Cumulative transaction count through `height`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssumeUtxoData {
+    /// Block height of the snapshot base.
+    pub height: u32,
+    /// Block hash of the snapshot base.
+    pub block_hash: Hash256,
+    /// Expected serialized UTXO commitment (`MuHash`) at `height`.
+    pub hash_serialized: Hash256,
+    /// Cumulative transaction count through `height`.
+    pub chain_tx_count: u64,
+}
+
 // `nMinimumChainWork` and `chainTxData`, copied from `src/kernel/chainparams.cpp`
 // in the Bitcoin Core tree this workspace already links against — the one
 // vendored by `libbitcoinkernel-sys`, client version 31.99, whose chain-tx data
@@ -277,6 +296,31 @@ impl Network {
             Self::Mainnet => Some((MAINNET_ASSUME_VALID_HEIGHT, MAINNET_ASSUME_VALID_HASH)),
             Self::Testnet3 | Self::Testnet4 | Self::Signet | Self::Regtest => None,
         }
+    }
+
+    /// Returns the pinned assumeutxo parameters for this network.
+    #[must_use]
+    pub const fn assume_utxo_data(self) -> &'static [AssumeUtxoData] {
+        match self {
+            Self::Mainnet => &MAINNET_ASSUME_UTXO,
+            Self::Testnet4 => &TESTNET4_ASSUME_UTXO,
+            Self::Regtest => &REGTEST_ASSUME_UTXO,
+            Self::Testnet3 | Self::Signet => &[],
+        }
+    }
+
+    /// Finds pinned assumeutxo data matching `height`.
+    #[must_use]
+    pub fn assume_utxo_for_height(self, height: u32) -> Option<&'static AssumeUtxoData> {
+        self.assume_utxo_data().iter().find(|d| d.height == height)
+    }
+
+    /// Finds pinned assumeutxo data matching `block_hash`.
+    #[must_use]
+    pub fn assume_utxo_for_hash(self, block_hash: Hash256) -> Option<&'static AssumeUtxoData> {
+        self.assume_utxo_data()
+            .iter()
+            .find(|d| d.block_hash == block_hash)
     }
 
     /// Returns the default JSON-RPC port used by Bitcoin Core.
@@ -577,6 +621,80 @@ const TESTNET4_GENESIS: [u8; 261] = decode_compiled_hex(TESTNET4_GENESIS_HEX);
 const SIGNET_GENESIS: [u8; 285] = decode_compiled_hex(SIGNET_GENESIS_HEX);
 const REGTEST_GENESIS: [u8; 285] = decode_compiled_hex(REGTEST_GENESIS_HEX);
 
+const fn decode_compiled_hash_be(hex: &str) -> Hash256 {
+    let bytes = hex.as_bytes();
+    assert!(
+        bytes.len() == 64,
+        "compiled-in hash hex must be 64 characters"
+    );
+    let mut out = [0_u8; 32];
+    let mut index = 0;
+    while index < 32 {
+        let hi = hex_nibble(bytes[index * 2]);
+        let lo = hex_nibble(bytes[index * 2 + 1]);
+        out[31 - index] = (hi << 4) | lo;
+        index += 1;
+    }
+    Hash256::from_le_bytes(&out)
+}
+
+const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 2] = [
+    AssumeUtxoData {
+        height: 840_000,
+        block_hash: decode_compiled_hash_be(
+            "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "a2a5521b1b5ab65f67818e5e8eccabb7171a517f9e2382208f77687310768f96",
+        ),
+        chain_tx_count: 991_032_194,
+    },
+    AssumeUtxoData {
+        height: 880_000,
+        block_hash: decode_compiled_hash_be(
+            "000000000000000000010b17283c3c400507969a9c2afd1dcf2082ec5cca2880",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9",
+        ),
+        chain_tx_count: 1_145_604_538,
+    },
+];
+
+const TESTNET4_ASSUME_UTXO: [AssumeUtxoData; 1] = [AssumeUtxoData {
+    height: 90_000,
+    block_hash: decode_compiled_hash_be(
+        "0000000002ebe8bcda020e0dd6ccfbdfac531d2f6a81457191b99fc2df2dbe3b",
+    ),
+    hash_serialized: decode_compiled_hash_be(
+        "784fb5e98241de66fdd429f4392155c9e7db5c017148e66e8fdbc95746f8b9b5",
+    ),
+    chain_tx_count: 11_347_043,
+}];
+
+const REGTEST_ASSUME_UTXO: [AssumeUtxoData; 2] = [
+    AssumeUtxoData {
+        height: 110,
+        block_hash: decode_compiled_hash_be(
+            "135eec25a6fb277884e5824e7aa7d052c4868161c99a5122170b5266f86c273d",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "86e9a1205b418b16dde3a18a78c730e30137e28466bda5dbf6b33ab8fc05447c",
+        ),
+        chain_tx_count: 111,
+    },
+    AssumeUtxoData {
+        height: 200,
+        block_hash: decode_compiled_hash_be(
+            "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a",
+        ),
+        chain_tx_count: 201,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::{ChainTxData, Network};
@@ -805,6 +923,82 @@ mod tests {
                 assert!(time > 0 && tx_count > 0, "{network:?}");
             }
         }
+    }
+
+    #[test]
+    fn assume_utxo_data_round_trips_expected_values() {
+        let Some(mainnet_840k) = Network::Mainnet.assume_utxo_for_height(840_000) else {
+            panic!("840k missing");
+        };
+        assert_eq!(
+            mainnet_840k.block_hash.to_string(),
+            "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5"
+        );
+        assert_eq!(
+            mainnet_840k.hash_serialized.to_string(),
+            "a2a5521b1b5ab65f67818e5e8eccabb7171a517f9e2382208f77687310768f96"
+        );
+        assert_eq!(mainnet_840k.chain_tx_count, 991_032_194);
+        assert_eq!(
+            Network::Mainnet.assume_utxo_for_hash(mainnet_840k.block_hash),
+            Some(mainnet_840k)
+        );
+
+        let Some(mainnet_880k) = Network::Mainnet.assume_utxo_for_height(880_000) else {
+            panic!("880k missing");
+        };
+        assert_eq!(
+            mainnet_880k.block_hash.to_string(),
+            "000000000000000000010b17283c3c400507969a9c2afd1dcf2082ec5cca2880"
+        );
+        assert_eq!(
+            mainnet_880k.hash_serialized.to_string(),
+            "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9"
+        );
+        assert_eq!(mainnet_880k.chain_tx_count, 1_145_604_538);
+
+        let Some(testnet4_90k) = Network::Testnet4.assume_utxo_for_height(90_000) else {
+            panic!("90k missing");
+        };
+        assert_eq!(
+            testnet4_90k.block_hash.to_string(),
+            "0000000002ebe8bcda020e0dd6ccfbdfac531d2f6a81457191b99fc2df2dbe3b"
+        );
+        assert_eq!(
+            testnet4_90k.hash_serialized.to_string(),
+            "784fb5e98241de66fdd429f4392155c9e7db5c017148e66e8fdbc95746f8b9b5"
+        );
+        assert_eq!(testnet4_90k.chain_tx_count, 11_347_043);
+
+        let Some(regtest_110) = Network::Regtest.assume_utxo_for_height(110) else {
+            panic!("110 missing");
+        };
+        assert_eq!(
+            regtest_110.block_hash.to_string(),
+            "135eec25a6fb277884e5824e7aa7d052c4868161c99a5122170b5266f86c273d"
+        );
+        assert_eq!(
+            regtest_110.hash_serialized.to_string(),
+            "86e9a1205b418b16dde3a18a78c730e30137e28466bda5dbf6b33ab8fc05447c"
+        );
+        assert_eq!(regtest_110.chain_tx_count, 111);
+
+        let Some(regtest_200) = Network::Regtest.assume_utxo_for_height(200) else {
+            panic!("200 missing");
+        };
+        assert_eq!(
+            regtest_200.block_hash.to_string(),
+            "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9"
+        );
+        assert_eq!(
+            regtest_200.hash_serialized.to_string(),
+            "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a"
+        );
+        assert_eq!(regtest_200.chain_tx_count, 201);
+
+        assert!(Network::Testnet3.assume_utxo_data().is_empty());
+        assert!(Network::Signet.assume_utxo_data().is_empty());
+        assert_eq!(Network::Mainnet.assume_utxo_for_height(12345), None);
     }
 }
 

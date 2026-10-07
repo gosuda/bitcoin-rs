@@ -357,6 +357,48 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   tests, which build fixture sets through
   `BlockChanges` + `commit_block_changes` on `fixture_set()`.
 
+### `ARCH-07b`: AssumeUTXO chainstate roles and single active authority
+
+- **Chainstate roles**:
+  `bitcoin_rs_chainstate::ChainstateRole` explicitly defines the lifecycle state
+  of every instantiated chainstate:
+  1. `Ordinary`: standard fully validated chainstate.
+  2. `AssumedActive`: snapshot-loaded chainstate actively driving the node tip,
+     retaining its snapshot base height and block hash.
+  3. `Historical`: background chainstate validating from genesis up to the snapshot
+     base height.
+- **Single active authority invariant**:
+  At all times, exactly one chainstate acts as the authoritative active chainstate
+  (`Ordinary` or `AssumedActive`). Only the active chainstate drives mempool admission,
+  mining block template assembly, RPC/ZMQ chain effects, indexer updates, and pruning
+  execution. The historical chainstate runs background validation using the consensus
+  connect path (`Chainstate::connect`), but its events are detached and never routed to
+  mempool, mining, RPC, ZMQ, or indexers.
+- **Snapshot activation and pinned metadata**:
+  Activation of an AssumeUTXO snapshot is coordinated exclusively by `AssumeUtxoManager`.
+  Snapshot height, block hash, serialized UTXO commitment (`MuHash`), and transaction
+  count must match hardcoded, pinned network metadata (`AssumeUtxoData`). Activating an
+  untrusted or mismatched snapshot fails immediately without modifying chainstate.
+- **Background validation and convergence**:
+  The historical chainstate validates blocks up to the snapshot base height. It refuses
+  to connect blocks past the base height or blocks that diverge from the expected target
+  hash (`ApplyError::ConnectPastHistoricalTarget`). When validation reaches the base height,
+  the accumulated `MuHash` is compared against the expected snapshot commitment:
+  - If valid, the active chainstate transitions from `AssumedActive` to `Ordinary`, the
+    historical chainstate is retired, and disk status is marked `Finalized`.
+  - If invalid, the manager persists `AssumeUtxoDiskStatus::Failed`, marks the active
+    chainstate permanently closed for recovery (`Chainstate::close_for_recovery`), and
+    refuses subsequent restarts to protect operator data.
+- **Reorg and pruning constraints**:
+  - Reorgs on the `AssumedActive` chainstate cannot disconnect blocks at or below the
+    snapshot base height (`ApplyError::DisconnectBelowSnapshotBase`).
+  - Blocks at or below the snapshot base height are protected from pruning while
+    historical validation is in progress (`AssumeUtxoManager::can_prune_height`).
+- **Operator observability**:
+  `AssumeUtxoManager::chainstates_summary` provides a unified read projection of both
+  active and background chainstates, reporting roles, tips, validation progress, and
+  commitments without exposing internal lock primitives.
+
 ### `ARCH-08`: Durable pruning and reorg retention
 
 - Transaction-cache pruning must not remove transactions from a block above

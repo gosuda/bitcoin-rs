@@ -114,6 +114,8 @@ pub struct NodeState {
     sync: Arc<crate::BlockSync>,
     /// Process-wide rollback-evidence reporter (warning snapshot + marker).
     recovery_reporter: Arc<storage::RecoveryReporter>,
+    /// `AssumeUTXO` coordinator managing chainstate roles.
+    assumeutxo: Arc<bitcoin_rs_chainstate::AssumeUtxoManager>,
 }
 
 impl Drop for NodeState {
@@ -356,6 +358,18 @@ impl NodeState {
     /// Starts chainstate journal and retention maintenance.
     pub fn start_chainstate_maintenance(&self) -> Result<std::thread::JoinHandle<()>> {
         self.chainstate.start_maintenance()
+    }
+
+    /// Returns the `AssumeUTXO` manager.
+    #[must_use]
+    pub fn assumeutxo_manager(&self) -> Arc<bitcoin_rs_chainstate::AssumeUtxoManager> {
+        Arc::clone(&self.assumeutxo)
+    }
+
+    /// Produces a summary of active and background chainstates for operator reporting.
+    #[must_use]
+    pub fn chainstates_summary(&self) -> bitcoin_rs_chainstate::ChainstatesSummary {
+        self.assumeutxo.chainstates_summary()
     }
 
     /// Returns the node-owned complete transaction-index query adapter.

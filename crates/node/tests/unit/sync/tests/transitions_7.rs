@@ -280,6 +280,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             capture_rawtx: false,
             capture_block_bytes: true,
             retention: bitcoin_rs_storage::MandatoryRetention::in_memory(),
+            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
     handles.apply_block(&genesis, None)?;
     for block in &blocks {

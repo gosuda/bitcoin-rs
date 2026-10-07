@@ -69,6 +69,25 @@ pub(super) fn apply_block_admitted<'b>(
         }
     };
 
+    if let crate::assumeutxo::ChainstateRole::Historical {
+        base_height,
+        base_hash,
+    } = handles.role()
+    {
+        if height > base_height {
+            return Err(ApplyError::ConnectPastHistoricalTarget {
+                height,
+                base_height,
+            });
+        }
+        if height == base_height && block_hash != base_hash {
+            return Err(ApplyError::PrevHashMismatch {
+                tip: base_hash,
+                prev: block_hash,
+            });
+        }
+    }
+
     // Contextual header rules, shared with header admission: the difficulty
     // continuity, median-time-past, BIP94 timewarp, future-drift, and version
     // floors all come from the one gate, so a block whose header never passed

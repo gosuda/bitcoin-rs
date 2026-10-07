@@ -155,7 +155,11 @@ fn enforce_corpus_verdicts(target: &str) {
 
     let mut observed: BTreeMap<String, String> = BTreeMap::new();
     for (path, bytes) in &seeds {
-        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+        let name = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(path)
+            .to_owned();
         let verdict = match target {
             "tx_validate" => decode_verdict::<NativeTx>(bytes),
             "block_validate" => decode_verdict::<NativeBlock>(bytes),

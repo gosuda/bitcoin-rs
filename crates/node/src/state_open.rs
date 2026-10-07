@@ -226,6 +226,7 @@ impl NodeState {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
+            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
@@ -428,6 +429,14 @@ impl NodeState {
             total_cache_bytes = cache_budget,
             "opened storage backend with effective cache capacities"
         );
+        let assumeutxo = Arc::new(
+            bitcoin_rs_chainstate::AssumeUtxoManager::open(
+                config.network,
+                Arc::clone(&chainstate),
+                Some(config.data_dir.clone()),
+            )
+            .map_err(|err| anyhow::anyhow!("assumeutxo open failed: {err}"))?,
+        );
         Ok(Self {
             config,
             #[cfg(test)]
@@ -447,6 +456,7 @@ impl NodeState {
             followers,
             sync,
             recovery_reporter,
+            assumeutxo,
         })
     }
 }

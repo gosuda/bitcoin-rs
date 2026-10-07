@@ -34,6 +34,12 @@ mod window;
 pub use prepare::bytes_are_block;
 pub use window::classify_apply_error;
 
+pub mod assumeutxo;
+pub use assumeutxo::{
+    ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager,
+    ChainstateRole, ChainstatesSummary, HistoricalChainstateSummary,
+};
+
 mod checkpoint;
 use checkpoint::CheckpointError;
 /// Typed chainstate mutation failures.
@@ -434,6 +440,8 @@ pub struct Chainstate {
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
     /// Process-wide initial-block-download latch owned by the chainstate.
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    /// Operational role of this chainstate instance.
+    pub(crate) role: Arc<RwLock<ChainstateRole>>,
 }
 
 /// Construction inputs for one authoritative chainstate service.
@@ -476,6 +484,8 @@ pub struct ChainstateParts {
     pub capture_block_bytes: bool,
     /// The mandatory retained-history capability storage/pruning granted.
     pub retention: bitcoin_rs_storage::MandatoryRetention,
+    /// Operational role of this chainstate instance.
+    pub role: ChainstateRole,
 }
 
 /// Held while new chain mutations are blocked.
@@ -595,7 +605,19 @@ impl Chainstate {
             capture_block_bytes: parts.capture_block_bytes,
             retention: parts.retention,
             ibd,
+            role: Arc::new(RwLock::new(parts.role)),
         }
+    }
+
+    /// Returns the operational role of this chainstate instance.
+    #[must_use]
+    pub fn role(&self) -> ChainstateRole {
+        *self.role.read()
+    }
+
+    /// Sets the operational role of this chainstate instance.
+    pub fn set_role(&self, role: ChainstateRole) {
+        *self.role.write() = role;
     }
 
     /// Permanently closes chain mutation and asks the process to shut down.
@@ -916,6 +938,7 @@ impl Chainstate {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: bitcoin_rs_storage::MandatoryRetention::in_memory(),
+            role: ChainstateRole::Ordinary,
         })
     }
 
@@ -1092,6 +1115,7 @@ impl Chainstate {
 }
 
 /// Everything a disconnect can refuse, decided before anything is mutated.
+#[derive(Debug)]
 struct DisconnectPlan {
     /// Parent tip with the cumulative count its tree node carries, which the
     /// disconnect commits and publishes unchanged.
@@ -1460,3 +1484,7 @@ mod checkpoint_debt_tests;
 #[cfg(test)]
 #[path = "../tests/unit/recovery_marker_order_tests.rs"]
 mod recovery_marker_order_tests;
+
+#[cfg(test)]
+#[path = "../tests/unit/assumeutxo_tests.rs"]
+mod assumeutxo_tests;

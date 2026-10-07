@@ -621,7 +621,9 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         | ApplyError::DisconnectOffDurableHead { .. }
         | ApplyError::DurableHeadGapUnrecoverable { .. }
         | ApplyError::RecoveryPublication(_)
-        | ApplyError::CoinStatsRewind(_) => {
+        | ApplyError::CoinStatsRewind(_)
+        | ApplyError::DisconnectBelowSnapshotBase { .. }
+        | ApplyError::ConnectPastHistoricalTarget { .. } => {
             return Err(MiningControlError::Failed(CompactString::from(
                 error.to_string(),
             )));

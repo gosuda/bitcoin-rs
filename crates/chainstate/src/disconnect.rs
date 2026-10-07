@@ -30,6 +30,15 @@ pub(super) fn plan_disconnect(
         });
     }
 
+    if let crate::assumeutxo::ChainstateRole::AssumedActive { base_height, .. } = handles.role() {
+        if height <= base_height {
+            return Err(ApplyError::DisconnectBelowSnapshotBase {
+                height,
+                base_height,
+            });
+        }
+    }
+
     // The head must already certify this block: a disconnect advances the
     // durable head from a known commit point, and any other tip is lineage
     // divergence that refusing preserves untouched.

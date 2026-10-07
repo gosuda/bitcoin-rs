@@ -144,6 +144,26 @@ pub enum ApplyError {
     /// Rewinding the block-level coinstats failed.
     #[error("coinstats rewind: {0}")]
     CoinStatsRewind(#[source] bitcoin_rs_utxo::stats::CoinStatsRewindError),
+    /// Disconnecting at or below the `AssumeUTXO` snapshot base is prohibited.
+    #[error(
+        "cannot disconnect block at height {height} at or below assumeutxo base height {base_height}"
+    )]
+    DisconnectBelowSnapshotBase {
+        /// Height of the block being disconnected.
+        height: u32,
+        /// Snapshot base height.
+        base_height: u32,
+    },
+    /// Historical chainstate cannot connect blocks past the `AssumeUTXO` snapshot base.
+    #[error(
+        "historical chainstate cannot connect block at height {height} past target height {base_height}"
+    )]
+    ConnectPastHistoricalTarget {
+        /// Height of the block attempting connection.
+        height: u32,
+        /// Target base height.
+        base_height: u32,
+    },
 }
 
 /// The outcome of a refused or failed block disconnect.
