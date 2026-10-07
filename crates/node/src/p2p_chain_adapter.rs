@@ -171,26 +171,7 @@ impl SyncChain for NodeSyncChain {
     }
 
     fn bootstrap_genesis(&self) {
-        if self.handles.applied_tip_snapshot().is_some() {
-            return;
-        }
-
-        let genesis = self.handles.network().genesis_block();
-        match self.followers.apply_connect(&self.handles, &genesis) {
-            // The header-tip cell is the chainstate's to publish.
-            Ok(outcome) => self.handles.publish_genesis_tip(outcome.tip),
-            Err(crate::chain_effects::ConnectMutationError::CommittedButSettlementFailed {
-                outcome,
-                source,
-            }) => {
-                self.handles.publish_genesis_tip(outcome.tip);
-                tracing::error!(%source, "block sync: genesis committed but settlement failed");
-            }
-            // Genesis apply failed before an applied tip could be published.
-            Err(crate::chain_effects::ConnectMutationError::NotCommitted(error)) => {
-                tracing::warn!(%error, "block sync: failed to bootstrap genesis");
-            }
-        }
+        crate::chain_effects::bootstrap_genesis(&self.handles, &self.followers);
     }
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {

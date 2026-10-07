@@ -368,6 +368,34 @@ impl ChainFollowers {
     }
 }
 
+/// Applies genesis when the applied-tip slot is still empty and publishes
+/// the header tip from its outcome.
+///
+/// A fresh chainstate has no applied tip until genesis commits; every
+/// caller that can outrun the sync loop's first tick (startup before the
+/// RPC listener binds, the sync tick itself) funnels through this one
+/// owner. Idempotent — a populated applied tip returns immediately.
+pub(crate) fn bootstrap_genesis(
+    handles: &bitcoin_rs_chainstate::Chainstate,
+    followers: &ChainFollowers,
+) {
+    if handles.applied_tip_snapshot().is_some() {
+        return;
+    }
+    let genesis = handles.network().genesis_block();
+    match followers.apply_connect(handles, &genesis) {
+        // The header-tip cell is the chainstate's to publish.
+        Ok(outcome) => handles.publish_genesis_tip(outcome.tip),
+        Err(ConnectMutationError::CommittedButSettlementFailed { outcome, source }) => {
+            handles.publish_genesis_tip(outcome.tip);
+            tracing::error!(%source, "genesis committed but settlement failed");
+        }
+        Err(ConnectMutationError::NotCommitted(error)) => {
+            tracing::warn!(%error, "failed to bootstrap genesis");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
