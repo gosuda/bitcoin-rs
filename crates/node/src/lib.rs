@@ -33,6 +33,10 @@ pub mod reorg;
 /// Top-level node runner.
 mod run;
 /// Signal handling.
+#[cfg(not(windows))]
+mod signal;
+#[cfg(windows)]
+#[path = "signal_windows.rs"]
 mod signal;
 /// Internal node composition root.
 #[cfg(not(feature = "test-seam"))]
@@ -46,8 +50,6 @@ mod state;
 #[doc(hidden)]
 pub mod state;
 mod storage_backend;
-/// Custody-grade data-directory storage-footprint evidence.
-mod storage_footprint;
 /// Adapter between the P2P block-download executor and Chainstate.
 #[path = "p2p_chain_adapter.rs"]
 pub mod sync;
@@ -85,10 +87,6 @@ pub use embed::{Node, NodeError};
 pub use mining::MiningCoordinator;
 
 pub use run::run;
-
-pub use storage_footprint::{
-    MeasureStorageRequest, measure_storage_footprint, storage_footprint_json,
-};
 
 pub use sync::BlockSync;
 

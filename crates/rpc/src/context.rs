@@ -1,18 +1,19 @@
 use alloc::sync::Arc;
+#[cfg(any(test, feature = "test-seam"))]
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
     BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot, softfork_state,
 };
-use bitcoin_rs_mempool::{
-    AdmissionChain, ChainAdmissionSnapshot, Mempool, MempoolGateway, MempoolLimits,
-    MempoolObserver, PrevoutMeta,
-};
+use bitcoin_rs_mempool::{AdmissionChain, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta};
+#[cfg(any(test, feature = "test-seam"))]
+use bitcoin_rs_mempool::{Mempool, MempoolLimits, MempoolObserver};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
     BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, consensus_bytes, unix_time_secs,
 };
 
 use bitcoin::hex::DisplayHex as _;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_consensus::ValidationEngine;
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, Script, Txid};
@@ -243,7 +244,7 @@ pub struct ChainHandles {
     /// Excludes authoritative chain transitions while a read runs.
     ///
     /// Production supplies the role minted alongside chainstate's mutation
-    /// role. [`Self::with_transition`] accepts a caller-supplied role but cannot
+    /// role. `Self::with_transition` accepts a caller-supplied role but cannot
     /// verify its provenance; callers can mint an unrelated domain through
     /// [`bitcoin_rs_chain::TransitionDomain::new`].
     pub chain_transition: bitcoin_rs_chain::StableRead,
@@ -428,6 +429,7 @@ impl fmt::Debug for Context {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for ChainHandles {
     /// Builds the empty synthetic chain world used by tests.
     ///
@@ -442,6 +444,7 @@ impl Default for ChainHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl ChainHandles {
     /// Builds the synthetic chain world over a caller-supplied transition role.
     ///
@@ -491,6 +494,7 @@ impl ChainHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for MempoolHandles {
     fn default() -> Self {
         Self {
@@ -503,6 +507,7 @@ impl Default for MempoolHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for NetworkHandles {
     fn default() -> Self {
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
@@ -517,6 +522,7 @@ impl Default for NetworkHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for ContextHandles {
     /// Builds the empty synthetic capability set used by tests. Production
     /// wiring supplies every capability it owns.
@@ -533,6 +539,7 @@ impl Default for ContextHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for Context {
     fn default() -> Self {
         Self::new()
@@ -544,6 +551,7 @@ impl Context {
     /// convenience; production composes a complete [`ContextHandles`]
     /// through [`Self::from_handles`].
     #[must_use]
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn new() -> Self {
         Self::from_handles(ContextHandles::default())
     }
@@ -554,6 +562,7 @@ impl Context {
     /// observer instead of `None`. Test-only: production wiring constructs
     /// the gateway through `NodeState::open`.
     #[must_use]
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn new_with_mempool_observer(observer: Arc<dyn MempoolObserver>) -> Self {
         Self::from_handles(ContextHandles {
             mempool: MempoolHandles {
@@ -577,7 +586,7 @@ impl Context {
     /// post-hoc attachment, which only test fixtures use.
     /// INVARIANT: production wiring supplies the chain owner's barrier
     /// (e.g. `chainstate.transition_barrier()`); the synthetic
-    /// [`ContextHandles::default`] path builds a private barrier for tests.
+    /// `ContextHandles::default` path builds a private barrier for tests.
     #[must_use]
     pub fn from_handles(handles: ContextHandles) -> Self {
         let ContextHandles {

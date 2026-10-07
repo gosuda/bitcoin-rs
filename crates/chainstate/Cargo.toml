@@ -22,7 +22,7 @@ default = []
 # follower-free mutation. Any downstream can enable this feature; the
 # production-build guarantee is in-workspace, where only dev-dependencies
 # select it and the g17 gate fails if it leaks into a shipped target.
-test-seam = []
+test-seam = ["bitcoin-rs-storage/test-seam"]
 kernel = ["bitcoin-rs-consensus/kernel"]
 rocksdb = [
     "bitcoin-rs-storage/rocksdb",
@@ -55,12 +55,12 @@ metrics.workspace = true
 parking_lot.workspace = true
 quanta.workspace = true
 rayon.workspace = true
-rustix.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+bitcoin-rs-chainstate = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 serde_json.workspace = true
 tempfile.workspace = true

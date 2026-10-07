@@ -261,6 +261,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "bitcoin-rs-chain",
+ "bitcoin-rs-chainstate",
  "bitcoin-rs-consensus",
  "bitcoin-rs-primitives",
  "bitcoin-rs-script",
@@ -274,7 +275,6 @@ dependencies = [
  "parking_lot",
  "quanta",
  "rayon",
- "rustix",
  "serde_json",
  "sha2",
  "tempfile",
@@ -477,6 +477,7 @@ dependencies = [
  "bitcoin-rs-node",
  "bitcoin-rs-p2p",
  "bitcoin-rs-primitives",
+ "bitcoin-rs-rpc",
  "bitcoin-rs-script",
  "bitcoin-rs-utxo",
  "compact_str",
@@ -520,6 +521,7 @@ version = "0.11.0"
 dependencies = [
  "arc-swap",
  "bitcoin-rs-primitives",
+ "bitcoin-rs-storage",
  "bytes",
  "cap-fs-ext",
  "cap-std",
@@ -538,6 +540,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "bitcoin-rs-storage-footprint"
+version = "0.11.0"
+dependencies = [
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -71,36 +71,9 @@ impl Drop for ShutdownHandler {
     }
 }
 
-/// Per-thread install/close counters for the lifecycle regressions.
-///
-/// Installs and closes both happen on the lifecycle owner's thread, so the
-/// counters measure exactly the handler a test installed — even while other
-/// tests run their own lifecycles concurrently.
 #[cfg(test)]
-pub(crate) mod testing {
-    use core::cell::Cell;
-
-    thread_local! {
-        static INSTALLED: Cell<usize> = const { Cell::new(0) };
-        static CLOSED: Cell<usize> = const { Cell::new(0) };
-    }
-
-    pub(crate) fn note_installed() {
-        INSTALLED.with(|count| count.set(count.get() + 1));
-    }
-
-    pub(crate) fn note_closed() {
-        CLOSED.with(|count| count.set(count.get() + 1));
-    }
-
-    pub(crate) fn installed_total() -> usize {
-        INSTALLED.with(Cell::get)
-    }
-
-    pub(crate) fn closed_total() -> usize {
-        CLOSED.with(Cell::get)
-    }
-}
+#[path = "../tests/unit/signal_counters.rs"]
+pub(crate) mod testing;
 
 #[cfg(test)]
 mod tests {

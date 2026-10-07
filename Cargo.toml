@@ -17,6 +17,7 @@ members = [
     "crates/node",
     "bin/bitcoin-rs",
     "e2e",
+    "tools/storage-footprint",
 ]
 
 [workspace.package]

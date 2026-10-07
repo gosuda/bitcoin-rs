@@ -67,7 +67,7 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
         "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
         | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
         RPC_CRATE => 3,
-        NODE_CRATE | BIN_CRATE | "bitcoin-rs-e2e" => 4,
+        NODE_CRATE | BIN_CRATE | "bitcoin-rs-e2e" | "bitcoin-rs-storage-footprint" => 4,
         other => panic!("unclassified workspace crate `{other}`: add it to the layer table"),
     }
 }

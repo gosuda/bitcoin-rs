@@ -51,20 +51,19 @@ Clamping bounds: budgets land in
 `[16 MiB, 1 TiB]`, and the node logs the effective per-namespace capacities at
 startup.
 
-## Storage footprint
+## Test isolation
 
-`crates/storage/src/footprint.rs` owns the two measurement ledgers used by
-`bitcoin-rs --measure-storage`. The logical ledger sums serialized key and
-value bytes per column family. The physical ledger walks an opened
-data-directory descriptor, counts allocated blocks, rejects symlinks and
-mount crossings, and deduplicates hard links. The ledgers are independent
-and must not be summed; the physical total is the data-directory budget.
-See [`docs/contracts/storage-footprint.md`](../../docs/contracts/storage-footprint.md).
+Persistence fault slots and injection APIs are compiled only for tests or the
+explicit, non-default `test-seam` feature. Real-backend durability tests opt in
+through dev-dependencies; production writes retain their ordinary durability
+barriers. Storage measurement lives separately in `tools/storage-footprint`
+and has no dependency on this crate.
 
 ## Features
 
 - `fjall` (default): enables the fjall-backed `FjallStore`.
 - `rocksdb`: enables the Rust-RocksDB-backed `RocksDbStore`.
+- `test-seam`: exposes fixture persistence injection; not a production default.
 - `redb`: enables the redb-backed `RedbStore` and the `open_redb_tx_index_store` transaction-index factory.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the

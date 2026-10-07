@@ -155,6 +155,7 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     pub(super) fn truncate_after(&self, cursor: ForkCursor) -> Result<(), JournalWriterError> {
+        #[cfg(any(test, feature = "test-seam"))]
         self.fail_rewind_truncate()?;
         let name = segment_name(cursor.generation);
         match self

@@ -774,14 +774,6 @@ fn write_record(writer: &mut impl io::Write, header: &[u8], body: &[u8]) -> io::
     Ok(())
 }
 
-/// Complete framed record count and byte length in an already-open block file.
-///
-/// Does not truncate an incomplete tail.
-pub(crate) fn complete_framed_stats(file: &mut File) -> Result<(u64, u64), StorageError> {
-    let file_len = file.metadata()?.len();
-    framed_stats_between(file, 0, file_len)
-}
-
 fn validate_committed_extent(blocks_dir: &Path, extent: BodyExtent) -> Result<(), StorageError> {
     let path = block_file_path(blocks_dir, extent.file_no);
     let corrupt = || {
@@ -880,12 +872,6 @@ fn highest_block_file_number(blocks_dir: &Path) -> Result<Option<u32>, StorageEr
         highest = Some(highest.map_or(file_no, |current: u32| current.max(file_no)));
     }
     Ok(highest)
-}
-
-/// Returns whether `name` is a `blkNNNNN.dat` block-body file.
-#[must_use]
-pub(crate) fn is_block_file_name(name: &str) -> bool {
-    parse_block_file_name(name).is_some()
 }
 
 fn parse_block_file_name(name: &str) -> Option<u32> {

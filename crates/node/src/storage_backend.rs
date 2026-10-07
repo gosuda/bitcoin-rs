@@ -36,20 +36,6 @@ where
     open_generic("chainstate", backend, path, cache_bytes, consumer)
 }
 
-/// Opens a generic store view for custody-grade logical inspection. The redb
-/// txindex keeps using its specialized runtime representation; this view is
-/// read for the backend-neutral column-family ledger only.
-pub(crate) fn open_store_inspection<C>(
-    backend: StorageBackend,
-    path: &Path,
-    consumer: C,
-) -> Result<C::Output, C::Error>
-where
-    C: StoreConsumer,
-{
-    open_generic("inspection", backend, path, None, consumer)
-}
-
 fn open_generic<C>(
     namespace: &str,
     backend: StorageBackend,

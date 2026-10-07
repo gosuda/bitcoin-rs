@@ -29,6 +29,7 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     pub(super) fn write_head_atomic(&self, marker: &HeadMarker) -> Result<(), JournalWriterError> {
+        #[cfg(any(test, feature = "test-seam"))]
         self.fail_head_temp_write()?;
         {
             let mut options = cap_std::fs::OpenOptions::new();
@@ -36,11 +37,14 @@ impl<S: KvStore> JournalWriter<S> {
             let mut tmp = self.dir.open_with("head.json.tmp", &options)?;
             tmp.set_len(0)?;
             tmp.write_all(&marker.serialize()?)?;
+            #[cfg(any(test, feature = "test-seam"))]
             self.fail_head_temp_sync()?;
             tmp.sync_all()?;
         }
+        #[cfg(any(test, feature = "test-seam"))]
         self.fail_head_rename()?;
         self.dir.rename("head.json.tmp", &self.dir, "head.json")?;
+        #[cfg(any(test, feature = "test-seam"))]
         self.fail_head_dir_sync()?;
         crate::checkpoint::fs::sync_dir(&self.dir)?;
         self.record_size_metric();
@@ -93,6 +97,7 @@ impl<S: KvStore> JournalWriter<S> {
             },
         )?;
 
+        #[cfg(any(test, feature = "test-seam"))]
         self.fail_storage_flush()?;
         let flush_started = Instant::now();
         let flush_result = self
@@ -103,6 +108,7 @@ impl<S: KvStore> JournalWriter<S> {
             .record(flush_started.elapsed().as_secs_f64());
         flush_result?;
 
+        #[cfg(any(test, feature = "test-seam"))]
         self.fail_segment_sync()?;
         let name = segment_name(self.segment_gen);
         let file = self
