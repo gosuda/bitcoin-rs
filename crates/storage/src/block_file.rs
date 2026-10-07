@@ -460,7 +460,9 @@ impl FlatFileBlockStore {
             ));
         }
         let blocks_dir = data_dir.join(BLOCK_FILE_DIRECTORY);
+        ensure_not_symlink(&blocks_dir)?;
         fs::create_dir_all(&blocks_dir)?;
+        ensure_not_symlink(&blocks_dir)?;
         reject_symlinks_in_dir(&blocks_dir)?;
         // Admit authority before opening any file with create/write permissions.
         // Even when a checkpoint already matches the head, these bytes must
