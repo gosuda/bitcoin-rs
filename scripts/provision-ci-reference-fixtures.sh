@@ -20,14 +20,21 @@ for candidate in python3.13 python3.12 python3.11 python3; do
 done
 [[ -n "$PYTHON" ]] || { echo "a Python >=3.11 interpreter (tomllib) is required" >&2; exit 1; }
 
-# Exact-match digest gate; macOS /sbin/sha256sum has no --check --strict.
+# Exact-match digest gate; stock macOS ships shasum, not sha256sum.
 sha256_check() {
   local got
-  got="$(sha256sum < "$2" | awk '{print $1}')"
+  if command -v sha256sum >/dev/null 2>&1; then
+    got="$(sha256sum < "$2" | awk '{print $1}')"
+  else
+    got="$(shasum -a 256 < "$2" | awk '{print $1}')"
+  fi
   [[ "$got" == "$1" ]] || { printf 'sha256 mismatch for %s\n' "$2" >&2; exit 1; }
 }
 
-mapfile -t identity < <("$PYTHON" - "$mode" <<'PY'
+# While-read keeps this working under the bash 3.2 that still ships with
+# macOS (no mapfile).
+identity=()
+while IFS= read -r line; do identity+=("$line"); done < <("$PYTHON" - "$mode" <<'PY'
 from pathlib import Path
 import platform
 import re
@@ -146,6 +153,6 @@ else
   mkdir -p "$(dirname "$install")"
   unzip -q "$download" -d "$(dirname "$install")"
   sha256_check "$binary_hash" "$install/lib/apalache.jar"
-  APALACHE_HOME="$install" python3 scripts/check_models.py --check-only
+  APALACHE_HOME="$install" "$PYTHON" scripts/check_models.py --check-only
 fi
 printf 'Provisioned %s\n' "$binary"

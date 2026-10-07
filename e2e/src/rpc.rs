@@ -229,6 +229,7 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
     stream.set_nonblocking(true).map_err(Error::Io)?;
     let mut pending = wire.as_slice();
     while !pending.is_empty() {
+        remaining()?;
         match stream.write(pending) {
             Ok(0) => return Err(Error::Protocol("closed HTTP writer".into())),
             Ok(written) => {
