@@ -2,7 +2,8 @@
 
 The archive digest comes from the same resolve_reference_identity.py selector
 the installer runs, so the stamp assertion tracks the manifest with no second
-owner. Requires a tomllib-capable interpreter (Python >=3.11).
+owner. Requires Python >=3.6 (the selector carries its own manifest reader
+when tomllib is absent).
 """
 
 import os

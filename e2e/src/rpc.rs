@@ -244,24 +244,30 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
             Err(error) => return Err(Error::Io(error)),
         }
     }
-    // Blocking reads honor SO_RCVTIMEO on both supported platforms.
-    stream.set_nonblocking(false).map_err(Error::Io)?;
+    // Reads stay nonblocking too: SO_RCVTIMEO is best-effort on macOS just
+    // like SO_SNDTIMEO, so the deadline must interleave between reads.
     let mut bytes = Vec::new();
     let mut chunk = [0_u8; 8192];
     loop {
-        stream.set_read_timeout(Some(remaining()?))?;
-        let count = stream.read(&mut chunk)?;
-        if count == 0 {
-            break;
+        remaining()?;
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                if bytes.len().saturating_add(count) > MAX_BODY {
+                    return Err(Error::Protocol("RPC response bound exceeded".into()));
+                }
+                bytes.extend_from_slice(
+                    chunk
+                        .get(..count)
+                        .ok_or_else(|| Error::Protocol("invalid read size".into()))?,
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(Error::Io(error)),
         }
-        if bytes.len().saturating_add(count) > MAX_BODY {
-            return Err(Error::Protocol("RPC response bound exceeded".into()));
-        }
-        bytes.extend_from_slice(
-            chunk
-                .get(..count)
-                .ok_or_else(|| Error::Protocol("invalid read size".into()))?,
-        );
     }
     let response = parse_reply(&bytes)?;
     remaining()?;
