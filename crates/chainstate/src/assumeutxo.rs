@@ -365,6 +365,7 @@ impl AssumeUtxoManager {
             AssumeUtxoDiskStatus::Uninitialized
         };
 
+        let mut historical = None;
         match loaded_status {
             AssumeUtxoDiskStatus::Failed {
                 base_height,
@@ -382,12 +383,32 @@ impl AssumeUtxoManager {
             AssumeUtxoDiskStatus::Validating {
                 base_height,
                 base_hash,
+                historical_height,
+                historical_hash,
                 ..
             } => {
                 active_chainstate.set_role(ChainstateRole::AssumedActive {
                     base_height,
                     base_hash,
                 });
+                let hist_cs =
+                    active_chainstate.create_historical_counterpart(base_height, base_hash);
+                if historical_height > 0 {
+                    let node_id = hist_cs
+                        .block_tree
+                        .read()
+                        .lookup(historical_hash)
+                        .unwrap_or_else(|| bitcoin_rs_chain::NodeId::new(historical_height));
+                    let tip = bitcoin_rs_chain::TipSnapshot {
+                        tip_id: node_id,
+                        height: historical_height,
+                        chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+                        hash: historical_hash,
+                        chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+                    };
+                    hist_cs.applied_tip.store(Some(Arc::new(tip)));
+                }
+                historical = Some(hist_cs);
             }
             AssumeUtxoDiskStatus::Finalized { .. } | AssumeUtxoDiskStatus::Uninitialized => {
                 active_chainstate.set_role(ChainstateRole::Ordinary);
@@ -397,15 +418,14 @@ impl AssumeUtxoManager {
         Ok(Self {
             network,
             active_chainstate,
-            historical_chainstate: Arc::new(RwLock::new(None)),
+            historical_chainstate: Arc::new(RwLock::new(historical)),
             status: Arc::new(RwLock::new(loaded_status)),
             data_dir,
         })
     }
 
-    /// Activates a verified `AssumeUTXO` snapshot, setting the active chainstate to
-    /// [`ChainstateRole::AssumedActive`] and configuring the background historical
-    /// validator with [`ChainstateRole::Historical`].
+    /// Activates a verified `AssumeUTXO` snapshot, installing snapshot UTXO and tip onto the
+    /// active chainstate, and configuring the isolated background historical validator.
     ///
     /// # Errors
     ///
@@ -414,7 +434,6 @@ impl AssumeUtxoManager {
         &self,
         snapshot_load: &SnapshotLoad,
         calculated_muhash: Hash256,
-        historical_chainstate: &Arc<Chainstate>,
     ) -> Result<(), AssumeUtxoError> {
         if matches!(*self.status.read(), AssumeUtxoDiskStatus::Validating { .. }) {
             return Err(AssumeUtxoError::AlreadyActive);
@@ -441,19 +460,6 @@ impl AssumeUtxoManager {
             });
         }
 
-        self.active_chainstate
-            .set_role(ChainstateRole::AssumedActive {
-                base_height: pinned.height,
-                base_hash: pinned.block_hash,
-            });
-
-        historical_chainstate.set_role(ChainstateRole::Historical {
-            base_height: pinned.height,
-            base_hash: pinned.block_hash,
-        });
-
-        *self.historical_chainstate.write() = Some(Arc::clone(historical_chainstate));
-
         let genesis_hash = self.network.genesis_block_hash();
         let new_status = AssumeUtxoDiskStatus::Validating {
             base_height: pinned.height,
@@ -464,8 +470,24 @@ impl AssumeUtxoManager {
             historical_hash: genesis_hash,
         };
 
-        *self.status.write() = new_status;
+        // 1. Transactionally persist status to disk FIRST
         self.persist_status(new_status)?;
+
+        // 2. Install snapshot UTXO and applied tip onto active chainstate
+        self.active_chainstate.install_snapshot(
+            &snapshot_load.set,
+            pinned.height,
+            pinned.block_hash,
+            pinned.chain_tx_count,
+        )?;
+
+        // 3. Create isolated historical chainstate with detached events
+        let historical = self
+            .active_chainstate
+            .create_historical_counterpart(pinned.height, pinned.block_hash);
+
+        *self.historical_chainstate.write() = Some(historical);
+        *self.status.write() = new_status;
 
         Ok(())
     }
@@ -539,16 +561,16 @@ impl AssumeUtxoManager {
                     *self.status.write() = finalized;
                     self.persist_status(finalized)?;
                 } else {
-                    self.active_chainstate.fail_closed_for_recovery();
-                    historical.fail_closed_for_recovery();
                     let failed = AssumeUtxoDiskStatus::Failed {
                         base_height,
                         base_hash,
                         expected_muhash,
                         actual_muhash,
                     };
-                    *self.status.write() = failed;
                     self.persist_status(failed)?;
+                    *self.status.write() = failed;
+                    self.active_chainstate.fail_closed_for_recovery();
+                    historical.fail_closed_for_recovery();
                     return Err(AssumeUtxoError::CommitmentMismatch {
                         base_height,
                         expected: expected_muhash,
@@ -648,8 +670,16 @@ impl AssumeUtxoManager {
             let tmp_path = dir.join(STATUS_TMP_FILENAME);
             let target_path = dir.join(STATUS_FILENAME);
             let serialized = serde_json::to_string_pretty(&status)?;
-            fs::write(&tmp_path, serialized.as_bytes())?;
+            {
+                use std::io::Write;
+                let mut file = fs::File::create(&tmp_path)?;
+                file.write_all(serialized.as_bytes())?;
+                file.sync_all()?;
+            }
             fs::rename(&tmp_path, &target_path)?;
+            if let Ok(dir_file) = fs::File::open(dir) {
+                let _ = dir_file.sync_all();
+            }
         }
         Ok(())
     }

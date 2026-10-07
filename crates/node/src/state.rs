@@ -372,6 +372,47 @@ impl NodeState {
         self.assumeutxo.chainstates_summary()
     }
 
+    /// Activates a verified `AssumeUTXO` snapshot from a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if reading or parsing the snapshot fails, if the snapshot is untrusted,
+    /// or if commitment verification fails.
+    pub fn activate_assumeutxo_snapshot_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> anyhow::Result<()> {
+        let mut file = std::fs::File::open(path)?;
+        let snapshot_load = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
+        self.activate_assumeutxo_snapshot(&snapshot_load)
+    }
+
+    /// Activates a verified `AssumeUTXO` snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the snapshot is untrusted or if commitment verification fails.
+    pub fn activate_assumeutxo_snapshot(
+        &self,
+        snapshot_load: &bitcoin_rs_utxo::SnapshotLoad,
+    ) -> anyhow::Result<()> {
+        let pinned = self
+            .config
+            .network
+            .assume_utxo_for_height(snapshot_load.height)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "snapshot height {} is not pinned for network {:?}",
+                    snapshot_load.height,
+                    self.config.network
+                )
+            })?;
+        self.assumeutxo
+            .activate_snapshot(snapshot_load, pinned.hash_serialized)
+            .map_err(|e| anyhow::anyhow!("failed to activate assumeutxo snapshot: {e}"))?;
+        Ok(())
+    }
+
     /// Returns the node-owned complete transaction-index query adapter.
     #[must_use]
     pub fn derived_index_query(

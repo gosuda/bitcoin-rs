@@ -996,8 +996,8 @@ mod tests {
         );
         assert_eq!(regtest_200.chain_tx_count, 201);
 
-        assert!(Network::Testnet3.assume_utxo_data().is_empty());
-        assert!(Network::Signet.assume_utxo_data().is_empty());
+        assert_eq!(Network::Testnet3.assume_utxo_data(), &[]);
+        assert_eq!(Network::Signet.assume_utxo_data(), &[]);
         assert_eq!(Network::Mainnet.assume_utxo_for_height(12345), None);
     }
 }

@@ -279,6 +279,14 @@ impl UtxoSet {
         }
     }
 
+    /// Replaces the live contents of this set with the contents of `other` under `stable_view_lock`.
+    pub fn replace_from(&self, other: &Self) {
+        let _guard = self.stable_view_lock.write();
+        for (my_shard, other_shard) in self.shards.iter().zip(other.shards.iter()) {
+            my_shard.swap_table(other_shard);
+        }
+    }
+
     /// Attaches the coinstats listener for subsequently committed UTXO changes.
     ///
     /// The set keeps one listener slot and the node keeps one listener: the

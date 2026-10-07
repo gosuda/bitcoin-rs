@@ -620,6 +620,104 @@ impl Chainstate {
         *self.role.write() = role;
     }
 
+    /// Installs a verified UTXO snapshot and initializes the applied tip and chain tx count
+    /// at the snapshot base height and block hash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyError`] if admission or transition lock cannot be acquired.
+    pub fn install_snapshot(
+        &self,
+        snapshot_set: &bitcoin_rs_utxo::UtxoSet,
+        height: u32,
+        block_hash: Hash256,
+        chain_tx_count: u64,
+    ) -> Result<(), ApplyError> {
+        let _guard = self.admission.enter()?;
+        let _transition = self.chain_transition.lock();
+
+        // 1. Install snapshot UTXO set
+        self.utxo.replace_from(snapshot_set);
+
+        // 2. Lookup or resolve node in block tree for snapshot base
+        let node_id = {
+            let mut tree = self.block_tree.write();
+            let id = tree.lookup(block_hash).unwrap_or_else(|| {
+                tree.tip()
+                    .map_or_else(|| bitcoin_rs_chain::NodeId::new(height), |tip| tip.tip_id)
+            });
+            let _ = tree.restore_chain_tx_count(
+                id,
+                bitcoin_rs_chain::ChainTxCount::established(chain_tx_count),
+            );
+            id
+        };
+
+        // 3. Store applied tip
+        let tip_snapshot = TipSnapshot {
+            tip_id: node_id,
+            height,
+            chainwork: bitcoin_rs_chain::ChainWork::ZERO,
+            hash: block_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(chain_tx_count),
+        };
+        self.applied_tip.store(Some(Arc::new(tip_snapshot)));
+
+        // 4. Update role
+        self.set_role(ChainstateRole::AssumedActive {
+            base_height: height,
+            base_hash: block_hash,
+        });
+
+        Ok(())
+    }
+
+    /// Constructs an isolated historical chainstate from this chainstate.
+    /// The historical chainstate has an independent UTXO set, detached events,
+    /// no active journal, and no external follower side-effects.
+    #[must_use]
+    pub fn create_historical_counterpart(&self, base_height: u32, base_hash: Hash256) -> Arc<Self> {
+        let mut historical_utxo = bitcoin_rs_utxo::UtxoSet::new();
+        let historical_coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
+            bitcoin_rs_utxo::stats::CoinStats::new(),
+        ));
+        historical_utxo.track_coin_stats((*historical_coin_stats).clone());
+
+        let transition = bitcoin_rs_chain::TransitionDomain::new();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
+        let chain_tip = Arc::new(arc_swap::ArcSwapOption::empty());
+
+        let parts = ChainstateParts {
+            network: self.network,
+            chain_tip,
+            applied_tip,
+            block_tree: Arc::clone(&self.block_tree),
+            utxo: Arc::new(historical_utxo),
+            coin_stats: historical_coin_stats,
+            chain_events: Arc::new(crate::events::ChainEventPublisher::detached(
+                self.chain_events.epoch(),
+            )),
+            block_body_store: self.block_body_store.clone(),
+            undo_store: Arc::clone(&self.undo_store),
+            durable_head: Arc::clone(&self.durable_head),
+            shutdown,
+            chain_transition: transition.authority(),
+            assume_valid_height: 0,
+            validation_mode: ValidationMode::Full,
+            validation_engine: self.validation_engine,
+            journal: None,
+            capture_rawtx: false,
+            capture_block_bytes: false,
+            retention: self.retention.clone(),
+            role: ChainstateRole::Historical {
+                base_height,
+                base_hash,
+            },
+        };
+        Arc::new(Self::from_parts(parts))
+    }
+
     /// Permanently closes chain mutation and asks the process to shut down.
     pub fn fail_closed_for_recovery(&self) {
         self.admission.close_permanently();

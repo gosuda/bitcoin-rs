@@ -78,6 +78,12 @@ impl Shard {
         }
     }
 
+    pub(crate) fn swap_table(&self, other: &Self) {
+        let mut my_table = self.inner.write();
+        let mut other_table = other.inner.write();
+        core::mem::swap(&mut *my_table, &mut *other_table);
+    }
+
     pub(crate) fn commit_batch(
         &self,
         adds: &[(UtxoKey, Hash256, BuildPayload<'_>)],

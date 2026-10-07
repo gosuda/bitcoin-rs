@@ -411,12 +411,21 @@ impl NodeState {
         if config.p2p.fast_sync {
             sync.install_budget(fast_sync_budget(config.network));
         }
+        let assumeutxo = Arc::new(
+            bitcoin_rs_chainstate::AssumeUtxoManager::open(
+                config.network,
+                Arc::clone(&chainstate),
+                Some(config.data_dir.clone()),
+            )
+            .map_err(|err| anyhow::anyhow!("assumeutxo open failed: {err}"))?,
+        );
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.deferred.prune_service(
                 Arc::clone(&block_files),
                 chainstate.prune_authority(),
                 Arc::clone(&durable_tip_height),
                 storage.retention(),
+                Some(Arc::clone(&assumeutxo)),
             )?)
         } else {
             None
@@ -428,14 +437,6 @@ impl NodeState {
             txindex_cache_bytes,
             total_cache_bytes = cache_budget,
             "opened storage backend with effective cache capacities"
-        );
-        let assumeutxo = Arc::new(
-            bitcoin_rs_chainstate::AssumeUtxoManager::open(
-                config.network,
-                Arc::clone(&chainstate),
-                Some(config.data_dir.clone()),
-            )
-            .map_err(|err| anyhow::anyhow!("assumeutxo open failed: {err}"))?,
         );
         Ok(Self {
             config,

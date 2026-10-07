@@ -126,7 +126,6 @@ fn activate_snapshot_validation_failures() -> Result<(), Box<dyn std::error::Err
     let temp_dir = tempfile::tempdir()?;
     let network = Network::Regtest;
     let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-    let historical = make_test_chainstate(network, ChainstateRole::Ordinary);
 
     let manager = AssumeUtxoManager::open(network, active, Some(temp_dir.path().to_path_buf()))?;
 
@@ -136,8 +135,7 @@ fn activate_snapshot_validation_failures() -> Result<(), Box<dyn std::error::Err
 
     // 1. Untrusted height
     let untrusted_load = dummy_snapshot_load(1234, pinned.block_hash);
-    let Err(err) = manager.activate_snapshot(&untrusted_load, pinned.hash_serialized, &historical)
-    else {
+    let Err(err) = manager.activate_snapshot(&untrusted_load, pinned.hash_serialized) else {
         return Err("expected UntrustedSnapshotHeight".into());
     };
     assert!(matches!(
@@ -147,8 +145,7 @@ fn activate_snapshot_validation_failures() -> Result<(), Box<dyn std::error::Err
 
     // 2. Mismatched block hash
     let wrong_hash_load = dummy_snapshot_load(110, Hash256::from_le_bytes(&[0x99; 32]));
-    let Err(err) = manager.activate_snapshot(&wrong_hash_load, pinned.hash_serialized, &historical)
-    else {
+    let Err(err) = manager.activate_snapshot(&wrong_hash_load, pinned.hash_serialized) else {
         return Err("expected SnapshotBlockHashMismatch".into());
     };
     assert!(matches!(
@@ -159,7 +156,7 @@ fn activate_snapshot_validation_failures() -> Result<(), Box<dyn std::error::Err
     // 3. Mismatched commitment (MuHash)
     let valid_load = dummy_snapshot_load(110, pinned.block_hash);
     let wrong_muhash = Hash256::from_le_bytes(&[0xee; 32]);
-    let Err(err) = manager.activate_snapshot(&valid_load, wrong_muhash, &historical) else {
+    let Err(err) = manager.activate_snapshot(&valid_load, wrong_muhash) else {
         return Err("expected SnapshotCommitmentMismatch".into());
     };
     assert!(matches!(
@@ -174,7 +171,6 @@ fn activate_snapshot_success_and_lifecycle() -> Result<(), Box<dyn std::error::E
     let temp_dir = tempfile::tempdir()?;
     let network = Network::Regtest;
     let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-    let historical = make_test_chainstate(network, ChainstateRole::Ordinary);
 
     let manager = AssumeUtxoManager::open(
         network,
@@ -187,7 +183,7 @@ fn activate_snapshot_success_and_lifecycle() -> Result<(), Box<dyn std::error::E
         .ok_or("pinned 110 missing")?;
     let valid_load = dummy_snapshot_load(110, pinned.block_hash);
 
-    manager.activate_snapshot(&valid_load, pinned.hash_serialized, &historical)?;
+    manager.activate_snapshot(&valid_load, pinned.hash_serialized)?;
 
     // Verify active chainstate role
     assert_eq!(
@@ -198,7 +194,16 @@ fn activate_snapshot_success_and_lifecycle() -> Result<(), Box<dyn std::error::E
         }
     );
 
-    // Verify historical chainstate role
+    // Verify applied tip is installed on active chainstate
+    let active_tip = active.applied_tip_snapshot().ok_or("active tip missing")?;
+    assert_eq!(active_tip.height, 110);
+    assert_eq!(active_tip.hash, pinned.block_hash);
+    assert_eq!(active_tip.chain_tx_count.to_wire(), pinned.chain_tx_count);
+
+    // Verify historical chainstate is created with Historical role
+    let historical = manager
+        .historical_chainstate()
+        .ok_or("historical chainstate missing")?;
     assert_eq!(
         historical.role(),
         ChainstateRole::Historical {
@@ -241,8 +246,8 @@ fn activate_snapshot_success_and_lifecycle() -> Result<(), Box<dyn std::error::E
     assert_eq!(hist_summary.base_hash, pinned.block_hash);
 
     // Re-activating snapshot fails with AlreadyActive
-    let Err(err) = manager.activate_snapshot(&valid_load, pinned.hash_serialized, &historical)
-    else {
+    let re_load = dummy_snapshot_load(110, pinned.block_hash);
+    let Err(err) = manager.activate_snapshot(&re_load, pinned.hash_serialized) else {
         return Err("expected AlreadyActive error".into());
     };
     assert!(matches!(err, AssumeUtxoError::AlreadyActive));
@@ -466,7 +471,6 @@ fn crash_recovery_across_phases() -> Result<(), Box<dyn std::error::Error>> {
     // Phase 2: Validating
     {
         let active = make_test_chainstate(network, ChainstateRole::Ordinary);
-        let historical = make_test_chainstate(network, ChainstateRole::Ordinary);
         let manager = AssumeUtxoManager::open(
             network,
             Arc::clone(&active),
@@ -474,7 +478,7 @@ fn crash_recovery_across_phases() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         let valid_load = dummy_snapshot_load(110, pinned.block_hash);
-        manager.activate_snapshot(&valid_load, pinned.hash_serialized, &historical)?;
+        manager.activate_snapshot(&valid_load, pinned.hash_serialized)?;
 
         assert_eq!(
             active.role(),
@@ -509,6 +513,18 @@ fn crash_recovery_across_phases() -> Result<(), Box<dyn std::error::Error>> {
                 ..
             }
         ));
+
+        // Historical chainstate must be restored and present
+        let historical = manager
+            .historical_chainstate()
+            .ok_or("historical chainstate missing on restart")?;
+        assert_eq!(
+            historical.role(),
+            ChainstateRole::Historical {
+                base_height: 110,
+                base_hash: pinned.block_hash,
+            }
+        );
     }
 
     // Phase 3: Finalized
