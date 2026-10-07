@@ -207,7 +207,9 @@ fn verify_for_each_prefix(store: &impl KvStore) -> Result<(), StorageError> {
             .collect::<Vec<_>>();
         expected.sort_by(|left, right| left.0.cmp(&right.0));
 
-        let iso_key = [PREFIX, b"snapshot-isolation"].concat();
+        // Use an unseeded counter with a zero low byte to preserve PREFIX
+        // while respecting each column family's key width.
+        let iso_key = cf_key(cf, ROWS.next_multiple_of(256));
         let iso_val = cf_value(cf, "isolation-val");
         store.put(cf, &iso_key, &iso_val)?;
 
