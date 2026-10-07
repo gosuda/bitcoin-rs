@@ -62,23 +62,16 @@ appear in the order they were settled:
 3. **Query mix** — which operations the audit exercises.
 4. **Materiality rule** — what counts as a real finding.
 5. **One-corpus / one-disposable-fixture guard** — what fixture is used and why.
-6. **Logical vs physical bytes** — the measured table.
+6. **Logical bytes** — the serialized row layout.
 7. **Q1–Q5 verdicts** — the five design questions and their answers.
 8. **Versioning** — per-capability format/reset contract.
 
 ### Trial count
 
-Every byte count in this document is from a single synthetic fixture run on
-the `MemoryStore` backend (a `BTreeMap`-backed `KvStore`). Logical byte counts
-are exact by construction — they are computed from the serialized key and
-value lengths defined in `crates/index/src/types.rs`, not measured from a
-live database. Physical byte counts on fjall came from the historical
-`crates/storage/examples/storage_footprint.rs` harness (200k rows per CF,
-retained in Git history), not re-run here.
-
-No trial count is claimed for physical bytes: the fjall figures are cited
-from `docs/benchmarks/storage-footprint.md` (single run, 200k rows, after the
-LZ4-all-levels fix). They are labeled **fixture-scale** throughout.
+Logical byte counts are exact by construction: they are computed from the
+serialized key and value lengths defined in `crates/index/src/types.rs`, not
+measured from a live database. No per-column-family physical measurement is
+retained because the historical prose and table disagree about those values.
 
 ### Fjall-primary accounting
 
@@ -138,15 +131,11 @@ contract. A finding is **informational** if it confirms an existing decision.
 
 1. **In-repo fixtures** — the `MemoryStore` backend (`crates/index/tests/common/mod.rs`)
    and the test blocks constructed in `crates/index/tests/be_order.rs`.
-2. **Cited fjall figures** — from the existing
-  `docs/benchmarks/storage-footprint.md` 200k-row synthetic corpus, not
-  re-run.
-
 The disposable-fixture guard: any fixture created for this audit (the
 `be_order.rs` test blocks) is test-only, behind `#[test]`, and never shipped
 as a benchmark corpus or a data file.
 
-### Logical vs physical bytes
+### Logical bytes
 
 #### Logical byte layout (from `crates/index/src/types.rs`)
 
@@ -167,35 +156,6 @@ as a benchmark corpus or a data file.
   requires a full-block scan.
 - BlockHeaders rows are keyed by the raw 80-byte block header (which is also
   the block hash). The value is empty.
-
-#### Physical bytes on fjall (fixture-scale, cited from storage-footprint.md)
-
-These figures are from the 200k-row-per-CF synthetic corpus in
-`docs/benchmarks/storage-footprint.md`, after the LZ4-all-levels fix. They
-are **fixture-scale**, not mainnet projections.
-
-| Column family | Key size | Value size | Rows | Logical (bytes) | On-disk (bytes) | Overhead/row |
-|---|---|---|---|---|---|---|
-| TxConfirmed | 12 | 8 | 200,000 | 4,000,000 | ~14.3 MiB | ~75 B |
-| Funding | 12 | 8 | 200,000 | 4,000,000 | ~14.3 MiB | ~75 B |
-| Spending | 12 | 0 | 200,000 | 2,400,000 | ~17.9 MiB | ~89 B |
-| BlockHeaders | 80 | 0 | 200,000 | 16,000,000 | ~15.2 MiB | ~0 B (compressed) |
-
-The Spending row was measured before format version 4 added positions to its
-value; a current-format Spending row has the same 12 + 8n logical layout as
-Funding.
-
-**Why Spending costs more per row than Funding despite having no value:**
-fjall's per-row overhead (bloom filter, block index, key encoding) is roughly
-constant. A 12-byte key with a 0-byte value pays the same overhead as a
-12-byte key with an 8-byte value, but the logical payload is smaller, so the
-amplification ratio is higher. The LZ4 compression cannot recover the
-overhead on rows with no value to compress.
-
-**Why BlockHeaders on-disk is smaller than logical:** the 80-byte headers in
-the synthetic corpus are highly repetitive (deterministic pattern), so LZ4
-compresses them well. Real block headers are near-incompressible (they
-contain hashes, timestamps, nonces); expect on-disk ≈ logical on mainnet.
 
 ### Q1–Q5 verdicts
 
@@ -254,27 +214,17 @@ entries sorted by numeric height. The raw `iter_funding_rows`,
 `iter_spending_rows`, and `iter_txid_rows_with_values` functions return rows in store
 order, so callers get chronological order without sorting.
 
-#### Q4: Per-CF cost table (fixture-scale)
+#### Q4: Per-CF logical cost
 
-**Verdict: the per-CF cost table is labeled fixture-scale and cited from
-`storage-footprint.md`.**
+**Verdict: retain only the exact serialized row sizes. No current physical
+amplification claim is supported by matched evidence.**
 
-| Column family | Logical bytes/row | Physical bytes/row (fjall, fixture-scale) | Amplification |
-|---|---|---|---|
-| TxConfirmed | 20 (12 key + 8 value) | ~75 | 3.75× |
-| Funding | 20 (12 key + 8 value) | ~75 | 3.75× |
-| Spending | 12 (12 key + 0 value) | ~89 | 7.42× |
-| BlockHeaders | 80 (80 key + 0 value) | ~0 (compressed, fixture) | <0.01× (fixture) |
-
-**Caveats:**
-
-- Physical bytes/row is computed as `on_disk / rows` from the 200k-row
-  fixture. It includes bloom-filter, block-index, and key-encoding overhead.
-- The BlockHeaders amplification is an artifact of the synthetic corpus
-  (repetitive 80-byte headers compress to near-zero). On mainnet, expect
-  amplification ≈ 1.0 (headers are incompressible).
-- The Spending amplification figure predates positioned Spending values
-  (format version 4) and has not been re-measured.
+| Column family | Logical bytes/row |
+|---|---:|
+| TxConfirmed | 20 (12 key + 8 value) |
+| Funding | 20 (12 key + 8 value) |
+| Spending | 12 + 6n (12 key + positioned value) |
+| BlockHeaders | 80 (80 key + empty value) |
 
 #### Q5: Live UTXO locator — what is the baseline key shape?
 

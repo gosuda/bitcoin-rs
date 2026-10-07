@@ -128,8 +128,9 @@ This is an evidence tool pin. No checker run is claimed by this page.
 
 - The default unpruned full-tip storage campaign uses a pinned mainnet
   stop. The stop is `(height, block_hash)` recorded by the run. No stop may be
-  floating or unpinned. The 1 TB budget applies only to that pinned default
-  lane.
+  floating or unpinned. The benchmark campaign owns any 1 TB verdict, which
+  applies only to that pinned default lane; the offline snapshot defined by
+  [FP-04](storage-footprint.md#fp-04-evidence-limits) does not decide it.
 - Missing identities, malformed commits or digests, unbound custody tuples,
   and confused product identities are rejected with a typed `ReferenceError`
   from

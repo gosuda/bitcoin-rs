@@ -10,6 +10,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
+use rustix::fs::{AtFlags, CWD, StatxFlags};
 use serde::Serialize;
 
 #[derive(Default, Serialize)]
@@ -49,6 +50,7 @@ pub(super) fn measure(root: &Path) -> io::Result<Report> {
     if !metadata.is_dir() {
         return Err(io::Error::other("data directory must be a real directory"));
     }
+    let mount = mount_id(root)?;
     let mut report = Report {
         format: "bitcoin-rs-storage-allocation-v1",
         observation: "offline_snapshot_lower_bound",
@@ -56,24 +58,47 @@ pub(super) fn measure(root: &Path) -> io::Result<Report> {
         namespaces: BTreeMap::new(),
     };
     let mut seen = HashSet::new();
-    visit(root, ".", metadata.dev(), &mut seen, &mut report)?;
+    visit(root, ".", metadata.dev(), mount, &mut seen, &mut report)?;
     Ok(report)
+}
+
+fn mount_id(path: &Path) -> io::Result<u64> {
+    let metadata = rustix::fs::statx(
+        CWD,
+        path,
+        AtFlags::NO_AUTOMOUNT | AtFlags::SYMLINK_NOFOLLOW,
+        StatxFlags::MNT_ID,
+    )?;
+    if !StatxFlags::from_bits_retain(metadata.stx_mask).contains(StatxFlags::MNT_ID) {
+        return Err(io::Error::other(format!(
+            "mount identity is unavailable for {}",
+            path.display()
+        )));
+    }
+    Ok(metadata.stx_mnt_id)
 }
 
 fn visit(
     path: &Path,
     namespace: &str,
     device: u64,
+    mount: u64,
     seen: &mut HashSet<(u64, u64)>,
     report: &mut Report,
 ) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.dev() != device || !(metadata.is_dir() || metadata.is_file()) {
+    if !(metadata.is_dir() || metadata.is_file())
+        || metadata.dev() != device
+        || mount_id(path)? != mount
+    {
         return Err(io::Error::other(format!(
             "unsupported entry or mount crossing: {}",
             path.display()
         )));
     }
+    // Preserve the complete top-level inventory even when this path aliases
+    // an inode whose bytes were assigned to an earlier namespace.
+    report.namespaces.entry(namespace.to_owned()).or_default();
     if !seen.insert((metadata.dev(), metadata.ino())) {
         return Ok(());
     }
@@ -99,7 +124,7 @@ fn visit(
             } else {
                 namespace
             };
-            visit(&entry.path(), child_namespace, device, seen, report)?;
+            visit(&entry.path(), child_namespace, device, mount, seen, report)?;
         }
     }
     Ok(())
@@ -128,7 +153,8 @@ mod tests {
         );
         assert_eq!(report.namespaces["a"].apparent_bytes, data.len());
         assert_eq!(report.namespaces["a"].allocated_bytes, data.blocks() * 512);
-        assert!(!report.namespaces.contains_key("b"));
+        assert_eq!(report.namespaces["b"].apparent_bytes, 0);
+        assert_eq!(report.namespaces["b"].allocated_bytes, 0);
         Ok(())
     }
 

@@ -137,10 +137,12 @@ Storage snapshots are collected by a separate Linux-only tool after stopping
 the node:
 
 ```sh
-cargo run --locked -p bitcoin-rs-storage-footprint -- .bitcoin-rs > footprint.json
+cargo run --locked -p bitcoin-rs-storage-footprint -- .bitcoin-rs \
+  > ../bitcoin-rs-footprint.json
 ```
 
 The tool reads filesystem metadata only; it does not open or initialize a DB.
+A report must be written outside the measured directory.
 A snapshot is a lower bound on peak usage, not a storage-budget verdict.
 See [contracts/storage-footprint.md](contracts/storage-footprint.md).
 

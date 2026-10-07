@@ -59,7 +59,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
   - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`, `bitcoin-rs-e2e`,
     `bitcoin-rs-storage-footprint`. The footprint package is an offline Linux
-    filesystem utility with no production or storage engine dependencies.
+    filesystem utility with no node/runtime-workspace or storage-engine
+    dependencies.
     Daemon assembly, subsystem lifecycle coordination, and CLI binary entry
     points. `bitcoin-rs-e2e` is the process-level test harness that drives
     the composed daemon and the pinned reference node over their public

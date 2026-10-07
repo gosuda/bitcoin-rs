@@ -30,8 +30,13 @@ compaction, migration, or file write is performed.
 ## FP-03: Separate command and platform
 
 ```sh
-cargo run --locked -p bitcoin-rs-storage-footprint -- /path/to/stopped-node > footprint.json
+cargo run --locked -p bitcoin-rs-storage-footprint -- /path/to/stopped-node \
+  > /path/outside-stopped-node/footprint.json
 ```
+
+The output path must be outside the measured directory. Shell redirection
+creates or truncates its target before the utility starts; placing that file
+inside the input tree would change the snapshot being measured.
 
 JSON uses `bitcoin-rs-storage-allocation-v1`. Linux is the only supported
 measurement platform. On other platforms the package compiles and exits with
