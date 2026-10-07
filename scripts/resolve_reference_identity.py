@@ -101,7 +101,11 @@ def _toml_lite(text):
             key, sep, value = line.partition("=")
             if not sep:
                 raise SystemExit(f"unreadable manifest line {number}")
-            cursor[key.strip()] = _toml_scalar(_strip_comment(value.strip()), number)
+            key = key.strip()
+            # tomllib rejects duplicate keys; the fallback must too.
+            if key in cursor:
+                raise SystemExit(f"duplicate manifest key at line {number}: {key}")
+            cursor[key] = _toml_scalar(_strip_comment(value.strip()), number)
     return root
 
 

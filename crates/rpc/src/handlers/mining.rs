@@ -376,12 +376,11 @@ fn parse_generateblock_transactions(
     params: &Value,
 ) -> Result<Vec<GenerateTx>, RpcError> {
     let array = params_array(params)?;
-    let Some(value) = array.get(1) else {
-        return Err(RpcError::InvalidParams("transactions is required"));
+    // Core treats `transactions` as optional: omitted or explicit null
+    // selects no transactions and mines a coinbase-only block.
+    let Some(value) = array.get(1).filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
     };
-    if value.is_null() {
-        return Err(RpcError::InvalidParams("transactions must be an array"));
-    }
     let Some(entries) = value.as_array() else {
         return Err(RpcError::InvalidType(
             "transactions must be an array".to_owned(),
@@ -1954,19 +1953,26 @@ mod tests {
         assert!(!request.submit);
     }
 
-    /// API-05, API-29: generateblock requires the transactions array; null is not an empty list, and bare-script output errors match Core.
+    /// API-27, API-29: an omitted or explicit-null transactions array selects
+    /// no transactions, like Core — the block mines coinbase-only; bare-script
+    /// output errors match Core.
     #[test]
-    fn generateblock_requires_transactions_array() {
+    fn generateblock_omitted_transactions_is_coinbase_only() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
-        let ctx = ctx_with_control(control);
-        let missing = generateblock(&ctx, &json!([REGTEST_ADDRESS]))
-            .err()
-            .unwrap_or_else(|| panic!("omitted transactions must fail"));
-        assert_eq!(missing.code(), RpcError::INVALID_PARAMS);
-        let null = generateblock(&ctx, &json!([REGTEST_ADDRESS, Value::new_null()]))
-            .err()
-            .unwrap_or_else(|| panic!("null transactions must fail"));
-        assert_eq!(null.code(), RpcError::INVALID_PARAMS);
+        let ctx = ctx_with_control(control.clone());
+        for params in [
+            json!([REGTEST_ADDRESS]),
+            json!([REGTEST_ADDRESS, Value::new_null()]),
+        ] {
+            generateblock(&ctx, &params)
+                .unwrap_or_else(|err| panic!("omitted transactions must mine: {err}"));
+        }
+        let request = control
+            .last_generate
+            .lock()
+            .clone()
+            .unwrap_or_else(|| panic!("generateblock must call generate"));
+        assert_eq!(request.selection, GenerateSelection::Ordered(Vec::new()));
         let hex = generateblock(&ctx, &json!(["51", []]))
             .err()
             .unwrap_or_else(|| panic!("bare script hex must fail"));

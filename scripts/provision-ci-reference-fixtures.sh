@@ -14,7 +14,7 @@ esac
 # since the system python3 on macOS predates tomllib). The formal lane's
 # check_models.py still requires tomllib on the resolved interpreter.
 PYTHON=""
-for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3; do
+for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3; do
   if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2>/dev/null; then
     PYTHON="$candidate"
     break

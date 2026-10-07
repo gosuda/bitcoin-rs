@@ -125,8 +125,8 @@ is the `gettxspendingprevout` mempool snapshot.
   package selection, collects fees, and always submits.
 - `generateblock` accepts an address or descriptor (`require_checksum = false`;
   a supplied checksum is verified). Ranged and multipath descriptors are
-  refused (`API-31`). The transactions array is required (an explicit `[]` is
-  coinbase-only).
+  refused (`API-31`). The transactions array is optional (omitted, explicit
+  null, or `[]` is coinbase-only).
   Listed order is kept, those fees are not added to the coinbase, 64-character
   hex is a mempool txid, and decoded raw transactions are included without
   mempool admission. Raw transaction sigop costs use copied applied-chain
@@ -608,7 +608,7 @@ owned by [wallet-facing.md](wallet-facing.md).
   `generateblock_projects_hash_object`,
   `generateblock_accepts_addr_descriptor`,
   `generateblock_without_submit_includes_hex`,
-  `generateblock_requires_transactions_array`,
+  `generateblock_omitted_transactions_is_coinbase_only`,
   `generateblock_keeps_raw_transactions`,
   `generateblock_rejects_trailing_parameters`,
   `generateblock_rejects_invalid_supplied_checksums`,
