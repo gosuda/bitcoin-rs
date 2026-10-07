@@ -171,7 +171,10 @@ impl SyncChain for NodeSyncChain {
     }
 
     fn bootstrap_genesis(&self) {
-        crate::chain_effects::bootstrap_genesis(&self.handles, &self.followers);
+        if let Err(error) = crate::chain_effects::bootstrap_genesis(&self.handles, &self.followers)
+        {
+            tracing::warn!(%error, "failed to bootstrap genesis");
+        }
     }
 
     fn admit_headers(&self, headers: &[Header]) -> HeaderAdmission {

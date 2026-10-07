@@ -375,12 +375,16 @@ impl ChainFollowers {
 /// caller that can outrun the sync loop's first tick (startup before the
 /// RPC listener binds, the sync tick itself) funnels through this one
 /// owner. Idempotent — a populated applied tip returns immediately.
+///
+/// A refused connect is returned so startup can abort instead of binding
+/// RPC onto a chainstate that cannot serve an applied tip; the sync tick
+/// logs it and retries.
 pub(crate) fn bootstrap_genesis(
     handles: &bitcoin_rs_chainstate::Chainstate,
     followers: &ChainFollowers,
-) {
+) -> Result<(), bitcoin_rs_chainstate::ApplyError> {
     if handles.applied_tip_snapshot().is_some() {
-        return;
+        return Ok(());
     }
     let genesis = handles.network().genesis_block();
     match followers.apply_connect(handles, &genesis) {
@@ -390,10 +394,9 @@ pub(crate) fn bootstrap_genesis(
             handles.publish_genesis_tip(outcome.tip);
             tracing::error!(%source, "genesis committed but settlement failed");
         }
-        Err(ConnectMutationError::NotCommitted(error)) => {
-            tracing::warn!(%error, "failed to bootstrap genesis");
-        }
+        Err(ConnectMutationError::NotCommitted(error)) => return Err(error),
     }
+    Ok(())
 }
 
 #[cfg(test)]
