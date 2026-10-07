@@ -406,6 +406,8 @@ composition seam.
     `Chainstate::utxo`, and `Chainstate::utxo_handle` accessors stay deleted:
     retained-history authority, the transition domain, and the authoritative
     UTXO set are owned elsewhere and chainstate must not broker any of them.
+    The deleted `Chainstate::read_block_tree` stays deleted too: tree reads,
+    including the P2P `SyncChain` adapter's, go through `BlockTreeReader`.
     The same consumer asserts `UtxoReader::fixture_set` is unavailable, so a
     production reader cannot reach the set `utxo::contract` mutates.
 - Manifest enforcement:

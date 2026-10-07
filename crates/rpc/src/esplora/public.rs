@@ -11,9 +11,11 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_index::ScriptHash;
-use bitcoin_rs_mempool::AdmissionOrigin;
+use bitcoin_rs_mempool::LocalOrigin;
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{
+    Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize, unix_time_secs,
+};
 use serde_json::json;
 use sonic_rs::{JsonValueTrait as _, json as sonic_json};
 
@@ -23,7 +25,7 @@ use super::model::{
     RecentTransaction, ScriptSummary, TransactionValue,
 };
 use super::projection::{Confirmation, Projection};
-use crate::context::{self, Context};
+use crate::context::Context;
 use crate::handlers::Handler;
 use crate::rest::{
     Response, bad_request, internal_error, json_ok, not_found, service_unavailable, text_response,
@@ -151,14 +153,15 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
                 return bad_request("TX decode failed. Make sure the tx has at least one input.");
             };
             let ctx = handler.context();
-            match context::admit_transaction(
-                &ctx.mempool.gateway,
-                &ctx.chain,
-                &transaction,
-                AdmissionOrigin::Esplora,
+            let txid = transaction.txid();
+            match ctx.mempool.gateway.submit_local_transaction(
+                Arc::new(transaction),
+                LocalOrigin::Esplora,
                 Some(MAX_BROADCAST_FEE_RATE_SAT_PER_KVB),
+                unix_time_secs(),
+                &ctx.chain.admission_chain(),
             ) {
-                Ok(_) => text_response("text/plain", transaction.txid().to_string().into_bytes()),
+                Ok(_) => text_response("text/plain", txid.to_string().into_bytes()),
                 Err(error) => admission_error(error),
             }
         }

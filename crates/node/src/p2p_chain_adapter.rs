@@ -26,6 +26,8 @@ pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
 /// consumers that must fire inside it.
 struct NodeSyncChain {
     handles: Arc<bitcoin_rs_chainstate::Chainstate>,
+    /// The chainstate's read-only block-tree capability.
+    block_tree: bitcoin_rs_chain::BlockTreeReader,
     followers: crate::chain_effects::ChainFollowers,
 }
 
@@ -39,8 +41,13 @@ pub fn block_sync(
     inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
 ) -> BlockSync {
+    let block_tree = handles.block_tree_reader();
     BlockSync::new(
-        Arc::new(NodeSyncChain { handles, followers }),
+        Arc::new(NodeSyncChain {
+            handles,
+            block_tree,
+            followers,
+        }),
         peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
@@ -152,7 +159,7 @@ impl SyncChain for NodeSyncChain {
     }
 
     fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, bitcoin_rs_chain::BlockTree> {
-        self.handles.read_block_tree()
+        self.block_tree.read()
     }
 
     fn chain_tip(&self) -> Option<Arc<bitcoin_rs_chain::TipSnapshot>> {
@@ -205,7 +212,7 @@ impl SyncChain for NodeSyncChain {
     fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
         let hash = Hash256::from(block.block_hash());
         let segwit_active = {
-            let tree = self.handles.read_block_tree();
+            let tree = self.block_tree.read();
             tree.lookup(hash)
                 .and_then(|node_id| tree.node(node_id).ok())
                 .is_none_or(|node| {

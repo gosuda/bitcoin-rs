@@ -8,9 +8,10 @@
 //! Embedders control placement of that work on their own runtime.
 
 use bitcoin_rs_index::CapabilitySnapshot;
-use bitcoin_rs_mempool::{FeeRate, MempoolStats, MutationResult};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Tx, Txid, deserialize};
+use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Tx, Txid, deserialize, unix_time_secs};
 pub(crate) use bitcoin_rs_rpc::context::SyncProgress;
+use bitcoin_rs_rpc::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -146,15 +147,30 @@ impl Node {
             .estimate_fee_rate(confirmation_target_blocks)
     }
 
-    /// Admits a transaction through the same typed operation as RPC submission.
+    /// Admits a transaction through the mempool gateway's local submission,
+    /// the operation RPC `sendrawtransaction` and Esplora broadcasts also call.
     ///
-    /// Policy checks and ordered publication belong to the shared gateway;
-    /// embedding does not insert directly into the pool or own another gateway.
+    /// The submission carries `sendrawtransaction`'s default fee-rate cap.
+    /// Policy checks and ordered publication belong to the gateway; embedding
+    /// does not insert directly into the pool or own another gateway.
     pub async fn broadcast(&self, tx: Tx) -> Result<MutationResult, NodeError> {
-        let max_feerate = Some(bitcoin_rs_rpc::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB);
-        self.context
-            .admit_transaction(tx, max_feerate)
-            .map_err(NodeError::Broadcast)
+        let chainstate = self.state.chainstate();
+        let chain = ChainAdmissionView::new(
+            chainstate.utxo_reader(),
+            chainstate.applied_tip_reader(),
+            chainstate.block_tree_reader(),
+            chainstate.network(),
+        );
+        self.state
+            .mempool_gateway()
+            .submit_local_transaction(
+                Arc::new(tx),
+                LocalOrigin::Rpc,
+                Some(DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB),
+                unix_time_secs(),
+                &chain,
+            )
+            .map_err(|error| NodeError::Broadcast(error.to_string()))
     }
 
     /// Stops owned services, then publishes the clean-shutdown checkpoint.
@@ -204,6 +220,7 @@ mod tests {
 
     use super::*;
     use crate::NodeConfig;
+    use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
     use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
     use bitcoin_rs_primitives::{
         Amount, LockTime, Network, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
@@ -367,6 +384,25 @@ mod tests {
         assert!(
             publisher.sequence_events.lock().is_empty(),
             "a direct pool insertion must not satisfy the gateway publication assertion"
+        );
+
+        // Refusal: an unknown prevout is refused with the gateway's policy
+        // reason verbatim, and nothing is inserted or published.
+        let orphan = spending(OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5C; 32])), 0));
+        let orphan_txid = orphan.txid();
+        let refusal = block_on(node.broadcast(orphan)).expect_err("an unknown prevout is refused");
+        assert!(
+            matches!(
+                &refusal,
+                NodeError::Broadcast(reason)
+                    if *reason == AcceptanceRejectReason::MissingInputs.to_string()
+            ),
+            "the embedded envelope carries the gateway's policy reason verbatim: {refusal}"
+        );
+        assert!(!node.state.mempool().read().contains_txid(&orphan_txid));
+        assert!(
+            publisher.sequence_events.lock().is_empty(),
+            "a refused broadcast publishes nothing"
         );
 
         block_on(node.shutdown()).expect("clean shutdown");

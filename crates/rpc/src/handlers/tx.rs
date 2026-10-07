@@ -7,10 +7,10 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
-use bitcoin_rs_mempool::{AdmissionOrigin, SubmitError};
+use bitcoin_rs_mempool::{LocalOrigin, SubmitError};
 use bitcoin_rs_primitives::{
     Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+    Txid, Witness, consensus_bytes, deserialize as native_deserialize, unix_time_secs,
 };
 use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
@@ -19,7 +19,7 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 use crate::compat::convert::{
     self, VerboseTxChain, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
-use crate::context::{self, AdmissionFailure, Context};
+use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
 use bitcoin_rs_index::block_log::BlockRecord;
@@ -459,22 +459,17 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
     )?;
     let txid = tx.txid();
 
-    match context::admit_transaction(
-        &ctx.mempool.gateway,
-        &ctx.chain,
-        &tx,
-        AdmissionOrigin::Rpc,
-        max_feerate,
-    ) {
-        Ok(_) => typed_to_sonic(&v31::SendRawTransaction(txid.to_string())),
-        Err(AdmissionFailure::Policy(reason)) => Err(reject_reason_to_rpc_error(reason)),
-        Err(AdmissionFailure::Consensus) => Err(RpcError::TxRejected(
-            "consensus-verification-failed".to_owned(),
-        )),
-        Err(AdmissionFailure::RetryExhausted) => Err(RpcError::Internal(
-            AdmissionFailure::RETRY_EXHAUSTED.to_owned(),
-        )),
-    }
+    ctx.mempool
+        .gateway
+        .submit_local_transaction(
+            Arc::new(tx),
+            LocalOrigin::Rpc,
+            max_feerate,
+            unix_time_secs(),
+            &ctx.chain.admission_chain(),
+        )
+        .map_err(submit_error_to_rpc_error)?;
+    typed_to_sonic(&v31::SendRawTransaction(txid.to_string()))
 }
 
 // corepc-types 0.15's v31 alias only describes completed rows. Core 31.1
@@ -521,15 +516,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
         .mempool
         .gateway
         .preview_transactions(&txs, max_feerate, &ctx.chain.admission_chain())
-        .map_err(|error| match error {
-            SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
-            SubmitError::Consensus => {
-                RpcError::TxRejected("consensus-verification-failed".to_owned())
-            }
-            SubmitError::RetryExhausted => {
-                RpcError::Internal(AdmissionFailure::RETRY_EXHAUSTED.to_owned())
-            }
-        })?;
+        .map_err(submit_error_to_rpc_error)?;
 
     let mut rows = Vec::with_capacity(facts.results.len());
     for fact in &facts.results {
@@ -777,6 +764,16 @@ pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcE
             RpcError::TxVerifyError("bad-txns-inputs-missingorspent".to_owned())
         }
         other => RpcError::TxRejected(reject_reason_to_frozen_string(other)),
+    }
+}
+
+/// Maps a gateway [`SubmitError`] to the Core-compatible RPC error for
+/// `sendrawtransaction` and `testmempoolaccept`.
+fn submit_error_to_rpc_error(error: SubmitError) -> RpcError {
+    match error {
+        SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
+        SubmitError::Consensus => RpcError::TxRejected(error.to_string()),
+        SubmitError::RetryExhausted => RpcError::Internal(error.to_string()),
     }
 }
 

@@ -10,8 +10,8 @@ use hashbrown::{HashMap, HashSet};
 
 use crate::standardness::{AcceptanceRejectReason, StandardnessPolicy, is_standard_tx};
 use crate::{
-    AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, MempoolGateway, MutationResult,
-    PeerToken,
+    AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, LocalOrigin, MempoolGateway,
+    MutationResult, PeerToken,
 };
 
 pub(crate) const MAX_ADMISSION_RETRIES: usize = 4;
@@ -445,6 +445,34 @@ impl MempoolGateway {
             None,
             AdmissionFence::Stable,
         )
+    }
+
+    /// Submits one locally originated transaction: RPC `sendrawtransaction`,
+    /// an Esplora broadcast, or the embedded `Node::broadcast`.
+    ///
+    /// Runs [`Self::submit_transaction`]. Holding an orphan and reporting a
+    /// confirmed transaction are peer-only outcomes, so a local submission
+    /// answers current membership as success with no changes and keeps a
+    /// missing input a refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the gateway's refusal; nothing is inserted when this fails.
+    pub fn submit_local_transaction(
+        &self,
+        tx: Arc<Tx>,
+        origin: LocalOrigin,
+        max_feerate_sat_per_kvb: Option<u64>,
+        time: u64,
+        chain: &dyn AdmissionChain,
+    ) -> Result<MutationResult, SubmitError> {
+        match self.submit_transaction(tx, origin.into(), max_feerate_sat_per_kvb, time, chain)? {
+            SubmitOutcome::Committed(result) => Ok(result),
+            SubmitOutcome::AlreadyKnown => Ok(MutationResult::empty()),
+            SubmitOutcome::AlreadyConfirmed | SubmitOutcome::Held { .. } => {
+                Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+            }
+        }
     }
 
     /// Re-admits transactions displaced by disconnected blocks through the
@@ -935,6 +963,30 @@ mod tests {
             );
             assert_eq!(gateway.orphan_count(), 0);
             assert_eq!(gateway.recent_rejects_count(), 0);
+        }
+    }
+
+    // POL-01: a local resubmission of a member succeeds without changes.
+    #[test]
+    fn local_submission_answers_membership_as_success_without_changes() {
+        for origin in [LocalOrigin::Rpc, LocalOrigin::Esplora] {
+            let gateway = gateway();
+            let (parent, child) = parent_and_child();
+            insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+            let committed = gateway.submit_local_transaction(
+                Arc::clone(&child),
+                origin,
+                None,
+                1,
+                &Coins(vec![]),
+            );
+            assert_eq!(committed.map(|result| result.len()), Ok(1));
+            let sequence = gateway.read().sequence_number();
+            assert_eq!(
+                gateway.submit_local_transaction(child, origin, None, 2, &Coins(vec![])),
+                Ok(MutationResult::empty())
+            );
+            assert_eq!(gateway.read().sequence_number(), sequence);
         }
     }
 

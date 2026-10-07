@@ -112,7 +112,10 @@ state (`crates/mempool/src/orphan.rs`).
   fatal invariant failure: retain the execution cause, close apply admission
   and request shutdown rather than report success or retry the chain walk.
 - `submit_transaction` owns common preparation and four bounded attempts for
-  RPC and peer submissions. `preview_transactions` uses the same policy and
+  RPC and peer submissions. `submit_local_transaction` runs it for RPC,
+  Esplora and embedded broadcasts, answering current membership as success
+  with no changes; it takes a `LocalOrigin`, so peer, reorg and block
+  origins cannot reach it. `preview_transactions` uses the same policy and
   script evaluator, with the same retry bound. Each attempt captures an even
   chain generation and pool sequence before reading chain facts. Preparation
   copies the input outputs under a pool read, then executes scripts without

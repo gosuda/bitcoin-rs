@@ -163,7 +163,8 @@ pub struct PeerToken {
 /// by the apply-path sweep (`crates/node/src/apply.rs`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionOrigin {
-    /// Submitted through RPC (`sendrawtransaction`).
+    /// Submitted through RPC `sendrawtransaction` or the embedded
+    /// `Node::broadcast`.
     Rpc,
     /// Submitted through an Esplora raw-transaction broadcast route.
     Esplora,
@@ -173,6 +174,28 @@ pub enum AdmissionOrigin {
     Reorg,
     /// Confirmed in by block application.
     Block,
+}
+
+/// The [`AdmissionOrigin`]s a local submission may carry.
+///
+/// [`MempoolGateway::submit_local_transaction`](crate::MempoolGateway::submit_local_transaction)
+/// takes this type, so a peer, reorg, or block origin cannot reach the local
+/// path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalOrigin {
+    /// Recorded as [`AdmissionOrigin::Rpc`].
+    Rpc,
+    /// Recorded as [`AdmissionOrigin::Esplora`].
+    Esplora,
+}
+
+impl From<LocalOrigin> for AdmissionOrigin {
+    fn from(origin: LocalOrigin) -> Self {
+        match origin {
+            LocalOrigin::Rpc => Self::Rpc,
+            LocalOrigin::Esplora => Self::Esplora,
+        }
+    }
 }
 
 /// What the gateway hands its observers: the committed result plus how the

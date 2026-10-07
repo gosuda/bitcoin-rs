@@ -39,7 +39,9 @@ use bitcoin_rs_primitives::tapleaf_hash;
 use bitcoin_rs_primitives::{
     Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, deserialize,
 };
-use bitcoin_rs_script::{Interpreter, ScriptError, VerifyFlags, opcode, push_data, push_int};
+use bitcoin_rs_script::{
+    Interpreter, PreparedTransaction, ScriptError, VerifyFlags, opcode, push_data, push_int,
+};
 
 // ===========================================================================
 // Script error code model — Core's `ScriptErrorString` names
@@ -1233,27 +1235,17 @@ fn load_tx_vectors(
 }
 
 fn run_tx_vectors_native(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<String> {
-    let interp = Interpreter;
     let mut mismatches = Vec::new();
 
     for row in rows {
         counts.executed += 1;
         let prevout_txouts: Vec<TxOut> = row.prevouts.iter().map(|(_, o)| o.clone()).collect();
+        let prepared = PreparedTransaction::new(&row.tx, prevout_txouts);
         // The first failing input decides the row, and its error name is what
         // a triage reader needs; a bare Reject says nothing.
         let mut first_failure = None;
         for input_idx in 0..row.tx.inputs.len() {
-            let prevout = &row.prevouts[input_idx].1;
-            let input = &row.tx.inputs[input_idx];
-            let result = interp.execute_with_prevouts(
-                &prevout.script_pubkey,
-                &input.script_sig,
-                &input.witness,
-                row.flags,
-                &prevout_txouts,
-                &row.tx,
-                input_idx,
-            );
+            let result = prepared.verify_input(input_idx, row.flags);
             if !matches!(result, Ok(true)) {
                 first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
                 break;

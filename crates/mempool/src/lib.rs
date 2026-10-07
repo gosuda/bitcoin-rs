@@ -54,8 +54,8 @@ pub use gateway::{
 #[cfg(any(test, feature = "test-seam"))]
 pub use gateway::{arm_admission_park, reset_admission_park};
 pub use mutation::{
-    AdmissionOrigin, MutationChange, MutationEnvelope, MutationOutcome, MutationResult, PeerToken,
-    RemovalReason,
+    AdmissionOrigin, LocalOrigin, MutationChange, MutationEnvelope, MutationOutcome,
+    MutationResult, PeerToken, RemovalReason,
 };
 pub(crate) use pareto::ParetoFront;
 pub use policy::{MempoolLimits, MempoolPolicySnapshot, PolicyError};

@@ -343,7 +343,7 @@ fn wrong_sighash_type_byte(tx: &mut Tx) -> bool {
     for input in &mut tx.inputs {
         let mut elements = input.witness.clone();
         let mut mutated = false;
-        for element in &mut elements {
+        for element in elements.iter_mut() {
             if looks_like_der_sig(element) || element.len() == 65 {
                 if let Some(byte) = element.last_mut() {
                     *byte ^= 0x02;

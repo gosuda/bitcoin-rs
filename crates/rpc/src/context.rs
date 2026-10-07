@@ -4,11 +4,7 @@ use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
     BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot, softfork_state,
 };
-use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
-use bitcoin_rs_mempool::{
-    AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, MempoolGateway, MutationResult,
-    PrevoutMeta, SubmitError, SubmitOutcome,
-};
+use bitcoin_rs_mempool::{AdmissionChain, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta};
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::{Mempool, MempoolLimits, MempoolObserver};
 use bitcoin_rs_mining::MiningControl;
@@ -682,111 +678,6 @@ impl Context {
     #[must_use]
     pub(crate) fn zmq_notifications(&self) -> Vec<crate::zmq::ZmqNotifier> {
         self.zmq_publisher.active_notifiers()
-    }
-
-    /// Admits one transaction through the full policy stack, then mutates
-    /// the mempool only through the node's one [`MempoolGateway`].
-    ///
-    /// `sendrawtransaction` and embedded `Node::broadcast` both use the
-    /// gateway's [`MempoolGateway::submit_transaction`] preparation and retry
-    /// boundary. [`MempoolGateway::admit_transaction`] evaluates policy under
-    /// a pool read and verifies scripts over copied inputs outside pool locks.
-    /// Its writer rechecks chain generation, pool sequence and enforced policy
-    /// before committing through the gateway's ordered publication seam.
-    ///
-    /// Membership follows `POL-01` Duplicate submission in
-    /// `docs/policies/mempool-policy.md`. The pool read is a best-effort
-    /// pre-check; the locked evaluation is authoritative. The RPC lookup
-    /// cache is not membership.
-    ///
-    /// `max_feerate_sat_per_kvb` of `None` disables the max-fee cap,
-    /// matching `sendrawtransaction`'s `maxfeerate=0` behavior.
-    ///
-    /// # Errors
-    ///
-    /// Returns the policy rejection verbatim (Core rejection strings) or
-    /// the failure verbatim; nothing is inserted when this fails.
-    // Owned `Tx` is the public call form (`admit_transaction(tx, None)`).
-    // Admission only borrows; the value parameter is the compatibility contract.
-    #[expect(clippy::needless_pass_by_value)]
-    pub fn admit_transaction(
-        &self,
-        tx: Tx,
-        max_feerate_sat_per_kvb: Option<u64>,
-    ) -> Result<MutationResult, String> {
-        admit_transaction(
-            &self.mempool.gateway,
-            &self.chain,
-            &tx,
-            AdmissionOrigin::Rpc,
-            max_feerate_sat_per_kvb,
-        )
-        .map_err(AdmissionFailure::into_string)
-    }
-}
-
-/// Failure from the one shared admission operation.
-///
-/// RPC, Esplora and [`Context::admit_transaction`] map this into their
-/// respective envelopes.
-pub(crate) enum AdmissionFailure {
-    /// Mempool or standardness policy refused the transaction.
-    Policy(AcceptanceRejectReason),
-    /// Consensus verification failed.
-    Consensus,
-    /// Generation or mempool tokens kept changing across the retry budget.
-    RetryExhausted,
-}
-
-impl AdmissionFailure {
-    pub(crate) const RETRY_EXHAUSTED: &'static str =
-        "admission retry exhausted: chain or mempool changed during submission";
-
-    /// Maps this failure to the string envelope used by
-    /// [`Context::admit_transaction`].
-    pub(crate) fn into_string(self) -> String {
-        match self {
-            Self::Policy(reason) => reason.to_string(),
-            Self::Consensus => "consensus-verification-failed".to_owned(),
-            Self::RetryExhausted => Self::RETRY_EXHAUSTED.to_owned(),
-        }
-    }
-}
-
-/// The node's one shared transaction-admission operation.
-///
-/// PRE: the gateway owns preparation, bounded retry, policy evaluation, and
-/// the authoritative commit; `chain` is the node's admission capability.
-/// POST: the same committed or already-known result, or the same refusal, as
-/// the gateway's submission call returns.
-/// INVARIANT: the gateway is the sole submission authority; this adds no
-/// retry loop, UTXO mutation path, or handler dependency.
-pub(crate) fn admit_transaction(
-    mempool: &MempoolGateway,
-    chain: &ChainHandles,
-    tx: &Tx,
-    origin: AdmissionOrigin,
-    max_feerate_sat_per_kvb: Option<u64>,
-) -> Result<MutationResult, AdmissionFailure> {
-    match mempool.submit_transaction(
-        Arc::new(tx.clone()),
-        origin,
-        max_feerate_sat_per_kvb,
-        unix_time_secs(),
-        &chain.admission_chain(),
-    ) {
-        Ok(SubmitOutcome::Committed(result)) => Ok(result),
-        Ok(SubmitOutcome::AlreadyKnown) => Ok(MutationResult::empty()),
-        Ok(SubmitOutcome::AlreadyConfirmed | SubmitOutcome::Held { .. }) => {
-            // RPC/Esplora never hold orphans or treat the transaction lookup cache
-            // as a successful submission. Preserve its missing-input refusal.
-            Err(AdmissionFailure::Policy(
-                AcceptanceRejectReason::MissingInputs,
-            ))
-        }
-        Err(SubmitError::Policy(reason)) => Err(AdmissionFailure::Policy(reason)),
-        Err(SubmitError::Consensus) => Err(AdmissionFailure::Consensus),
-        Err(SubmitError::RetryExhausted) => Err(AdmissionFailure::RetryExhausted),
     }
 }
 
@@ -2312,10 +2203,13 @@ mod admission_chain_tests {
 
     #[test]
     fn stable_chainstate_reader_does_not_block_transaction_admission() -> anyhow::Result<()> {
-        let ctx = Context::new();
+        use sonic_rs::{JsonValueTrait as _, json};
+
+        let ctx = Arc::new(Context::new());
         let outpoint = OutPoint::new(Txid::from(Hash256::from_le_bytes(&[8; 32])), 0);
         let tx = spending(outpoint);
         let txid = tx.txid();
+        let raw = consensus_bytes(&tx).to_lower_hex_string();
         let mut changes = BlockChanges::default();
         changes.add(UtxoAdd::new(
             outpoint,
@@ -2336,11 +2230,10 @@ mod admission_chain_tests {
         // generation. Admission must succeed through its real RPC path while
         // such a reader is active, rather than spending its retry budget on
         // contention that says nothing about stale chain facts.
-        let result = ctx
-            .chain
-            .with_stable_chainstate(|| ctx.admit_transaction(tx, None))
-            .map_err(anyhow::Error::msg)?;
-        assert_eq!(result.changes.len(), 1);
+        let accepted = ctx.chain.with_stable_chainstate(|| {
+            crate::handlers::tx::sendrawtransaction(&ctx, &json!([raw]))
+        })?;
+        assert_eq!(accepted.as_str(), Some(txid.to_string()).as_deref());
         assert!(ctx.mempool.gateway.read().contains_txid(&txid));
         Ok(())
     }
@@ -2489,25 +2382,8 @@ mod admission_chain_tests {
             0,
         ));
 
-        // Accepted: the embedded call and the RPC handler commit the same
-        // funded transaction through the one operation.
-        let embedded_ctx = Context::new();
-        bitcoin_rs_utxo::contract::commit_block_changes(
-            &embedded_ctx.chain.utxo.fixture_set(),
-            &changes,
-            &Hash256::default(),
-        )?;
-        let embedded = embedded_ctx
-            .admit_transaction(spend.clone(), None)
-            .map_err(anyhow::Error::msg)?;
-        assert_eq!(embedded.changes.len(), 1);
-        assert!(
-            embedded_ctx
-                .mempool
-                .gateway
-                .read()
-                .contains_txid(&spend.txid())
-        );
+        // Accepted: the handler commits the funded transaction through the
+        // gateway.
         let rpc_ctx = Arc::new(Context::new());
         bitcoin_rs_utxo::contract::commit_block_changes(
             &rpc_ctx.chain.utxo.fixture_set(),
@@ -2518,31 +2394,15 @@ mod admission_chain_tests {
         assert_eq!(accepted.as_str(), Some(spend.txid().to_string()).as_deref());
         assert!(rpc_ctx.mempool.gateway.read().contains_txid(&spend.txid()));
 
-        // Refused: an unknown prevout is refused on both surfaces and
-        // inserted on neither.
+        // Refused: an unknown prevout is refused and not inserted.
         let orphan = spending(OutPoint::new(
             Txid::from(Hash256::from_le_bytes(&[22; 32])),
             0,
         ));
-        let refusal = embedded_ctx
-            .admit_transaction(orphan.clone(), None)
-            .expect_err("an unknown prevout must be refused");
-        assert_eq!(
-            refusal,
-            bitcoin_rs_mempool::standardness::AcceptanceRejectReason::MissingInputs.to_string(),
-            "the embedded envelope maps the shared policy failure verbatim"
-        );
         let orphan_raw = consensus_bytes(&orphan).to_lower_hex_string();
         let refused = tx::sendrawtransaction(&rpc_ctx, &json!([orphan_raw]))
-            .expect_err("the RPC surface refuses the same transaction");
+            .expect_err("an unknown prevout must be refused");
         assert_eq!(refused.code(), RpcError::CORE_VERIFY_ERROR);
-        assert!(
-            !embedded_ctx
-                .mempool
-                .gateway
-                .read()
-                .contains_txid(&orphan.txid())
-        );
         assert!(!rpc_ctx.mempool.gateway.read().contains_txid(&orphan.txid()));
 
         // Preview: testmempoolaccept answers for the funded transaction

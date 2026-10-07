@@ -23,7 +23,6 @@ pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
     let _: ChainstateSnapshot = state.snapshot();
     let _ = state.chain_snapshot();
     let _ = tree.read().tip();
-    let _ = state.read_block_tree().tip_height();
     // The read-only UTXO capability is what production consumers receive;
     // it must compile without the fixture seam.
     let _ = state.utxo_reader();
@@ -124,6 +123,9 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         "applied_tip_handle",
         "block_tree",
         "block_tree_handle",
+        // Tree reads go through `BlockTreeReader`; a facade read guard would
+        // be a second route to the same lock.
+        "read_block_tree",
         "transition_barrier",
         // Retained-history authority lives in storage/pruning; chainstate
         // keeps only `MandatoryRetention` and must not broker the registry.

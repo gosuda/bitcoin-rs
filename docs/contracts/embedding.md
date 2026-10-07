@@ -43,10 +43,11 @@ the first embedder — there is one lifecycle implementation, not two.
   the node's concrete-service `CapabilitySnapshot`. Owners:
   `crates/node/src/embed.rs` and `crates/rpc/src/context.rs`; wire types:
   `crates/index/src/capabilities.rs`.
-- **EMB-05 — Broadcast is the shared admission.** `Node::broadcast` runs
-  `Context::admit_transaction` (`crates/rpc/src/context.rs`) — the identical
-  typed admission `sendrawtransaction` runs (`crates/rpc/src/handlers/tx.rs`):
-  the full policy stack is evaluated under the node's one
+- **EMB-05 — Broadcast is the shared admission.** `Node::broadcast`,
+  `sendrawtransaction` (`crates/rpc/src/handlers/tx.rs`) and Esplora
+  broadcasts all call `MempoolGateway::submit_local_transaction`;
+  `Node::broadcast` passes `sendrawtransaction`'s default fee-rate cap. The
+  full policy stack is evaluated under the node's one
   `MempoolGateway` write-lock interval and the authorized mutation
   commits inside it, so no concurrent admission can pass stale policy.
   Block-connect eviction commits through the same gateway's
@@ -132,7 +133,9 @@ rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
   worker join failure, daemon/embedded identity, repeated teardown, rollback,
   queued-wake, and owned-startup-result regressions.
 - `crates/node/src/embed.rs::tests::broadcast_publishes_one_ordered_a_event_through_the_shared_gateway`
-  retains the gateway publication test and its direct-insertion control.
+  retains the gateway publication test and its direct-insertion control, and
+  checks that a refused broadcast returns the gateway's policy reason and
+  publishes nothing.
 - `crates/node/tests/shutdown.rs::run_exits_cleanly_after_fast_shutdown_signal`
   exercises the daemon path.
 

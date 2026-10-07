@@ -442,9 +442,6 @@ impl Interpreter {
                 index: input_idx,
                 inputs,
             })?;
-        // In-bounds: prevouts.len() == tx.inputs.len() and input_idx < len.
-        let prevout = &prevouts[input_idx];
-
         let matches_tx = input.script_sig.as_slice() == script_sig
             && input.witness.len() == witness.len()
             && input
@@ -463,28 +460,107 @@ impl Interpreter {
             Cow::Owned(grafted)
         };
 
-        if is_p2tr(script_pubkey) && flags.contains(VerifyFlags::TAPROOT) {
-            verify_taproot(
-                &spending,
-                input_idx,
-                script_pubkey,
-                witness,
-                prevouts,
-                flags,
-            )?;
-            return Ok(true);
-        }
-
-        let mut checker = TxSignatureChecker::new(&spending, input_idx, prevout.value, prevouts);
-        verify_script(
+        let cache = SighashCache::new(&spending);
+        execute_spend(
+            &spending,
+            input_idx,
+            script_pubkey,
             script_sig,
+            witness,
+            flags,
+            prevouts,
+            &cache,
+        )
+    }
+}
+
+/// One native transaction and its ordered spent outputs for parallel input checks.
+///
+/// This owner binds the sighash cache to its transaction and prevouts for its
+/// lifetime. Each input retains its own script, hash mode, annex and separator
+/// context; only transaction-wide aggregate hashes are shared.
+pub struct PreparedTransaction<'tx> {
+    tx: &'tx Tx,
+    prevouts: Vec<TxOut>,
+    cache: SighashCache<'tx>,
+}
+
+impl<'tx> PreparedTransaction<'tx> {
+    /// Retains the resolved prevouts and initializes an empty aggregate cache.
+    /// `verify_input` checks the count before evaluating any script.
+    #[must_use]
+    pub fn new(tx: &'tx Tx, prevouts: Vec<TxOut>) -> Self {
+        Self {
+            tx,
+            prevouts,
+            cache: SighashCache::new(tx),
+        }
+    }
+
+    /// Verifies an input using this transaction's bytes and resolved prevout.
+    ///
+    /// # Errors
+    /// Returns the same count, input-index and script errors as
+    /// [`Interpreter::execute_with_prevouts`], in the same order.
+    pub fn verify_input(&self, input_idx: usize, flags: VerifyFlags) -> Result<bool, ScriptError> {
+        let inputs = self.tx.inputs.len();
+        if self.prevouts.len() != inputs {
+            return Err(ScriptError::TaprootPrevoutsUnavailable);
+        }
+        let input = self
+            .tx
+            .inputs
+            .get(input_idx)
+            .ok_or(ScriptError::InputIndexOutOfRange {
+                index: input_idx,
+                inputs,
+            })?;
+        execute_spend(
+            self.tx,
+            input_idx,
+            &self.prevouts[input_idx].script_pubkey,
+            &input.script_sig,
+            &input.witness,
+            flags,
+            &self.prevouts,
+            &self.cache,
+        )
+    }
+}
+
+/// Callers have checked the input/prevout bounds and bound the cache to these
+/// immutable transaction bytes and ordered prevouts.
+fn execute_spend(
+    spending: &Tx,
+    input_idx: usize,
+    script_pubkey: &[u8],
+    script_sig: &[u8],
+    witness: &[Vec<u8>],
+    flags: VerifyFlags,
+    prevouts: &[TxOut],
+    cache: &SighashCache<'_>,
+) -> Result<bool, ScriptError> {
+    if is_p2tr(script_pubkey) && flags.contains(VerifyFlags::TAPROOT) {
+        verify_taproot(
+            spending,
+            input_idx,
             script_pubkey,
             witness,
-            flags.filled(),
-            &mut checker,
+            prevouts,
+            flags,
+            cache,
         )?;
-        Ok(true)
+        return Ok(true);
     }
+    let checker = TxSignatureChecker::new(
+        spending,
+        input_idx,
+        prevouts[input_idx].value,
+        prevouts,
+        cache,
+    );
+    verify_script(script_sig, script_pubkey, witness, flags.filled(), &checker)?;
+    Ok(true)
 }
 
 fn invalid(code: ScriptErrCode) -> ScriptError {
@@ -498,7 +574,7 @@ fn verify_script(
     script_pubkey: &[u8],
     witness: &[Vec<u8>],
     flags: VerifyFlags,
-    checker: &mut TxSignatureChecker<'_>,
+    checker: &TxSignatureChecker<'_>,
 ) -> Result<(), ScriptError> {
     if flags.contains(VerifyFlags::SIGPUSHONLY) && !is_push_only(script_sig) {
         return Err(invalid(ScriptErrCode::SigPushonly));
@@ -601,7 +677,7 @@ fn verify_witness_program(
     version: u8,
     program: &[u8],
     flags: VerifyFlags,
-    checker: &mut TxSignatureChecker<'_>,
+    checker: &TxSignatureChecker<'_>,
     stack: &mut Stack,
 ) -> Result<(), ScriptError> {
     if version != 0 {
@@ -711,6 +787,7 @@ fn verify_taproot(
     witness: &[Vec<u8>],
     prevouts: &[TxOut],
     flags: VerifyFlags,
+    cache: &SighashCache<'_>,
 ) -> Result<(), ScriptError> {
     // scriptPubKey). `is_p2tr` already confirmed the shape.
     let program = script_pubkey
@@ -730,22 +807,22 @@ fn verify_taproot(
 
     if stack.len() == 1 {
         verify_taproot_keypath(
-            spending,
             input_idx,
             program,
             &stack,
             annex_bytes.as_deref(),
             prevouts,
+            cache,
         )
     } else {
+        let mut checker =
+            TxSignatureChecker::new(spending, input_idx, Amount::ZERO, prevouts, cache);
         verify_taproot_scriptpath(
-            spending,
-            input_idx,
+            &mut checker,
             program,
             witness,
             &mut stack,
             annex_bytes,
-            prevouts,
             flags,
         )
     }
@@ -767,12 +844,12 @@ fn strip_annex(stack: &mut Vec<Vec<u8>>) -> Option<Vec<u8>> {
 
 /// Verifies a taproot key-path spend (BIP341).
 fn verify_taproot_keypath(
-    spending: &Tx,
     input_idx: usize,
     program: &[u8],
     stack: &[Vec<u8>],
     annex_bytes: Option<&[u8]>,
     prevouts: &[TxOut],
+    cache: &SighashCache<'_>,
 ) -> Result<(), ScriptError> {
     let signature_bytes = &stack[0];
     let sighash_type = match signature_bytes.len() {
@@ -789,7 +866,6 @@ fn verify_taproot_keypath(
         .map_err(|error| ScriptError::Verification(error.to_string()))?;
     let public_key = XOnlyPublicKey::from_slice(program)
         .map_err(|error| ScriptError::Verification(error.to_string()))?;
-    let mut cache = SighashCache::new(spending);
     let sighash = cache
         .taproot_signature_hash(input_idx, prevouts, annex_bytes, None, sighash_type)
         .map_err(|error| ScriptError::Verification(error.to_string()))?;
@@ -805,13 +881,11 @@ fn verify_taproot_keypath(
 
 /// Verifies a taproot script-path spend (BIP341/BIP342).
 fn verify_taproot_scriptpath(
-    spending: &Tx,
-    input_idx: usize,
+    checker: &mut TxSignatureChecker<'_>,
     program: &[u8],
     witness: &[Vec<u8>],
     stack: &mut Vec<Vec<u8>>,
     annex_bytes: Option<Vec<u8>>,
-    prevouts: &[TxOut],
     flags: VerifyFlags,
 ) -> Result<(), ScriptError> {
     // Core: "const valtype& control = SpanPopBack(stack); const valtype& script = SpanPopBack(stack);"
@@ -881,14 +955,13 @@ fn verify_taproot_scriptpath(
         i64::try_from(witness_serialized_size).unwrap_or(i64::MAX) + eval::VALIDATION_WEIGHT_OFFSET,
     );
 
-    let mut checker = TxSignatureChecker::new(spending, input_idx, Amount::ZERO, prevouts);
     checker.set_annex(annex_bytes);
 
     eval::eval_script(
         &mut witness_stack,
         &script,
         flags,
-        &mut checker,
+        checker,
         SigVersion::Tapscript,
         &mut validation_weight_left,
         Some(&tapleaf),

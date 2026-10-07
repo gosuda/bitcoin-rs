@@ -64,9 +64,7 @@ fn ensure_prevout_count(
 /// decoded block, so the production native path decodes the transaction tree
 /// exactly once.
 mod native {
-    use core::marker::PhantomData;
-
-    use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
+    use bitcoin_rs_primitives::{Tx, Txid};
 
     use crate::ConsensusError;
 
@@ -121,27 +119,6 @@ mod native {
         #[must_use]
         pub fn derive_facts(&self, _txs: &[Tx], _txids: &[Txid]) -> crate::block_view::BlockFacts {
             self.facts.clone()
-        }
-
-        /// The native backend has nothing to prepare per transaction.
-        ///
-        /// Infallible and self-less here; the shape is the kernel backend's
-        /// fallible per-transaction prepare so callers do not fork.
-        #[expect(
-            clippy::unused_self,
-            reason = "shape parity with the kernel backend's per-transaction prepare"
-        )]
-        #[expect(
-            clippy::unnecessary_wraps,
-            reason = "shape parity with the fallible kernel backend"
-        )]
-        pub(super) fn prepare_tx<'b>(
-            &self,
-            _index: usize,
-            _input_count: usize,
-            _spent_outputs: &[(OutPoint, TxOut)],
-        ) -> Result<super::PreparedTx<'b>, ConsensusError> {
-            Ok(super::PreparedTx::Native(PhantomData))
         }
     }
 }
@@ -247,11 +224,13 @@ mod kernel_backend {
             spent_outputs: &[(OutPoint, TxOut)],
         ) -> Result<super::PreparedTx<'_>, ConsensusError> {
             let kernel_tx = self.block.transaction(index).map_err(map_kernel_error)?;
-            Ok(super::PreparedTx::Kernel(prepare_kernel_tx(
-                kernel_tx,
-                input_count,
-                spent_outputs,
-            )?))
+            Ok(super::PreparedTx::Kernel {
+                state: prepare_kernel_tx(kernel_tx, input_count, spent_outputs)?,
+                spent_outputs: spent_outputs
+                    .iter()
+                    .map(|(_, output)| output.clone())
+                    .collect(),
+            })
         }
 
         /// Derives the shared block facts (weight, Merkle root, and mutation
@@ -403,15 +382,23 @@ impl BlockParse {
     /// count is rejected outright, before any backend runs).
     pub(crate) fn prepare_tx<'b>(
         &'b self,
-        index: usize,
-        input_count: usize,
+        #[cfg_attr(not(feature = "kernel"), expect(unused_variables))] index: usize,
+        tx: &'b Tx,
         spent_outputs: &[(OutPoint, TxOut)],
     ) -> Result<PreparedTx<'b>, ConsensusError> {
-        ensure_prevout_count(spent_outputs, input_count)?;
+        ensure_prevout_count(spent_outputs, tx.inputs.len())?;
         match self {
-            Self::Native(block) => block.prepare_tx(index, input_count, spent_outputs),
+            Self::Native(_) => Ok(PreparedTx::Native(
+                bitcoin_rs_script::PreparedTransaction::new(
+                    tx,
+                    spent_outputs
+                        .iter()
+                        .map(|(_, output)| output.clone())
+                        .collect(),
+                ),
+            )),
             #[cfg(feature = "kernel")]
-            Self::Kernel(block) => block.prepare_tx(index, input_count, spent_outputs),
+            Self::Kernel(block) => block.prepare_tx(index, tx.inputs.len(), spent_outputs),
         }
     }
 
@@ -444,35 +431,44 @@ fn kernel_block_parse(_raw_block: &[u8]) -> Result<BlockParse, ConsensusError> {
 }
 
 /// One prepared transaction's backend state for the parse's engine.
+#[cfg_attr(
+    feature = "kernel",
+    expect(
+        clippy::large_enum_variant,
+        reason = "retain the fixed-size native aggregate cache inline instead of allocating for every transaction"
+    )
+)]
 pub(crate) enum PreparedTx<'b> {
-    /// The native backend retains no prepared state; the marker ties the
-    /// variant to its parse in builds where the kernel variant is compiled out.
-    Native(core::marker::PhantomData<&'b ()>),
+    /// The native transaction, ordered prevouts and shared aggregate hashes.
+    Native(bitcoin_rs_script::PreparedTransaction<'b>),
     /// The kernel transaction and its shared sighash precompute.
     #[cfg(feature = "kernel")]
-    Kernel(kernel_backend::PreparedKernelTx<bitcoinkernel::TransactionRef<'b>>),
+    Kernel {
+        state: kernel_backend::PreparedKernelTx<bitcoinkernel::TransactionRef<'b>>,
+        spent_outputs: Vec<TxOut>,
+    },
 }
 
 /// Verifies one input against its prepared transaction state under the
 /// engine that prepared it.
 ///
-/// `spent_outputs` is the full ordered set of outputs this transaction spends,
-/// shared by every input check (BIP341 sighashes commit to it).
+/// Each backend retains the ordered spent outputs with its prepared state.
 pub(crate) fn verify_prepared_input(
     prepared: &PreparedTx<'_>,
-    spent_outputs: &[TxOut],
-    tx: &Tx,
     input_index: usize,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
     match prepared {
         // The native per-input script verdict: the interpreter in
         // `bitcoin-rs-script` covers every consensus spend class.
-        PreparedTx::Native(_) => {
-            crate::verify_tx::verify_input_script_native(input_index, spent_outputs, tx, flags)
+        PreparedTx::Native(state) => {
+            crate::verify_tx::verify_input_script_native(state, input_index, flags)
         }
         #[cfg(feature = "kernel")]
-        PreparedTx::Kernel(state) => kernel_backend::verify_prepared_input(
+        PreparedTx::Kernel {
+            state,
+            spent_outputs,
+        } => kernel_backend::verify_prepared_input(
             state,
             &spent_outputs[input_index],
             input_index,
@@ -512,8 +508,9 @@ pub fn verify_tx_scripts(
                 .iter()
                 .map(|(_, prevout)| prevout.clone())
                 .collect();
+            let prepared = bitcoin_rs_script::PreparedTransaction::new(tx, spent);
             for (input_index, _) in spent_outputs.iter().enumerate() {
-                crate::verify_tx::verify_input_script_native(input_index, &spent, tx, flags)?;
+                crate::verify_tx::verify_input_script_native(&prepared, input_index, flags)?;
             }
             Ok(())
         }

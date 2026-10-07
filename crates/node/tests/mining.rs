@@ -805,7 +805,8 @@ fn submit_header_admits_a_mined_child_and_is_idempotent() -> anyhow::Result<()> 
     assert!(
         state
             .chainstate()
-            .read_block_tree()
+            .block_tree_reader()
+            .read()
             .lookup(child_hash)
             .is_some(),
         "submitted header must be in the tree"

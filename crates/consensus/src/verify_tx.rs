@@ -6,7 +6,7 @@ use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut};
 
 use crate::block_view::BlockView;
 use crate::sigops::transaction_sigop_cost;
-use bitcoin_rs_script::Interpreter;
+use bitcoin_rs_script::PreparedTransaction;
 use bitcoin_rs_script::VerifyFlags;
 use rayon::prelude::*;
 
@@ -362,23 +362,12 @@ fn finalize_tx_value_and_sigops(
 /// script-path). Compiled in every build — the `kernel` feature adds a
 /// backend, it never removes this one.
 pub(crate) fn verify_input_script_native(
+    prepared: &PreparedTransaction<'_>,
     input_index: usize,
-    spent_outputs: &[TxOut],
-    tx: &Tx,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    let input = &tx.inputs[input_index];
-    let prevout = &spent_outputs[input_index];
-    Interpreter
-        .execute_with_prevouts(
-            &prevout.script_pubkey,
-            &input.script_sig,
-            &input.witness,
-            flags,
-            spent_outputs,
-            tx,
-            input_index,
-        )
+    prepared
+        .verify_input(input_index, flags)
         .map_err(|error| ConsensusError::Script {
             input_index,
             reason: error.to_string(),
@@ -389,14 +378,6 @@ pub(crate) fn verify_input_script_native(
 
 /// Per-transaction state retained across the flat block verify phases.
 struct PreparedTx<'b> {
-    /// Borrowed from the parse-once [`BlockView`]; every input check of this
-    /// transaction reads the same decoded transaction without re-indexing.
-    tx: &'b Tx,
-    /// The prevouts of `prevouts` as a plain slice, cloned once per
-    /// transaction instead of once per input check; both engines commit to
-    /// every spent output (the interpreter in its sighashes, the kernel in its
-    /// precompute).
-    spent_outputs: Vec<TxOut>,
     pre_error: Option<ConsensusError>,
     post_error: Option<ConsensusError>,
     checks_start: usize,
@@ -677,8 +658,6 @@ fn prepare_block_input_checks<'b>(
             Ok(Some(prep)) => prep,
             Ok(None) => {
                 prepared.push(PreparedTx {
-                    tx,
-                    spent_outputs: Vec::new(),
                     pre_error: None,
                     post_error: None,
                     checks_start: checks.len(),
@@ -689,8 +668,6 @@ fn prepare_block_input_checks<'b>(
             }
             Err(pre_error) => {
                 prepared.push(PreparedTx {
-                    tx,
-                    spent_outputs: Vec::new(),
                     pre_error: Some(pre_error),
                     post_error: None,
                     checks_start: checks.len(),
@@ -701,23 +678,12 @@ fn prepare_block_input_checks<'b>(
             }
         };
 
-        // One clone of the spent outputs per transaction, not per input: both
-        // engines commit to every spent output, so each input check needs the
-        // full ordered set.
-        let spent_outputs: Vec<TxOut> = prep
-            .prevouts
-            .iter()
-            .map(|(_, spent)| spent.clone())
-            .collect();
-
         // Build retained backend state before checks so setup failure cannot
         // leave an InputCheck without its prepared state.
-        let script_state = match parsed.prepare_tx(tx_index, tx.inputs.len(), &prep.prevouts) {
+        let script_state = match parsed.prepare_tx(tx_index, tx, &prep.prevouts) {
             Ok(state) => state,
             Err(setup_error) => {
                 prepared.push(PreparedTx {
-                    tx,
-                    spent_outputs,
                     pre_error: Some(setup_error),
                     post_error: None,
                     checks_start: checks.len(),
@@ -741,8 +707,6 @@ fn prepare_block_input_checks<'b>(
         let post_error = finalize_tx_value_and_sigops(tx, &prep, flags).err();
         let stop_after_tx = post_error.is_some();
         prepared.push(PreparedTx {
-            tx,
-            spent_outputs,
             pre_error: None,
             post_error,
             checks_start,
@@ -766,13 +730,7 @@ fn check_input(unit: &BlockScriptChecks<'_>, check: &InputCheck) -> Result<(), C
     let script_state = prep.script_state.as_ref().ok_or_else(|| {
         ConsensusError::Kernel("clean non-coinbase tx lost prepared script state".to_owned())
     })?;
-    crate::kernel::verify_prepared_input(
-        script_state,
-        &prep.spent_outputs,
-        prep.tx,
-        check.input_index,
-        unit.flags,
-    )
+    crate::kernel::verify_prepared_input(script_state, check.input_index, unit.flags)
 }
 
 fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
@@ -1175,7 +1133,7 @@ mod tests {
         };
 
         for (input_idx, keypair) in keypairs.iter().enumerate() {
-            let mut cache = SighashCache::new(&tx);
+            let cache = SighashCache::new(&tx);
             let sighash = cache
                 .taproot_signature_hash(input_idx, &prevouts, None, None, Sighash::Default)
                 .unwrap_or_else(|_| panic!("taproot sighash"));
