@@ -35,6 +35,7 @@ fn chainstate() -> Arc<Chainstate> {
 struct FaultHead {
     inner: bitcoin_rs_storage::InMemoryDurableHeadStore,
     fail: AtomicBool,
+    fail_terminal: AtomicBool,
 }
 impl DurableHeadStore for FaultHead {
     fn load(&self) -> Result<Option<DurableHead>, StorageError> {
@@ -46,7 +47,13 @@ impl DurableHeadStore for FaultHead {
         next: &DurableHead,
         records: &CommitRecords<'_>,
     ) -> Result<(), StorageError> {
-        if self.fail.load(Ordering::Acquire) {
+        if self.fail.load(Ordering::Acquire)
+            || (self.fail_terminal.load(Ordering::Acquire)
+                && matches!(
+                    next.assumeutxo,
+                    AssumeUtxoDiskStatus::Failed { .. } | AssumeUtxoDiskStatus::Finalized { .. }
+                ))
+        {
             return Err(StorageError::InvalidOperation(
                 "injected durable-head failure",
             ));
@@ -350,6 +357,23 @@ fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip(
 }
 
 #[test]
+fn out_of_order_historical_input_does_not_persist_or_close_admission() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    let before = fixture.active.durable_head.load()?;
+    assert!(matches!(
+        manager.step_historical(&fixture.blocks[1], None),
+        Err(AssumeUtxoError::Apply(ApplyError::PrevHashMismatch { .. }))
+    ));
+    assert_eq!(fixture.active.durable_head.load()?, before);
+    assert!(!fixture.active.is_closed_for_recovery());
+    manager.step_historical(&fixture.blocks[0], None)?;
+    Ok(())
+}
+
+#[test]
 fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
@@ -475,7 +499,7 @@ fn mismatch_closes_admission_even_when_failure_record_cannot_be_written() -> Tes
     for block in &fixture.blocks[..2] {
         manager.step_historical(block, None)?;
     }
-    fixture.head.fail.store(true, Ordering::Release);
+    fixture.head.fail_terminal.store(true, Ordering::Release);
     let mut wrong = fixture.blocks[2].clone();
     wrong.header.nonce = wrong.header.nonce.wrapping_add(1);
     assert!(matches!(
@@ -502,7 +526,7 @@ fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> Te
     for block in &fixture.blocks[..2] {
         manager.step_historical(block, None)?;
     }
-    fixture.head.fail.store(true, Ordering::Release);
+    fixture.head.fail_terminal.store(true, Ordering::Release);
     assert!(matches!(
         manager.step_historical(&fixture.blocks[2], None),
         Err(AssumeUtxoError::Storage(_))

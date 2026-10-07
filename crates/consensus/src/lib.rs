@@ -240,6 +240,13 @@ pub enum ConsensusError {
         /// Number of supplied prevout rows.
         prevout_count: usize,
     },
+    /// Resolved prevouts identify the wrong transaction input: a caller wiring
+    /// error, not a script verdict or proof that a block is invalid.
+    #[error("prevout does not match transaction input {input_index}")]
+    PrevoutMismatch {
+        /// First input whose supplied prevout identity differs.
+        input_index: usize,
+    },
     /// The requested [`ValidationEngine`] is not compiled into this build.
     ///
     /// A build/wiring error, not a verdict about the transaction: this build

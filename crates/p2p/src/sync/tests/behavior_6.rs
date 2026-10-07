@@ -106,14 +106,10 @@ fn mutated_forward_body_preserves_descendant_for_retry() -> Result<(), Box<dyn s
         vec![regtest_fixture::coinbase(3)],
     )
     .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
-    {
-        let mut tree = sync.chain.block_tree_mut();
-        let main_id = tree
-            .lookup(Hash256::from_le_bytes(main_hash.as_bytes()))
-            .ok_or_else(|| std::io::Error::other("missing applied main block"))?;
-        let bad_id = tree.insert_node(Some(main_id), bad.header, NodeStatus::HeaderValid)?;
-        tree.insert_node(Some(bad_id), descendant.header, NodeStatus::HeaderValid)?;
-    }
+    assert!(matches!(
+        sync.chain.admit_headers(&[bad.header, descendant.header]),
+        HeaderAdmission::Accepted { .. }
+    ));
     stage_body(&sync, &bad_body);
     stage_body(&sync, &descendant);
 

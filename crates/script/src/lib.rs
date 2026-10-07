@@ -22,7 +22,10 @@ mod stack;
 /// Taproot verification helpers.
 mod taproot;
 
-pub use interpreter::{Interpreter, PreparedTransaction, ScriptErrCode, ScriptError, VerifyFlags};
+pub use interpreter::{
+    Interpreter, PreparedTransaction, PrevoutError, ScriptErrCode, ScriptError, VerifyFlags,
+    validate_prevouts,
+};
 pub use script::{
     EarlyEndOfScript, Instruction, Instructions, instructions, is_multisig, is_op_return, is_p2a,
     is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh, is_push_only, is_witness_program,

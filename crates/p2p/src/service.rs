@@ -175,6 +175,20 @@ pub enum P2pJoinError {
     BootstrapPanic,
 }
 
+/// Errors returned by RPC-facing P2P control operations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum P2pControlError {
+    /// The destination is covered by an active manual ban.
+    #[error("destination is banned")]
+    Banned,
+    /// The bounded dial queue has no capacity.
+    #[error("p2p outbound queue is full")]
+    QueueFull,
+    /// The P2P service has already shut down.
+    #[error("p2p outbound queue is closed")]
+    Closed,
+}
+
 #[derive(Default)]
 struct Workers {
     listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
@@ -670,29 +684,81 @@ impl P2pService {
         self.network_active.load(Ordering::Acquire)
     }
 
-    /// Returns the shared admission switch for compatibility with node
-    /// orchestration code that passes the switch into worker constructors.
-    #[must_use]
-    pub fn network_active_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.network_active)
+    /// Enables or disables network activity. Disabling cancels current peers;
+    /// their owners remove the leases during teardown.
+    pub fn set_network_active(&self, active: bool) {
+        apply_network_active(&self.network_active, &self.peer_table, active);
     }
 
-    /// Returns the service-owned manual ban list handle.
-    #[must_use]
-    pub fn banned_handle(&self) -> Arc<RwLock<Vec<crate::BannedSubnet>>> {
-        Arc::clone(&self.banned)
+    /// Adds or replaces one manual ban entry.
+    pub fn set_ban(&self, entry: crate::BannedSubnet) {
+        let mut banned = self.banned.write();
+        banned.retain(|current| current.subnet != entry.subnet);
+        banned.push(entry);
     }
 
-    /// Returns a sender for outbound dial requests, manual or not.
-    #[must_use]
-    pub fn outbound_sender(&self) -> Sender<OutboundDial> {
-        self.outbound_tx.clone()
+    /// Removes one manual ban entry.
+    pub fn remove_ban(&self, subnet: crate::IpSubnet) {
+        self.banned.write().retain(|entry| entry.subnet != subnet);
     }
 
-    /// Returns the service-owned persistent addnode view.
+    /// Clears all manual bans.
+    pub fn clear_banned(&self) {
+        self.banned.write().clear();
+    }
+
+    /// Returns a snapshot of current manual bans.
     #[must_use]
-    pub fn added_nodes_handle(&self) -> Arc<RwLock<Vec<SocketAddr>>> {
-        Arc::clone(&self.added_nodes)
+    pub fn banned(&self) -> Vec<crate::BannedSubnet> {
+        self.banned.read().clone()
+    }
+
+    /// Returns configured addnode add addresses.
+    #[must_use]
+    pub fn added_nodes(&self) -> Vec<SocketAddr> {
+        self.added_nodes.read().clone()
+    }
+
+    /// Applies Core-like addnode state and requests a connection.
+    pub fn add_node(&self, addr: SocketAddr, persist: bool) -> Result<(), P2pControlError> {
+        if crate::subnet::is_banned(&self.banned.read(), addr.ip(), SystemTime::now()) {
+            return Err(P2pControlError::Banned);
+        }
+        if persist {
+            let mut added = self.added_nodes.write();
+            if !added.contains(&addr) {
+                added.push(addr);
+            }
+        }
+        if !self.network_active() {
+            return Ok(());
+        }
+        match self.outbound_tx.try_send(OutboundDial::pinned(addr)) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => Ok(()),
+            Err(TrySendError::Full(_)) => Err(P2pControlError::QueueFull),
+            Err(TrySendError::Disconnected(_)) => Err(P2pControlError::Closed),
+        }
+    }
+
+    /// Removes one configured addnode add address.
+    pub fn remove_node(&self, addr: SocketAddr) {
+        self.added_nodes.write().retain(|current| *current != addr);
+    }
+
+    /// Disconnects any active connection with the given address.
+    pub fn disconnect(&self, addr: SocketAddr) -> bool {
+        self.peer_table.disconnect(addr)
+    }
+
+    /// Queues an automatic dial for the stale-tip slot-cap unit test.
+    /// Local addnode requests are manual and cannot exercise that allowance.
+    #[cfg(test)]
+    pub(crate) fn test_queue_automatic_dial(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<(), crossbeam_channel::SendError<OutboundDial>> {
+        self.outbound_tx.send(OutboundDial::auto(addr))
     }
 
     /// Returns a cloned inbound headers receiver for the node sync coordinator.
@@ -714,11 +780,11 @@ impl P2pService {
     }
 }
 
-/// Applies the network-activity transition used by [`P2pService`] and RPC.
+/// Applies the service-owned network-activity transition.
 ///
 /// Disabling cancels current leases; connection owners remove their own
 /// sessions during teardown.
-pub fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active: bool) {
+fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active: bool) {
     flag.store(active, Ordering::Release);
     if !active {
         table.cancel_all();
@@ -1890,5 +1956,68 @@ mod tests {
             addr(4),
             "a real automatic excess still retires its newest aged peer"
         );
+    }
+
+    #[test]
+    fn add_node_enqueues_and_respects_queue_capacity() {
+        let service = P2pService::new(
+            P2pServiceConfig {
+                outbound_queue_limit: 1,
+                ..P2pServiceConfig::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let addr1: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
+        let addr2: SocketAddr = "127.0.0.2:8333".parse().expect("addr");
+
+        assert!(service.add_node(addr1, true).is_ok());
+        assert_eq!(service.added_nodes().as_slice(), &[addr1]);
+        let dial = service.outbound_rx.lock().try_recv().expect("recv");
+        assert_eq!(dial, OutboundDial::pinned(addr1));
+
+        service
+            .outbound_tx
+            .try_send(OutboundDial::pinned(addr1))
+            .expect("send");
+
+        assert_eq!(
+            service.add_node(addr2, false),
+            Err(P2pControlError::QueueFull)
+        );
+
+        assert!(service.add_node(addr2, true).is_ok());
+        assert_eq!(service.added_nodes().as_slice(), &[addr1, addr2]);
+    }
+
+    #[test]
+    fn add_node_inactive_skips_queueing() {
+        let service = P2pService::new(
+            P2pServiceConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        service.set_network_active(false);
+        let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
+        assert!(service.add_node(addr, true).is_ok());
+        assert_eq!(service.added_nodes().as_slice(), &[addr]);
+        assert!(service.outbound_rx.lock().try_recv().is_err());
+    }
+
+    #[test]
+    fn add_node_rejects_banned_address() {
+        let service = P2pService::new(
+            P2pServiceConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let subnet: crate::IpSubnet = "127.0.0.0/24".parse().expect("subnet");
+        service.set_ban(crate::BannedSubnet {
+            subnet,
+            ban_created: SystemTime::now(),
+            banned_until: None,
+            reason: String::new(),
+        });
+        let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
+        assert_eq!(service.add_node(addr, true), Err(P2pControlError::Banned));
+        assert_eq!(service.added_nodes().as_slice(), &[]);
+        assert!(service.outbound_rx.lock().try_recv().is_err());
     }
 }

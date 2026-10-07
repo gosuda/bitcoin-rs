@@ -1239,17 +1239,21 @@ fn run_tx_vectors_native(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<Strin
 
     for row in rows {
         counts.executed += 1;
-        let prevout_txouts: Vec<TxOut> = row.prevouts.iter().map(|(_, o)| o.clone()).collect();
-        let prepared = PreparedTransaction::new(&row.tx, prevout_txouts);
+        let prepared = PreparedTransaction::new(&row.tx, &row.prevouts);
         // The first failing input decides the row, and its error name is what
         // a triage reader needs; a bare Reject says nothing.
         let mut first_failure = None;
-        for input_idx in 0..row.tx.inputs.len() {
-            let result = prepared.verify_input(input_idx, row.flags);
-            if !matches!(result, Ok(true)) {
-                first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
-                break;
+        match prepared {
+            Ok(prepared) => {
+                for input_idx in 0..row.tx.inputs.len() {
+                    let result = prepared.verify_input(input_idx, row.flags);
+                    if !matches!(result, Ok(true)) {
+                        first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
+                        break;
+                    }
+                }
             }
+            Err(error) => first_failure = Some((0, Verdict::Reject(Some(error.to_string())))),
         }
 
         let verdict = match &first_failure {

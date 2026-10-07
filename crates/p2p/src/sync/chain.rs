@@ -15,8 +15,6 @@ use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use bytes::Bytes;
 use parking_lot::RwLockReadGuard;
-#[cfg(test)]
-use parking_lot::RwLockWriteGuard;
 use std::sync::Arc;
 
 /// Boxed source for seam failures: the executor forwards them to logs and
@@ -231,14 +229,6 @@ pub trait SyncChain: Send + Sync {
 
     /// Applied tip published by commits and branch switches.
     fn applied_tip(&self) -> Option<Arc<TipSnapshot>>;
-
-    /// Fixture-only mutation seam, absent from production trait objects.
-    #[cfg(test)]
-    fn block_tree_mut(&self) -> RwLockWriteGuard<'_, BlockTree>;
-
-    /// Fixture-only tip publication seam, absent from production trait objects.
-    #[cfg(test)]
-    fn set_tips(&self, applied: TipSnapshot, header: TipSnapshot);
 
     /// Applies genesis when nothing is applied yet.
     fn bootstrap_genesis(&self);

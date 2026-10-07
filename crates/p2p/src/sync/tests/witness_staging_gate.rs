@@ -79,18 +79,12 @@ fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn s
     let correct_block = segwit_block(prev_hash, 1, true);
     let block_hash = Hash256::from_le_bytes(correct_block.block_hash().as_bytes());
 
-    // Insert the header into the tree so the witness gate can derive
+    // Admit the header into the chain so the witness gate can derive
     // segwit_active from the parent (genesis) and the block height.
-    let genesis_id = sync
-        .chain
-        .block_tree()
-        .lookup(Hash256::from_le_bytes(genesis.block_hash().as_bytes()))
-        .ok_or("missing genesis node")?;
-    sync.chain.block_tree_mut().insert_node(
-        Some(genesis_id),
-        correct_block.header,
-        NodeStatus::HeaderValid,
-    )?;
+    assert!(matches!(
+        sync.chain.admit_headers(&[correct_block.header]),
+        HeaderAdmission::Accepted { .. }
+    ));
 
     // The stripped variant shares the same header/hash (witness does not
     // affect txid or block hash).

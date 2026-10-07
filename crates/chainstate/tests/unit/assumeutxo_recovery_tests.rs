@@ -115,9 +115,22 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
             .applied_tip_snapshot()
             .is_none()
     );
+    let archived_head = active.durable_head.load()?;
+    let archived_extent = active
+        .block_body_store
+        .as_ref()
+        .and_then(|store| store.append_cursor());
     assert_eq!(
         manager.advance_historical()?,
         Some((2, fixture.pinned.block_hash))
+    );
+    assert_eq!(active.durable_head.load()?, archived_head);
+    assert_eq!(
+        active
+            .block_body_store
+            .as_ref()
+            .and_then(|store| store.append_cursor()),
+        archived_extent
     );
     let events = active.chain_events.snapshot();
     manager.step_historical(&fixture.blocks[2], None)?;
@@ -200,6 +213,26 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
             .ok_or("missing restarted ordinary tip")?
             .height,
         1
+    );
+    Ok(())
+}
+
+#[test]
+fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let (active, manager) = activate(dir.path(), &fixture)?;
+    assert!(active.publish_checkpoint()?.is_some());
+    drop(manager);
+    drop(active);
+    let mut wrong_pin = fixture.pinned;
+    wrong_pin.hash_serialized = Hash256::default();
+    assert!(crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &wrong_pin).is_err());
+    let restored =
+        crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned)?;
+    assert_eq!(
+        restored.utxo.lock_stable_view().hash_serialized_3()?,
+        fixture.pinned.hash_serialized
     );
     Ok(())
 }
@@ -461,6 +494,59 @@ impl DurableHeadStore for RejectTerminalHead {
         }
         self.inner.commit(expected, next, records)
     }
+}
+
+#[test]
+fn failed_pre_base_validation_cannot_be_forgotten_when_failure_receipt_is_lost() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let mut active = open_persistent(dir.path(), &fixture.pinned)?;
+    let inner = active.durable_head.clone();
+    Arc::get_mut(&mut active)
+        .ok_or("shared fixture")?
+        .durable_head = Arc::new(RejectTerminalHead { inner });
+    active.admit_headers(
+        &fixture
+            .blocks
+            .iter()
+            .map(|block| block.header)
+            .collect::<Vec<_>>(),
+    )?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        active.clone(),
+        Some(dir.path().to_path_buf()),
+    )?;
+    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    manager.step_historical(&fixture.blocks[0], None)?;
+    let mut invalid = fixture.blocks[1].clone();
+    invalid.txs.clear();
+    assert!(manager.step_historical(&invalid, None).is_err());
+    assert!(active.is_closed_for_recovery());
+    assert!(
+        matches!(manager.status()?, AssumeUtxoDiskStatus::Validating { pending: Some(pending), .. } if pending.height == 1)
+    );
+    drop(manager);
+    drop(active);
+    let active = open_persistent(dir.path(), &fixture.pinned)?;
+    assert!(
+        AssumeUtxoManager::open(
+            Network::Regtest,
+            active.clone(),
+            Some(dir.path().to_path_buf())
+        )
+        .is_err()
+    );
+    assert!(active.is_closed_for_recovery());
+    assert!(matches!(
+        active
+            .durable_head
+            .load()?
+            .ok_or("missing head")?
+            .assumeutxo,
+        AssumeUtxoDiskStatus::Failed { .. }
+    ));
+    Ok(())
 }
 
 #[test]

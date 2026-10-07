@@ -15,7 +15,8 @@ use crate::{ApplyError, WindowApplyDisposition, classify_apply_error};
 fn apply_errors_classify_into_their_documented_dispositions() {
     use ApplyError::{Chain, Consensus, DurableHeadCommit, ProofOfWork};
     use ConsensusError::{
-        Kernel, MerkleRoot, PrevoutCount, PrevoutMatrixSize, Script, UnsupportedEngine,
+        Kernel, MerkleRoot, PrevoutCount, PrevoutMatrixSize, PrevoutMismatch, Script,
+        UnsupportedEngine,
     };
     use WindowApplyDisposition::{BodyMutated, Fatal, Operational, Permanent};
 
@@ -48,6 +49,7 @@ fn apply_errors_classify_into_their_documented_dispositions() {
             }),
             Operational,
         ),
+        (Consensus(PrevoutMismatch { input_index: 1 }), Operational),
         (Consensus(Kernel("parse failed".to_owned())), Operational),
         (Consensus(script(ScriptEngine::Kernel)), Operational),
         (Consensus(script(ScriptEngine::Native)), Permanent),

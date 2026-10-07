@@ -11,16 +11,7 @@ fn runtime_accessors_borrow_their_subsystem_owner() -> anyhow::Result<()> {
     let followers = state.chain_followers();
 
     assert!(Arc::ptr_eq(&state.peer_table(), &p2p.table()));
-    assert!(Arc::ptr_eq(
-        &state.network_active(),
-        &p2p.network_active_handle()
-    ));
-    assert!(Arc::ptr_eq(&state.banned_subnets(), &p2p.banned_handle()));
-    assert!(
-        state
-            .p2p_outbound_sender()
-            .same_channel(&p2p.outbound_sender())
-    );
+    assert!(Arc::ptr_eq(&state.p2p(), &p2p));
     assert!(
         state
             .inbound_blocks_sender()
@@ -163,7 +154,12 @@ fn unmarked_nonempty_datadir_is_refused_without_modification() -> anyhow::Result
     std::fs::write(config.data_dir.join("legacy-state"), b"old")?;
 
     let data_dir = config.data_dir.clone();
-    assert!(NodeState::open(config, None).is_err());
+    let error = match NodeState::open(config, None) {
+        Ok(_) => anyhow::bail!("unmarked legacy datadir was accepted"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("implicitly schema epoch 0"));
+    assert!(error.contains("resync"));
     assert!(
         !data_dir
             .join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE)

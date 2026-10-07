@@ -9,6 +9,10 @@
   prevout set per prepared transaction. Transaction aggregates initialize once
   across parallel input checks; script, input index, hash mode, annex and
   code-separator context remain local to each check.
+- Preparation validates the prevout count and each row's outpoint against the
+  corresponding transaction input before script evaluation. A mismatch is a
+  caller-wiring error, not a script verdict; the native owner retains cloned
+  outputs against an immutable borrowed transaction after this check.
 - Core `script_tests.json`, `tx_valid.json`, and `tx_invalid.json` native
   columns pin zero mismatches on **runnable** rows in
   `crates/script/tests/core_vectors.rs`, and pin skip counts **and**

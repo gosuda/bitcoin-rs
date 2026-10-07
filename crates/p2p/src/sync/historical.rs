@@ -14,7 +14,7 @@ use crate::{InboundBlock, Message, PeerSource};
 pub(super) struct HistoricalRequest {
     pub(super) hash: Hash256,
     pub(super) source: PeerSource,
-    sent: Instant,
+    pub(super) sent: Instant,
 }
 
 const RETRY_AFTER: Duration = Duration::from_secs(30);
@@ -88,7 +88,8 @@ impl BlockSync {
             return false;
         }
         // Reject corrupted deliveries without treating their committed header
-        // as invalid. The next tick retries the same pinned hash.
+        // as invalid. Retain the lease on failure, so retry waits out the
+        // deadline and prefers another peer rather than hammering this one.
         let result = self
             .chain
             .check_body_binding(&inbound.block)
@@ -98,8 +99,9 @@ impl BlockSync {
             });
         if let Err(error) = result {
             tracing::warn!(%error, "historical body rejected");
+        } else {
+            *self.historical_request.lock() = None;
         }
-        *self.historical_request.lock() = None;
         true
     }
 }

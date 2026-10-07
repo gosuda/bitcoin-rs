@@ -67,16 +67,17 @@ pub trait BlockBodyStore: Send + Sync {
     ) -> Result<Option<Vec<u8>>, StorageError> {
         self.load_block_body(height, hash)
     }
-    /// Stages bytes without publishing a new locator when the store supports
-    /// atomic head batches. The caller must sync and commit the returned row.
+    /// Stages bytes without publishing a new locator. The caller must sync
+    /// and commit the returned row. Stores without isolated staging refuse.
     fn stage_block_body(
         &self,
-        height: u32,
-        hash: Hash256,
-        body: &[u8],
+        _height: u32,
+        _hash: Hash256,
+        _body: &[u8],
     ) -> Result<Option<BlockFilePosition>, StorageError> {
-        self.persist_block_body(height, hash, body)?;
-        self.block_position(height, hash)
+        Err(StorageError::InvalidOperation(
+            "isolated body staging is unsupported",
+        ))
     }
     /// Persists an exact block body.
     fn persist_block_body(

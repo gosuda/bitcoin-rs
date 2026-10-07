@@ -373,17 +373,10 @@ pub struct IndexHandles {
 
 /// Network capability handles.
 pub struct NetworkHandles {
-    /// Whether the node accepts or starts P2P connections.
-    pub network_active: Arc<core::sync::atomic::AtomicBool>,
     /// Authoritative live peer sessions.
     pub peer_table: Arc<bitcoin_rs_p2p::PeerTable>,
-    /// Channel that requests outbound P2P connections, tagged with the
-    /// origin that asked for each one.
-    pub p2p_outbound_sender: Option<crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial>>,
-    /// Manual IP/CIDR bans.
-    pub banned: Arc<parking_lot::RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>>,
-    /// Persisted `addnode add` entries.
-    pub added_nodes: Arc<parking_lot::RwLock<Vec<std::net::SocketAddr>>>,
+    /// P2P service runtime owner for network mutations and state.
+    pub p2p: Arc<bitcoin_rs_p2p::P2pService>,
     /// Service flags the node advertises, as resolved at P2P startup —
     /// `NETWORK` on an unpruned node, `NETWORK_LIMITED` on a pruned one.
     pub local_services: u64,
@@ -512,12 +505,13 @@ impl Default for MempoolHandles {
 
 impl Default for NetworkHandles {
     fn default() -> Self {
+        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
+            bitcoin_rs_p2p::P2pServiceConfig::default(),
+            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+        ));
         Self {
-            network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
-            peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
-            p2p_outbound_sender: None,
-            banned: Arc::new(RwLock::new(Vec::new())),
-            added_nodes: Arc::new(RwLock::new(Vec::new())),
+            peer_table: p2p.table(),
+            p2p,
             local_services: 0x09,
         }
     }
@@ -1426,9 +1420,10 @@ mod tests {
                 BlockTreeReader::new(Arc::clone(&block_tree)),
             )),
         );
-        let banned = Arc::new(RwLock::new(Vec::<bitcoin_rs_p2p::BannedSubnet>::new()));
-        let added_nodes = Arc::new(RwLock::new(Vec::new()));
-        let network_active = Arc::new(core::sync::atomic::AtomicBool::new(true));
+        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
+            bitcoin_rs_p2p::P2pServiceConfig::default(),
+            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+        ));
         let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
@@ -1451,11 +1446,9 @@ mod tests {
                 .unwrap_or_else(|error| panic!("mempool gateway intern: {error}")),
             },
             network: NetworkHandles {
-                network_active: Arc::clone(&network_active),
-                banned: Arc::clone(&banned),
-                added_nodes: Arc::clone(&added_nodes),
+                peer_table: p2p.table(),
+                p2p: Arc::clone(&p2p),
                 local_services: 0x09,
-                ..NetworkHandles::default()
             },
             ..ContextHandles::default()
         });
@@ -1525,16 +1518,8 @@ mod tests {
             );
         }
         assert!(
-            Arc::ptr_eq(&ctx.network.network_active, &network_active),
-            "network activity must be shared with caller"
-        );
-        assert!(
-            Arc::ptr_eq(&ctx.network.banned, &banned),
-            "banned must be shared with caller"
-        );
-        assert!(
-            Arc::ptr_eq(&ctx.network.added_nodes, &added_nodes),
-            "added_nodes must be shared with caller"
+            Arc::ptr_eq(&ctx.network.p2p, &p2p),
+            "p2p service must be shared with caller"
         );
     }
 
@@ -2043,14 +2028,7 @@ mod tests {
                 script_index: None,
                 derived_index_status: Some(Arc::clone(&status)),
             },
-            network: NetworkHandles {
-                network_active: Arc::new(core::sync::atomic::AtomicBool::new(true)),
-                peer_table: Arc::new(bitcoin_rs_p2p::PeerTable::new()),
-                p2p_outbound_sender: None,
-                banned: Arc::new(RwLock::new(Vec::new())),
-                added_nodes: Arc::new(RwLock::new(Vec::new())),
-                local_services: 0x09,
-            },
+            network: NetworkHandles::default(),
             mining: MiningHandles {
                 mining_control: None,
             },

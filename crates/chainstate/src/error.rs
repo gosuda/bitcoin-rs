@@ -70,7 +70,7 @@ pub enum ApplyError {
     UndoPersistence(#[source] bitcoin_rs_storage::StorageError),
     /// Journal durability or retention cannot recover within configured bounds.
     #[error("chainstate journal backpressure stopped block apply: {0}")]
-    JournalBackpressure(String),
+    JournalBackpressure(#[source] Box<bitcoin_rs_storage::chainstate_journal::JournalWriterError>),
     /// A spent output had no resolved prevout, so the undo record would be
     /// unable to restore it.
     #[error("undo record cannot restore spent output {txid}:{vout}")]
@@ -136,10 +136,11 @@ pub enum ApplyError {
         /// Why the gap is not a replayable publication lag.
         reason: &'static str,
     },
-    /// Disconnect-marker recovery reconstructed the state but could not
-    /// publish its clean checkpoint, so the marker stays armed and startup
-    /// fails closed. The underlying publication failure rides as source.
-    #[error("disconnect recovery checkpoint publication failed: {0}")]
+    /// Recovery reconstructed a coherent state but could not publish the
+    /// checkpoint required by its current phase, so its marker stays armed
+    /// and startup fails closed. The underlying publication failure rides as
+    /// source.
+    #[error("recovery checkpoint publication failed: {0}")]
     RecoveryPublication(#[source] Box<crate::checkpoint::CheckpointError>),
     /// Rewinding the block-level coinstats failed.
     #[error("coinstats rewind: {0}")]

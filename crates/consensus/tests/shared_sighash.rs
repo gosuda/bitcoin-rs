@@ -18,7 +18,7 @@ use bitcoin_rs_primitives::{
     SighashError, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_script::{
-    PreparedTransaction, ScriptErrCode, ScriptError, VerifyFlags, opcode, push_data,
+    PreparedTransaction, PrevoutError, ScriptErrCode, ScriptError, VerifyFlags, opcode, push_data,
 };
 use secp256k1::{Keypair, Message, PublicKey, SECP256K1, SecretKey};
 
@@ -31,6 +31,14 @@ const MODES: [Sighash; 7] = [
     Sighash::NoneAnyoneCanPay,
     Sighash::SingleAnyoneCanPay,
 ];
+
+fn resolved_prevouts(tx: &Tx, prevouts: &[TxOut]) -> Vec<(OutPoint, TxOut)> {
+    tx.inputs
+        .iter()
+        .zip(prevouts)
+        .map(|(input, output)| (input.previous_output, output.clone()))
+        .collect()
+}
 
 fn fixture(inputs: u8, outputs: usize) -> (Tx, Vec<TxOut>) {
     let prevouts: Vec<TxOut> = (0..inputs)
@@ -328,7 +336,9 @@ fn prepared_block_and_transaction_accept_reference_signatures_and_order_failures
     for (failed_input, signature_input) in [(1, 41), (41, 1)] {
         let mut isolated = tx.clone();
         isolated.inputs[failed_input].witness[0].clone_from(&tx.inputs[signature_input].witness[0]);
-        let prepared = PreparedTransaction::new(&isolated, prevouts.clone());
+        let prepared =
+            PreparedTransaction::new(&isolated, &resolved_prevouts(&isolated, &prevouts))
+                .expect("ordered prevouts");
         for input_index in 0..tx.inputs.len() {
             let expected = if input_index == failed_input {
                 Err(ScriptError::Invalid {
@@ -375,17 +385,66 @@ fn prepared_block_and_transaction_accept_reference_signatures_and_order_failures
 #[test]
 fn prepared_input_preserves_typed_bounds_and_count_precedence() {
     let (tx, prevouts) = fixture(3, 2);
-    let wrong_count = PreparedTransaction::new(&tx, Vec::new());
+    let wrong_count = PreparedTransaction::new(&tx, &[]);
     assert_eq!(
-        wrong_count.verify_input(999, VerifyFlags::MANDATORY),
-        Err(ScriptError::TaprootPrevoutsUnavailable)
+        wrong_count.err(),
+        Some(PrevoutError::Count {
+            input_count: 3,
+            prevout_count: 0
+        })
     );
-    let prepared = PreparedTransaction::new(&tx, prevouts);
+    let prepared = PreparedTransaction::new(&tx, &resolved_prevouts(&tx, &prevouts))
+        .expect("ordered prevouts");
     assert_eq!(
         prepared.verify_input(999, VerifyFlags::MANDATORY),
         Err(ScriptError::InputIndexOutOfRange {
             index: 999,
             inputs: 3
+        })
+    );
+}
+
+#[test]
+fn preparation_rejects_swapped_and_foreign_prevout_identities_before_scripts() {
+    let (tx, mut outputs) = fixture(3, 2);
+    // Identical, always-true scripts cannot expose wrong row identities during
+    // execution. Preparation must reject the wiring independently of scripts.
+    for output in &mut outputs {
+        *output = TxOut {
+            value: Amount::from_sat(1),
+            script_pubkey: Script::from_bytes(vec![opcode::OP_PUSHNUM_1]),
+        };
+    }
+    let rows = resolved_prevouts(&tx, &outputs);
+    let prepared = PreparedTransaction::new(&tx, &rows).expect("ordered identities");
+    for index in 0..tx.inputs.len() {
+        assert_eq!(prepared.verify_input(index, VerifyFlags::NONE), Ok(true));
+    }
+    let mut swapped = rows.clone();
+    swapped.swap(0, 1);
+    let mut foreign = rows.clone();
+    foreign[1].0.vout += 1;
+    for (bad_rows, input_index) in [(swapped, 0), (foreign, 1)] {
+        assert_eq!(
+            PreparedTransaction::new(&tx, &bad_rows).err(),
+            Some(PrevoutError::Mismatch { input_index })
+        );
+        // Even an unavailable backend rejects caller wiring before dispatch.
+        for engine in [ValidationEngine::Native, ValidationEngine::Kernel] {
+            assert_eq!(
+                verify_tx_scripts(&tx, &bad_rows, VerifyFlags::NONE, engine),
+                Err(ConsensusError::PrevoutMismatch { input_index })
+            );
+        }
+    }
+    let mut short = rows;
+    short.swap(0, 1);
+    short.pop();
+    assert_eq!(
+        PreparedTransaction::new(&tx, &short).err(),
+        Some(PrevoutError::Count {
+            input_count: 3,
+            prevout_count: 2
         })
     );
 }

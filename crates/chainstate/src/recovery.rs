@@ -123,6 +123,12 @@ pub(crate) fn restore_snapshot(
             .and_then(|id| restored.tree.node(id).ok())
             .is_some_and(|node| node.hash == pinned.block_hash);
         if compatible {
+            if restored.applied_tip.height == pinned.height
+                && (restored.utxo.lock_stable_view().hash_serialized_3()? != pinned.hash_serialized
+                    || restored.chain_tx_count != pinned.chain_tx_count)
+            {
+                bail!("snapshot-base checkpoint does not match the pinned commitment/count");
+            }
             return restored_initial(
                 *restored,
                 ChainstateJournalConfig {

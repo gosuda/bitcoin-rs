@@ -1,14 +1,17 @@
-//! Shared node runtime state and capability handles.
+//! Internal node runtime composition root and capability handles.
 //!
 //! Shared handles, checkpoint publication, and index lifecycle live with
 //! `NodeState`. Construction, recovery, storage, events, and pruning retain
-//! separate private implementations.
+//! separate private implementations. Production embedders enter through
+//! [`crate::Node`]; the module is public only under the explicit `test-seam`
+//! feature used by integration tests and benchmarks.
 
 use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
 use bitcoin_rs_chain::BlockBodySource;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chainstate::events::ChainEventPublisher;
 #[cfg(test)]
@@ -19,6 +22,7 @@ use bitcoin_rs_index::runtime::OpenDerivedIndex;
 use bitcoin_rs_index::runtime::REDB_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
 use bitcoin_rs_mempool::Mempool;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_rpc::context::PruneService;
 use bitcoin_rs_storage::KvStore;
@@ -83,7 +87,7 @@ pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
 // the same connection under normal load.
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
-/// Aggregate handle to a running node.
+/// Internal aggregate handle to a running node.
 pub struct NodeState {
     config: NodeConfig,
     #[cfg(test)]
@@ -153,6 +157,7 @@ impl NodeState {
     }
 
     /// Returns the configured storage backend that was opened.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub const fn storage_kind(&self) -> &'static str {
         self.storage.kind()
@@ -164,6 +169,7 @@ impl NodeState {
     /// Crash-recovery test seam: exposes the undo/marker store so harnesses
     /// can arm and inspect disconnect markers. Not a supported mutation
     /// surface for node owners.
+    #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
     pub fn undo_store(&self) -> Arc<dyn bitcoin_rs_chainstate::UndoStore> {
@@ -175,6 +181,7 @@ impl NodeState {
     /// Crash-recovery test seam: exposes the durable head store so
     /// harnesses can read the commit point. Not a supported mutation
     /// surface for node owners.
+    #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
     pub fn durable_head(&self) -> Arc<dyn bitcoin_rs_storage::DurableHeadStore> {
@@ -232,18 +239,6 @@ impl NodeState {
         Ok(Arc::new(StoredBlockBodySource::new(store)))
     }
 
-    /// Returns the shared P2P admission switch exposed to RPC and P2P workers.
-    #[must_use]
-    pub fn network_active(&self) -> Arc<AtomicBool> {
-        self.p2p.network_active_handle()
-    }
-
-    /// Returns the shared manual IP/subnet ban list exposed to RPC and P2P.
-    #[must_use]
-    pub fn banned_subnets(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>> {
-        self.p2p.banned_handle()
-    }
-
     /// Returns the P2P runtime that owns workers and the session table.
     #[must_use]
     pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
@@ -256,19 +251,9 @@ impl NodeState {
         self.p2p.table()
     }
 
-    /// Returns the service-owned persistent addnode view.
-    #[must_use]
-    pub fn added_nodes(&self) -> Arc<RwLock<Vec<std::net::SocketAddr>>> {
-        self.p2p.added_nodes_handle()
-    }
-    /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
-    #[must_use]
-    pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial> {
-        self.p2p.outbound_sender()
-    }
-
     /// Returns a cloned `Sender` that the P2P listener pushes inbound
     /// blocks into for verification and relay.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBlock> {
         self.p2p.inbound_blocks_sender()
     }
@@ -336,6 +321,7 @@ impl NodeState {
     /// Holds the chain transition through follower dispatch (`ARCH-07`).
     /// A post-commit settlement failure remains distinguishable in
     /// [`crate::ConnectMutationError`] and retains the authoritative outcome.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
         block: &Block,
@@ -358,12 +344,6 @@ impl NodeState {
     /// Starts chainstate journal and retention maintenance.
     pub fn start_chainstate_maintenance(&self) -> Result<std::thread::JoinHandle<()>> {
         self.chainstate.start_maintenance()
-    }
-
-    /// Returns the `AssumeUTXO` manager.
-    #[must_use]
-    pub fn assumeutxo_manager(&self) -> Arc<bitcoin_rs_chainstate::AssumeUtxoManager> {
-        Arc::clone(&self.assumeutxo)
     }
 
     /// Produces a summary of active and background chainstates for operator reporting.
@@ -400,13 +380,23 @@ impl NodeState {
     ) -> anyhow::Result<()> {
         let change = self.followers.begin_mempool_change()?;
         let result = self.assumeutxo.activate_snapshot(snapshot_load);
-        if result.is_ok() {
-            self.followers.on_snapshot();
+        if result.is_ok()
+            && let Err(error) = self.followers.on_snapshot(change.as_ref())
+        {
+            self.chainstate.fail_closed_for_recovery();
+            return Err(anyhow::anyhow!(
+                "snapshot consumer reconciliation failed: {error}"
+            ));
         }
         if !self.chainstate.is_closed_for_recovery() {
             if let Some(change) = change {
                 if let Err(error) = change.finish() {
                     self.chainstate.fail_closed_for_recovery();
+                    if let Err(activation) = result {
+                        return Err(anyhow::anyhow!(
+                            "snapshot activation failed: {activation}; consumer settlement also failed: {error}"
+                        ));
+                    }
                     return Err(anyhow::anyhow!(
                         "snapshot consumer settlement failed: {error}"
                     ));

@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use bitcoin_rs_primitives::{
-    Amount, Script, Sighash, SighashCache, Tx, TxOut, Witness, varint::encoded_len,
+    Amount, OutPoint, Script, Sighash, SighashCache, Tx, TxOut, Witness, varint::encoded_len,
 };
 use secp256k1::{Message, XOnlyPublicKey, schnorr::Signature};
 use sha2::{Digest as _, Sha256};
@@ -474,6 +474,45 @@ impl Interpreter {
     }
 }
 
+/// Invalid resolved-input wiring, rejected before script evaluation.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum PrevoutError {
+    /// The supplied rows do not cover every input exactly once.
+    #[error("transaction has {input_count} inputs but {prevout_count} prevouts")]
+    Count {
+        /// Number of transaction inputs.
+        input_count: usize,
+        /// Number of supplied prevouts.
+        prevout_count: usize,
+    },
+    /// A row identifies a different outpoint than the corresponding input.
+    #[error("prevout does not match transaction input {input_index}")]
+    Mismatch {
+        /// First input with a mismatched prevout identity.
+        input_index: usize,
+    },
+}
+
+/// Checks that resolved prevouts cover the transaction in input order.
+///
+/// # Errors
+/// Returns a count error before checking identities, or the first mismatched
+/// outpoint. This validates caller wiring, not the contents of a UTXO record.
+pub fn validate_prevouts(tx: &Tx, prevouts: &[(OutPoint, TxOut)]) -> Result<(), PrevoutError> {
+    if prevouts.len() != tx.inputs.len() {
+        return Err(PrevoutError::Count {
+            input_count: tx.inputs.len(),
+            prevout_count: prevouts.len(),
+        });
+    }
+    for (input_index, (input, (outpoint, _))) in tx.inputs.iter().zip(prevouts).enumerate() {
+        if input.previous_output != *outpoint {
+            return Err(PrevoutError::Mismatch { input_index });
+        }
+    }
+    Ok(())
+}
+
 /// One native transaction and its ordered spent outputs for parallel input checks.
 ///
 /// This owner binds the sighash cache to its transaction and prevouts for its
@@ -486,27 +525,26 @@ pub struct PreparedTransaction<'tx> {
 }
 
 impl<'tx> PreparedTransaction<'tx> {
-    /// Retains the resolved prevouts and initializes an empty aggregate cache.
-    /// `verify_input` checks the count before evaluating any script.
-    #[must_use]
-    pub fn new(tx: &'tx Tx, prevouts: Vec<TxOut>) -> Self {
-        Self {
+    /// Validates and retains resolved prevouts, then initializes an empty cache.
+    /// The borrowed transaction and owned outputs cannot change after validation.
+    ///
+    /// # Errors
+    /// Returns [`PrevoutError`] if the count or ordered outpoint identities differ.
+    pub fn new(tx: &'tx Tx, prevouts: &[(OutPoint, TxOut)]) -> Result<Self, PrevoutError> {
+        validate_prevouts(tx, prevouts)?;
+        Ok(Self {
             tx,
-            prevouts,
+            prevouts: prevouts.iter().map(|(_, output)| output.clone()).collect(),
             cache: SighashCache::new(tx),
-        }
+        })
     }
 
     /// Verifies an input using this transaction's bytes and resolved prevout.
     ///
     /// # Errors
-    /// Returns the same count, input-index and script errors as
-    /// [`Interpreter::execute_with_prevouts`], in the same order.
+    /// Returns input-index or script errors. Prevout wiring was checked at construction.
     pub fn verify_input(&self, input_idx: usize, flags: VerifyFlags) -> Result<bool, ScriptError> {
         let inputs = self.tx.inputs.len();
-        if self.prevouts.len() != inputs {
-            return Err(ScriptError::TaprootPrevoutsUnavailable);
-        }
         let input = self
             .tx
             .inputs

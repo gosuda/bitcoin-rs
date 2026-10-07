@@ -12,6 +12,22 @@ pub(super) struct ProductionConsumer {
 }
 
 impl ProductionConsumer {
+    /// Adds node without its workspace dev-dependencies or fixture feature.
+    pub(super) fn with_node(root: &Path) -> Result<Self> {
+        use std::io::Write as _;
+
+        let consumer = Self::new(root)?;
+        let node = serde_json::to_string(&root.join("crates/node"))?;
+        let mut manifest = std::fs::OpenOptions::new()
+            .append(true)
+            .open(consumer.directory.path().join("Cargo.toml"))?;
+        writeln!(
+            manifest,
+            "bitcoin-rs-node = {{ path = {node}, default-features = false, features = [\"fjall\"] }}"
+        )?;
+        Ok(consumer)
+    }
+
     /// Copies the repository lock to retain its pinned dependency versions.
     pub(super) fn new(root: &Path) -> Result<Self> {
         let directory = tempfile::tempdir()?;

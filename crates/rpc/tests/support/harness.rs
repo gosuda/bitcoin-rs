@@ -134,11 +134,8 @@ impl ServerHarness {
                 derived_index_status: Some(state.derived_index_status()),
             },
             network: NetworkHandles {
-                network_active: state.network_active(),
                 peer_table: state.peer_table(),
-                p2p_outbound_sender: Some(state.p2p_outbound_sender()),
-                banned: state.banned_subnets(),
-                added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
+                p2p: state.p2p(),
                 local_services: state.p2p().local_services().to_u64(),
             },
             mining: bitcoin_rs_rpc::context::MiningHandles {

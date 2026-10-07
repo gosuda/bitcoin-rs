@@ -496,8 +496,8 @@ impl BlockSync {
         self.chain.bootstrap_genesis();
         // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
-        self.drain_inbound_blocks();
         self.advance_historical();
+        self.drain_inbound_blocks();
 
         let now = Instant::now();
         // One frontier observation feeds recovery, selection, and planning;

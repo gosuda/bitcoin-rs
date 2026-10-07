@@ -19,6 +19,23 @@ use bitcoin_rs_script::VerifyFlags;
 use crate::ConsensusError;
 use crate::ValidationEngine;
 
+impl From<bitcoin_rs_script::PrevoutError> for ConsensusError {
+    fn from(error: bitcoin_rs_script::PrevoutError) -> Self {
+        match error {
+            bitcoin_rs_script::PrevoutError::Count {
+                input_count,
+                prevout_count,
+            } => Self::PrevoutCount {
+                input_count,
+                prevout_count,
+            },
+            bitcoin_rs_script::PrevoutError::Mismatch { input_index } => {
+                Self::PrevoutMismatch { input_index }
+            }
+        }
+    }
+}
+
 /// Returns the unsupported-build error for a kernel request on a build
 /// without `kernel` support. Selection fails closed here; it never falls back
 /// to another engine. Only builds without the capability produce it.
@@ -27,31 +44,6 @@ fn kernel_not_compiled() -> ConsensusError {
     ConsensusError::UnsupportedEngine {
         engine: ValidationEngine::Kernel,
     }
-}
-
-/// Rejects a prevout set that does not cover exactly `input_count` inputs.
-///
-/// Shared by every seam that hands resolved prevouts to a script backend, so
-/// no engine can disagree about it. The dispatch loops are driven by the
-/// prevout slice: a short slice would leave trailing inputs silently
-/// unverified (fail-open) and a long one would index past the transaction's
-/// inputs in the native interpreter.
-///
-/// # Errors
-/// Returns [`ConsensusError::PrevoutCount`] when the counts disagree: the
-/// mismatch is a caller wiring bug and is reported backend-neutrally, never
-/// as a script failure.
-fn ensure_prevout_count(
-    spent_outputs: &[(OutPoint, TxOut)],
-    input_count: usize,
-) -> Result<(), ConsensusError> {
-    if spent_outputs.len() != input_count {
-        return Err(ConsensusError::PrevoutCount {
-            input_count,
-            prevout_count: spent_outputs.len(),
-        });
-    }
-    Ok(())
 }
 
 /// The native one-shot block parse, compiled in every build.
@@ -160,7 +152,7 @@ mod kernel_backend {
         let tx_bytes = consensus_bytes(tx);
         let kernel_tx = bitcoinkernel::Transaction::new(&tx_bytes)
             .map_err(|error| ConsensusError::Kernel(error.to_string()))?;
-        let prepared = prepare_kernel_tx(kernel_tx, tx.inputs.len(), spent_outputs)?;
+        let prepared = prepare_kernel_tx(kernel_tx, spent_outputs)?;
         for (input_index, (_, prevout)) in spent_outputs.iter().enumerate() {
             verify_prepared_input(&prepared, prevout, input_index, flags)?;
         }
@@ -220,12 +212,11 @@ mod kernel_backend {
         pub(super) fn prepare_tx(
             &self,
             index: usize,
-            input_count: usize,
             spent_outputs: &[(OutPoint, TxOut)],
         ) -> Result<super::PreparedTx<'_>, ConsensusError> {
             let kernel_tx = self.block.transaction(index).map_err(map_kernel_error)?;
             Ok(super::PreparedTx::Kernel {
-                state: prepare_kernel_tx(kernel_tx, input_count, spent_outputs)?,
+                state: prepare_kernel_tx(kernel_tx, spent_outputs)?,
                 spent_outputs: spent_outputs
                     .iter()
                     .map(|(_, output)| output.clone())
@@ -266,10 +257,8 @@ mod kernel_backend {
     /// already-parsed kernel transaction.
     fn prepare_kernel_tx<T: bitcoinkernel::prelude::TransactionExt>(
         kernel_tx: T,
-        input_count: usize,
         spent_outputs: &[(OutPoint, TxOut)],
     ) -> Result<PreparedKernelTx<T>, ConsensusError> {
-        super::ensure_prevout_count(spent_outputs, input_count)?;
         let kernel_prevouts = spent_outputs
             .iter()
             .map(|(_, prevout)| kernel_txout(prevout))
@@ -377,28 +366,24 @@ impl BlockParse {
     /// per-input script checks over its resolved prevouts.
     ///
     /// # Errors
-    /// Returns [`ConsensusError::Kernel`] when the backend cannot prepare the
-    /// transaction (a `spent_outputs` length that disagrees with the input
-    /// count is rejected outright, before any backend runs).
+    /// Returns [`ConsensusError::PrevoutCount`] or [`ConsensusError::PrevoutMismatch`]
+    /// for invalid caller wiring, before preparing either backend. Backend
+    /// preparation failures return [`ConsensusError::Kernel`].
     pub(crate) fn prepare_tx<'b>(
         &'b self,
         #[cfg_attr(not(feature = "kernel"), expect(unused_variables))] index: usize,
         tx: &'b Tx,
         spent_outputs: &[(OutPoint, TxOut)],
     ) -> Result<PreparedTx<'b>, ConsensusError> {
-        ensure_prevout_count(spent_outputs, tx.inputs.len())?;
         match self {
             Self::Native(_) => Ok(PreparedTx::Native(
-                bitcoin_rs_script::PreparedTransaction::new(
-                    tx,
-                    spent_outputs
-                        .iter()
-                        .map(|(_, output)| output.clone())
-                        .collect(),
-                ),
+                bitcoin_rs_script::PreparedTransaction::new(tx, spent_outputs)?,
             )),
             #[cfg(feature = "kernel")]
-            Self::Kernel(block) => block.prepare_tx(index, tx.inputs.len(), spent_outputs),
+            Self::Kernel(block) => {
+                bitcoin_rs_script::validate_prevouts(tx, spent_outputs)?;
+                block.prepare_tx(index, spent_outputs)
+            }
         }
     }
 
@@ -491,30 +476,29 @@ pub(crate) fn verify_prepared_input(
 /// before any backend runs: the dispatch below is driven by `spent_outputs`,
 /// so a short slice would otherwise leave trailing inputs silently unverified
 /// (fail-open) and a long one would index past `tx.inputs` in the native
-/// interpreter. The check is shared, not per-branch, so no engine can
-/// disagree about it.
+/// interpreter. Same-length misordered or foreign outpoints return
+/// [`ConsensusError::PrevoutMismatch`]. Both engines use the script crate's
+/// preparation validator, before any script evaluation or kernel dispatch.
 pub fn verify_tx_scripts(
     tx: &Tx,
     spent_outputs: &[(OutPoint, TxOut)],
     flags: VerifyFlags,
     engine: ValidationEngine,
 ) -> Result<(), ConsensusError> {
-    ensure_prevout_count(spent_outputs, tx.inputs.len())?;
     match engine {
         ValidationEngine::Native => {
             // One clone of the spent outputs per transaction, shared by every
             // input check; BIP341 sighashes commit to the full ordered set.
-            let spent: Vec<TxOut> = spent_outputs
-                .iter()
-                .map(|(_, prevout)| prevout.clone())
-                .collect();
-            let prepared = bitcoin_rs_script::PreparedTransaction::new(tx, spent);
+            let prepared = bitcoin_rs_script::PreparedTransaction::new(tx, spent_outputs)?;
             for (input_index, _) in spent_outputs.iter().enumerate() {
                 crate::verify_tx::verify_input_script_native(&prepared, input_index, flags)?;
             }
             Ok(())
         }
-        ValidationEngine::Kernel => verify_tx_scripts_kernel(tx, spent_outputs, flags),
+        ValidationEngine::Kernel => {
+            bitcoin_rs_script::validate_prevouts(tx, spent_outputs)?;
+            verify_tx_scripts_kernel(tx, spent_outputs, flags)
+        }
     }
 }
 
@@ -536,4 +520,40 @@ fn verify_tx_scripts_kernel(
     _flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
     Err(kernel_not_compiled())
+}
+
+#[cfg(test)]
+mod tests {
+    use bitcoin_rs_primitives::{Network, consensus_bytes};
+
+    use super::*;
+
+    #[test]
+    fn block_preparation_rejects_misordered_prevout_identities() {
+        let mut block = Network::Regtest.genesis_block();
+        let mut second_input = block.txs[0].inputs[0].clone();
+        second_input.previous_output.vout = 0;
+        block.txs[0].inputs.push(second_input);
+        let tx = &block.txs[0];
+        let rows: Vec<_> = tx
+            .inputs
+            .iter()
+            .map(|input| (input.previous_output, tx.outputs[0].clone()))
+            .collect();
+        let mut swapped = rows.clone();
+        swapped.swap(0, 1);
+        for engine in ValidationEngine::ALL
+            .iter()
+            .copied()
+            .filter(|engine| engine.is_supported())
+        {
+            let parsed = BlockParse::parse(&consensus_bytes(&block), engine)
+                .unwrap_or_else(|error| panic!("fixture parse: {error}"));
+            assert!(parsed.prepare_tx(0, tx, &rows).is_ok());
+            assert!(matches!(
+                parsed.prepare_tx(0, tx, &swapped),
+                Err(ConsensusError::PrevoutMismatch { input_index: 0 })
+            ));
+        }
+    }
 }

@@ -109,7 +109,7 @@ pub(super) fn load_verified(
             &[header],
             network,
             bitcoin_rs_chain::current_unix_seconds(),
-            bitcoin_rs_chain::HeaderValidationMode::LiveAdmission,
+            bitcoin_rs_chain::HeaderValidationMode::HistoricalReplay,
         )?;
     }
     let id = tree

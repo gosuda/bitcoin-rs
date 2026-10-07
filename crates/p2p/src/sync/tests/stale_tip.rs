@@ -9,7 +9,7 @@ use std::thread;
 use super::super::{StaleTipState, tip_may_be_stale};
 use super::*;
 use crate::listener::ListenerExtras;
-use crate::service::{OutboundDial, P2pService, P2pServiceConfig};
+use crate::service::{P2pService, P2pServiceConfig};
 use bitcoin_rs_primitives::Hash256;
 
 /// The network's target spacing: ten minutes, as every production chain
@@ -100,11 +100,10 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
             listener
         })
         .collect();
-    let outbound = service.outbound_sender();
     for listener in &listeners {
         let addr = listener.local_addr().expect("fake peer address");
-        outbound
-            .send(OutboundDial::auto(addr))
+        service
+            .test_queue_automatic_dial(addr)
             .expect("queue the automatic dial");
     }
 

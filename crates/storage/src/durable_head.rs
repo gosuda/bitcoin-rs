@@ -288,10 +288,16 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
         for (file_no, maximum) in file_heights {
             let key = crate::block_file_max_height_key(file_no);
             let prior = self.store.get(BLOCK_DATA_CF, &key)?;
-            let maximum = prior
-                .as_deref()
-                .and_then(crate::decode_block_file_max_height)
-                .map_or(maximum, |height| height.max(maximum));
+            let maximum = match prior {
+                Some(bytes) => crate::decode_block_file_max_height(&bytes)
+                    .ok_or_else(|| {
+                        StorageError::IncompatibleData(
+                            "invalid block-file maximum height".to_owned(),
+                        )
+                    })?
+                    .max(maximum),
+                None => maximum,
+            };
             batch.put(
                 BLOCK_DATA_CF,
                 &key,

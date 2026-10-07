@@ -30,9 +30,12 @@ pub(super) enum PublishMode<'a> {
     /// committed. The stored head receipt covers it, so nothing syncs and
     /// nothing re-commits: replay rebuilds the derived state the crash
     /// lost — coins, bookkeeping, journal tail — and publishes under the
-    /// receipt the head already issued.
+    /// receipt the head already issued. Only the final replayed block takes
+    /// the head's certified chain-transaction count; intermediate tips keep
+    /// their reconstructed count so a progress checkpoint remains coherent.
     Replay {
         receipt: super::durable::DurableReceipt,
+        certify_head: bool,
     },
 }
 
@@ -371,6 +374,7 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
             ConsensusError::Encoding(_)
             | ConsensusError::PrevoutMatrixSize { .. }
             | ConsensusError::PrevoutCount { .. }
+            | ConsensusError::PrevoutMismatch { .. }
             | ConsensusError::UnsupportedEngine { .. }
             | ConsensusError::Kernel(_)
             | ConsensusError::Script {

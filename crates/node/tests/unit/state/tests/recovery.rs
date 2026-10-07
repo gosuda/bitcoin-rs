@@ -569,6 +569,97 @@ fn full_revalidation_marker_resumes_on_durable_head() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `RCV-02`: cold replay runs before the maintenance worker exists, so the
+/// recovery owner must compact a full journal and retry the refused block.
+/// The progress checkpoint is not completion: the sticky marker remains until
+/// a checkpoint at the fully recovered state retires it.
+#[test]
+fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<()> {
+    let (_dir, state, mut config) = applied_regtest_chain(2, 1)?;
+    let remembered_tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("applied tip missing"))?;
+    drop(state);
+
+    config.chainstate_journal.max_journal_mib = 1;
+    config.chainstate_journal.rotate_mib = 1;
+    let journal_dir = config.data_dir.join(CHAINSTATE_JOURNAL_DIR);
+    std::fs::remove_dir_all(&journal_dir)?;
+    std::fs::create_dir_all(&journal_dir)?;
+    let marker = journal_dir.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER);
+    std::fs::write(&marker, b"force full validation\n")?;
+
+    // Start one byte below the retention limit. Genesis emits no journal
+    // record, block one crosses the limit, and block two is deterministically
+    // refused before mutation until recovery publishes a compaction base.
+    let pressure = journal_dir.join("segment-9999999999.log");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pressure)?
+        .set_len(1024 * 1024 - 1)?;
+
+    let reopened = NodeState::open(config.clone(), None)?;
+    assert_eq!(reopened.resume_source(), ResumeSource::Cold);
+    let tip = reopened
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("cold replay did not publish an applied tip"))?;
+    assert_eq!(
+        (tip.hash, tip.height),
+        (remembered_tip.hash, remembered_tip.height),
+        "cold replay must retry the block refused by journal retention pressure"
+    );
+    assert_eq!(
+        tip.chain_tx_count.get(),
+        Some(
+            reopened
+                .chainstate()
+                .coin_stats_handle()
+                .snapshot()
+                .tx_count
+        ),
+        "the recovered tip count must remain coherent with CoinStats"
+    );
+    assert!(
+        marker.exists(),
+        "a progress checkpoint must not retire the full-revalidation marker"
+    );
+    assert!(
+        !pressure.exists(),
+        "recovery relief must compact the retained journal segments"
+    );
+
+    // Crash/restart after progress compaction can leave a later segment at
+    // the exact retention limit. The sticky marker restarts from genesis,
+    // before any applied tip exists for checkpoint publication.
+    drop(reopened);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pressure)?
+        .set_len(1024 * 1024)?;
+    let restarted = NodeState::open(config, None)?;
+    let landed = restarted
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("restart at the retention limit did not land"))?;
+    assert_eq!(
+        (landed.hash, landed.height),
+        (remembered_tip.hash, remembered_tip.height)
+    );
+    assert!(
+        marker.exists(),
+        "replay progress must preserve the sticky marker"
+    );
+    assert!(
+        !pressure.exists(),
+        "post-genesis relief must compact stale segments"
+    );
+    Ok(())
+}
+
 // -----------------------------------------------------------------------
 // #655: prune-then-reorg and bounded deep-reorg scenarios.
 // -----------------------------------------------------------------------

@@ -292,14 +292,18 @@ impl ChainFollowers {
 
     /// Reconciles derived consumers after an atomic snapshot-tip replacement.
     /// No per-block notifications are fabricated for the skipped history.
-    pub(crate) fn on_snapshot(&self) {
-        self.blocks.write().clear();
+    pub(crate) fn on_snapshot(
+        &self,
+        change: Option<&ChainChangeGuard>,
+    ) -> Result<(), bitcoin_rs_mempool::ChainChangeError> {
         if let Some(gateway) = &self.mempool {
-            gateway.clear(AdmissionOrigin::Block);
-            gateway.chain_changed(&[]);
+            let change = change.ok_or(bitcoin_rs_mempool::ChainChangeError::ForeignGuard)?;
+            gateway.clear_for_snapshot(change)?;
         }
+        self.blocks.write().clear();
         self.wake_index();
         self.mining.publish_generation();
+        Ok(())
     }
 
     fn wake_index(&self) {
@@ -647,7 +651,7 @@ mod tests {
         let fence = followers
             .begin_mempool_change()?
             .ok_or_else(|| anyhow::anyhow!("missing fence"))?;
-        followers.on_snapshot();
+        followers.on_snapshot(Some(&fence))?;
         assert!(!gateway.read().contains_txid(&tx.txid()));
         assert!(gateway.stable_generation().is_none());
         assert!(wake_rx.try_recv().is_ok());

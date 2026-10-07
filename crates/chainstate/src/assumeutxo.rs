@@ -520,7 +520,19 @@ impl AssumeUtxoManager {
             .clone()
             .ok_or(AssumeUtxoError::NoHistoricalChainstate)?;
 
-        self.begin_historical(block, &historical).inspect_err(|_| {
+        // Refuse out-of-order input before creating durable validation intent.
+        // Such a caller error must not poison the next startup.
+        let expected_prev = historical
+            .applied_tip_snapshot()
+            .map_or_else(Hash256::default, |tip| tip.hash);
+        if block.header.prev_blockhash.0 != expected_prev {
+            return Err(ApplyError::PrevHashMismatch {
+                tip: expected_prev,
+                prev: block.header.prev_blockhash.0,
+            }
+            .into());
+        }
+        let archived = self.begin_historical(block, &historical).inspect_err(|_| {
             self.active_chainstate.fail_closed_for_recovery();
             historical.fail_closed_for_recovery();
         })?;
@@ -553,6 +565,12 @@ impl AssumeUtxoManager {
             }
             Ok(outcome) => outcome,
         };
+
+        if archived {
+            self.historical_undo
+                .remove_archived(outcome.height, outcome.hash);
+            return Ok(outcome);
+        }
 
         let current_status = self.status().inspect_err(|_| {
             self.active_chainstate.fail_closed_for_recovery();
@@ -797,19 +815,34 @@ impl AssumeUtxoManager {
         &self,
         block: &Block,
         historical: &Chainstate,
-    ) -> Result<(), AssumeUtxoError> {
+    ) -> Result<bool, AssumeUtxoError> {
         let active = &self.active_chainstate;
         let _transition = active.lock_transition()?;
         let mut status = self.status()?;
-        let AssumeUtxoDiskStatus::Validating { pending, .. } = &mut status else {
+        let AssumeUtxoDiskStatus::Validating {
+            base_height,
+            historical_height,
+            pending,
+            ..
+        } = &mut status
+        else {
             return Err(AssumeUtxoError::NoHistoricalChainstate);
         };
         let height = historical
             .applied_tip_snapshot()
             .map_or(0, |tip| tip.height + 1);
         let hash = block.block_hash().0;
+        // A committed archive receipt already owns these bytes. Replay still
+        // runs consensus, but must not regress progress or rewrite the receipt.
+        if height < *base_height
+            && height <= *historical_height
+            && self.next_historical_block()? == Some((height, hash))
+            && active.undo_store.load_undo(height, hash)?.is_some()
+        {
+            return Ok(true);
+        }
         if pending.is_some_and(|record| record.height == height && record.hash == hash) {
-            return Ok(());
+            return Ok(false);
         }
         let prior = active
             .durable_head
@@ -847,7 +880,7 @@ impl AssumeUtxoManager {
             &next,
             &bitcoin_rs_storage::CommitRecords::default(),
         )?;
-        Ok(())
+        Ok(false)
     }
 
     /// A failed terminal write leaves this intent intact. Reconstruct its

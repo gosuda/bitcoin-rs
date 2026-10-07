@@ -46,7 +46,7 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
 
-    // --- seed chain state on the same datadir through the public types ------
+    // --- seed chain state on the same datadir through the test seam --------
     // The height-1 coinbase (anyone-can-spend OP_1) becomes spendable by the
     // next block once the tip reaches height 100 — the same fixture shape
     // the mining e2e test uses.
@@ -68,6 +68,18 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     ))?;
 
     assert_embedded_node_readiness(&node, seed_tip_hash, first_block_hash, &first_block_bytes)?;
+
+    let before_import = node.snapshot();
+    let summary = node.chainstates_summary()?;
+    assert!(summary.active_chainstate.validated);
+    assert!(summary.historical_chainstate.is_none());
+    let invalid_snapshot = dir.path().join("invalid-snapshot.dat");
+    std::fs::write(&invalid_snapshot, b"not a UTXO snapshot")?;
+    assert!(matches!(
+        block_on(node.activate_assumeutxo_snapshot_file(&invalid_snapshot)),
+        Err(NodeError::Snapshot(_))
+    ));
+    assert_eq!(node.snapshot(), before_import);
 
     assert_broadcast_and_lookups(&node)?;
 

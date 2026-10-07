@@ -32,8 +32,14 @@ the first embedder — there is one lifecycle implementation, not two.
   `async fn` running on the caller's Tokio runtime; the node never
   creates, enters, or retains a runtime. Startup and shutdown drive the
   node's own threads synchronously. Owner: `crates/node/src/embed.rs`.
-- **EMB-03 — No storage in signatures.** No public embedding signature
-  names a storage backend, `NodeStorage`, or index internals. Owner:
+- **EMB-03 — Internal composition root.** No public embedding signature
+  names a storage backend, `NodeStorage`, index internals, or `NodeState`.
+  The `state` and `tx_ingress` worker-wiring modules are private in normal
+  production builds; the non-default `test-seam` exposes them for integration
+  tests and benchmarks. Deliberate downstream feature opt-in is not a security
+  boundary, and production dependency/feature edges must not enable this seam.
+  Embedders use operation-oriented `Node` methods instead of receiving raw
+  writable locks, subsystem services, channels, or runtime handles. Owner:
   `crates/node/src/embed.rs`.
 - **EMB-04 — Typed reads mirror the RPC facts.** `snapshot()` returns the
   coherent `ChainSnapshot`; `sync_progress()` returns the
@@ -87,6 +93,15 @@ the first embedder — there is one lifecycle implementation, not two.
 
 ## Startup failure and cancellation
 
+`Node::activate_assumeutxo_snapshot_file` enters the node-owned snapshot
+activation boundary after ordinary header synchronization has admitted the
+pinned base. It preserves mempool fencing and consumer alignment without
+exporting `NodeState` or the historical mutation handle. Like startup, this
+async method performs synchronous work when polled; callers choose its runtime
+placement. `Node::chainstates_summary` exposes roles and validation progress.
+Import or activation refusal is `NodeError::Snapshot`; reporting-storage failure
+is `NodeError::Unavailable`. See `ARCH-07b` for the durable lifecycle contract.
+
 ### `EMB-10`: Independent runtime-stall evidence
 
 Sync telemetry cadence is elapsed monotonic time, not the number or origin of
@@ -130,6 +145,11 @@ rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
 
 ## Proof
 
+- `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs::node_composition_root_is_not_a_production_embedding_api`
+  compiles supported `Node` reads in an isolated production consumer and rejects
+  imports of `state::NodeState` and the ingress worker entry point (`EMB-03`).
+  The same gate's Cargo graph validator rejects production feature/dependency
+  edges that enable `test-seam`, excluding legitimate dev-only fixture edges.
 - `crates/node/tests/embed.rs::embedded_node_lifecycle_round_trip` exercises
   typed reads, broadcast, consuming shutdown, and reopen.
 - `crates/node/tests/embed.rs::dropped_node_releases_services_and_datadir_for_reopen`

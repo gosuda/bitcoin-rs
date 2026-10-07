@@ -43,6 +43,7 @@ fn restored_chainstate() -> Result<(Chainstate, Block), Box<dyn std::error::Erro
     handles
         .applied_tip
         .store(Some(Arc::new(genesis_tip.clone())));
+    handles.coin_stats.finish_block(0, 1);
 
     let tx = Tx {
         version: 2,
@@ -249,6 +250,7 @@ fn committed_gap_with_missing_body_fails_closed() -> Result<(), Box<dyn std::err
 fn cold_chainstate_replays_head_chain_from_genesis() -> Result<(), Box<dyn std::error::Error>> {
     let (mut handles, child) = restored_chainstate()?;
     handles.applied_tip.store(None);
+    handles.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let genesis = Network::Regtest.genesis_block();
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
@@ -287,6 +289,7 @@ fn cold_chainstate_with_missing_genesis_body_fails_closed() -> Result<(), Box<dy
 {
     let (mut handles, child) = restored_chainstate()?;
     handles.applied_tip.store(None);
+    handles.coin_stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(
         1,
@@ -459,6 +462,7 @@ fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::e
         (landed.height, landed.hash, landed.chain_tx_count.to_wire()),
         certified
     );
+    assert_eq!(handles.coin_stats.snapshot().tx_count, certified.2);
     assert_eq!(
         handles.durable_head.load()?.map(|head| head.commit_id),
         Some(5),
@@ -575,5 +579,70 @@ fn committed_gap_replay_failure_fails_closed() -> Result<(), Box<dyn std::error:
         matches!(handles.begin_transition(), Err(ApplyError::Shutdown)),
         "admission must stay closed after a failed replay"
     );
+    Ok(())
+}
+
+/// RCV-02 / JW-ORDER-1: retention relief must not turn append-gap poison into
+/// a progress checkpoint or a retry. The original writer error stays intact.
+#[cfg(feature = "fjall")]
+#[test]
+fn committed_gap_append_gap_does_not_enter_retention_relief()
+-> Result<(), Box<dyn std::error::Error>> {
+    use bitcoin_rs_storage::chainstate_journal::{
+        FULL_REVALIDATION_MARKER, JournalEmit, JournalWriter, JournalWriterError,
+        shared_journal_writer,
+    };
+
+    let (mut handles, child) = restored_chainstate()?;
+    let bodies = Arc::new(MemoryBodies::default());
+    bodies.persist_block_body(1, child.block_hash().0, &consensus_bytes(&child))?;
+    let head = install_head(&mut handles, &child, bodies)?;
+    let temp = tempfile::tempdir()?;
+    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+        temp.path().join("kv"),
+    )?);
+    let path = temp.path().join("journal");
+    std::fs::create_dir(&path)?;
+    let dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&path)?;
+    let mut writer = JournalWriter::initialize(
+        dir,
+        store,
+        0,
+        (0, 0),
+        0,
+        Network::Regtest.genesis_block_hash().to_le_bytes(),
+        [0; 32],
+        1,
+    )?;
+    std::fs::write(
+        path.join(FULL_REVALIDATION_MARKER),
+        b"force full validation\n",
+    )?;
+    let marker_before = std::fs::read(path.join(FULL_REVALIDATION_MARKER))?;
+    let journal_head_before = std::fs::read(path.join("head.json"))?;
+    JournalEmit::mark_append_gap(&mut writer, 1);
+    *handles.journal.write() = Some(shared_journal_writer(writer));
+
+    let Err(ApplyError::JournalBackpressure(error)) = super::reconcile_at_boot(&handles) else {
+        panic!("append gap must return the original journal refusal, not recovery publication");
+    };
+    assert!(matches!(
+        *error,
+        JournalWriterError::AppendGap { height: 1 }
+    ));
+    assert!(matches!(
+        handles.begin_transition(),
+        Err(ApplyError::Shutdown)
+    ));
+    assert_eq!(
+        handles.applied_tip.load_full().map(|tip| tip.height),
+        Some(0)
+    );
+    assert_eq!(handles.durable_head.load()?, Some(head));
+    assert_eq!(
+        std::fs::read(path.join(FULL_REVALIDATION_MARKER))?,
+        marker_before
+    );
+    assert_eq!(std::fs::read(path.join("head.json"))?, journal_head_before);
     Ok(())
 }

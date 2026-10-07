@@ -66,7 +66,7 @@ pub use peer::{CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities,
 pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{
-    OutboundDial, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError, apply_network_active,
+    OutboundDial, P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use tx_relay::{

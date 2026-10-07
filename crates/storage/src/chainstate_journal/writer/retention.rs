@@ -63,7 +63,10 @@ impl<S: KvStore> JournalWriter<S> {
         {
             self.advance_durability()?;
         }
-        let bytes = self.journal_size_bytes()?;
+        let mut bytes = self.journal_size_bytes()?;
+        if bytes >= self.max_journal_bytes && self.discard_invalidated_cold_segments()? {
+            bytes = self.journal_size_bytes()?;
+        }
         if bytes >= self.max_journal_bytes {
             return Err(JournalWriterError::RetentionLimit {
                 bytes,
@@ -71,6 +74,46 @@ impl<S: KvStore> JournalWriter<S> {
             });
         }
         Ok(())
+    }
+
+    /// Cold initialization has no replayable journal suffix. A sticky
+    /// full-revalidation marker invalidates old generations, which may still
+    /// fill the retention budget before genesis creates an applied tip.
+    /// Retire only those segments, leaving the marker and active cursor intact.
+    fn discard_invalidated_cold_segments(&self) -> Result<bool, JournalWriterError> {
+        if self.base_generation != 0
+            || self.base_height != 0
+            || self.durable.height != 0
+            || self.segment_gen != 0
+            || self.segment_offset != 0
+            || self.record_count != 0
+            || !self.pending_records.is_empty()
+        {
+            return Ok(false);
+        }
+        match self.dir.metadata(super::FULL_REVALIDATION_MARKER) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        // Finish traversal before unlinking: deleting entries can invalidate
+        // directory iteration and leave some invalidated generations behind.
+        let mut invalidated_segments = Vec::new();
+        for entry in self.dir.entries()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if parse_segment_name(name.to_string_lossy().as_ref())
+                .is_some_and(|generation| generation != self.segment_gen)
+            {
+                invalidated_segments.push(name);
+            }
+        }
+        for name in invalidated_segments {
+            self.dir.remove_file(name)?;
+        }
+        crate::checkpoint::fs::sync_dir(&self.dir)?;
+        Ok(true)
     }
 
     pub(crate) fn flush_due(&mut self) -> Result<(), JournalWriterError> {
@@ -132,7 +175,9 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     /// §2.5 compact: rebase the empty post-publication journal on the newly
-    /// installed checkpoint and delete every superseded segment.
+    /// installed checkpoint and delete every superseded segment. A recovery
+    /// progress checkpoint preserves the full-revalidation marker; only a
+    /// completed or ordinary replacement checkpoint retires it.
     pub(crate) fn compact_to_checkpoint(
         &mut self,
         checkpoint_generation: u64,
@@ -140,6 +185,7 @@ impl<S: KvStore> JournalWriter<S> {
         tip_hash: [u8; 32],
         tip_prev_hash: [u8; 32],
         chain_tx_count: u64,
+        retire_full_revalidation_marker: bool,
     ) -> Result<(), JournalWriterError> {
         if self.state != WriterState::Frozen {
             return Err(JournalWriterError::NotOpen {
@@ -149,6 +195,9 @@ impl<S: KvStore> JournalWriter<S> {
                     WriterState::Frozen => unreachable!("guarded above"),
                 },
             });
+        }
+        if let Some(height) = self.append_gap_height {
+            return Err(JournalWriterError::AppendGap { height });
         }
         if self.durable.height != tip_height
             || self.durable_block_hash != tip_hash
@@ -215,7 +264,9 @@ impl<S: KvStore> JournalWriter<S> {
         for name in entries {
             self.dir.remove_file(name)?;
         }
-        clear_full_revalidation_marker(&self.dir)?;
+        if retire_full_revalidation_marker {
+            clear_full_revalidation_marker(&self.dir)?;
+        }
         crate::checkpoint::fs::sync_dir(&self.dir)?;
         Ok(())
     }

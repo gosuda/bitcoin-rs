@@ -34,7 +34,16 @@ pub mod reorg;
 mod run;
 /// Signal handling.
 mod signal;
-/// Shared node state.
+/// Internal node composition root.
+#[cfg(not(feature = "test-seam"))]
+#[allow(
+    unreachable_pub,
+    reason = "the public shape is exposed only by the explicit test seam"
+)]
+mod state;
+/// Integration-test and benchmark access to the internal node composition root.
+#[cfg(feature = "test-seam")]
+#[doc(hidden)]
 pub mod state;
 mod storage_backend;
 /// Custody-grade data-directory storage-footprint evidence.
@@ -42,7 +51,16 @@ mod storage_footprint;
 /// Adapter between the P2P block-download executor and Chainstate.
 #[path = "p2p_chain_adapter.rs"]
 pub mod sync;
-/// P2P transaction ingress consumer.
+/// Internal P2P transaction ingress wiring.
+#[cfg(not(feature = "test-seam"))]
+#[allow(
+    unreachable_pub,
+    reason = "the worker entry point is exposed only by the explicit test seam"
+)]
+mod tx_ingress;
+/// Integration-test access to P2P transaction ingress wiring.
+#[cfg(feature = "test-seam")]
+#[doc(hidden)]
 pub mod tx_ingress;
 pub use bitcoin_rs_primitives::Network;
 

@@ -74,7 +74,12 @@ fn rejected(error: ApplyError) -> CompactString {
 #[test]
 fn journal_backpressure_is_operational() {
     assert!(matches!(
-        map_apply_error(ApplyError::JournalBackpressure("test pressure".to_owned())),
+        map_apply_error(ApplyError::JournalBackpressure(Box::new(
+            bitcoin_rs_storage::chainstate_journal::JournalWriterError::RetentionLimit {
+                bytes: 1,
+                limit: 1,
+            }
+        ))),
         Ok(BlockValidationResult::Inconclusive)
     ));
 }
@@ -105,7 +110,12 @@ fn generateblock_validity_keeps_shutdown_operational() {
         MiningControlError::Unavailable(_)
     ));
     assert!(matches!(
-        test_block_validity_error(&ApplyError::JournalBackpressure("test pressure".to_owned())),
+        test_block_validity_error(&ApplyError::JournalBackpressure(Box::new(
+            bitcoin_rs_storage::chainstate_journal::JournalWriterError::RetentionLimit {
+                bytes: 1,
+                limit: 1,
+            }
+        ))),
         MiningControlError::Unavailable(_)
     ));
 }

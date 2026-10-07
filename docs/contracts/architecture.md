@@ -295,9 +295,14 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   because node orchestration drains it into `MempoolGateway`. Confirmed
   transaction bodies are queried through the derived index and durable block
   storage, never through a second node/RPC transaction map. RPC network
-  answers likewise read the P2P-owned peer table, traffic counters, ban list,
-  added-node list, and network-active latch directly; there is no parallel
-  RPC-local network-state projection.
+  answers and control operations likewise read and mutate network state through
+  `P2pService` directly (querying the P2P-owned peer table, traffic counters,
+  ban list, added-node list, and network-active latch, and invoking service
+  control methods for bans, added nodes, network-active toggling, and
+  disconnections). RPC no longer receives raw handles for bans, added nodes,
+  the network-active latch, or the outbound dial channel; the peer table stays
+  as a read view, and there is no parallel RPC-local network-state projection
+  or duplicate mutation authority.
 - `MempoolGateway` owns the process mempool handle; `NodeState::mempool` is a
   read/composition capability borrowed from that gateway, not a parallel
   retained `Arc`. Gateway interning remains the public one-gateway-per-pool
@@ -404,7 +409,8 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   the archive receipt, so it does not accumulate through the entire history.
   Reopening reconstructs historical coins from genesis; persisted archive progress
   is not a live coin-set cursor. The summary exposes live progress separately.
-  Before checking each body, the manager syncs its staged bytes and commits a
+  Replaying a block already covered by an archive receipt does not rewrite its
+  body or progress. Before checking a new body, the manager syncs its staged bytes and commits a
   pending-validation reference in the same root. If a crash or terminal-status
   write failure leaves that reference, startup reconstructs the dependencies and
   completes the check before returning node state. A mismatch cannot be forgotten
@@ -414,6 +420,8 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   requests one missing body on the pinned base ancestry. It uses archive-capable
   peers, retries expired/replaced connections, and validates body binding before
   historical admission. Foreground and historical deliveries have separate owners.
+  This initial runner does not pipeline historical downloads; throughput and
+  restart-latency optimization remain explicit follow-ups to #1288.
 - **Reorg and pruning constraints**:
   - Reorgs on the `AssumedActive` chainstate cannot disconnect blocks at or below the
     snapshot base height (`ApplyError::DisconnectBelowSnapshotBase`).

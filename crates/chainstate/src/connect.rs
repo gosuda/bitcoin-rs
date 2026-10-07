@@ -125,7 +125,7 @@ pub(super) fn apply_block_admitted<'b>(
         if let Err(error) = maintenance {
             metrics::counter!("node.chainstate_journal.backpressure_total").increment(1);
             tracing::error!(height, %error, "chainstate journal backpressure stopped block apply");
-            return Err(ApplyError::JournalBackpressure(error.to_string()));
+            return Err(ApplyError::JournalBackpressure(Box::new(error)));
         }
     }
 
@@ -545,9 +545,18 @@ pub(super) fn apply_block_admitted<'b>(
         }
         // The gap block's durable batch committed before the crash: the
         // stored head receipt covers its body, undo, and locator rows.
-        PublishMode::Replay { receipt } => {
+        // Replay redoes only what publication owed — the journal tail and the
+        // coherent tip — and carries the receipt's commit id. Intermediate
+        // tips retain their reconstructed cumulative count; only the landing
+        // tip takes the durable head's certified count.
+        PublishMode::Replay {
+            receipt,
+            certify_head,
+        } => {
             let commit_id = receipt.commit_id;
-            outcome.tip = receipt.certify(outcome.tip);
+            if certify_head {
+                outcome.tip = receipt.certify(outcome.tip);
+            }
             commit_id
         }
         PublishMode::Grouped(group) => {
