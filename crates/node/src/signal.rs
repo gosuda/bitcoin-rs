@@ -75,25 +75,52 @@ impl ShutdownHandler {
     }
 }
 
-#[cfg(not(windows))]
-pub(crate) const fn notify_teardown_completed() {}
-
 #[cfg(windows)]
 static NEXT_HANDLER_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
 
+/// Installed console-ctrl targets plus every close-type dispatch still
+/// owed teardown completions. One lock covers both fields so a dispatch is
+/// registered before — never after — the event reaches the handlers, and a
+/// teardown report resolves every dispatch that was waiting on it.
 #[cfg(windows)]
-static ACTIVE_HANDLERS: parking_lot::Mutex<Vec<(usize, Sender<u32>)>> =
-    parking_lot::Mutex::new(Vec::new());
+static CONSOLE_REGISTRY: parking_lot::Mutex<ConsoleRegistry> =
+    parking_lot::Mutex::new(ConsoleRegistry {
+        handlers: Vec::new(),
+        dispatches: Vec::new(),
+    });
 
 #[cfg(windows)]
-static TEARDOWN_COMPLETIONS: parking_lot::Mutex<Vec<crossbeam_channel::Sender<()>>> =
-    parking_lot::Mutex::new(Vec::new());
+struct ConsoleRegistry {
+    handlers: Vec<(usize, Sender<u32>)>,
+    dispatches: Vec<CloseDispatch>,
+}
+
+/// One close-type console event broadcast to every handler installed at
+/// dispatch time. The console callback may return only after each of those
+/// lifecycles reports its teardown: `pending` names the handler ids still
+/// owed a completion.
+#[cfg(windows)]
+struct CloseDispatch {
+    pending: std::collections::BTreeSet<usize>,
+    done: Sender<()>,
+}
 
 #[cfg(windows)]
-pub(crate) fn notify_teardown_completed() {
-    let mut completions = TEARDOWN_COMPLETIONS.lock();
-    for tx in completions.drain(..) {
-        let _ = tx.try_send(());
+impl ConsoleRegistry {
+    /// Marks `id`'s teardown as finished. Dispatches that were waiting on
+    /// it stop blocking on it; any dispatch whose pending set empties is
+    /// released and removed. A dispatch only ever waits on the handler set
+    /// it broadcast to, so one lifecycle finishing cannot release a wait
+    /// owed by another.
+    fn teardown_completed(&mut self, id: usize) {
+        self.dispatches.retain(|dispatch| {
+            dispatch.pending.remove(&id);
+            if dispatch.pending.is_empty() {
+                let _ = dispatch.done.try_send(());
+                return false;
+            }
+            true
+        });
     }
 }
 
@@ -104,31 +131,42 @@ unsafe extern "system" fn win_console_ctrl_handler(ctrl_type: u32) -> i32 {
     };
     match ctrl_type {
         CTRL_C_EVENT | CTRL_BREAK_EVENT => {
-            let handlers = ACTIVE_HANDLERS.lock();
-            if handlers.is_empty() {
+            let registry = CONSOLE_REGISTRY.lock();
+            if registry.handlers.is_empty() {
                 return 0;
             }
-            for (_id, tx) in handlers.iter() {
+            for (_id, tx) in registry.handlers.iter() {
                 let _ = tx.try_send(ctrl_type);
             }
             1
         }
         CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
-            let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
-            {
-                let handlers = ACTIVE_HANDLERS.lock();
-                if handlers.is_empty() {
+            let (done_tx, done_rx) = {
+                let mut registry = CONSOLE_REGISTRY.lock();
+                if registry.handlers.is_empty() {
                     return 0;
                 }
-                for (_id, tx) in handlers.iter() {
+                let (done_tx, done_rx) = crossbeam_channel::bounded::<()>(1);
+                registry.dispatches.push(CloseDispatch {
+                    pending: registry.handlers.iter().map(|(id, _)| *id).collect(),
+                    done: done_tx.clone(),
+                });
+                for (_id, tx) in registry.handlers.iter() {
                     let _ = tx.try_send(ctrl_type);
                 }
-                TEARDOWN_COMPLETIONS.lock().push(done_tx);
-            }
-            // Windows terminates the process once console close/logoff/shutdown
-            // handlers return. Wait for lifecycle teardown to complete clean
-            // checkpoint publication, bounded within Windows' ~5 second close deadline.
+                (done_tx, done_rx)
+            };
+            // Windows terminates the process once the close/logoff/shutdown
+            // callback returns. Wait until every dispatched lifecycle has
+            // reported its teardown — checkpoint publication must finish —
+            // bounded inside Windows' ~5 second close deadline.
             let _ = done_rx.recv_timeout(std::time::Duration::from_millis(4500));
+            // On timeout the wait is abandoned: drop the stale dispatch so
+            // later teardowns never release a receiver that is gone.
+            let mut registry = CONSOLE_REGISTRY.lock();
+            registry
+                .dispatches
+                .retain(|dispatch| !dispatch.done.same_channel(&done_tx));
             1
         }
         _ => 0,
@@ -144,15 +182,15 @@ impl ShutdownHandler {
         let (ctrl_tx, ctrl_rx) = crossbeam_channel::bounded::<u32>(1);
 
         {
-            let mut handlers = ACTIVE_HANDLERS.lock();
-            if handlers.is_empty() {
+            let mut registry = CONSOLE_REGISTRY.lock();
+            if registry.handlers.is_empty() {
                 // SAFETY: win_console_ctrl_handler is an extern "system" function pointer with the PHANDLER_ROUTINE signature.
                 let success = unsafe { SetConsoleCtrlHandler(Some(win_console_ctrl_handler), 1) };
                 if success == 0 {
                     return Err(std::io::Error::last_os_error().into());
                 }
             }
-            handlers.push((id, ctrl_tx));
+            registry.handlers.push((id, ctrl_tx));
         }
 
         let thread = thread::spawn(move || {
@@ -177,9 +215,13 @@ impl ShutdownHandler {
 
         let mut unregister_error = None;
         {
-            let mut handlers = ACTIVE_HANDLERS.lock();
-            handlers.retain(|(id, _)| *id != self.id);
-            if handlers.is_empty() {
+            let mut registry = CONSOLE_REGISTRY.lock();
+            // Unregistering stops future events reaching this handler but
+            // cannot release waits on it: the lifecycle's teardown (clean
+            // checkpoint publication included) is still owed to any
+            // dispatch that counted this handler.
+            registry.handlers.retain(|(id, _)| *id != self.id);
+            if registry.handlers.is_empty() {
                 // SAFETY: unregistering the previously registered win_console_ctrl_handler function pointer.
                 let success = unsafe { SetConsoleCtrlHandler(Some(win_console_ctrl_handler), 0) };
                 if success == 0 {
@@ -205,6 +247,21 @@ impl ShutdownHandler {
         join_result
     }
 }
+
+/// Reports `handler`'s lifecycle teardown as finished.
+///
+/// Windows may terminate the process as soon as a close-type console
+/// callback returns, so the callback holds until every lifecycle it was
+/// dispatched to has reported here through its own handler id.
+#[cfg(windows)]
+pub(crate) fn teardown_completed(handler: &ShutdownHandler) {
+    CONSOLE_REGISTRY.lock().teardown_completed(handler.id);
+}
+
+/// No-op outside Windows: the signal worker exits independently of
+/// teardown order.
+#[cfg(not(windows))]
+pub(crate) fn teardown_completed(_handler: &ShutdownHandler) {}
 
 impl Drop for ShutdownHandler {
     fn drop(&mut self) {
@@ -294,11 +351,18 @@ mod tests {
         Ok(())
     }
 
+    /// Serializes the Windows console-ctrl tests: they share the
+    /// process-global registry and console-handler slot, so the parallel
+    /// test runner would let one test's teardown resolve another's wait.
+    #[cfg(windows)]
+    static SERIAL: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     #[cfg(windows)]
     #[test]
     fn windows_console_ctrl_triggers_shutdown() -> Result<()> {
         use windows_sys::Win32::System::Console::CTRL_C_EVENT;
 
+        let _serial = SERIAL.lock();
         let shutdown = Arc::new(AtomicBool::new(false));
         let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
         let mut handler = ShutdownHandler::install(Arc::clone(&shutdown), shutdown_tx)?;
@@ -325,14 +389,21 @@ mod tests {
         Ok(())
     }
 
+    /// A close-type event must hold the console callback until EVERY
+    /// lifecycle it was broadcast to has reported teardown: the first
+    /// finisher cannot release a wait still owed by another handler.
     #[cfg(windows)]
     #[test]
-    fn windows_console_ctrl_close_waits_for_completion() -> Result<()> {
+    fn windows_console_ctrl_close_waits_for_every_dispatched_teardown() -> Result<()> {
         use windows_sys::Win32::System::Console::CTRL_CLOSE_EVENT;
 
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded::<()>(1);
-        let mut handler = ShutdownHandler::install(Arc::clone(&shutdown), shutdown_tx)?;
+        let _serial = SERIAL.lock();
+        let shutdown_a = Arc::new(AtomicBool::new(false));
+        let shutdown_b = Arc::new(AtomicBool::new(false));
+        let (shutdown_tx_a, shutdown_rx_a) = crossbeam_channel::bounded::<()>(1);
+        let (shutdown_tx_b, shutdown_rx_b) = crossbeam_channel::bounded::<()>(1);
+        let mut handler_a = ShutdownHandler::install(Arc::clone(&shutdown_a), shutdown_tx_a)?;
+        let mut handler_b = ShutdownHandler::install(Arc::clone(&shutdown_b), shutdown_tx_b)?;
 
         let (handler_done_tx, handler_done_rx) = crossbeam_channel::bounded::<i32>(1);
         std::thread::spawn(move || {
@@ -341,27 +412,42 @@ mod tests {
             let _ = handler_done_tx.send(handled);
         });
 
-        assert!(
-            shutdown_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .is_ok(),
-            "CTRL_CLOSE_EVENT must wake shutdown channel"
-        );
+        for (rx, flag) in [
+            (&shutdown_rx_a, &shutdown_a),
+            (&shutdown_rx_b, &shutdown_b),
+        ] {
+            assert!(
+                rx.recv_timeout(std::time::Duration::from_secs(1)).is_ok(),
+                "CTRL_CLOSE_EVENT must wake every dispatched shutdown channel"
+            );
+            assert!(
+                flag.load(Ordering::Acquire),
+                "CTRL_CLOSE_EVENT must set every dispatched shutdown atomic"
+            );
+        }
         assert!(
             handler_done_rx
                 .recv_timeout(std::time::Duration::from_millis(50))
                 .is_err(),
-            "handler must wait for teardown completion"
+            "callback must wait for teardown completions"
         );
 
-        notify_teardown_completed();
+        teardown_completed(&handler_a);
+        assert!(
+            handler_done_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "the first teardown must not release a wait still owed by another lifecycle"
+        );
 
+        teardown_completed(&handler_b);
         let Ok(handled) = handler_done_rx.recv_timeout(std::time::Duration::from_secs(1)) else {
-            panic!("handler must return after teardown completion");
+            panic!("callback must return once every dispatched lifecycle tore down");
         };
         assert_eq!(handled, 1, "handler must return 1 for CTRL_CLOSE_EVENT");
 
-        handler.close_and_join()?;
+        handler_a.close_and_join()?;
+        handler_b.close_and_join()?;
 
         // SAFETY: simulating console event callback with no active handlers.
         let handled_empty = unsafe { win_console_ctrl_handler(CTRL_CLOSE_EVENT) };

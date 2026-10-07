@@ -275,7 +275,11 @@ impl NodeServices {
         if let Some(state) = state {
             bitcoin_rs_mempool::fee_history::save(state.data_dir(), &state.mempool());
         }
-        crate::signal::notify_teardown_completed();
+        if let Some(handler) = &self.signal_handler {
+            // Windows console-close callbacks wait on this report before
+            // returning and letting the process die.
+            crate::signal::teardown_completed(handler);
+        }
         if let Some(error) = first_error {
             return Err(error);
         }
@@ -367,8 +371,10 @@ impl NodeServices {
                 );
             }
         }
-        if let Some(mut handler) = self.signal_handler.take() {
-            // Signal forwarding thread failed to close or join.
+        if let Some(handler) = self.signal_handler.as_mut() {
+            // Signal forwarding thread failed to close or join. The handler
+            // stays installed in the field: teardown_completed below still
+            // needs its registry id after the checkpoint publication.
             if let Err(error) = handler.close_and_join() {
                 tracing::error!(%error, "signal forwarding thread did not shut down cleanly");
                 set_first_error(first_error, error);
