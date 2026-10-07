@@ -16,6 +16,8 @@ default = ["fjall"]
 rocksdb = ["dep:rust-rocksdb"]
 fjall = ["dep:fjall"]
 redb = ["dep:redb"]
+# Explicit fixture/fault-injection surface; never a production default.
+test-seam = []
 
 [dependencies]
 arc-swap.workspace = true
@@ -28,7 +30,6 @@ bytes.workspace = true
 hashbrown.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
-rustix.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -37,7 +38,11 @@ rust-rocksdb = { workspace = true, optional = true }
 fjall = { workspace = true, optional = true }
 redb = { workspace = true, optional = true }
 
+[target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "redox"))'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 libc = ">=0.2.189, <0.3"
 proptest.workspace = true
 tempfile.workspace = true

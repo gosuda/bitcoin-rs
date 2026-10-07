@@ -177,7 +177,8 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     if !lock_metadata.is_file() {
         bail!("process epoch lock {PROCESS_EPOCH_LOCK_FILE} is not a regular file");
     }
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+    let lock = lock.into_std();
+    lock.lock()
         .with_context(|| format!("lock process epoch file {PROCESS_EPOCH_LOCK_FILE}"))?;
 
     let epoch = load_process_epoch(dir)?

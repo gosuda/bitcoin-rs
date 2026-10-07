@@ -151,6 +151,78 @@ fn historical_archive_replay_retires_overtaken_downloads() -> Result<(), Box<dyn
 }
 
 #[test]
+fn late_retired_history_cannot_enter_foreground_staging() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (harness, chain, blocks) = fixture(6)?;
+    chain.bootstrap_genesis();
+    chain
+        .commit_window(&blocks.iter().collect::<Vec<_>>(), &[])
+        .map_err(|error| format!("fixture commit: {error:?}"))?;
+    let addr = test_addr(28205, 0)?;
+    let _rx = connect_peer(&harness.peers, synthetic_peer(addr, 7));
+    harness.sync.advance_historical();
+    let source = current_source(&harness.peers, addr);
+    chain.historical.lock().pop_front();
+    harness.sync.advance_historical();
+    assert!(
+        !harness
+            .sync
+            .owns_body_fetch(source, blocks[0].block_hash().0)
+    );
+
+    for competing_headers in [false, true] {
+        if competing_headers {
+            // The fast applied-ancestry filter cannot run when the best header
+            // tip is another branch. The unrequested-body work gate still must.
+            let mut tree = harness.block_tree.write();
+            let mut parent = tree
+                .lookup(Network::Regtest.genesis_block().block_hash().0)
+                .ok_or("missing genesis")?;
+            for height in 1..=7 {
+                let block = regtest_fixture::mined_block_with_prev_hash(
+                    BlockHash(tree.node(parent)?.hash),
+                    height,
+                    vec![regtest_fixture::coinbase(10_000 + height)],
+                )?;
+                parent = tree.insert_node(Some(parent), block.header, NodeStatus::HeaderValid)?;
+            }
+            assert_ne!(
+                tree.tip().ok_or("missing header tip")?.hash,
+                blocks[5].block_hash().0
+            );
+        }
+        let inbound = crate::InboundBlock {
+            block: blocks[0].clone(),
+            serialized: bytes::Bytes::from(consensus_bytes(&blocks[0])),
+            source: Some(source),
+            forward_credit: None,
+        };
+        let inbound = harness
+            .sync
+            .receive_historical(inbound)
+            .ok_or("retired lease must not retain ownership")?;
+        let mut deliveries = vec![inbound];
+        assert_eq!(
+            harness
+                .sync
+                .buffer_received_block_chunk(&mut deliveries, None),
+            0
+        );
+        assert_eq!(harness.sync.scheduler.lock().stager.received_len(), 0);
+        assert_eq!(
+            harness
+                .applied_tip
+                .load_full()
+                .ok_or("missing foreground tip")?
+                .hash,
+            blocks[5].block_hash().0
+        );
+        assert!(chain.historical_connected.lock().is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn historical_pipeline_retries_expired_owner_on_another_connection()
 -> Result<(), Box<dyn std::error::Error>> {
     let (harness, _, blocks) = fixture(4)?;

@@ -30,7 +30,7 @@ When code and a contract disagree, fix the drift in the same change. Do not dupl
 | [campaign-corpora.md](campaign-corpora.md) | `CORP-01`–`CORP-05` | C150/Cmodern custody and Core-framed corpus format | `tools/campaign-corpus/test_corpus.py` |
 | [muhash-rpc.md](muhash-rpc.md) | `MRPC-01`–`MRPC-03` | MuHash RPC arity and benchmark custody | RPC arity and benchmark-campaign tests |
 | [embedding.md](embedding.md) | `EMB-01`–`EMB-10` | Embedded lifecycle, shared node services and independent stall evidence | `crates/node/tests/embed.rs`; daemon teardown test; `crates/node/src/event_loop.rs` telemetry test; `scripts/tests/test_watch_runtime_stall.py` |
-| [storage-footprint.md](storage-footprint.md) | `FP-01`–`FP-04` | Logical/physical storage accounting and 1-TB gate | storage/node footprint behavior tests |
+| [storage-footprint.md](storage-footprint.md) | `FP-01`–`FP-04` | Offline apparent/allocated snapshot boundary and evidence limits | offline-tool tests; isolated production API gate |
 | [hot-path-attribution.md](hot-path-attribution.md) | `HPA-01`–`HPA-13` | Product cells, overlap accounting, evidence identity, promotion thresholds | benchmark evidence tests and measured campaign artifacts |
 | [dependency-range.md](dependency-range.md) | `DEP-01`–`DEP-02` | Declared Cargo ranges compile at their minimum and maximum resolvable versions; one copy each of `bitcoin`, `bitcoin_hashes`, `secp256k1`, `secp256k1-sys` | `scripts/check-dep-range.sh`; `cargo deny check bans` |
 | [feature-matrix.md](feature-matrix.md) | `FEAT-01`–`FEAT-02` | Named supported feature combinations; no empty backend markers on crates that do not own storage | `scripts/check-feature-matrix.sh`; `g17_dependency_direction` |

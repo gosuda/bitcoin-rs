@@ -8,9 +8,6 @@
 
 use std::process::ExitCode;
 
-use anyhow::Context;
-use bitcoin_rs_node::{MeasureStorageRequest, measure_storage_footprint, storage_footprint_json};
-
 mod config;
 
 #[global_allocator]
@@ -25,36 +22,13 @@ fn load(
     config::resolve(cli, vars)
 }
 
-fn measure_storage(mut cli: config::CliArgs) -> anyhow::Result<()> {
-    let output = cli.measure_storage_output.take();
-    let request = MeasureStorageRequest {
-        high_water_allocated_bytes: cli.storage_high_water_bytes,
-        stop_height: cli.measure_storage_stop_height,
-        stop_hash: cli.measure_storage_stop_hash.take(),
-    };
-    let config = config::resolve(cli, std::env::vars_os())?;
-    let evidence = measure_storage_footprint(&config, &request)?;
-    let json = storage_footprint_json(&evidence)?;
-    if let Some(path) = output {
-        std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
-    } else {
-        println!("{json}");
-    }
-    Ok(())
-}
-
 fn main() -> ExitCode {
     let cli = match <config::CliArgs as clap::Parser>::try_parse() {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
-    let result = if cli.measure_storage {
-        measure_storage(cli)
-    } else {
-        config::resolve(cli, std::env::vars_os()).and_then(|config| {
-            bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default())
-        })
-    };
+    let result = config::resolve(cli, std::env::vars_os())
+        .and_then(|config| bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default()));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -66,6 +40,22 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn measurement_options_are_not_node_options() {
+        use clap::Parser as _;
+        for option in [
+            "--measure-storage",
+            "--measure-storage-output",
+            "--measure-storage-stop-height",
+            "--measure-storage-stop-hash",
+            "--storage-high-water-bytes",
+        ] {
+            let error = super::config::CliArgs::try_parse_from(["bitcoin-rs", option])
+                .err()
+                .unwrap_or_else(|| panic!("measurement option accepted: {option}"));
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
     use std::ffi::OsString;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;

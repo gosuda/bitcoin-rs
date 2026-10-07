@@ -1,0 +1,19 @@
+[package]
+name = "bitcoin-rs-storage-footprint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Offline Linux filesystem allocation snapshot for benchmark evidence"
+
+[lints]
+workspace = true
+
+[dependencies]
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

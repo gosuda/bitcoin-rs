@@ -89,6 +89,8 @@ sha2.workspace = true
 cap-std.workspace = true
 
 [dev-dependencies]
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
 # Own integration tests and benchmarks are separate crates, so they opt into
 # the same explicit seam used by the subsystem crates below.

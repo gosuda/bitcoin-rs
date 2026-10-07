@@ -13,6 +13,8 @@ workspace = true
 
 [features]
 default = []
+# Synthetic capability worlds for tests, not production composition.
+test-seam = []
 zmq = ["dep:zmq"]
 
 [dependencies]
@@ -43,6 +45,7 @@ anyhow.workspace = true
 zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
+bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 toml.workspace = true
 bitcoin-rs-e2e.workspace = true
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }

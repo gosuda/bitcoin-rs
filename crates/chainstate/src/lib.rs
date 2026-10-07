@@ -2,17 +2,21 @@
 
 pub use crate::error::{ApplyError, DisconnectError};
 use arc_swap::ArcSwapOption;
+#[cfg(any(test, feature = "test-seam"))]
+use bitcoin_rs_chain::TransitionDomain;
 use bitcoin_rs_chain::{
     BlockTree, BlockTreeReader, ChainError, ChainTxCount, TipReader, TipSnapshot,
-    TransitionAuthority, TransitionAuthorityGuard, TransitionDomain,
+    TransitionAuthority, TransitionAuthorityGuard,
 };
 use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::{Block, Network, OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_primitives::{Hash256, Header};
+use bitcoin_rs_storage::DurableHeadStore;
+#[cfg(any(test, feature = "test-seam"))]
+use bitcoin_rs_storage::InMemoryUndoStore;
 pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
-use bitcoin_rs_storage::{DurableHeadStore, InMemoryUndoStore};
 use bitcoin_rs_utxo::contract::{SpentOutputLookup, is_coinbase_tx};
 use bitcoin_rs_utxo::{UtxoCoin, UtxoSet};
 use connect::{apply_block_admitted, apply_committed_block_admitted};
@@ -1034,8 +1038,8 @@ impl Chainstate {
         Ok(self.lock_transition()?.into_transition())
     }
 
-    /// Builds a chainstate facade for tests and composition that do not go
-    /// through `NodeState::open`.
+    /// Builds a synthetic, in-memory chainstate for fixtures.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn new(
         network: Network,

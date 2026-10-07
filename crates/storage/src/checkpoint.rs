@@ -218,6 +218,7 @@ pub enum CheckpointLoadError {
     Io(#[from] std::io::Error),
 }
 /// Failpoint boundaries used to test checkpoint publication recovery.
+#[cfg(any(test, feature = "test-seam"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointFailpoint {
     /// Before headers bytes are written.
@@ -267,21 +268,26 @@ pub(crate) struct HashingWriter<'a> {
     file: BufWriter<&'a mut File>,
     hasher: Sha256,
     bytes: u64,
+    #[cfg(any(test, feature = "test-seam"))]
     fail: bool,
 }
 impl<'a> HashingWriter<'a> {
+    /// The `configured`/`boundary` parameters exist only under
+    /// `test`/`test-seam` and arm the write-failure injection.
     pub(crate) fn new(
         file: &'a mut File,
-        configured: Option<CheckpointFailpoint>,
-        boundary: CheckpointFailpoint,
+        #[cfg(any(test, feature = "test-seam"))] configured: Option<CheckpointFailpoint>,
+        #[cfg(any(test, feature = "test-seam"))] boundary: CheckpointFailpoint,
     ) -> Self {
         Self {
             file: BufWriter::with_capacity(CHECKPOINT_WRITE_BUFFER_SIZE, file),
             hasher: Sha256::new(),
             bytes: 0,
+            #[cfg(any(test, feature = "test-seam"))]
             fail: configured == Some(boundary),
         }
     }
+
     pub(crate) fn finish(mut self) -> std::io::Result<(u64, [u8; 32])> {
         self.file.flush()?;
         Ok((self.bytes, self.hasher.finalize().into()))
@@ -289,6 +295,7 @@ impl<'a> HashingWriter<'a> {
 }
 impl Write for HashingWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        #[cfg(any(test, feature = "test-seam"))]
         if self.fail {
             return Err(std::io::Error::from_raw_os_error(28));
         }
