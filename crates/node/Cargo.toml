@@ -72,7 +72,6 @@ crossbeam-channel.workspace = true
 parking_lot.workspace = true
 arc-swap.workspace = true
 compact_str.workspace = true
-signal-hook = { workspace = true, features = ["iterator"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 metrics.workspace = true
@@ -84,9 +83,16 @@ rayon.workspace = true
 sha2.workspace = true
 cap-std.workspace = true
 
+[target.'cfg(not(windows))'.dependencies]
+signal-hook = { workspace = true, features = ["iterator"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Console"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
 criterion.workspace = true
@@ -97,6 +103,7 @@ rustix.workspace = true
 bitcoin-rs-script.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 
 [[bench]]
 name = "sync_pipeline"

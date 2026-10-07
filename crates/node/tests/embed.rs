@@ -424,7 +424,9 @@ fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
         Err(NodeError::Startup(message)) => {
             let lowered = message.to_lowercase();
             assert!(
-                lowered.contains("address") || lowered.contains("bind"),
+                lowered.contains("address")
+                    || lowered.contains("bind")
+                    || lowered.contains("10048"),
                 "the failure should name the bind conflict, got: {message}"
             );
         }

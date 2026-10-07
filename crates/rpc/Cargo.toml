@@ -13,6 +13,7 @@ workspace = true
 
 [features]
 default = []
+test-seam = []
 zmq = ["dep:zmq"]
 
 [dependencies]
@@ -51,5 +52,8 @@ bitcoin-rs-node = { workspace = true, default-features = false, features = ["fja
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-utxo = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
+
+[target.'cfg(not(windows))'.dev-dependencies]
 rustix.workspace = true

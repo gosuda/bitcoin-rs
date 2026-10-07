@@ -11,7 +11,7 @@ Owners:
 
 | Layer | Crates | Responsibility |
 | --- | --- | --- |
-| 4: Compose | `node`, `bitcoin-rs`, `e2e` | Runtime assembly and lifecycle |
+| 4: Compose | `node`, `bitcoin-rs`, `e2e`, `storage-footprint` | Runtime assembly, lifecycle, and measurement tools |
 | 3: Surface | `rpc` | External protocol boundaries |
 | 2: Services | `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, `mining` | Domain state and services |
 | 1: Storage | `storage` | Storage contracts and engine drivers |
@@ -57,12 +57,14 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     `g17_dependency_direction` gate checks this boundary explicitly.
   - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
     handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
-  - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`, `bitcoin-rs-e2e`.
-    Daemon assembly, subsystem lifecycle coordination, and CLI binary entry
-    points. `bitcoin-rs-e2e` is the process-level test harness that drives
-    the composed daemon and the pinned reference node over their public
-    surfaces only; it declares no internal dependencies and no workspace
-    crate may depend on it.
+  - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`, `bitcoin-rs-e2e`,
+    `bitcoin-rs-storage-footprint`. Daemon assembly, subsystem lifecycle
+    coordination, measurement tools, and CLI binary entry points.
+    `bitcoin-rs-e2e` is the process-level test harness that drives the composed
+    daemon and the pinned reference node over their public surfaces only; it
+    declares no internal dependencies and no workspace crate may depend on it.
+    `bitcoin-rs-storage-footprint` is the custody-grade offline physical/logical
+    storage measurement tool.
 - **Explicit non-goal**: Layer numbers do not justify speculative new crates or
   thin wrapper layers. A boundary exists only when it isolates external
   dependencies, enforces safety/consensus boundaries, or separates independent
@@ -81,8 +83,9 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 
 - Backend feature forwarding (`fjall`, `redb`, `rocksdb`) is strictly
   confined to:
-  1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose
-     backend selection to operators and packaging scripts.
+  1. Operator-facing entry points and tools (`bitcoin-rs-node`, `bitcoin-rs`,
+     `bitcoin-rs-storage-footprint`) that expose backend selection to operators
+     and packaging scripts.
   2. Services-tier adapter crates (`bitcoin-rs-chainstate`, `bitcoin-rs-utxo`,
      `bitcoin-rs-index`) whose features exist solely so `-p` package builds
      propagate backend selection into `bitcoin-rs-storage`.
@@ -187,7 +190,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   its configuration slot, its text grammar, and its spelling on the command
   line, in the environment, in the TOML file, and in `bitcoin.conf`. The
   `bitcoin-rs` binary holds no option name or grammar of its own beyond the two
-  configuration-file selectors and the storage-measurement flags.
+  configuration-file selectors (`--config`, `--bitcoin-conf`). Storage-measurement
+  flags are owned exclusively by the standalone `bitcoin-rs-storage-footprint` tool.
 - `resolve` folds every layer through `UserConfig::overlay` in precedence order,
   lowest first: a set field replaces the earlier value, an unset field leaves
   it, and nested override structs merge the same way, including

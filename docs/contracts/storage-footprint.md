@@ -5,17 +5,18 @@ The normative contract for custody-grade data-directory storage evidence.
 it already is. This collector is a separate, explicit measurement command.
 
 Owners:
-- Physical walk and logical column-family scan: `crates/storage/src/footprint.rs`
+- Physical walk: `tools/storage-footprint/src/physical.rs`
+- Logical column-family scan: `tools/storage-footprint/src/logical.rs`
 - Evidence envelope, identity, namespace inventory, and budget verdict:
-  `crates/storage/src/footprint/evidence.rs`
-- Measurement orchestration and identity projection:
-  `crates/node/src/storage_footprint.rs`
+  `tools/storage-footprint/src/evidence.rs`
+- Measurement orchestration and CLI entrypoint:
+  `tools/storage-footprint/src/collector.rs`, `tools/storage-footprint/src/main.rs`
 - Default-lane full-tip conservative high-water evidence (planned):
   `bin/bitcoin-rs/tests/overhaul_storage_evidence.rs`
-- Verdict-machine gates: `crates/node/tests/unit/storage_footprint/tests.rs`
-  (FP-02, FP-04 budget pass/fail and stop-pinning rules)
-- Command: `bin/bitcoin-rs --measure-storage`, exercised by
-  `e2e/tests/lifecycle.rs` `measure_storage_exits_with_report`
+- Contract tests & verdict-machine gates: `tools/storage-footprint/tests/storage_footprint.rs`
+  (FP-01..FP-04 budget pass/fail, physical walk, and stop-pinning rules)
+- Command: `tools/storage-footprint` (`cargo run -p bitcoin-rs-storage-footprint -- ...` or standalone binary `storage-footprint`), exercised by
+  `tools/storage-footprint/tests/storage_footprint.rs`
 
 ## Clauses
 
@@ -58,13 +59,14 @@ Owners:
   peak can hide between samples.
 - A passing sub-1-TB result requires a pinned stop identity,
   `observation_kind = conservative_high_water` from an isolated filesystem or
-  project quota (`--storage-high-water-bytes`), and that peak must be at least
+  project quota (`--high-water-bytes` / `--storage-high-water-bytes`), and that peak must be at least
   the snapshot. The conservative high-water must cover compaction, restart,
   reorg, and migration where applicable.
 
 ### `FP-03`: Explicit measurement command
 
-- The collector is invoked with `bitcoin-rs --measure-storage`. It does not
+- The collector is invoked via `storage-footprint` (or `cargo run -p bitcoin-rs-storage-footprint -- ...`).
+  It is a standalone offline measurement tool isolated from the main node daemon, and does not
   start P2P, RPC, or index workers. It is not an RPC method, background
   scanner, or dashboard.
 - Empty `chainstate/` or index directories are not opened. Opening a backend
@@ -73,10 +75,11 @@ Owners:
 - Logical key-value scans open `chainstate/` and index directories as child
   directory descriptors of the same anchor. Backends that still take a pathname
   are pointed at the already-opened descriptor (`/proc/self/fd/N` on Linux).
-- `--measure-storage-stop-height` and `--measure-storage-stop-hash` must be
-  supplied together. The hash is a 64-character RPC big-endian hex block hash.
-  The pair pins the intended stop identity for this run; it does not itself
-  prove that the data directory reached that tip.
+- `--stop-height` and `--stop-hash` (or `--measure-storage-stop-height` and
+  `--measure-storage-stop-hash`) must be supplied together. The hash is a
+  64-character RPC big-endian hex block hash. The pair pins the intended stop
+  identity for this run; it does not itself prove that the data directory reached
+  that tip.
 - Each record uses format `bitcoin-rs-storage-footprint-v1` and includes the
   resolved configuration, network, stop height and hash, whether that stop was
   pinned, backend, enabled indexes, cache budget, compiled feature set,
@@ -129,26 +132,25 @@ Owners:
   storage bounds, including retained undo and body extents.
 - `crates/node/tests/overhaul_checkpoint_independence.rs` (planned): migration
   and fresh-replay storage footprint, including no legacy checkpoint residue.
-- `crates/storage/tests/storage_footprint.rs` existing unit tests:
+- `tools/storage-footprint/tests/storage_footprint.rs` tests (see the clause map at the top of that module):
   - `logical_owner_bytes_are_exact_key_plus_value`;
   - `physical_ledger_uses_allocated_blocks_not_apparent_length`;
   - `hard_links_are_counted_once`;
   - `symlink_is_rejected`;
   - `high_water_below_snapshot_is_rejected`;
-  - `ledgers_are_not_summed_by_the_physical_total`.
-- `crates/node/tests/unit/storage_footprint/tests.rs` contract tests (see the clause map at the top of that module):
+  - `ledgers_are_not_summed_by_the_physical_total`;
   - `default_regtest_record_is_inapplicable_to_the_mainnet_budget`;
   - `conservative_high_water_can_pass_the_default_mainnet_budget`;
   - `snapshot_of_default_mainnet_is_insufficient_for_the_peak_gate`;
   - `high_water_above_budget_fails_the_default_mainnet_gate`;
   - `empty_chainstate_directory_is_not_created_as_a_store`;
-    - `unpinned_high_water_is_tip_unpinned_not_pass`;
-    - `stop_height_without_hash_is_rejected`;
-    - `stop_hash_without_height_is_rejected`;
-    - `invalid_stop_hash_is_rejected`;
-    - `oversized_current_witness_falls_back_to_prev`;
-    - `identity_names_the_txindex_lane`;
-    - `logical_chainstate_rows_are_named_owners`.
+  - `unpinned_high_water_is_tip_unpinned_not_pass`;
+  - `stop_height_without_hash_is_rejected`;
+  - `stop_hash_without_height_is_rejected`;
+  - `invalid_stop_hash_is_rejected`;
+  - `oversized_current_witness_falls_back_to_prev`;
+  - `identity_names_the_txindex_lane`;
+  - `logical_chainstate_rows_are_named_owners`.
 
 ## Vocabulary
 

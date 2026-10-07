@@ -1,0 +1,53 @@
+[package]
+name = "bitcoin-rs-storage-footprint"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "bitcoin-rs :: storage footprint measurement tool"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "storage-footprint"
+path = "src/main.rs"
+
+[features]
+default = ["fjall", "redb"]
+rocksdb = [
+    "bitcoin-rs-node/rocksdb",
+    "bitcoin-rs-storage/rocksdb",
+]
+fjall = [
+    "bitcoin-rs-node/fjall",
+    "bitcoin-rs-storage/fjall",
+]
+redb = [
+    "bitcoin-rs-node/redb",
+    "bitcoin-rs-storage/redb",
+]
+
+[dependencies]
+bitcoin-rs-primitives.workspace = true
+bitcoin-rs-storage.workspace = true
+bitcoin-rs-node.workspace = true
+bitcoin-rs-index.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = ">=0.2.189, <0.3"

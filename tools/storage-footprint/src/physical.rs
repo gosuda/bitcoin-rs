@@ -1,13 +1,4 @@
-//! Custody-grade logical and physical storage-footprint ledgers.
-//!
-//! The two ledgers are independently owned and must not be summed. Logical
-//! owners report exact serialized key and value bytes. Physical namespaces
-//! report allocated filesystem blocks. Shared database files make exact
-//! physical attribution to a logical owner impossible; the physical ledger is
-//! the source of the data-directory budget.
-
-/// Storage-footprint evidence record format and budget verdict.
-pub mod evidence;
+//! Custody-grade physical storage-footprint ledger (Unix).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -18,238 +9,17 @@ use std::path::Path;
 use rustix::fs::{self as rfs, AtFlags, FileType, Mode, OFlags, Stat};
 use rustix::io::Errno;
 
-use crate::block_file::{complete_framed_stats, is_block_file_name};
-use crate::{ColumnFamily, KvStore, StorageError};
+use bitcoin_rs_storage::block_file::{complete_framed_stats, is_block_file_name};
 
-/// POSIX `st_blocks` unit: allocated bytes = `st_blocks * 512`.
-const ALLOCATED_BLOCK_BYTES: u64 = 512;
-
-/// Errors from custody-grade footprint collection.
-#[derive(Debug, thiserror::Error)]
-pub enum FootprintError {
-    /// A symlink was present in the data-directory tree.
-    #[error("symlink at {path}")]
-    Symlink {
-        /// Path relative to the opened data directory, or the open path.
-        path: String,
-    },
-    /// A child inode lived on a different mount than the data directory.
-    #[error("mount crossing at {path}")]
-    MountCrossing {
-        /// Path relative to the opened data directory.
-        path: String,
-    },
-    /// An inode identity or allocated size changed between the two collection walks.
-    #[error("data directory changed during collection at {path}")]
-    ChangedDuringCollection {
-        /// Path that differed between walks.
-        path: String,
-    },
-    /// A supplied high-water mark was below the measured snapshot.
-    #[error("high-water {high_water} is below snapshot {snapshot}")]
-    HighWaterBelowSnapshot {
-        /// Conservative peak supplied by the caller.
-        high_water: u64,
-        /// Allocated bytes observed in the snapshot.
-        snapshot: u64,
-    },
-    /// A directory entry name was not valid UTF-8.
-    #[error("non-UTF-8 path component under {parent}")]
-    InvalidName {
-        /// Parent relative path.
-        parent: String,
-    },
-    /// The supplied path is not a directory.
-    #[error("{path} is not a directory")]
-    NotADirectory {
-        /// Path that failed to open as a directory.
-        path: String,
-    },
-    /// A FIFO, device, or other non-file/non-directory entry was present.
-    #[error("unsupported file type {kind} at {path}")]
-    UnsupportedEntry {
-        /// Path relative to the opened data directory.
-        path: String,
-        /// File-type spelling.
-        kind: &'static str,
-    },
-    /// Filesystem or OS I/O failure.
-    #[error("io: {0}")]
-    Io(#[from] io::Error),
-    /// Key-value or block-file read failure.
-    #[error("storage: {0}")]
-    Storage(#[from] StorageError),
-}
+use crate::logical::LogicalOwner;
+use crate::physical_types::{
+    ALLOCATED_BLOCK_BYTES, FootprintError, PhysicalCategory, PhysicalLedger, PhysicalNamespace,
+    PhysicalObservationKind,
+};
 
 impl From<Errno> for FootprintError {
     fn from(error: Errno) -> Self {
         Self::Io(io::Error::from(error))
-    }
-}
-
-/// How a physical observation relates to a create/allocate/delete peak.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PhysicalObservationKind {
-    /// One consistent snapshot. A lower bound on the true peak.
-    SnapshotLowerBound,
-    /// Snapshot plus an external conservative high-water (quota or isolated FS).
-    ConservativeHighWater,
-}
-
-impl PhysicalObservationKind {
-    /// Stable evidence spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SnapshotLowerBound => "snapshot_lower_bound",
-            Self::ConservativeHighWater => "conservative_high_water",
-        }
-    }
-}
-
-/// Physical file-role category inside a namespace, or the unattributed residual.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) enum PhysicalCategory {
-    /// Primary payload of the namespace (SST tables, block files, checkpoint bytes).
-    Data,
-    /// Write-ahead / journal residue inside a key-value namespace.
-    Wal,
-    /// Engine manifests, options, locks, and directory inodes.
-    Metadata,
-    /// Compaction temporaries and anything the collector will not guess.
-    Unattributed,
-}
-
-impl PhysicalCategory {
-    /// Stable evidence spelling.
-    #[must_use]
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Data => "data",
-            Self::Wal => "wal",
-            Self::Metadata => "metadata",
-            Self::Unattributed => "unattributed",
-        }
-    }
-}
-
-/// Exact serialized key and value bytes for one logical owner.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub struct LogicalOwner {
-    /// `{namespace}.{column_family}` or a named subsystem such as `blocks.flat_files`.
-    pub name: String,
-    /// Number of rows or framed records.
-    pub rows: u64,
-    /// Sum of serialized key lengths.
-    pub key_bytes: u64,
-    /// Sum of serialized value lengths.
-    pub value_bytes: u64,
-    /// `key_bytes + value_bytes`. Not a filesystem allocation.
-    pub serialized_bytes: u64,
-}
-
-impl LogicalOwner {
-    fn new(name: impl Into<String>, rows: u64, key_bytes: u64, value_bytes: u64) -> Self {
-        Self {
-            name: name.into(),
-            rows,
-            key_bytes,
-            value_bytes,
-            serialized_bytes: key_bytes.saturating_add(value_bytes),
-        }
-    }
-}
-
-/// Logical owner ledger. Do not add these bytes to the physical ledger.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct LogicalLedger {
-    /// Owners in stable name order.
-    pub owners: Vec<LogicalOwner>,
-}
-
-impl LogicalLedger {
-    /// Sum of serialized key and value bytes across owners.
-    ///
-    /// This is a logical-ledger total only. It is not a data-directory budget.
-    #[must_use]
-    pub(crate) fn serialized_bytes(&self) -> u64 {
-        self.owners.iter().fold(0, |total, owner| {
-            total.saturating_add(owner.serialized_bytes)
-        })
-    }
-
-    /// Inserts `owner` and keeps owners sorted by name.
-    pub fn push(&mut self, owner: LogicalOwner) {
-        self.owners.push(owner);
-        self.owners
-            .sort_by(|left, right| left.name.cmp(&right.name));
-    }
-}
-
-/// Allocated bytes for one top-level storage namespace.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub struct PhysicalNamespace {
-    /// Top-level directory name, or `residual` for data-directory root files.
-    pub name: String,
-    /// Allocated bytes attributed to this namespace (hard links counted once globally).
-    pub allocated_bytes: u64,
-    /// Per-category allocated bytes. Sum equals `allocated_bytes`.
-    pub categories: BTreeMap<&'static str, u64>,
-}
-
-impl PhysicalNamespace {
-    fn new(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            allocated_bytes: 0,
-            categories: BTreeMap::new(),
-        }
-    }
-
-    fn add(&mut self, category: PhysicalCategory, bytes: u64) {
-        self.allocated_bytes = self.allocated_bytes.saturating_add(bytes);
-        let slot = self.categories.entry(category.as_str()).or_insert(0);
-        *slot = slot.saturating_add(bytes);
-    }
-}
-
-/// Physical namespace ledger. This is the source of the data-directory budget.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PhysicalLedger {
-    /// One row per top-level directory.
-    pub namespaces: Vec<PhysicalNamespace>,
-    /// Root-level files and the data-directory inode.
-    pub residual: PhysicalNamespace,
-    /// Allocated bytes of the whole tree, hard links counted once.
-    pub allocated_bytes: u64,
-    /// Distinct `(device, inode)` identities counted.
-    pub inode_count: u64,
-    /// Whether this observation can satisfy a peak-budget gate.
-    pub observation_kind: PhysicalObservationKind,
-    /// Conservative peak when `observation_kind` is [`PhysicalObservationKind::ConservativeHighWater`].
-    pub high_water_allocated_bytes: Option<u64>,
-}
-
-impl PhysicalLedger {
-    /// Peak used by a budget gate: high-water when present, otherwise the snapshot.
-    #[must_use]
-    pub(crate) fn budget_bytes(&self) -> u64 {
-        self.high_water_allocated_bytes
-            .unwrap_or(self.allocated_bytes)
-    }
-
-    /// Records an external conservative peak. The peak must be at least the snapshot.
-    pub fn with_high_water(mut self, high_water: u64) -> Result<Self, FootprintError> {
-        if high_water < self.allocated_bytes {
-            return Err(FootprintError::HighWaterBelowSnapshot {
-                high_water,
-                snapshot: self.allocated_bytes,
-            });
-        }
-        self.high_water_allocated_bytes = Some(high_water);
-        self.observation_kind = PhysicalObservationKind::ConservativeHighWater;
-        Ok(self)
     }
 }
 
@@ -304,9 +74,6 @@ impl DataDirAnchor {
     }
 
     /// Reads a direct child regular file without following a symlink.
-    ///
-    /// Returns `Ok(None)` when the name is missing or the payload is larger
-    /// than `max_bytes`. The opened descriptor is typed with `fstat`.
     pub fn read_child_file(
         &self,
         name: &str,
@@ -316,10 +83,14 @@ impl DataDirAnchor {
     }
 }
 
+/// Alias for `complete_framed_stats`.
+pub fn complete_flat_file_stats(
+    file: &mut File,
+) -> Result<(u64, u64), bitcoin_rs_storage::StorageError> {
+    complete_framed_stats(file)
+}
+
 /// Filesystem path that refers to an already-opened descriptor.
-///
-/// Used so key-value backends, which take a pathname, open the same inode the
-/// anchor already holds rather than re-resolving `config.data_dir`.
 #[must_use]
 pub fn opened_fd_path(fd: BorrowedFd<'_>) -> std::path::PathBuf {
     #[cfg(target_os = "linux")]
@@ -330,9 +101,6 @@ pub fn opened_fd_path(fd: BorrowedFd<'_>) -> std::path::PathBuf {
     {
         use std::os::unix::ffi::OsStrExt as _;
 
-        // `/dev/fd/N` dup-opens the descriptor itself but cannot be
-        // descended into — `F_GETPATH` returns the real path, the same
-        // resolved path `/proc/self/fd/N` yields on Linux.
         rfs::getpath(fd).map_or_else(
             |_| std::path::PathBuf::from(format!("/dev/fd/{}", fd.as_raw_fd())),
             |path| std::path::PathBuf::from(std::ffi::OsStr::from_bytes(path.as_bytes())),
@@ -345,15 +113,6 @@ pub fn opened_fd_path(fd: BorrowedFd<'_>) -> std::path::PathBuf {
 }
 
 /// Whether `path` currently resolves to the same inode `fd` holds.
-///
-/// Backends that can only open a pathname lose descriptor anchoring on
-/// platforms without `/proc/self/fd` descent (macOS's `/dev/fd` opens the
-/// descriptor itself but cannot be descended into): a rename-and-replace of
-/// the data directory mid-scan would leave the physical ledger anchored to
-/// the held inode while the logical scan reads its successor. Callers must
-/// check this identity while they still hold `fd` and fail the scan on
-/// mismatch rather than emit incoherent evidence. Fails closed — open and
-/// stat errors propagate.
 pub fn opened_path_matches_fd(fd: BorrowedFd<'_>, path: &Path) -> io::Result<bool> {
     let held = rfs::fstat(fd)?;
     let resolved = rfs::open(
@@ -388,38 +147,6 @@ pub fn dir_has_entries(dir: BorrowedFd<'_>) -> Result<bool, FootprintError> {
 /// Opens `path` and measures the physical ledger. A convenience over [`DataDirAnchor`].
 pub fn measure_physical_tree(path: &Path) -> Result<PhysicalLedger, FootprintError> {
     DataDirAnchor::open(path)?.measure_physical()
-}
-
-/// Exact serialized key and value bytes for every column family in `store`.
-///
-/// Owner names are `{namespace}.{column_family}`.
-pub fn logical_store_owners<S: KvStore>(
-    store: &S,
-    namespace: &str,
-) -> Result<Vec<LogicalOwner>, StorageError> {
-    let mut owners = Vec::with_capacity(ColumnFamily::ALL.len());
-    for cf in ColumnFamily::ALL.iter().copied() {
-        let name = format!("{namespace}.{}", cf.name());
-        owners.push(logical_column_family_named(store, cf, &name)?);
-    }
-    Ok(owners)
-}
-
-fn logical_column_family_named<S: KvStore>(
-    store: &S,
-    cf: ColumnFamily,
-    name: &str,
-) -> Result<LogicalOwner, StorageError> {
-    let mut rows = 0_u64;
-    let mut key_bytes = 0_u64;
-    let mut value_bytes = 0_u64;
-    for item in store.iter_prefix(cf, &[])? {
-        let (key, value) = item?;
-        rows = rows.saturating_add(1);
-        key_bytes = key_bytes.saturating_add(u64::try_from(key.len()).unwrap_or(u64::MAX));
-        value_bytes = value_bytes.saturating_add(u64::try_from(value.len()).unwrap_or(u64::MAX));
-    }
-    Ok(LogicalOwner::new(name, rows, key_bytes, value_bytes))
 }
 
 fn nofollow_read() -> OFlags {
@@ -492,7 +219,7 @@ fn walk_dir(
     out.insert(rel.to_owned(), InodeSnapshot::from_stat(&dir_stat));
 
     let mut entries = rfs::Dir::read_from(dir)?;
-    let mut names = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     for entry in &mut entries {
         let entry = entry?;
         let name = entry
@@ -507,8 +234,8 @@ fn walk_dir(
         names.push(name.to_owned());
     }
     names.sort_unstable();
-    for name in names {
-        let child_rel = join_rel(rel, &name);
+    for name in &names {
+        let child_rel = join_rel(rel, name);
         let listed = rfs::statat(dir, name.as_str(), AtFlags::SYMLINK_NOFOLLOW)?;
         match FileType::from_raw_mode(listed.st_mode) {
             FileType::Symlink => {
@@ -753,7 +480,7 @@ fn is_json_sidecar(name: &str) -> bool {
 }
 
 fn classify_inside(namespace: &str, rel_within: &str) -> PhysicalCategory {
-    if namespace == crate::block_file::BLOCK_FILE_DIRECTORY {
+    if namespace == "blocks" {
         let name = rel_within.rsplit('/').next().unwrap_or(rel_within);
         if is_block_file_name(name) {
             return PhysicalCategory::Data;
@@ -801,7 +528,7 @@ fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, Footpr
     let root_stat = rfs::fstat(root)?;
     let blocks = match rfs::openat(
         root,
-        crate::block_file::BLOCK_FILE_DIRECTORY,
+        "blocks",
         nofollow_read() | OFlags::DIRECTORY,
         Mode::empty(),
     ) {
@@ -811,18 +538,14 @@ fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, Footpr
         }
         Err(Errno::LOOP) => {
             return Err(FootprintError::Symlink {
-                path: crate::block_file::BLOCK_FILE_DIRECTORY.to_owned(),
+                path: "blocks".to_owned(),
             });
         }
         Err(error) => return Err(error.into()),
     };
     let blocks_stat = rfs::fstat(&blocks)?;
-    require_directory(&blocks_stat, crate::block_file::BLOCK_FILE_DIRECTORY)?;
-    require_same_dev(
-        &root_stat,
-        &blocks_stat,
-        crate::block_file::BLOCK_FILE_DIRECTORY,
-    )?;
+    require_directory(&blocks_stat, "blocks")?;
+    require_same_dev(&root_stat, &blocks_stat, "blocks")?;
     let mut rows = 0_u64;
     let mut value_bytes = 0_u64;
     let mut entries = rfs::Dir::read_from(&blocks)?;
@@ -833,7 +556,7 @@ fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, Footpr
             .file_name()
             .to_str()
             .map_err(|_| FootprintError::InvalidName {
-                parent: crate::block_file::BLOCK_FILE_DIRECTORY.to_owned(),
+                parent: "blocks".to_owned(),
             })?;
         if name == "." || name == ".." {
             continue;
@@ -844,7 +567,7 @@ fn logical_flat_block_files(root: BorrowedFd<'_>) -> Result<LogicalOwner, Footpr
     }
     names.sort_unstable();
     for name in names {
-        let child_rel = format!("{}/{name}", crate::block_file::BLOCK_FILE_DIRECTORY);
+        let child_rel = format!("blocks/{name}");
         let listed = rfs::statat(blocks.as_fd(), name.as_str(), AtFlags::SYMLINK_NOFOLLOW)?;
         require_regular_file(&listed, &child_rel)?;
         let child = match rfs::openat(
@@ -893,49 +616,4 @@ fn display_rel(rel: &str) -> String {
 
 fn is_symlink_path(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink())
-}
-
-#[cfg(test)]
-mod comparison_tests {
-    use super::{InodeSnapshot, first_change};
-    use std::collections::BTreeMap;
-
-    fn snap(ino: u64, blocks: u64) -> InodeSnapshot {
-        InodeSnapshot {
-            dev: 1,
-            ino,
-            nlink: 1,
-            blocks,
-            size: blocks.saturating_mul(512),
-            is_dir: false,
-        }
-    }
-
-    #[test]
-    fn stable_snapshots_have_no_change() {
-        let mut tree = BTreeMap::new();
-        tree.insert("chainstate".to_owned(), snap(2, 8));
-        assert_eq!(first_change(&tree, &tree), None);
-    }
-
-    #[test]
-    fn size_change_is_reported() {
-        let mut first = BTreeMap::new();
-        first.insert("blocks/blk00000.dat".to_owned(), snap(3, 8));
-        let mut second = first.clone();
-        second.insert("blocks/blk00000.dat".to_owned(), snap(3, 16));
-        assert_eq!(
-            first_change(&first, &second).as_deref(),
-            Some("blocks/blk00000.dat")
-        );
-    }
-
-    #[test]
-    fn new_path_is_reported() {
-        let mut first = BTreeMap::new();
-        first.insert("chainstate".to_owned(), snap(2, 8));
-        let mut second = first.clone();
-        second.insert("txindex".to_owned(), snap(4, 4));
-        assert_eq!(first_change(&first, &second).as_deref(), Some("txindex"));
-    }
 }

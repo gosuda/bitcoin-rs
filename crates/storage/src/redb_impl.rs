@@ -1,11 +1,13 @@
-use crate::batch::{BatchOp, BufferedWriteBatch, prefix_ops};
+#[cfg(any(test, feature = "test-seam"))]
+use crate::batch::prefix_ops;
+use crate::batch::{BatchOp, BufferedWriteBatch};
 use std::path::{Path, PathBuf};
 
 use redb::{
     Database, Durability, ReadTransaction, ReadableDatabase, ReadableTable, TableDefinition,
 };
 
-use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
+use crate::{ColumnFamily, KvSnapshot, KvStore, KvVisitor, StorageError, WriteCondition};
 
 type ByteTable = TableDefinition<'static, &'static [u8], &'static [u8]>;
 type FixedTable<const N: usize> = TableDefinition<'static, &'static [u8; N], ()>;
@@ -35,6 +37,7 @@ pub const REDB_DEFAULT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 /// redb-backed key-value store.
 pub struct RedbStore {
     db: Database,
+    #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
 }
 
@@ -72,6 +75,7 @@ impl RedbStore {
         write_txn.commit().map_err(StorageError::backend)?;
         Ok(Self {
             db,
+            #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
         })
     }
@@ -92,31 +96,34 @@ impl RedbStore {
         metrics::histogram!("storage.write_bytes", "backend" => "redb")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
 
-        // Apply boundary: the atomic transaction commit.
-        if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
-            if fault == crate::PersistFault::PartialApply {
-                // A strict prefix of the batch is staged into a
-                // transaction that is dropped uncommitted: no family
-                // observes a partial batch.
-                let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-                apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;
-                drop(write_txn);
-            }
-            return Err(fault.injected_error());
-        }
-
-        // Sync boundary: the durability tier of the commit.
-        if matches!(durability, Durability::Immediate) {
-            if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
-                // The batch commits at the deferred tier; completion then
-                // faults or is lost.
-                let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-                write_txn
-                    .set_durability(Durability::None)
-                    .map_err(StorageError::backend)?;
-                apply_redb_ops(&write_txn, batch.ops.into_iter())?;
-                write_txn.commit().map_err(StorageError::backend)?;
+        #[cfg(any(test, feature = "test-seam"))]
+        {
+            // Apply boundary: the atomic transaction commit.
+            if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
+                if fault == crate::PersistFault::PartialApply {
+                    // A strict prefix of the batch is staged into a
+                    // transaction that is dropped uncommitted: no family
+                    // observes a partial batch.
+                    let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
+                    apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;
+                    drop(write_txn);
+                }
                 return Err(fault.injected_error());
+            }
+
+            // Sync boundary: the durability tier of the commit.
+            if matches!(durability, Durability::Immediate) {
+                if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
+                    // The batch commits at the deferred tier; completion then
+                    // faults or is lost.
+                    let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
+                    write_txn
+                        .set_durability(Durability::None)
+                        .map_err(StorageError::backend)?;
+                    apply_redb_ops(&write_txn, batch.ops.into_iter())?;
+                    write_txn.commit().map_err(StorageError::backend)?;
+                    return Err(fault.injected_error());
+                }
             }
         }
 
@@ -149,6 +156,16 @@ impl KvStore for RedbStore {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
         let rows = collect_prefix(&read_txn, table_for(cf), prefix)?;
         Ok(Box::new(rows.into_iter().map(Ok)))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
+        for_each_table_prefix(&read_txn, table_for(cf), prefix, f)
     }
 
     fn scan_prefix_bounded(
@@ -219,8 +236,7 @@ impl KvStore for RedbStore {
                 return Ok(false);
             }
         }
-        // Seam: the apply and sync boundaries of this commit. Condition
-        // evaluation precedes both, so a mismatch never consumes a fault.
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
             if fault == crate::PersistFault::PartialApply {
                 apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;
@@ -228,7 +244,9 @@ impl KvStore for RedbStore {
             }
             return Err(fault.injected_error());
         }
+        #[cfg(any(test, feature = "test-seam"))]
         let sync_fault = self.faults.take_at(crate::trait_::PersistBoundary::Sync);
+        #[cfg(any(test, feature = "test-seam"))]
         let durability = if sync_fault.is_some() {
             // The commit runs at the deferred tier; the completion fault or
             // loss is reported after the batch applies.
@@ -236,6 +254,8 @@ impl KvStore for RedbStore {
         } else {
             Durability::Immediate
         };
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let durability = Durability::Immediate;
         write_txn
             .set_durability(durability)
             .map_err(StorageError::backend)?;
@@ -245,6 +265,7 @@ impl KvStore for RedbStore {
             .increment(1);
         metrics::histogram!("storage.write_bytes", "backend" => "redb")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = sync_fault {
             return Err(fault.injected_error());
         }
@@ -253,6 +274,7 @@ impl KvStore for RedbStore {
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "redb").increment(1);
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Flush) {
             return Err(fault.injected_error());
         }
@@ -270,6 +292,7 @@ impl KvStore for RedbStore {
         }))
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
     fn arm_persist_fault(&self, fault: crate::PersistFault) {
         self.faults.arm(fault);
     }
@@ -278,6 +301,7 @@ impl KvStore for RedbStore {
 /// redb-backed transaction-index store using fixed-width physical tables.
 struct RedbTxIndexStore {
     db: Database,
+    #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
 }
 
@@ -344,6 +368,7 @@ impl RedbTxIndexStore {
         write_txn.commit().map_err(StorageError::backend)?;
         Ok(Self {
             db,
+            #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
         })
     }
@@ -363,8 +388,7 @@ impl RedbTxIndexStore {
         metrics::histogram!("storage.write_bytes", "backend" => "redb")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
 
-        // Same seam discipline as the main store: apply faults precede the
-        // transaction, sync faults downgrade the commit tier.
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
             if fault == crate::PersistFault::PartialApply {
                 let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
@@ -373,11 +397,13 @@ impl RedbTxIndexStore {
             }
             return Err(fault.injected_error());
         }
+        #[cfg(any(test, feature = "test-seam"))]
         let sync_fault = if matches!(durability, Durability::Immediate) {
             self.faults.take_at(crate::trait_::PersistBoundary::Sync)
         } else {
             None
         };
+        #[cfg(any(test, feature = "test-seam"))]
         let effective_durability = if sync_fault.is_some() {
             // The commit runs at the deferred tier; the completion fault or
             // loss is reported after the batch applies.
@@ -385,12 +411,15 @@ impl RedbTxIndexStore {
         } else {
             durability
         };
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let effective_durability = durability;
         let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
         write_txn
             .set_durability(effective_durability)
             .map_err(StorageError::backend)?;
         apply_txindex_ops(&write_txn, batch.ops.into_iter())?;
         write_txn.commit().map_err(StorageError::backend)?;
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = sync_fault {
             return Err(fault.injected_error());
         }
@@ -429,6 +458,16 @@ impl KvStore for RedbTxIndexStore {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
         let rows = collect_txindex_prefix(&read_txn, cf, prefix)?;
         Ok(Box::new(rows.into_iter().map(Ok)))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
+        for_each_txindex_prefix(&read_txn, cf, prefix, f)
     }
 
     fn scan_prefix_bounded(
@@ -482,6 +521,7 @@ impl KvStore for RedbTxIndexStore {
         }
         // Seam: the apply and sync boundaries of this commit, after every
         // condition matched. A mismatch consumes no fault.
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
             if fault == crate::PersistFault::PartialApply {
                 apply_txindex_ops(&write_txn, prefix_ops(batch.ops))?;
@@ -489,7 +529,9 @@ impl KvStore for RedbTxIndexStore {
             }
             return Err(fault.injected_error());
         }
+        #[cfg(any(test, feature = "test-seam"))]
         let sync_fault = self.faults.take_at(crate::trait_::PersistBoundary::Sync);
+        #[cfg(any(test, feature = "test-seam"))]
         let durability = if sync_fault.is_some() {
             // The commit runs at the deferred tier; the completion fault or
             // loss is reported after the batch applies.
@@ -497,6 +539,8 @@ impl KvStore for RedbTxIndexStore {
         } else {
             Durability::Immediate
         };
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let durability = Durability::Immediate;
         write_txn
             .set_durability(durability)
             .map_err(StorageError::backend)?;
@@ -506,6 +550,7 @@ impl KvStore for RedbTxIndexStore {
             .increment(1);
         metrics::histogram!("storage.write_bytes", "backend" => "redb")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = sync_fault {
             return Err(fault.injected_error());
         }
@@ -514,6 +559,7 @@ impl KvStore for RedbTxIndexStore {
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "redb-txindex").increment(1);
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Flush) {
             return Err(fault.injected_error());
         }
@@ -530,6 +576,7 @@ impl KvStore for RedbTxIndexStore {
         }))
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
     fn arm_persist_fault(&self, fault: crate::PersistFault) {
         self.faults.arm(fault);
     }
@@ -657,6 +704,15 @@ impl KvSnapshot for RedbSnapshot {
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for_each_table_prefix(&self.read_txn, table_for(cf), prefix, f)
+    }
+
     fn scan_prefix_bounded(
         &self,
         cf: ColumnFamily,
@@ -703,6 +759,15 @@ impl KvSnapshot for RedbTxIndexSnapshot {
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
         let rows = collect_txindex_prefix(&self.read_txn, cf, prefix)?;
         Ok(Box::new(rows.into_iter().map(Ok)))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for_each_txindex_prefix(&self.read_txn, cf, prefix, f)
     }
 
     fn scan_prefix_bounded(
@@ -804,15 +869,15 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
     }
 }
 
-fn collect_prefix(
+fn for_each_table_prefix(
     read_txn: &ReadTransaction,
     table_def: ByteTable,
     prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
+    f: &mut KvVisitor<'_>,
+) -> Result<(), StorageError> {
     let table = read_txn
         .open_table(table_def)
         .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
     match prefix_end(prefix) {
         Some(end) => {
             for item in table
@@ -820,7 +885,7 @@ fn collect_prefix(
                 .map_err(StorageError::backend)?
             {
                 let (key, value) = item.map_err(StorageError::backend)?;
-                rows.push((key.value().to_vec(), value.value().to_vec()));
+                f(key.value(), value.value())?;
             }
         }
         None => {
@@ -829,10 +894,23 @@ fn collect_prefix(
                 if !key.value().starts_with(prefix) {
                     break;
                 }
-                rows.push((key.value().to_vec(), value.value().to_vec()));
+                f(key.value(), value.value())?;
             }
         }
     }
+    Ok(())
+}
+
+fn collect_prefix(
+    read_txn: &ReadTransaction,
+    table_def: ByteTable,
+    prefix: &[u8],
+) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
+    let mut rows = Vec::new();
+    for_each_table_prefix(read_txn, table_def, prefix, &mut |key, value| {
+        rows.push((key.to_vec(), value.to_vec()));
+        Ok(())
+    })?;
     Ok(rows)
 }
 
@@ -962,32 +1040,33 @@ fn byte_get(
         .map_err(StorageError::backend)
 }
 
-fn fixed_prefix_collect<const N: usize>(
+fn fixed_for_each_prefix<const N: usize>(
     read_txn: &ReadTransaction,
     table_def: FixedTable<N>,
     prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
+    f: &mut KvVisitor<'_>,
+) -> Result<(), StorageError> {
     let (start, end) = fixed_prefix_bounds::<N>(prefix)?;
     let table = read_txn
         .open_table(table_def)
         .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
     for item in table
         .range::<&[u8; N]>(&start..=&end)
         .map_err(StorageError::backend)?
     {
         let (key, _) = item.map_err(StorageError::backend)?;
-        rows.push((key.value().to_vec(), Vec::new()));
+        f(key.value(), &[])?;
     }
-    Ok(rows)
+    Ok(())
 }
 
-fn fixed_value_prefix_collect(
+fn fixed_value_for_each_prefix(
     read_txn: &ReadTransaction,
     main_def: FixedTable<12>,
     value_def: TxIndexValueTable,
     prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
+    f: &mut KvVisitor<'_>,
+) -> Result<(), StorageError> {
     let (start, end) = fixed_prefix_bounds::<12>(prefix)?;
     let main = read_txn
         .open_table(main_def)
@@ -995,20 +1074,17 @@ fn fixed_value_prefix_collect(
     let values = read_txn
         .open_table(value_def)
         .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
     for item in main
         .range::<&[u8; 12]>(&start..=&end)
         .map_err(StorageError::backend)?
     {
         let (key, _) = item.map_err(StorageError::backend)?;
-        let key = key.value();
-        let value = values
-            .get(key)
-            .map_err(StorageError::backend)?
-            .map_or_else(Vec::new, |bytes| bytes.value().to_vec());
-        rows.push((key.to_vec(), value));
+        let key_bytes = key.value();
+        let value = values.get(key_bytes).map_err(StorageError::backend)?;
+        let value_bytes = value.as_ref().map_or([].as_slice(), |bytes| bytes.value());
+        f(key_bytes, value_bytes)?;
     }
-    Ok(rows)
+    Ok(())
 }
 
 fn fixed_prefix_scan<const N: usize>(
@@ -1080,33 +1156,56 @@ fn fixed_value_prefix_scan(
     })
 }
 
+fn for_each_txindex_prefix(
+    read_txn: &ReadTransaction,
+    cf: ColumnFamily,
+    prefix: &[u8],
+    f: &mut KvVisitor<'_>,
+) -> Result<(), StorageError> {
+    match cf {
+        ColumnFamily::TxConfirmed => fixed_value_for_each_prefix(
+            read_txn,
+            TXINDEX_TX_CONFIRMED,
+            TXINDEX_TX_CONFIRMED_VALUES,
+            prefix,
+            f,
+        ),
+        ColumnFamily::Funding => fixed_value_for_each_prefix(
+            read_txn,
+            TXINDEX_FUNDING,
+            TXINDEX_FUNDING_VALUES,
+            prefix,
+            f,
+        ),
+        ColumnFamily::Spending => fixed_value_for_each_prefix(
+            read_txn,
+            TXINDEX_SPENDING,
+            TXINDEX_SPENDING_VALUES,
+            prefix,
+            f,
+        ),
+        ColumnFamily::BlockHeaders => {
+            fixed_for_each_prefix::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix, f)
+        }
+        ColumnFamily::ScriptLive => {
+            fixed_for_each_prefix::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix, f)
+        }
+        ColumnFamily::UtxoMeta => for_each_table_prefix(read_txn, TXINDEX_META, prefix, f),
+        _ => Err(invalid_txindex_cf()),
+    }
+}
+
 fn collect_txindex_prefix(
     read_txn: &ReadTransaction,
     cf: ColumnFamily,
     prefix: &[u8],
 ) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
-    match cf {
-        ColumnFamily::TxConfirmed => fixed_value_prefix_collect(
-            read_txn,
-            TXINDEX_TX_CONFIRMED,
-            TXINDEX_TX_CONFIRMED_VALUES,
-            prefix,
-        ),
-        ColumnFamily::Funding => {
-            fixed_value_prefix_collect(read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, prefix)
-        }
-        ColumnFamily::Spending => {
-            fixed_value_prefix_collect(read_txn, TXINDEX_SPENDING, TXINDEX_SPENDING_VALUES, prefix)
-        }
-        ColumnFamily::BlockHeaders => {
-            fixed_prefix_collect::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix)
-        }
-        ColumnFamily::ScriptLive => {
-            fixed_prefix_collect::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix)
-        }
-        ColumnFamily::UtxoMeta => collect_prefix(read_txn, TXINDEX_META, prefix),
-        _ => Err(invalid_txindex_cf()),
-    }
+    let mut rows = Vec::new();
+    for_each_txindex_prefix(read_txn, cf, prefix, &mut |key, value| {
+        rows.push((key.to_vec(), value.to_vec()));
+        Ok(())
+    })?;
+    Ok(rows)
 }
 
 fn scan_txindex_prefix(

@@ -47,13 +47,14 @@ pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-chainstate";
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
     ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
 /// Crates permitted to define and forward storage backend feature selection.
-pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 6] = [
+pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 7] = [
     STORAGE_CRATE,
     CHAINSTATE_CRATE,
     "bitcoin-rs-utxo",
     "bitcoin-rs-index",
     NODE_CRATE,
     BIN_CRATE,
+    "bitcoin-rs-storage-footprint",
 ];
 
 /// Approved layer for each workspace crate.
@@ -67,7 +68,7 @@ pub(crate) fn approved_layer(crate_name: &str) -> u8 {
         "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
         | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
         RPC_CRATE => 3,
-        NODE_CRATE | BIN_CRATE | "bitcoin-rs-e2e" => 4,
+        NODE_CRATE | BIN_CRATE | "bitcoin-rs-e2e" | "bitcoin-rs-storage-footprint" => 4,
         other => panic!("unclassified workspace crate `{other}`: add it to the layer table"),
     }
 }

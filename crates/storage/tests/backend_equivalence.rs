@@ -41,6 +41,7 @@ fn run_equivalence_suite<S: KvStore>(store: S) -> Result<[u8; 32], StorageError>
     verify_rows(&store)?;
     verify_snapshot_multi_get(&store)?;
     verify_prefix_iteration(&store)?;
+    verify_for_each_prefix(&store)?;
     verify_mixed_column_family_batch_ordering(&store)?;
     verify_mixed_owned_value_batch_ordering(&store)?;
     verify_deferred_batch_visibility(&store)?;
@@ -174,6 +175,67 @@ fn verify_prefix_iteration(store: &impl KvStore) -> Result<(), StorageError> {
         expected.sort_by(|left, right| left.0.cmp(&right.0));
         let actual = collect_iter(store.iter_prefix(cf, PREFIX)?)?;
         assert_eq!(actual, expected);
+    }
+    Ok(())
+}
+
+fn verify_for_each_prefix(store: &impl KvStore) -> Result<(), StorageError> {
+    for cf in ColumnFamily::ALL.iter().copied() {
+        let mut expected = (0_u32..ROWS)
+            .filter_map(|counter| {
+                let key = cf_key(cf, counter);
+                key.starts_with(PREFIX)
+                    .then(|| (key, cf_value(cf, format!("{cf:?}-{counter}"))))
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+        let mut actual = Vec::new();
+        store.for_each_prefix(cf, PREFIX, &mut |key, value| {
+            actual.push((key.to_vec(), value.to_vec()));
+            Ok(())
+        })?;
+        assert_eq!(actual, expected);
+    }
+    let snapshot = store.snapshot()?;
+    for cf in ColumnFamily::ALL.iter().copied() {
+        let mut expected = (0_u32..ROWS)
+            .filter_map(|counter| {
+                let key = cf_key(cf, counter);
+                key.starts_with(PREFIX)
+                    .then(|| (key, cf_value(cf, format!("{cf:?}-{counter}"))))
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| left.0.cmp(&right.0));
+
+        // Use an unseeded counter with a zero low byte to preserve PREFIX
+        // while respecting each column family's key width.
+        let iso_key = cf_key(cf, ROWS.next_multiple_of(256));
+        let iso_val = cf_value(cf, "isolation-val");
+        store.put(cf, &iso_key, &iso_val)?;
+
+        let mut live_actual = Vec::new();
+        store.for_each_prefix(cf, PREFIX, &mut |key, value| {
+            live_actual.push((key.to_vec(), value.to_vec()));
+            Ok(())
+        })?;
+        assert!(
+            live_actual.iter().any(|(k, _)| k == &iso_key),
+            "live store must observe post-snapshot mutation"
+        );
+
+        let mut actual = Vec::new();
+        snapshot.for_each_prefix(cf, PREFIX, &mut |key, value| {
+            actual.push((key.to_vec(), value.to_vec()));
+            Ok(())
+        })?;
+        assert_eq!(
+            actual, expected,
+            "snapshot must remain isolated from post-snapshot mutation"
+        );
+
+        let mut del_batch = store.new_batch();
+        del_batch.delete(cf, &iso_key);
+        store.write(del_batch)?;
     }
     Ok(())
 }

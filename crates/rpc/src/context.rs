@@ -1,18 +1,19 @@
 use alloc::sync::Arc;
+#[cfg(any(test, feature = "test-seam"))]
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{
     BlockBodySource, BlockTreeReader, LatchReader, TipReader, TipSnapshot, softfork_state,
 };
-use bitcoin_rs_mempool::{
-    AdmissionChain, ChainAdmissionSnapshot, Mempool, MempoolGateway, MempoolLimits,
-    MempoolObserver, PrevoutMeta,
-};
+use bitcoin_rs_mempool::{AdmissionChain, ChainAdmissionSnapshot, MempoolGateway, PrevoutMeta};
+#[cfg(any(test, feature = "test-seam"))]
+use bitcoin_rs_mempool::{Mempool, MempoolLimits, MempoolObserver};
 use bitcoin_rs_mining::MiningControl;
 use bitcoin_rs_primitives::{
     BlockHash, CompactTarget, Hash256, Network, OutPoint, Tx, consensus_bytes, unix_time_secs,
 };
 
 use bitcoin::hex::DisplayHex as _;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_consensus::ValidationEngine;
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, Script, Txid};
@@ -435,6 +436,7 @@ impl fmt::Debug for Context {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for ChainHandles {
     /// Builds the empty synthetic chain world used by tests.
     ///
@@ -449,6 +451,7 @@ impl Default for ChainHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl ChainHandles {
     /// Builds the synthetic chain world over a caller-supplied transition role.
     ///
@@ -498,6 +501,7 @@ impl ChainHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for MempoolHandles {
     fn default() -> Self {
         Self {
@@ -510,6 +514,7 @@ impl Default for MempoolHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for NetworkHandles {
     fn default() -> Self {
         Self {
@@ -523,6 +528,7 @@ impl Default for NetworkHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for ContextHandles {
     /// Builds the empty synthetic capability set used by tests. Production
     /// wiring supplies every capability it owns.
@@ -539,12 +545,14 @@ impl Default for ContextHandles {
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Default for Context {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl Context {
     /// Builds an empty context over the default synthetic handles. Test
     /// convenience; production composes a complete [`ContextHandles`]
@@ -573,7 +581,9 @@ impl Context {
             ..ContextHandles::default()
         })
     }
+}
 
+impl Context {
     /// Composes one context from a complete [`ContextHandles`] value.
     ///
     /// This is the single production composition point. PRE: `handles` names

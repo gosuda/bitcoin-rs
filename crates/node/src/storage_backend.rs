@@ -13,10 +13,13 @@ use bitcoin_rs_storage::{KvStore, StorageBackend, StorageError};
 
 /// Consumes one freshly opened concrete store without exposing its type to the
 /// runtime caller.
-pub(crate) trait StoreConsumer {
+pub trait StoreConsumer {
+    /// Result type produced upon consuming the store.
     type Output;
+    /// Error type convertible from `StorageError`.
     type Error: From<StorageError>;
 
+    /// Consumes the opened `store`.
     fn consume<S>(self, store: Arc<S>) -> Result<Self::Output, Self::Error>
     where
         S: KvStore;
@@ -36,10 +39,11 @@ where
     open_generic("chainstate", backend, path, cache_bytes, consumer)
 }
 
-/// Opens a generic store view for custody-grade logical inspection. The redb
-/// txindex keeps using its specialized runtime representation; this view is
-/// read for the backend-neutral column-family ledger only.
-pub(crate) fn open_store_inspection<C>(
+/// Opens a generic store view for custody-grade logical inspection.
+///
+/// The redb txindex keeps using its specialized runtime representation; this
+/// view is read for the backend-neutral column-family ledger only.
+pub fn open_store_inspection<C>(
     backend: StorageBackend,
     path: &Path,
     consumer: C,

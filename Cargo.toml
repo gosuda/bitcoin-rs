@@ -16,6 +16,7 @@ members = [
     "crates/rpc",
     "crates/node",
     "bin/bitcoin-rs",
+    "tools/storage-footprint",
     "e2e",
 ]
 
@@ -51,6 +52,7 @@ bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.11.0" }
 bitcoin-rs-mining     = { path = "crates/mining",     version = "0.11.0" }
 bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.11.0" }
 bitcoin-rs-node       = { path = "crates/node",       version = "0.11.0", default-features = false }
+bitcoin-rs-storage-footprint = { path = "tools/storage-footprint", version = "0.11.0" }
 bitcoin-rs-e2e        = { path = "e2e",               version = "0.11.0" }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
@@ -87,6 +89,7 @@ bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features
 cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
 rustix = { version = "=1.1.5", features = ["fs"] }
+windows-sys = { version = "0.61.2", default-features = false }
 
 # Miniscript supplies the key-free PSBT finalizer retained by the RPC crate.
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }

@@ -8,6 +8,9 @@ pub type KvPair = (Vec<u8>, Vec<u8>);
 /// Boxed portable key-value iterator.
 pub type KvIter<'a> = Box<dyn Iterator<Item = Result<KvPair, StorageError>> + 'a>;
 
+/// Callback invoked for each matching key-value pair during prefix visitation.
+pub type KvVisitor<'a> = dyn FnMut(&[u8], &[u8]) -> Result<(), StorageError> + 'a;
+
 /// Limits for one bounded prefix scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrefixScanLimit {
@@ -65,6 +68,7 @@ impl WriteCondition<'_> {
 }
 
 /// Persistence boundary used by fault-injection tests.
+#[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PersistBoundary {
@@ -77,6 +81,7 @@ pub(crate) enum PersistBoundary {
 }
 
 /// One-shot persistence fault used by storage proof tests.
+#[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PersistFault {
@@ -96,6 +101,7 @@ pub enum PersistFault {
     LostFlush,
 }
 
+#[cfg(any(test, feature = "test-seam"))]
 impl PersistFault {
     /// Returns the boundary at which this fault fires.
     pub(crate) const fn boundary(self) -> PersistBoundary {
@@ -120,10 +126,12 @@ impl PersistFault {
 }
 
 /// One-shot persistence fault slot used by storage backends.
+#[cfg(any(test, feature = "test-seam"))]
 #[doc(hidden)]
 #[derive(Default)]
 pub(crate) struct PersistFaultSlot(parking_lot::Mutex<Option<PersistFault>>);
 
+#[cfg(any(test, feature = "test-seam"))]
 impl PersistFaultSlot {
     /// Arms one fault, replacing any previously armed fault.
     #[cfg_attr(
@@ -169,6 +177,20 @@ pub trait KvStore: Send + Sync + 'static {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError>;
+
+    /// Visits matching key-value pairs in key order without materializing an owned iterator.
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for item in self.iter_prefix(cf, prefix)? {
+            let (key, value) = item?;
+            f(&key, &value)?;
+        }
+        Ok(())
+    }
 
     /// Collects matching rows within `limit`.
     fn scan_prefix_bounded(
@@ -258,7 +280,10 @@ pub trait KvStore: Send + Sync + 'static {
 
     /// Arms a one-shot persistence fault for storage proof tests.
     #[doc(hidden)]
-    fn arm_persist_fault(&self, fault: PersistFault);
+    #[cfg(any(test, feature = "test-seam"))]
+    fn arm_persist_fault(&self, fault: PersistFault) {
+        let _ = fault;
+    }
 }
 
 /// Compile-time proof that [`KvStore`] stays object-safe: the trait carries
@@ -293,6 +318,20 @@ pub trait KvSnapshot: Send + Sync {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<KvIter<'a>, StorageError>;
+
+    /// Visits matching snapshot key-value pairs in key order without materializing an owned iterator.
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        for item in self.iter_prefix(cf, prefix)? {
+            let (key, value) = item?;
+            f(&key, &value)?;
+        }
+        Ok(())
+    }
 
     /// Collects matching snapshot rows within `limit`.
     fn scan_prefix_bounded(

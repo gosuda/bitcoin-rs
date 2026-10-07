@@ -133,14 +133,15 @@ The durable-root recovery model and its evidence status are owned by [contracts/
 
 ## Measure storage
 
-`--measure-storage` records logical and physical datadir accounting and exits:
+The standalone `bitcoin-rs-storage-footprint` tool records logical and physical datadir accounting and exits. Physical measurement requires POSIX `st_blocks` filesystem semantics, so the tool is currently supported only on Unix/Linux (`cfg(unix)`) and exits with an error on non-Unix platforms:
 
 ```sh
-./target/release/bitcoin-rs --data-dir .bitcoin-rs --measure-storage \
-  --measure-storage-output footprint.json \
-  --measure-storage-stop-height <height> \
-  --measure-storage-stop-hash <hash> \
-  --storage-high-water-bytes <bytes>
+cargo run --locked --release -p bitcoin-rs-storage-footprint -- \
+  --data-dir .bitcoin-rs \
+  --output footprint.json \
+  --stop-height <height> \
+  --stop-hash <hash> \
+  --high-water-bytes <bytes>
 ```
 
 Only a measured physical high-water can prove the storage budget; a point-in-time filesystem snapshot is a lower bound. See [contracts/storage-footprint.md](contracts/storage-footprint.md).

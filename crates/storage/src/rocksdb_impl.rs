@@ -6,7 +6,7 @@ use rust_rocksdb::{
     Options, ReadOptions, WriteBatch as RocksWriteBatch, WriteOptions,
 };
 
-use crate::{ColumnFamily, KvSnapshot, KvStore, StorageError, WriteCondition};
+use crate::{ColumnFamily, KvSnapshot, KvStore, KvVisitor, StorageError, WriteCondition};
 
 const BLOCK_SIZE: usize = 4 * 1024 * 1024;
 /// `RocksDB`'s block-cache capacity for unbudgeted opens.
@@ -19,6 +19,7 @@ pub struct RocksDbStore {
     db: rust_rocksdb::DB,
     // Non-reentrant: public mutators hold this lock while calling the lock-free batch helper.
     write_lock: parking_lot::Mutex<()>,
+    #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,
 }
 
@@ -71,6 +72,7 @@ impl RocksDbStore {
         Ok(Self {
             db,
             write_lock: parking_lot::Mutex::new(()),
+            #[cfg(any(test, feature = "test-seam"))]
             faults: crate::trait_::PersistFaultSlot::default(),
         })
     }
@@ -114,17 +116,20 @@ impl RocksDbStore {
         sync: bool,
     ) -> Result<(), StorageError> {
         count_write(durability, batch.encoded_bytes);
-        // Same seam discipline as the primary backends: apply faults precede
-        // the engine write, sync faults drop the durable write options.
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
             return Err(fault.injected_error());
         }
+        #[cfg(any(test, feature = "test-seam"))]
         let sync_fault = if sync {
             self.faults.take_at(crate::trait_::PersistBoundary::Sync)
         } else {
             None
         };
+        #[cfg(any(test, feature = "test-seam"))]
         let effective_sync = sync_fault.is_none() && sync;
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let effective_sync = sync;
         let rocks_batch = self.rocks_batch(batch)?;
         let outcome = if effective_sync {
             let mut write_options = WriteOptions::default();
@@ -136,6 +141,7 @@ impl RocksDbStore {
             self.db.write(&rocks_batch).map_err(StorageError::backend)
         };
         outcome?;
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = sync_fault {
             return Err(fault.injected_error());
         }
@@ -173,6 +179,28 @@ impl KvStore for RocksDbStore {
                     Err(_) => true,
                 }),
         ))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        let handle = self.cf_handle(cf)?;
+        let iterator = self.db.iterator_cf_opt(
+            handle,
+            ReadOptions::default(),
+            IteratorMode::From(prefix, Direction::Forward),
+        );
+        for item in iterator {
+            let (key, value) = item.map_err(StorageError::backend)?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            f(&key, &value)?;
+        }
+        Ok(())
     }
 
     fn new_batch(&self) -> BufferedWriteBatch {
@@ -222,6 +250,7 @@ impl KvStore for RocksDbStore {
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "rocksdb").increment(1);
+        #[cfg(any(test, feature = "test-seam"))]
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Flush) {
             return Err(fault.injected_error());
         }
@@ -235,6 +264,7 @@ impl KvStore for RocksDbStore {
         }))
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
     fn arm_persist_fault(&self, fault: crate::PersistFault) {
         self.faults.arm(fault);
     }
@@ -327,5 +357,27 @@ impl KvSnapshot for RocksDbSnapshot<'_> {
                     Err(_) => true,
                 }),
         ))
+    }
+
+    fn for_each_prefix(
+        &self,
+        cf: ColumnFamily,
+        prefix: &[u8],
+        f: &mut KvVisitor<'_>,
+    ) -> Result<(), StorageError> {
+        let handle = self.db.cf_handle(cf)?;
+        let iterator = self.snapshot.iterator_cf_opt(
+            handle,
+            ReadOptions::default(),
+            IteratorMode::From(prefix, Direction::Forward),
+        );
+        for item in iterator {
+            let (key, value) = item.map_err(StorageError::backend)?;
+            if !key.starts_with(prefix) {
+                break;
+            }
+            f(&key, &value)?;
+        }
+        Ok(())
     }
 }

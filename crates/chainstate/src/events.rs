@@ -177,7 +177,11 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     if !lock_metadata.is_file() {
         bail!("process epoch lock {PROCESS_EPOCH_LOCK_FILE} is not a regular file");
     }
+    #[cfg(not(windows))]
     rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+        .with_context(|| format!("lock process epoch file {PROCESS_EPOCH_LOCK_FILE}"))?;
+    #[cfg(windows)]
+    windows_lock_file_exclusive(&lock)
         .with_context(|| format!("lock process epoch file {PROCESS_EPOCH_LOCK_FILE}"))?;
 
     let epoch = load_process_epoch(dir)?
@@ -212,8 +216,57 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
 
     // `lock` intentionally remains live until after the directory durability
     // barrier above. Dropping it here releases the cross-process transaction.
+    #[cfg(windows)]
+    let _ = windows_unlock_file(&lock);
     drop(lock);
     Ok(epoch)
+}
+
+#[cfg(windows)]
+fn windows_lock_file_exclusive(file: &cap_std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LockFileEx};
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let handle: HANDLE = file.as_raw_handle();
+    // SAFETY: A zeroed OVERLAPPED struct is the documented initialized state for synchronous locking.
+    let mut overlapped: OVERLAPPED = unsafe { core::mem::zeroed() };
+    // SAFETY: `handle` is an open OS file handle and `overlapped` points to valid initialized stack memory.
+    let ret = unsafe {
+        LockFileEx(
+            handle,
+            LOCKFILE_EXCLUSIVE_LOCK,
+            0,
+            u32::MAX,
+            u32::MAX,
+            &raw mut overlapped,
+        )
+    };
+    if ret == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn windows_unlock_file(file: &cap_std::fs::File) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+
+    let handle: HANDLE = file.as_raw_handle();
+    // SAFETY: A zeroed OVERLAPPED struct is the documented initialized state for synchronous unlocking.
+    let mut overlapped: OVERLAPPED = unsafe { core::mem::zeroed() };
+    // SAFETY: `handle` is an open OS file handle and `overlapped` points to valid initialized stack memory.
+    let ret = unsafe { UnlockFileEx(handle, 0, u32::MAX, u32::MAX, &raw mut overlapped) };
+    if ret == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Validates the chainstate data-directory schema and allocates this process epoch.
