@@ -5,6 +5,7 @@ use super::super::record::encode_record;
 use super::DurableCursor;
 use super::JournalWriter;
 use super::JournalWriterError;
+#[cfg(any(test, feature = "test-seam"))]
 use super::JournalWriterFailpoint;
 use super::PendingRecordMeta;
 use super::segment_name;
@@ -85,6 +86,7 @@ impl<S: KvStore> JournalWriter<S> {
         if let Err(error) = self.maybe_rotate() {
             return self.fail_append(height, error);
         }
+        #[cfg(any(test, feature = "test-seam"))]
         if let Err(error) = self.fail_segment_append() {
             return self.fail_append(height, error);
         }
@@ -112,6 +114,7 @@ impl<S: KvStore> JournalWriter<S> {
             Ok(file) => file,
             Err(error) => return self.fail_append(height, error.into()),
         };
+        #[cfg(any(test, feature = "test-seam"))]
         let write_result = if self.failpoint == Some(JournalWriterFailpoint::SegmentAppendPartial) {
             let prefix_len = (bytes.len() / 2).max(1);
             file.write_all(&bytes[..prefix_len]).and_then(|()| {
@@ -122,6 +125,8 @@ impl<S: KvStore> JournalWriter<S> {
         } else {
             file.write_all(bytes)
         };
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let write_result = file.write_all(bytes);
         if let Err(append_error) = write_result {
             let rollback_result = file
                 .set_len(known_good_offset)

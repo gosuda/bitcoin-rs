@@ -1,7 +1,11 @@
+#[cfg(any(test, feature = "test-seam"))]
+use super::CheckpointFailpoint;
 use super::format::{
     generation_name, valid_current_temp_name, valid_generation_name, valid_staging_name,
 };
 use super::fs::{CheckpointRoot, create_file, remove_known_dir};
+#[cfg(any(test, feature = "test-seam"))]
+use super::io::injected_io;
 #[cfg(any(
     target_vendor = "apple",
     target_os = "linux",
@@ -12,8 +16,8 @@ use super::io::rename_generation;
 use super::io::{rename_current, sync_checkpoint_dir, sync_file, sync_root, write_file};
 use super::load::read_current;
 use super::{
-    CHECKPOINT_ROOT, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointFailpoint,
-    CheckpointManifestV1, CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
+    CHECKPOINT_ROOT, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointManifestV1,
+    CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
 };
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
@@ -32,6 +36,7 @@ pub struct CheckpointStage {
     pub(crate) staging: Dir,
     pub(crate) generation: u64,
     pub(crate) paths: GenerationPaths,
+    #[cfg(any(test, feature = "test-seam"))]
     pub(crate) failpoint: Option<CheckpointFailpoint>,
 }
 impl CheckpointStage {
@@ -39,29 +44,37 @@ impl CheckpointStage {
     pub fn generation(&self) -> u64 {
         self.generation
     }
-    /// Writes, hashes, and synchronizes one staged artifact.
+    /// Writes, hashes, and synchronizes one staged artifact. The two
+    /// failpoint parameters exist only under `test`/`test-seam`.
     pub fn write_artifact<T, E: From<CheckpointError>>(
         &self,
         name: &str,
-        write_failpoint: CheckpointFailpoint,
-        sync_failpoint: CheckpointFailpoint,
+        #[cfg(any(test, feature = "test-seam"))] write_failpoint: CheckpointFailpoint,
+        #[cfg(any(test, feature = "test-seam"))] sync_failpoint: CheckpointFailpoint,
         write: impl FnOnce(&mut dyn std::io::Write) -> Result<T, E>,
     ) -> Result<(T, ArtifactDigest), E> {
         let mut file =
             create_file(&self.staging, name).map_err(|e| E::from(CheckpointError::from(e)))?;
+        #[cfg(any(test, feature = "test-seam"))]
         let mut writer = HashingWriter::new(&mut file, self.failpoint, write_failpoint);
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let mut writer = HashingWriter::new(&mut file);
         let value = write(&mut writer)?;
         let (bytes, sha256) = writer
             .finish()
             .map_err(|e| E::from(CheckpointError::from(e)))?;
-        sync_file(&file, self.failpoint, sync_failpoint).map_err(|e| E::from(e))?;
+        #[cfg(any(test, feature = "test-seam"))]
+        injected_io(self.failpoint, sync_failpoint)
+            .map_err(|e| E::from(CheckpointError::from(e)))?;
+        sync_file(&file).map_err(|e| E::from(e))?;
         Ok((value, ArtifactDigest { bytes, sha256 }))
     }
 }
 /// Reserves a new generation directory and opens its staging transaction.
+/// The `failpoint` parameter exists only under `test`/`test-seam`.
 pub fn begin_publication(
     data_dir: &Dir,
-    failpoint: Option<CheckpointFailpoint>,
+    #[cfg(any(test, feature = "test-seam"))] failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointStage, CheckpointError> {
     let root = CheckpointRoot::open_or_create(data_dir, CHECKPOINT_ROOT)?;
     let current_generation = match read_current(&root)? {
@@ -74,20 +87,29 @@ pub fn begin_publication(
         staging,
         generation,
         paths,
+        #[cfg(any(test, feature = "test-seam"))]
         failpoint,
     })
 }
+
 /// Atomically publishes a staged generation through CURRENT.
+///
+/// The write → flush → sync → rename → sync-root barrier sequence exists
+/// exactly once; under `test`/`test-seam` each boundary is armed through
+/// `injected_io` immediately before the operation it names, so a failpoint
+/// run exercises this same sequence.
 pub fn commit_publication(
     stage: CheckpointStage,
     manifest: &CheckpointManifestV1,
 ) -> Result<u64, CheckpointError> {
+    #[cfg(any(test, feature = "test-seam"))]
+    let failpoint = stage.failpoint;
     let CheckpointStage {
         root,
         staging,
         generation,
         paths,
-        failpoint,
+        ..
     } = stage;
     // Caller built the manifest for a different generation than the stage
     // reserved; publishing it would make CURRENT point at an unreadable checkpoint.
@@ -99,36 +121,28 @@ pub fn commit_publication(
     }
     let manifest_bytes = serde_json::to_vec(manifest)?;
     let mut mf = create_file(&staging, MANIFEST_FILE)?;
-    write_file(
-        &mut mf,
-        &manifest_bytes,
-        failpoint,
-        CheckpointFailpoint::ManifestWrite,
-    )?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::ManifestWrite)?;
+    write_file(&mut mf, &manifest_bytes)?;
     mf.flush()?;
-    sync_file(&mf, failpoint, CheckpointFailpoint::ManifestSync)?;
-    sync_checkpoint_dir(&staging, failpoint, CheckpointFailpoint::StageSync)?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::ManifestSync)?;
+    sync_file(&mf)?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::StageSync)?;
+    sync_checkpoint_dir(&staging)?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::GenerationRename)?;
     #[cfg(any(
         target_vendor = "apple",
         target_os = "linux",
         target_os = "android",
         target_os = "redox"
     ))]
-    rename_generation(
-        &root,
-        &paths.staging,
-        &paths.final_dir,
-        failpoint,
-        CheckpointFailpoint::GenerationRename,
-    )?;
-    #[cfg(not(any(
-        target_vendor = "apple",
-        target_os = "linux",
-        target_os = "android",
-        target_os = "redox"
-    )))]
-    super::io::injected_io(failpoint, CheckpointFailpoint::GenerationRename)?;
-    sync_root(&root, failpoint, CheckpointFailpoint::GenerationRootSync)?;
+    rename_generation(&root, &paths.staging, &paths.final_dir)?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::GenerationRootSync)?;
+    sync_root(&root)?;
     let current = CurrentV1 {
         format: CURRENT_FORMAT.to_owned(),
         version: CURRENT_VERSION,
@@ -138,21 +152,19 @@ pub fn commit_publication(
     };
     let current_bytes = serde_json::to_vec(&current)?;
     let mut cf = root.create_file(&paths.current_temp)?;
-    write_file(
-        &mut cf,
-        &current_bytes,
-        failpoint,
-        CheckpointFailpoint::CurrentTempWrite,
-    )?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::CurrentTempWrite)?;
+    write_file(&mut cf, &current_bytes)?;
     cf.flush()?;
-    sync_file(&cf, failpoint, CheckpointFailpoint::CurrentTempSync)?;
-    rename_current(
-        &root,
-        &paths.current_temp,
-        failpoint,
-        CheckpointFailpoint::CurrentRename,
-    )?;
-    sync_root(&root, failpoint, CheckpointFailpoint::CurrentRootSync)?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::CurrentTempSync)?;
+    sync_file(&cf)?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::CurrentRename)?;
+    rename_current(&root, &paths.current_temp)?;
+    #[cfg(any(test, feature = "test-seam"))]
+    injected_io(failpoint, CheckpointFailpoint::CurrentRootSync)?;
+    sync_root(&root)?;
     cleanup_after_publication(&root, &paths.directory);
     Ok(generation)
 }

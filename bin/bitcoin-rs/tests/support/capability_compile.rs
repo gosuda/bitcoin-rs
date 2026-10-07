@@ -62,6 +62,21 @@ bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
         Ok(Self { directory })
     }
 
+    /// Adds the storage and RPC fixture owners without enabling test features.
+    pub(super) fn with_fixture_owners(root: &Path) -> Result<Self> {
+        let consumer = Self::new(root)?;
+        let storage = serde_json::to_string(&root.join("crates/storage"))?;
+        let rpc = serde_json::to_string(&root.join("crates/rpc"))?;
+        let path = consumer.directory.path().join("Cargo.toml");
+        let mut manifest = std::fs::read_to_string(&path)?;
+        manifest.push_str(&format!(
+            "bitcoin-rs-storage = {{ path = {storage}, default-features = false }}\n\
+             bitcoin-rs-rpc = {{ path = {rpc}, default-features = false }}\n"
+        ));
+        std::fs::write(path, manifest)?;
+        Ok(consumer)
+    }
+
     fn check(&self, source: &str, locked: bool) -> Result<Output> {
         std::fs::write(self.directory.path().join("src/lib.rs"), source)?;
         let mut command = Command::new(env!("CARGO"));

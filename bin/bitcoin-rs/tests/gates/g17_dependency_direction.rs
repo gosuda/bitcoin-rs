@@ -97,6 +97,60 @@ pub fn observe(node: &Node) {
     )?;
     Ok(())
 }
+/// Compile a consumer in a separate workspace: dev feature unification must
+/// not make persistence injection or synthetic worlds into production APIs.
+#[test]
+fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> anyhow::Result<()> {
+    let manifest = dependency_graph::workspace_root_manifest();
+    let root = manifest
+        .parent()
+        .ok_or_else(|| std::io::Error::other("workspace root"))?
+        .canonicalize()?;
+    let consumer = capability_compile::ProductionConsumer::with_fixture_owners(&root)?;
+    consumer.allow_reads(&format!(
+        "{READ_CONTROL}\npub fn compose(handles: bitcoin_rs_rpc::context::ContextHandles) -> bitcoin_rs_rpc::context::Context {{ bitcoin_rs_rpc::context::Context::from_handles(handles) }}"
+    ))?;
+    for (source, codes, member) in [
+        (
+            "use bitcoin_rs_storage::PersistFault;",
+            &["E0432"][..],
+            "PersistFault",
+        ),
+        (
+            "use bitcoin_rs_storage::checkpoint::CheckpointFailpoint;",
+            &["E0432"][..],
+            "CheckpointFailpoint",
+        ),
+        (
+            "use bitcoin_rs_storage::footprint;",
+            &["E0432"][..],
+            "footprint",
+        ),
+        (
+            "pub fn denied(store: &dyn bitcoin_rs_storage::KvStore) { let _ = store.arm_persist_fault; }",
+            &["E0609", "E0599"][..],
+            "arm_persist_fault",
+        ),
+        (
+            "pub fn denied() { let _ = bitcoin_rs_chainstate::Chainstate::new; }",
+            &["E0599"][..],
+            "new",
+        ),
+        (
+            "pub fn denied() { let _ = bitcoin_rs_rpc::context::Context::new; }",
+            &["E0599"][..],
+            "new",
+        ),
+        (
+            "pub fn denied() { let _ = bitcoin_rs_rpc::context::ContextHandles::default; }",
+            &["E0599"][..],
+            "default",
+        ),
+    ] {
+        consumer.deny(source, codes, member)?;
+    }
+    Ok(())
+}
 
 #[test]
 fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Result<()> {

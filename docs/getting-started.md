@@ -133,17 +133,16 @@ The durable-root recovery model and its evidence status are owned by [contracts/
 
 ## Measure storage
 
-`--measure-storage` records logical and physical datadir accounting and exits:
+Storage snapshots are collected by a separate Linux-only tool after stopping
+the node:
 
 ```sh
-./target/release/bitcoin-rs --data-dir .bitcoin-rs --measure-storage \
-  --measure-storage-output footprint.json \
-  --measure-storage-stop-height <height> \
-  --measure-storage-stop-hash <hash> \
-  --storage-high-water-bytes <bytes>
+cargo run --locked -p bitcoin-rs-storage-footprint -- .bitcoin-rs > footprint.json
 ```
 
-Only a measured physical high-water can prove the storage budget; a point-in-time filesystem snapshot is a lower bound. See [contracts/storage-footprint.md](contracts/storage-footprint.md).
+The tool reads filesystem metadata only; it does not open or initialize a DB.
+A snapshot is a lower bound on peak usage, not a storage-budget verdict.
+See [contracts/storage-footprint.md](contracts/storage-footprint.md).
 
 ## Validation mode
 

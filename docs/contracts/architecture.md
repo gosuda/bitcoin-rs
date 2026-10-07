@@ -11,7 +11,7 @@ Owners:
 
 | Layer | Crates | Responsibility |
 | --- | --- | --- |
-| 4: Compose | `node`, `bitcoin-rs`, `e2e` | Runtime assembly and lifecycle |
+| 4: Compose | `node`, `bitcoin-rs`, `e2e`, `storage-footprint` | Runtime assembly, lifecycle, and offline tooling |
 | 3: Surface | `rpc` | External protocol boundaries |
 | 2: Services | `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, `mining` | Domain state and services |
 | 1: Storage | `storage` | Storage contracts and engine drivers |
@@ -57,7 +57,9 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     `g17_dependency_direction` gate checks this boundary explicitly.
   - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
     handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
-  - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`, `bitcoin-rs-e2e`.
+  - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`, `bitcoin-rs-e2e`,
+    `bitcoin-rs-storage-footprint`. The footprint package is an offline Linux
+    filesystem utility with no production or storage engine dependencies.
     Daemon assembly, subsystem lifecycle coordination, and CLI binary entry
     points. `bitcoin-rs-e2e` is the process-level test harness that drives
     the composed daemon and the pinned reference node over their public
@@ -370,6 +372,19 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   `CORE_REORG_SAFETY_MARGIN`; this protects reconsideration of disconnected
   transactions during reorg handling.
 
+## Test and evidence isolation
+
+Default production builds contain no storage persistence fault slots,
+checkpoint/journal injection branches, synthetic `Chainstate::new`, or RPC
+synthetic-world constructors/defaults. Explicit `test-seam` features expose
+fixtures; only dev-dependencies opt in in the production workspace graph.
+This is build isolation, not a security boundary against downstream feature
+selection. Production RPC composition remains `Context::from_handles` and
+chainstate composition remains `Chainstate::from_parts`.
+
+Offline allocation measurement and its dependencies live in
+`tools/storage-footprint`, never in node startup/storage behavior.
+
 ## Remaining composition boundary
 
 `crates/chainstate` owns authoritative applied-chain mutation, recovery,
@@ -398,6 +413,10 @@ composition seam.
     adapters, and rejects empty backend markers on crates that do not own an
     engine. Normal/build dependency selections and production feature paths
     must not enable `test-seam`; dev-only selections remain available to fixtures.
+  - `fixture_owners_expose_no_production_injection_or_synthetic_constructors`:
+    compiles an isolated consumer; ordinary read/composition APIs must compile,
+    while persistence/checkpoint injection, the old footprint module, and
+    synthetic chainstate/RPC constructors must be absent.
   - `chainstate_facade_exposes_no_production_raw_mutation_handles`: compiles an
     isolated Cargo consumer without dev-feature unification. Read operations
     must compile; raw mutation handles, reader write/publication methods,
