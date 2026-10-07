@@ -42,6 +42,7 @@ pub use assumeutxo::{
 
 mod checkpoint;
 use checkpoint::CheckpointError;
+mod assumeutxo_snapshot;
 /// Typed chainstate mutation failures.
 mod error;
 pub mod events;
@@ -435,7 +436,8 @@ pub struct Chainstate {
     /// engine-specific seams of the shared block/tx validation pipeline.
     pub(crate) validation_engine: bitcoin_rs_consensus::ValidationEngine,
     /// Chainstate-journal writer, when the journal is enabled (issue #230).
-    pub(crate) journal: Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>,
+    pub(crate) journal:
+        Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
     /// Publishes checkpoints to settle rolled-back disconnect debt after a
     /// non-fatal reorg. `None` in unit-test handle sets that never reorg.
     pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint::publisher::CheckpointPublisher>>,
@@ -608,7 +610,7 @@ impl Chainstate {
             assume_valid_gate,
             validation_mode: parts.validation_mode,
             validation_engine: parts.validation_engine,
-            journal: parts.journal,
+            journal: Arc::new(RwLock::new(parts.journal)),
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
@@ -642,7 +644,7 @@ impl Chainstate {
         snapshot_set: bitcoin_rs_utxo::UtxoSet,
         mut stats: bitcoin_rs_utxo::stats::CoinStats,
         pinned: &bitcoin_rs_primitives::AssumeUtxoData,
-        persist: impl FnOnce() -> Result<(), AssumeUtxoError>,
+        persist: impl FnOnce(&BlockTree, &TipSnapshot) -> Result<(), AssumeUtxoError>,
     ) -> Result<(), AssumeUtxoError> {
         let _guard = self.admission.enter()?;
         let _transition = self.chain_transition.lock();
@@ -666,13 +668,25 @@ impl Chainstate {
         };
         // All refusals precede publication. The transition stays held across the
         // lifecycle record and the whole coin/statistics/tip installation.
-        persist().inspect_err(|_| self.fail_closed_for_recovery())?;
+        persist(&tree, &tip_snapshot).inspect_err(|error| {
+            if !matches!(error, AssumeUtxoError::ActivationBehindTip) {
+                self.fail_closed_for_recovery();
+            }
+        })?;
+        // This journal extends the old checkpoint, not the new snapshot root.
+        // Snapshot recovery uses its immutable anchor and the certified suffix.
+        *self.journal.write() = None;
         tree.restore_chain_tx_count(node_id, tip_snapshot.chain_tx_count)
-            .map_err(ApplyError::from)?;
+            .map_err(ApplyError::from)
+            .inspect_err(|_| self.fail_closed_for_recovery())?;
         self.utxo.replace_from(snapshot_set);
         stats.tx_count = pinned.chain_tx_count;
         self.coin_stats.reset(stats);
-        self.applied_tip.store(Some(Arc::new(tip_snapshot)));
+        crate::publication::publish_applied(
+            self,
+            &tip_snapshot,
+            crate::events::HintKind::Connected,
+        );
         *self.role.write() = ChainstateRole::AssumedActive {
             base_height: pinned.height,
             base_hash: pinned.block_hash,
@@ -686,7 +700,12 @@ impl Chainstate {
     /// separate transient undo/head stores, no body writer or active journal,
     /// and no external follower side-effects. Reopening replays from genesis.
     #[must_use]
-    fn create_historical_counterpart(&self, base_height: u32, base_hash: Hash256) -> Arc<Self> {
+    fn create_historical_counterpart(
+        &self,
+        base_height: u32,
+        base_hash: Hash256,
+        undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
+    ) -> Arc<Self> {
         let mut historical_utxo = bitcoin_rs_utxo::UtxoSet::new();
         let historical_coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
             bitcoin_rs_utxo::stats::CoinStats::new(),
@@ -709,7 +728,7 @@ impl Chainstate {
                 self.chain_events.epoch(),
             )),
             block_body_store: None,
-            undo_store: Arc::new(InMemoryUndoStore::default()),
+            undo_store: undo,
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
             shutdown,
             chain_transition: transition.authority(),

@@ -652,6 +652,7 @@ impl SyncFixture {
             inbound_headers_rx,
             inbound_blocks_rx,
             Arc::clone(&ibd),
+            None,
         );
 
         let outbound_rxs = install_synthetic_peers(&peer_table, peer_count);

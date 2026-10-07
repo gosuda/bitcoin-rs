@@ -58,6 +58,26 @@ impl<S: BlockBodyStore + ?Sized> BlockBodyReader for DirectBlockBodyReader<'_, S
 
 /// Authoritative body bytes and the storage durability boundary.
 pub trait BlockBodyStore: Send + Sync {
+    /// Reads a root-owned pending validation body without publishing its locator.
+    fn load_staged_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        _position: Option<BlockFilePosition>,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.load_block_body(height, hash)
+    }
+    /// Stages bytes without publishing a new locator when the store supports
+    /// atomic head batches. The caller must sync and commit the returned row.
+    fn stage_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: &[u8],
+    ) -> Result<Option<BlockFilePosition>, StorageError> {
+        self.persist_block_body(height, hash, body)?;
+        self.block_position(height, hash)
+    }
     /// Persists an exact block body.
     fn persist_block_body(
         &self,
@@ -305,6 +325,29 @@ impl<S: KvStore> IndexedBlockBodyStore<S> {
 }
 
 impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
+    fn load_staged_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        position: Option<BlockFilePosition>,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        match position {
+            Some(position) => self.files.load(position, height, *hash.as_byte_array()),
+            None => self.load_block_body(height, hash),
+        }
+    }
+    fn stage_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: &[u8],
+    ) -> Result<Option<BlockFilePosition>, StorageError> {
+        let existing = self.body_position(height, hash)?;
+        self.files
+            .persist(existing, height, *hash.as_byte_array(), body)
+            .map(Some)
+    }
+
     fn undo_record(
         &self,
         height: u32,

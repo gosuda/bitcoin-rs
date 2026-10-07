@@ -91,6 +91,7 @@ impl NodeState {
             &config.data_dir,
             config.network,
             config.chainstate_journal,
+            durable_head.load()?.as_ref(),
         )?;
         if resume_source == ResumeSource::Checkpoint {
             tracing::info!(
@@ -128,6 +129,7 @@ impl NodeState {
             ) {
                 let witness_height = witness.height;
                 let source = match resume_source {
+                    ResumeSource::Snapshot => "snapshot",
                     ResumeSource::Cold => "cold",
                     ResumeSource::Checkpoint => "checkpoint",
                     ResumeSource::Journal => "journal",
@@ -400,17 +402,6 @@ impl NodeState {
         // the transaction-relay gate, and block-peer eligibility can never
         // disagree.
         let ibd = chainstate.ibd_latch();
-        let sync = Arc::new(crate::sync::block_sync(
-            Arc::clone(&chainstate),
-            followers.clone(),
-            Arc::clone(&peer_table),
-            Arc::clone(&inbound_headers_rx),
-            Arc::clone(&inbound_blocks_rx),
-            Arc::clone(&ibd),
-        ));
-        if config.p2p.fast_sync {
-            sync.install_budget(fast_sync_budget(config.network));
-        }
         let assumeutxo = Arc::new(
             bitcoin_rs_chainstate::AssumeUtxoManager::open(
                 config.network,
@@ -419,6 +410,18 @@ impl NodeState {
             )
             .map_err(|err| anyhow::anyhow!("assumeutxo open failed: {err}"))?,
         );
+        let sync = Arc::new(crate::sync::block_sync(
+            Arc::clone(&chainstate),
+            followers.clone(),
+            Arc::clone(&peer_table),
+            Arc::clone(&inbound_headers_rx),
+            Arc::clone(&inbound_blocks_rx),
+            Arc::clone(&ibd),
+            Some(Arc::clone(&assumeutxo)),
+        ));
+        if config.p2p.fast_sync {
+            sync.install_budget(fast_sync_budget(config.network));
+        }
         let prune_service = if config.storage.prune_target_mb > 0 {
             Some(storage.deferred.prune_service(
                 Arc::clone(&block_files),

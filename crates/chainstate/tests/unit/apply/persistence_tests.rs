@@ -241,6 +241,7 @@ fn direct_transition_fatal_error_closes_admission() -> Result<(), Box<dyn std::e
     seed_genesis(&handles)?;
     let child = mined_child(genesis.block_hash(), 1)?;
     let incompatible = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 1,
         height: 0,
         tip: Hash256::from_le_bytes(&[0x66; 32]),

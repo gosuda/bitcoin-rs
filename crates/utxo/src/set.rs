@@ -285,9 +285,11 @@ impl UtxoSet {
     /// mutation between verification and installation. The chainstate owner must
     /// install the matching coin statistics before publishing its new tip.
     pub fn replace_from(&self, other: Self) {
-        let _guard = self.stable_view_lock.write();
-        for (my_shard, other_shard) in self.shards.iter().zip(other.shards.iter()) {
-            my_shard.swap_table(other_shard);
+        {
+            let _guard = self.stable_view_lock.write();
+            for (my_shard, other_shard) in self.shards.iter().zip(other.shards.iter()) {
+                my_shard.swap_table(other_shard);
+            }
         }
         drop(other);
     }

@@ -396,7 +396,7 @@ fn format_and_schema_helpers_round_trip() -> Result<(), Box<dyn std::error::Erro
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"0\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"1\n");
     let mut oversized = data.create("oversized")?;
     oversized.write_all(&[0_u8; 17])?;
     oversized.sync_all()?;
@@ -406,7 +406,7 @@ fn format_and_schema_helpers_round_trip() -> Result<(), Box<dyn std::error::Erro
     ));
     data.remove_file(CURRENT_SCHEMA_FILE)?;
     let mut stale_schema = data.create(CURRENT_SCHEMA_FILE)?;
-    stale_schema.write_all(b"1\n")?;
+    stale_schema.write_all(b"0\n")?;
     stale_schema.sync_all()?;
     assert!(ensure_current_schema(&data).is_err());
     Ok(())

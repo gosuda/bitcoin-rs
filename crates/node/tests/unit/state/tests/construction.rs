@@ -154,7 +154,7 @@ fn new_datadir_initializes_current_schema_before_storage() -> anyhow::Result<()>
 }
 
 #[test]
-fn unmarked_nonempty_datadir_adopts_baseline_schema() -> anyhow::Result<()> {
+fn unmarked_nonempty_datadir_is_refused_without_modification() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = dir.path().join("legacy-node");
@@ -163,15 +163,15 @@ fn unmarked_nonempty_datadir_adopts_baseline_schema() -> anyhow::Result<()> {
     std::fs::write(config.data_dir.join("legacy-state"), b"old")?;
 
     let data_dir = config.data_dir.clone();
-    let _state = NodeState::open(config, None)?;
-    assert_eq!(
-        std::fs::read(data_dir.join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE))?,
-        b"0\n"
-    );
+    assert!(NodeState::open(config, None).is_err());
     assert!(
-        data_dir.join("chainstate").exists(),
-        "baseline adoption must initialize storage"
+        !data_dir
+            .join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE)
+            .exists()
     );
+    assert!(!data_dir.join("chainstate").exists());
+    assert!(!data_dir.join("process-epoch").exists());
+    assert_eq!(std::fs::read(data_dir.join("legacy-state"))?, b"old");
     Ok(())
 }
 
@@ -186,7 +186,7 @@ fn mismatched_datadir_schema_is_refused_before_storage_opens() -> anyhow::Result
         config
             .data_dir
             .join(bitcoin_rs_storage::checkpoint::fs::CURRENT_SCHEMA_FILE),
-        b"1\n",
+        b"0\n",
     )?;
 
     let data_dir = config.data_dir.clone();

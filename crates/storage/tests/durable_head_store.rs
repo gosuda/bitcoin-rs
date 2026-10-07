@@ -17,6 +17,7 @@ use bitcoin_rs_storage::{
 
 fn head(commit_id: u64, height: u32) -> DurableHead {
     DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id,
         height,
         tip: Hash256::from_le_bytes(&[0xB0; 32]),

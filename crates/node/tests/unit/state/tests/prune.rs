@@ -265,10 +265,26 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyho
         chain_tx_count: pinned.chain_tx_count,
         historical_height: 0,
         historical_hash: Network::Regtest.genesis_block_hash(),
+        pending: None,
     };
-    std::fs::write(
-        dir.path().join("assumeutxo.json"),
-        serde_json::to_vec(&status)?,
+    let head_store = state.durable_head();
+    let prior = head_store.load()?;
+    let tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("missing fixture tip"))?;
+    head_store.commit(
+        prior.as_ref(),
+        &bitcoin_rs_storage::DurableHead {
+            assumeutxo: status,
+            commit_id: 1,
+            tip: tip.hash,
+            height: tip.height,
+            chain_tx_count: tip.chain_tx_count.to_wire(),
+            body_extent: None,
+            undo_extent: None,
+        },
+        &bitcoin_rs_storage::CommitRecords::default(),
     )?;
     let _assumeutxo = AssumeUtxoManager::open(
         Network::Regtest,

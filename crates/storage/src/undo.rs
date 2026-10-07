@@ -164,6 +164,14 @@ pub struct InMemoryUndoStore {
     marker: parking_lot::RwLock<Option<DisconnectMarker>>,
 }
 
+impl InMemoryUndoStore {
+    /// Retires a transient record after its owner durably archives it. Used by
+    /// forward-only historical validation, which cannot roll back this store.
+    pub fn remove_archived(&self, height: u32, hash: Hash256) {
+        self.records.write().remove(&(height, hash));
+    }
+}
+
 impl UndoStore for InMemoryUndoStore {
     fn persist_undo(&self, height: u32, hash: Hash256, record: &[u8]) -> Result<(), StorageError> {
         self.records.write().insert((height, hash), record.to_vec());

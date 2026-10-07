@@ -62,6 +62,8 @@ pub(crate) struct TestChain {
     minimum_chain_work: ChainWork,
     scripted_commit_failure: Mutex<Option<(Hash256, WindowCommitDisposition)>>,
     scripted_branch_switch: Mutex<Option<ScriptedBranchSwitch>>,
+    historical: Mutex<std::collections::VecDeque<(u32, Hash256)>>,
+    historical_connected: Mutex<Vec<Hash256>>,
 }
 
 impl TestChain {
@@ -78,6 +80,8 @@ impl TestChain {
             minimum_chain_work: ChainWork::from_be_bytes(Network::Regtest.minimum_chain_work()),
             scripted_commit_failure: Mutex::new(None),
             scripted_branch_switch: Mutex::new(None),
+            historical: Mutex::new(std::collections::VecDeque::new()),
+            historical_connected: Mutex::new(Vec::new()),
         }
     }
 }
@@ -109,6 +113,23 @@ impl TestChain {
 }
 
 impl SyncChain for TestChain {
+    fn advance_historical(&self) -> Result<Option<(u32, Hash256)>, SyncChainError> {
+        Ok(self.historical.lock().front().copied())
+    }
+
+    fn connect_historical(
+        &self,
+        block: &Block,
+        _serialized: bytes::Bytes,
+    ) -> Result<(), SyncChainError> {
+        let hash = block.block_hash().0;
+        assert_eq!(
+            self.historical.lock().pop_front().map(|(_, hash)| hash),
+            Some(hash)
+        );
+        self.historical_connected.lock().push(hash);
+        Ok(())
+    }
     fn network(&self) -> Network {
         self.network
     }
@@ -1981,6 +2002,134 @@ fn sync_with_mined_chain(count: u32) -> Result<MinedChainFixture, Box<dyn std::e
     } = SyncHarness::new(tree);
 
     Ok((sync, peers, applied_tip, blocks, inbound_blocks_tx))
+}
+
+#[test]
+fn historical_delivery_retries_corruption_and_does_not_rewind_foreground()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (tree, blocks) = mined_chain(3, 0)?;
+    let mut harness = SyncHarness::new(tree);
+    let chain = Arc::new(TestChain::new(
+        harness.block_tree.write().tip_handle(),
+        harness.applied_tip.clone(),
+        harness.block_tree.clone(),
+    ));
+    // Model an active snapshot at height two, with ordinary work above it.
+    chain.bootstrap_genesis();
+    for block in &blocks[..2] {
+        chain
+            .commit_window(&[block], &[])
+            .map_err(|error| format!("fixture commit: {error:?}"))?;
+    }
+    chain
+        .historical
+        .lock()
+        .push_back((1, blocks[0].block_hash().0));
+    harness.sync.chain = chain.clone();
+    let addr = test_addr(28000, 0)?;
+    let rx = connect_peer(&harness.peers, synthetic_peer(addr, 3));
+    harness.sync.tick();
+    let source = current_source(&harness.peers, addr);
+    assert!(
+        harness
+            .sync
+            .owns_body_fetch(source, blocks[0].block_hash().0)
+    );
+    assert!(rx.try_iter().any(|message| matches!(message, Message::GetData(ref items) if items.contains(&Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(blocks[0].block_hash().0.to_le_bytes()))))));
+    let mut corrupt = blocks[0].clone();
+    corrupt.txs[0].outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(1);
+    for block in [corrupt, blocks[2].clone()] {
+        harness.inbound_blocks_tx.send(crate::InboundBlock {
+            serialized: bytes::Bytes::from(consensus_bytes(&block)),
+            block,
+            source: Some(source),
+            forward_credit: None,
+        })?;
+    }
+    harness.sync.tick();
+    assert!(chain.historical_connected.lock().is_empty());
+    assert_eq!(
+        harness
+            .applied_tip
+            .load_full()
+            .ok_or("missing active tip")?
+            .height,
+        3
+    );
+    assert!(
+        harness
+            .sync
+            .owns_body_fetch(source, blocks[0].block_hash().0)
+    );
+    harness.inbound_blocks_tx.send(crate::InboundBlock {
+        block: blocks[0].clone(),
+        serialized: bytes::Bytes::from(consensus_bytes(&blocks[0])),
+        source: Some(source),
+        forward_credit: None,
+    })?;
+    harness.sync.tick();
+    assert_eq!(
+        *chain.historical_connected.lock(),
+        vec![blocks[0].block_hash().0]
+    );
+    assert_eq!(
+        harness
+            .applied_tip
+            .load_full()
+            .ok_or("missing active tip")?
+            .height,
+        3
+    );
+    assert!(harness.sync.historical_request.lock().is_none());
+    Ok(())
+}
+
+#[test]
+fn historical_requests_use_archive_peers_and_replace_disconnected_leases()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (tree, blocks) = mined_chain(1, 0)?;
+    let mut harness = SyncHarness::new(tree);
+    let chain = Arc::new(TestChain::new(
+        harness.block_tree.write().tip_handle(),
+        harness.applied_tip.clone(),
+        harness.block_tree.clone(),
+    ));
+    chain
+        .historical
+        .lock()
+        .push_back((1, blocks[0].block_hash().0));
+    harness.sync.chain = chain;
+    let limited_addr = test_addr(28100, 0)?;
+    let mut limited = synthetic_peer(limited_addr, 1000);
+    limited.services = (bitcoin::p2p::ServiceFlags::NETWORK_LIMITED
+        | bitcoin::p2p::ServiceFlags::WITNESS)
+        .to_u64();
+    let limited_rx = connect_peer(&harness.peers, limited);
+    harness.sync.advance_historical();
+    assert!(limited_rx.try_recv().is_err());
+    assert!(harness.sync.historical_request.lock().is_none());
+    let addr = test_addr(28100, 1)?;
+    let old_rx = connect_peer(&harness.peers, synthetic_peer(addr, 1000));
+    harness.sync.advance_historical();
+    let old = current_source(&harness.peers, addr);
+    assert!(harness.sync.owns_body_fetch(old, blocks[0].block_hash().0));
+    assert!(matches!(old_rx.try_recv()?, Message::GetData(_)));
+    harness.sync.advance_historical();
+    assert!(
+        old_rx.try_recv().is_err(),
+        "one outstanding historical request"
+    );
+    let replacement_rx = connect_peer(&harness.peers, synthetic_peer(addr, 1000));
+    harness.sync.advance_historical();
+    let replacement = current_source(&harness.peers, addr);
+    assert!(!harness.sync.owns_body_fetch(old, blocks[0].block_hash().0));
+    assert!(
+        harness
+            .sync
+            .owns_body_fetch(replacement, blocks[0].block_hash().0)
+    );
+    assert!(matches!(replacement_rx.try_recv()?, Message::GetData(_)));
+    Ok(())
 }
 
 type WedgeFixture = (

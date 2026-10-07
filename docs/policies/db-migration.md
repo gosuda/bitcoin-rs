@@ -6,7 +6,7 @@
 
 `CURRENT_SCHEMA` covers only authoritative chainstate bytes: the durable head, the coin set it commits, body and undo extents and references, and their identity metadata. Owner-local state does not belong to this marker. Fee estimator state, peer discovery state, and index-only layouts carry their own versions (see the owner-local section below).
 
-Every node datadir contains a small `CURRENT_SCHEMA` epoch record. Its current schema epoch is `0`. It is the sole authority for authoritative persistent-format compatibility. The node writes and syncs the marker before any authoritative store opens. Its file contents are synced everywhere; the containing directory is synced on platforms that expose a reliable directory-sync primitive.
+Every node datadir contains a small `CURRENT_SCHEMA` epoch record. Its current schema epoch is `1`. It is the sole authority for authoritative persistent-format compatibility. Epoch 1 adds the root-owned AssumeUTXO anchor, lifecycle, and pending-validation reference to the durable head; epoch 0 datadirs require an explicit fresh resync. The node writes and syncs the marker before any authoritative store opens. Its file contents are synced everywhere; the containing directory is synced on platforms that expose a reliable directory-sync primitive.
 
 Startup follows this contract:
 
@@ -14,8 +14,7 @@ Startup follows this contract:
 | --- | --- |
 | Empty directory | Create and sync the current `CURRENT_SCHEMA` epoch, then initialize the current schema |
 | `CURRENT_SCHEMA` matches the current epoch | Continue startup |
-| Non-empty directory without `CURRENT_SCHEMA`, while epoch `0` is current | Treat the datadir as baseline epoch `0`, publish the marker, then continue startup |
-| Non-empty directory without `CURRENT_SCHEMA`, while a later epoch is current | Treat the datadir as implicit epoch `0` and refuse open with `incompatible_schema` |
+| Non-empty directory without `CURRENT_SCHEMA` | Treat the datadir as implicit epoch `0` and refuse open with `incompatible_schema` |
 | Marker is malformed or has another epoch | Refuse open with `incompatible_schema` before opening persistent state |
 | Current marker with no durable head | Start cold; this is normal before the first committed head |
 | Durable head references missing or corrupt authoritative bytes | Refuse open with `incompatible_schema`; committed-range corruption is diagnosed, never silently accepted |

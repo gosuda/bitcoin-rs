@@ -63,6 +63,7 @@ struct DurableHead {
     chain_tx_count: u64,
     body_extent: Option<BodyExtent { file_no: u32, offset: u64 }>,
     undo_extent: Option<(u32, Hash256)>,
+    assumeutxo: AssumeUtxoDiskStatus,
 }
 ```
 
@@ -80,6 +81,27 @@ the batch are what make a committed tip recoverable. The chainstate journal
 is derived from this batch and may lag it, never lead it. `commit_id` is
 strictly monotonic on disconnect as well as on connect: a reorg lowers
 `height`, never `commit_id`.
+
+AssumeUTXO activation and historical archive updates use this same root and
+transition reservation. Activation first syncs immutable `coins.dat` and
+`headers.dat` under `assumeutxo/<base_hash>/`, then commits the pinned base,
+count, and lifecycle in the head. An unreferenced import is an orphan, not a
+checkpoint or activation authority. Historical updates advance `commit_id`
+without changing the active tip. Each candidate body is synced and referenced
+as pending before validation; its locator becomes visible to derived readers
+only with the validated undo/progress batch. An unresolved pending check is
+reconstructed and completed during startup, before service admission, even if
+the preceding process could not persist its terminal failure.
+
+Snapshot recovery validates the root's network pin, restores a compatible
+checkpoint or verifies the immutable snapshot archive, and replays the
+root-certified foreground suffix. A full-revalidation marker still overrides
+incremental recovery. The pre-activation journal cannot extend a snapshot jump
+and is detached. Historical coins are reconstructed from genesis using retained
+bodies; durable archive progress never pretends to be a recovered coin set.
+Finalized history supplies ordinary undo/reorg behavior. A disconnect below
+the base clears the snapshot anchor in its head batch. These bytes use datadir
+schema epoch 1; older datadirs are refused without conversion.
 
 ## Clauses
 

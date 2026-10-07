@@ -210,6 +210,16 @@ impl core::fmt::Debug for BranchSwitchError {
 /// admission under the chain-transition lock, window commit, branch switch,
 /// and genesis bootstrap. The executor owns everything else.
 pub trait SyncChain: Send + Sync {
+    /// Replays bounded retained snapshot history and names the next missing
+    /// pinned-ancestry body. Foreground tip and notifications do not change.
+    fn advance_historical(&self) -> Result<Option<(u32, Hash256)>, SyncChainError> {
+        Ok(None)
+    }
+
+    /// Validates a requested historical body through the chainstate owner.
+    fn connect_historical(&self, _block: &Block, _body: Bytes) -> Result<(), SyncChainError> {
+        Err("historical validation is not configured".into())
+    }
     /// Network the applied chain validates against.
     fn network(&self) -> Network;
 

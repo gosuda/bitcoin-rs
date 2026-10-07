@@ -1,15 +1,15 @@
 //! ARCH-07b: verified installation, isolated replay, and fail-closed convergence.
-use std::fs;
 use std::io::Cursor;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus};
 use bitcoin_rs_primitives::{AssumeUtxoData, Block, Hash256, Network};
-use bitcoin_rs_storage::{CommitRecords, DurableHead};
+use bitcoin_rs_storage::{CommitRecords, DurableHead, DurableHeadStore, StorageError};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{SnapshotLoad, UtxoSet, read_snapshot_strict_v4, write_snapshot_observed};
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole};
 use crate::{ApplyError, Chainstate};
@@ -31,7 +31,32 @@ fn chainstate() -> Arc<Chainstate> {
     ))
 }
 
+#[derive(Default)]
+struct FaultHead {
+    inner: bitcoin_rs_storage::InMemoryDurableHeadStore,
+    fail: AtomicBool,
+}
+impl DurableHeadStore for FaultHead {
+    fn load(&self) -> Result<Option<DurableHead>, StorageError> {
+        self.inner.load()
+    }
+    fn commit(
+        &self,
+        expected: Option<&DurableHead>,
+        next: &DurableHead,
+        records: &CommitRecords<'_>,
+    ) -> Result<(), StorageError> {
+        if self.fail.load(Ordering::Acquire) {
+            return Err(StorageError::InvalidOperation(
+                "injected durable-head failure",
+            ));
+        }
+        self.inner.commit(expected, next, records)
+    }
+}
+
 struct Fixture {
+    head: Arc<FaultHead>,
     active: Arc<Chainstate>,
     blocks: Vec<Block>,
     pinned: AssumeUtxoData,
@@ -64,7 +89,11 @@ impl Fixture {
         };
         let mut snapshot = Cursor::new(Vec::new());
         write_snapshot_observed(&source.utxo, &tip.hash, tip.height, &mut snapshot, ())?;
-        let active = chainstate();
+        let mut active = chainstate();
+        let head = Arc::new(FaultHead::default());
+        Arc::get_mut(&mut active)
+            .ok_or("shared active fixture")?
+            .durable_head = head.clone();
         for block in &blocks {
             active
                 .block_tree
@@ -72,6 +101,7 @@ impl Fixture {
                 .insert_header(block.header, NodeStatus::HeaderValid)?;
         }
         Ok(Self {
+            head,
             active,
             blocks,
             pinned,
@@ -98,10 +128,11 @@ impl Fixture {
     }
 }
 
-fn disk_status(dir: &std::path::Path) -> Result<AssumeUtxoDiskStatus, Box<dyn std::error::Error>> {
-    Ok(serde_json::from_slice(&fs::read(
-        dir.join("assumeutxo.json"),
-    )?)?)
+fn disk_status(active: &Chainstate) -> Result<AssumeUtxoDiskStatus, Box<dyn std::error::Error>> {
+    Ok(active
+        .durable_head
+        .load()?
+        .map_or(AssumeUtxoDiskStatus::Uninitialized, |head| head.assumeutxo))
 }
 
 #[test]
@@ -139,7 +170,7 @@ fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
                 AssumeUtxoError::SnapshotBlockHashMismatch { .. }
             )),
         }
-        assert_eq!(manager.status(), AssumeUtxoDiskStatus::Uninitialized);
+        assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
         assert!(active.applied_tip_snapshot().is_none());
         assert_eq!(active.role(), ChainstateRole::Ordinary);
     }
@@ -170,7 +201,7 @@ fn snapshot_installs_coins_statistics_and_resolved_header_together() -> TestResu
         fixture.pinned.hash_serialized
     );
     assert!(active.role().is_assumed_active());
-    assert_eq!(manager.status(), disk_status(dir.path())?);
+    assert_eq!(manager.status()?, disk_status(&fixture.active)?);
     assert!(matches!(
         active.prune_authority().begin(),
         Err(ApplyError::PruneDuringHistoricalValidation { .. })
@@ -196,7 +227,7 @@ fn snapshot_refuses_missing_or_wrong_height_header_before_persistence() -> TestR
         manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
         Err(AssumeUtxoError::SnapshotHeaderMissing(_))
     ));
-    assert!(!dir.path().join("assumeutxo.json").exists());
+    assert!(active.durable_head.load()?.is_none());
     let manager = fixture.manager(dir.path())?;
     let mut wrong_height = fixture.pinned;
     wrong_height.height += 1;
@@ -205,7 +236,7 @@ fn snapshot_refuses_missing_or_wrong_height_header_before_persistence() -> TestR
         Err(AssumeUtxoError::SnapshotHeaderHeightMismatch { .. })
     ));
     assert!(fixture.active.applied_tip_snapshot().is_none());
-    assert!(!dir.path().join("assumeutxo.json").exists());
+    assert!(active.durable_head.load()?.is_none());
     Ok(())
 }
 
@@ -214,12 +245,12 @@ fn activation_io_failure_does_not_publish_snapshot() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
-    fs::create_dir(dir.path().join("assumeutxo.json"))?;
+    fixture.head.fail.store(true, Ordering::Release);
     assert!(matches!(
         manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
-        Err(AssumeUtxoError::Io(_))
+        Err(AssumeUtxoError::Storage(_))
     ));
-    assert_eq!(manager.status(), AssumeUtxoDiskStatus::Uninitialized);
+    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
     assert!(fixture.active.applied_tip_snapshot().is_none());
     assert_eq!(fixture.active.coin_stats.snapshot(), CoinStats::default());
     assert!(fixture.active.role().is_ordinary());
@@ -233,18 +264,11 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
     let dir = tempfile::tempdir()?;
     let manager = fixture.manager(dir.path())?;
     fixture.activate(&manager)?;
-    let active_head = DurableHead {
-        commit_id: 10,
-        height: fixture.pinned.height,
-        tip: fixture.pinned.block_hash,
-        chain_tx_count: fixture.pinned.chain_tx_count,
-        body_extent: None,
-        undo_extent: None,
-    };
-    fixture
+    let active_head = fixture
         .active
         .durable_head
-        .commit(None, &active_head, &CommitRecords::default())?;
+        .load()?
+        .ok_or("missing active anchor")?;
     let events = fixture.active.chain_events.snapshot();
     let historical = manager
         .historical_chainstate()
@@ -264,7 +288,16 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
     ));
     for block in &fixture.blocks {
         manager.step_historical(block, None)?;
-        assert_eq!(fixture.active.durable_head.load()?, Some(active_head));
+        let head = fixture.active.durable_head.load()?.ok_or("missing head")?;
+        assert_eq!(
+            (head.tip, head.height, head.chain_tx_count),
+            (
+                active_head.tip,
+                active_head.height,
+                active_head.chain_tx_count
+            )
+        );
+        assert!(head.commit_id > active_head.commit_id);
         assert_eq!(fixture.active.chain_events.snapshot(), events);
         assert_eq!(fixture.active.coin_stats.snapshot(), fixture.stats);
     }
@@ -272,10 +305,47 @@ fn historical_replay_preserves_active_durable_head_and_notifications() -> TestRe
     assert!(fixture.active.prune_authority().begin().is_ok());
     assert!(manager.historical_chainstate().is_none());
     assert!(matches!(
-        manager.status(),
+        manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
-    assert_eq!(manager.status(), disk_status(dir.path())?);
+    assert_eq!(manager.status()?, disk_status(&fixture.active)?);
+    Ok(())
+}
+
+#[cfg(feature = "fjall")]
+#[path = "assumeutxo_recovery_tests.rs"]
+mod recovery;
+
+#[test]
+fn snapshot_advances_partial_state_but_refuses_to_replace_an_equal_or_newer_tip() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    fixture
+        .active
+        .begin_transition()?
+        .connect(&fixture.blocks[0], None)?;
+    fixture
+        .active
+        .begin_transition()?
+        .connect(&fixture.blocks[1], None)?;
+    let manager = fixture.manager(dir.path())?;
+    fixture.activate(&manager)?;
+    assert_eq!(fixture.active.coin_stats.snapshot(), fixture.stats);
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    for block in &fixture.blocks {
+        fixture.active.begin_transition()?.connect(block, None)?;
+    }
+    let manager = fixture.manager(dir.path())?;
+    let before = fixture.active.durable_head.load()?;
+    // This is an ordinary user refusal, not an unresolved storage mutation.
+    assert!(matches!(
+        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        Err(AssumeUtxoError::ActivationBehindTip)
+    ));
+    assert_eq!(fixture.active.durable_head.load()?, before);
+    assert_eq!(fixture.active.coin_stats.snapshot(), fixture.stats);
+    assert!(!fixture.active.is_closed_for_recovery());
     Ok(())
 }
 
@@ -308,7 +378,7 @@ fn historical_restart_replays_coins_from_genesis_instead_of_fabricating_a_tip() 
         reopened.step_historical(block, None)?;
     }
     assert!(matches!(
-        reopened.status(),
+        reopened.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
     Ok(())
@@ -322,12 +392,13 @@ fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> Test
         let manager = fixture.manager(dir.path())?;
         fixture.activate(&manager)?;
         {
-            let mut status = manager.status.write();
+            let prior = fixture.active.durable_head.load()?.ok_or("missing head")?;
+            let mut next = prior;
             if let AssumeUtxoDiskStatus::Validating {
                 ref mut expected_hash_serialized,
                 ref mut chain_tx_count,
                 ..
-            } = *status
+            } = next.assumeutxo
             {
                 if wrong_count {
                     *chain_tx_count += 1;
@@ -335,6 +406,11 @@ fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> Test
                     *expected_hash_serialized = Hash256::default();
                 }
             }
+            next.commit_id += 1;
+            fixture
+                .active
+                .durable_head
+                .commit(Some(&prior), &next, &CommitRecords::default())?;
         }
         for block in &fixture.blocks[..2] {
             manager.step_historical(block, None)?;
@@ -356,7 +432,7 @@ fn reconstructed_commitment_or_transaction_count_mismatch_fails_closed() -> Test
         assert!(fixture.active.is_closed_for_recovery());
         assert!(historical.is_closed_for_recovery());
         assert!(matches!(
-            disk_status(dir.path())?,
+            disk_status(&fixture.active)?,
             AssumeUtxoDiskStatus::Failed { .. }
         ));
         assert!(matches!(
@@ -384,7 +460,7 @@ fn target_hash_divergence_is_classified_and_persisted() -> TestResult {
     ));
     assert!(fixture.active.is_closed_for_recovery());
     assert!(matches!(
-        disk_status(dir.path())?,
+        disk_status(&fixture.active)?,
         AssumeUtxoDiskStatus::Failed { .. }
     ));
     Ok(())
@@ -399,13 +475,12 @@ fn mismatch_closes_admission_even_when_failure_record_cannot_be_written() -> Tes
     for block in &fixture.blocks[..2] {
         manager.step_historical(block, None)?;
     }
-    fs::remove_file(dir.path().join("assumeutxo.json"))?;
-    fs::create_dir(dir.path().join("assumeutxo.json"))?;
+    fixture.head.fail.store(true, Ordering::Release);
     let mut wrong = fixture.blocks[2].clone();
     wrong.header.nonce = wrong.header.nonce.wrapping_add(1);
     assert!(matches!(
         manager.step_historical(&wrong, None),
-        Err(AssumeUtxoError::Io(_))
+        Err(AssumeUtxoError::Storage(_))
     ));
     assert!(fixture.active.lock_transition().is_err());
     assert!(
@@ -427,15 +502,14 @@ fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> Te
     for block in &fixture.blocks[..2] {
         manager.step_historical(block, None)?;
     }
-    fs::remove_file(dir.path().join("assumeutxo.json"))?;
-    fs::create_dir(dir.path().join("assumeutxo.json"))?;
+    fixture.head.fail.store(true, Ordering::Release);
     assert!(matches!(
         manager.step_historical(&fixture.blocks[2], None),
-        Err(AssumeUtxoError::Io(_))
+        Err(AssumeUtxoError::Storage(_))
     ));
     assert!(fixture.active.role().is_assumed_active());
     assert!(matches!(
-        manager.status(),
+        manager.status()?,
         AssumeUtxoDiskStatus::Validating { .. }
     ));
     assert!(fixture.active.lock_transition().is_err());

@@ -20,6 +20,7 @@ mod commit;
 mod frontier;
 mod headers;
 mod headers_presync;
+mod historical;
 mod peers;
 mod receive;
 mod requests;
@@ -178,6 +179,11 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 /// applied-chain seam. See `docs/contracts/architecture.md` for the
 /// download-window ownership contract.
 pub struct BlockSync {
+    /// One bounded historical body request, independent of the foreground
+    /// download window. This short-held lock is also read by peer ingress.
+    historical_request: Mutex<Option<historical::HistoricalRequest>>,
+    /// Serializes historical replay and delivery without holding the ingress lock.
+    historical_work: Mutex<()>,
     /// Applied-chain seam: header admission, window commit, branch switch,
     /// and genesis bootstrap live behind it (node owns them, ARCH-07).
     pub(crate) chain: Arc<dyn SyncChain>,
@@ -381,6 +387,8 @@ impl BlockSync {
     ) -> Self {
         let budget = default_sync_budget(chain.network());
         Self {
+            historical_request: Mutex::new(None),
+            historical_work: Mutex::new(()),
             chain,
             peer_table,
             ibd,
@@ -464,6 +472,14 @@ impl BlockSync {
     ///   predecessor's request.
     #[must_use]
     pub(crate) fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
+        if self
+            .historical_request
+            .lock()
+            .as_ref()
+            .is_some_and(|request| request.source == source && request.hash == hash)
+        {
+            return true;
+        }
         let scheduler = self.scheduler.lock();
         scheduler.window.pending_owner(&hash) == Some(source)
             || scheduler
@@ -481,6 +497,7 @@ impl BlockSync {
         // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
         self.drain_inbound_blocks();
+        self.advance_historical();
 
         let now = Instant::now();
         // One frontier observation feeds recovery, selection, and planning;

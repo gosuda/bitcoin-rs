@@ -13,6 +13,8 @@ pub const STALE_RESTORE_ERROR_THRESHOLD: u32 = 1000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// Source selected for the initial authoritative chainstate.
 pub enum ResumeSource {
+    /// A pinned snapshot selected by the authoritative durable head.
+    Snapshot,
     /// No recoverable checkpoint existed.
     Cold,
     /// State came directly from a full checkpoint.
@@ -100,6 +102,39 @@ fn restored_initial(
     })
 }
 
+/// A compatible checkpoint accelerates the root-selected snapshot without
+/// becoming a second commit authority. This permits pruning after finalization.
+pub(crate) fn restore_snapshot(
+    data_dir: &Path,
+    network: bitcoin_rs_primitives::Network,
+    pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+) -> Result<InitialChainstate> {
+    let config = crate::checkpoint::headers::HeaderCheckpointConfig {
+        network,
+        genesis: network.genesis_block_hash(),
+    };
+    let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)?;
+    if let crate::checkpoint::CheckpointLoad::Complete(restored) =
+        crate::checkpoint::load_checkpoint_from_dir(&data, config)?
+    {
+        let compatible = restored
+            .tree
+            .node_at_height_from(restored.applied_tip.tip_id, pinned.height)
+            .and_then(|id| restored.tree.node(id).ok())
+            .is_some_and(|node| node.hash == pinned.block_hash);
+        if compatible {
+            return restored_initial(
+                *restored,
+                ChainstateJournalConfig {
+                    enabled: false,
+                    ..ChainstateJournalConfig::default()
+                },
+            );
+        }
+    }
+    crate::assumeutxo_snapshot::load_verified(data_dir, network, pinned)
+}
+
 fn cold_initial_chainstate(
     data_dir: &Path,
     network: bitcoin_rs_primitives::Network,
@@ -133,11 +168,16 @@ pub fn prepare_initial_chainstate(
     data_dir: &Path,
     network: bitcoin_rs_primitives::Network,
     journal_config: ChainstateJournalConfig,
+    durable_head: Option<&bitcoin_rs_storage::DurableHead>,
 ) -> Result<InitialChainstate> {
     let checkpoint_data_dir = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
         .with_context(|| format!("open data_dir {}", data_dir.display()))?;
     bitcoin_rs_storage::checkpoint::fs::ensure_current_schema(&checkpoint_data_dir)
         .with_context(|| format!("validate CURRENT_SCHEMA for datadir {}", data_dir.display()))?;
+    let anchor = durable_head
+        .map(|head| crate::assumeutxo_snapshot::trusted_anchor(network, head.assumeutxo))
+        .transpose()?
+        .flatten();
     let checkpoint_config = crate::checkpoint::headers::HeaderCheckpointConfig {
         network,
         genesis: network.genesis_block_hash(),
@@ -157,6 +197,9 @@ pub fn prepare_initial_chainstate(
             "chainstate restore requires full validation"
         );
         return cold_initial_chainstate(data_dir, network, journal_config, false);
+    }
+    if let Some(pinned) = anchor {
+        return restore_snapshot(data_dir, network, pinned);
     }
     let checkpoint_load =
         crate::checkpoint::load_checkpoint_from_dir(&checkpoint_data_dir, checkpoint_config)?;

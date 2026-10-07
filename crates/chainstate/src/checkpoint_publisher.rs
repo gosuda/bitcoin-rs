@@ -65,7 +65,8 @@ pub(crate) struct CheckpointPublisher {
     pub(crate) block_tree: Arc<RwLock<BlockTree>>,
     pub(crate) utxo: Arc<UtxoSet>,
     pub(crate) coin_stats: Arc<CoinStatsListener>,
-    pub(crate) journal: Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>,
+    pub(crate) journal:
+        Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
 
     pub(crate) data_dir: PathBuf,
     pub(crate) chain_events: Arc<ChainEventPublisher>,
@@ -92,7 +93,8 @@ impl CheckpointPublisher {
         retirement: DisconnectRetirement,
     ) -> core::result::Result<CheckpointWrite, CheckpointError> {
         let _exclusive_apply = self.admission.pause();
-        let mut journal = self.journal.as_ref().map(|journal| journal.lock());
+        let journal_handle = self.journal.read().clone();
+        let mut journal = journal_handle.as_ref().map(|journal| journal.lock());
         if let Some(writer) = journal.as_mut() {
             writer.freeze().map_err(|error| {
                 CheckpointError::Store(bitcoin_rs_storage::checkpoint::CheckpointError::Invalid(

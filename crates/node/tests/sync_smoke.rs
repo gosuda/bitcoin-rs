@@ -48,6 +48,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         inbound_headers_rx,
         inbound_blocks_rx,
         Arc::clone(&ibd),
+        None,
     );
 
     inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
@@ -106,6 +107,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         inbound_headers_rx,
         inbound_blocks_rx,
         Arc::clone(&ibd),
+        None,
     );
 
     inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {

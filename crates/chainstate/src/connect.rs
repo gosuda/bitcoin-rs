@@ -116,7 +116,7 @@ pub(super) fn apply_block_admitted<'b>(
         contextual_header_result?;
     }
     if intent == ApplyIntent::Commit
-        && let Some(journal) = &handles.journal
+        && let Some(journal) = handles.journal.read().clone()
     {
         let maintenance = {
             let mut journal = journal.lock();
@@ -990,7 +990,7 @@ fn build_journal_record(
 
 /// Emits one built journal record, best-effort.
 pub(super) fn emit_journal_record(handles: &Chainstate, built: BuiltJournalRecord, height: u32) {
-    let Some(journal) = handles.journal.as_ref() else {
+    let Some(journal) = handles.journal.read().clone() else {
         return;
     };
     let Some(record) = built else {

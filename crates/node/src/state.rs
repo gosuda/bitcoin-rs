@@ -367,8 +367,10 @@ impl NodeState {
     }
 
     /// Produces a summary of active and background chainstates for operator reporting.
-    #[must_use]
-    pub fn chainstates_summary(&self) -> bitcoin_rs_chainstate::ChainstatesSummary {
+    pub fn chainstates_summary(
+        &self,
+    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, bitcoin_rs_chainstate::AssumeUtxoError>
+    {
         self.assumeutxo.chainstates_summary()
     }
 
@@ -382,7 +384,7 @@ impl NodeState {
         &self,
         path: impl AsRef<std::path::Path>,
     ) -> anyhow::Result<()> {
-        let mut file = std::fs::File::open(path)?;
+        let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
         let snapshot_load = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
         self.activate_assumeutxo_snapshot(snapshot_load)
     }
@@ -396,9 +398,22 @@ impl NodeState {
         &self,
         snapshot_load: bitcoin_rs_utxo::SnapshotLoad,
     ) -> anyhow::Result<()> {
-        self.assumeutxo
-            .activate_snapshot(snapshot_load)
-            .map_err(|e| anyhow::anyhow!("failed to activate assumeutxo snapshot: {e}"))?;
+        let change = self.followers.begin_mempool_change()?;
+        let result = self.assumeutxo.activate_snapshot(snapshot_load);
+        if result.is_ok() {
+            self.followers.on_snapshot();
+        }
+        if !self.chainstate.is_closed_for_recovery() {
+            if let Some(change) = change {
+                if let Err(error) = change.finish() {
+                    self.chainstate.fail_closed_for_recovery();
+                    return Err(anyhow::anyhow!(
+                        "snapshot consumer settlement failed: {error}"
+                    ));
+                }
+            }
+        }
+        result.map_err(|e| anyhow::anyhow!("failed to activate assumeutxo snapshot: {e}"))?;
         Ok(())
     }
 

@@ -396,15 +396,24 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   - If invalid, the manager persists `AssumeUtxoDiskStatus::Failed`, marks the active
     chainstate permanently closed for recovery (`Chainstate::fail_closed_for_recovery`), and
     refuses subsequent restarts to protect operator data.
-  Historical replay uses its own in-memory durable-head and undo stores, no body
-  writer, and a detached event publisher. It cannot advance the active durable head
-  or publish active-chain notifications. Its persisted progress is diagnostic only:
-  reopening starts historical validation from genesis with empty coins and statistics,
-  rather than attaching an advanced tip to an empty set. The caller must replay the
-  retained history. Lifecycle operations serialize with each other. Finalized status
-  is synced before retiring the historical role; an I/O failure after historical
-  mutation closes both admissions. A detected mismatch closes admission even if its
-  diagnostic status cannot be persisted.
+  Historical replay uses its own transient coins, durable-head and undo stores,
+  no body writer, and detached events. The manager archives validated body locators
+  and undo records together with lifecycle progress in the active durable-head batch.
+  These batches advance `commit_id` while preserving the active tip and transaction
+  count. They publish no active-chain notification. Transient undo is released after
+  the archive receipt, so it does not accumulate through the entire history.
+  Reopening reconstructs historical coins from genesis; persisted archive progress
+  is not a live coin-set cursor. The summary exposes live progress separately.
+  Before checking each body, the manager syncs its staged bytes and commits a
+  pending-validation reference in the same root. If a crash or terminal-status
+  write failure leaves that reference, startup reconstructs the dependencies and
+  completes the check before returning node state. A mismatch cannot be forgotten
+  by restarting after a failed `Failed` write. Finalization is durable before the
+  role becomes `Ordinary`; unresolved storage errors close both admissions.
+  The production sync tick replays at most eight retained historical blocks and
+  requests one missing body on the pinned base ancestry. It uses archive-capable
+  peers, retries expired/replaced connections, and validates body binding before
+  historical admission. Foreground and historical deliveries have separate owners.
 - **Reorg and pruning constraints**:
   - Reorgs on the `AssumedActive` chainstate cannot disconnect blocks at or below the
     snapshot base height (`ApplyError::DisconnectBelowSnapshotBase`).
@@ -416,12 +425,19 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   `AssumeUtxoManager::chainstates_summary` provides a unified read projection of both
   active and background chainstates, reporting roles, tips, validation progress, and
   commitments without exposing internal lock primitives.
-- **Current integration limits**:
-  `step_historical` is a caller-driven API; the node runtime does not yet schedule
-  historical downloads or replay. Active snapshot installation is in memory and
-  does not establish a durable snapshot anchor in the active commit/recovery path.
-  Persisted lifecycle metadata therefore does not provide full active-chainstate
-  crash recovery. These remain requirements of #1288 before the feature is complete.
+- **Durable activation and recovery**:
+  Immutable coin and header archives are synced before the active head commits the
+  pinned base and lifecycle status. That head is the only activation authority;
+  orphan import files do not activate a snapshot. Startup admits the current schema,
+  validates the root's network pin, and restores a compatible checkpoint or verifies
+  the snapshot archive, then replays the certified foreground suffix to the head.
+  A checkpoint remains an accelerator, including after finalized history is pruned.
+  Activation detaches the old checkpoint journal; anchored recovery does not replay
+  that journal across the snapshot jump. Node activation fences mempool admission,
+  clears old transactions, and wakes index/mining consumers. It does not manufacture
+  per-block ZMQ events for imported history. Historical undo makes below-base reorgs
+  possible after finalization; crossing below the base removes the snapshot anchor
+  in the disconnect's authoritative batch.
 
 ### `ARCH-08`: Durable pruning and reorg retention
 

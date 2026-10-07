@@ -61,7 +61,7 @@ fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &AtomicBool) {
 /// batch boundary has passed and reports whether segment retention
 /// requires compaction.
 fn idle_journal_maintenance(publisher: &CheckpointPublisher) -> bool {
-    let Some(journal) = publisher.journal.as_ref() else {
+    let Some(journal) = publisher.journal.read().clone() else {
         return false;
     };
     let mut journal = journal.lock();

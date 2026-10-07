@@ -16,7 +16,7 @@ use cap_std::fs::{Dir, File, OpenOptions};
 /// Marker filename containing the current datadir schema epoch.
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
-const CURRENT_SCHEMA_VERSION: u32 = 0;
+const CURRENT_SCHEMA_VERSION: u32 = 1;
 // This serialized marker is the single source of truth for the current
 // persistent format epoch. Increment it for a schema-breaking storage change;
 // no converter or compatibility reader accompanies the bump.
@@ -28,9 +28,8 @@ pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
 
 /// Opens the current datadir epoch.
 ///
-/// A non-empty directory without the marker is treated as baseline epoch 0 and
-/// adopted only while epoch 0 is current; a later schema epoch rejects it and
-/// requires an explicit resync.
+/// A non-empty directory without the marker is implicit epoch 0, rejected
+/// without modification. Older epochs require an explicit fresh resync.
 pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
     match read_file(data, CURRENT_SCHEMA_FILE, 16) {
         Ok(bytes) => validate_current_schema(&bytes),
@@ -45,7 +44,7 @@ pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
                     has_other_entry = true;
                 }
             }
-            if has_other_entry && CURRENT_SCHEMA_VERSION != 0 {
+            if has_other_entry {
                 return Err(incompatible_schema(
                     "datadir has no CURRENT_SCHEMA marker and is implicitly schema epoch 0, which is not current",
                 ));

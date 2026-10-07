@@ -290,6 +290,18 @@ impl ChainFollowers {
         }
     }
 
+    /// Reconciles derived consumers after an atomic snapshot-tip replacement.
+    /// No per-block notifications are fabricated for the skipped history.
+    pub(crate) fn on_snapshot(&self) {
+        self.blocks.write().clear();
+        if let Some(gateway) = &self.mempool {
+            gateway.clear(AdmissionOrigin::Block);
+            gateway.chain_changed(&[]);
+        }
+        self.wake_index();
+        self.mining.publish_generation();
+    }
+
     fn wake_index(&self) {
         if let Some(runtime) = &self.derived_index {
             runtime.wake();
@@ -606,6 +618,44 @@ mod tests {
             Arc::new(crate::mining::MiningGenerationSignal::new()),
             Some(Arc::clone(gateway)),
         )
+    }
+
+    #[test]
+    fn snapshot_reconciles_pool_and_index_without_fabricating_block_events() -> anyhow::Result<()> {
+        let gateway = MempoolGateway::shared(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            ValidationEngine::Native,
+        )?;
+        let publisher = Arc::new(RecordingPublisher::default());
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+        let followers = followers_with_gateway(&gateway)
+            .with_zmq_publisher(publisher.clone())
+            .with_tx_index(Some(Arc::new(DerivedIndexRuntime::new(wake_tx))));
+        let genesis = Network::Regtest.genesis_block();
+        let outpoint = OutPoint::new(genesis.txs[0].txid(), 0);
+        let tx = orphan_child(outpoint);
+        let chain = AdmissionCoins::default();
+        *chain.prevouts.write() = vec![(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+        )];
+        gateway.submit_transaction(tx.clone(), AdmissionOrigin::Rpc, None, 0, &chain)?;
+        assert!(gateway.read().contains_txid(&tx.txid()));
+        let fence = followers
+            .begin_mempool_change()?
+            .ok_or_else(|| anyhow::anyhow!("missing fence"))?;
+        followers.on_snapshot();
+        assert!(!gateway.read().contains_txid(&tx.txid()));
+        assert!(gateway.stable_generation().is_none());
+        assert!(wake_rx.try_recv().is_ok());
+        assert_eq!(publisher.events(), Vec::<String>::new());
+        assert!(followers.block_log().read().is_empty());
+        fence.finish()?;
+        assert!(gateway.stable_generation().is_some());
+        Ok(())
     }
 
     /// Exercise committed-outcome dispatch with a real gateway, without any
