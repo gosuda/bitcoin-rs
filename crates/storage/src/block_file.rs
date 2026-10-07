@@ -1719,9 +1719,11 @@ mod tests {
         std::fs::write(&target_file, original_content)?;
         std::os::unix::fs::symlink(&target_file, blocks_dir.join("blk00000.dat"))?;
 
-        let res = FlatFileBlockStore::open(dir.path());
-        assert!(res.is_err(), "open must fail when block file is a symlink");
-        match res.unwrap_err() {
+        let error = match FlatFileBlockStore::open(dir.path()) {
+            Ok(_) => panic!("open must fail when block file is a symlink"),
+            Err(error) => error,
+        };
+        match error {
             crate::StorageError::Io(err) => {
                 assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
                 assert!(
