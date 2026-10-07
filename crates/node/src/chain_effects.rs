@@ -614,11 +614,11 @@ mod tests {
     /// `crates/chainstate`; this checks the follower's lifecycle notification
     /// boundary.
     fn assert_admission_followers_after_chain_change(connect: bool) -> anyhow::Result<()> {
-        let gateway = MempoolGateway::shared(
+        let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
             ValidationEngine::Native,
-        )
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        ));
         let followers = followers_with_gateway(&gateway);
         let block = Network::Regtest.genesis_block();
         let parent = block.txs[0].txid();
@@ -723,11 +723,11 @@ mod tests {
 
     #[test]
     fn active_chain_change_is_retryable_not_shutdown() -> anyhow::Result<()> {
-        let gateway = MempoolGateway::shared(
+        let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
             ValidationEngine::Native,
-        )
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        ));
         let followers = followers_with_gateway(&gateway);
         let active = gateway.begin_chain_change()?;
 

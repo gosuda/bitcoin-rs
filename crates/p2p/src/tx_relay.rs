@@ -1023,12 +1023,11 @@ mod tests {
         use parking_lot::RwLock;
 
         let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let gateway = MempoolGateway::shared_with(
+        let gateway = Arc::new(MempoolGateway::new(
             pool,
-            Arc::new(CompositeObserver::new()),
+            Some(Arc::new(CompositeObserver::new())),
             ValidationEngine::Native,
-        )
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        ));
         let (queue, rx) = TxRelayQueue::new(8);
         let observer = Arc::new(LocalTxRelayObserver::new(queue, Arc::downgrade(&gateway)));
         gateway
