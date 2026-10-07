@@ -76,14 +76,13 @@ fn spawn_sequence_subscriber() -> Result<(tempfile::TempDir, ProcessNode, zmq::C
         "ipc://{}",
         socket_dir.path().join("sequence.sock").display()
     );
-    // A Windows path's backslashes are escapes in a TOML basic string, so
-    // the emitted endpoint is escaped — a literal string would instead
-    // break on a path containing a single quote (e.g. a user named
-    // O'Brien). `endpoint` keeps its real value for the subscriber and the
-    // assertions below.
-    let endpoint_escaped = endpoint.replace('\\', "\\\\").replace('"', "\\\"");
+    // The serializer escapes the endpoint as a TOML string — quoting it
+    // verbatim breaks on backslashes, single quotes, and control
+    // characters in the path alike. `endpoint` keeps its real value for
+    // the subscriber and the assertions below.
     let toml_extra = format!(
-        "[[notifications.zmq]]\nendpoint = \"{endpoint_escaped}\"\ntopics = [\"sequence\"]\nhwm = 1000\n"
+        "[[notifications.zmq]]\nendpoint = {}\ntopics = [\"sequence\"]\nhwm = 1000\n",
+        toml::Value::String(endpoint.clone())
     );
     let mut node = ProcessNode::spawn_with(
         Kind::BitcoinRs,

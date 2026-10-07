@@ -782,7 +782,7 @@ impl ProcessNode {
     /// to a forced terminate immediately rather than stalling the stop
     /// timeout.
     #[cfg(windows)]
-    fn send_sigterm(&self) {
+    fn send_sigterm(&mut self) {
         use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
         // SAFETY: GenerateConsoleCtrlEvent is safe to call for any process
         // group id; a stale pid simply makes the call a no-op.
@@ -805,21 +805,12 @@ impl ProcessNode {
     }
 
     /// Forcibly terminate the child, the Windows counterpart of SIGKILL.
+    /// `Child::kill` acts on the process handle owned by `self.child`, so
+    /// a pid recycled after the child exits can never redirect the kill at
+    /// an unrelated process the way an `OpenProcess(pid)` lookup could.
     #[cfg(windows)]
-    pub fn send_sigkill(&self) {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
-        };
-        // SAFETY: OpenProcess is safe with any pid, and TerminateProcess /
-        // CloseHandle are only invoked on the non-null handle it returns.
-        unsafe {
-            let handle = OpenProcess(PROCESS_TERMINATE, 0, self.pid());
-            if !handle.is_null() {
-                let _ = TerminateProcess(handle, 1);
-                let _ = CloseHandle(handle);
-            }
-        }
+    pub fn send_sigkill(&mut self) {
+        let _ = self.child.kill();
     }
 
     fn finish_output(&mut self) {
