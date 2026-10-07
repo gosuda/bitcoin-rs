@@ -1,4 +1,8 @@
 //! Read-only, single-pass measurement of a stopped node's data directory.
+//!
+//! In `bitcoin-rs-storage-allocation-v1`, the `namespaces` key `"."` accounts
+//! only for the root directory itself. Other keys account for each top-level
+//! entry and its descendants, with hard-linked inodes counted only once.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -110,6 +114,8 @@ mod tests {
     fn sparse_file_and_hard_link_are_not_double_counted() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let file = fs::File::create(dir.path().join("a"))?;
+        // This creates a sparse file where supported; allocation is determined
+        // by the filesystem, not required to be smaller than the file length.
         file.set_len(16 * 1024 * 1024)?;
         fs::hard_link(dir.path().join("a"), dir.path().join("b"))?;
         let report = measure(dir.path())?;
@@ -120,8 +126,9 @@ mod tests {
             report.totals.allocated_bytes,
             (root.blocks() + data.blocks()) * 512
         );
-        assert!(data.blocks() * 512 < data.len());
         assert_eq!(report.namespaces["a"].apparent_bytes, data.len());
+        assert_eq!(report.namespaces["a"].allocated_bytes, data.blocks() * 512);
+        assert!(!report.namespaces.contains_key("b"));
         Ok(())
     }
 
@@ -134,6 +141,9 @@ mod tests {
         }
         let report = measure(dir.path())?;
         assert_eq!(report.namespaces.len(), 4);
+        let root = fs::metadata(dir.path())?;
+        assert_eq!(report.namespaces["."].apparent_bytes, root.len());
+        assert_eq!(report.namespaces["."].allocated_bytes, root.blocks() * 512);
         assert_eq!(
             report.totals.allocated_bytes,
             report

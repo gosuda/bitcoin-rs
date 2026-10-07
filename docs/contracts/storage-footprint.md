@@ -11,6 +11,10 @@ On Linux, the utility reports total apparent bytes and allocated bytes
 (`st_blocks * 512`), with a breakdown by top-level data-directory entry.
 Directory metadata and loose files are included. Hard links are counted once
 by device/inode; the lexicographically first visited path owns their bytes.
+In `bitcoin-rs-storage-allocation-v1`, the reserved `namespaces` key `"."`
+contains only the root directory's own bytes. Each other key contains the bytes
+of that top-level entry and its descendants, subject to hard-link deduplication.
+Summing all namespace values, including `"."`, reproduces each total.
 Apparent bytes are filesystem lengths, **not** serialized logical KV bytes;
 do not add apparent and allocated totals.
 
@@ -52,7 +56,8 @@ actual evidence consumer, outside production behavior.
 
 ## Verification
 
-`tools/storage-footprint/src/linux.rs` tests sparse allocation, hard-link
+`tools/storage-footprint/src/linux.rs` tests metadata-based allocation (including
+sparse files where supported), hard-link
 deduplication, namespace totals, unchanged file contents and namespace inventory,
 and refusal of symlinks and special entries. The isolated-consumer g17 gate
 proves the old storage measurement module is absent from the production API.
