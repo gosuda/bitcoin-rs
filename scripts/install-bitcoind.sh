@@ -50,36 +50,15 @@ sha256_of() {
   fi
 }
 
-# The manifest owns the pinned digests; this selects the artifact row for
-# the host platform's release target. While-read keeps this working under
-# the bash 3.2 that still ships with macOS (no mapfile).
+# The manifest owns the pinned digests; resolve_reference_identity.py is the
+# single owner of the host-platform artifact selection. Capturing stdout
+# propagates the interpreter's exit status; the while-read keeps this
+# working under the bash 3.2 that still ships with macOS (no mapfile, no
+# heredoc inside a substitution — bash 3.2 cannot parse that).
+pin_text="$("$PYTHON" "$REPO/scripts/resolve_reference_identity.py" core "$REPO")" || exit 1
 pin=()
-while IFS= read -r line; do pin+=("$line"); done < <("$PYTHON" - "$REPO" <<'PY'
-from pathlib import Path
-import platform
-import sys
-import tomllib
-
-TARGETS = {
-    ("linux", "x86_64"): "x86_64-linux-gnu",
-    ("linux", "aarch64"): "aarch64-linux-gnu",
-    ("darwin", "arm64"): "arm64-apple-darwin",
-    ("darwin", "x86_64"): "x86_64-apple-darwin",
-}
-target = TARGETS.get((sys.platform, platform.machine()))
-with (Path(sys.argv[1]) / "crates/rpc/core-compat.toml").open("rb") as stream:
-    release = tomllib.load(stream)["reference"]["release"]
-artifacts = {row["target"]: row for row in release.get("platforms", [])}
-artifacts[release["target"]] = release
-row = artifacts.get(target)
-if row is None:
-    raise SystemExit(f"no pinned Core artifact for {sys.platform}-{platform.machine()}")
-print(release["core_version"])
-print(row["archive"])
-print(row["archive_sha256"])
-PY
-)
-[[ "${#pin[@]}" -eq 3 ]] || { echo "incomplete Core artifact pin" >&2; exit 1; }
+while IFS= read -r line; do pin+=("$line"); done <<< "$pin_text"
+[[ "${#pin[@]}" -ge 3 ]] || { echo "incomplete Core artifact pin" >&2; exit 1; }
 readonly CORE_VERSION="${pin[0]}"
 readonly TARBALL="${pin[1]}"
 readonly TARBALL_SHA256="${pin[2]}"

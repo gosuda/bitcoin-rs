@@ -31,49 +31,14 @@ sha256_check() {
   [[ "$got" == "$1" ]] || { printf 'sha256 mismatch for %s\n' "$2" >&2; exit 1; }
 }
 
-# While-read keeps this working under the bash 3.2 that still ships with
-# macOS (no mapfile).
+# resolve_reference_identity.py is the single owner of the fixture identity
+# tuple. Capturing stdout propagates the interpreter's exit status; the
+# while-read keeps this working under the bash 3.2 that still ships with
+# macOS (no mapfile, no heredoc inside a substitution — bash 3.2 cannot
+# parse that).
+identity_text="$("$PYTHON" scripts/resolve_reference_identity.py "$mode" .)" || exit 1
 identity=()
-while IFS= read -r line; do identity+=("$line"); done < <("$PYTHON" - "$mode" <<'PY'
-from pathlib import Path
-import platform
-import re
-import sys
-import tomllib
-
-TARGETS = {
-    ("linux", "x86_64"): "x86_64-linux-gnu",
-    ("linux", "aarch64"): "aarch64-linux-gnu",
-    ("darwin", "arm64"): "arm64-apple-darwin",
-    ("darwin", "x86_64"): "x86_64-apple-darwin",
-}
-with Path("crates/rpc/core-compat.toml").open("rb") as stream:
-    reference = tomllib.load(stream)["reference"]
-if sys.argv[1] == "core":
-    release = reference["release"]
-    target = TARGETS.get((sys.platform, platform.machine()))
-    artifacts = {row["target"]: row for row in release.get("platforms", [])}
-    artifacts[release["target"]] = release
-    pin = artifacts.get(target)
-    if pin is None:
-        raise SystemExit(f"no pinned Core artifact for {sys.platform}-{platform.machine()}")
-    values = (release["core_version"],) + tuple(
-        pin[key] for key in ("archive", "archive_sha256", "bitcoind_sha256")
-    ) + (release["version_output"],)
-else:
-    pin = reference["formal_tool"]
-    if pin["name"] != "apalache-mc":
-        raise SystemExit("unexpected formal tool")
-    contract = Path("docs/contracts/formal-verification.md").read_text()
-    archive = re.search(r"^\| Archive \| `([^`]+)`", contract, re.MULTILINE)
-    if archive is None:
-        raise SystemExit("formal archive identity missing")
-    values = (pin["version"], archive[1], pin["archive_sha256"], pin["jar_sha256"], pin["version"])
-if not all(isinstance(value, str) and "\n" not in value for value in values):
-    raise SystemExit("invalid fixture identity")
-print("\n".join(values))
-PY
-)
+while IFS= read -r line; do identity+=("$line"); done <<< "$identity_text"
 [[ "${#identity[@]}" -eq 5 ]] || { echo "incomplete fixture identity" >&2; exit 1; }
 version="${identity[0]}"
 archive="${identity[1]}"

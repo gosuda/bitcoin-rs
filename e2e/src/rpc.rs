@@ -238,9 +238,9 @@ pub fn exchange(addr: SocketAddr, request: &Value, deadline: Instant) -> Result<
                     .ok_or_else(|| Error::Protocol("invalid write size".into()))?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                remaining()?;
                 std::thread::sleep(Duration::from_millis(1));
             }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => return Err(Error::Io(error)),
         }
     }

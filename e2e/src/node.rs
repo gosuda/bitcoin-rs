@@ -233,9 +233,9 @@ fn current_platform_target() -> Option<&'static str> {
 }
 
 /// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins
-/// for the platform this suite runs on: a `[[reference.release.platforms]]`
-/// row when one matches, else the canonical artifact — and a typed failure
-/// when the manifest carries no artifact for this platform at all.
+/// for the platform this suite runs on: the canonical artifact when its
+/// target matches, else the matching `[[reference.release.platforms]]` row —
+/// and a typed failure when the manifest carries no artifact for this platform.
 pub(crate) fn manifest_reference_sha256() -> Result<String> {
     let target = current_platform_target().ok_or_else(|| {
         Error::Assertion(format!(

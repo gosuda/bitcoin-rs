@@ -1,36 +1,29 @@
 """Offline checks for accepting or replacing a pinned Core installation cache.
 
-Requires a tomllib-capable interpreter (Python >=3.11): the archive digest is
-resolved from core-compat.toml exactly as the installer does.
+The archive digest comes from the same resolve_reference_identity.py selector
+the installer runs, so the stamp assertion tracks the manifest with no second
+owner. Requires a tomllib-capable interpreter (Python >=3.11).
 """
 
 import os
-import platform
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "install-bitcoind.sh"
-MANIFEST = Path(__file__).resolve().parents[2] / "crates/rpc/core-compat.toml"
-
-TARGETS = {
-    ("linux", "x86_64"): "x86_64-linux-gnu",
-    ("linux", "aarch64"): "aarch64-linux-gnu",
-    ("darwin", "arm64"): "arm64-apple-darwin",
-    ("darwin", "x86_64"): "x86_64-apple-darwin",
-}
-with MANIFEST.open("rb") as stream:
-    release = tomllib.load(stream)["reference"]["release"]
-ARTIFACTS = {row["target"]: row for row in release.get("platforms", [])}
-ARTIFACTS[release["target"]] = release
-target = TARGETS.get((sys.platform, platform.machine()))
-if target is None or target not in ARTIFACTS:
-    raise RuntimeError(f"no pinned Core artifact for {sys.platform}-{platform.machine()}")
-PIN = ARTIFACTS[target]["archive_sha256"]
+REPO = Path(__file__).resolve().parents[2]
+SCRIPT = REPO / "scripts/install-bitcoind.sh"
+PIN = subprocess.check_output(
+    [
+        sys.executable,
+        str(REPO / "scripts/resolve_reference_identity.py"),
+        "core",
+        str(REPO),
+    ],
+    text=True,
+).splitlines()[2]
 
 
 class InstallBitcoindTest(unittest.TestCase):
