@@ -17,7 +17,8 @@ use bitcoin_rs_script::{Interpreter, VerifyFlags};
 /// Input framing (all lengths little-endian u16 unless noted):
 ///
 /// ```text
-/// byte 0      flags selector (mod FLAGS.len())
+/// byte 0      flags selector (mod FLAGS.len()), or EXPLICIT_FLAGS
+/// [0xFF only] u32 LE  explicit Core-compatible VerifyFlags bits
 /// u16  len    script_sig
 /// bytes       script_sig
 /// u16  len    script_pubkey
@@ -30,7 +31,9 @@ use bitcoin_rs_script::{Interpreter, VerifyFlags};
 /// Scripts from the qa-assets corpus are wrapped into this framing by
 /// `scripts/import-qa-assets.sh`; seeds written by that script use the harness
 /// `FLAGS` entry `NONE` for raw scripts and, for files >= 32 bytes, a P2TR
-/// variant using its `TAPROOT` entry.
+/// variant using its `TAPROOT` entry. Reference-vector seeds written by
+/// `scripts/import-reference-corpora.sh` use `EXPLICIT_FLAGS` so each seed
+/// carries its own row's flag bits.
 const FLAGS: [VerifyFlags; 6] = [
     VerifyFlags::NONE,
     VerifyFlags::MANDATORY,
@@ -48,11 +51,15 @@ const FLAGS: [VerifyFlags; 6] = [
 const WITNESS_ELEMENTS_MAX: usize = 8;
 const ELEMENT_LEN_MAX: usize = 1024;
 
+/// Selector value choosing the explicit-flags framing: the next four input
+/// bytes are little-endian `VerifyFlags` bits used verbatim, letting vector
+/// importers carry each row's own flag set instead of a `FLAGS` table entry.
+const EXPLICIT_FLAGS: u8 = 0xff;
+
 fuzz_target!(|data: &[u8]| {
     let Some((&selector_byte, mut rest)) = data.split_first() else {
         return;
     };
-    let flags = FLAGS[usize::from(selector_byte) % FLAGS.len()];
 
     // Length-prefixed cursor; every read is checked, nothing panics.
 
@@ -65,6 +72,15 @@ fuzz_target!(|data: &[u8]| {
         let bytes = take(rest, 2)?;
         Some(usize::from(u16::from_le_bytes([bytes[0], bytes[1]])))
     }
+
+    let flags = if selector_byte == EXPLICIT_FLAGS {
+        let Some(bits) = take(&mut rest, 4) else {
+            return;
+        };
+        VerifyFlags::from_bits(u32::from_le_bytes(bits.try_into().unwrap_or([0; 4])))
+    } else {
+        FLAGS[usize::from(selector_byte) % FLAGS.len()]
+    };
 
     let Some(script_sig_len) = take_u16(&mut rest) else {
         return;
