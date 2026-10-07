@@ -1,4 +1,4 @@
-# Bridge binary for the examples/stratum-sv2 compose stack.
+# Bridge binary for the tools/stratum-sv2 compose stack.
 # syntax=docker/dockerfile:1.7
 
 FROM rust:1.88-slim-bookworm@sha256:38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89 AS build

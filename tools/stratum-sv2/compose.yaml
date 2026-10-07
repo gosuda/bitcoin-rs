@@ -1,4 +1,4 @@
-# examples/stratum-sv2 — bitcoin-rs as the mining owner behind a pinned SRI Stratum V2 stack.
+# tools/stratum-sv2 — bitcoin-rs as the mining owner behind a pinned SRI Stratum V2 stack.
 #
 #   devices -> pool (SRI) -> template-provider bridge (this repo) -> bitcoin-rs (regtest)
 #
