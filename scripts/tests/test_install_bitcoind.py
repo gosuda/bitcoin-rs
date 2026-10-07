@@ -9,9 +9,12 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "install-bitcoind.sh"
-PIN = re.search(r'^readonly TARBALL_SHA256="([0-9a-f]{64})"$', SCRIPT.read_text(), re.M)
-if PIN is None:
-    raise RuntimeError("Installer must declare its pinned archive digest")
+# The installer pins both release artifacts; the host's selection lands in
+# TARBALL_SHA256 at runtime. Both declarations must stay machine-readable.
+PIN = re.search(r'^readonly TARBALL_SHA256_LINUX="([0-9a-f]{64})"$', SCRIPT.read_text(), re.M)
+PIN_WIN64 = re.search(r'^readonly TARBALL_SHA256_WIN64="([0-9a-f]{64})"$', SCRIPT.read_text(), re.M)
+if PIN is None or PIN_WIN64 is None:
+    raise RuntimeError("Installer must declare its pinned archive digests")
 
 
 class InstallBitcoindTest(unittest.TestCase):

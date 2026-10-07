@@ -16,3 +16,7 @@ docs/rpc-reference.md text eol=lf
 # Corpus seeds are binary fuzz inputs; even byte-identical
 # text-looking seeds must survive checkout unconverted.
 fuzz/corpus/** -text
+
+# The corpus manifest is generated JSON — text that must stay LF even
+# though the directory above it is pinned binary.
+fuzz/corpus/manifest.json text eol=lf

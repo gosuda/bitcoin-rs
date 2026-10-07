@@ -415,7 +415,7 @@ mod corpus_io {
                         ))
                     })
             })
-            .filter(|name| !matches!(name.as_deref(), Ok(".") | Ok("..")))
+            .filter(|name| !matches!(name.as_deref(), Ok("." | "..")))
             .collect()
     }
 
@@ -500,28 +500,44 @@ mod corpus_io {
     /// through.
     pub(super) type CorpusDir = Dir;
 
-    /// Opens the corpus root as a capability directory. `symlink_metadata`
-    /// refuses a symlinked or non-directory root before the ambient open
-    /// would follow it — the same refusal the unix root open performs.
+    /// Opens the corpus root as a capability directory. `OPEN_REPARSE_POINT`
+    /// makes the open deliver the reparse object itself rather than resolving
+    /// a junction or symlink, so the type judgment is a property of the
+    /// opened handle — the same open-then-verify the unix `NOFOLLOW|DIRECTORY`
+    /// arm performs, with no pre-check a swapped entry could race.
     pub(super) fn open(dir: &Path) -> Result<CorpusDir, LoadError> {
-        let metadata = std::fs::symlink_metadata(dir).map_err(|error| {
+        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+        // `BACKUP_SEMANTICS` admits a directory as a file handle;
+        // `OPEN_REPARSE_POINT` opens a junction or symlink as the reparse
+        // object instead of its target.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+        let file = std::fs::File::options()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(dir)
+            .map_err(|error| {
+                LoadError::Violation(format!(
+                    "{}: corpus directory could not be opened no-follow: {error}",
+                    dir.display()
+                ))
+            })?;
+        let metadata = file.metadata().map_err(|error| {
             LoadError::Violation(format!(
                 "{}: corpus directory could not be opened no-follow: {error}",
                 dir.display()
             ))
         })?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_dir() {
             return Err(LoadError::Violation(format!(
                 "{}: corpus directory could not be opened no-follow: not a directory",
                 dir.display()
             )));
         }
-        Dir::open_ambient_dir(dir, cap_std::ambient_authority()).map_err(|error| {
-            LoadError::Violation(format!(
-                "{}: corpus directory could not be opened no-follow: {error}",
-                dir.display()
-            ))
-        })
+        Ok(Dir::from_std_file(file))
     }
 
     /// Enumerates the corpus root's entry names through the open handle.

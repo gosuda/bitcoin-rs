@@ -83,6 +83,9 @@ pub(crate) struct ReleaseIdentity {
     pub(crate) archive_win64_sha256: [u8; 32],
     /// SHA-256 of the `bitcoind.exe` binary inside the win64 archive.
     pub(crate) bitcoind_win64_sha256: [u8; 32],
+    /// The binary digest a spawned reference process must match on this
+    /// host, selected from the manifest at parse time.
+    pub(crate) spawned_bitcoind_sha256: [u8; 32],
     /// The exact `bitcoind -version` line the pinned binary must print.
     pub(crate) version_output: String,
 }
@@ -92,19 +95,11 @@ pub(crate) struct ReleaseIdentity {
 #[allow(dead_code)]
 impl ReleaseIdentity {
     /// The binary digest a spawned reference process must match on this
-    /// platform: the win64 build on Windows, the linux-gnu build elsewhere.
-    /// `bitcoind_sha256` always names the capture platform's binary, which
-    /// every checked-in corpus records — it does not vary per host.
-    #[cfg(windows)]
+    /// platform. Parsed via
+    /// `bitcoin_rs_rpc::manifest::REFERENCE_BITCOIND_SHA256_FIELD`, the one
+    /// owner of the platform→manifest-field mapping.
     pub(crate) fn spawned_bitcoind_sha256(&self) -> [u8; 32] {
-        self.bitcoind_win64_sha256
-    }
-
-    /// The binary digest a spawned reference process must match on this
-    /// platform: the win64 build on Windows, the linux-gnu build elsewhere.
-    #[cfg(not(windows))]
-    pub(crate) fn spawned_bitcoind_sha256(&self) -> [u8; 32] {
-        self.bitcoind_sha256
+        self.spawned_bitcoind_sha256
     }
 }
 
@@ -236,6 +231,10 @@ pub(crate) fn load_reference_set(manifest: &str) -> Result<ReferenceSet, Referen
         archive_win64: required_str(release_table, "archive_win64")?,
         archive_win64_sha256: required_sha256(release_table, "archive_win64_sha256")?,
         bitcoind_win64_sha256: required_sha256(release_table, "bitcoind_win64_sha256")?,
+        spawned_bitcoind_sha256: required_sha256(
+            release_table,
+            bitcoin_rs_rpc::manifest::REFERENCE_BITCOIND_SHA256_FIELD,
+        )?,
         version_output: required_str(release_table, "version_output")?,
     };
 

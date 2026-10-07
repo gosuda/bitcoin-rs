@@ -14,16 +14,22 @@
 set -euo pipefail
 
 readonly CORE_VERSION="31.1"
+# Both artifact pins are named declarations so offline checks can read them
+# regardless of which platform the script runs on.
+readonly TARBALL_LINUX="bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz"
+readonly TARBALL_SHA256_LINUX="b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+readonly TARBALL_WIN64="bitcoin-${CORE_VERSION}-win64.zip"
+readonly TARBALL_SHA256_WIN64="c99ef173471c58e6766d9eebd12e6c35349082eeed3939bc99eed58ef57db587"
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
-    TARBALL="bitcoin-${CORE_VERSION}-win64.zip"
-    TARBALL_SHA256="c99ef173471c58e6766d9eebd12e6c35349082eeed3939bc99eed58ef57db587"
+    TARBALL="${TARBALL_WIN64}"
+    TARBALL_SHA256="${TARBALL_SHA256_WIN64}"
     BITCOIND_NAME="bitcoind.exe"
     BITCOIN_CLI_NAME="bitcoin-cli.exe"
     ;;
   *)
-    TARBALL="bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz"
-    TARBALL_SHA256="b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
+    TARBALL="${TARBALL_LINUX}"
+    TARBALL_SHA256="${TARBALL_SHA256_LINUX}"
     BITCOIND_NAME="bitcoind"
     BITCOIN_CLI_NAME="bitcoin-cli"
     ;;
@@ -86,10 +92,18 @@ else
     exit 1
   fi
   mkdir -p "${PREFIX}/bin"
-  # GNU tar cannot read zip archives, so the win64 artifact extracts with
-  # unzip while the linux tarball keeps tar.
+  # The win64 artifact is a zip: prefer unzip where it is installed and
+  # otherwise fall back to tar — bsdtar (the tar.exe shipping with
+  # Windows 10+) reads zip archives, which covers stock Git for Windows
+  # and MSYS2 installs that carry neither GNU-unzip nor a zip-capable tar.
   case "${TARBALL}" in
-    *.zip) unzip -o -q "${WORKDIR}/${TARBALL}" -d "${WORKDIR}" ;;
+    *.zip)
+      if command -v unzip >/dev/null 2>&1; then
+        unzip -o -q "${WORKDIR}/${TARBALL}" -d "${WORKDIR}"
+      else
+        tar -xf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}"
+      fi
+      ;;
     *) tar -xzf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}" ;;
   esac
   install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/${BITCOIND_NAME}" "${BITCOIND}"

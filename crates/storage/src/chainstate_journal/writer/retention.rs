@@ -154,9 +154,10 @@ impl<S: KvStore> JournalWriter<S> {
                 return Ok(total);
             }
             // `DirEntry::metadata` reuses the stale size cached by directory
-            // enumeration on Windows; a fresh stat sees the live length.
+            // enumeration on Windows; a fresh stat by name sees the live
+            // length without opening the segment.
             total
-                .checked_add(entry.open()?.metadata()?.len())
+                .checked_add(self.dir.metadata(entry.file_name())?.len())
                 .ok_or_else(|| {
                     JournalWriterError::CursorMismatch("journal segment size overflow".to_owned())
                 })

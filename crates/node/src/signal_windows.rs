@@ -8,14 +8,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
-use signal_hook::consts::signal::{SIGINT, SIGTERM};
+use signal_hook::consts::signal::{SIGBREAK, SIGINT, SIGTERM};
 
-/// The CRT `SIGBREAK` constant (21), which the CRT dispatches to
-/// `CTRL_BREAK_EVENT`. libc's Windows bindings and signal-hook's consts do
-/// not name it, but the CRT accepts the value in `signal()` and it is the
-/// only console event another process can aim at a specific process group —
-/// how a harness or the console asks a spawned node for a graceful stop.
-const SIGBREAK: std::ffi::c_int = 21;
+// signal-hook names `SIGBREAK` (21) under cfg(windows): the CRT dispatches
+// it to `CTRL_BREAK_EVENT`, the only console event another process can aim
+// at a specific process group — how a harness or the console asks a
+// spawned node for a graceful stop.
 
 pub(crate) struct ShutdownHandler {
     registrations: Vec<signal_hook::SigId>,

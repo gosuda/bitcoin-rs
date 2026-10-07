@@ -41,6 +41,11 @@ redb = { workspace = true, optional = true }
 [target.'cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "redox"))'.dependencies]
 rustix.workspace = true
 
+# MoveFileExW provides the atomic rename-replace POSIX gives the evidence
+# publisher for free.
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [dev-dependencies]
 bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 libc = ">=0.2.189, <0.3"

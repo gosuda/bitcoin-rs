@@ -228,33 +228,20 @@ fn verified_core_binary() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// The release field naming the binary digest a spawned reference process
-/// must match on this platform: the win64 build on Windows (the linux-gnu
-/// binary cannot execute there), the capture platform's binary elsewhere.
-#[cfg(windows)]
-const RELEASE_BINARY_FIELD: &str = "bitcoind_win64_sha256";
-/// The release field naming the binary digest a spawned reference process
-/// must match on this platform.
-#[cfg(not(windows))]
-const RELEASE_BINARY_FIELD: &str = "bitcoind_sha256";
-
 /// Read the binary digest the compiled `core-compat.toml` manifest pins for
 /// a spawned reference process on this platform.
 pub(crate) fn manifest_reference_sha256() -> Result<String> {
+    const FIELD: &str = bitcoin_rs_rpc::manifest::REFERENCE_BITCOIND_SHA256_FIELD;
     let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
         .parse()
         .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
     table
         .get("reference")
         .and_then(|r| r.get("release"))
-        .and_then(|r| r.get(RELEASE_BINARY_FIELD))
+        .and_then(|r| r.get(FIELD))
         .and_then(|v| v.as_str())
         .map(str::to_owned)
-        .ok_or_else(|| {
-            Error::Assertion(format!(
-                "{RELEASE_BINARY_FIELD} missing in core-compat.toml"
-            ))
-        })
+        .ok_or_else(|| Error::Assertion(format!("{FIELD} missing in core-compat.toml")))
 }
 
 /// Hash one file with SHA256; callers shape the error vocabulary.
@@ -788,13 +775,25 @@ impl ProcessNode {
     /// process group, and the node maps it through its CRT SIGBREAK
     /// registration onto the shared shutdown flag. The child was spawned
     /// with `CREATE_NEW_PROCESS_GROUP` so the group id is its pid.
+    ///
+    /// The event only reaches a child sharing this console; when the
+    /// harness has none (a service or a windowless parent) delivery fails
+    /// and there is no graceful stop to wait for, so the failure escalates
+    /// to a forced terminate immediately rather than stalling the stop
+    /// timeout.
     #[cfg(windows)]
     fn send_sigterm(&self) {
         use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
         // SAFETY: GenerateConsoleCtrlEvent is safe to call for any process
         // group id; a stale pid simply makes the call a no-op.
-        unsafe {
-            let _ = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid());
+        let delivered = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid()) };
+        if delivered == 0 {
+            eprintln!(
+                "CTRL_BREAK delivery failed for pid {} ({}); forcing terminate",
+                self.pid(),
+                std::io::Error::last_os_error()
+            );
+            self.send_sigkill();
         }
     }
 
