@@ -931,7 +931,7 @@ fn open_block_file_for_append(path: &Path) -> Result<File, StorageError> {
     let mut options = {
         use std::os::unix::fs::OpenOptionsExt;
         let mut opts = OpenOptions::new();
-        opts.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32);
+        opts.custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed());
         opts
     };
     #[cfg(all(
