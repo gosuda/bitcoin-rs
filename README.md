@@ -194,13 +194,13 @@ Implemented and tested lanes:
   five targets, pinned reference seeds, and codec invariants.
 - [Crash recovery and reorgs](docs/validation-tooling.md#8-chainstate-crash-recovery-and-reorg-evidence):
   durable commits, process-death boundaries, and restart consistency.
+- [Live Core acceptance](docs/validation-tooling.md#2-live-core-block-and-transaction-acceptance-differential):
+  curated block/transaction cases compared by an in-tree harness against pinned live Bitcoin Core.
 
 External evidence and remaining work:
 
 - [Live Core P2P](docs/validation-tooling.md#1-live-bitcoin-core-p2p-and-chain-identity-differential):
   externally verified handshake, sync, compact blocks, and chain identity.
-- [Live Core acceptance](docs/validation-tooling.md#2-live-core-block-and-transaction-acceptance-differential):
-  curated block/transaction cases tested.
 - [bitcoinfuzz integration](https://github.com/bitcoinfuzz/bitcoinfuzz/issues/662):
   integration effort in progress to add bitcoin-rs as a differential fuzzing module.
 - [Offline full-validation comparator](docs/validation-tooling.md#9-offline-full-validation-comparator):
