@@ -181,11 +181,11 @@ pub struct SighashCache<'t> {
     segwit_prevouts: OnceLock<Hash256>,
     segwit_sequences: OnceLock<Hash256>,
     segwit_outputs: OnceLock<Hash256>,
-    taproot_prevouts: OnceLock<Hash256>,
+    prevouts: OnceLock<Hash256>,
     taproot_amounts: OnceLock<Hash256>,
     taproot_scriptpubkeys: OnceLock<Hash256>,
-    taproot_sequences: OnceLock<Hash256>,
-    taproot_outputs: OnceLock<Hash256>,
+    sequences: OnceLock<Hash256>,
+    outputs: OnceLock<Hash256>,
 }
 
 impl<'t> SighashCache<'t> {
@@ -197,11 +197,11 @@ impl<'t> SighashCache<'t> {
             segwit_prevouts: OnceLock::new(),
             segwit_sequences: OnceLock::new(),
             segwit_outputs: OnceLock::new(),
-            taproot_prevouts: OnceLock::new(),
+            prevouts: OnceLock::new(),
             taproot_amounts: OnceLock::new(),
             taproot_scriptpubkeys: OnceLock::new(),
-            taproot_sequences: OnceLock::new(),
-            taproot_outputs: OnceLock::new(),
+            sequences: OnceLock::new(),
+            outputs: OnceLock::new(),
         }
     }
 
@@ -332,16 +332,22 @@ impl<'t> SighashCache<'t> {
         let prevouts_hash = if ty.is_anyone_can_pay() {
             zero
         } else {
-            self.segwit_prevouts()
+            *self.segwit_prevouts.get_or_init(|| {
+                sha256_over(|writer| writer.write_all(self.prevouts().as_byte_array()))
+            })
         };
         let sequences_hash = if ty.is_anyone_can_pay() || ty.is_single() || ty.is_none() {
             zero
         } else {
-            self.segwit_sequences()
+            *self.segwit_sequences.get_or_init(|| {
+                sha256_over(|writer| writer.write_all(self.sequences().as_byte_array()))
+            })
         };
 
         let outputs_hash = if !ty.is_single() && !ty.is_none() {
-            self.segwit_outputs()
+            *self.segwit_outputs.get_or_init(|| {
+                sha256_over(|writer| writer.write_all(self.outputs().as_byte_array()))
+            })
         } else if ty.is_single() {
             match self.tx.outputs.get(input_index) {
                 Some(output) => {
@@ -419,13 +425,13 @@ impl<'t> SighashCache<'t> {
         msg.extend_from_slice(&self.tx.version.to_le_bytes());
         msg.extend_from_slice(&self.tx.lock_time.to_le_bytes());
         if !is_anyone_can_pay {
-            msg.extend_from_slice(&self.taproot_prevouts().to_le_bytes());
+            msg.extend_from_slice(&self.prevouts().to_le_bytes());
             msg.extend_from_slice(&self.taproot_amounts(prevouts).to_le_bytes());
             msg.extend_from_slice(&self.taproot_scriptpubkeys(prevouts).to_le_bytes());
-            msg.extend_from_slice(&self.taproot_sequences().to_le_bytes());
+            msg.extend_from_slice(&self.sequences().to_le_bytes());
         }
         if base != 0x02 && base != 0x03 {
-            msg.extend_from_slice(&self.taproot_outputs().to_le_bytes());
+            msg.extend_from_slice(&self.outputs().to_le_bytes());
         }
         let mut spend_type = 0_u8;
         if annex.is_some() {
@@ -465,42 +471,9 @@ impl<'t> SighashCache<'t> {
         Ok(tagged_hash(b"TapSighash", &msg))
     }
 
-    fn segwit_prevouts(&self) -> Hash256 {
+    fn prevouts(&self) -> Hash256 {
         let tx = self.tx;
-        *self.segwit_prevouts.get_or_init(|| {
-            double_sha256_over(|writer| {
-                for input in &tx.inputs {
-                    input.previous_output.consensus_encode(writer);
-                }
-            })
-        })
-    }
-
-    fn segwit_sequences(&self) -> Hash256 {
-        let tx = self.tx;
-        *self.segwit_sequences.get_or_init(|| {
-            double_sha256_over(|writer| {
-                for input in &tx.inputs {
-                    writer.write_all(&input.sequence.to_le_bytes());
-                }
-            })
-        })
-    }
-
-    fn segwit_outputs(&self) -> Hash256 {
-        let tx = self.tx;
-        *self.segwit_outputs.get_or_init(|| {
-            double_sha256_over(|writer| {
-                for output in &tx.outputs {
-                    output.consensus_encode(writer);
-                }
-            })
-        })
-    }
-
-    fn taproot_prevouts(&self) -> Hash256 {
-        let tx = self.tx;
-        *self.taproot_prevouts.get_or_init(|| {
+        *self.prevouts.get_or_init(|| {
             sha256_over(|writer| {
                 for input in &tx.inputs {
                     input.previous_output.consensus_encode(writer);
@@ -529,9 +502,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_sequences(&self) -> Hash256 {
+    fn sequences(&self) -> Hash256 {
         let tx = self.tx;
-        *self.taproot_sequences.get_or_init(|| {
+        *self.sequences.get_or_init(|| {
             sha256_over(|writer| {
                 for input in &tx.inputs {
                     writer.write_all(&input.sequence.to_le_bytes());
@@ -540,9 +513,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_outputs(&self) -> Hash256 {
+    fn outputs(&self) -> Hash256 {
         let tx = self.tx;
-        *self.taproot_outputs.get_or_init(|| {
+        *self.outputs.get_or_init(|| {
             sha256_over(|writer| {
                 for output in &tx.outputs {
                     output.consensus_encode(writer);
@@ -640,13 +613,6 @@ fn sha256_over(encode: impl FnOnce(&mut Sha256Sink<'_>)) -> Hash256 {
     let mut out = [0_u8; 32];
     out.copy_from_slice(&first);
     Hash256::from_le_bytes(&out)
-}
-
-fn double_sha256_over(encode: impl FnOnce(&mut Sha256Sink<'_>)) -> Hash256 {
-    let mut engine = Sha256::new();
-    let writer = &mut Sha256Sink(&mut engine);
-    encode(writer);
-    finalize_double_sha256(engine)
 }
 
 fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
