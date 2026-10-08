@@ -91,8 +91,7 @@ rustix = { version = "=1.1.5", features = ["fs"] }
 # windows-sys: the console-control and process APIs the e2e harness uses to
 # signal (CTRL_BREAK_EVENT) and reap spawned nodes on Windows.
 windows-sys = { version = "=0.61.2", features = [
-    "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console",
-    "Win32_System_Threading",
+    "Win32_Foundation", "Win32_System_Console", "Win32_System_Threading",
 ] }
 
 # Miniscript supplies the key-free PSBT finalizer retained by the RPC crate.

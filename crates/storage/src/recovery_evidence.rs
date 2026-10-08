@@ -181,49 +181,6 @@ fn read_sidecar<T>(dir: &Path, name: &str, decode: impl Fn(&[u8]) -> Option<T>) 
         .find_map(|n| decode(&std::fs::read(dir.join(n)).ok()?))
 }
 
-/// Substitute `to` for `from` as one operation: POSIX `rename` replaces an
-/// existing destination atomically, so a crash can never find the published
-/// evidence file gone.
-#[cfg(not(windows))]
-fn replace_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::rename(from, to)
-}
-
-/// Windows `std::fs::rename` cannot replace an existing destination, but
-/// `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` performs the same atomic
-/// substitute as POSIX rename — no delete-then-rename window in which the
-/// published evidence is missing.
-#[cfg(windows)]
-fn replace_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_COPY_ALLOWED, MOVEFILE_REPLACE_EXISTING, MoveFileExW,
-    };
-
-    let wide = |path: &Path| -> Vec<u16> {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
-    let from_w = wide(from);
-    let to_w = wide(to);
-    // SAFETY: both pointers name NUL-terminated wide strings owned by this
-    // frame, so they remain valid for the duration of the call.
-    let moved = unsafe {
-        MoveFileExW(
-            from_w.as_ptr(),
-            to_w.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED,
-        )
-    };
-    if moved == 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 /// Atomic publish: stage `.tmp` (`create_new`, fsync), rotate a *valid*
 /// current to `.prev` (an invalid current is removed, never displacing a
 /// valid `.prev`), rename, fsync dir.
@@ -275,7 +232,11 @@ fn write_sidecar(
                 let _ = std::fs::remove_file(&current);
             }
         }
-        replace_rename(&tmp, &current)?;
+        // `std::fs::rename` substitutes atomically over an existing
+        // destination on both platforms — POSIX rename semantics; Windows
+        // applies MoveFileExW REPLACE_EXISTING under the hood — so a crash
+        // can never find the published evidence file gone.
+        std::fs::rename(&tmp, &current)?;
         // std cannot open a directory on Windows; the checkpoint fsync
         // primitive carries the platform rules for flushing the entry.
         let capability = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;

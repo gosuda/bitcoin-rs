@@ -544,7 +544,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
