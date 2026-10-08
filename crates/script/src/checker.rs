@@ -9,7 +9,7 @@
 //! (`CheckSignatureEncoding`, `CheckPubKeyEncoding`, `IsLowDERSignature`,
 //! `CheckLockTime`, `CheckSequence`).
 
-use bitcoin_rs_primitives::{Amount, Hash256, Sighash, SighashCache, SighashError, Tx, TxOut};
+use bitcoin_rs_primitives::{Amount, Hash256, Sighash, SighashCache, Tx, TxOut};
 use secp256k1::{Message, PublicKey, XOnlyPublicKey, ecdsa::Signature as EcdsaSig};
 
 use crate::eval::{OP_CODESEPARATOR, remove_all};
@@ -147,7 +147,7 @@ impl<'a> TxSignatureChecker<'a> {
                 let cleaned = remove_all(script_code, &[OP_CODESEPARATOR]).0;
                 self.cache
                     .legacy_signature_hash(self.input_index, &cleaned, raw_hashtype)
-                    .map_err(|e| sighash_to_script_error(&e))?
+                    .map_err(|e| ScriptError::Verification(e.to_string()))?
             }
             SigVersion::WitnessV0 => {
                 // STRICTENC alone restricts ECDSA hashtypes. BIP143 must
@@ -159,7 +159,7 @@ impl<'a> TxSignatureChecker<'a> {
                         self.amount,
                         u32::from(*hashtype_byte),
                     )
-                    .map_err(|e| sighash_to_script_error(&e))?
+                    .map_err(|e| ScriptError::Verification(e.to_string()))?
             }
             SigVersion::Tapscript => {
                 // ECDSA is not used in tapscript; this is a caller error.
@@ -261,7 +261,7 @@ impl<'a> TxSignatureChecker<'a> {
                 leaf_codesep,
                 sighash_type,
             )
-            .map_err(|e| sighash_to_script_error(&e))?;
+            .map_err(|e| ScriptError::Verification(e.to_string()))?;
 
         let message = Message::from_digest(*sighash.as_byte_array());
         secp256k1::SECP256K1
@@ -575,25 +575,12 @@ fn is_defined_hashtype(sig: &[u8]) -> bool {
 
 /// Core's `IsCompressedOrUncompressedPubKey`.
 fn is_compressed_or_uncompressed_pubkey(pubkey: &[u8]) -> bool {
-    // COMPRESSED_SIZE = 33
-    if pubkey.len() < 33 {
-        return false;
-    }
-    match pubkey[0] {
-        0x04 => pubkey.len() == 65,        // SIZE = 65
-        0x02 | 0x03 => pubkey.len() == 33, // COMPRESSED_SIZE = 33
-        _ => false,
-    }
+    is_compressed_pubkey(pubkey) || (pubkey.len() == 65 && pubkey[0] == 0x04)
 }
 
 /// Core's `IsCompressedPubKey`.
 fn is_compressed_pubkey(pubkey: &[u8]) -> bool {
     pubkey.len() == 33 && (pubkey[0] == 0x02 || pubkey[0] == 0x03)
-}
-
-/// Converts a [`SighashError`] to a [`ScriptError`].
-fn sighash_to_script_error(error: &SighashError) -> ScriptError {
-    ScriptError::Verification(error.to_string())
 }
 
 // ---------------------------------------------------------------------------
