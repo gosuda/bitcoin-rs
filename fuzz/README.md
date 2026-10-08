@@ -3,11 +3,13 @@
 Five `cargo-fuzz` harnesses covering the untrusted-input surfaces of
 bitcoin-rs: P2P wire messages, block/transaction **consensus** after
 rust-bitcoin deserialization, the production script interpreter, and UTXO
-snapshot loading. Seed corpora under `fuzz/corpus/` are imported from
-rust-bitcoin/qa-assets by `scripts/import-qa-assets.sh` and from Bitcoin
-Core and btcd test vectors by `scripts/import-reference-corpora.sh`; see
-`fuzz/CORPUS_PROVENANCE.md` for upstream commits, licenses, and mapping.
-Parser-only rust-bitcoin decode targets are not kept.
+snapshot loading. Seed corpora live in the companion repository
+[gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus)
+under `corpus/<target>/`; they are imported from rust-bitcoin/qa-assets by
+`scripts/import-qa-assets.sh` and from Bitcoin Core and btcd test vectors
+by `scripts/import-reference-corpora.sh`. See `fuzz/CORPUS_PROVENANCE.md`
+for upstream commits, licenses, and mapping. Parser-only rust-bitcoin
+decode targets are not kept.
 
 ## Prerequisites
 
@@ -75,21 +77,23 @@ Keep the corpus clone on the same filesystem as bitcoin-rs because
 Submit minimized exploration inputs to the companion repository, with the
 bitcoin-rs commit, starting corpus revision, command, and coverage evidence.
 Inputs promoted into this repository should protect a named current contract
-or reproduce a fixed bug; update their provenance and any applicable verdict
-manifest together (see [the QA corpus contract](../docs/contracts/qa-corpus.md)).
+or reproduce a fixed bug; update their provenance together (see
+[the QA corpus contract](../docs/contracts/qa-corpus.md)).
 
 ## Adding a corpus
 
-Each target has a seed corpus directory at `fuzz/corpus/<target>/`. Create it
-and add seed files (one file per input):
+Committed seeds live in the companion repository at `corpus/<target>/`.
+Add seed files there (one file per input) in a sibling checkout:
 
 ```sh
-mkdir -p fuzz/corpus/p2p_message
+mkdir -p ../bitcoin-rs-fuzz-corpus/corpus/p2p_message
 # Add binary seed files, e.g. a captured wire message:
-cp some_block_message.bin fuzz/corpus/p2p_message/
+cp some_block_message.bin ../bitcoin-rs-fuzz-corpus/corpus/p2p_message/
 ```
 
-To merge new coverage finds into the corpus:
+A local `fuzz/corpus/<target>/` directory also works for ad-hoc runs — it
+is untracked and never committed. To merge new coverage finds into a local
+corpus:
 
 ```sh
 cargo +nightly fuzz run p2p_message -- -merge=1 fuzz/corpus/p2p_message
@@ -123,14 +127,20 @@ To get a full backtrace, set `RUST_BACKTRACE=1`:
 RUST_BACKTRACE=1 cargo +nightly fuzz run p2p_message -- fuzz/artifacts/p2p_message/crash-<hash>
 ```
 
-To refresh the seed corpora from rust-bitcoin/qa-assets (CC0), run from the
-repository root:
+To refresh the seed corpora from rust-bitcoin/qa-assets (CC0), clone
+bitcoin-rs-fuzz-corpus beside this checkout (or set `FUZZ_CORPUS_DIR` to
+its `corpus/` directory) and run from the repository root:
 
 ```sh
 scripts/import-qa-assets.sh
 ```
 
 The script declares and checks the clone's disk footprint, shallow-clones the
-upstream corpus repo, remaps the seeds to each harness's input framing,
-minimizes with `cargo fuzz cmin`, deletes the clone, and rewrites
+upstream corpus repo, remaps the seeds to each harness's input framing into
+the corpus checkout, minimizes with `cargo fuzz cmin` (staged through
+`fuzz/corpus/` symlinks), deletes the clone, and rewrites
 `fuzz/CORPUS_PROVENANCE.md`.
+
+`scripts/import-reference-corpora.sh` does the same for the pinned
+bitcoin/bitcoin and btcsuite/btcd test vectors and refreshes the
+`## Reference corpora` section of `fuzz/CORPUS_PROVENANCE.md`.

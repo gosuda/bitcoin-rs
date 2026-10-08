@@ -33,3 +33,7 @@ __pycache__/
 # Local formal-checker output
 /_apalache-out/
 /graph.yaml
+
+# Seed corpora live in gosuda/bitcoin-rs-fuzz-corpus; local cargo-fuzz runs
+# write here and must stay untracked.
+fuzz/corpus/

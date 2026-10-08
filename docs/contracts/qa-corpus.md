@@ -15,12 +15,19 @@ end-state evidence roles.
   imported from `rust-bitcoin/qa-assets` (CC0-1.0) and from the
   `bitcoin/bitcoin` (MIT) and `btcsuite/btcd` (ISC) reference corpora,
   minimized with `cargo fuzz cmin`).
-- **Scope**: seeds under `fuzz/corpus/` feeding fuzz targets
-  `fuzz/fuzz_targets/p2p_message.rs`, `block_validate.rs`, `tx_validate.rs`,
-  `script_eval.rs`, and `utxo_snapshot.rs`. Each upstream source has its own
-  run-dependent record section in the provenance document; the
-  `## Reference corpora` section is owned and refreshed by
+- **Scope**: seeds under `corpus/<target>/` in the companion repository
+  [`gosuda/bitcoin-rs-fuzz-corpus`](https://github.com/gosuda/bitcoin-rs-fuzz-corpus),
+  feeding fuzz targets `fuzz/fuzz_targets/p2p_message.rs`, `block_validate.rs`,
+  `tx_validate.rs`, `script_eval.rs`, and `utxo_snapshot.rs`. The corpus repo
+  is the single seed home; this repository keeps no committed `fuzz/corpus/`
+  (a local `fuzz/corpus/` overlay stays untracked for ad-hoc runs). Each
+  upstream source has its own run-dependent record section in the provenance
+  document; the `## Reference corpora` section is owned and refreshed by
   `scripts/import-reference-corpora.sh`.
+- Importers write into the corpus repo checkout pointed at by
+  `FUZZ_CORPUS_DIR` (default: a sibling checkout named
+  `bitcoin-rs-fuzz-corpus`); they refuse to run when that directory is
+  absent rather than silently republishing into this repository.
 - `scripts/fuzz-policy.sh` owns `FUZZ_MAX_SEED_BYTES`, the input-size bound
   shared by QA import and scheduled corpus evolution. Provenance publishes the
   current value; it does not own a second copy.
@@ -47,25 +54,27 @@ end-state evidence roles.
 - G6 policy and admission: the `script_eval` and `tx_validate` targets exercise
   standardness and admission edge cases in addition to consensus decoding.
 
-### `QAC-05`: Native-consensus-codec round-trip over accepted corpus seeds
+### `QAC-05`: Native-consensus-codec round-trip over corpus seeds
 
-- **Owner**: `crates/primitives/tests/differential.rs` enforces the contract;
-  `fuzz/corpus/manifest.json` pins the expected verdict for every seed in
-  `fuzz/corpus/tx_validate/` and `fuzz/corpus/block_validate/`.
-- Every listed seed has exactly one expected verdict:
+- **Owner**: `crates/primitives/tests/differential.rs` enforces the contract
+  over `tx_validate` and `block_validate` seeds read from
+  `BITCOIN_RS_FUZZ_CORPUS/<target>` (a `gosuda/bitcoin-rs-fuzz-corpus`
+  checkout) or, when the variable is unset, a local `fuzz/corpus/<target>/`
+  overlay. The gate loud-skips only when no corpus directory exists.
+- The corpus evolves in the companion repository — the scheduled campaign
+  minimizes and grows it continuously — so the gate cannot pin per-seed
+  verdicts. It pins the verdict *shape* every seed must satisfy:
   - `accepted`: the native consensus codec decodes the seed under the exact-consume
     `deserialize` entry the wire codec uses, and re-encodes it byte-identically;
-  - `rejected:<kind>`: the native codec rejects the seed with that typed error
+  - `rejected:<kind>`: the native codec rejects the seed with a typed error
     (`end_of_data`, `varint`, `invalid_segwit_flag`, `superfluous_witness`,
     `trailing_bytes`). The `superfluous_witness` family is the documented
     exception class of this contract: a BIP144 marker/flag with an all-empty
     witness section cannot re-encode byte-identically, so the codec rejects it
     before the lock time, at the same check position as Core and rust-bitcoin.
-- A seed on disk without a manifest entry, or a manifest entry without a seed,
-  fails the gate; the corpus cannot grow or decay silently past the contract.
-- `CORPUS_MANIFEST_WRITE=1 cargo test -p bitcoin-rs-primitives` regenerates the
-  manifest from observed verdicts; the regeneration is a test-local write path,
-  and the committed manifest is the verdict record for review.
+- A seed that decodes to neither verdict — an untyped error or a panic —
+  fails the gate, so a decoder change that alters verdict classification
+  surfaces here rather than drifting silently.
 
 ### `QAC-03`: Importer acquisition and provenance publication
 
@@ -112,9 +121,9 @@ nonzero-status propagation; they are not stable public status-code assignments.
   `fuzz/CORPUS_PROVENANCE.md`).
 - `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 arm;
   counts and classifies invalid corpora with fixed skip reasons.
-- `crates/primitives/tests/differential.rs`: `QAC-05` gate; enforces the
-  pinned accepted/rejected verdict manifest over `tx_validate` and
-  `block_validate` seeds, including byte-identical re-encoding of accepted seeds.
+- `crates/primitives/tests/differential.rs`: `QAC-05` gate; every
+  `tx_validate`/`block_validate` seed in the external corpus must decode to a
+  typed verdict, with byte-identical re-encoding of accepted seeds.
 - Fuzz targets executed via `cargo fuzz run <target> -- -runs=10000` (see
   [fuzz/README.md](../../fuzz/README.md)).
 

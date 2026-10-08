@@ -1,8 +1,13 @@
 # Fuzz corpus provenance
 
-Seeds under fuzz/corpus/ were imported from the sources recorded in the
-run-dependent sections below: rust-bitcoin/qa-assets (this section) and the
-upstream reference corpora (`## Reference corpora`).
+Seeds live in the companion repository
+[gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus)
+under `corpus/<target>/` — this document stays the single owner of their
+provenance (per `docs/contracts/qa-corpus.md`, `QAC-01`). They were imported
+from the sources recorded in the run-dependent sections below:
+rust-bitcoin/qa-assets (this section) and the upstream reference corpora
+(`## Reference corpora`). Importers publish into the checkout named by
+`FUZZ_CORPUS_DIR` (default: a sibling `bitcoin-rs-fuzz-corpus` clone).
 
 Seeds from [rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets),
 license [CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)

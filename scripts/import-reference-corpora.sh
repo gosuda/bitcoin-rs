@@ -53,6 +53,18 @@ if ! "${CARGO_ENV[@]}" cargo fuzz --version >/dev/null 2>&1; then
     exit 1
 fi
 
+# Seed corpora live in gosuda/bitcoin-rs-fuzz-corpus; FUZZ_CORPUS_DIR points
+# at its `corpus/` directory (default: a sibling checkout named
+# bitcoin-rs-fuzz-corpus, matching fuzz/README.md's local-campaign layout).
+OUT_BASE="${FUZZ_CORPUS_DIR:-${REPO_ROOT}/../bitcoin-rs-fuzz-corpus/corpus}"
+if [[ ! -d "${OUT_BASE}" ]]; then
+    log "ERROR: corpus directory ${OUT_BASE} is missing; clone \
+gosuda/bitcoin-rs-fuzz-corpus beside this checkout or set FUZZ_CORPUS_DIR"
+    exit 1
+fi
+OUT_BASE="$(cd "${OUT_BASE}" && pwd -P)"
+readonly OUT_BASE
+
 # --- 1. Disk discipline: declare footprint, verify free space ---------------
 available_mb() {
     local available
@@ -68,10 +80,14 @@ available_mb() {
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/reference-corpora.XXXXXX")"
 readonly WORKDIR
 PROVENANCE_TMP=""
+CORPUS_LINKS=()
 cleanup() {
     if [[ -n "${PROVENANCE_TMP}" ]]; then
         rm -f -- "${PROVENANCE_TMP}"
     fi
+    for link in "${CORPUS_LINKS[@]:-}"; do
+        rm -f -- "${link}"
+    done
     rm -rf -- "${WORKDIR:?workdir unset}"
 }
 trap cleanup EXIT
@@ -126,7 +142,6 @@ readonly BITCOIN_SIZE_MB BTCD_SIZE_MB
 log "clones at pins (${BITCOIN_SIZE_MB} / ${BTCD_SIZE_MB} MiB actual)"
 
 readonly FUZZ_DIR="${REPO_ROOT}/fuzz"
-readonly OUT_BASE="${FUZZ_DIR}/corpus"
 
 # --- 3. Transform and publish bounded seeds ---------------------------------
 # One mapper owns framing and atomic publication for all targets. Failures in
@@ -137,6 +152,19 @@ readonly OUT_BASE="${FUZZ_DIR}/corpus"
     --out-base "${OUT_BASE}" --max-seed-bytes "${FUZZ_MAX_SEED_BYTES}"
 
 # --- 4. Minimize each target corpus with cargo fuzz cmin ---------------------
+# cargo-fuzz only operates on fuzz/corpus/<target>; stage each entry as a
+# symlink into the external corpus so cmin minimizes it in place. A real
+# directory means a legacy in-repo corpus — refuse to clobber it.
+for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; do
+    existing="${FUZZ_DIR}/corpus/${target}"
+    if [[ -e "${existing}" && ! -L "${existing}" ]]; then
+        log "ERROR: ${existing} is a real directory; move its seeds into the fuzz-corpus checkout first"
+        exit 1
+    fi
+    mkdir -p "${OUT_BASE}/${target}" "${FUZZ_DIR}/corpus"
+    ln -sfn "${OUT_BASE}/${target}" "${existing}"
+    CORPUS_LINKS+=("${existing}")
+done
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_validate
