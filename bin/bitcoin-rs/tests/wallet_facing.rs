@@ -74,7 +74,10 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
 
     let genesis_hex = serialize_hex(&genesis_block(Network::Regtest));
     let genesis = client.rpc("submitblock", &json!([genesis_hex]))?;
-    if !genesis.is_null() {
+    // The node applies genesis before its RPC listener binds, so the block is
+    // usually already in the chain and submitblock answers "duplicate"; the
+    // requirement is that the chain has genesis, which either reply proves.
+    if !(genesis.is_null() || genesis == "duplicate") {
         return Err(format!("submitblock(genesis) rejected: {genesis}").into());
     }
     for _ in 0..COINBASE_MATURITY {

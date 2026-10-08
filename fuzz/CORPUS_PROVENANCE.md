@@ -1,8 +1,11 @@
 # Fuzz corpus provenance
 
-Seeds under fuzz/corpus/ were imported from
-[rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets), license
-[CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)
+Seeds under fuzz/corpus/ were imported from the sources recorded in the
+run-dependent sections below: rust-bitcoin/qa-assets (this section) and the
+upstream reference corpora (`## Reference corpora`).
+
+Seeds from [rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets),
+license [CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)
 (public domain; no attribution required, recorded here for provenance).
 
 | Field | Value |
@@ -21,15 +24,35 @@ as the corpus change (see `docs/contracts/qa-corpus.md`, clause `QAC-01`).
 
 ## Mapping
 
-| Target | Upstream corpus | Transformation |
-|---|---|---|
-| p2p_message | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload kept as-is (harness rebuilds magic/length/checksum) |
-| block_validate | fuzz_corpora/bitcoin_deserialize_block | consensus-serialized blocks; rust-bitcoin deserializes, then bitcoin-rs `verify_block_rules`. `bitcoin_arbitrary_block` is Unstructured bytes, not imported. Current seeds were the minimized `bitcoin_deserialize_block` set, moved from the retired `block_decode` target. |
-| tx_validate | fuzz_corpora/bitcoin_deserialize_transaction, fuzz_corpora/bitcoin_deserialize_witness | consensus-serialized txs/witnesses; rust-bitcoin deserializes, then bitcoin-rs consensus + mempool `is_standard_tx`. `bitcoin_arbitrary_*` Unstructured streams are not imported. Current seeds were the minimized `bitcoin_deserialize_transaction` set, moved from the retired `tx_decode` target. |
-| script_eval | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector from the harness FLAGS entry NONE); files >= 32 bytes also emit a P2TR key-path variant (selector from its TAPROOT entry) |
+| Target | Source | Upstream corpus | Transformation |
+|---|---|---|---|
+| p2p_message | qa-assets | fuzz_corpora/p2p_deserialize_raw_net_msg | 24-byte envelope stripped; header command mapped to the harness selector byte; payload kept as-is (harness rebuilds magic/length/checksum) |
+| p2p_message | btcd | wire/testdata/*.blk, wire/testdata/megatx.bin.bz2, blockchain/testdata/277647.dat.bz2 | payload prefixed with the `block`/`tx` selector byte; over-bound payloads truncated to the seed bound (the harness accepts arbitrary prefixes) |
+| block_validate | qa-assets | fuzz_corpora/bitcoin_deserialize_block | consensus-serialized blocks; rust-bitcoin deserializes, then bitcoin-rs `verify_block_rules`. `bitcoin_arbitrary_block` is Unstructured bytes, not imported. Current seeds were the minimized `bitcoin_deserialize_block` set, moved from the retired `block_decode` target. |
+| block_validate | btcd | blockchain/testdata/blk_0_to_14131.dat, blk_0_to_4.dat.bz2, blk_3A.dat.bz2, blk_4A.dat.bz2, blk_5A.dat.bz2, 277647.dat.bz2 | blk.dat records split on mainnet magic into raw blocks; the 277647 block is over the bound and counted skipped |
+| block_validate | bitcoin-core | src/test/data/blockfilters.json | `row[2]` block hex decoded to consensus bytes |
+| tx_validate | qa-assets | fuzz_corpora/bitcoin_deserialize_transaction, fuzz_corpora/bitcoin_deserialize_witness | consensus-serialized txs/witnesses; rust-bitcoin deserializes, then bitcoin-rs consensus + mempool `is_standard_tx`. `bitcoin_arbitrary_*` Unstructured streams are not imported. Current seeds were the minimized `bitcoin_deserialize_transaction` set, moved from the retired `tx_decode` target. |
+| tx_validate | bitcoin-core | src/test/data/tx_valid.json, tx_invalid.json, sighash.json, bip341_wallet_vectors.json | tx hex decoded to consensus bytes |
+| tx_validate | btcd | txscript/data/tx_valid.json, tx_invalid.json, sighash.json, many_inputs_tx.hex, taproot-ref/*.json (`tx` field) | tx hex decoded to consensus bytes; the BADTX pseudo-flag only marks rows whose tx fails CheckTransaction |
+| script_eval | qa-assets | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector from the harness FLAGS entry NONE); files >= 32 bytes also emit a P2TR key-path variant (selector from its TAPROOT entry) |
+| utxo_snapshot | btcd | blockchain/testdata/277647.utxostore.bz2 | foreign-format serialized UTXO store truncated to the seed bound; negative seed for the strict v4 snapshot decoder |
 
 Corpora were minimized with cargo fuzz cmin after import; only minimized
-seeds are tracked here. Re-run the script after major decoder changes to
-refresh.
+seeds are tracked here. Re-run the matching import script after major
+decoder changes to refresh.
 
 See also docs/contracts/qa-corpus.md for the contracts index and precedence rule.
+
+## Reference corpora
+
+Generated by scripts/import-reference-corpora.sh; refreshed on each run.
+Authored content lives above this heading.
+
+| Field | bitcoin/bitcoin | btcsuite/btcd |
+|---|---|---|
+| Upstream commit | 9dfde64cc3262329051fd05fffe40eecc786a99f | b48125d0a3565b1441522ee10422f7815db03216 |
+| Import date | 2026-10-08T00:42:51Z | 2026-10-08T00:42:51Z |
+| License | MIT | ISC |
+| Import tool | scripts/import-reference-corpora.sh + scripts/import_reference_corpora.py | (same) |
+| Size policy | rows and payloads larger than 65536 bytes are skipped or truncated and counted in the import log; witness stacks longer than the harness cap and framed elements over the u16 bound are skipped, never truncated |
+
