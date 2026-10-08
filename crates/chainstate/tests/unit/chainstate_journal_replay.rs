@@ -1,12 +1,11 @@
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, NodeStatus, TipSnapshot};
-use bitcoin_rs_primitives::{
-    Amount, BlockHash, CompactTarget, Hash256, Header, OutPoint, TxOut, Txid, consensus_bytes,
-};
+use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Header, consensus_bytes};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 
 use super::{JournalRecord, JournalReplayError, Mutation, replay_records, validate_replayed_head};
+use crate::test_fixtures::journal_coin as coin;
 use bitcoin_rs_storage::chainstate_journal::Coin;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -31,18 +30,6 @@ fn raw_header(header: &Header) -> [u8; 80] {
     let mut raw = [0_u8; 80];
     raw.copy_from_slice(&encoded);
     raw
-}
-
-fn coin(marker: u8, height: u32, value: u64) -> Coin {
-    Coin {
-        outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
-        txout: TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: vec![0x51].into(),
-        },
-        height,
-        coinbase: true,
-    }
 }
 
 fn base_state() -> TestResult<BaseState> {

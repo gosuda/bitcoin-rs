@@ -1,29 +1,9 @@
 //! Explicit `AssumeUTXO` chainstate role management and background historical validation.
 //!
-//! Under `AssumeUTXO`, a node can bootstrap instantly from a pinned UTXO snapshot.
-//! To protect consensus safety, the node manages two explicit chainstate roles
-//! behind a single coordination boundary ([`AssumeUtxoManager`]):
-//!
-//! 1. **Active assumed chainstate** ([`ChainstateRole::AssumedActive`]):
-//!    Initialized at the snapshot base (`base_height`, `base_hash`). This is the
-//!    single active authority driving P2P block sync, mempool, mining, RPC, ZMQ,
-//!    and derived indexers. Reorgs below `base_height` are strictly prohibited.
-//!
-//! 2. **Historical validated chainstate** ([`ChainstateRole::Historical`]):
-//!    Validates from genesis up to `base_height` through the normal consensus
-//!    path ([`Chainstate::connect`]). It does not publish external events,
-//!    mempool changes, or indexer updates, and stops connecting blocks past
-//!    `base_height`.
-//!
-//! 3. **Finalization & Single Authority**:
-//!    When the historical chainstate connects `base_height`, its reconstructed
-//!    UTXO commitment (`hash_serialized_3`) is compared against the pinned commitment.
-//!    - On match: the active chainstate transitions to [`ChainstateRole::Ordinary`],
-//!      the historical chainstate is retired, and the node converges to a single
-//!      ordinary chainstate.
-//!    - On mismatch: the node fails closed immediately, permanently closing
-//!      mutation admission and recording the failure on disk so future restarts
-//!      also fail closed.
+//! [`AssumeUtxoManager`] coordinates an active state rooted at a pinned snapshot
+//! and an isolated historical state validating through [`crate::ChainTransition::connect`].
+//! Role restrictions are defined by [`ChainstateRole`]; commitment/count checks,
+//! finalization, and durable fail-closed behavior by [`AssumeUtxoManager::step_historical`].
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,31 +38,24 @@ mod serde_hash256 {
 
 mod serde_opt_hash256 {
     use bitcoin_rs_primitives::Hash256;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[expect(clippy::ref_option)]
     pub(super) fn serialize<S>(hash: &Option<Hash256>, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        match hash {
-            Some(h) => serializer.serialize_some(&h.to_string()),
-            None => serializer.serialize_none(),
-        }
+        hash.as_ref().map(ToString::to_string).serialize(serializer)
     }
 
     pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Option<Hash256>, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let opt = Option::<String>::deserialize(deserializer)?;
-        match opt {
-            Some(s) => s
-                .parse::<Hash256>()
-                .map(Some)
-                .map_err(serde::de::Error::custom),
-            None => Ok(None),
-        }
+        Option::<String>::deserialize(deserializer)?
+            .map(|s| s.parse::<Hash256>())
+            .transpose()
+            .map_err(serde::de::Error::custom)
     }
 }
 
