@@ -266,6 +266,7 @@ fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyho
         historical_height: 0,
         historical_hash: Network::Regtest.genesis_block_hash(),
         pending: None,
+        checkpoint: None,
     };
     let head_store = state.durable_head();
     let prior = head_store.load()?;

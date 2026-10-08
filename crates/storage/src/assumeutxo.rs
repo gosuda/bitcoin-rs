@@ -14,6 +14,22 @@ pub struct PendingHistoricalBlock {
     pub position: Option<crate::BlockFilePosition>,
 }
 
+/// The latest complete historical checkpoint accepted by the durable head.
+///
+/// The checkpoint files are recovery artifacts.  The durable head remains the
+/// authority for whether this generation may be used and how far historical
+/// validation has durably progressed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HistoricalCheckpointRef {
+    /// Published checkpoint generation in the historical namespace.
+    pub generation: u64,
+    /// Historical applied height represented by the checkpoint.
+    pub height: u32,
+    /// Historical applied block hash represented by the checkpoint.
+    #[serde(with = "serde_hash256")]
+    pub hash: Hash256,
+}
+
 mod serde_hash256 {
     use bitcoin_rs_primitives::Hash256;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -60,6 +76,8 @@ pub enum AssumeUtxoDiskStatus {
         historical_hash: Hash256,
         /// Unfinished validation must complete during startup before serving.
         pending: Option<PendingHistoricalBlock>,
+        /// Latest complete historical checkpoint accepted by the durable head.
+        checkpoint: Option<HistoricalCheckpointRef>,
     },
     /// Background historical validation succeeded and matched the pinned commitment.
     /// Chainstate roles have converged to `Ordinary`.
@@ -90,7 +108,8 @@ pub enum AssumeUtxoDiskStatus {
 }
 
 impl AssumeUtxoDiskStatus {
-    pub(crate) const ENCODED_LEN: usize = 166;
+    const CHECKPOINT_ENCODED_LEN: usize = 45;
+    pub(crate) const ENCODED_LEN: usize = 166 + Self::CHECKPOINT_ENCODED_LEN;
 
     pub(crate) fn encode(self) -> [u8; Self::ENCODED_LEN] {
         let mut out = [0; Self::ENCODED_LEN];
@@ -104,6 +123,7 @@ impl AssumeUtxoDiskStatus {
                 historical_height,
                 historical_hash,
                 pending,
+                checkpoint,
             } => {
                 out[0] = 1;
                 out[1..5].copy_from_slice(&base_height.to_be_bytes());
@@ -119,6 +139,12 @@ impl AssumeUtxoDiskStatus {
                     if let Some(position) = pending.position {
                         out[150..166].copy_from_slice(&position.encode());
                     }
+                }
+                if let Some(checkpoint) = checkpoint {
+                    out[166] = 1;
+                    out[167..175].copy_from_slice(&checkpoint.generation.to_be_bytes());
+                    out[175..179].copy_from_slice(&checkpoint.height.to_be_bytes());
+                    out[179..211].copy_from_slice(checkpoint.hash.as_byte_array());
                 }
             }
             Self::Finalized {
@@ -174,6 +200,15 @@ impl AssumeUtxoDiskStatus {
                         } else {
                             None
                         },
+                    }),
+                    _ => return None,
+                },
+                checkpoint: match bytes[166] {
+                    0 => None,
+                    1 => Some(HistoricalCheckpointRef {
+                        generation: u64::from_be_bytes(bytes[167..175].try_into().ok()?),
+                        height: u32::from_be_bytes(bytes[175..179].try_into().ok()?),
+                        hash: Hash256::from_le_bytes(&bytes[179..211].try_into().ok()?),
                     }),
                     _ => return None,
                 },

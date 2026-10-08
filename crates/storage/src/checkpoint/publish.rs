@@ -16,8 +16,8 @@ use super::io::rename_generation;
 use super::io::{rename_current, sync_checkpoint_dir, sync_file, sync_root, write_file};
 use super::load::read_current;
 use super::{
-    CHECKPOINT_ROOT, CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointManifestV1,
-    CurrentV1, GenerationPaths, HashingWriter, MANIFEST_FILE,
+    CURRENT_FORMAT, CURRENT_VERSION, CheckpointError, CheckpointManifestV1, CurrentV1,
+    GenerationPaths, HashingWriter, MANIFEST_FILE,
 };
 use cap_std::fs::Dir;
 use sha2::{Digest, Sha256};
@@ -104,8 +104,17 @@ impl CheckpointStage {
 }
 /// Reserves a new generation directory and opens its staging transaction.
 pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointError> {
+    begin_publication_at(data_dir, super::CHECKPOINT_ROOT)
+}
+
+/// Reserves a generation in an explicit checkpoint namespace.
+pub fn begin_publication_at(
+    data_dir: &Dir,
+    root_name: &str,
+) -> Result<CheckpointStage, CheckpointError> {
     begin_publication_inner(
         data_dir,
+        root_name,
         #[cfg(any(test, feature = "test-seam"))]
         None,
     )
@@ -117,14 +126,26 @@ pub fn begin_publication_with_failpoint(
     data_dir: &Dir,
     failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointStage, CheckpointError> {
-    begin_publication_inner(data_dir, failpoint)
+    begin_publication_at_with_failpoint(data_dir, super::CHECKPOINT_ROOT, failpoint)
+}
+
+/// Reserves a generation in an explicit checkpoint namespace with a test-only
+/// failure boundary armed.
+#[cfg(any(test, feature = "test-seam"))]
+pub fn begin_publication_at_with_failpoint(
+    data_dir: &Dir,
+    root_name: &str,
+    failpoint: Option<CheckpointFailpoint>,
+) -> Result<CheckpointStage, CheckpointError> {
+    begin_publication_inner(data_dir, root_name, failpoint)
 }
 
 fn begin_publication_inner(
     data_dir: &Dir,
+    root_name: &str,
     #[cfg(any(test, feature = "test-seam"))] failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointStage, CheckpointError> {
-    let root = CheckpointRoot::open_or_create(data_dir, CHECKPOINT_ROOT)?;
+    let root = CheckpointRoot::open_or_create(data_dir, root_name)?;
     let current_generation = match read_current(&root)? {
         Some(current) => current.generation,
         None => 0,

@@ -14,6 +14,10 @@ pub use fs::{
     CURRENT_SCHEMA_FILE, create_file, current_schema_bytes, ensure_current_schema, open_data_dir,
     read_file, sync_dir,
 };
+pub use load::open_current_checkpoint_at;
+pub use publish::begin_publication_at;
+#[cfg(any(test, feature = "test-seam"))]
+pub use publish::begin_publication_at_with_failpoint;
 
 use cap_std::fs::File;
 use serde::{Deserialize, Serialize};
@@ -23,6 +27,8 @@ use thiserror::Error;
 
 /// Root directory containing checkpoint generations.
 pub const CHECKPOINT_ROOT: &str = "chainstate-checkpoints";
+/// Root containing checkpoints for the background `AssumeUTXO` chainstate.
+pub const HISTORICAL_CHECKPOINT_ROOT: &str = "assumeutxo-historical-checkpoints";
 /// Published pointer file for the active checkpoint generation.
 pub const CURRENT_FILE: &str = "CURRENT";
 /// Manifest filename inside each checkpoint generation.

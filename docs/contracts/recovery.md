@@ -6,10 +6,16 @@ the single durable authority. `crates/chainstate` owns the ordered commit
 protocol over the storage durable head. That head certifies ordering and
 high-water bounds, not coin contents. If startup restores no chainstate while
 a durable head still exists, `reconcile_at_boot` replays the head chain
-from genesis out of the durable bodies it certifies — coins are durable
-only through the checkpoint export, so the head is the only surviving
-authority — and a missing or mismatched body fails closed. Every
+from the newest accepted checkpoint out of the durable bodies it certifies
+(or from genesis when no checkpoint is accepted). Coins are recovery artifacts
+and the durable head remains the only surviving authority; a missing or
+mismatched body fails closed. Every
 other persisted component is derived and reconciles to it.
+
+For an AssumeUTXO historical role, the durable head may name a complete
+historical checkpoint in the isolated `assumeutxo-historical-checkpoints`
+namespace. Startup restores that checkpoint before replaying any remaining
+certified historical suffix; an unreferenced generation is ignored.
 
 Owners:
 - Authoritative durable root and ordered commit protocol:
@@ -34,7 +40,8 @@ Owners:
 The authoritative durable root is:
 
 ```text
-R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs)
+R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs,
+     historical_checkpoint)
 ```
 
 - `tip` is the 32-byte block hash of the applied tip.
@@ -50,6 +57,8 @@ R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs
 - `refs` is the authoritative map from `(height, block_hash, Body|Undo)` to
   the durable byte range in the corresponding segment file. Undo and body
   references include the block hash, not only the height.
+- `historical_checkpoint` is an optional durable-head reference to a complete
+  historical checkpoint generation, including its generation, height, and hash.
 
 `DurableHead` is the persisted form, landed in
 `crates/storage/src/durable_head.rs` as one versioned, CRC32C-framed row in
@@ -82,9 +91,9 @@ is derived from this batch and may lag it, never lead it. `commit_id` is
 strictly monotonic on disconnect as well as on connect: a reorg lowers
 `height`, never `commit_id`.
 
-AssumeUTXO activation and historical archive updates use this same root and
-transition reservation. Activation first syncs immutable `coins.dat` and
-`headers.dat` under `assumeutxo/<base_hash>/`, then commits the pinned base,
+AssumeUTXO activation and historical archive updates use the same transition
+reservation but separate recovery namespaces. Activation first syncs immutable
+`coins.dat` and `headers.dat` under `assumeutxo/<base_hash>/`, then commits the pinned base,
 count, and lifecycle in the head. An unreferenced import is an orphan, not a
 checkpoint or activation authority. Historical updates advance `commit_id`
 without changing the active tip. Each new candidate body is synced and referenced
@@ -93,16 +102,22 @@ only with the validated undo/progress batch. An unresolved pending check is
 reconstructed and completed during startup, before service admission, even if
 the preceding process could not persist its terminal failure. This applies below
 the base as well: discarding an intermediate intent could forget a consensus
-failure whose `Failed` receipt was lost. Reconstruction can delay startup by the
-full historical prefix; this initial implementation makes no bounded restart-time
-guarantee. Already archived blocks replay without another pending/archive write.
+failure whose `Failed` receipt was lost. When the durable head names a historical
+checkpoint, startup restores its UTXO, CoinStats, and applied tip, then replays
+only the validated archive suffix. Checkpoint publication and its durable-head
+reference are ordered so an unreferenced generation is ignored after a crash.
+A missing or corrupt named checkpoint fails closed rather than attaching an
+unverified height to empty coins. Without an accepted checkpoint, reconstruction
+can still delay startup by the full historical prefix. Already archived blocks
+replay without another pending/archive write.
 
 Snapshot recovery validates the root's network pin, restores a compatible
-checkpoint or verifies the immutable snapshot archive, and replays the
-root-certified foreground suffix. A full-revalidation marker still overrides
-incremental recovery. The pre-activation journal cannot extend a snapshot jump
-and is detached. Historical coins are reconstructed from genesis using retained
-bodies; durable archive progress never pretends to be a recovered coin set.
+ checkpoint or verifies the immutable snapshot archive, and replays the
+ root-certified foreground suffix. A full-revalidation marker still overrides
+ incremental recovery. The pre-activation journal cannot extend a snapshot jump
+ and is detached. Historical coins are restored from the head-accepted
+ checkpoint and retained bodies supply only the remaining suffix; durable archive
+ progress never pretends to be a recovered coin set.
 Finalized history supplies ordinary undo/reorg behavior. A disconnect below
 the base clears the snapshot anchor in its head batch. These bytes use datadir
 schema epoch 1; older datadirs are refused without conversion.

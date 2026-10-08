@@ -34,18 +34,14 @@ pub(crate) use bitcoin_rs_storage::checkpoint::UTXO_CODEC;
 pub(crate) use bitcoin_rs_storage::checkpoint::UTXO_FILE;
 pub(crate) use bitcoin_rs_storage::checkpoint::UTXO_VERSION;
 pub(crate) use bitcoin_rs_storage::checkpoint::UtxoArtifactV1;
-#[cfg(not(any(test, feature = "test-seam")))]
-use bitcoin_rs_storage::checkpoint::begin_publication;
-#[cfg(any(test, feature = "test-seam"))]
-use bitcoin_rs_storage::checkpoint::begin_publication_with_failpoint;
 pub(crate) use bitcoin_rs_storage::checkpoint::classify_checkpoint_io;
 pub(crate) use bitcoin_rs_storage::checkpoint::corrupt_checkpoint;
 use bitcoin_rs_storage::checkpoint::decode_hex;
 pub(crate) use bitcoin_rs_storage::checkpoint::hex_encode;
+use bitcoin_rs_storage::checkpoint::network_name;
 #[cfg(test)]
 use bitcoin_rs_storage::checkpoint::open_data_dir;
 use bitcoin_rs_storage::checkpoint::{coinstats_artifact_payload, commit_publication};
-use bitcoin_rs_storage::checkpoint::{network_name, open_current_checkpoint};
 use bitcoin_rs_storage::checkpoint::{read_manifest, require_filename, verify_artifact};
 use bitcoin_rs_utxo::stats::coin_stats::COIN_STATS_ENCODED_LEN;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsAccumulator, CoinStatsListener};
@@ -145,7 +141,19 @@ pub(crate) fn load_checkpoint_from_dir(
     data_dir: &Dir,
     config: headers::HeaderCheckpointConfig,
 ) -> Result<CheckpointLoad, CheckpointLoadError> {
-    let opened = open_current_checkpoint(data_dir)?;
+    load_checkpoint_from_dir_at(
+        data_dir,
+        config,
+        bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
+    )
+}
+
+pub(crate) fn load_checkpoint_from_dir_at(
+    data_dir: &Dir,
+    config: headers::HeaderCheckpointConfig,
+    root_name: &str,
+) -> Result<CheckpointLoad, CheckpointLoadError> {
+    let opened = bitcoin_rs_storage::checkpoint::open_current_checkpoint_at(data_dir, root_name)?;
     let CheckpointOpen::Current {
         generation_dir,
         current,
@@ -478,7 +486,6 @@ fn checkpoint_best_tip_id(
     }
     Ok(applied_id)
 }
-#[expect(clippy::too_many_lines)]
 pub(crate) fn write_checkpoint_from_dir(
     data_dir: &Dir,
     config: headers::HeaderCheckpointConfig,
@@ -486,6 +493,30 @@ pub(crate) fn write_checkpoint_from_dir(
     utxo: &UtxoSet,
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
+) -> Result<CheckpointWrite, CheckpointError> {
+    write_checkpoint_from_dir_at(
+        data_dir,
+        config,
+        block_tree,
+        utxo,
+        coin_stats,
+        applied_tip,
+        bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
+    )
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep checkpoint artifact ordering and manifest construction together"
+)]
+pub(crate) fn write_checkpoint_from_dir_at(
+    data_dir: &Dir,
+    config: headers::HeaderCheckpointConfig,
+    block_tree: &RwLock<BlockTree>,
+    utxo: &UtxoSet,
+    coin_stats: &CoinStatsListener,
+    applied_tip: Option<&TipSnapshot>,
+    root_name: &str,
 ) -> Result<CheckpointWrite, CheckpointError> {
     let Some(applied_tip) = applied_tip else {
         return Ok(CheckpointWrite::SkippedNoAppliedTip);
@@ -511,13 +542,15 @@ pub(crate) fn write_checkpoint_from_dir(
         }};
     }
     #[cfg(any(test, feature = "test-seam"))]
-    let stage = begin_publication_with_failpoint(
+    let stage = bitcoin_rs_storage::checkpoint::begin_publication_at_with_failpoint(
         data_dir,
+        root_name,
         NEXT_CHECKPOINT_FAILPOINT.with(std::cell::Cell::take),
     )
     .map_err(CheckpointError::Store)?;
     #[cfg(not(any(test, feature = "test-seam")))]
-    let stage = begin_publication(data_dir).map_err(CheckpointError::Store)?;
+    let stage = bitcoin_rs_storage::checkpoint::begin_publication_at(data_dir, root_name)
+        .map_err(CheckpointError::Store)?;
     let (headers_meta, headers_digest) = {
         let tree = block_tree.read();
         let (meta, digest) =

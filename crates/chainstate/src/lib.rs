@@ -18,6 +18,7 @@ pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_utxo::contract::{SpentOutputLookup, is_coinbase_tx};
+use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{UtxoCoin, UtxoSet};
 use connect::{apply_block_admitted, apply_committed_block_admitted};
 use disconnect::disconnect_block_admitted;
@@ -41,7 +42,7 @@ pub use window::classify_apply_error;
 pub mod assumeutxo;
 pub use assumeutxo::{
     ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager,
-    ChainstateRole, ChainstatesSummary, HistoricalChainstateSummary,
+    ChainstateRole, ChainstatesSummary, HistoricalChainstateSummary, HistoricalCheckpointRef,
 };
 
 mod checkpoint;
@@ -702,23 +703,65 @@ impl Chainstate {
     /// Constructs an isolated historical chainstate from this chainstate.
     /// The historical chainstate has an independent UTXO set, detached events,
     /// separate transient undo/head stores, no body writer or active journal,
-    /// and no external follower side-effects. Reopening replays from genesis.
-    #[must_use]
+    /// and no external follower side-effects. Reopening restores a published
+    /// historical checkpoint when the durable head names one.
     fn create_historical_counterpart(
         &self,
         base_height: u32,
         base_hash: Hash256,
         undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
-    ) -> Arc<Self> {
-        let mut historical_utxo = bitcoin_rs_utxo::UtxoSet::new();
-        let historical_coin_stats = Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::new(),
-        ));
+    ) -> Result<Arc<Self>, crate::AssumeUtxoError> {
+        self.create_historical_counterpart_with_state(base_height, base_hash, undo, None)
+    }
+
+    /// Constructs an isolated historical chainstate from a validated
+    /// checkpoint state.  The active header tree remains the single header
+    /// authority; only the historical UTXO, statistics, and applied tip are
+    /// restored from the checkpoint artifacts.
+    fn create_historical_counterpart_with_state(
+        &self,
+        base_height: u32,
+        base_hash: Hash256,
+        undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
+        restored: Option<(UtxoSet, CoinStats, TipSnapshot)>,
+    ) -> Result<Arc<Self>, crate::AssumeUtxoError> {
+        let restored_tip = restored.as_ref().map(|(_, _, tip)| tip.clone());
+        let (mut historical_utxo, historical_stats) = restored.map_or_else(
+            || {
+                (
+                    bitcoin_rs_utxo::UtxoSet::new(),
+                    bitcoin_rs_utxo::stats::CoinStats::new(),
+                )
+            },
+            |(utxo, stats, _)| (utxo, stats),
+        );
+        let historical_coin_stats = Arc::new(CoinStatsListener::new(historical_stats));
         historical_utxo.track_coin_stats((*historical_coin_stats).clone());
 
         let transition = bitcoin_rs_chain::TransitionDomain::new();
         let shutdown = Arc::new(AtomicBool::new(false));
         let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
+        if let Some(restored_tip) = restored_tip.clone() {
+            applied_tip.store(Some(Arc::new(restored_tip)));
+        }
+        let historical_head = Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new());
+        if let Some(restored_tip) = restored_tip {
+            let head = bitcoin_rs_storage::DurableHead {
+                assumeutxo: crate::AssumeUtxoDiskStatus::Uninitialized,
+                commit_id: 0,
+                height: restored_tip.height,
+                tip: restored_tip.hash,
+                chain_tx_count: restored_tip.chain_tx_count.to_wire(),
+                body_extent: None,
+                undo_extent: None,
+            };
+            bitcoin_rs_storage::DurableHeadStore::commit(
+                &*historical_head,
+                None,
+                &head,
+                &bitcoin_rs_storage::CommitRecords::default(),
+            )?;
+        }
         let chain_tip = Arc::new(arc_swap::ArcSwapOption::empty());
 
         let parts = ChainstateParts {
@@ -733,7 +776,7 @@ impl Chainstate {
             )),
             block_body_store: None,
             undo_store: undo,
-            durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
+            durable_head: historical_head,
             shutdown,
             chain_transition: transition.authority(),
             assume_valid_height: 0,
@@ -748,7 +791,7 @@ impl Chainstate {
                 base_hash,
             },
         };
-        Arc::new(Self::from_parts(parts))
+        Ok(Arc::new(Self::from_parts(parts)))
     }
 
     /// Permanently closes chain mutation and asks the process to shut down.

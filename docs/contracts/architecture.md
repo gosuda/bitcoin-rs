@@ -364,8 +364,8 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   1. `Ordinary`: standard fully validated chainstate.
   2. `AssumedActive`: snapshot-loaded chainstate actively driving the node tip,
      retaining its snapshot base height and block hash.
-  3. `Historical`: background chainstate validating from genesis up to the snapshot
-     base height.
+  3. `Historical`: background chainstate validating from genesis or an accepted
+     historical checkpoint up to the snapshot base height.
 - **Single active authority invariant**:
   At all times, exactly one chainstate acts as the authoritative active chainstate
   (`Ordinary` or `AssumedActive`). Only the active chainstate drives mempool admission,
@@ -395,14 +395,17 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   - If invalid, the manager persists `AssumeUtxoDiskStatus::Failed`, marks the active
     chainstate permanently closed for recovery (`Chainstate::fail_closed_for_recovery`), and
     refuses subsequent restarts to protect operator data.
-  Historical replay uses its own transient coins, durable-head and undo stores,
+  Historical replay uses its own isolated coins, transient durable-head and undo stores,
   no body writer, and detached events. The manager archives validated body locators
   and undo records together with lifecycle progress in the active durable-head batch.
   These batches advance `commit_id` while preserving the active tip and transaction
   count. They publish no active-chain notification. Transient undo is released after
   the archive receipt, so it does not accumulate through the entire history.
-  Reopening reconstructs historical coins from genesis; persisted archive progress
-  is not a live coin-set cursor. The summary exposes live progress separately.
+  Historical progress checkpoints reuse the chainstate checkpoint format in a
+  separate namespace. The durable head records the accepted generation, height,
+  and hash; startup restores that checkpoint and replays only its certified
+  archive suffix. Without an accepted checkpoint, startup safely falls back to
+  genesis replay. The summary exposes live progress separately.
   Replaying a block already covered by an archive receipt does not rewrite its
   body or progress. Before checking a new body, the manager syncs its staged bytes and commits a
   pending-validation reference in the same root. If a crash or terminal-status
@@ -424,7 +427,9 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   after draining deliveries. Replay retires overtaken downloads; completion clears
   transient staging. Only validation publishes body locators and lifecycle progress.
   Foreground and historical deliveries have separate owners. Mainnet throughput and
-  restart-latency guarantees remain unproven follow-ups to #1288.
+  absolute restart-latency guarantees remain unproven follow-ups to #1288; the
+  restart contract is bounded by the historical checkpoint interval once an
+  accepted checkpoint exists.
 - **Reorg and pruning constraints**:
   - Reorgs on the `AssumedActive` chainstate cannot disconnect blocks at or below the
     snapshot base height (`ApplyError::DisconnectBelowSnapshotBase`).

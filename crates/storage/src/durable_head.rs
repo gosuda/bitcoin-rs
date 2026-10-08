@@ -30,7 +30,7 @@ pub const DURABLE_HEAD_KEY: &[u8] = b"node:durable-head";
 /// Owner-local to this row. A bump is a breaking change for every datadir
 /// that ever wrote the row, so decode treats an unknown version as corruption
 /// and refuses, rather than guessing around it.
-pub const DURABLE_HEAD_FORMAT_VERSION: u8 = 2;
+pub const DURABLE_HEAD_FORMAT_VERSION: u8 = 3;
 
 /// Magic prefix of the durable-head row bytes.
 const DURABLE_HEAD_MAGIC: [u8; 4] = *b"BRSD";
@@ -420,6 +420,11 @@ mod tests {
                         offset: 128,
                         len: 500,
                     }),
+                }),
+                checkpoint: Some(crate::assumeutxo::HistoricalCheckpointRef {
+                    generation: 9,
+                    height: 40,
+                    hash: base_hash,
                 }),
             },
             AssumeUtxoDiskStatus::Finalized {

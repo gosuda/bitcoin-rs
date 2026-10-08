@@ -239,7 +239,15 @@ pub enum CheckpointOpen {
 }
 /// Opens and validates the checkpoint named by the data directory's CURRENT.
 pub fn open_current_checkpoint(data_dir: &Dir) -> Result<CheckpointOpen, CheckpointLoadError> {
-    let root = match CheckpointRoot::open_existing(data_dir, super::CHECKPOINT_ROOT) {
+    open_current_checkpoint_at(data_dir, super::CHECKPOINT_ROOT)
+}
+
+/// Opens the published checkpoint in an explicit namespace.
+pub fn open_current_checkpoint_at(
+    data_dir: &Dir,
+    root_name: &str,
+) -> Result<CheckpointOpen, CheckpointLoadError> {
+    let root = match CheckpointRoot::open_existing(data_dir, root_name) {
         Ok(Some(root)) => root,
         Ok(None) => return Ok(CheckpointOpen::Cold),
         // Opening the checkpoint root failed before CURRENT could be read.

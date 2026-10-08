@@ -218,6 +218,80 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
 }
 
 #[test]
+fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let active = open_persistent(dir.path(), &fixture.pinned)?;
+    active.admit_headers(
+        &fixture
+            .blocks
+            .iter()
+            .map(|block| block.header)
+            .collect::<Vec<_>>(),
+    )?;
+    let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
+        Network::Regtest,
+        active.clone(),
+        Some(dir.path().to_path_buf()),
+        1,
+    )?;
+    manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
+    manager.step_historical(&fixture.blocks[0], None)?;
+    manager.step_historical(&fixture.blocks[1], None)?;
+    let status = manager.status()?;
+    let checkpoint = match status {
+        AssumeUtxoDiskStatus::Validating {
+            checkpoint: Some(checkpoint),
+            historical_height,
+            historical_hash,
+            ..
+        } => {
+            assert_eq!(historical_height, 1);
+            assert_eq!(historical_hash, fixture.blocks[1].block_hash().0);
+            checkpoint
+        }
+        other => return Err(format!("unexpected status after checkpoint: {other:?}").into()),
+    };
+    assert_eq!(checkpoint.height, 1);
+    assert_eq!(checkpoint.hash, fixture.blocks[1].block_hash().0);
+    assert!(
+        dir.path()
+            .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
+            .join("CURRENT")
+            .exists()
+    );
+    drop(manager);
+    drop(active);
+
+    let active = open_persistent(dir.path(), &fixture.pinned)?;
+    let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
+        Network::Regtest,
+        active,
+        Some(dir.path().to_path_buf()),
+        1,
+    )?;
+    let historical = manager
+        .historical_chainstate()
+        .ok_or("missing restored historical chainstate")?;
+    let restored_tip = historical
+        .applied_tip_snapshot()
+        .ok_or("missing historical checkpoint tip")?;
+    assert_eq!(restored_tip.height, 1);
+    assert_eq!(restored_tip.hash, fixture.blocks[1].block_hash().0);
+    assert_eq!(restored_tip.chain_tx_count.to_wire(), 2);
+    assert_eq!(historical.coin_stats.snapshot().tx_count, 2);
+
+    // The checkpoint restored blocks 0..1.  Only the remaining archived suffix
+    // is replayed before the historical role reaches the pinned base.
+    manager.step_historical(&fixture.blocks[2], None)?;
+    assert!(matches!(
+        manager.status()?,
+        AssumeUtxoDiskStatus::Finalized { .. }
+    ));
+    Ok(())
+}
+
+#[test]
 fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
