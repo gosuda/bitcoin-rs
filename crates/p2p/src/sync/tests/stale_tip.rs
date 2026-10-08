@@ -22,17 +22,12 @@ const GENESIS_HASH: Hash256 = Hash256::from_le_bytes(&[7u8; 32]);
 /// A second stand-in tip hash at the same height as [`GENESIS_HASH`].
 const REPLACEMENT_HASH: Hash256 = Hash256::from_le_bytes(&[9u8; 32]);
 
-/// The armed allowance must let the connection manager dial past the slot
-/// cap, or the stale-tip rule buys nothing: Core's `ThreadOpenConnections`
-/// opens one more full-relay peer while `GetTryNewOutboundPeer()` is set
-/// (`net.cpp:2786-2806`), on top of the full and block-relay populations.
 #[test]
 #[expect(
     clippy::expect_used,
     reason = "a test that cannot wire its fake peers has nothing to report"
 )]
 fn the_stale_tip_allowance_dials_past_the_slot_cap() {
-    // A scheduler whose tip has stood still for three target spacings.
     let t0 = Instant::now();
     let mut tree = BlockTree::new();
     let chain_tip = tree.tip_handle();
@@ -64,8 +59,6 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
         "premise: the stale tip armed the extra dial"
     );
 
-    // A service with one full-relay and one block-relay slot, so the cap is
-    // two and the third dial only forms on the allowance.
     let service = P2pService::new(
         P2pServiceConfig {
             listen_addrs: Vec::new(),
@@ -88,8 +81,6 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
         )
         .expect("the service starts");
 
-    // Three automatic addresses: two fill the slots, and the third may only
-    // dial because the stale tip raises the cap by one.
     let listeners: Vec<TcpListener> = (0..3)
         .map(|_| {
             let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
@@ -113,8 +104,6 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
         loop {
             match listener.accept() {
                 Ok((stream, _peer)) => {
-                    // The stream stays alive: the connection thread then sits
-                    // in its one-minute handshake, holding its slot.
                     held.push(stream);
                     break;
                 }
@@ -135,16 +124,12 @@ fn the_stale_tip_allowance_dials_past_the_slot_cap() {
         "all three dials arrived and hold their slots"
     );
 
-    // Closing the sockets lets each connection thread see EOF and exit, so
-    // the drain worker's final join cannot hang.
     drop(held);
     drop(listeners);
     service.shutdown();
     service.join().expect("clean join");
 }
 
-/// A tip that stands still for three target spacings buys one extra dial, and
-/// the next advance takes the allowance back at once.
 #[test]
 fn still_tip_buys_one_extra_dial_and_an_advance_withdraws_it() {
     let t0 = Instant::now();
@@ -175,10 +160,6 @@ fn still_tip_buys_one_extra_dial_and_an_advance_withdraws_it() {
     );
 }
 
-/// A tip that changes identity without gaining height — a same-height
-/// replacement or a reorg to a lower tip — is progress: the staleness clock
-/// restarts on the new tip and an armed extra-dial allowance is withdrawn at
-/// once, instead of surviving on a height high-water mark.
 #[test]
 fn a_same_height_tip_change_restarts_the_staleness_clock() {
     let t0 = Instant::now();
@@ -191,8 +172,6 @@ fn a_same_height_tip_change_restarts_the_staleness_clock() {
         "premise: the stood-still tip armed the extra dial"
     );
 
-    // A different tip at the same height is a new observation, not an
-    // advance past the old high-water mark.
     state.follow(
         100,
         REPLACEMENT_HASH,
@@ -217,8 +196,6 @@ fn a_same_height_tip_change_restarts_the_staleness_clock() {
         "the next check finds the new tip only 28 minutes old, inside the bound"
     );
 
-    // A reorg to a lower tip is likewise a change, and the lower tip is
-    // judged on its own clock.
     state.follow(99, GENESIS_HASH, 0, SPACING, t0 + Duration::from_mins(71));
     assert!(
         !state.extra_dial_allowed,
@@ -236,17 +213,12 @@ fn a_same_height_tip_change_restarts_the_staleness_clock() {
     );
 }
 
-/// The staleness question is asked once per `STALE_CHECK_INTERVAL`, so a tip
-/// crossing the three-interval bound between two checks is not judged until the
-/// next one is due.
 #[test]
 fn the_staleness_question_is_paced() {
     let t0 = Instant::now();
     let mut state = StaleTipState::default();
     state.follow(100, GENESIS_HASH, 0, SPACING, t0);
 
-    // Twenty-five minutes: the question is asked and answered "not yet", and
-    // the next answer is not due until ten minutes later.
     state.follow(100, GENESIS_HASH, 0, SPACING, t0 + Duration::from_mins(25));
     assert!(!state.extra_dial_allowed, "inside the bound");
     state.follow(100, GENESIS_HASH, 0, SPACING, t0 + Duration::from_mins(31));
@@ -261,8 +233,6 @@ fn the_staleness_question_is_paced() {
     );
 }
 
-/// Three target spacings of silence is the bound, and nothing in flight is the
-/// other half of it.
 #[test]
 fn in_flight_bodies_hold_staleness_off() {
     let t0 = Instant::now();

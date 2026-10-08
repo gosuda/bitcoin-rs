@@ -700,9 +700,6 @@ mod tests {
         assert_eq!(stager.received_len(), 0);
     }
 
-    /// A gate-pending entry dropped by expiry must return its quota slot:
-    /// the count would otherwise climb until every unresolved body is
-    /// refused while staging sits empty.
     #[test]
     fn prune_expired_releases_gate_pending_count() {
         let block = Network::Regtest.genesis_block();
@@ -966,8 +963,6 @@ mod tests {
     #[test]
     fn full_window_of_estimate_sized_blocks_stages_without_eviction() {
         let budget = default_sync_budget(Network::Regtest);
-        // Budget-pair consistency (R9): the staging byte budget admits a full
-        // download window of blocks at the high-height per-slot estimate.
         assert_eq!(
             budget.max_received_bytes,
             budget
@@ -1030,8 +1025,6 @@ mod tests {
         );
         assert_eq!(stager.received_bytes(), budget.max_received_bytes);
 
-        // Exhausted: every further non-expected block is refused outright —
-        // backpressure, never evict/re-download churn of staged progress.
         for byte in [0x03_u8, 0x04] {
             let incoming = Hash256::from_le_bytes(&[byte; 32]);
             match stager.insert(
@@ -1047,7 +1040,6 @@ mod tests {
                 }
                 other => panic!("exhausted stager should refuse incoming block: {other:?}"),
             }
-            // Non-churn pin: zero staged blocks evicted while exhausted.
             assert_eq!(stager.received_len(), 2);
             assert!(stager.contains(&expected));
             assert!(stager.contains(&successor));
@@ -1086,9 +1078,6 @@ mod tests {
         );
         assert_eq!(stager.received_bytes(), budget.max_received_bytes);
 
-        // The next expected block must stage even at byte exhaustion (bounded
-        // overshoot) — refusing it would deadlock the apply frontier behind
-        // the staged successors that hold the budget.
         match stager.insert(expected, Some(expected), block, serialized, None, now) {
             super::StagedBlock::Memory { dropped, .. } => {
                 assert!(
@@ -1139,9 +1128,6 @@ mod tests {
         assert_eq!(dropped[0], first);
         assert!(stager.contains(&second));
     }
-
-    // Architecture Contract (`docs/contracts/architecture.md`): the staging
-    // budget evicts a same-height fork before the expected hash.
 
     #[test]
     fn insert_evicts_same_height_fork_before_expected_hash() {

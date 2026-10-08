@@ -20,10 +20,6 @@ mod policy;
 
 pub use policy::*;
 
-// ---------------------------------------------------------------------------
-// Download window (stall, peer-inflight, cold-front, prefix-probe policy)
-// ---------------------------------------------------------------------------
-
 #[derive(Clone, Copy, Debug)]
 #[expect(missing_docs)]
 pub struct SyncBudget {
@@ -174,8 +170,7 @@ struct PendingTimeoutObservation {
 
 /// A running window-blocked stall observation: the window front (`front_hash`)
 /// has been in flight to `peer_addr` with the apply frontier idle and no other
-/// download progress possible since `since`. The analog of Bitcoin Core's
-/// per-peer `m_stalling_since` (`net_processing.cpp`).
+/// download progress possible since `since`.
 #[derive(Clone, Copy, Debug)]
 struct StallEpisode {
     owner: PeerSource,
@@ -319,7 +314,7 @@ const PREFIX_PROBE_ESTIMATED_BYTES: usize = 2 * 1024 * 1024;
 /// Stall-episode clearing reasons, the counter taxonomy for
 /// `node.sync.stall_episodes_cleared{reason}`. Every path that zeroes the
 /// episode clock tags exactly one reason:
-/// - `apply_busy`: the no-blame guard held this tick ([`DownloadWindow::advance_stall`]).
+/// - `apply_busy`: the no-blame guard held this tick ([`DownloadWindow::observe_blocked`]).
 /// - `predicate`: a [`DownloadWindow::window_blocked_on`] term went false
 ///   (front moved off the frontier, no staged successor, or capacity opened).
 /// - `front_moved`: the predicate still holds but for a different
@@ -536,10 +531,6 @@ impl DownloadWindow {
     }
 
     /// Maximum number of blocks the download window will keep pending at once.
-    ///
-    /// Used as the horizon cap when the apply-side cache is repopulated on a
-    /// miss: at most this many blocks can be in flight (and therefore stage)
-    /// before the cache's validity keys change and force a refresh.
     pub(crate) const fn max_pending_blocks(&self) -> usize {
         self.budget.max_pending_blocks
     }
@@ -910,7 +901,6 @@ impl DownloadWindow {
         now: Instant,
     ) -> Option<(Hash256, Duration)> {
         let Some(frontier_hash) = frontier_hash else {
-            // No expected frontier: nothing can be stuck.
             self.apply_side_stuck = None;
             return None;
         };
@@ -927,9 +917,6 @@ impl DownloadWindow {
                 });
             }
             _ => {
-                // The frontier changed (or its body is absent with no active
-                // episode): no clock may run for a frontier with nothing
-                // staged about it.
                 self.apply_side_stuck = None;
             }
         }
@@ -941,7 +928,6 @@ impl DownloadWindow {
         if suppressed_for < bound {
             return None;
         }
-        // Re-arm: the eviction escalation consumed this conviction.
         if let Some(stuck) = self.apply_side_stuck.as_mut() {
             stuck.since = now;
         }
@@ -1534,8 +1520,6 @@ impl DownloadWindow {
             None => {
                 self.owner_downloading_since.remove(&owner);
             }
-            // Strictly older than every survivor: the true head left, and
-            // the clock restarts at the removal instant.
             Some(oldest) if removed_requested_at < oldest => {
                 self.owner_downloading_since.insert(owner, now);
             }
@@ -1553,7 +1537,6 @@ impl DownloadWindow {
                     .and_modify(|since| *since = (*since).max(oldest))
                     .or_insert(oldest);
             }
-            // A strictly older survivor is still the head: untouched.
             Some(_) => {}
         }
     }
@@ -1814,10 +1797,6 @@ impl DownloadWindow {
         for hash in stale_pending {
             self.remove_pending(&hash, now);
         }
-        // The stager is the single staged-body store: bodies the request
-        // branch left behind are released here, so freed capacity is real
-        // and a late old-branch delivery cannot re-acquire purged state.
-        // A hash the tree cannot resolve is off-branch by definition.
         let stale_staged: Vec<Hash256> = stager
             .staged_hashes()
             .filter(|hash| {
@@ -1859,7 +1838,6 @@ impl DownloadWindow {
             .len()
             .saturating_add(stager.received_len())
             .saturating_add(selected_hashes.map_or(0, SelectedHashes::len));
-        // Each skipped hash can displace at most one eligible height from the prefix.
         let scan_limit = scan.remaining_limit.saturating_add(skipped_hashes);
         let scan_span = u32::try_from(scan_limit.saturating_sub(1)).unwrap_or(u32::MAX);
         let request_end_height = scan
@@ -1915,8 +1893,6 @@ impl DownloadWindow {
             if entries.len() >= batch_limit || *byte_capacity < self.ewma_block_bytes {
                 break;
             }
-            // Below the peer's retained window the entry is unservable for
-            // it: leave it unowned so another peer's scan picks it up.
             if entry.height < servable_floor
                 || stager.contains(&entry.hash)
                 || self.pending.contains_key(&entry.hash)
@@ -2233,11 +2209,6 @@ impl DownloadWindow {
         let was_front = self.pending.values().all(|pending| pending.height > height);
         if was_front {
             if let Some(previous) = self.last_front_advance {
-                // Millisecond integer math throughout: ewma += (sample -
-                // ewma) / 4 (alpha = 1/4). `Instant::duration_since`
-                // saturates to zero for an earlier `now`, so out-of-order
-                // timestamps fall under the batch filter below instead of
-                // corrupting the EWMA.
                 let sample_ms =
                     u64::try_from(now.duration_since(previous).as_millis()).unwrap_or(u64::MAX);
                 // Batch artifacts are not cadence: an in-order front run
@@ -2296,8 +2267,6 @@ impl DownloadWindow {
         source_peer: Option<PeerSource>,
         now: Instant,
     ) -> RejectDelivery {
-        // A malformed response is still proof that this peer answered. Do not
-        // let a first-tick timeout observation disconnect it on the next tick.
         if self.pending_timeout_observation.is_some_and(|observation| {
             observation.hash == hash && Some(observation.owner) == source_peer
         }) {

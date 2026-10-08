@@ -93,9 +93,7 @@ pub struct HeaderSyncResult {
 /// A typed failure that ends one peer's download-twice sync.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeaderSyncError {
-    /// The batch did not connect to the sync cursor. Core treats this as
-    /// benign — the peer may have reorged — and gives up on the sync
-    /// (`bitcoin-core/src/headerssync.cpp:155-163`).
+    /// The batch did not connect to the sync cursor.
     NonContinuous {
         /// Phase that observed the break.
         phase: HeadersSyncPhase,
@@ -329,10 +327,7 @@ pub struct HeadersSyncState {
     redownloaded: VecDeque<CompressedHeader>,
     redownload_last_height: u32,
     redownload_last_hash: Hash256,
-    /// Bits of the last stored redownload header. The buffer can drain
-    /// below it, so the difficulty check reads this rather than the
-    /// buffer's tail — which would wrongly fall back to the anchor's bits
-    /// after a release emptied the buffer mid-retarget.
+    /// Bits of the last stored redownload header.
     redownload_last_bits: CompactTarget,
     redownload_first_prev_hash: Hash256,
     redownload_work: Work,

@@ -1,17 +1,4 @@
 //! Header-presync admission gating over the real headers drain.
-//!
-//! A connection that is not synced can serve an endless chain of
-//! valid-at-minimum-difficulty headers, and inserting it makes every later
-//! reorganization cheaper than the honest chain. The drain therefore parks
-//! a below-threshold batch in the connection's download-twice sync state
-//! (`headerssync.h:57-149`, `headerssync.cpp:72-326`) and admits only
-//! headers the committed phase has verified. These tests drive that path
-//! end to end: inbound batches through the channel, outbound requests
-//! through the peer lease.
-//!
-//! Every fixture chain is regtest-easy (`0x207fffff`), which mints exactly
-//! two work units per header, so a floor of `2 * height + delta` places the
-//! crossing on a chosen header.
 
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -36,12 +23,9 @@ const PAGE: usize = MAX_HEADERS_RESPONSE;
 /// the assertion in the first test).
 const WORK_PER_HEADER: u64 = 2;
 
-/// Mines one regtest-easy fixture header. Version 4: regtest raises the
-/// minimum block version at heights 500, 1251, and 1351, and these fixture
-/// chains are longer than all of them.
+/// Mines one regtest-easy fixture header.
 fn mine_header(prev_blockhash: BlockHash, height: u32) -> Header {
-    regtest_fixture::mined_regtest_header(prev_blockhash, height)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"))
+    regtest_fixture::mined_regtest_header(prev_blockhash, height).or_fail("regtest fixture header")
 }
 
 /// One regtest-easy header with the height salted into its merkle root, the
@@ -58,8 +42,7 @@ fn test_header(prev_blockhash: BlockHash, height: u32) -> Header {
         bits: CompactTarget::from_consensus(regtest_fixture::REGTEST_BITS),
         nonce: 0,
     };
-    regtest_fixture::mine_header_to_declared_target(&mut header)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+    regtest_fixture::mine_header_to_declared_target(&mut header).or_fail("regtest fixture header");
     header
 }
 
@@ -150,12 +133,8 @@ fn sync_phase(sync: &BlockSync, source: PeerSource) -> Option<HeadersSyncPhase> 
     with_sync_state(sync, source, HeadersSyncState::phase)
 }
 
-/// More headers than one wire page, so the second batch's fork point is a
-/// header the sync state buffered — never the tree. A routing bug that
-/// re-derives the anchor per batch shows up here as the honest peer being
-/// re-requested from and the second batch falling into admission.
 #[test]
-fn low_work_headers_do_not_reach_block_tree() -> Result<(), Box<dyn std::error::Error>> {
+fn low_work_headers_do_not_reach_block_tree() -> TestResult {
     let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, lease, rx) = connect(&peers, 9701, 100_000);
@@ -189,8 +168,6 @@ fn low_work_headers_do_not_reach_block_tree() -> Result<(), Box<dyn std::error::
         "the continuation must resume from the collected cursor"
     );
 
-    // The second page forks off buffered, uncommitted headers: it must
-    // route into the live state, not into the tree-anchored admission path.
     deliver_headers(&inbound_headers_tx, chain[PAGE..2 * PAGE].to_vec(), source)?;
     sync.tick();
 
@@ -217,12 +194,8 @@ fn low_work_headers_do_not_reach_block_tree() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-/// Crossing the assumed-work floor flips the sync to its second pass: the
-/// chain is re-requested from the fork point, every header is checked
-/// against the salted commitments, and only then does admission run — in
-/// the order the wire delivered.
 #[test]
-fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn std::error::Error>> {
+fn sufficient_work_chain_syncs_presync_then_redownload() -> TestResult {
     // A chain one page plus a tail long, with the floor on its last
     // header: the first page's own claimed work stays below the floor, so
     // it collects under presync; the tail page carries the cumulative work
@@ -242,8 +215,6 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn s
         Some(HeadersSyncPhase::Presync),
         "a page whose own claimed work is below the floor collects"
     );
-    // Presync wants the next page on the wire, continuing from the
-    // collected tip.
     assert_eq!(
         next_locator(&rx).map(|locator| locator.first().copied()),
         Some(Some(
@@ -255,8 +226,6 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn s
     deliver_headers(&inbound_headers_tx, chain[PAGE..].to_vec(), source)?;
     sync.tick();
 
-    // The crossing header committed the sync: it now asks for the whole
-    // chain again, from the fork point, and still admits nothing.
     assert_eq!(
         sync_phase(&sync, source),
         Some(HeadersSyncPhase::Redownload),
@@ -267,14 +236,6 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn s
         1,
         "crossing the floor must not admit the collected pass"
     );
-    // The second pass restarts at the fork point, and the transition
-    // request must reach the wire: Core retires the request this batch
-    // answered and always sends the sync's own locator when the sync
-    // wants more (`net_processing.cpp:2932-2943`). The phase transition
-    // re-anchors at the fork — a locator identical to the one still
-    // pending — and the dedup must not silence it against the pre-answer
-    // deadline; otherwise no second pass is ever requested and expiry
-    // later blames the connection that did respond.
     assert_eq!(
         next_locator(&rx).map(|locator| locator.first().copied()),
         Some(Some(Hash256::from(genesis.compute_hash()).to_le_bytes())),
@@ -286,9 +247,6 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn s
         "the second pass must restart at the fork point"
     );
 
-    // Serve the second pass as the answer to that request: its last
-    // header crosses the floor inside the state, which releases the whole
-    // verified chain in wire order.
     let chain_last = chain[PAGE + 500 - 1].compute_hash();
     deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source)?;
     sync.tick();
@@ -310,12 +268,8 @@ fn sufficient_work_chain_syncs_presync_then_redownload() -> Result<(), Box<dyn s
     Ok(())
 }
 
-/// One substituted header must diverge from the salted commitments the
-/// first pass collected, and the connection that served it is the faulty
-/// one: disconnect, and nothing admitted.
 #[test]
-fn a_substituted_redownload_header_disconnects_the_connection()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_substituted_redownload_header_disconnects_the_connection() -> TestResult {
     // A page plus 500 headers whose floor crosses on the last of them:
     // the whole chain is committed at once and the replay restarts at the
     // fork point.
@@ -337,9 +291,6 @@ fn a_substituted_redownload_header_disconnects_the_connection()
         "the fixture must reach its second pass"
     );
 
-    // Replay with one valid-but-different header at a height that actually
-    // carries a salted commitment, chosen from the state's own salt so the
-    // substitution is guaranteed to be seen.
     let Some(commitment_height) =
         with_sync_state(&sync, source, |state| state.first_commitment_height(2))
     else {
@@ -371,10 +322,6 @@ fn a_substituted_redownload_header_disconnects_the_connection()
     }
     let mut substituted = chain;
     substituted[commitment_index - 1] = rogue;
-    // Re-anchor the tail so only the salted commitment can fail: without
-    // this, `substituted[commitment_index]` still chains to the replaced
-    // header's hash and the asserted punishment is reachable on the bare
-    // continuity break alone.
     for index in commitment_index..chain_len {
         let mut header = substituted[index];
         header.prev_blockhash = substituted[index - 1].compute_hash();
@@ -407,16 +354,8 @@ fn a_substituted_redownload_header_disconnects_the_connection()
     Ok(())
 }
 
-/// A REDOWNLOAD release must continue from the state's own cursor. Core
-/// sends the sync's locator whenever the sync wants more, independent of
-/// whether the batch returned headers (`net_processing.cpp:2933-2943`).
-/// The state's cursor sits up to `redownload_buffer_size` headers deeper
-/// than the release point, so a continuation anchored at the release
-/// point — where the tree stops — fails the state's continuity check and
-/// restarts the whole sync. The fixture replays past one regtest buffer
-/// page (7,017) so the release path is genuinely exercised.
 #[test]
-fn redownload_release_continues_from_the_state_cursor() -> Result<(), Box<dyn std::error::Error>> {
+fn redownload_release_continues_from_the_state_cursor() -> TestResult {
     // Five pages: the work floor crosses on the chain's last header, and
     // the replay overflows the regtest buffer on its fourth page — three
     // pages before the chain runs out, so the release is a buffer
@@ -448,8 +387,6 @@ fn redownload_release_continues_from_the_state_cursor() -> Result<(), Box<dyn st
         "the fixture must reach its second pass"
     );
 
-    // Replay the same chain. The first three pages only fill the buffer;
-    // the fourth overflows it and releases the retired prefix.
     for page in 0..3 {
         deliver_headers(
             &inbound_headers_tx,
@@ -478,8 +415,6 @@ fn redownload_release_continues_from_the_state_cursor() -> Result<(), Box<dyn st
         "the continuation must leave from the state's redownload cursor, not the release point",
     );
 
-    // The last page crosses the replay's own work floor: the state
-    // releases everything left and retires.
     deliver_headers(
         &inbound_headers_tx,
         chain[4 * PAGE..5 * PAGE].to_vec(),
@@ -499,13 +434,8 @@ fn redownload_release_continues_from_the_state_cursor() -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// A batch that breaks continuity mid-way must be rejected whole: Core
-/// checks every header of the batch against the running cursor
-/// (`CheckHeadersAreContinuous`, `net_processing.cpp:2915-2924`), so a
-/// batch whose tail forks elsewhere cannot sum its disconnected branch
-/// work into the crossing decision.
 #[test]
-fn a_midbatch_continuity_break_spends_the_sync() -> Result<(), Box<dyn std::error::Error>> {
+fn a_midbatch_continuity_break_spends_the_sync() -> TestResult {
     let floor =
         ChainWork::from(WORK_PER_HEADER * u64::try_from(2 * PAGE + 500).unwrap_or(u64::MAX));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
@@ -521,8 +451,6 @@ fn a_midbatch_continuity_break_spends_the_sync() -> Result<(), Box<dyn std::erro
         "the fixture must collect below the floor"
     );
 
-    // A full page whose last header chains onto nothing the cursor knows:
-    // the batch head is honest, so only a per-header check can see it.
     let mut midbreak = chain[PAGE..2 * PAGE - 1].to_vec();
     midbreak.push(mine_header(
         BlockHash(Hash256::from_le_bytes(&[0xa5; 32])),
@@ -548,15 +476,8 @@ fn a_midbatch_continuity_break_spends_the_sync() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// A header carried by a delivered body is not a wire `headers` message,
-/// and Core feeds the download-twice state only from processed `headers`
-/// messages (`net_processing.cpp:2915-2924`). A forwarded one-header page
-/// must therefore leave a live state exactly as it found it: not
-/// finalize it as a short page, not advance its cursor, not spend it on a
-/// continuity break.
 #[test]
-fn a_forwarded_body_header_leaves_the_live_sync_state_alone()
--> Result<(), Box<dyn std::error::Error>> {
+fn a_forwarded_body_header_leaves_the_live_sync_state_alone() -> TestResult {
     let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, lease, rx) = connect(&peers, 9706, 100_000);
@@ -571,13 +492,8 @@ fn a_forwarded_body_header_leaves_the_live_sync_state_alone()
         "the fixture must collect below the floor"
     );
     let cursor = with_sync_state(&sync, source, |state| state.next_locator()[0].to_le_bytes());
-    // The collection continuation from the setup page is expected; retire
-    // it so the wire is quiet before the forwarded delivery.
     while rx.try_recv().is_ok() {}
 
-    // The same connection delivers a body whose embedded header is
-    // forwarded through the drain: one header, not a wire response,
-    // chaining off the in-tree fork below the floor.
     inbound_headers_tx
         .send(InboundHeaders {
             headers: vec![mine_header(genesis.compute_hash(), 5_000)],
@@ -644,13 +560,8 @@ fn presync_fixture_refusing(
     Ok((genesis, sync, inbound_headers_tx, peers))
 }
 
-/// A release refused by paused admission must not park the released prefix
-/// inside the live state: while refusals persist, every new page would
-/// requeue the excess and grow the buffer without bound. The sync state is
-/// dropped instead, and the paced ancestry re-request — the same retry the
-/// direct path gets — restarts the sync once admission reopens.
 #[test]
-fn a_refused_release_drops_the_sync() -> Result<(), Box<dyn std::error::Error>> {
+fn a_refused_release_drops_the_sync() -> TestResult {
     let chain = chain_on(&genesis_header(), 0, PAGE + 500);
     let threshold = chain_work(&chain);
     let (_genesis, sync, inbound_headers_tx, peers) = presync_fixture_refusing(threshold)?;
@@ -659,8 +570,6 @@ fn a_refused_release_drops_the_sync() -> Result<(), Box<dyn std::error::Error>> 
     sync.tick();
     assert!(matches!(rx.try_recv()?, Message::GetHeaders(_)));
 
-    // The collected pass stays under presync; the crossing page commits
-    // the sync to its download-twice pass.
     deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source)?;
     sync.tick();
     assert_eq!(sync_phase(&sync, source), Some(HeadersSyncPhase::Presync),);
@@ -672,9 +581,6 @@ fn a_refused_release_drops_the_sync() -> Result<(), Box<dyn std::error::Error>> 
     );
     let _ = rx.try_iter().count();
 
-    // The second pass's final partial page releases the whole verified
-    // chain into a refusal: the sync must drop, the tree must stay at its
-    // genesis, and the paced ancestry retry must reach the wire.
     deliver_headers(&inbound_headers_tx, chain[..PAGE].to_vec(), source)?;
     sync.tick();
     deliver_headers(&inbound_headers_tx, chain[PAGE..].to_vec(), source)?;
@@ -698,12 +604,8 @@ fn a_refused_release_drops_the_sync() -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// A batch whose own claimed work crosses the floor skips the presync
-/// entirely: Core's `TryLowWorkHeadersSync` fast path counts
-/// `chain_start->nChainWork + CalculateClaimedHeadersWork`, so the headers
-/// admit directly without a download-twice pass or a re-requested page.
 #[test]
-fn a_batch_crossing_the_floor_admits_without_presync() -> Result<(), Box<dyn std::error::Error>> {
+fn a_batch_crossing_the_floor_admits_without_presync() -> TestResult {
     let chain = chain_on(&genesis_header(), 0, 10);
     let floor = chain_work(&chain);
     let (_genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
@@ -726,14 +628,8 @@ fn a_batch_crossing_the_floor_admits_without_presync() -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// A batch anchored on a node a subtree invalidation already marked
-/// `Invalid` must not open a download-twice pass: hashing and retaining
-/// commitments for headers that can never admit is wasted work. The batch
-/// routes to the admission path's `InvalidParent` refusal instead — a
-/// non-fault refusal, so the peer stays connected and no sync state is
-/// created.
 #[test]
-fn an_invalid_anchor_refuses_without_presync() -> Result<(), Box<dyn std::error::Error>> {
+fn an_invalid_anchor_refuses_without_presync() -> TestResult {
     let floor = ChainWork::from(u64::MAX);
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
@@ -783,12 +679,8 @@ fn an_invalid_anchor_refuses_without_presync() -> Result<(), Box<dyn std::error:
     Ok(())
 }
 
-/// A peer whose short page ends its presync below the floor has
-/// demonstrated it has nothing past that cursor: capping its advertised
-/// horizon at the reached height keeps the scheduler from reselecting the
-/// same connection forever while it serves the same terminal page.
 #[test]
-fn a_terminal_low_work_page_demotes_the_source() -> Result<(), Box<dyn std::error::Error>> {
+fn a_terminal_low_work_page_demotes_the_source() -> TestResult {
     let floor = ChainWork::from(u64::MAX);
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, _lease, _rx) = connect(&peers, 9706, 100_000);
@@ -817,9 +709,6 @@ fn a_terminal_low_work_page_demotes_the_source() -> Result<(), Box<dyn std::erro
         Some(5),
         "the horizon must fall to the demonstrated cursor height"
     );
-    // The demotion caps header selection only: the shared P2P-03 credit
-    // still carries the handshake claim, so the connection remains
-    // body-eligible for blocks it advertised.
     assert_eq!(
         session.info.map(|info| info.best_known_height),
         Some(100_000),
@@ -833,8 +722,7 @@ fn a_terminal_low_work_page_demotes_the_source() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn unsolicited_presync_continuation_keeps_another_peers_pending_request()
--> Result<(), Box<dyn std::error::Error>> {
+fn unsolicited_presync_continuation_keeps_another_peers_pending_request() -> TestResult {
     let floor = ChainWork::from(WORK_PER_HEADER * u64::try_from(4 * PAGE).unwrap_or(u64::MAX));
     let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (owner_addr, _owner_lease, owner_rx) = connect(&peers, 9707, 100_000);
@@ -872,10 +760,7 @@ fn unsolicited_presync_continuation_keeps_another_peers_pending_request()
     Ok(())
 }
 
-fn assert_invalid_body_header_is_discarded(
-    block: Block,
-    port: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_invalid_body_header_is_discarded(block: Block, port: u16) -> TestResult {
     let floor = ChainWork::from(u64::MAX);
     let (_genesis, sync, _inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, _lease, _rx) = connect(&peers, port, 100_000);
@@ -908,8 +793,7 @@ fn assert_invalid_body_header_is_discarded(
 }
 
 #[test]
-fn body_carried_low_work_bad_pow_is_discarded_and_faults_peer()
--> Result<(), Box<dyn std::error::Error>> {
+fn body_carried_low_work_bad_pow_is_discarded_and_faults_peer() -> TestResult {
     let genesis = Network::Regtest.genesis_block().header;
     let mut block = regtest_fixture::mined_block_with_prev_hash(
         genesis.compute_hash(),
@@ -925,8 +809,7 @@ fn body_carried_low_work_bad_pow_is_discarded_and_faults_peer()
 }
 
 #[test]
-fn body_carried_low_work_bad_nbits_is_discarded_and_faults_peer()
--> Result<(), Box<dyn std::error::Error>> {
+fn body_carried_low_work_bad_nbits_is_discarded_and_faults_peer() -> TestResult {
     let genesis = Network::Regtest.genesis_block().header;
     let mut block = regtest_fixture::mined_block_with_prev_hash(
         genesis.compute_hash(),
@@ -943,7 +826,7 @@ fn body_carried_low_work_bad_nbits_is_discarded_and_faults_peer()
 }
 
 #[test]
-fn body_carried_low_work_valid_header_stays_deferred() -> Result<(), Box<dyn std::error::Error>> {
+fn body_carried_low_work_valid_header_stays_deferred() -> TestResult {
     let floor = ChainWork::from(u64::MAX);
     let (_genesis, sync, _inbound_headers_tx, peers) = presync_fixture(floor)?;
     let (addr, _lease, _rx) = connect(&peers, 9713, 100_000);

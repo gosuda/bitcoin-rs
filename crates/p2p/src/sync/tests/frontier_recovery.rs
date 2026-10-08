@@ -16,8 +16,7 @@ fn next_getheaders(
 }
 
 #[test]
-fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix()
--> Result<(), Box<dyn std::error::Error>> {
+fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix() -> TestResult {
     let (sync, peers, applied, blocks, incoming) = sync_with_mined_chain(3)?;
     let peer = test_addr(9760, 0)?;
     let outbound = connect_peer(&peers, synthetic_peer(peer, 3));
@@ -32,8 +31,6 @@ fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix()
     assert_eq!(applied.load_full().ok_or("missing applied tip")?.height, 3);
     assert_no_getdata(&outbound)?;
 
-    // The chain owner may disconnect independently of this executor. Headers
-    // still select the same branch; the old forward cursor is not authority.
     applied.store(Some(genesis));
     sync.tick();
     assert_eq!(witness_block_inventory(next_getdata(&outbound)?)?, hashes);
@@ -43,8 +40,7 @@ fn applied_rewind_with_unchanged_headers_refetches_the_missing_prefix()
 }
 
 #[test]
-fn cancelled_ready_event_does_not_wait_for_an_unrelated_body_writer()
--> Result<(), Box<dyn std::error::Error>> {
+fn cancelled_ready_event_does_not_wait_for_an_unrelated_body_writer() -> TestResult {
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let peer = test_addr(9760, 1)?;
     let _old = connect_peer(&peers, synthetic_peer(peer, 1));
@@ -67,8 +63,7 @@ fn cancelled_ready_event_does_not_wait_for_an_unrelated_body_writer()
 }
 
 #[test]
-fn empty_header_probe_is_paced_then_rotates_to_another_peer()
--> Result<(), Box<dyn std::error::Error>> {
+fn empty_header_probe_is_paced_then_rotates_to_another_peer() -> TestResult {
     let (tree, _blocks) = mined_chain(1, 0)?;
     let harness = SyncHarness::new(tree);
     let sync = harness.sync;
@@ -104,19 +99,12 @@ fn empty_header_probe_is_paced_then_rotates_to_another_peer()
 }
 
 #[test]
-fn staged_successors_behind_a_rejected_frontier_still_probe()
--> Result<(), Box<dyn std::error::Error>> {
+fn staged_successors_behind_a_rejected_frontier_still_probe() -> TestResult {
     use bitcoin_rs_primitives::Amount;
     let (sync, peers, _, blocks, incoming) = sync_with_mined_chain(3)?;
     let peer = test_addr(9761, 0)?;
-    // start_height 0: not getdata-eligible (height must exceed the floor of
-    // 0) but probe-eligible (services carry NETWORK|WITNESS), so any
-    // GetHeaders this peer observes can only come from the idle probe.
     let outbound = connect_peer(&peers, synthetic_peer(peer, 0));
 
-    // Malformed frontier body: the header still hashes to block 1's hash, but
-    // the txid Merkle root no longer binds to the header, so the body fails
-    // the binding gate and is rejected instead of staged.
     let mut malformed_frontier = blocks[0].clone();
     malformed_frontier.txs[0].outputs[0].value = Amount::from_sat(2);
     assert_eq!(
@@ -128,12 +116,8 @@ fn staged_successors_behind_a_rejected_frontier_still_probe()
     incoming.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
     incoming.send(crate::InboundBlock::from_decoded(blocks[2].clone()))?;
 
-    // One tick: bootstraps genesis, drains and stages, and probes. No earlier
-    // tick ran, so the probe decision is the one under test.
     sync.tick();
 
-    // The rejected frontier leaves the apply-frontier block unowned, so the
-    // idle probe must fire despite the two staged successors.
     let probe = next_getheaders(&outbound)?;
     assert_eq!(
         probe
@@ -144,7 +128,6 @@ fn staged_successors_behind_a_rejected_frontier_still_probe()
         "the probe must start from the applied chain"
     );
 
-    // The successors staged; the malformed frontier body did not.
     let body = sync.scheduler.lock();
     assert_eq!(body.stager.received_len(), 2);
     assert!(!body.stager.contains(&Hash256::from(blocks[0].block_hash())));
@@ -154,15 +137,12 @@ fn staged_successors_behind_a_rejected_frontier_still_probe()
 }
 
 #[test]
-fn superseded_session_gets_no_probe_and_cannot_send_getheaders()
--> Result<(), Box<dyn std::error::Error>> {
+fn superseded_session_gets_no_probe_and_cannot_send_getheaders() -> TestResult {
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let peer = test_addr(9762, 0)?;
     let old_rx = connect_peer(&peers, synthetic_peer(peer, 1));
     let old_source = current_source(&peers, peer);
 
-    // A handshaking replacement takes the address; it never publishes
-    // handshake metadata, so it cannot be selected by either header path.
     let (replacement_tx, replacement_rx) = unbounded::<Message>();
     peers.register(peer, PeerLease::new(replacement_tx));
 
@@ -189,8 +169,6 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders()
         "superseded session must receive no probe"
     );
 
-    // The superseded identity must be rejected by the source-validated lease
-    // even when addressed directly, and it must leave no pending request.
     let genesis = Network::Regtest.genesis_block().block_hash();
     let locator = vec![Hash256::from_le_bytes(genesis.as_bytes())];
     assert!(
@@ -205,8 +183,7 @@ fn superseded_session_gets_no_probe_and_cannot_send_getheaders()
 }
 
 #[test]
-fn frontier_probe_preserves_another_live_header_request() -> Result<(), Box<dyn std::error::Error>>
-{
+fn frontier_probe_preserves_another_live_header_request() -> TestResult {
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let first = test_addr(9764, 0)?;
     let second = test_addr(9764, 1)?;
@@ -263,11 +240,8 @@ fn frontier_probe_preserves_another_live_header_request() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick()
--> Result<(), Box<dyn std::error::Error>> {
+fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick() -> TestResult {
     let (sync, peers, _, _, expected) = sync_with_header_chain(1)?;
-    // Inert getdata: an exhausted staging byte budget closes the request gate
-    // before any scan, so no pending body work can suppress the probe.
     install_budget(
         &sync,
         super::super::SyncBudget {
@@ -291,8 +265,6 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick()
         "the failed probe source must be evicted instead of lingering table-resident",
     );
 
-    // The failed probe must hand off to request_headers_from_best_peer in the
-    // same tick, which sends to the live higher peer.
     let request = next_getheaders(&high_rx)?;
     assert_eq!(
         request
@@ -303,8 +275,6 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick()
         "the fallback request must start at the header tip"
     );
 
-    // The dead peer must not have inherited the pending request, and no
-    // further getheaders lands anywhere in this tick.
     assert_eq!(
         sync.scheduler
             .lock()
@@ -320,8 +290,7 @@ fn failed_probe_send_falls_back_to_best_peer_in_the_same_tick()
 }
 
 #[test]
-fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback()
--> Result<(), Box<dyn std::error::Error>> {
+fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback() -> TestResult {
     let (sync, peers, _, _, expected) = sync_with_header_chain(1)?;
     install_budget(
         &sync,
@@ -333,16 +302,12 @@ fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback()
     );
     let dead = test_addr(9764, 0)?;
     let live = test_addr(9764, 1)?;
-    // The lowest address is selected for the probe and has the highest
-    // advertised height, but its disconnected queue makes the send fail.
     let dead_rx = connect_peer(&peers, synthetic_peer(dead, 5));
     drop(dead_rx);
     let live_rx = connect_peer(&peers, synthetic_peer(live, 3));
 
     sync.tick();
 
-    // Without the failed-source exclusion, normal selection retries the dead
-    // highest peer and masks the lower live peer in this same tick.
     let request = next_getheaders(&live_rx)?;
     assert_eq!(
         request
@@ -366,8 +331,7 @@ fn failed_probe_send_excludes_dead_highest_peer_from_header_fallback()
 }
 
 #[test]
-fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
--> Result<(), Box<dyn std::error::Error>> {
+fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick() -> TestResult {
     let (sync, peers, _, _, expected) = sync_with_header_chain(1)?;
     install_budget(
         &sync,
@@ -386,8 +350,6 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
     drop(dead_rx);
     let live_rx = connect_peer(&peers, synthetic_peer(live, 3));
 
-    // Tick 1: the dead peer's probe send fails and the same-tick fallback
-    // hands the request to the live peer.
     sync.tick();
     let request = next_getheaders(&live_rx)?;
     assert_eq!(
@@ -399,8 +361,6 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
         "the fallback request must start at the header tip"
     );
 
-    // Expire the live peer's pending request so the next tick must choose a
-    // probe target again.
     sync.scheduler
         .lock()
         .header_request
@@ -408,9 +368,6 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
         .ok_or("fallback lost its deadline")?
         .requested_at -= super::super::HEADER_REQUEST_TIMEOUT;
 
-    // Tick 2: the dead session must be gone (evicted on the failed send,
-    // swept by the reconciler as backstop) instead of being re-picked once
-    // per tick forever.
     sync.tick();
     assert!(
         !peers.sessions().iter().any(|session| session.addr == dead),
@@ -426,9 +383,6 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
         "the pending request must not be keyed to the dead addr",
     );
     let request = next_getheaders(&live_rx)?;
-    // The follow-up request is the idle frontier probe, anchored on the
-    // active chain at the applied height (genesis here) — not the fallback's
-    // chain-tip locator.
     assert_eq!(
         request
             .locator_hashes
@@ -442,12 +396,9 @@ fn dead_probe_peer_is_evicted_and_not_repicked_on_the_next_tick()
 }
 
 #[test]
-fn reconciler_sweeps_cancelled_lease_sessions_within_one_tick()
--> Result<(), Box<dyn std::error::Error>> {
+fn reconciler_sweeps_cancelled_lease_sessions_within_one_tick() -> TestResult {
     let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
     let addr = test_addr(9767, 0)?;
-    // A lease cancelled by any path (here: direct teardown request) while its
-    // session stays table-resident must leave the table within one tick.
     let _rx = connect_peer(&peers, synthetic_peer(addr, 5));
     peers.lease(addr).ok_or("peer missing from table")?.cancel();
     assert!(peers.sessions().iter().any(|session| session.addr == addr));
@@ -460,8 +411,7 @@ fn reconciler_sweeps_cancelled_lease_sessions_within_one_tick()
 }
 
 #[test]
-fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
--> Result<(), Box<dyn std::error::Error>> {
+fn reorg_probe_anchors_locator_on_active_chain_at_applied_height() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
@@ -471,7 +421,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let common_id = tree.insert_node(Some(genesis_id), common.header, NodeStatus::HeaderValid)?;
 
     let losing_2 = regtest_fixture::mined_block_with_prev_hash(
@@ -479,7 +429,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
         2,
         vec![regtest_fixture::coinbase(2_002)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let losing_2_id =
         tree.insert_node(Some(common_id), losing_2.header, NodeStatus::HeaderValid)?;
     let losing_3 = regtest_fixture::mined_block_with_prev_hash(
@@ -487,7 +437,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
         3,
         vec![regtest_fixture::coinbase(2_003)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let losing_3_id =
         tree.insert_node(Some(losing_2_id), losing_3.header, NodeStatus::HeaderValid)?;
 
@@ -496,7 +446,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
         2,
         vec![regtest_fixture::coinbase(1_002)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let winning_2_id =
         tree.insert_node(Some(common_id), winning_2.header, NodeStatus::HeaderValid)?;
     let winning_3 = regtest_fixture::mined_block_with_prev_hash(
@@ -504,7 +454,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
         3,
         vec![regtest_fixture::coinbase(1_003)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let winning_3_id = tree.insert_node(
         Some(winning_2_id),
         winning_3.header,
@@ -515,7 +465,7 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
         4,
         vec![regtest_fixture::coinbase(1_004)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let winning_4_id = tree.insert_node(
         Some(winning_3_id),
         winning_4.header,
@@ -570,14 +520,8 @@ fn reorg_probe_anchors_locator_on_active_chain_at_applied_height()
     Ok(())
 }
 
-/// An unsolicited body the tree cannot place stages on the missing-header
-/// path. When expiry prunes it, its retry must not move the request cursor:
-/// a body of unknown height has no height to rewind to. Before the stager
-/// became the single staged-body store, the window mirrored such a body at
-/// height 0 and the prune rewound the cursor to genesis.
 #[test]
-fn unsolicited_staged_body_never_rewinds_request_cursor() -> Result<(), Box<dyn std::error::Error>>
-{
+fn unsolicited_staged_body_never_rewinds_request_cursor() -> TestResult {
     let (sync, peers, applied, blocks, incoming) = sync_with_mined_chain(4)?;
     let peer = test_addr(9766, 0)?;
     let outbound = connect_peer(&peers, synthetic_peer(peer, 4));
@@ -592,7 +536,6 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> Result<(), Box<dyn 
     let cursor = sync.scheduler.lock().window.request_cursor();
     assert!(cursor > 3, "the cursor advanced past the requested heights");
 
-    // Expire every staged body on the next drain, without a timing race.
     sync.scheduler.lock().stager = crate::BlockStager::new(super::super::SyncBudget {
         received_timeout: Duration::ZERO,
         ..super::super::default_sync_budget(Network::Regtest)
@@ -602,7 +545,7 @@ fn unsolicited_staged_body_never_rewinds_request_cursor() -> Result<(), Box<dyn 
         9,
         vec![regtest_fixture::coinbase(9)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let orphan_hash = Hash256::from(orphan.block_hash());
     let mut inbound = vec![crate::InboundBlock::from_decoded(orphan)];
     assert_eq!(sync.buffer_received_block_chunk(&mut inbound, None), 1);

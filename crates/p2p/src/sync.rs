@@ -196,17 +196,14 @@ pub struct BlockSync {
     inbound_headers_rx: Receiver<InboundHeaders>,
     inbound_blocks_rx: Receiver<crate::InboundBlock>,
     /// One lock owns the coupled download, staged-body, header-request, and
-    /// session-reconciliation state. Consensus and chain I/O stay outside
-    /// this lock; each component's policy remains in the P2P crate.
+    /// session-reconciliation state.
     scheduler: Mutex<SchedulerState>,
     /// Last time a `Refused` admission replayed a `getheaders` re-request;
     /// paces retries to the request timeout so a paused admission cannot
     /// re-issue the same locator at round-trip pace.
     refused_rerequest_at: Mutex<Option<Instant>>,
-    /// Latest `MSG_BLOCK` inventory hash per announcing connection, drained
-    /// by the next tick's header drain. One entry per connection keeps the
-    /// queue bounded by the live session set, as Core keeps one best block
-    /// per `inv` message.
+    /// Latest `MSG_BLOCK` inventory hash per announcing connection, drained by
+    /// the next tick's header drain.
     block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
     /// Latched by the first [`WindowCommitDisposition::Fatal`] settlement.
@@ -252,8 +249,6 @@ struct SchedulerState {
     header_request: Option<PendingHeaderRequest>,
     /// Deferred body-fetch ownership: a compact `getblocktxn` or fallback
     /// `getdata` was issued for a tip hash whose header has not attached yet.
-    /// Marks resolve against the tree each drain once ancestry admits the
-    /// tip (P2P-06); bounded so announcements cannot grow it.
     owned_body_fetches: Vec<(PeerSource, Hash256)>,
     /// Chain-sync eviction state for every connection that has not yet shown
     /// it can bring us to the tip. Keyed by exact connection identity, so a
@@ -350,11 +345,6 @@ struct ExpectedApplyCache {
 
 /// A contiguous run of expected apply hashes together with the chain/applied
 /// tip snapshot it was computed against.
-///
-/// The validity keys are captured at the moment the parent-walk reads the
-/// block tree, so a cache built from this run is coherent with the hashes it
-/// holds — no second `load_full` is taken (which would reopen a TOCTOU gap
-/// between the hashes and the keys that guard them).
 #[derive(Clone, Debug)]
 struct ExpectedRun {
     chain_tip_hash: Hash256,
@@ -506,9 +496,6 @@ impl BlockSync {
         // the same tick can re-request it.
         self.reconcile_peer_sessions();
         let frontier = self.observe_frontier(chain.clone(), now);
-        // A connection that has had twenty minutes to bring a better chain and
-        // two more to answer a probe is retired before this tick plans any
-        // further work with it.
         self.sweep_chain_sync(&frontier, now);
         self.follow_tip_progress(&frontier, now);
         // The sweep can disconnect a peer; re-observe so selection and body
@@ -568,8 +555,6 @@ impl BlockSync {
     ///   `STALE_CHECK_INTERVAL`, so a stalled tip costs one dial rather than
     ///   one decision per tick.
     fn follow_tip_progress(&self, frontier: &SyncFrontier, now: Instant) {
-        // The applied tip — not the header tip — marks real chain progress:
-        // headers can advance for an hour without one validated block.
         let Some(tip) = frontier.chain.applied_tip.as_ref() else {
             return;
         };
@@ -729,8 +714,6 @@ impl BlockSync {
     /// Records why the frontier cannot advance this tick.
     fn note_no_progress(frontier: &SyncFrontier, reason: NoProgressReason) {
         if reason == NoProgressReason::AtTip {
-            // At tip is the healthy terminal state, not a stall: counting it
-            // would make the no-progress signal grow monotonically forever.
             return;
         }
         metrics::counter!("node.sync.no_progress_ticks", "reason" => reason.as_str()).increment(1);

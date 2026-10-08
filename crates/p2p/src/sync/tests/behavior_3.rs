@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error::Error>> {
+fn tick_caps_requests_at_staged_byte_headroom() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(8)?;
     let slot = 256 * 1024;
     install_budget(
@@ -11,8 +11,6 @@ fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    // Two of three staging slots already occupied: the staged-byte gate is
-    // still open, but only one more estimated block fits.
     {
         let mut scheduler = sync.scheduler.lock();
         let now = Instant::now();
@@ -35,32 +33,22 @@ fn tick_caps_requests_at_staged_byte_headroom() -> Result<(), Box<dyn std::error
     sync.tick();
 
     assert_applied_genesis(&applied_tip, &block_tree)?;
-    // The staged fixture bodies carry headers with unknown parents, so the
-    // tick also sends a recovery `getheaders`; only block requests count.
-    // A gate-open burst must not over-request past staging headroom.
     assert_eq!(witness_block_inventory(next_getdata(&rx)?)?, expected[..1]);
 
     sync.tick();
 
-    // The in-flight request consumed the last slot: no further requests
-    // until staged blocks apply.
     assert_no_getdata(&rx)?;
     Ok(())
 }
 
 #[test]
-fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
--> Result<(), Box<dyn std::error::Error>> {
+fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn() -> TestResult {
     // The recorded live-collapse construction (scaled 8x down): the
     // default one-minute timeouts never fire inside the test, so the only
     // thing that can stop the second wave is the count clamp itself.
     let (sync, _peers, expected, rxs, _blocks_tx) =
         staged_count_wedge(wedge_budget(Duration::from_mins(1)))?;
 
-    // Tick 2: the healthy deliveries stage; staged (14) + pending (2) sit
-    // exactly at the count budget (16). The byte gates are unbounded here
-    // (KB-scale blocks), so requests stop only if count overflow is
-    // request backpressure.
     sync.tick();
 
     {
@@ -77,10 +65,6 @@ fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
         }
     }
 
-    // Tick 3: stability. Pre-fix this is where the second wave was
-    // requested, delivered past RECEIVED_BLOCK_BUDGET, evicted the oldest
-    // staged blocks (nearest the frozen front) and snapped the window
-    // back into self-sustaining re-request churn.
     sync.tick();
 
     for rx in &rxs {
@@ -101,17 +85,11 @@ fn stalled_front_stripe_wedges_into_request_backpressure_not_evict_churn()
 }
 
 #[test]
-fn cold_start_stall_hedges_front_without_reassigning_owner()
--> Result<(), Box<dyn std::error::Error>> {
+fn cold_start_stall_hedges_front_without_reassigning_owner() -> TestResult {
     let budget = super::super::SyncBudget {
         stall_timeout_initial: Duration::from_millis(100),
         ..wedge_budget(Duration::from_mins(1))
     };
-    // A striped window with nothing delivered: the stall predicate stays
-    // unarmed (no staged successor), so the cold-front hedge is the only
-    // actor. A shape whose predicate is armed convicts at the initial
-    // floor even with an unseeded cadence EWMA — pinned at the window
-    // level by `stall_convicts_at_initial_floor_before_ewma_is_seeded`.
     let ((sync, peers, _block_tree, _applied_tip, expected), _blocks_tx) =
         sync_with_header_chain_and_blocks(64)?;
     install_budget(&sync, budget);
@@ -126,7 +104,6 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
     let owner = test_addr(9320, 0)?;
     let alternate = test_addr(9320, 1)?;
 
-    // The first tick stripes the window and starts the cold-front timer.
     sync.tick();
     assert_eq!(sync.scheduler.lock().window.pending_len(), 16);
     for (idx, rx) in rxs.iter().enumerate() {
@@ -139,9 +116,6 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
         );
     }
 
-    // The alternate peer connected at height zero. Its accepted header
-    // announcement proves the active front, which must make it a hedge
-    // candidate even though the handshake snapshot remains at zero.
     let alternate_lease = peers
         .lease(alternate)
         .ok_or_else(|| std::io::Error::other("alternate peer lease missing"))?;
@@ -158,7 +132,6 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
         Hash256::from_le_bytes(expected[0].as_bytes()),
         Some(1),
     ));
-    // The tick that observes the striped front arms the cold-front timer.
     sync.tick();
     std::thread::sleep(Duration::from_millis(150));
     sync.tick();
@@ -185,7 +158,6 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
         "the hedge must not reassign the front's owner"
     );
 
-    // The confirmed front hash is not duplicated again on later ticks.
     std::thread::sleep(Duration::from_millis(50));
     sync.tick();
     for rx in &rxs[1..] {
@@ -195,8 +167,7 @@ fn cold_start_stall_hedges_front_without_reassigning_owner()
 }
 
 #[test]
-fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
--> Result<(), Box<dyn std::error::Error>> {
+fn fanout_replaces_preferred_peer_when_eligible_pool_recovers() -> TestResult {
     let (sync, peers, _applied_tip, blocks, blocks_tx) = sync_with_mined_chain(48)?;
     install_budget(
         &sync,
@@ -258,33 +229,32 @@ fn fanout_replaces_preferred_peer_when_eligible_pool_recovers()
 }
 
 #[test]
-fn applied_ancestry_lookup_uses_active_index_only_for_applied_prefix()
--> Result<(), Box<dyn std::error::Error>> {
+fn applied_ancestry_lookup_uses_active_index_only_for_applied_prefix() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let main1 = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let main2 = regtest_fixture::mined_block_with_prev_hash(
         main1.block_hash(),
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let main3 = regtest_fixture::mined_block_with_prev_hash(
         main2.block_hash(),
         3,
         vec![regtest_fixture::coinbase(3)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let main4 = regtest_fixture::mined_block_with_prev_hash(
         main3.block_hash(),
         4,
         vec![regtest_fixture::coinbase(4)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let main1_id = tree.insert_node(Some(genesis_id), main1.header, NodeStatus::HeaderValid)?;
@@ -312,7 +282,7 @@ fn applied_ancestry_lookup_uses_active_index_only_for_applied_prefix()
             height.saturating_add(100),
             vec![regtest_fixture::coinbase(height.saturating_add(100))],
         )
-        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+        .or_fail("regtest fixture block");
         fork_prev = fork.block_hash();
         fork_parent = tree.insert_node(Some(fork_parent), fork.header, NodeStatus::HeaderValid)?;
     }
@@ -331,7 +301,7 @@ fn applied_ancestry_lookup_uses_active_index_only_for_applied_prefix()
 }
 
 #[test]
-fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn std::error::Error>> {
+fn apply_side_backpressure_never_blamed_on_front_peer() -> TestResult {
     // No-blame guard at the sync layer: while the stager holds the next
     // expected block (apply lag / failed-apply restore), the stall clock
     // must not run — no disconnect fires even arbitrarily far past the
@@ -351,10 +321,6 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
     let staller = test_addr(9450, 0)?;
     let rx = connect_peer(&peers, synthetic_peer(staller, 100));
 
-    // Cold-start disarm: an unseeded EWMA would suppress the fire on its
-    // own and this test would pass vacuously. Seed it (50ms keeps the
-    // decay floor at the default 2s initial threshold) so the no-fire
-    // phase below pins the apply-side no-blame guard specifically.
     sync.scheduler
         .lock()
         .window
@@ -365,8 +331,6 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
         return Err(std::io::Error::other("expected getdata").into());
     };
     assert_eq!(witness_block_inventory(inventory)?, expected[..2]);
-    // The successor stages; the window is otherwise fully blocked on the
-    // front-holding peer.
     let successor = Hash256::from_le_bytes(expected[1].as_bytes());
     {
         let block = Network::Regtest.genesis_block();
@@ -385,8 +349,6 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
         .window
         .mark_received_from(successor, 80, None, Instant::now());
 
-    // Apply-side backpressure: the next expected block (the frontier) is
-    // itself staged but not yet drained.
     let frontier = Hash256::from_le_bytes(expected[0].as_bytes());
     {
         let block = Network::Regtest.genesis_block();
@@ -403,13 +365,10 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
 
     let far_future = Instant::now() + Duration::from_mins(1);
 
-    // Far past any threshold, but the apply side is busy: frozen.
     sync.reconcile_window_recovery(&sync.observe_chain_frontier(), far_future);
     assert!(sync.scheduler.lock().window.stalling_peer().is_none());
     assert!(peers.is_connected(staller));
 
-    // The apply side drains the frontier: blame starts from scratch and
-    // only then runs to a fire — the busy interval was not charged.
     let drained = sync
         .scheduler
         .lock()
@@ -438,8 +397,7 @@ fn apply_side_backpressure_never_blamed_on_front_peer() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn staged_frontier_stuck_past_bound_escalates_without_blame()
--> Result<(), Box<dyn std::error::Error>> {
+fn staged_frontier_stuck_past_bound_escalates_without_blame() -> TestResult {
     // Issue #1091 regression: a well-formed next-expected body staged but
     // never applied used to hold `apply_side_busy` (and with it stall
     // conviction, pending-timeout conviction, and the cold-front hedge)
@@ -464,8 +422,6 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     let staller = test_addr(9470, 0)?;
     let rx = connect_peer(&peers, synthetic_peer(staller, 100));
 
-    // Cold-start disarm, exactly like the no-blame test above, so the final
-    // phase fires on the fixed threshold rather than the unseeded-EWMA gate.
     sync.scheduler
         .lock()
         .window
@@ -477,11 +433,6 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     };
     assert_eq!(witness_block_inventory(inventory)?, expected[..2]);
 
-    // The #1091 wedge shape: the frontier (and a successor) staged, nothing
-    // applied — apply_side_busy true and stuck. Both bodies stage in the
-    // stager exactly as real deliveries do: the escalation drains the
-    // staged prefix and requeues it, so an unstaged frontier would leave
-    // the refetch assertion below vacuous.
     let frontier = Hash256::from_le_bytes(expected[0].as_bytes());
     let successor = Hash256::from_le_bytes(expected[1].as_bytes());
     for hash in [frontier, successor] {
@@ -509,7 +460,6 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
         .saturating_mul(2);
     let start = Instant::now();
 
-    // Below the bound the suppression holds and nothing is evicted.
     sync.reconcile_window_recovery(&sync.observe_chain_frontier(), start);
     sync.reconcile_window_recovery(
         &sync.observe_chain_frontier(),
@@ -524,8 +474,6 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     assert!(peers.is_connected(staller));
     assert!(sync.scheduler.lock().window.stalling_peer().is_none());
 
-    // Past the bound: escalation evicts the stuck staged body for refetch
-    // and blames nobody.
     sync.reconcile_window_recovery(
         &sync.observe_chain_frontier(),
         start + bound + Duration::from_secs(1),
@@ -540,9 +488,6 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
     );
     assert!(sync.scheduler.lock().window.stalling_peer().is_none());
 
-    // The eviction requeues the frontier through the window's
-    // drop-for-retry path, so the next tick re-requests it — the refetch
-    // re-arm actually engaged, not just the stager removal.
     sync.tick();
     let requeued = witness_block_inventory(next_getdata(&rx)?)?;
     assert!(
@@ -550,8 +495,6 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
         "the escalation must requeue the evicted frontier for refetch, got {requeued:?}"
     );
 
-    // With the body evicted the normal unsuppressed stall path engages: the
-    // front peer now owes an unanswered request and is convicted as before.
     sync.reconcile_window_recovery(
         &sync.observe_chain_frontier(),
         start + bound + Duration::from_secs(1) + super::super::BLOCK_STALLING_TIMEOUT,
@@ -576,7 +519,7 @@ fn staged_frontier_stuck_past_bound_escalates_without_blame()
 }
 
 #[test]
-fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::error::Error>> {
+fn transient_demotion_does_not_flap_fanout_mode() -> TestResult {
     const PEER_COUNT: usize = 8;
     let ((sync, peers, block_tree, applied_tip, expected), blocks_tx) =
         sync_with_header_chain_and_blocks(64)?;
@@ -585,8 +528,6 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
         super::super::SyncBudget {
             max_pending_blocks: 16,
             max_pending_bytes: usize::MAX,
-            // Roomy count budget: the staging clamps must not bind, so
-            // any request change is attributable to the mode alone.
             max_received_blocks: 64,
             max_received_bytes: usize::MAX,
             max_peer_inflight: 16,
@@ -606,7 +547,6 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
         ));
     }
 
-    // Tick 1: eight eligible peers engage fan-out and stripe the window.
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
     assert!(sync.scheduler.lock().window.fanout_active());
@@ -620,8 +560,6 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
         );
     }
 
-    // The healthy peers deliver their stripes; the front-stripe owner
-    // stalls past the pending timeout — eligible peers dip 8 -> 7.
     for height in 3..=16_u32 {
         blocks_tx.send(crate::InboundBlock::from_decoded(header_chain_block(
             &expected, height,
@@ -630,9 +568,6 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
     std::thread::sleep(Duration::from_millis(300));
     sync.tick();
 
-    // Mode stability under the transient dip: hysteresis holds fan-out,
-    // so the stalled stripe is redistributed in cap-sized batches instead
-    // of re-concentrating the whole window on one deep peer.
     assert!(
         sync.scheduler.lock().window.fanout_active(),
         "one demotion below the threshold must not disengage fan-out"
@@ -660,23 +595,20 @@ fn transient_demotion_does_not_flap_fanout_mode() -> Result<(), Box<dyn std::err
         "the stalled front stripe must move to healthy peers under the cap"
     );
 
-    // Tick 3: the dip heals (7 -> 8) and the mode is still fan-out — the
-    // window stayed in one mode across 8 -> 7 -> 8.
     sync.tick();
     assert!(sync.scheduler.lock().window.fanout_active());
     Ok(())
 }
 
 /// Builds a regtest block whose serialized size is exactly `size` bytes by
-/// padding the coinbase-style transaction's output script. The script
-/// length prefix grows by 2 bytes at 253 and again at 65536.
+/// padding the coinbase-style transaction's output script.
 fn padded_block_exact(size: usize, seed: u8) -> Block {
     let mut block = regtest_fixture::mined_block_with_prev_hash(
         BlockHash(Hash256::from_le_bytes(&[seed; 32])),
         1,
         vec![super::transaction(seed)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     block.txs[0].outputs[0].script_pubkey = Vec::new().into();
     let prefix_growth = |len: usize| match len {
         0..=252 => 0,

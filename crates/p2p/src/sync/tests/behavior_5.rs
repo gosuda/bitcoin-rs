@@ -1,10 +1,7 @@
 use super::*;
 
-/// A recorded Fatal settlement halts further apply attempts: staged blocks
-/// stay queued, no new transition starts, and the latched tick reports
-/// idle instead of churning an `AlreadyActive` refusal every round.
 #[test]
-fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::error::Error>> {
+fn fatal_settlement_halts_further_apply_attempts() -> TestResult {
     let (sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
     stage_body(&sync, &main[0]);
     let staged = sync.scheduler.lock().stager.received_len();
@@ -31,8 +28,7 @@ fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget()
--> Result<(), Box<dyn std::error::Error>> {
+fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget() -> TestResult {
     let fixture = deterministic_proxy_fixture()?;
     let max_received_blocks = 2;
     install_budget(
@@ -64,7 +60,7 @@ fn drain_inbound_blocks_keeps_oversized_burst_within_received_budget()
 }
 
 #[test]
-fn apply_cache_miss_populates_and_then_hits() -> Result<(), Box<dyn std::error::Error>> {
+fn apply_cache_miss_populates_and_then_hits() -> TestResult {
     // 8 block bodies available as headers, but only the first three staged
     // this round. A small pending budget caps the cached horizon at 5.
     let fixture = apply_cache_fixture(8, 0)?;
@@ -93,8 +89,6 @@ fn apply_cache_miss_populates_and_then_hits() -> Result<(), Box<dyn std::error::
         Some(3)
     );
 
-    // Miss path populated the cache with the full 5-block horizon, then the
-    // post-apply advance moved the offset past the three applied blocks.
     let cache = cache_snapshot(&fixture.sync)
         .ok_or_else(|| std::io::Error::other("miss did not populate apply cache"))?;
     assert_eq!(
@@ -118,8 +112,6 @@ fn apply_cache_miss_populates_and_then_hits() -> Result<(), Box<dyn std::error::
     );
     let cached_suffix = cache.hashes[cache.offset..].to_vec();
 
-    // Stage block #4: this round must be a cache HIT (validity keys match the
-    // advanced cache), draining from the retained suffix rather than re-walking.
     stage_body(&fixture.sync, &fixture.blocks[3]);
     let (applied, failed) = fixture.sync.apply_buffered_blocks(None);
     assert_eq!(
@@ -148,7 +140,7 @@ fn apply_cache_miss_populates_and_then_hits() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn apply_cache_horizon_capped_by_pending_budget() -> Result<(), Box<dyn std::error::Error>> {
+fn apply_cache_horizon_capped_by_pending_budget() -> TestResult {
     // 12 header-backed bodies available, pending budget capped at 4. Stage a
     // single body: the populated horizon must not exceed the budget even
     // though far more headers are available above the applied tip.
@@ -175,7 +167,6 @@ fn apply_cache_horizon_capped_by_pending_budget() -> Result<(), Box<dyn std::err
         cap,
         "horizon must be capped at max_pending_blocks even with more headers available"
     );
-    // The cached run begins at applied_tip + 1 (height 1) and stays contiguous.
     assert_eq!(
         cache.hashes[0],
         Hash256::from_le_bytes(fixture.blocks[0].block_hash().as_bytes())
@@ -188,8 +179,7 @@ fn apply_cache_horizon_capped_by_pending_budget() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn on_peer_ready_sweeps_dead_predecessor_header_request() -> Result<(), Box<dyn std::error::Error>>
-{
+fn on_peer_ready_sweeps_dead_predecessor_header_request() -> TestResult {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     sync.scheduler.lock().header_request = Some(super::super::PendingHeaderRequest {
@@ -209,8 +199,7 @@ fn on_peer_ready_sweeps_dead_predecessor_header_request() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> Result<(), Box<dyn std::error::Error>>
-{
+fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> TestResult {
     let HeaderSyncFixture { sync, .. } = header_sync_with_genesis()?;
     let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8334);
     let (stale_tx, _stale_rx) = unbounded::<Message>();
@@ -237,7 +226,7 @@ fn on_peer_ready_sweep_releases_dead_owned_requests_only() -> Result<(), Box<dyn
 }
 
 #[test]
-fn far_future_matching_peer_retries_without_peer_blame() -> Result<(), Box<dyn std::error::Error>> {
+fn far_future_matching_peer_retries_without_peer_blame() -> TestResult {
     let HeaderSyncFixture {
         genesis,
         sync,
@@ -285,15 +274,8 @@ fn far_future_matching_peer_retries_without_peer_blame() -> Result<(), Box<dyn s
     Ok(())
 }
 
-/// Mines `depth` regtest blocks on genesis and applies them. Block 1's
-/// coinbase pays the full subsidy, and the tip block carries a matured
-/// spend of that coin paying a fee far above min-relay, so a reorg that
-/// disconnects the chain has a real readmission candidate. Returns the
-/// handles, the blocks, and their serialized bodies for the reorg body
-/// loader.
 #[test]
-fn tick_sorts_out_of_order_peers_before_requesting_blocks() -> Result<(), Box<dyn std::error::Error>>
-{
+fn tick_sorts_out_of_order_peers_before_requesting_blocks() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
     let low_addr = test_addr(9500, 0)?;
     let high_addr = test_addr(9500, 1)?;
@@ -313,8 +295,7 @@ fn tick_sorts_out_of_order_peers_before_requesting_blocks() -> Result<(), Box<dy
 }
 
 #[test]
-fn same_address_registration_clears_getheaders_gate_and_routes_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn same_address_registration_clears_getheaders_gate_and_routes_replacement() -> TestResult {
     let HeaderSyncFixture { sync, peers, .. } = header_sync_with_genesis()?;
     install_budget(
         &sync,
@@ -340,8 +321,7 @@ fn same_address_registration_clears_getheaders_gate_and_routes_replacement()
 }
 
 #[test]
-fn tick_uses_highest_peer_for_headers_when_request_capacity_is_zero()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_uses_highest_peer_for_headers_when_request_capacity_is_zero() -> TestResult {
     let (sync, peers, _tree, _applied, _expected) = sync_with_header_chain(3)?;
     install_budget(
         &sync,
@@ -350,8 +330,6 @@ fn tick_uses_highest_peer_for_headers_when_request_capacity_is_zero()
             ..super::super::default_sync_budget(Network::Regtest)
         },
     );
-    // Peers that may not serve block bodies: the tick's only job here is the
-    // header request, and it must still go to the highest peer.
     let low_rx = connect_peer(&peers, ineligible_peer(test_addr(9502, 0)?, 5));
     let high_rx = connect_peer(&peers, ineligible_peer(test_addr(9502, 1)?, 9));
 
@@ -363,8 +341,7 @@ fn tick_uses_highest_peer_for_headers_when_request_capacity_is_zero()
 }
 
 #[test]
-fn tick_bounded_request_peer_selection_preserves_equal_height_order()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_bounded_request_peer_selection_preserves_equal_height_order() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(8)?;
     install_budget(
         &sync,
@@ -404,7 +381,7 @@ pub(crate) fn deliver_headers(
     tx: &crossbeam_channel::Sender<InboundHeaders>,
     headers: Vec<Header>,
     source: PeerSource,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> TestResult {
     tx.send(InboundHeaders {
         headers,
         source: Some(source),

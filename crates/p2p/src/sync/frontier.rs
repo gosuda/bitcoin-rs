@@ -123,8 +123,7 @@ pub(crate) fn body_capability(claimed: i32, active_height: Option<u32>) -> Optio
 impl UsablePeer {
     /// Demonstrated serving capability for this connection: the height it is
     /// trusted at, precomputed once per observation instead of per request
-    /// peer. See [`body_capability`] for the rule and why branch evidence
-    /// cannot lower it.
+    /// peer.
     pub(crate) fn capability(&self) -> Option<u32> {
         body_capability(self.info.best_known_height, self.active_height)
     }

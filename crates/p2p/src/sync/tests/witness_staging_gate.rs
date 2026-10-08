@@ -1,9 +1,4 @@
 //! Executor-level body/header binding interaction tests (issue #1070).
-//!
-//! These exercise the `buffer_received_block_chunk` flow: the binding gate
-//! pre-pass through the chain seam, `AlreadyStaged` priority over late
-//! malformed duplicates, and recovery when a malformed body is followed by
-//! the correct one.
 
 use super::*;
 use crate::InboundBlock;
@@ -18,11 +13,7 @@ const ZERO_RESERVED_COMMITMENT: [u8; 32] = [
     0x5c, 0x69, 0x06, 0x89, 0x79, 0x99, 0x62, 0xb4, 0x8b, 0xeb, 0xd8, 0x36, 0x97, 0x4e, 0x8c, 0xf9,
 ];
 
-/// Builds a coinbase with a BIP141 commitment output. When `witness` is true
-/// the coinbase input carries a single 32-byte zero witness element (the
-/// reserved nonce); when false the witness is empty (stripped). Both variants
-/// share the same txid — witness data is not committed to in the txid — so
-/// they produce the same merkle root and block hash.
+/// Builds a coinbase with a BIP141 commitment output.
 fn segwit_coinbase(height: u32, witness: bool) -> Tx {
     let mut script_sig = regtest_fixture::script_num_push(i64::from(height));
     script_sig.extend_from_slice(&regtest_fixture::script_num_push(1));
@@ -61,7 +52,7 @@ fn segwit_block(prev_blockhash: BlockHash, height: u32, witness: bool) -> Block 
         height,
         vec![segwit_coinbase(height, witness)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"))
+    .or_fail("regtest fixture block")
 }
 
 type SegwitSyncFixture = (
@@ -86,7 +77,6 @@ fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>
     let genesis = Network::Regtest.genesis_block();
     let prev_hash = genesis.block_hash();
 
-    // Mine the correct block (with witness) — this also fixes the header.
     let correct_block = segwit_block(prev_hash, 1, true);
     let block_hash = Hash256::from_le_bytes(correct_block.block_hash().as_bytes());
 
@@ -97,8 +87,6 @@ fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>
         HeaderAdmission::Accepted { .. }
     ));
 
-    // The stripped variant shares the same header/hash (witness does not
-    // affect txid or block hash).
     let stripped_block = segwit_block(prev_hash, 1, false);
     assert_eq!(
         stripped_block.block_hash(),
@@ -109,15 +97,10 @@ fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>
     Ok((sync, block_hash, correct_block, stripped_block, headers_tx))
 }
 
-/// (g) A malformed (witness-stripped) body arrives first and is rejected for
-/// delivery; the correct body arrives later and is staged normally. The
-/// window's source-aware `reject_delivery` is a no-op here (no pending, no
-/// source), but the stager must remain clean so the correct body can stage.
 #[test]
-fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::error::Error>> {
+fn malformed_body_dropped_then_correct_body_staged() -> TestResult {
     let (sync, block_hash, correct_block, stripped_block, _) = segwit_sync_fixture()?;
 
-    // Send the stripped (malformed) body first.
     let mut batch = vec![InboundBlock::from_decoded(stripped_block)];
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "malformed body should be processed (rejected)");
@@ -125,17 +108,14 @@ fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::
         batch.is_empty(),
         "buffer_received_block_chunk should drain the batch"
     );
-    // The stager must NOT contain the malformed body.
     assert!(
         !sync.scheduler.lock().stager.contains(&block_hash),
         "malformed body must not be staged"
     );
 
-    // Now send the correct body.
     let mut batch = vec![InboundBlock::from_decoded(correct_block)];
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "correct body should be processed (staged)");
-    // The stager must now contain the correct body.
     assert!(
         sync.scheduler.lock().stager.contains(&block_hash),
         "correct body must be staged after malformed was rejected"
@@ -145,8 +125,7 @@ fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash()
--> Result<(), Box<dyn std::error::Error>> {
+fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash() -> TestResult {
     let (sync, block_hash, _correct_block, stripped_block, _) = segwit_sync_fixture()?;
     let peer_a = test_addr(9750, 0)?;
     let peer_b = test_addr(9750, 1)?;
@@ -181,12 +160,8 @@ fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash()
     Ok(())
 }
 
-/// A body with altered non-witness transaction data retains the header hash
-/// but fails the txid Merkle-root binding. It must not occupy the stager slot,
-/// leaving the original body eligible to arrive later.
 #[test]
-fn altered_non_witness_body_dropped_then_correct_body_staged()
--> Result<(), Box<dyn std::error::Error>> {
+fn altered_non_witness_body_dropped_then_correct_body_staged() -> TestResult {
     let (sync, block_hash, correct_block, _, _) = segwit_sync_fixture()?;
     let mut altered_block = correct_block.clone();
     altered_block.txs[0].outputs[0].value = Amount::from_sat(2);
@@ -213,17 +188,10 @@ fn altered_non_witness_body_dropped_then_correct_body_staged()
     Ok(())
 }
 
-/// (h) A correct body is staged first; a late malformed duplicate for the
-/// same hash must not displace it or corrupt the received/window state. The
-/// already-staged precheck skips witness hashing for the duplicate, so no
-/// `reject_delivery` or window manipulation occurs — the duplicate is a pure
-/// `AlreadyStaged` credited as a duplicate delivery.
 #[test]
-fn correct_body_staged_then_malformed_duplicate_is_ignored()
--> Result<(), Box<dyn std::error::Error>> {
+fn correct_body_staged_then_malformed_duplicate_is_ignored() -> TestResult {
     let (sync, block_hash, correct_block, stripped_block, _) = segwit_sync_fixture()?;
 
-    // Send the correct body first.
     let mut batch = vec![InboundBlock::from_decoded(correct_block)];
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "correct body should be staged");
@@ -233,12 +201,10 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored()
     );
     let staged_bytes = sync.scheduler.lock().stager.received_bytes();
 
-    // Send the stripped (malformed) duplicate.
     let mut batch = vec![InboundBlock::from_decoded(stripped_block)];
     let received = sync.buffer_received_block_chunk(&mut batch, Some(block_hash));
     assert_eq!(received, 1, "duplicate should be processed (AlreadyStaged)");
 
-    // The stager must still contain the correct body — not displaced.
     assert!(
         sync.scheduler.lock().stager.contains(&block_hash),
         "correct body must still be staged after malformed duplicate"
@@ -257,11 +223,8 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored()
     Ok(())
 }
 
-/// P2P-05: losing the only credited body peer must not require restart or a
-/// spontaneous announcement from a surviving, long-lived connection.
 #[test]
-fn idle_frontier_relearns_stale_peer_credit_after_rejected_body()
--> Result<(), Box<dyn std::error::Error>> {
+fn idle_frontier_relearns_stale_peer_credit_after_rejected_body() -> TestResult {
     let (sync, hash, correct, stripped, headers_tx) = segwit_sync_fixture()?;
     let bad = test_addr(9765, 0)?;
     let good = test_addr(9765, 1)?;

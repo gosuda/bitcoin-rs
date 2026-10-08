@@ -128,7 +128,6 @@ mod tests {
             .into()
     }
 
-    // P2P-01 / BIP339: unannounced parents may be requested by txid.
     #[test]
     fn missing_parents_use_txids_and_deduplicate_repeated_inputs() {
         let table = PeerTable::new();
@@ -152,9 +151,6 @@ mod tests {
         assert!(!lease.is_cancelled());
     }
 
-    /// P2P-01 / BIP144: request witness serialization by txid from `NODE_WITNESS`
-    /// sources. BIP339 announcement preference does not alter this requirement.
-    /// <https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay>
     #[test]
     fn missing_parents_request_witness_by_service_not_announcement_preference() {
         use bitcoin::p2p::ServiceFlags;
@@ -210,9 +206,6 @@ mod tests {
         }
     }
 
-    // BIP144: `MSG_TX` is requested as `MSG_WITNESS_TX` from a witness peer
-    // with the same hash. Every other inventory type passes through: block
-    // bodies are never requested from an announcement.
     #[test]
     fn witness_flag_upgrades_transactions_only() {
         let txid = bitcoin::Txid::from_byte_array(*parent(1).as_bytes());
@@ -238,7 +231,6 @@ mod tests {
         assert_eq!(items, expected);
     }
 
-    // P2P-02: a stale source cannot target or cancel its successor.
     #[test]
     fn stale_missing_parent_source_cannot_send_to_or_cancel_replacement() {
         let table = PeerTable::new();
@@ -250,8 +242,6 @@ mod tests {
         let current = PeerLease::new(new_sender);
         table.register(stale_source.addr, current.clone());
 
-        // Fill the replacement's queue: an incorrect address-only send would
-        // both target the wrong connection and cancel it on saturation.
         assert!(current.send(Message::Ping(7)).is_ok());
         assert!(!request_missing_parents(&table, stale_source, &[parent(1)]));
         assert!(old_receiver.try_recv().is_err());
@@ -266,7 +256,6 @@ mod tests {
         assert!(matches!(new_receiver.try_recv(), Ok(Message::GetData(_))));
     }
 
-    // P2P-02: only the saturated delivering connection is cancelled.
     #[test]
     fn missing_parent_request_keeps_outbound_saturation_policy() {
         let table = PeerTable::new();
@@ -281,7 +270,6 @@ mod tests {
         assert!(lease.is_cancelled());
     }
 
-    // P2P-02: cancellation prevents subsequent parent-request enqueue.
     #[test]
     fn cancelled_missing_parent_source_does_not_enqueue_a_request() {
         let table = PeerTable::new();

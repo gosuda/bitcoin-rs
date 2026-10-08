@@ -52,8 +52,7 @@ impl BlockSync {
 
     /// Same punishment when the failing body was consumed inside a branch
     /// switch: the staged entry carries the delivering connection, captured
-    /// before [`Self::purge_invalidated`] drops it. `None` means a locally
-    /// injected body — purged without blame.
+    /// before [`Self::purge_invalidated`] drops it.
     pub(super) fn punish_permanent_delivery_source(
         &self,
         source: Option<crate::PeerSource>,
@@ -103,11 +102,8 @@ impl BlockSync {
         next_expected_hash: Option<Hash256>,
     ) -> (usize, usize) {
         // A latched Fatal settlement left the implementation's admission
-        // closed: starting another transition would bounce off the same
-        // refusal and churn staged state every tick. Staged blocks stay
-        // queued until recreation. The counter keeps the stall observable:
-        // the one `error!` in `note_fatal_settlement` fires once, these
-        // ticks stay quiet.
+        // closed: starting another transition would bounce off the same refusal
+        // and churn staged state every tick.
         if self.apply_halted.load(std::sync::atomic::Ordering::SeqCst) {
             metrics::counter!("node.sync.apply_halted_ticks").increment(1);
             return (0, 0);
@@ -162,8 +158,7 @@ impl BlockSync {
         let mut failed_permanent = false;
         // Applied in windows, not one at a time: the window verifies every
         // block's input scripts in a single dispatch, which is where the
-        // measured apply win comes from. Blocks still commit one by one and in
-        // order inside the window, so nothing about the applied chain changes.
+        // measured apply win comes from.
         let drained: Vec<_> = drained.into_iter().collect();
         let mut chunk_start = 0_usize;
         while chunk_start < drained.len() {

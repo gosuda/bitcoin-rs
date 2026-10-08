@@ -62,10 +62,6 @@ pub const DEFAULT_TX_RELAY_QUEUE_CAPACITY: usize = 1024;
 const RELAY_POLL: Duration = Duration::from_millis(100);
 
 /// One accepted transaction awaiting `inv` announcement.
-///
-/// `source` is the delivering peer's node id to exclude from the
-/// announcement, or `None` for a locally-injected transaction (RPC
-/// `sendrawtransaction`), which is announced to every connected peer.
 #[derive(Clone, Copy, Debug)]
 pub struct RelayRequest {
     /// The transaction id to advertise in the `inv` vector.
@@ -217,13 +213,9 @@ pub struct RelayOutcome {
 }
 
 /// Consumer seam for the relay worker.
-///
-/// [`PeerRelaySink`] is the production implementation; tests supply a fake
-/// that records announcements without a live connection.
 pub trait RelaySink: Send + Sync {
-    /// Announces `txid` as a transaction `inv` to every connected peer
-    /// except the one identified by `exclude` (if any). Returns the
-    /// per-announce outcome.
+    /// Announces `txid` as a transaction `inv` to every connected peer except
+    /// the one identified by `exclude` (if any).
     fn announce_inv(&self, txid: Txid, wtxid: Wtxid, exclude: Option<u64>) -> RelayOutcome;
 }
 
@@ -269,9 +261,8 @@ impl RelaySink for PeerRelaySink {
             };
             if let Err(error) = lease.send(Message::Inv(vec![inv])) {
                 // Saturation or a cancelled/disconnected lease: the existing
-                // p2p policy disconnects this peer (PeerLease::send cancels
-                // the lease on Full/Disconnected). Count it and continue;
-                // the listener reaps the dead connection.
+                // p2p policy disconnects this peer (PeerLease::send cancels the
+                // lease on Full/Disconnected).
                 tracing::debug!(
                     peer_addr = %addr,
                     %error,
@@ -433,8 +424,6 @@ mod tests {
                     continue;
                 }
                 if peer.capacity == 0 {
-                    // Simulate a saturated outbound queue: the p2p layer
-                    // would disconnect this peer.
                     outcome.saturated += 1;
                 } else {
                     peer.capacity -= 1;
@@ -477,8 +466,6 @@ mod tests {
     }
 
     /// Allocates a fresh process-unique node id via a throwaway lease.
-    /// `ConnectionId` has no public constructor, so tests obtain real ids
-    /// the same way production code does — from `PeerLease::node_id()`.
     fn fresh_node_id() -> u64 {
         let (tx, _rx) = bounded::<Message>(1);
         PeerLease::new(tx).node_id()
@@ -511,8 +498,6 @@ mod tests {
         assert_eq!(outcome.attempted, 3);
         assert_eq!(outcome.excluded, 1);
         assert_eq!(outcome.saturated, 0);
-        // The remaining two peers each consumed one unit of capacity; the
-        // source peer's capacity is unchanged.
         let locked = sink.peers.lock();
         assert_eq!(locked[0].capacity, 63);
         assert_eq!(
@@ -539,9 +524,6 @@ mod tests {
 
     #[test]
     fn reconnect_uses_new_node_id_and_old_source_excludes_nothing() {
-        // A peer disconnects and reconnects with a fresh node id. The old
-        // source id is no longer in the peer set, so an announcement
-        // excluding the stale source reaches every live peer.
         let stale_source = fresh_node_id();
         let (peers, _ids) = fake_peers(2);
         let sink = FakeSink::new(peers);
@@ -558,9 +540,6 @@ mod tests {
 
     #[test]
     fn replacement_txid_is_announced_excluding_source() {
-        // A replacement transaction has a fresh txid replacing a same-input
-        // mempool entry. Relay announces the new txid to every peer except
-        // the one that submitted it.
         let (peers, ids) = fake_peers(3);
         let sink = FakeSink::new(peers);
         let replacement = dummy_txid(0xD4);
@@ -588,13 +567,11 @@ mod tests {
 
         assert!(queue.announce(live[0].0, live_wtxid(&live[0].0, &gateway), None, live[0].1));
         assert!(queue.announce(live[1].0, live_wtxid(&live[1].0, &gateway), None, live[1].1));
-        // Queue is full: the third announcement is dropped, not blocked.
         assert!(!queue.announce(live[2].0, live_wtxid(&live[2].0, &gateway), None, live[2].1));
 
         assert_eq!(queue.enqueued(), 2);
         assert_eq!(queue.dropped(), 1);
 
-        // The dropped request never reaches the sink.
         let (peers, _ids) = fake_peers(1);
         let sink = FakeSink::new(peers);
         let processed = drain_relay_queue(&rx, &sink, &gateway);
@@ -643,11 +620,6 @@ mod tests {
 
     #[test]
     fn a_re_admitted_request_is_not_announced() {
-        // The transaction leaves and returns — same body, same txid —
-        // before the drain. Re-admission assigns a new admission epoch, so
-        // the queued request's epoch no longer matches and the stale
-        // request (whose `source` belongs to the earlier admission) must
-        // not announce the fresh entry.
         let (peers, _ids) = fake_peers(1);
         let sink = FakeSink::new(peers);
         let gateway = relay_identity_gateway();
@@ -679,14 +651,10 @@ mod tests {
         let (tx, sequence) = admit_live_tx(10, &gateway);
         queue.announce(tx.txid(), tx.wtxid(), None, sequence);
 
-        // The transaction leaves the shared mempool (block connect,
-        // replacement, or eviction) before the drain.
         gateway.clear(AdmissionOrigin::Block);
 
         let processed = drain_relay_queue(&rx, &sink, &gateway);
 
-        // A stale request is consumed so the queue cannot retain it, but it
-        // must never produce an `inv` for a body `getdata` cannot retrieve.
         assert_eq!(processed, 1);
         assert!(
             sink.log().is_empty(),
@@ -707,8 +675,6 @@ mod tests {
         queue.announce(live.txid(), live.wtxid(), None, live_seq);
         queue.announce(confirmed.txid(), confirmed.wtxid(), None, confirmed_seq);
 
-        // A block connection confirms the second transaction before the
-        // worker reaches it, so only the first may be announced.
         gateway.remove_for_block(
             AdmissionOrigin::Block,
             &[&*confirmed],
@@ -720,8 +686,6 @@ mod tests {
         let worker =
             spawn_tx_relay_worker(sink, rx, Arc::downgrade(&gateway), Arc::clone(&shutdown))
                 .expect("relay worker spawns");
-        // Deterministic release: dropping the last sender disconnects the
-        // queue once the two buffered requests are consumed. No sleeping.
         drop(queue);
         worker.join().expect("relay worker exits");
 
@@ -774,10 +738,6 @@ mod tests {
 
     #[test]
     fn per_peer_saturation_counts_saturated_not_dropped() {
-        // One peer has capacity 0 (saturated outbound queue). The
-        // announcement is counted as saturated for that peer; the other
-        // peer still receives it. The p2p layer disconnects the saturated
-        // peer rather than silently dropping the message.
         let id_a = fresh_node_id();
         let id_b = fresh_node_id();
         let sink = FakeSink::new(vec![
@@ -805,9 +765,6 @@ mod tests {
         use bitcoin::hashes::Hash as _;
         use bitcoin::p2p::message_blockdata::Inventory;
 
-        // End-to-end with real PeerLease objects: build the production peer
-        // map, announce excluding one peer's node id, and confirm only the
-        // other peer's outbound channel receives the inv.
         let addr_a: SocketAddr = "127.0.0.1:1".parse().expect("valid addr");
         let addr_b: SocketAddr = "127.0.0.1:2".parse().expect("valid addr");
         let (tx_a, rx_a) = bounded::<Message>(8);
@@ -830,8 +787,6 @@ mod tests {
         assert_eq!(outcome.excluded, 1);
         assert_eq!(outcome.saturated, 0);
 
-        // The source peer (a) must not receive the inv; the other peer (b)
-        // must receive exactly one inv carrying the announced txid.
         assert!(
             rx_a.try_recv().is_err(),
             "source peer must not be announced to"
@@ -851,8 +806,6 @@ mod tests {
         }
     }
 
-    /// A block-relay-only connection is never told about a transaction, so it
-    /// is not even counted as a target of the announcement.
     #[test]
     fn peer_relay_sink_skips_block_relay_connections() {
         let addr_full: SocketAddr = "127.0.0.1:3".parse().expect("valid addr");
@@ -937,8 +890,6 @@ mod tests {
             witness_inv
         );
 
-        // A replacement must neither inherit the old negotiation nor be
-        // excluded by its retired source identity.
         let (sender, receiver) = bounded(2);
         let replacement = PeerLease::new(sender);
         peers.register(connections[0].0, replacement.clone());
@@ -1241,8 +1192,6 @@ mod tests {
         (gateway, rx)
     }
 
-    // P2P-01 / MPL-01: callbacks may re-enter the gateway before a later leg.
-    // An old local event must not borrow a new peer admission's identity.
     #[test]
     fn delayed_local_relay_does_not_adopt_a_reinserted_body() {
         for origin in [
@@ -1258,8 +1207,6 @@ mod tests {
                         bitcoin_rs_primitives::Witness::from_stack(vec![vec![2]]);
                     Arc::new(variant)
                 } else {
-                    // Same allocation, not merely equal bytes: Arc identity is
-                    // not an admission identity either.
                     Arc::clone(&original)
                 };
                 assert_eq!(original.txid(), next.txid());

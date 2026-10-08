@@ -43,9 +43,7 @@ pub enum WindowCommitDisposition {
     /// `Permanent` failures poisoned the failed block's header subtree while
     /// the chain transition was still held.
     Permanent,
-    /// The delivered body is mutated or not bound to its header. Discard
-    /// this body and retry the same header/hash from another source; do not
-    /// poison the header or its descendants.
+    /// The delivered body is mutated or not bound to its header.
     BodyMutated,
     /// `Operational` failures poisoned nothing; the failed block stays
     /// retryable.
@@ -98,11 +96,7 @@ pub enum BranchSwitchError {
         /// Height the missing body sits at.
         height: u32,
     },
-    /// A connect failed while applying the new branch. When the first body
-    /// was permanently invalid, the previously applied branch is restored
-    /// before this outcome is returned. The implementation has evaluated the
-    /// assume-valid gate over the post-invalidation tree when `invalidated`
-    /// is non-empty.
+    /// A connect failed while applying the new branch.
     ConnectFailed {
         /// Hash of the block that failed to connect.
         hash: Hash256,
