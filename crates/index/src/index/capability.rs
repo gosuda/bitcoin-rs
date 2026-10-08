@@ -57,13 +57,11 @@ pub enum IndexCapability {
 impl IndexCapability {
     /// Every capability in mask-bit and report order.
     ///
-    /// PRE: none.
     /// POST: distinct entries, ordered `TxLookup`, `ScriptHistory`, `ScriptLive`.
     /// INVARIANT: this order is load-bearing; the query-refusal text and the
     /// index-ahead capability label follow it.
     pub(crate) const ALL: [Self; 3] = [Self::TxLookup, Self::ScriptHistory, Self::ScriptLive];
 
-    /// PRE: none.
     /// POST: the single mask bit this capability owns, matching the persisted
     /// reset-marker mask (`TxLookup` 0b001, `ScriptHistory` 0b010, `ScriptLive` 0b100).
     pub(super) const fn bit(self) -> u8 {
@@ -74,7 +72,6 @@ impl IndexCapability {
         }
     }
 
-    /// PRE: none.
     /// POST: the position of this capability in [`Self::ALL`], 0 to 2.
     pub(crate) const fn index(self) -> usize {
         match self {
@@ -84,9 +81,7 @@ impl IndexCapability {
         }
     }
 
-    /// PRE: none.
-    /// POST: the persisted watermark key, byte-identical to the constants
-    /// this method replaces (the `T`, `S`, `L` keys under `0x00`).
+    /// The persisted watermark key (`T`, `S`, or `L` under `0x00`).
     pub(super) const fn watermark_key(self) -> &'static [u8] {
         match self {
             Self::TxLookup => TX_LOOKUP_WATERMARK_KEY,
@@ -95,7 +90,6 @@ impl IndexCapability {
         }
     }
 
-    /// PRE: none.
     /// POST: the column families this capability occupies
     /// (`TxLookup`: `TxConfirmed`; `ScriptHistory`: Funding, Spending;
     /// `ScriptLive`: `ScriptLive`).
@@ -107,7 +101,6 @@ impl IndexCapability {
         }
     }
 
-    /// PRE: none.
     /// POST: the display name (`tx_lookup`, `script_history`, `script_live`).
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -117,9 +110,7 @@ impl IndexCapability {
         }
     }
 
-    /// PRE: none.
-    /// POST: the query-refusal text for this capability, byte-identical to
-    /// the inline literals this method replaces.
+    /// The query-refusal text for this capability.
     pub(crate) const fn disabled_message(self) -> &'static str {
         match self {
             Self::TxLookup => "txindex is disabled",
@@ -151,8 +142,7 @@ impl IndexCapabilities {
     pub const SCRIPT_HISTORY: Self = Self(IndexCapability::ScriptHistory.bit());
     /// `ScriptIndex` live outputs only.
     pub const SCRIPT_LIVE: Self = Self(IndexCapability::ScriptLive.bit());
-    /// Node `--txindex` plus `--scriptindex=utxo`; previously an ad-hoc
-    /// struct literal at its sole construction site.
+    /// Node `--txindex` plus `--scriptindex=utxo`.
     pub const TX_LOOKUP_SCRIPT_LIVE: Self =
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptLive.bit());
     /// Every index capability, including the compact live view.
@@ -164,21 +154,18 @@ impl IndexCapabilities {
     pub const HISTORICAL: Self =
         Self(IndexCapability::TxLookup.bit() | IndexCapability::ScriptHistory.bit());
 
-    /// PRE: none.
     /// POST: whether `capability` is selected.
     #[must_use]
     pub(crate) const fn contains(self, capability: IndexCapability) -> bool {
         self.0 & capability.bit() != 0
     }
 
-    /// PRE: none.
     /// POST: whether no capability is selected.
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
-    /// PRE: none.
     /// POST: `capability` is selected in the result; every other selection
     /// bit is unchanged.
     #[must_use]
@@ -186,7 +173,6 @@ impl IndexCapabilities {
         Self(self.0 | capability.bit())
     }
 
-    /// PRE: none.
     /// POST: `capability` is unselected in the result; every other selection
     /// bit is unchanged.
     #[must_use]
@@ -194,7 +180,6 @@ impl IndexCapabilities {
         Self(self.0 & !capability.bit())
     }
 
-    /// PRE: none.
     /// POST: the selected capabilities in [`IndexCapability::ALL`] order.
     pub(crate) fn iter(self) -> impl Iterator<Item = IndexCapability> {
         IndexCapability::ALL
@@ -221,7 +206,6 @@ impl IndexCapabilities {
         self.0
     }
 
-    /// PRE: none.
     /// POST: the set the mask encodes, or
     /// [`IndexError::InvalidResetMarker`] when `mask` is 0 or any bit above
     /// bit 2 is set.

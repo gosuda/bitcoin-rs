@@ -445,36 +445,66 @@ fn parent_hash(body: &[u8]) -> [u8; 32] {
     hash
 }
 
+/// Watermark bytes round-trip, and a truncated encoding is rejected both in
+/// the codec and through a durable read.
 #[test]
-fn watermark_roundtrip_and_invalid_rejection() -> Result<(), Box<dyn std::error::Error>> {
+fn watermark_bytes_round_trip_and_truncation_is_rejected() -> Result<(), Box<dyn std::error::Error>>
+{
     let watermark = IndexWatermark {
         height: 123,
         hash: [0xab; 32],
     };
     let bytes = watermark.to_bytes();
-    let decoded = IndexWatermark::from_bytes(&bytes)?;
-    assert_eq!(decoded, watermark);
-
-    let result = IndexWatermark::from_bytes(&bytes[..3]);
-    assert!(matches!(result, Err(IndexError::InvalidWatermark)));
-    Ok(())
-}
-
-#[test]
-fn format_version_rejection() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    store.put(
-        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
-        &[0x00, b'V'],
-        &[4, 0, 0, 0],
-    )?;
+    assert_eq!(IndexWatermark::from_bytes(&bytes)?, watermark);
     assert!(matches!(
-        IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
+        IndexWatermark::from_bytes(&bytes[..3]),
+        Err(IndexError::InvalidWatermark)
+    ));
+
+    let store = Arc::new(MemoryStore::default());
+    store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], &[5, 0, 0, 0])?;
+    store.put(ColumnFamily::UtxoMeta, &[0x00, b'T'], &[0_u8; 2])?;
+    assert!(matches!(
+        IndexWriter::open(store, 1)?.watermark(),
+        Err(IndexError::InvalidWatermark)
     ));
     Ok(())
 }
 
+/// Durable metadata the current format cannot serve fails `open` with its
+/// own reason. A version cell is authoritative even with trailing bytes, and
+/// derived rows without one are a cursorless legacy index.
+#[test]
+fn open_rejects_incompatible_durable_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    let cases: [(&str, Option<&[u8]>); 3] = [
+        ("format 4", Some(&[4, 0, 0, 0])),
+        ("format 4 with a trailing byte", Some(&[4, 0, 0, 0, 0])),
+        ("derived rows with no version cell", None),
+    ];
+    for (label, version) in cases {
+        let store = Arc::new(MemoryStore::default());
+        match version {
+            Some(version) => store.put(ColumnFamily::UtxoMeta, &[0x00, b'V'], version)?,
+            None => store.put(ColumnFamily::TxConfirmed, b"orphan-row", &[])?,
+        }
+        let failure = IndexWriter::open(store, 1).err();
+        if version.is_some() {
+            assert!(
+                matches!(
+                    failure,
+                    Some(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
+                ),
+                "{label}"
+            );
+        } else {
+            assert!(
+                matches!(failure, Some(IndexError::LegacyCursorlessIndex)),
+                "{label}"
+            );
+        }
+    }
+    Ok(())
+}
 #[test]
 fn format_4_open_refuses_for_rebuild() -> Result<(), Box<dyn std::error::Error>> {
     // Format 5 changed every row family, so a format-4 store refuses start
@@ -494,18 +524,6 @@ fn format_4_open_refuses_for_rebuild() -> Result<(), Box<dyn std::error::Error>>
             .is_none()
     );
     assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
-    Ok(())
-}
-
-#[test]
-fn unversioned_rows_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    store.put(ColumnFamily::TxConfirmed, b"orphan-row", &[])?;
-
-    assert!(matches!(
-        IndexWriter::open(Arc::clone(&store), 1),
-        Err(IndexError::LegacyCursorlessIndex)
-    ));
     Ok(())
 }
 
@@ -534,27 +552,6 @@ fn reset_index_replaces_an_incompatible_derived_format() -> Result<(), Box<dyn s
         store.count(bitcoin_rs_storage::ColumnFamily::TxConfirmed),
         0
     );
-    Ok(())
-}
-
-#[test]
-fn invalid_watermark_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    store.put(
-        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
-        &[0x00, b'V'],
-        &[5, 0, 0, 0],
-    )?;
-    store.put(
-        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
-        &[0x00, b'T'],
-        &[0u8; 2],
-    )?;
-    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    assert!(matches!(
-        writer.watermark(),
-        Err(IndexError::InvalidWatermark)
-    ));
     Ok(())
 }
 
@@ -589,60 +586,70 @@ fn prepare_block_verifies_header_identity_and_parent() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn prepare_block_for_rejects_a_short_body() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    let body = read_fixture(0)?;
-    // Forty bytes cannot hold the fixed 80-byte header the parser requires.
-    let truncated = &body[..40];
+fn prepare_block_for_rejects_malformed_bodies() -> Result<(), Box<dyn std::error::Error>> {
+    // Every case must fail in the parser and leave no row behind: a body
+    // shorter than the fixed 80-byte header, a body whose last transaction is
+    // cut short, and a structurally complete body with extra bytes appended.
+    type Mangle = fn(Vec<u8>) -> Vec<u8>;
+    type Check = fn(&IndexError) -> bool;
+    let cases: [(&str, Mangle, Check); 3] = [
+        (
+            "short body",
+            |body| body[..40].to_vec(),
+            |error| {
+                matches!(
+                    error,
+                    IndexError::BlockParse(DecodeError::EndOfData {
+                        needed: 40,
+                        available: 40,
+                    })
+                )
+            },
+        ),
+        (
+            "truncated transaction",
+            |body| body[..body.len() - 8].to_vec(),
+            |error| matches!(error, IndexError::BlockParse(DecodeError::EndOfData { .. })),
+        ),
+        (
+            "trailing bytes",
+            |mut body| {
+                body.push(0);
+                body
+            },
+            |error| {
+                matches!(
+                    error,
+                    IndexError::BlockParse(DecodeError::TrailingBytes { remaining: 1 })
+                )
+            },
+        ),
+    ];
 
-    assert!(matches!(
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, [0_u8; 32], truncated),
-        Err(IndexError::BlockParse(DecodeError::EndOfData {
-            needed: 40,
-            available: 40,
-        }))
-    ));
-    Ok(())
-}
+    for (label, mangle, check) in cases {
+        let store = Arc::new(MemoryStore::default());
+        let writer = IndexWriter::open(Arc::clone(&store), 1)?;
+        let body = mangle(read_fixture(0)?);
+        let hash = if label == "trailing bytes" {
+            block_hash(&body)
+        } else {
+            [0_u8; 32]
+        };
 
-#[test]
-fn prepare_block_for_rejects_a_truncated_transaction() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    let body = read_fixture(0)?;
-    // Cut the coinbase short: the header and the transaction count still
-    // parse, so the failure lands inside a transaction.
-    let truncated = &body[..body.len() - 8];
-
-    assert!(matches!(
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, [0_u8; 32], truncated),
-        Err(IndexError::BlockParse(DecodeError::EndOfData { .. }))
-    ));
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
-    assert_eq!(store.count(ColumnFamily::Funding), 0);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
-    assert_eq!(store.count(ColumnFamily::BlockHeaders), 0);
-    Ok(())
-}
-
-#[test]
-fn prepare_block_for_rejects_trailing_bytes() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    let writer = IndexWriter::open(Arc::clone(&store), 1)?;
-    let mut body = read_fixture(0)?;
-    let hash = block_hash(&body);
-    body.push(0);
-
-    // Preparation takes one complete block, so a structurally complete block
-    // followed by anything else is rejected rather than front-consumed. The
-    // header hashes to `hash`, so only the parse can reject this body.
-    assert!(matches!(
-        writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body),
-        Err(IndexError::BlockParse(DecodeError::TrailingBytes {
-            remaining: 1
-        }))
-    ));
+        let error = writer
+            .prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)
+            .err()
+            .ok_or_else(|| format!("{label}: expected a parse rejection"))?;
+        assert!(check(&error), "{label}: unexpected error {error:?}");
+        for cf in [
+            ColumnFamily::TxConfirmed,
+            ColumnFamily::Funding,
+            ColumnFamily::Spending,
+            ColumnFamily::BlockHeaders,
+        ] {
+            assert_eq!(store.count(cf), 0, "{label}: {cf:?} must stay empty");
+        }
+    }
     Ok(())
 }
 
@@ -659,11 +666,13 @@ fn commit_forward_and_rollback_are_atomic_and_ordered() -> Result<(), Box<dyn st
     assert_eq!(block1.parent_hash, block0.hash);
     assert_eq!(block1.parent_hash, parent_hash(&body1));
 
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 1_000,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block0).is_ok());
+    let mut batch = common::batch_with_limits(
+        block0,
+        PreparedBatchLimits {
+            max_rows: 1_000,
+            max_bytes: 1_000_000,
+        },
+    );
     assert!(batch.try_push(block1).is_ok());
     let watermark = writer.commit_forward(batch)?;
     assert_eq!(watermark, block1_watermark);
@@ -728,11 +737,7 @@ fn snapshot_scan_preserves_position_values() -> Result<(), Box<dyn std::error::E
     let block = deserialize::<Block>(&body)?;
     let txid = block.txs[0].txid();
     let prepared = writer.prepare_block(0, block_hash(&body), &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(prepared).is_ok());
+    let batch = common::single_block_batch(prepared);
     writer.commit_forward(batch)?;
 
     let snapshot = writer.snapshot()?;
@@ -786,11 +791,7 @@ fn spending_rows_carry_transaction_positions() -> Result<(), Box<dyn std::error:
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let prepared = writer.prepare_block(0, block_hash(&body), &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(prepared).is_ok());
+    let batch = common::single_block_batch(prepared);
     writer.commit_forward(batch)?;
 
     let snapshot = writer.snapshot()?;
@@ -825,11 +826,7 @@ fn commit_forward_uses_one_durable_write() -> Result<(), Box<dyn std::error::Err
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let block = writer.prepare_block(0, block_hash(&body), &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block).is_ok());
+    let batch = common::single_block_batch(block);
 
     writer.commit_forward(batch)?;
 
@@ -903,11 +900,7 @@ fn aligned_capabilities_share_one_atomic_commit() -> Result<(), Box<dyn std::err
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
     let block = writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block).is_ok());
+    let batch = common::single_block_batch(block);
 
     writer.commit_forward(batch)?;
 
@@ -932,11 +925,7 @@ fn script_index_reset_preserves_tx_lookup_and_shared_identity()
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
     let block = writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block).is_ok());
+    let batch = common::single_block_batch(block);
     writer.commit_forward(batch)?;
 
     writer.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY)?;
@@ -969,11 +958,13 @@ fn rollback_preserves_shared_ancestors_for_a_disabled_capability()
     let block1 =
         writer.prepare_block_for(IndexCapabilities::HISTORICAL, 1, block_hash(&body1), &body1)?;
     let watermark0 = block0.watermark();
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block0).is_ok());
+    let mut batch = common::batch_with_limits(
+        block0,
+        PreparedBatchLimits {
+            max_rows: 100,
+            max_bytes: 1_000_000,
+        },
+    );
     assert!(batch.try_push(block1).is_ok());
     writer.commit_forward(batch)?;
 
@@ -1004,11 +995,7 @@ fn resetting_the_only_cursor_removes_shared_identity() -> Result<(), Box<dyn std
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body), &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block).is_ok());
+    let batch = common::single_block_batch(block);
     writer.commit_forward(batch)?;
 
     writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
@@ -1025,11 +1012,7 @@ fn open_resumes_interrupted_capability_reset() -> Result<(), Box<dyn std::error:
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
     let block = writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     drop(writer);
 
@@ -1059,11 +1042,7 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
     let body = read_fixture(0)?;
     let hash = block_hash(&body);
     let block = writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     let (fence, _) = writer.fenced_watermarks()?;
     writer.commit_consumer_cursor(fence, b"before-reset")?;
@@ -1106,111 +1085,89 @@ fn reset_claim_carries_mask_epoch_and_base_version() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn forward_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let body = read_fixture(1)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 1, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
-    let rows_before = store.rows(ColumnFamily::TxConfirmed);
-    let (fence, _) = writer.fenced_watermarks()?;
-    let mut claim = store.new_batch();
-    claim.put(
-        ColumnFamily::UtxoMeta,
-        RESET_KEY,
-        &fenced_marker(SCRIPT_HISTORY_MASK, 9),
-    );
-    claim.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
-    claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
-    store.write_durable(claim)?;
+fn ordinary_commits_are_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
+    // A reset claim published after the fence capture must reject every
+    // ordinary mutator, leave derived rows and watermarks untouched, and
+    // leave the adopted claim completed at Idle(base_version + 1).
+    #[derive(Clone, Copy)]
+    enum Mutator {
+        Forward,
+        Rollback,
+        Cursor,
+    }
+    let cases = [
+        (Mutator::Forward, SCRIPT_HISTORY_MASK, SCRIPT_WATERMARK_KEY),
+        (Mutator::Rollback, SCRIPT_HISTORY_MASK, SCRIPT_WATERMARK_KEY),
+        (Mutator::Cursor, TX_LOOKUP_MASK, TX_WATERMARK_KEY),
+    ];
 
-    let result = writer.commit_forward_with_cursor(
-        fence,
-        prepared,
-        ConsumerCursorUpdate::Set(b"stale-forward"),
-    );
+    for (mutator, mask, dropped_watermark) in cases {
+        let store = Arc::new(MemoryStore::default());
+        seed_populated_store(&store, 1)?;
+        let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
+        let rollback_body = read_fixture(0)?;
+        let forward_body = read_fixture(1)?;
 
-    assert!(matches!(result, Err(IndexError::ResetInProgress)));
-    assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_before);
-    assert_eq!(
-        writer.watermarks()?.tx_lookup.map(|mark| mark.height),
-        Some(0)
-    );
-    assert!(writer.consumer_cursor()?.is_none());
-    assert_eq!(stored_idle_version(&store)?, 1);
+        // Prepared work and the pre-existing cursor are captured before the
+        // racing claim lands, exactly as a live writer would hold them.
+        let mut prepared = PreparedBatch::new(PreparedBatchLimits {
+            max_rows: 100,
+            max_bytes: 1_000_000,
+        });
+        if matches!(mutator, Mutator::Forward) {
+            let block = writer.prepare_block_for(
+                IndexCapabilities::TX_LOOKUP,
+                1,
+                block_hash(&forward_body),
+                &forward_body,
+            )?;
+            assert!(prepared.try_push(block).is_ok());
+        }
+        let rows_before = store.rows(ColumnFamily::TxConfirmed);
+        let (fence, _) = writer.fenced_watermarks()?;
+        if matches!(mutator, Mutator::Cursor) {
+            writer.commit_consumer_cursor(fence, b"old-cursor")?;
+        }
+
+        let mut claim = store.new_batch();
+        claim.put(ColumnFamily::UtxoMeta, RESET_KEY, &fenced_marker(mask, 9));
+        claim.delete(ColumnFamily::UtxoMeta, dropped_watermark);
+        claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
+        store.write_durable(claim)?;
+
+        let result = match mutator {
+            Mutator::Forward => writer
+                .commit_forward_with_cursor(
+                    fence,
+                    prepared,
+                    ConsumerCursorUpdate::Set(b"stale-forward"),
+                )
+                .map(drop),
+            Mutator::Rollback => writer.commit_rollback_one_for_with_cursor(
+                fence,
+                IndexCapabilities::TX_LOOKUP,
+                None,
+                &rollback_body,
+                ConsumerCursorUpdate::Set(b"stale-rollback"),
+            ),
+            Mutator::Cursor => writer.commit_consumer_cursor(fence, b"stale-cursor"),
+        };
+
+        assert!(matches!(result, Err(IndexError::ResetInProgress)));
+        if mask != TX_LOOKUP_MASK {
+            // The adopted claim owns only script history, so tx-lookup rows
+            // and watermark must survive the rejected write untouched.
+            assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_before);
+            assert_eq!(
+                writer.watermarks()?.tx_lookup.map(|mark| mark.height),
+                Some(0)
+            );
+        }
+        assert!(writer.consumer_cursor()?.is_none());
+        assert_eq!(stored_idle_version(&store)?, 1);
+    }
     Ok(())
 }
-
-#[test]
-fn rollback_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let body = read_fixture(0)?;
-    let rows_before = store.rows(ColumnFamily::TxConfirmed);
-    let (fence, _) = writer.fenced_watermarks()?;
-    let mut claim = store.new_batch();
-    claim.put(
-        ColumnFamily::UtxoMeta,
-        RESET_KEY,
-        &fenced_marker(SCRIPT_HISTORY_MASK, 9),
-    );
-    claim.delete(ColumnFamily::UtxoMeta, SCRIPT_WATERMARK_KEY);
-    claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
-    store.write_durable(claim)?;
-
-    let result = writer.commit_rollback_one_for_with_cursor(
-        fence,
-        IndexCapabilities::TX_LOOKUP,
-        None,
-        &body,
-        ConsumerCursorUpdate::Set(b"stale-rollback"),
-    );
-
-    assert!(matches!(result, Err(IndexError::ResetInProgress)));
-    assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_before);
-    assert_eq!(
-        writer.watermarks()?.tx_lookup.map(|mark| mark.height),
-        Some(0)
-    );
-    assert!(writer.consumer_cursor()?.is_none());
-    assert_eq!(stored_idle_version(&store)?, 1);
-    Ok(())
-}
-
-#[test]
-fn consumer_cursor_commit_is_excluded_by_a_reset_claim() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let (fence, _) = writer.fenced_watermarks()?;
-    writer.commit_consumer_cursor(fence, b"old-cursor")?;
-    let mut claim = store.new_batch();
-    claim.put(
-        ColumnFamily::UtxoMeta,
-        RESET_KEY,
-        &fenced_marker(TX_LOOKUP_MASK, 9),
-    );
-    claim.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
-    claim.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
-    store.write_durable(claim)?;
-
-    // The claim moved the reset fence, so the captured fence is stale: the
-    // write is rejected as ResetInProgress after adopting and completing the
-    // pending claim, matching the forward/rollback fence-conflict path.
-    let result = writer.commit_consumer_cursor(fence, b"stale-cursor");
-    assert!(matches!(result, Err(IndexError::ResetInProgress)));
-    assert!(writer.consumer_cursor()?.is_none());
-    assert_eq!(stored_idle_version(&store)?, 1);
-    Ok(())
-}
-
 #[test]
 fn rollback_is_excluded_by_a_reset_fence() -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
@@ -1310,11 +1267,7 @@ fn seed_populated_store(
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     Ok(())
 }
@@ -1345,72 +1298,52 @@ fn dump_all(store: &MemoryStore) -> Vec<(ColumnFamily, Vec<u8>, Vec<u8>)> {
 }
 
 #[test]
-fn interrupted_reset_resumes_after_marker_commit() -> Result<(), Box<dyn std::error::Error>> {
-    let (control, interrupted) = seed_populated_stores()?;
-    crash_after_marker_commit(&interrupted)?;
+fn interrupted_reset_resumes_from_every_crash_point() -> Result<(), Box<dyn std::error::Error>> {
+    // Whatever prefix of the reset the crashed process managed to persist,
+    // reopening must converge byte-identically on the uninterrupted result.
+    type CrashPoint = fn(&MemoryStore) -> Result<(), Box<dyn std::error::Error>>;
+    let cases: [(&str, CrashPoint); 3] = [
+        ("after the marker commit", |_store| Ok(())),
+        ("mid-delete", |store| {
+            // Half the masked Funding rows are already gone.
+            let mut partial = store.new_batch();
+            for (key, _) in store.rows(ColumnFamily::Funding).into_iter().take(2) {
+                partial.delete(ColumnFamily::Funding, &key);
+            }
+            store.write_durable(partial)?;
+            Ok(())
+        }),
+        (
+            "after the deletion loops, before the marker clear",
+            |store| {
+                for cf in [ColumnFamily::Funding, ColumnFamily::Spending] {
+                    let mut batch = store.new_batch();
+                    for (key, _) in store.rows(cf) {
+                        batch.delete(cf, &key);
+                    }
+                    store.write_durable(batch)?;
+                }
+                Ok(())
+            },
+        ),
+    ];
 
-    let control_writer = IndexWriter::open(Arc::clone(&control), 1)?;
-    control_writer.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY)?;
-    drop(control_writer);
-    IndexWriter::open(Arc::clone(&interrupted), 4)?;
+    for (label, crash) in cases {
+        let (control, interrupted) = seed_populated_stores()?;
+        crash_after_marker_commit(&interrupted)?;
+        crash(&interrupted)?;
 
-    assert_eq!(
-        dump_all(&control),
-        dump_all(&interrupted),
-        "resume after a marker-commit crash converges byte-identically"
-    );
-    Ok(())
-}
+        let control_writer = IndexWriter::open(Arc::clone(&control), 1)?;
+        control_writer.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY)?;
+        drop(control_writer);
+        IndexWriter::open(Arc::clone(&interrupted), 4)?;
 
-#[test]
-fn interrupted_reset_resumes_mid_delete() -> Result<(), Box<dyn std::error::Error>> {
-    let (control, interrupted) = seed_populated_stores()?;
-    crash_after_marker_commit(&interrupted)?;
-    // Crash mid-delete: half the masked Funding rows are already gone.
-    let funding_rows = interrupted.rows(ColumnFamily::Funding);
-    let mut partial = interrupted.new_batch();
-    for (key, _) in funding_rows.into_iter().take(2) {
-        partial.delete(ColumnFamily::Funding, &key);
+        assert_eq!(
+            dump_all(&control),
+            dump_all(&interrupted),
+            "resume {label} converges byte-identically"
+        );
     }
-    interrupted.write_durable(partial)?;
-
-    let control_writer = IndexWriter::open(Arc::clone(&control), 1)?;
-    control_writer.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY)?;
-    drop(control_writer);
-    IndexWriter::open(Arc::clone(&interrupted), 4)?;
-
-    assert_eq!(
-        dump_all(&control),
-        dump_all(&interrupted),
-        "resume mid-delete converges byte-identically"
-    );
-    Ok(())
-}
-
-#[test]
-fn interrupted_reset_resumes_after_delete_before_clear() -> Result<(), Box<dyn std::error::Error>> {
-    let (control, interrupted) = seed_populated_stores()?;
-    crash_after_marker_commit(&interrupted)?;
-
-    // Crash after the deletion loops but before the marker clear.
-    for cf in [ColumnFamily::Funding, ColumnFamily::Spending] {
-        let mut batch = interrupted.new_batch();
-        for (key, _) in interrupted.rows(cf) {
-            batch.delete(cf, &key);
-        }
-        interrupted.write_durable(batch)?;
-    }
-
-    let control_writer = IndexWriter::open(Arc::clone(&control), 1)?;
-    control_writer.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY)?;
-    drop(control_writer);
-    IndexWriter::open(Arc::clone(&interrupted), 4)?;
-
-    assert_eq!(
-        dump_all(&control),
-        dump_all(&interrupted),
-        "resume after delete converges byte-identically"
-    );
     Ok(())
 }
 
@@ -1444,12 +1377,39 @@ struct CompetingClaim {
 ///
 /// The delete hook also fires for an unconditional write, which makes a
 /// regression from exact-claim conditional deletion observable without sleeps.
+#[derive(Default)]
 struct ForeignFenceStore {
     inner: MemoryStore,
     on_claim: Mutex<Option<CompetingClaim>>,
     on_delete: Mutex<Option<CompetingClaim>>,
     on_clear: Mutex<Option<CompetingClaim>>,
     unconditional_delete_after_claim_change: AtomicBool,
+}
+
+/// A store whose competing claim fires at exactly one point of the fence.
+fn racing_store(
+    hook: fn(&mut ForeignFenceStore) -> &mut Mutex<Option<CompetingClaim>>,
+) -> Arc<ForeignFenceStore> {
+    let mut store = ForeignFenceStore::default();
+    *hook(&mut store) = Mutex::new(Some(CompetingClaim {
+        generation: 9,
+        requested_mask: SCRIPT_HISTORY_MASK,
+    }));
+    Arc::new(store)
+}
+
+/// Replays the durable state a crash leaves mid-fence: the claim is written and
+/// the capability watermark and cursor are already gone.
+fn crash_mid_fence(store: &ForeignFenceStore, mask: u8, epoch: u64) -> Result<(), StorageError> {
+    let mut crashed = store.inner.new_batch();
+    crashed.put(
+        ColumnFamily::UtxoMeta,
+        RESET_KEY,
+        &fenced_marker(mask, epoch),
+    );
+    crashed.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
+    crashed.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
+    store.inner.write_durable(crashed)
 }
 
 impl ForeignFenceStore {
@@ -1577,26 +1537,9 @@ impl KvStore for ForeignFenceStore {
 
 #[test]
 fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(ForeignFenceStore {
-        inner: MemoryStore::default(),
-        on_claim: Mutex::new(None),
-        on_delete: Mutex::new(None),
-        on_clear: Mutex::new(Some(CompetingClaim {
-            generation: 9,
-            requested_mask: SCRIPT_HISTORY_MASK,
-        })),
-        unconditional_delete_after_claim_change: AtomicBool::new(false),
-    });
+    let store = racing_store(|s| &mut s.on_clear);
     seed_populated_store(&store, 1)?;
-    let mut crashed = store.inner.new_batch();
-    crashed.put(
-        ColumnFamily::UtxoMeta,
-        RESET_KEY,
-        &fenced_marker(TX_LOOKUP_MASK, 3),
-    );
-    crashed.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
-    crashed.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
-    store.inner.write_durable(crashed)?;
+    crash_mid_fence(&store, TX_LOOKUP_MASK, 3)?;
 
     let writer = IndexWriter::open(Arc::clone(&store), 4)?;
 
@@ -1612,26 +1555,9 @@ fn clear_loss_restarts_and_completes_the_merged_fence() -> Result<(), Box<dyn st
 
 #[test]
 fn changed_claim_prevents_stale_row_deletion() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(ForeignFenceStore {
-        inner: MemoryStore::default(),
-        on_claim: Mutex::new(None),
-        on_delete: Mutex::new(Some(CompetingClaim {
-            generation: 9,
-            requested_mask: SCRIPT_HISTORY_MASK,
-        })),
-        on_clear: Mutex::new(None),
-        unconditional_delete_after_claim_change: AtomicBool::new(false),
-    });
+    let store = racing_store(|s| &mut s.on_delete);
     seed_populated_store(&store, 1)?;
-    let mut crashed = store.inner.new_batch();
-    crashed.put(
-        ColumnFamily::UtxoMeta,
-        RESET_KEY,
-        &fenced_marker(TX_LOOKUP_MASK, 4),
-    );
-    crashed.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
-    crashed.delete(ColumnFamily::UtxoMeta, CURSOR_KEY);
-    store.inner.write_durable(crashed)?;
+    crash_mid_fence(&store, TX_LOOKUP_MASK, 4)?;
 
     IndexWriter::open(Arc::clone(&store), 4)?;
 
@@ -1659,16 +1585,7 @@ fn competing_claim_during_claim_merges_different_masks() -> Result<(), Box<dyn s
     // SCRIPT_HISTORY claim into the same conditional-write window. The
     // losing Absent claim must retry from fresh state, adopt the union
     // mask, and clear the union of watermarks — no sleeps, no lost claim.
-    let store = Arc::new(ForeignFenceStore {
-        inner: MemoryStore::default(),
-        on_claim: Mutex::new(Some(CompetingClaim {
-            generation: 9,
-            requested_mask: SCRIPT_HISTORY_MASK,
-        })),
-        on_delete: Mutex::new(None),
-        on_clear: Mutex::new(None),
-        unconditional_delete_after_claim_change: AtomicBool::new(false),
-    });
+    let store = racing_store(|s| &mut s.on_claim);
     seed_populated_store(&store, 1)?;
 
     let writer = IndexWriter::open(Arc::clone(&store), 4)?;
@@ -1788,11 +1705,13 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
     // Oversized first block: empty batch accepts it, then refuses another.
     let block0 = writer.prepare_block(0, block_hash(&body0), &body0)?;
     let block1 = writer.prepare_block(1, block_hash(&body1), &body1)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 0,
-        max_bytes: 0,
-    });
-    assert!(batch.try_push(block0).is_ok());
+    let mut batch = common::batch_with_limits(
+        block0,
+        PreparedBatchLimits {
+            max_rows: 0,
+            max_bytes: 0,
+        },
+    );
     assert!(batch.try_push(block1).is_err());
     assert_eq!(batch.len(), 1);
     // Header row plus one positioned txid and one positioned funding row.
@@ -1809,22 +1728,6 @@ fn batch_caps_admit_oversized_first_block() -> Result<(), Box<dyn std::error::Er
         })
     );
 
-    Ok(())
-}
-
-#[test]
-fn format_version_requires_exact_bytes() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    // Extra trailing byte must be rejected even though the prefix is version 4.
-    store.put(
-        bitcoin_rs_storage::ColumnFamily::UtxoMeta,
-        &[0x00, b'V'],
-        &[4, 0, 0, 0, 0],
-    )?;
-    assert!(matches!(
-        IndexWriter::open(store, 1),
-        Err(IndexError::UnsupportedTxIndexFormatVersion { version: 4 })
-    ));
     Ok(())
 }
 
@@ -1851,11 +1754,7 @@ fn commit_forward_accepts_terminal_height() -> Result<(), Box<dyn std::error::Er
     let expected_hash = block_hash(&body);
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, u32::MAX, expected_hash, &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block).is_ok());
+    let batch = common::single_block_batch(block);
 
     let watermark = writer.commit_forward(batch)?;
     assert_eq!(
@@ -1890,11 +1789,7 @@ fn commit_forward_rejects_height_overflow() -> Result<(), Box<dyn std::error::Er
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body), &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block).is_ok());
+    let batch = common::single_block_batch(block);
     assert!(matches!(
         writer.commit_forward(batch),
         Err(IndexError::NonContiguousPrepared { watermark })
@@ -1909,11 +1804,7 @@ fn rollback_rejects_prev_at_genesis() -> Result<(), Box<dyn std::error::Error>> 
     let mut writer = IndexWriter::open(Arc::clone(&store), 1)?;
     let body = read_fixture(0)?;
     let block = writer.prepare_block(0, block_hash(&body), &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(block).is_ok());
+    let batch = common::single_block_batch(block);
     writer.commit_forward(batch)?;
 
     assert!(matches!(
@@ -1942,11 +1833,7 @@ fn redb_snapshot_preserves_position_values() -> Result<(), Box<dyn std::error::E
     let txid = block.txs[0].txid();
     let scripthash = ScriptHash::new(&block.txs[0].outputs[0].script_pubkey);
     let prepared = writer.prepare_block(0, block_hash(&body), &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(batch.try_push(prepared).is_ok());
+    let batch = common::single_block_batch(prepared);
     writer.commit_forward(batch)?;
 
     let snapshot = writer.snapshot()?;
@@ -1988,85 +1875,63 @@ fn inject_full_claim(
 }
 
 #[test]
-fn full_reset_between_derive_and_commit_rejects_forward() -> Result<(), Box<dyn std::error::Error>>
-{
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let (fence, _) = writer.fenced_watermarks()?;
-    let body = read_fixture(1)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 1, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
-
-    inject_full_claim(&store, 9)?;
-
-    let result = writer.commit_forward_with_cursor(fence, prepared, ConsumerCursorUpdate::Keep);
-    assert!(matches!(result, Err(IndexError::ResetInProgress)));
-    // The stale forward never landed: the adoption cleared the state and the
-    // block-1 watermark it would have written is absent.
-    assert_eq!(writer.watermarks()?, IndexWatermarks::default());
-    assert_eq!(stored_idle_version(&store)?, 1);
-    Ok(())
-}
-
-#[test]
-fn full_reset_between_derive_and_commit_rejects_rollback() -> Result<(), Box<dyn std::error::Error>>
-{
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let (fence, _) = writer.fenced_watermarks()?;
-    let body = read_fixture(0)?;
-
-    inject_full_claim(&store, 9)?;
-
-    let result = writer.commit_rollback_one_for_with_cursor(
-        fence,
-        IndexCapabilities::TX_LOOKUP,
-        None,
-        &body,
-        ConsumerCursorUpdate::Keep,
-    );
-    assert!(matches!(result, Err(IndexError::ResetInProgress)));
-    assert_eq!(writer.watermarks()?, IndexWatermarks::default());
-    assert_eq!(stored_idle_version(&store)?, 1);
-    Ok(())
-}
-
-#[test]
-fn full_reset_between_derive_and_commit_skips_stale_cursor()
+fn full_reset_between_derive_and_commit_rejects_stale_work()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let (fence, _) = writer.fenced_watermarks()?;
-    let body = read_fixture(1)?;
-    let block =
-        writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 1, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    // A full reset claimed after the fence capture must reject every stale
+    // mutator, leave no watermark behind, skip any cursor bytes the caller
+    // asked to publish, and complete the adopted claim.
+    let cases = [
+        ("forward", false, ConsumerCursorUpdate::Keep),
+        ("rollback", true, ConsumerCursorUpdate::Keep),
+        (
+            "forward with cursor",
+            false,
+            ConsumerCursorUpdate::Set(b"stale-cursor"),
+        ),
+    ];
 
-    inject_full_claim(&store, 9)?;
+    for (label, rollback, cursor_update) in cases {
+        let store = Arc::new(MemoryStore::default());
+        seed_populated_store(&store, 1)?;
+        let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
+        let (fence, _) = writer.fenced_watermarks()?;
 
-    let result = writer.commit_forward_with_cursor(
-        fence,
-        prepared,
-        ConsumerCursorUpdate::Set(b"stale-cursor"),
-    );
-    assert!(matches!(result, Err(IndexError::ResetInProgress)));
-    assert!(
-        writer.consumer_cursor()?.is_none(),
-        "stale cursor bytes are skipped, never published past a reset"
-    );
-    assert_eq!(stored_idle_version(&store)?, 1);
+        let result = if rollback {
+            let body = read_fixture(0)?;
+            inject_full_claim(&store, 9)?;
+            writer.commit_rollback_one_for_with_cursor(
+                fence,
+                IndexCapabilities::TX_LOOKUP,
+                None,
+                &body,
+                cursor_update,
+            )
+        } else {
+            let body = read_fixture(1)?;
+            let block = writer.prepare_block_for(
+                IndexCapabilities::TX_LOOKUP,
+                1,
+                block_hash(&body),
+                &body,
+            )?;
+            let prepared = common::single_block_batch(block);
+            inject_full_claim(&store, 9)?;
+            writer
+                .commit_forward_with_cursor(fence, prepared, cursor_update)
+                .map(drop)
+        };
+
+        assert!(
+            matches!(result, Err(IndexError::ResetInProgress)),
+            "{label}"
+        );
+        assert_eq!(writer.watermarks()?, IndexWatermarks::default(), "{label}");
+        assert!(
+            writer.consumer_cursor()?.is_none(),
+            "{label}: stale cursor bytes are never published past a reset"
+        );
+        assert_eq!(stored_idle_version(&store)?, 1, "{label}");
+    }
     Ok(())
 }
 
@@ -2087,11 +1952,7 @@ fn double_reset_same_generation_still_rejects_stale_commit()
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     let result =
         writer.commit_forward_with_cursor(stale_fence, prepared, ConsumerCursorUpdate::Keep);
     assert!(matches!(result, Err(IndexError::ResetInProgress)));
@@ -2102,11 +1963,7 @@ fn double_reset_same_generation_still_rejects_stale_commit()
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     let (fresh_fence, _) = writer.fenced_watermarks()?;
     writer.commit_forward_with_cursor(fresh_fence, prepared, ConsumerCursorUpdate::Keep)?;
     assert_eq!(writer.watermark()?.map(|mark| mark.height), Some(0));
@@ -2180,7 +2037,6 @@ fn intermediate_rollback_removes_stale_cursor() -> Result<(), Box<dyn std::error
     );
     Ok(())
 }
-
 #[test]
 fn stale_cursor_publish_is_rejected_when_watermarks_lag() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -2192,11 +2048,7 @@ fn stale_cursor_publish_is_rejected_when_watermarks_lag() -> Result<(), Box<dyn 
     let body1 = read_fixture(1)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 1, block_hash(&body1), &body1)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     let (fence, _) = writer.fenced_watermarks()?;
     writer.commit_forward_with_cursor(fence, prepared, ConsumerCursorUpdate::Keep)?;
 
@@ -2219,77 +2071,73 @@ fn stale_cursor_publish_is_rejected_when_watermarks_lag() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn cursor_publish_rejects_atomic_watermark_race() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(CallTrackingStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let (fence, _) = writer.fenced_watermarks()?;
-    let raced = IndexWatermark {
-        height: 1,
-        hash: [0x42; 32],
-    };
-    *store.cursor_race_tx_watermark.lock() = Some(raced);
+fn cursor_publish_rejects_a_watermark_race() -> Result<(), Box<dyn std::error::Error>> {
+    // A watermark that moves between the fence capture and the conditional
+    // cursor write must reject the publish as stale, whatever the racing
+    // family is and whether the pre-race watermark was present or absent.
+    struct Case {
+        label: &'static str,
+        drop_tx_watermark: bool,
+        script_family: bool,
+        raced_hash: [u8; 32],
+    }
+    let cases = [
+        Case {
+            label: "tx watermark race",
+            drop_tx_watermark: false,
+            script_family: false,
+            raced_hash: [0x42; 32],
+        },
+        Case {
+            label: "absent tx watermark race",
+            drop_tx_watermark: true,
+            script_family: false,
+            raced_hash: [0x42; 32],
+        },
+        Case {
+            label: "script watermark race",
+            drop_tx_watermark: false,
+            script_family: true,
+            raced_hash: [0x99; 32],
+        },
+    ];
 
-    let result = writer.commit_consumer_cursor(fence, b"stale");
-    assert!(
-        matches!(result, Err(IndexError::StaleIndexState)),
-        "a watermark race must reject the cursor publish as stale state: {result:?}"
-    );
-    assert!(writer.consumer_cursor()?.is_none());
-    assert_eq!(writer.watermarks()?.tx_lookup, Some(raced));
-    Ok(())
-}
+    for case in cases {
+        let store = Arc::new(CallTrackingStore::default());
+        seed_populated_store(&store, 1)?;
+        if case.drop_tx_watermark {
+            // The caller then expects Absent at the commit boundary.
+            let mut del = store.new_batch();
+            del.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
+            store.write_durable(del)?;
+        }
 
-#[test]
-fn cursor_publish_rejects_absent_tx_watermark_race() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(CallTrackingStore::default());
-    seed_populated_store(&store, 1)?;
+        let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
+        let (fence, _) = writer.fenced_watermarks()?;
+        let raced = IndexWatermark {
+            height: 1,
+            hash: case.raced_hash,
+        };
+        if case.script_family {
+            *store.cursor_race_script_watermark.lock() = Some(raced);
+        } else {
+            *store.cursor_race_tx_watermark.lock() = Some(raced);
+        }
 
-    // Remove the tx watermark so the caller expects Absent at the commit
-    // boundary.
-    let mut del = store.new_batch();
-    del.delete(ColumnFamily::UtxoMeta, TX_WATERMARK_KEY);
-    store.write_durable(del)?;
-
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let (fence, _) = writer.fenced_watermarks()?;
-
-    let raced = IndexWatermark {
-        height: 1,
-        hash: [0x42; 32],
-    };
-    *store.cursor_race_tx_watermark.lock() = Some(raced);
-
-    let result = writer.commit_consumer_cursor(fence, b"stale");
-    assert!(
-        matches!(result, Err(IndexError::StaleIndexState)),
-        "an absent-watermark race must reject the cursor publish: {result:?}"
-    );
-    assert!(writer.consumer_cursor()?.is_none());
-    assert_eq!(writer.watermarks()?.tx_lookup, Some(raced));
-    Ok(())
-}
-
-#[test]
-fn cursor_publish_rejects_script_watermark_race() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(CallTrackingStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let (fence, _) = writer.fenced_watermarks()?;
-
-    let raced = IndexWatermark {
-        height: 1,
-        hash: [0x99; 32],
-    };
-    *store.cursor_race_script_watermark.lock() = Some(raced);
-
-    let result = writer.commit_consumer_cursor(fence, b"stale");
-    assert!(
-        matches!(result, Err(IndexError::StaleIndexState)),
-        "a script-watermark race must reject the cursor publish: {result:?}"
-    );
-    assert!(writer.consumer_cursor()?.is_none());
-    assert_eq!(writer.watermarks()?.script_history, Some(raced));
+        let result = writer.commit_consumer_cursor(fence, b"stale");
+        assert!(
+            matches!(result, Err(IndexError::StaleIndexState)),
+            "{}: must reject the cursor publish: {result:?}",
+            case.label
+        );
+        assert!(writer.consumer_cursor()?.is_none(), "{}", case.label);
+        let observed = if case.script_family {
+            writer.watermarks()?.script_history
+        } else {
+            writer.watermarks()?.tx_lookup
+        };
+        assert_eq!(observed, Some(raced), "{}", case.label);
+    }
     Ok(())
 }
 
@@ -2322,11 +2170,7 @@ fn populated_idle_tracking_store() -> Result<Arc<CallTrackingStore>, Box<dyn std
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     assert_eq!(stored_idle_version(&store)?, 1);
 
@@ -2490,11 +2334,7 @@ fn fenced_watermarks_captures_one_coherent_snapshot_across_five_reads()
     let body = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     writer.commit_forward_with_cursor(fence, prepared, ConsumerCursorUpdate::Keep)?;
     assert_eq!(writer.watermark()?.map(|mark| mark.height), Some(0));
     Ok(())
@@ -2583,11 +2423,7 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
     let body0 = read_fixture(0)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::HISTORICAL, 0, block_hash(&body0), &body0)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     assert_state_revision(&store, Some(1))?;
 
@@ -2610,11 +2446,7 @@ fn each_ordinary_mutator_advances_the_revision_exactly_once()
     // 4. reconnect the rolled-back capability
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 0, block_hash(&body0), &body0)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     writer.commit_forward(prepared)?;
     assert_state_revision(&store, Some(4))?;
 
@@ -2653,11 +2485,7 @@ fn ordinary_revision_overflow_rejects_forward_without_destroying_state()
     let body = read_fixture(1)?;
     let block =
         writer.prepare_block_for(IndexCapabilities::TX_LOOKUP, 1, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
+    let prepared = common::single_block_batch(block);
     let (fence, _) = writer.fenced_watermarks()?;
     let before = dump_all(store.as_ref());
 
@@ -2674,64 +2502,64 @@ fn ordinary_revision_overflow_rejects_forward_without_destroying_state()
     Ok(())
 }
 
+/// Either counter at its ceiling refuses a reset before publishing a claim
+/// or deleting a row: neither the idle reset version nor the ordinary state
+/// revision may wrap, and the store must be byte-identical afterwards.
 #[test]
-fn reset_version_overflow_is_rejected_before_claiming() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut near_ceiling = store.new_batch();
-    near_ceiling.put(ColumnFamily::UtxoMeta, RESET_KEY, &idle_bytes(u64::MAX - 1));
-    store.write_durable(near_ceiling)?;
+fn reset_counter_overflow_is_rejected_before_any_write() -> Result<(), Box<dyn std::error::Error>> {
+    for version_overflow in [true, false] {
+        let store = Arc::new(MemoryStore::default());
+        seed_populated_store(&store, 1)?;
+        let mut state = store.new_batch();
+        if version_overflow {
+            // One real reset carries the version from MAX - 1 to MAX, so the
+            // ceiling is reached the way production reaches it.
+            state.put(ColumnFamily::UtxoMeta, RESET_KEY, &idle_bytes(u64::MAX - 1));
+        } else {
+            state.put(ColumnFamily::UtxoMeta, RESET_KEY, &idle_bytes(1));
+            state.put(
+                ColumnFamily::UtxoMeta,
+                ORDINARY_STATE_REVISION_KEY,
+                &u64::MAX.to_le_bytes(),
+            );
+        }
+        store.write_durable(state)?;
 
-    let writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
-    assert_eq!(
-        store.get(ColumnFamily::UtxoMeta, RESET_KEY)?,
-        Some(idle_bytes(u64::MAX))
-    );
-    let before = dump_all(store.as_ref());
+        let writer = IndexWriter::open(Arc::clone(&store), 4)?;
+        if version_overflow {
+            writer.reset_capabilities(IndexCapabilities::TX_LOOKUP)?;
+            assert_eq!(
+                store.get(ColumnFamily::UtxoMeta, RESET_KEY)?,
+                Some(idle_bytes(u64::MAX))
+            );
+        }
+        let before = dump_all(store.as_ref());
 
-    let result = writer.reset_capabilities(IndexCapabilities::SCRIPT_HISTORY);
-    assert!(
-        matches!(result, Err(IndexError::ResetVersionOverflow)),
-        "an idle version at u64::MAX must refuse the next reset: {result:?}"
-    );
-    assert_eq!(
-        dump_all(store.as_ref()),
-        before,
-        "reset-version overflow must precede claim publication and deletion"
-    );
+        let selected = if version_overflow {
+            IndexCapabilities::SCRIPT_HISTORY
+        } else {
+            IndexCapabilities::TX_LOOKUP
+        };
+        let result = writer.reset_capabilities(selected);
+        if version_overflow {
+            assert!(
+                matches!(result, Err(IndexError::ResetVersionOverflow)),
+                "an idle version at u64::MAX must refuse the next reset: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result, Err(IndexError::StateRevisionOverflow)),
+                "a full revision must refuse the reset before any claim: {result:?}"
+            );
+        }
+        assert_eq!(
+            dump_all(store.as_ref()),
+            before,
+            "overflow must precede claim publication, deletion, and every other write"
+        );
+    }
     Ok(())
 }
-
-#[test]
-fn reset_revision_overflow_is_rejected_before_claim_publication()
--> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut state = store.new_batch();
-    state.put(ColumnFamily::UtxoMeta, RESET_KEY, &idle_bytes(1));
-    state.put(
-        ColumnFamily::UtxoMeta,
-        ORDINARY_STATE_REVISION_KEY,
-        &u64::MAX.to_le_bytes(),
-    );
-    store.write_durable(state)?;
-    let before = dump_all(store.as_ref());
-
-    let writer = IndexWriter::open(Arc::clone(&store), 4)?;
-    let result = writer.reset_capabilities(IndexCapabilities::TX_LOOKUP);
-    assert!(
-        matches!(result, Err(IndexError::StateRevisionOverflow)),
-        "a full revision must refuse the reset before any claim: {result:?}"
-    );
-    assert_eq!(
-        dump_all(store.as_ref()),
-        before,
-        "revision overflow must leave reset state, rows, cursors, and watermarks untouched"
-    );
-    Ok(())
-}
-
 /// Interrupted 9-byte claim from an earlier binary: mask plus process epoch,
 /// with no base version.
 fn legacy_nine_byte_claim(mask: u8, process_epoch: u64) -> Vec<u8> {
@@ -2801,19 +2629,15 @@ fn legacy_aba_rejection(marker: &[u8]) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// Both interrupted legacy claim encodings adopt back to byte-identical idle
+/// bytes, so only the revision can reject a fence captured before the
+/// round-trip.
 #[test]
-fn legacy_one_byte_marker_rejects_aba_commit() -> Result<(), Box<dyn std::error::Error>> {
-    legacy_aba_rejection(&[TX_LOOKUP_MASK | SCRIPT_HISTORY_MASK])
+fn legacy_markers_reject_aba_commits() -> Result<(), Box<dyn std::error::Error>> {
+    let mask = TX_LOOKUP_MASK | SCRIPT_HISTORY_MASK;
+    legacy_aba_rejection(&[mask])?;
+    legacy_aba_rejection(&legacy_nine_byte_claim(mask, 9))
 }
-
-#[test]
-fn legacy_nine_byte_marker_rejects_aba_commit() -> Result<(), Box<dyn std::error::Error>> {
-    legacy_aba_rejection(&legacy_nine_byte_claim(
-        TX_LOOKUP_MASK | SCRIPT_HISTORY_MASK,
-        9,
-    ))
-}
-
 #[test]
 fn same_mask_claim_is_adopted_cooperatively_without_rewrite()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -2934,120 +2758,91 @@ fn union_growth_preserves_claim_identity_and_deletes_full_union_state()
 }
 
 #[test]
-fn second_writer_forward_contention_rejects_stale_fence() -> Result<(), Box<dyn std::error::Error>>
-{
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut winner = IndexWriter::open(Arc::clone(&store), 4)?;
-    let mut loser = IndexWriter::open(Arc::clone(&store), 5)?;
+fn second_writer_contention_rejects_a_stale_fence() -> Result<(), Box<dyn std::error::Error>> {
+    for rollback in [false, true] {
+        let store = Arc::new(MemoryStore::default());
+        seed_populated_store(&store, 1)?;
+        let mut winner = IndexWriter::open(Arc::clone(&store), 4)?;
+        let mut loser = IndexWriter::open(Arc::clone(&store), 5)?;
+        let (winner_fence, _) = winner.fenced_watermarks()?;
+        let (loser_fence, _) = loser.fenced_watermarks()?;
+        let mut rows_after_winner = Vec::new();
 
-    // Both writers capture the same pre-commit state.
-    let (winner_fence, _) = winner.fenced_watermarks()?;
-    let (loser_fence, _) = loser.fenced_watermarks()?;
+        let result = if rollback {
+            let body = read_fixture(0)?;
+            winner.commit_rollback_one_for_with_cursor(
+                winner_fence,
+                IndexCapabilities::TX_LOOKUP,
+                None,
+                &body,
+                ConsumerCursorUpdate::Clear,
+            )?;
+            loser.commit_rollback_one_for_with_cursor(
+                loser_fence,
+                IndexCapabilities::TX_LOOKUP,
+                None,
+                &body,
+                ConsumerCursorUpdate::Clear,
+            )
+        } else {
+            let body = read_fixture(1)?;
+            let replay =
+                |writer: &mut IndexWriter<MemoryStore>| -> Result<PreparedBatch, IndexError> {
+                    let block = writer.prepare_block_for(
+                        IndexCapabilities::TX_LOOKUP,
+                        1,
+                        block_hash(&body),
+                        &body,
+                    )?;
+                    let prepared = common::single_block_batch(block);
+                    Ok(prepared)
+                };
+            let prepared = replay(&mut winner)?;
+            let watermark = winner.commit_forward_with_cursor(
+                winner_fence,
+                prepared,
+                ConsumerCursorUpdate::Set(b"winner"),
+            )?;
+            assert_eq!(watermark.height, 1);
+            rows_after_winner = store.rows(ColumnFamily::TxConfirmed);
+            let prepared = replay(&mut loser)?;
+            loser
+                .commit_forward_with_cursor(
+                    loser_fence,
+                    prepared,
+                    ConsumerCursorUpdate::Set(b"loser"),
+                )
+                .map(drop)
+        };
+        assert!(
+            matches!(result, Err(IndexError::StaleIndexState)),
+            "the loser must lose the conditional write: {result:?}"
+        );
 
-    let body = read_fixture(1)?;
-    let block =
-        winner.prepare_block_for(IndexCapabilities::TX_LOOKUP, 1, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
-    let watermark = winner.commit_forward_with_cursor(
-        winner_fence,
-        prepared,
-        ConsumerCursorUpdate::Set(b"winner"),
-    )?;
-    assert_eq!(watermark.height, 1);
-    let rows_after_winner = store.rows(ColumnFamily::TxConfirmed);
+        assert_eq!(
+            winner.watermarks()?.script_history.map(|mark| mark.height),
+            Some(0)
+        );
+        assert_eq!(
+            store.get(ColumnFamily::UtxoMeta, ORDINARY_STATE_REVISION_KEY)?,
+            Some(2_u64.to_le_bytes().to_vec())
+        );
+        assert_eq!(store.count(ColumnFamily::Funding), 1);
 
-    // The loser replays the identical block against the shared pre-commit
-    // fence: the four-condition CAS misses and nothing may move.
-    let block =
-        loser.prepare_block_for(IndexCapabilities::TX_LOOKUP, 1, block_hash(&body), &body)?;
-    let mut prepared = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 100,
-        max_bytes: 1_000_000,
-    });
-    assert!(prepared.try_push(block).is_ok());
-    let result = loser.commit_forward_with_cursor(
-        loser_fence,
-        prepared,
-        ConsumerCursorUpdate::Set(b"loser"),
-    );
-    assert!(
-        matches!(result, Err(IndexError::StaleIndexState)),
-        "the losing forward must lose the four-condition CAS: {result:?}"
-    );
-
-    // The winner's committed state is exact and untouched by the loser.
-    assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_after_winner);
-    assert_eq!(winner.watermark()?.map(|mark| mark.height), Some(1));
-    assert_eq!(
-        winner.watermarks()?.script_history.map(|mark| mark.height),
-        Some(0)
-    );
-    assert_eq!(
-        winner.consumer_cursor()?.as_deref(),
-        Some(b"winner".as_slice())
-    );
-    assert_eq!(
-        store.get(ColumnFamily::UtxoMeta, ORDINARY_STATE_REVISION_KEY)?,
-        Some(2_u64.to_le_bytes().to_vec())
-    );
-    Ok(())
-}
-
-#[test]
-fn second_writer_rollback_contention_rejects_stale_fence() -> Result<(), Box<dyn std::error::Error>>
-{
-    let store = Arc::new(MemoryStore::default());
-    seed_populated_store(&store, 1)?;
-    let mut winner = IndexWriter::open(Arc::clone(&store), 4)?;
-    let mut loser = IndexWriter::open(Arc::clone(&store), 5)?;
-
-    // Both writers capture the same pre-commit state.
-    let (winner_fence, _) = winner.fenced_watermarks()?;
-    let (loser_fence, _) = loser.fenced_watermarks()?;
-
-    let body = read_fixture(0)?;
-    // The winner selectively rolls block0 back for tx lookup only.
-    winner.commit_rollback_one_for_with_cursor(
-        winner_fence,
-        IndexCapabilities::TX_LOOKUP,
-        None,
-        &body,
-        ConsumerCursorUpdate::Clear,
-    )?;
-
-    // The loser replays the identical selective rollback against the shared
-    // pre-commit fence: the four-condition CAS misses and nothing may move.
-    let result = loser.commit_rollback_one_for_with_cursor(
-        loser_fence,
-        IndexCapabilities::TX_LOOKUP,
-        None,
-        &body,
-        ConsumerCursorUpdate::Clear,
-    );
-    assert!(
-        matches!(result, Err(IndexError::StaleIndexState)),
-        "the losing rollback must lose the four-condition CAS: {result:?}"
-    );
-
-    // The winner's selective state is exact and untouched by the loser.
-    assert!(winner.watermarks()?.tx_lookup.is_none());
-    assert_eq!(
-        winner.watermarks()?.script_history.map(|mark| mark.height),
-        Some(0)
-    );
-    assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
-    assert_eq!(store.count(ColumnFamily::Funding), 1);
-    assert_eq!(store.count(ColumnFamily::Spending), 0);
-    assert_eq!(store.count(ColumnFamily::BlockHeaders), 1);
-    assert!(winner.consumer_cursor()?.is_none());
-    assert_eq!(
-        store.get(ColumnFamily::UtxoMeta, ORDINARY_STATE_REVISION_KEY)?,
-        Some(2_u64.to_le_bytes().to_vec())
-    );
+        if rollback {
+            assert!(winner.watermarks()?.tx_lookup.is_none());
+            assert_eq!(store.count(ColumnFamily::TxConfirmed), 0);
+            assert_eq!(store.count(ColumnFamily::Spending), 0);
+            assert_eq!(store.count(ColumnFamily::BlockHeaders), 1);
+            assert!(winner.consumer_cursor()?.is_none());
+        } else {
+            assert_eq!(winner.watermark()?.map(|mark| mark.height), Some(1));
+            assert_eq!(store.rows(ColumnFamily::TxConfirmed), rows_after_winner);
+            assert_eq!(
+                winner.consumer_cursor()?.as_deref(),
+                Some(b"winner".as_slice())
+            );
+        }
+    }
     Ok(())
 }
