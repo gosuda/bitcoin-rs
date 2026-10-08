@@ -86,7 +86,7 @@ fn restored_initial(
             height: restored.applied_tip.height,
             block_hash: restored.applied_tip.hash.to_le_bytes(),
             prev_hash,
-            chain_tx_count: restored.chain_tx_count,
+            chain_tx_count: restored.applied_tip.chain_tx_count.to_wire(),
             config,
         })
     } else {
@@ -129,7 +129,7 @@ pub(crate) fn restore_snapshot(
                     .lock_stable_view()
                     .hash_serialized_3_at_height(pinned.height)?
                     != pinned.hash_serialized
-                    || restored.chain_tx_count != pinned.chain_tx_count)
+                    || restored.applied_tip.chain_tx_count.to_wire() != pinned.chain_tx_count)
             {
                 bail!("snapshot-base checkpoint does not match the pinned commitment/count");
             }
@@ -234,7 +234,7 @@ pub fn prepare_initial_chainstate(
             restore_source = "checkpoint",
             height = restored.applied_tip.height,
             hash = %restored.applied_tip.hash,
-            chain_tx_count = restored.chain_tx_count,
+            chain_tx_count = restored.applied_tip.chain_tx_count.to_wire(),
             reason = "journal_disabled",
             "chainstate restore selected"
         );
@@ -252,7 +252,6 @@ pub fn prepare_initial_chainstate(
         restored.utxo,
         restored.coin_stats,
         restored.applied_tip,
-        restored.chain_tx_count,
     );
     let replay_seconds = replay_started.elapsed().as_secs_f64();
     drop(journal_dir);
@@ -271,7 +270,7 @@ pub fn prepare_initial_chainstate(
                 height = replayed.applied_tip.height,
                 hash = %replayed.applied_tip.hash,
                 replayed_records,
-                chain_tx_count = replayed.chain_tx_count,
+                chain_tx_count = replayed.applied_tip.chain_tx_count.to_wire(),
                 replay_seconds,
                 "chainstate restore selected"
             );
@@ -281,7 +280,7 @@ pub fn prepare_initial_chainstate(
                 height: replayed.applied_tip.height,
                 block_hash: replayed.applied_tip.hash.to_le_bytes(),
                 prev_hash: [0_u8; 32],
-                chain_tx_count: replayed.chain_tx_count,
+                chain_tx_count: replayed.applied_tip.chain_tx_count.to_wire(),
                 config: journal_config,
             };
             Ok(InitialChainstate {

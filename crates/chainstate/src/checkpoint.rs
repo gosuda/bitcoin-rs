@@ -90,8 +90,6 @@ pub(crate) struct RestoredChainstate {
     pub(crate) utxo: UtxoSet,
     pub(crate) coin_stats: CoinStats,
     pub(crate) applied_tip: TipSnapshot,
-    /// Cumulative transaction count through `applied_tip`.
-    pub(crate) chain_tx_count: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -343,7 +341,6 @@ fn load_payloads(
         utxo,
         coin_stats,
         applied_tip,
-        chain_tx_count: chain_tx_count.to_wire(),
     })
 }
 fn validate_chain_tx_count(
