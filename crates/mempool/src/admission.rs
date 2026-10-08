@@ -483,7 +483,7 @@ impl MempoolGateway {
     /// A guard issued by a different gateway admits nothing and returns an
     /// empty result: the odd value alone is not authority.
     ///
-    /// Every candidate is admitted with [`crate::LimitEnforcement::Deferred`],
+    /// Every candidate is admitted with `LimitEnforcement::Deferred`,
     /// the equivalent of Core passing `bypassLimits = true` to
     /// `AcceptToMemoryPool` from its disconnect walk — derived from the held
     /// `ChainChangeGuard`, not the caller-declared origin. The mempool fee

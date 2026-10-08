@@ -115,7 +115,7 @@ pub struct AdmissionRequest {
     /// [`MempoolGateway::stable_generation`]; requests prepared under a
     /// [`ChainChangeGuard`] carry its odd value. The token alone grants no
     /// authority — `check_admission_state` accepts it only under the
-    /// matching [`crate::admission::AdmissionFence`].
+    /// matching `AdmissionFence`.
     pub expected_generation: u64,
     /// Exact mempool sequence the caller captured before admission.
     pub expected_sequence: u64,
@@ -470,7 +470,7 @@ struct PublishState {
 ///
 /// # Ordering invariant
 ///
-/// Every mutating method flows through exactly one path, [`Self::commit`],
+/// Every mutating method flows through exactly one path, `Self::commit`,
 /// which runs, in this exact order:
 ///
 /// 1. take the pool write lock,

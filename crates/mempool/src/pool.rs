@@ -1167,7 +1167,7 @@ impl Mempool {
     /// Returns a clone of the shared `Arc<Tx>` for `txid`, or `None`
     /// if the transaction is not in the pool.
     ///
-    /// Cheaper than [`entry_by_txid`] when only the transaction body is needed
+    /// Cheaper than [`Self::entry_by_txid`] when only the transaction body is needed
     /// — no `MempoolEntry` indirection, just an `Arc::clone`.
     #[must_use]
     pub fn transaction_by_txid(&self, txid: &Txid) -> Option<Arc<Tx>> {
@@ -1209,8 +1209,7 @@ impl Mempool {
 
     /// Returns the txids of every entry in the pool.
     ///
-    /// Order is the underlying slab iteration order (i.e., NOT fee-rate sorted;
-    /// use `iter_by_fee_rate_desc` for that).
+    /// Order is the underlying slab iteration order, not fee-rate sorted.
     #[must_use]
     pub fn iter_txids(&self) -> Vec<Txid> {
         self.entries.iter().map(|(_id, entry)| entry.txid).collect()
@@ -1433,7 +1432,7 @@ impl Mempool {
     /// aggregates, ancestor topology, and the current sequence number — so
     /// the caller's read critical section ends when this returns and
     /// selection works on the owned copy with the lock released. Entries
-    /// appear in modified-priority order (the order [`ParetoFront`] ranks
+    /// appear in modified-priority order (the order `ParetoFront` ranks
     /// them), and `ancestors` positions refer to this vector, so a consumer
     /// can walk packages without re-consulting the pool.
     #[must_use]
