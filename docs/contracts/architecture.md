@@ -29,16 +29,9 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   `g17_dependency_direction` gate.
 - The resolved workspace dependency graph is a directed acyclic graph. Any
   cycle among workspace crates, even within the same layer, fails the gate.
-- Crate layer assignments:
-  - **Layer 0 (Core)**: `bitcoin-rs-primitives`, `bitcoin-rs-script`,
-    `bitcoin-rs-consensus`. Pure protocol types, consensus verification, and
-    script interpreter logic. Layer 0 crates have zero dependencies on storage,
-    network, or filesystem I/O.
-  - **Layer 1 (Storage)**: `bitcoin-rs-storage`. Key-value storage abstractions,
-    batching primitives, and backend engine drivers.
-  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`,
-    `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
-    `bitcoin-rs-mining`. Domain services and capability runtimes.
+- The [layer model](#layer-model) assigns every crate. Additional boundaries:
+  - Layer 0 crates have zero dependencies on storage, network, or filesystem I/O.
+  - In Layer 2,
     `chainstate` is the authoritative applied-chain owner. It composes only
     lower/same-layer protocol, chain, UTXO, and storage capabilities; it must
     not depend on mempool, P2P, index, mining, RPC, node, or the binary.
@@ -55,14 +48,10 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     `p2p`, `rpc`, `node`, or the binary. Admission retains peer attribution
     as data without owning connections or runtime assembly. The
     `g17_dependency_direction` gate checks this boundary explicitly.
-  - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
-    handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
-  - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`, `bitcoin-rs-e2e`,
-    `bitcoin-rs-storage-footprint`. The footprint package is an offline Linux
+  - In Layer 4, the footprint package is an offline Linux
     filesystem utility with no node/runtime-workspace or storage-engine
     dependencies.
-    Daemon assembly, subsystem lifecycle coordination, and CLI binary entry
-    points. `bitcoin-rs-e2e` is the process-level test harness that drives
+    `bitcoin-rs-e2e` is the process-level test harness that drives
     the composed daemon and the pinned reference node over their public
     surfaces only; it declares no internal dependencies and no workspace
     crate may depend on it.
@@ -79,6 +68,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   `[dependencies]`, `[build-dependencies]`, or `[dev-dependencies]`.
 - All higher layers interact with persistent state through the `KvStore` facade
   and storage abstractions exported by `bitcoin-rs-storage`.
+- Storage owns generic journal/checkpoint formats, filesystem operations and
+  durability primitives. Its bounded `HistoryAccess` supplies optional consumers.
 
 ### `ARCH-03`: Storage backend feature forwarding confinement
 
@@ -388,32 +379,17 @@ Offline allocation measurement and its dependencies live in
 
 ## Remaining composition boundary
 
-`crates/chainstate` owns authoritative applied-chain mutation, recovery,
-checkpoint payload assembly/publication, reorg, and the mandatory retention
-it takes into those transitions. Storage owns the retained-history
-authority — `RetentionRegistry`, the executed frontier, prune reserve/commit,
-and the bounded `HistoryAccess` it hands optional consumers — as well as
-generic journal/checkpoint formats, filesystem operations, backend
-drivers, and durability primitives. Node owns process configuration, concrete
-backend selection, seeding that one retention registry and distributing its
-capabilities, mempool/P2P/index/mining/RPC wiring, and post-commit
-cross-domain effects. Backend construction stays at the `ARCH-03`
-composition seam.
+Ownership is defined in [ARCH-02](#arch-02-exclusive-storage-engine-dependency-ownership)
+and [ARCH-03](#arch-03-storage-backend-feature-forwarding-confinement) (storage and
+backend construction), [ARCH-05](#arch-05-node-composition-and-orchestration-boundary)
+(node assembly) and [ARCH-07](#arch-07-chainstate-owns-authoritative-applied-chain-mutation)
+(chainstate transitions and the separate storage retention authority).
 
 ## Proven by
 
 - `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`:
-  - `workspace_dependency_direction_is_one_way`: parses `cargo metadata --no-deps`,
-    validates every internal workspace dependency edge against the approved
-    layer table, rejects any workspace dependency cycle, and verifies
-    `bitcoin-rs-mempool` does not depend on its transaction consumers (`p2p`,
-    `rpc`, `node`, or the binary). It also verifies `bitcoin-rs-storage`
-    exclusively owns storage engine dependencies, confirms `bitcoin-rs-rpc` has
-    no dependency on storage and forwards no backend features, and verifies
-    backend feature forwarding is confined to operator tiers and service
-    adapters, and rejects empty backend markers on crates that do not own an
-    engine. Normal/build dependency selections and production feature paths
-    must not enable `test-seam`; dev-only selections remain available to fixtures.
+  - `workspace_dependency_direction_is_one_way`: validates `cargo metadata --no-deps`
+    against `ARCH-01`–`ARCH-04` and the production feature isolation rule above.
   - `fixture_owners_expose_no_production_injection_or_synthetic_constructors`:
     compiles an isolated consumer; ordinary read/composition APIs must compile,
     while persistence/checkpoint injection, the old footprint module, and
@@ -432,12 +408,6 @@ composition seam.
     including the P2P `SyncChain` adapter's, go through `BlockTreeReader`.
     The same consumer asserts `UtxoReader::fixture_set` is unavailable, so a
     production reader cannot reach the set `utxo::contract` mutates.
-- Manifest enforcement:
-  - Root `Cargo.toml`: workspace member list and package versions.
-  - `crates/storage/Cargo.toml`: engine dependency definitions.
-  - `crates/rpc/Cargo.toml`: zero storage backend dependencies or features.
-  - `crates/node/Cargo.toml` and `bin/bitcoin-rs/Cargo.toml`: confined
-    operator-tier backend feature flags.
 - `crates/chainstate/tests/unit/apply/admission_tests.rs` and
   `crates/chainstate/tests/unit/apply/chain_tx_count_tests.rs` cover admission
   shutdown and coherent chain transaction-count publication. Checkpoint and
