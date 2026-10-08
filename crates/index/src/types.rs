@@ -387,28 +387,15 @@ impl TxPosition {
 
 /// Codec for the row value carrying a row's transaction byte positions.
 ///
-/// Layout: a packed `TxPosition[n]`, `n >= 1`. A row exists only because at
-/// least one transaction produced it, so an **empty** value never means "this
-/// block has no matching transactions" — it means the row predates this format.
-/// Readers must treat empty and malformed values identically: no usable
-/// positions, scan the block.
+/// Layout: a packed `TxPosition[n]`, `n >= 1`. An empty value means the row
+/// predates this format, not that the block has no matching transactions, so
+/// readers treat empty and malformed values identically: scan the block.
 ///
-/// # Staleness
-///
-/// The value does not carry block identity. The durable index supplies that
-/// identity by committing every row change with an exact full-hash watermark.
-/// The single writer rolls rows back before it writes a replacement block, and
-/// snapshot queries accept rows only while that watermark equals the applied
-/// tip and the revision and tip stay unchanged. In that valid state, positions
-/// belong to the canonical block hash used for the read.
-///
-/// Readers still validate the complete position list before I/O and exact-check
-/// every decoded transaction. If one position is malformed, unavailable, or
-/// does not match the requested transaction or script, the reader must discard
-/// all tentative results for that row and scan the full block. It must never
-/// skip one position and keep the rest. A stale row under an accepted watermark
-/// means manual mutation, broken backend atomicity, or storage corruption; it is
-/// outside the valid index-state contract.
+/// The value carries no block identity; the watermark committed with every row
+/// change supplies it, and snapshot queries accept rows only while that
+/// watermark equals the applied tip. Readers still exact-check every decoded
+/// transaction, and a single malformed or mismatched position discards all
+/// tentative results for the row rather than skipping one entry.
 pub struct TxPositionValue;
 
 impl TxPositionValue {

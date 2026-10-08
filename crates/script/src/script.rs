@@ -7,44 +7,109 @@
 
 /// Opcode byte constants the workspace builds and inspects scripts with.
 pub mod opcode {
-    /// `OP_0`: pushes an empty byte string.
-    pub const OP_0: u8 = 0x00;
-    /// `OP_PUSHDATA1`: the next byte is the push length.
-    pub(crate) const OP_PUSHDATA1: u8 = 0x4c;
-    /// `OP_PUSHDATA2`: the next two little-endian bytes are the push length.
-    pub(crate) const OP_PUSHDATA2: u8 = 0x4d;
-    /// `OP_PUSHDATA4`: the next four little-endian bytes are the push length.
-    pub(crate) const OP_PUSHDATA4: u8 = 0x4e;
-    /// `OP_1NEGATE`: pushes the number -1.
-    pub const OP_1NEGATE: u8 = 0x4f;
-    /// `OP_1`: pushes the number 1 (`OP_PUSHNUM_1`).
-    pub const OP_PUSHNUM_1: u8 = 0x51;
-    /// `OP_16`: pushes the number 16 (`OP_PUSHNUM_16`).
-    pub const OP_PUSHNUM_16: u8 = 0x60;
-    /// `OP_IF`: begins a conditional branch (evaluator-owned semantics).
-    pub const OP_IF: u8 = 0x63;
-    /// `OP_ENDIF`: closes a conditional branch.
-    pub const OP_ENDIF: u8 = 0x68;
-    /// `OP_RETURN`: marks an unspendable provably-prunable output.
-    pub const OP_RETURN: u8 = 0x6a;
-    /// `OP_DROP`: drops the top stack item.
-    pub const OP_DROP: u8 = 0x75;
-    /// `OP_DUP`: duplicates the top stack item.
-    pub const OP_DUP: u8 = 0x76;
-    /// `OP_EQUAL`: pushes whether the top two stack items are equal.
-    pub const OP_EQUAL: u8 = 0x87;
-    /// `OP_EQUALVERIFY`: `OP_EQUAL` followed by `OP_VERIFY`.
-    pub const OP_EQUALVERIFY: u8 = 0x88;
-    /// `OP_HASH160`: RIPEMD160(SHA256(x)).
-    pub const OP_HASH160: u8 = 0xa9;
-    /// `OP_CHECKSIG`: verifies a signature against the top public key.
-    pub const OP_CHECKSIG: u8 = 0xac;
-    /// `OP_CHECKSIGVERIFY`: `OP_CHECKSIG` followed by `OP_VERIFY`.
-    pub(crate) const OP_CHECKSIGVERIFY: u8 = 0xad;
-    /// `OP_CHECKMULTISIG`: verifies an m-of-n multisignature set.
-    pub const OP_CHECKMULTISIG: u8 = 0xae;
-    /// `OP_CHECKMULTISIGVERIFY`: `OP_CHECKMULTISIG` followed by `OP_VERIFY`.
-    pub(crate) const OP_CHECKMULTISIGVERIFY: u8 = 0xaf;
+    macro_rules! opcodes {
+        ($($(#[$doc:meta])* $visibility:vis $name:ident = $value:literal,)*) => {
+            $(
+                #[doc = concat!("`", stringify!($name), "` (", stringify!($value), ").")]
+                $(#[$doc])*
+                $visibility const $name: u8 = $value;
+            )*
+        };
+    }
+
+    opcodes! {
+        /// `OP_0`: pushes an empty byte string.
+        pub OP_0 = 0x00,
+        /// `OP_PUSHDATA1`: the next byte is the push length.
+        pub(crate) OP_PUSHDATA1 = 0x4c,
+        /// `OP_PUSHDATA2`: the next two little-endian bytes are the push length.
+        pub(crate) OP_PUSHDATA2 = 0x4d,
+        /// `OP_PUSHDATA4`: the next four little-endian bytes are the push length.
+        pub(crate) OP_PUSHDATA4 = 0x4e,
+        /// `OP_1NEGATE`: pushes the number -1.
+        pub OP_1NEGATE = 0x4f,
+        /// `OP_1`: pushes the number 1 (`OP_PUSHNUM_1`).
+        pub OP_PUSHNUM_1 = 0x51,
+        /// `OP_16`: pushes the number 16 (`OP_PUSHNUM_16`).
+        pub OP_PUSHNUM_16 = 0x60,
+        /// `OP_IF`: begins a conditional branch (evaluator-owned semantics).
+        pub OP_IF = 0x63,
+        /// `OP_ENDIF`: closes a conditional branch.
+        pub OP_ENDIF = 0x68,
+        /// `OP_RETURN`: marks an unspendable provably-prunable output.
+        pub OP_RETURN = 0x6a,
+        /// `OP_DROP`: drops the top stack item.
+        pub OP_DROP = 0x75,
+        /// `OP_DUP`: duplicates the top stack item.
+        pub OP_DUP = 0x76,
+        /// `OP_EQUAL`: pushes whether the top two stack items are equal.
+        pub OP_EQUAL = 0x87,
+        /// `OP_EQUALVERIFY`: `OP_EQUAL` followed by `OP_VERIFY`.
+        pub OP_EQUALVERIFY = 0x88,
+        /// `OP_HASH160`: RIPEMD160(SHA256(x)).
+        pub OP_HASH160 = 0xa9,
+        /// `OP_CHECKSIG`: verifies a signature against the top public key.
+        pub OP_CHECKSIG = 0xac,
+        /// `OP_CHECKSIGVERIFY`: `OP_CHECKSIG` followed by `OP_VERIFY`.
+        pub(crate) OP_CHECKSIGVERIFY = 0xad,
+        /// `OP_CHECKMULTISIG`: verifies an m-of-n multisignature set.
+        pub OP_CHECKMULTISIG = 0xae,
+        /// `OP_CHECKMULTISIGVERIFY`: `OP_CHECKMULTISIG` followed by `OP_VERIFY`.
+        pub(crate) OP_CHECKMULTISIGVERIFY = 0xaf,
+        pub(crate) OP_NOP = 0x61,
+        pub(crate) OP_NOTIF = 0x64,
+        pub(crate) OP_ELSE = 0x67,
+        pub(crate) OP_VERIFY = 0x69,
+        pub(crate) OP_TOALTSTACK = 0x6b,
+        pub(crate) OP_FROMALTSTACK = 0x6c,
+        pub(crate) OP_2DROP = 0x6d,
+        pub(crate) OP_2DUP = 0x6e,
+        pub(crate) OP_3DUP = 0x6f,
+        pub(crate) OP_2OVER = 0x70,
+        pub(crate) OP_2ROT = 0x71,
+        pub(crate) OP_2SWAP = 0x72,
+        pub(crate) OP_IFDUP = 0x73,
+        pub(crate) OP_DEPTH = 0x74,
+        pub(crate) OP_NIP = 0x77,
+        pub(crate) OP_OVER = 0x78,
+        pub(crate) OP_PICK = 0x79,
+        pub(crate) OP_ROLL = 0x7a,
+        pub(crate) OP_ROT = 0x7b,
+        pub(crate) OP_SWAP = 0x7c,
+        pub(crate) OP_TUCK = 0x7d,
+        pub(crate) OP_SIZE = 0x82,
+        pub(crate) OP_1ADD = 0x8b,
+        pub(crate) OP_1SUB = 0x8c,
+        pub(crate) OP_NEGATE = 0x8f,
+        pub(crate) OP_ABS = 0x90,
+        pub(crate) OP_NOT = 0x91,
+        pub(crate) OP_0NOTEQUAL = 0x92,
+        pub(crate) OP_ADD = 0x93,
+        pub(crate) OP_SUB = 0x94,
+        pub(crate) OP_BOOLAND = 0x9a,
+        pub(crate) OP_BOOLOR = 0x9b,
+        pub(crate) OP_NUMEQUAL = 0x9c,
+        pub(crate) OP_NUMEQUALVERIFY = 0x9d,
+        pub(crate) OP_NUMNOTEQUAL = 0x9e,
+        pub(crate) OP_LESSTHAN = 0x9f,
+        pub(crate) OP_GREATERTHAN = 0xa0,
+        pub(crate) OP_LESSTHANOREQUAL = 0xa1,
+        pub(crate) OP_GREATERTHANOREQUAL = 0xa2,
+        pub(crate) OP_MIN = 0xa3,
+        pub(crate) OP_MAX = 0xa4,
+        pub(crate) OP_WITHIN = 0xa5,
+        pub(crate) OP_RIPEMD160 = 0xa6,
+        pub(crate) OP_SHA1 = 0xa7,
+        pub(crate) OP_SHA256 = 0xa8,
+        pub(crate) OP_HASH256 = 0xaa,
+        pub(crate) OP_CODESEPARATOR = 0xab,
+        pub(crate) OP_NOP1 = 0xb0,
+        pub(crate) OP_CHECKLOCKTIMEVERIFY = 0xb1,
+        pub(crate) OP_CHECKSEQUENCEVERIFY = 0xb2,
+        pub(crate) OP_NOP4 = 0xb3,
+        pub(crate) OP_NOP10 = 0xb9,
+        pub(crate) OP_CHECKSIGADD = 0xba,
+    }
 
     /// Returns the small-integer value an `OP_PUSHNUM_*` opcode encodes,
     /// or `None` for every other opcode.

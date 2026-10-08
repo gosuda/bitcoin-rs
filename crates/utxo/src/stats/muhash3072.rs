@@ -598,7 +598,6 @@ mod tests {
         }
     }
 
-    /// Adversarial single-limb fillers for carry/boundary coverage.
     fn boundary_limb_patterns() -> Vec<[u64; LIMBS]> {
         let all_max = [u64::MAX; LIMBS];
         let all_zero = [0_u64; LIMBS];
@@ -642,8 +641,6 @@ mod tests {
         ]
     }
 
-    /// Asserts the optimized `multiply` produces RAW limbs (pre-`to_reduced_ruint`)
-    /// byte-identical to the frozen serial reference for one input pair.
     fn assert_multiply_byte_identical(left: &[u64; LIMBS], right: &[u64; LIMBS]) {
         let mut optimized = Num3072 { limbs: *left };
         optimized.multiply(&Num3072 { limbs: *right });
@@ -680,9 +677,6 @@ mod tests {
 
     #[test]
     fn multiply_byte_identical_on_random_chains() {
-        // Exercises the unreduced-state propagation the bench hot loop relies on:
-        // repeated multiply without an intervening normalization. 4_000 chains of
-        // length 8 = 32_000 chained multiplies compared limb-for-limb.
         const CHAINS: usize = 4_000;
         const CHAIN_LEN: usize = 8;
         let mut rng = SplitMix64::new(0x4d75_4861_7368_4368);

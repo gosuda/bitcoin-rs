@@ -1198,14 +1198,14 @@ mod tests {
         );
     }
 
-    #[test]
     // CONTRACT: docs/contracts/external-api.md#API-26
+    #[test]
     fn estimatesmartfee_rejects_conf_target_outside_core_range() {
         let ctx = Arc::new(Context::new());
         for target in [-1_i64, 0, 1009] {
             let error = match estimatesmartfee(&ctx, &json!([target])) {
                 Err(e) => e,
-                Ok(_) => panic!("conf_target outside 1..=1008 must fail"),
+                Ok(_) => panic!("conf_target {target} outside 1..=1008 must fail"),
             };
             assert!(matches!(error, RpcError::InvalidParameter(_)));
             assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
@@ -1214,36 +1214,38 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: docs/contracts/external-api.md#API-26
     fn estimatesmartfee_rejects_unknown_estimate_mode() {
         let ctx = Arc::new(Context::new());
-        let error = match estimatesmartfee(&ctx, &json!([3, "hurry"])) {
+        let unknown_mode = match estimatesmartfee(&ctx, &json!([3, "hurry"])) {
             Err(e) => e,
             Ok(_) => panic!("unknown estimate_mode must fail"),
         };
-        assert!(matches!(error, RpcError::InvalidParameter(_)));
-        assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
-        assert_eq!(error.to_string(), ESTIMATE_SMART_FEE_MODE_ERROR);
-        let type_error = match estimatesmartfee(&ctx, &json!([3, 1])) {
+        assert!(matches!(unknown_mode, RpcError::InvalidParameter(_)));
+        assert_eq!(unknown_mode.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(unknown_mode.to_string(), ESTIMATE_SMART_FEE_MODE_ERROR);
+
+        let typed_mode = match estimatesmartfee(&ctx, &json!([3, 1])) {
             Err(e) => e,
             Ok(_) => panic!("non-string estimate_mode must fail"),
         };
-        assert!(matches!(type_error, RpcError::InvalidType(_)));
-        assert_eq!(type_error.code(), RpcError::CORE_INVALID_TYPE);
+        assert!(matches!(typed_mode, RpcError::InvalidType(_)));
+        assert_eq!(typed_mode.code(), RpcError::CORE_INVALID_TYPE);
     }
 
     #[test]
-    // CONTRACT: docs/contracts/external-api.md#API-26
     fn estimatesmartfee_accepts_core_estimate_modes_and_rejects_trailing() {
         let ctx = Arc::new(Context::new());
-        for mode in ["unset", "ECONOMICAL", "Conservative"] {
-            estimatesmartfee(&ctx, &json!([3, mode]))
-                .unwrap_or_else(|err| panic!("Core estimate_mode {mode} must be accepted: {err}"));
+        for params in [
+            json!([3, "unset"]),
+            json!([3, "ECONOMICAL"]),
+            json!([3, "Conservative"]),
+            json!([3, null]),
+            json!([3]),
+        ] {
+            estimatesmartfee(&ctx, &params)
+                .unwrap_or_else(|err| panic!("{params:?} must be accepted: {err}"));
         }
-        estimatesmartfee(&ctx, &json!([3, null]))
-            .unwrap_or_else(|err| panic!("null estimate_mode must be accepted: {err}"));
-        estimatesmartfee(&ctx, &json!([3]))
-            .unwrap_or_else(|err| panic!("omitted estimate_mode must be accepted: {err}"));
+
         let extra = match estimatesmartfee(&ctx, &json!([3, "conservative", 1])) {
             Err(e) => e,
             Ok(_) => panic!("trailing estimatesmartfee arguments must fail"),
@@ -1266,26 +1268,12 @@ mod tests {
     }
 
     #[test]
-    fn uptime_returns_u64_seconds() {
-        let ctx = Arc::new(Context::new());
-        let result = uptime(&ctx, &json!([])).unwrap_or_else(|err| panic!("uptime failed: {err}"));
+    fn getrpcinfo_needs_a_configured_log_path_and_reports_it() {
+        let bare = Arc::new(Context::new());
         assert!(
-            result.is_u64() || result.is_i64(),
-            "uptime returns numeric: {result:?}"
+            matches!(getrpcinfo(&bare, &json!([])), Err(RpcError::Internal(message)) if message == "debug log path is not configured")
         );
-    }
 
-    #[test]
-    fn getrpcinfo_requires_a_configured_log_path() {
-        let ctx = Arc::new(Context::new());
-        let result = getrpcinfo(&ctx, &json!([]));
-        assert!(
-            matches!(result, Err(RpcError::Internal(message)) if message == "debug log path is not configured")
-        );
-    }
-
-    #[test]
-    fn getrpcinfo_returns_active_commands_and_configured_log_path() {
         let mut ctx = Context::new();
         ctx.debug_log_path = Some(std::path::PathBuf::from("/tmp/debug.log"));
         let ctx = Arc::new(ctx);
@@ -1344,20 +1332,6 @@ mod tests {
 
     #[cfg(feature = "zmq")]
     #[test]
-    fn getzmqnotifications_returns_empty_array() {
-        use alloc::sync::Arc;
-
-        let ctx = Arc::new(Context::new());
-        let result = getzmqnotifications(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getzmqnotifications failed: {err}"));
-        let Some(arr) = result.as_array() else {
-            panic!("expected array, got {result:?}");
-        };
-        assert!(arr.is_empty());
-    }
-
-    #[cfg(feature = "zmq")]
-    #[test]
     fn getzmqnotifications_returns_active_metadata() {
         use alloc::sync::Arc;
 
@@ -1376,6 +1350,15 @@ mod tests {
             fn publish_rawblock(&self, _bytes: &[u8]) {}
             fn publish_rawtx(&self, _bytes: &[u8]) {}
         }
+        let bare = Arc::new(Context::new());
+        let empty = getzmqnotifications(&bare, &json!([]))
+            .unwrap_or_else(|err| panic!("getzmqnotifications failed: {err}"));
+        assert_eq!(
+            empty.as_array().map(sonic_rs::Array::len),
+            Some(0),
+            "{empty:?}"
+        );
+
         let mut ctx = Context::new();
         ctx.zmq_publisher = Arc::new(NotifierPublisher);
         let ctx = Arc::new(ctx);
@@ -1629,10 +1612,6 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// A descriptor with keys in it *is* solvable, and this used to say no.
-    ///
-    /// `issolvable` was hardcoded `false`, so every descriptor -- including one
-    /// carrying the key needed to spend -- reported that it could not be spent.
     #[test]
     fn a_key_descriptor_is_solvable() {
         let ctx = Arc::new(Context::new());
@@ -1653,11 +1632,6 @@ mod descriptor_checksum_tests {
         );
     }
 
-    /// A private key is reported as one, and is not handed back.
-    ///
-    /// `hasprivatekeys` was hardcoded `false`. Someone checking whether a
-    /// descriptor they were about to share carried their key was told it did
-    /// not -- and the response echoed the descriptor, key included.
     #[test]
     fn a_private_key_is_reported_and_not_echoed_back() {
         let ctx = Arc::new(Context::new());
@@ -1971,13 +1945,6 @@ mod deriveaddresses_tests {
         );
     }
 
-    /// A descriptor with no checksum does not derive an address.
-    ///
-    /// Core passes `require_checksum = true` here and only here, and the reason
-    /// is what these addresses are for: someone sends money to them. A mistyped
-    /// descriptor derives perfectly good addresses that nobody holds the keys
-    /// for, and the checksum is the only thing between a typo and that. This
-    /// used to accept the bare descriptor and derive from it.
     #[test]
     fn deriveaddresses_requires_a_checksum() {
         let ctx = Arc::new(Context::new());

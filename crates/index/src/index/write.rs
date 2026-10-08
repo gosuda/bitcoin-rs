@@ -69,7 +69,7 @@ impl<S: KvStore> IndexWriter<S> {
         self.indexer.watermark()
     }
 
-    /// Loads both independently durable capability watermarks.
+    /// Loads independently durable capability watermarks.
     pub fn watermarks(&self) -> Result<IndexWatermarks, IndexError> {
         self.indexer.watermarks()
     }
@@ -261,26 +261,15 @@ impl<S: KvStore> IndexWriter<S> {
 
     /// Commits one serialized block through the prepared-write owner.
     ///
-    /// The successful return is the commit point: all prepared rows and the
-    /// watermark become durable together under the store's atomic-write
-    /// guarantee. A crash before that point leaves the previous watermark and
-    /// rows; a crash after it leaves both the rows and watermark. A failed
-    /// call is therefore ambiguous to the caller: do not retry blindly or
-    /// write column families directly. The supervised index worker owns
-    /// retry-from-the-last-confirmed-watermark, or reset and rebuild when
-    /// the persisted state cannot be established; storage failures are
-    /// non-retriable after the worker is marked failed.
+    /// The successful return is the commit point: prepared rows and the
+    /// watermark become durable together. Storage-write failures can leave the
+    /// commit uncertain; the supervised worker owns retry from the last confirmed
+    /// watermark, or reset and rebuild.
     ///
-    /// Production catch-up uses [`Self::prepare_block_with_spent_scripts`] plus
-    /// [`super::prepared::PreparedBatch`] to bound multi-block writes. This is the same owner
-    /// for a single block: tests and benches must not grow a second ingest path.
-    /// Delegates to [`Self::commit_forward`]. See `IDX-06` / `IDX-07` in
-    /// `docs/contracts/indexing.md`.
-    ///
-    /// This path selects [`IndexCapabilities::HISTORICAL`]: it advances
-    /// `TxLookup` and `ScriptHistory` only. Callers that maintain `ScriptLive`
-    /// must use [`Self::prepare_block_with_spent_scripts`] with `script_live`
-    /// selected and a spent-script source, then [`Self::commit_forward`].
+    /// Selects [`IndexCapabilities::HISTORICAL`]. Callers maintaining
+    /// `ScriptLive` must use [`Self::prepare_block_with_spent_scripts`] with a
+    /// spent-script source, then [`Self::commit_forward`]. See `IDX-06` /
+    /// `IDX-07` in `docs/contracts/indexing.md`.
     pub fn commit_block(&mut self, height: u32, body: &[u8]) -> Result<IndexWatermark, IndexError> {
         let header = body.get(..crate::types::HEADER_ROW_SIZE).ok_or_else(|| {
             IndexError::InvalidHeaderLength {
@@ -418,20 +407,11 @@ impl<S: KvStore> IndexWriter<S> {
     /// coins. This is the anchored variant used when `ScriptLive` is selected.
     ///
     /// The commit point is the successful return from the durable conditional
-    /// store write. Until then, no rollback rows, selected watermark, cursor,
-    /// or ordinary revision is committed; after it, they are committed as one
-    /// batch. Consequently, crash recovery sees either the prior state or the
-    /// complete rollback state, never a partially applied rollback.
-    ///
-    /// Preparation and fence checks are deterministic failures and should be
-    /// corrected rather than retried unchanged. Storage failures are returned
-    /// without claiming whether the write reached the backend; the caller owns
-    /// recovery, and must reacquire a fence and reconcile the stored watermark
-    /// and cursor before retrying or compensating. A successful return is the
-    /// durability guarantee; an error must not be treated as proof of rollback.
-    ///
-    /// Same fenced batch as [`Self::commit_forward`]. See `IDX-06` / `IDX-07`
-    /// in `docs/contracts/indexing.md`.
+    /// write, so recovery sees either the prior state or the complete rollback.
+    /// Preparation and fence failures precede the rollback write. Storage-write
+    /// errors can leave its commit uncertain; reacquire a fence and reconcile the
+    /// stored watermark and cursor before retrying. Same fenced batch as
+    /// [`Self::commit_forward`]; see `IDX-06` / `IDX-07` in `docs/contracts/indexing.md`.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &mut self,
         fence: IndexWriteFence,

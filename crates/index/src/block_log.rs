@@ -74,17 +74,10 @@ pub struct BlockRecord {
     pub body_size: usize,
     /// Serialized block header bytes, when the record carries a header.
     ///
-    /// **The log never carries one.** A record is held for every applied block
-    /// for the life of the process, and the `BlockTree` already holds that
-    /// block's header — so storing it here stored it twice. Every constructor
-    /// leaves this `None`; [`Context::header_record`] is the only thing that
-    /// fills it, from the tree node it resolved, on the way out to a caller.
-    ///
-    /// Boxed rather than inline for the same reason. An `Option<[u8; 80]>`
-    /// costs its full 80 bytes in every record even when it is `None`, so
-    /// leaving the log's records empty would have saved nothing. Boxing makes
-    /// an absent header cost 8 bytes and allocates only where one is actually
-    /// produced, which is once per RPC answer rather than once per block.
+    /// The log never carries one: the `BlockTree` already holds the header of
+    /// every applied block. Every constructor leaves this `None`, and
+    /// [`Context::header_record`] is the only thing that fills it. Boxed so an
+    /// absent header costs 8 bytes rather than the full 80 in every record.
     pub header: Option<Box<[u8; SERIALIZED_BLOCK_HEADER_LEN]>>,
     /// Transaction count in the block.
     pub tx_count: usize,
@@ -93,16 +86,10 @@ pub struct BlockRecord {
 }
 
 /// Compile-time gate for the per-block record cost documented on
-/// [`BlockRecord::header`]: the field was 104 bytes inline plus a 160-byte
-/// heap `String` of hex — 264 bytes and an allocation per block. Storing the
-/// raw header inline took that to 168 with no allocation. Not storing it at
-/// all takes it to **64**: a further **24 bytes per block**, about
-/// **22 MiB** at a mainnet-sized chain, on top of the 73.5 MiB the boxed
-/// header saved. The boxing is what buys those 80 bytes and is easy to undo
-/// by accident, so reverting it fails here at compile time rather than in a
-/// runtime test. The 64-byte figure is the 64-bit layout; `usize` fields make
-/// narrower targets smaller still, so the figure is an upper bound, not a
-/// floor.
+/// [`BlockRecord::header`]. Boxing the header is what keeps the record at 64
+/// bytes instead of 144, and it is easy to undo by accident, so reverting it
+/// fails here at compile time rather than in a runtime test. The figure is the
+/// 64-bit layout; narrower targets are smaller still.
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(
     core::mem::size_of::<BlockRecord>() == 64,
@@ -113,36 +100,13 @@ const _: () = assert!(
     "BlockRecord grew past the 64-byte bound; re-measure the per-block saving"
 );
 
-/// The node's block-record log, with the two whole-log sums kept as it changes.
-///
-/// The log holds one record per applied block and grows for the life of the
-/// process — ~963k entries on a mainnet node at the time of writing. Two
-/// RPC-visible figures are sums over all of it: `size_on_disk` in
-/// `getblockchaininfo`, and `txcount` in `getchaintxstats`. Folding the log to
-/// answer them made a call that reports a handful of scalars cost time linear in
-/// chain length, and it was paid **under the log's read lock**, which is the
-/// lock block application takes to append. The sums are maintained here instead.
-///
-/// Deliberately not a `Vec<BlockRecord>` with the totals kept beside it: the log
-/// is appended from `apply`, from `Context::add_block`, and from tests, and a
-/// total that any of those could forget to update is a total that will drift.
-/// Mutation goes through the methods below, so it cannot.
-///
-/// Reads are unchanged. The type derefs to `[BlockRecord]`, so every existing
-/// slice, index, iterator and binary search over the log keeps working.
+/// Applied block records with cached body-size and transaction-prefix sums.
 #[derive(Clone, Debug, Default)]
 pub struct BlockLog {
     records: Vec<BlockRecord>,
     /// Sum of `body_size` over every record.
     total_body_size: u64,
     /// `cumulative_tx_count[i]` is the sum of `tx_count` over `records[..=i]`.
-    ///
-    /// A single running total would answer `txcount` only when the applied tip
-    /// is the log's last record, and would fall back to walking everything above
-    /// it otherwise — a cliff, not a bound. Prefix sums answer any prefix in
-    /// constant time, so the cost no longer depends on where the applied tip
-    /// sits relative to the log. Eight bytes per record, ~7.7 MB at a mainnet
-    /// tip, against ~254 MB the records themselves occupy.
     cumulative_tx_count: Vec<u64>,
 }
 
@@ -162,9 +126,7 @@ impl BlockLog {
         self.total_body_size = self
             .total_body_size
             .saturating_add(u64::try_from(record.body_size).unwrap_or(u64::MAX));
-        // Read the last prefix directly rather than through `total_tx_count`:
-        // that one carries a `debug_assert` which folds the log, and paying it
-        // per append would make block application quadratic in debug builds.
+        // Avoid total_tx_count's debug fold on every append.
         let running = self
             .cumulative_tx_count
             .last()
@@ -175,10 +137,7 @@ impl BlockLog {
         self.records.push(record);
     }
 
-    /// Removes the last record, taking it back out of both.
-    ///
-    /// This is the disconnect path: a reorg pops the tip's record after checking
-    /// it is the one being disconnected.
+    /// Removes the last record and its contribution to both sums.
     pub fn pop(&mut self) -> Option<BlockRecord> {
         let record = self.records.pop()?;
         let _ = self.cumulative_tx_count.pop();
@@ -203,10 +162,7 @@ impl BlockLog {
 
     /// Sum of every record's serialized block length, in bytes.
     ///
-    /// This is `getblockchaininfo`'s `size_on_disk`. It counts the block sizes
-    /// the node has recorded, which is what the fold it replaced counted;
-    /// pruning does not remove records, so a pruned node still reports the bytes
-    /// its blocks would occupy.
+    /// Pruning retains records, so this includes bytes pruned blocks would occupy.
     #[must_use]
     pub fn size_on_disk(&self) -> u64 {
         debug_assert_eq!(
@@ -291,15 +247,7 @@ pub fn cumulative_tx_count_through(log: &BlockLog, height: u32) -> Option<u64> {
 
 /// Finds the record at `height`, or `None` when the log holds no such height.
 ///
-/// The log is append-only in height order — `Context::add_block` pushes, and the
-/// only removal is the tail `pop` a disconnect performs on the applied tip — so
-/// it is non-decreasing by height and binary-searchable. Where several records
-/// share a height, this returns the first.
-///
-/// The direct index is tried first because the log is usually dense from height
-/// zero, which makes the common case one bounds check instead of a search. The
-/// guard on the preceding record is what keeps that fast path honest when it is
-/// not dense.
+/// Records must be sorted by non-decreasing height. Returns the first duplicate.
 #[must_use]
 pub fn record_at_height(records: &[BlockRecord], height: u32) -> Option<&BlockRecord> {
     if let Ok(index) = usize::try_from(height)
@@ -324,11 +272,7 @@ pub fn record_at_height(records: &[BlockRecord], height: u32) -> Option<&BlockRe
 
 /// Finds the record with both `height` and `hash`, or `None`.
 ///
-/// Several records can share a height — a reorg leaves the losing block in the
-/// log beside the winner — so the binary search lands anywhere in that run and
-/// this walks it in both directions before comparing hashes. Returning the first
-/// record at the height without checking the hash would hand back the wrong
-/// block on exactly the chain shape this exists to handle.
+/// Records must be sorted by non-decreasing height; hashes disambiguate duplicates.
 #[must_use]
 pub fn record_at_height_hash(
     records: &[BlockRecord],

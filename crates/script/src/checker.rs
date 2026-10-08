@@ -629,444 +629,238 @@ mod tests {
         }]
     }
 
-    // =======================================================================
-    // DER encoding tests (DERSIG flag)
-    // =======================================================================
+    fn low_s_der(hashtype: u8) -> Vec<u8> {
+        let mut sig = vec![0x30, 0x44, 0x02, 0x20];
+        sig.extend_from_slice(&[0x01; 32]);
+        sig.extend_from_slice(&[0x02, 0x20]);
+        sig.extend_from_slice(&[0x01; 32]);
+        sig.push(hashtype);
+        sig
+    }
+
+    fn high_s_der() -> Vec<u8> {
+        let mut sig = vec![0x30, 0x45, 0x02, 0x20];
+        sig.extend_from_slice(&[0x01; 32]);
+        sig.extend_from_slice(&[0x02, 0x21, 0x00, 0x80]);
+        sig.extend_from_slice(&[0x00; 31]);
+        sig.push(0x01);
+        sig
+    }
+
+    fn invalid(code: ScriptErrCode) -> Result<bool, ScriptError> {
+        Err(ScriptError::Invalid { code })
+    }
+
+    type EcdsaCase = (
+        &'static str,
+        Vec<u8>,
+        Vec<u8>,
+        SigVersion,
+        VerifyFlags,
+        Result<bool, ScriptError>,
+    );
 
     #[test]
-    fn der_flag_rejects_non_der_signature() {
-        let tx = make_tx(2, 0, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // A non-DER signature: just random bytes with a hashtype appended.
-        let bad_sig = [0x00, 0x01, 0x02, 0x03, 0x01_u8];
-        let pubkey = [0x02_u8; 33]; // compressed pubkey placeholder
-
-        let result = checker.check_ecdsa_signature(
-            &bad_sig,
-            &pubkey,
-            &[],
-            SigVersion::Base,
-            VerifyFlags::DERSIG,
-        );
-
-        // Deletion transcript: when the DERSIG check is removed (the
-        // `needs_der && !is_valid_der_encoding` branch deleted), this
-        // signature is not rejected at the encoding stage. Instead it
-        // proceeds to `EcdsaSig::from_der` which returns `Err`, yielding
-        // `Ok(false)` — a clean false instead of the expected `Err`.
-        // The test would fail because it expects `Err` but gets `Ok(false)`.
-        assert!(
-            matches!(
-                result,
-                Err(ScriptError::Invalid {
-                    code: ScriptErrCode::SigDer
-                })
+    fn ecdsa_encoding_rules_match_core_per_flag() {
+        const COMPRESSED: [u8; 33] = [0x02; 33];
+        const UNCOMPRESSED: [u8; 65] = [0x04; 65];
+        const BAD_PREFIX: [u8; 33] = [0x05; 33];
+        let dersig = VerifyFlags::DERSIG;
+        let cases: [EcdsaCase; 10] = [
+            (
+                "DERSIG rejects a non-DER signature",
+                vec![0x00, 0x01, 0x02, 0x03, 0x01],
+                COMPRESSED.to_vec(),
+                SigVersion::Base,
+                dersig,
+                invalid(ScriptErrCode::SigDer),
             ),
-            "DERSIG flag must reject non-DER signatures, got {result:?}"
-        );
-    }
-
-    #[test]
-    fn der_flag_accepts_empty_signature() {
-        let tx = make_tx(2, 0, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        let result = checker.check_ecdsa_signature(
-            &[],
-            &[0x02_u8; 33],
-            &[],
-            SigVersion::Base,
-            VerifyFlags::DERSIG,
-        );
-
-        assert_eq!(result, Ok(false));
-    }
-
-    // =======================================================================
-    // Low-S tests (LOW_S flag)
-    // =======================================================================
-
-    #[test]
-    fn low_s_flag_rejects_high_s_signature() {
-        let tx = make_tx(2, 0, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // Construct a DER-encoded signature with a high S value that is
-        // still valid DER (positive integer). S = 0x80...00 (32 bytes) is
-        // above the half-order 0x7FFF...A0. To keep DER valid (positive),
-        // prepend a 0x00 byte to S, making the DER length 33.
-        // DER: 0x30 <len> 0x02 0x20 <R: 32 bytes> 0x02 0x21 0x00 <S: 32 bytes> <hashtype>
-        let sig: Vec<u8> = [0x30, 0x45, 0x02, 0x20]
-            .into_iter()
-            .chain([0x01; 32])
-            .chain([0x02, 0x21, 0x00, 0x80])
-            .chain([0x00; 31])
-            .chain([0x01])
-            .collect();
-
-        let result = checker.check_ecdsa_signature(
-            &sig,
-            &[0x02_u8; 33],
-            &[],
-            SigVersion::Base,
-            VerifyFlags::DERSIG.union(VerifyFlags::LOW_S),
-        );
-
-        // Deletion transcript: when the LOW_S check is removed (the
-        // `flags.contains(VerifyFlags::LOW_S) && !is_low_der_signature`
-        // branch deleted), this signature passes encoding checks (it is
-        // valid DER) and proceeds to `EcdsaSig::from_der` + verification.
-        // `from_der` accepts it (secp256k1 does not enforce low-S by
-        // default), so it returns `Ok(false)` (verification fails against
-        // the random pubkey) instead of `Err(SigHighS)`. The test would
-        // fail because it expects `Err` but gets `Ok(false)`.
-        assert!(
-            matches!(
-                result,
-                Err(ScriptError::Invalid {
-                    code: ScriptErrCode::SigHighS
-                })
+            (
+                "LOW_S rejects a high-S signature",
+                high_s_der(),
+                COMPRESSED.to_vec(),
+                SigVersion::Base,
+                dersig.union(VerifyFlags::LOW_S),
+                invalid(ScriptErrCode::SigHighS),
             ),
-            "LOW_S flag must reject high-S signatures, got {result:?}"
-        );
-    }
-
-    // =======================================================================
-    // STRICTENC hashtype test
-    // =======================================================================
-
-    #[test]
-    fn strictenc_rejects_undefined_hashtype() {
-        let tx = make_tx(2, 0, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // Build a valid DER signature with an undefined hashtype (0x05).
-        let sig: Vec<u8> = [0x30, 0x44, 0x02, 0x20]
-            .into_iter()
-            .chain([0x01; 32])
-            .chain([0x02, 0x20])
-            .chain([0x01; 32])
-            .chain([0x05])
-            .collect();
-
-        let result = checker.check_ecdsa_signature(
-            &sig,
-            &[0x02_u8; 33],
-            &[],
-            SigVersion::Base,
-            VerifyFlags::STRICTENC.union(VerifyFlags::DERSIG),
-        );
-
-        assert!(
-            matches!(
-                result,
-                Err(ScriptError::Invalid {
-                    code: ScriptErrCode::SigHashtype
-                })
+            (
+                "STRICTENC rejects an undefined hashtype",
+                low_s_der(0x05),
+                COMPRESSED.to_vec(),
+                SigVersion::Base,
+                dersig.union(VerifyFlags::STRICTENC),
+                invalid(ScriptErrCode::SigHashtype),
             ),
-            "STRICTENC must reject undefined hashtype, got {result:?}"
-        );
-    }
-
-    // =======================================================================
-    // STRICTENC pubkey encoding test
-    // =======================================================================
-
-    #[test]
-    fn strictenc_rejects_invalid_pubkey() {
-        let tx = make_tx(2, 0, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // A valid DER sig with low S.
-        let sig: Vec<u8> = [0x30, 0x44, 0x02, 0x20]
-            .into_iter()
-            .chain([0x01; 32])
-            .chain([0x02, 0x20])
-            .chain([0x01; 32])
-            .chain([0x01])
-            .collect();
-
-        // Invalid pubkey: wrong prefix byte.
-        let bad_pubkey = [0x05_u8; 33];
-
-        let result = checker.check_ecdsa_signature(
-            &sig,
-            &bad_pubkey,
-            &[],
-            SigVersion::Base,
-            VerifyFlags::STRICTENC.union(VerifyFlags::DERSIG),
-        );
-
-        assert!(
-            matches!(
-                result,
-                Err(ScriptError::Invalid {
-                    code: ScriptErrCode::PubkeyType
-                })
+            (
+                "STRICTENC rejects an unknown pubkey prefix",
+                low_s_der(0x01),
+                BAD_PREFIX.to_vec(),
+                SigVersion::Base,
+                dersig.union(VerifyFlags::STRICTENC),
+                invalid(ScriptErrCode::PubkeyType),
             ),
-            "STRICTENC must reject invalid pubkey encoding, got {result:?}"
-        );
-    }
-
-    // =======================================================================
-    // WITNESS_PUBKEYTYPE test
-    // =======================================================================
-
-    #[test]
-    fn witness_pubkeytype_rejects_uncompressed_in_segwit() {
-        let tx = make_tx(2, 0, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // Uncompressed pubkey (0x04 prefix, 65 bytes).
-        let uncompressed = [0x04_u8; 65];
-
-        let sig: Vec<u8> = [0x30, 0x44, 0x02, 0x20]
-            .into_iter()
-            .chain([0x01; 32])
-            .chain([0x02, 0x20])
-            .chain([0x01; 32])
-            .chain([0x01])
-            .collect();
-
-        let result = checker.check_ecdsa_signature(
-            &sig,
-            &uncompressed,
-            &[],
-            SigVersion::WitnessV0,
-            VerifyFlags::WITNESS_PUBKEYTYPE.union(VerifyFlags::DERSIG),
-        );
-
-        assert!(
-            matches!(
-                result,
-                Err(ScriptError::Invalid {
-                    code: ScriptErrCode::WitnessPubkeyType
-                })
+            (
+                "WITNESS_PUBKEYTYPE rejects an uncompressed key in segwit",
+                low_s_der(0x01),
+                UNCOMPRESSED.to_vec(),
+                SigVersion::WitnessV0,
+                dersig.union(VerifyFlags::WITNESS_PUBKEYTYPE),
+                invalid(ScriptErrCode::WitnessPubkeyType),
             ),
-            "WITNESS_PUBKEYTYPE must reject uncompressed keys in segwit, got {result:?}"
-        );
-    }
+            (
+                "an uncompressed key is fine in segwit without the flag",
+                low_s_der(0x01),
+                UNCOMPRESSED.to_vec(),
+                SigVersion::WitnessV0,
+                dersig,
+                Ok(false),
+            ),
+            (
+                "an empty signature is a clean false under DERSIG",
+                Vec::new(),
+                COMPRESSED.to_vec(),
+                SigVersion::Base,
+                dersig,
+                Ok(false),
+            ),
+            (
+                "an empty signature is a clean false under NULLFAIL",
+                Vec::new(),
+                COMPRESSED.to_vec(),
+                SigVersion::Base,
+                dersig.union(VerifyFlags::NULLFAIL),
+                Ok(false),
+            ),
+            (
+                "a failing signature is false without NULLFAIL",
+                low_s_der(0x01),
+                COMPRESSED.to_vec(),
+                SigVersion::Base,
+                dersig.union(VerifyFlags::LOW_S),
+                Ok(false),
+            ),
+            (
+                "the checker does not enforce NULLFAIL for a failing signature",
+                low_s_der(0x01),
+                COMPRESSED.to_vec(),
+                SigVersion::Base,
+                dersig
+                    .union(VerifyFlags::LOW_S)
+                    .union(VerifyFlags::NULLFAIL),
+                Ok(false),
+            ),
+        ];
 
-    // =======================================================================
-    // NULLFAIL test
-    // =======================================================================
-
-    #[test]
-    fn nullfail_rejects_nonempty_failing_signature() {
-        let tx = make_tx(2, 0, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // Valid DER, low S, valid hashtype — but the signature won't verify
-        // against this random pubkey, so without NULLFAIL it would be Ok(false).
-        let sig: Vec<u8> = [0x30, 0x44, 0x02, 0x20]
-            .into_iter()
-            .chain([0x01; 32])
-            .chain([0x02, 0x20])
-            .chain([0x01; 32])
-            .chain([0x01])
-            .collect();
-
-        // Use a valid compressed pubkey (0x02 prefix + 32 bytes).
-        // This is a valid encoding but the signature won't match.
-        let pubkey = [0x02_u8; 33];
-
-        // Without NULLFAIL: should be Ok(false) (verification fails but no error).
-        let result_no_nullfail = checker.check_ecdsa_signature(
-            &sig,
-            &pubkey,
-            &[0x51], // script_code
-            SigVersion::Base,
-            VerifyFlags::DERSIG.union(VerifyFlags::LOW_S),
-        );
-        assert_eq!(result_no_nullfail, Ok(false));
-
-        // With NULLFAIL: check_ecdsa_signature returns Ok(false) — NULLFAIL
-        // enforcement is the caller's job (eval_checksig / check_multisig
-        // cleanup), not the checker's.
-        let checker2_cache = SighashCache::new(&tx);
-        let checker2 =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker2_cache);
-        let result_nullfail = checker2.check_ecdsa_signature(
-            &sig,
-            &pubkey,
-            &[0x51],
-            SigVersion::Base,
-            VerifyFlags::DERSIG
-                .union(VerifyFlags::LOW_S)
-                .union(VerifyFlags::NULLFAIL),
-        );
-        assert_eq!(
-            result_nullfail,
-            Ok(false),
-            "check_ecdsa_signature must not enforce NULLFAIL; caller does"
-        );
+        for (name, sig, pubkey, sigversion, flags, expected) in cases {
+            for script_code in [[].as_slice(), &[0x51]] {
+                let tx = make_tx(2, 0, SEQUENCE_FINAL);
+                let prevouts = make_prevouts();
+                let cache = SighashCache::new(&tx);
+                let checker =
+                    TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &cache);
+                let got =
+                    checker.check_ecdsa_signature(&sig, &pubkey, script_code, sigversion, flags);
+                assert_eq!(got, expected, "{name}");
+            }
+        }
     }
 
     #[test]
-    fn nullfail_allows_empty_signature() {
-        let tx = make_tx(2, 0, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        let result = checker.check_ecdsa_signature(
-            &[],
-            &[0x02_u8; 33],
-            &[],
-            SigVersion::Base,
-            VerifyFlags::NULLFAIL.union(VerifyFlags::DERSIG),
-        );
-
-        assert_eq!(result, Ok(false));
-    }
-
-    // =======================================================================
-    // check_locktime tests (BIP65)
-    // =======================================================================
-
-    #[test]
-    fn check_locktime_satisfied_when_types_match_and_locktime_le_tx() {
-        let tx = make_tx(2, 100, 0);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // locktime 50 <= tx locktime 100, both block height, input not finalized.
-        assert!(checker.check_locktime(50));
-        assert!(checker.check_locktime(100)); // equal is satisfied
-    }
-
-    #[test]
-    fn check_locktime_fails_when_locktime_exceeds_tx() {
-        let tx = make_tx(2, 100, 0);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        assert!(!checker.check_locktime(101));
-    }
-
-    #[test]
-    fn check_locktime_fails_on_type_mismatch() {
-        let tx = make_tx(2, 100, 0); // tx locktime = block height
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // Timestamp locktime vs block-height tx locktime.
+    fn check_locktime_follows_bip65() {
         let timestamp = i64::from(LOCKTIME_THRESHOLD) + 100;
-        assert!(!checker.check_locktime(timestamp));
+        let cases = [
+            (
+                "a lower block-height locktime is satisfied",
+                100_u32,
+                0_u32,
+                50_i64,
+                true,
+            ),
+            (
+                "an equal block-height locktime is satisfied",
+                100,
+                0,
+                100,
+                true,
+            ),
+            (
+                "a locktime above the transaction's fails",
+                100,
+                0,
+                101,
+                false,
+            ),
+            (
+                "a timestamp request against a height locktime fails",
+                100,
+                0,
+                timestamp,
+                false,
+            ),
+            (
+                "a height request against a timestamp locktime fails",
+                u32::try_from(timestamp).unwrap_or(0),
+                0,
+                50,
+                false,
+            ),
+            ("a finalized input fails", 100, SEQUENCE_FINAL, 50, false),
+        ];
+
+        for (name, tx_locktime, sequence, required, expected) in cases {
+            let tx = make_tx(2, tx_locktime, sequence);
+            let prevouts = make_prevouts();
+            let cache = SighashCache::new(&tx);
+            let checker =
+                TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &cache);
+            assert_eq!(checker.check_locktime(required), expected, "{name}");
+        }
     }
 
     #[test]
-    fn check_locktime_fails_when_input_finalized() {
-        let tx = make_tx(2, 100, SEQUENCE_FINAL);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
+    fn check_sequence_follows_bip112() {
+        let cases = [
+            (
+                "a lower relative locktime is satisfied",
+                2_i32,
+                100_u32,
+                50_i64,
+                true,
+            ),
+            ("an equal relative locktime is satisfied", 2, 100, 100, true),
+            (
+                "a relative locktime above the input's fails",
+                2,
+                100,
+                101,
+                false,
+            ),
+            ("version 1 disables relative locktime", 1, 100, 50, false),
+            (
+                "the input's disable bit fails the check",
+                2,
+                0x64 | SEQUENCE_LOCKTIME_DISABLE_FLAG,
+                50,
+                false,
+            ),
+            (
+                "a time-based request against a height-based input fails",
+                2,
+                100,
+                i64::from(SEQUENCE_LOCKTIME_TYPE_FLAG) + 50,
+                false,
+            ),
+        ];
 
-        // Even though locktime 50 <= 100 and types match, the input is finalized.
-        assert!(!checker.check_locktime(50));
+        for (name, version, sequence, required, expected) in cases {
+            let tx = make_tx(version, 0, sequence);
+            let prevouts = make_prevouts();
+            let cache = SighashCache::new(&tx);
+            let checker =
+                TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &cache);
+            assert_eq!(checker.check_sequence(required), expected, "{name}");
+        }
     }
-
-    // =======================================================================
-    // check_sequence tests (BIP112)
-    // =======================================================================
-
-    #[test]
-    fn check_sequence_satisfied_when_masked_sequence_le_input() {
-        // tx version 2, sequence with type=height, value=100, disable bit clear.
-        let sequence = 100_u32; // block-height type, value 100
-        let tx = make_tx(2, 0, sequence);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // Required sequence 50 <= input sequence 100, same type.
-        assert!(checker.check_sequence(50));
-        assert!(checker.check_sequence(100)); // equal is satisfied
-    }
-
-    #[test]
-    fn check_sequence_fails_when_sequence_exceeds_input() {
-        let sequence = 100_u32;
-        let tx = make_tx(2, 0, sequence);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        assert!(!checker.check_sequence(101));
-    }
-
-    #[test]
-    fn check_sequence_fails_when_tx_version_too_low() {
-        let tx = make_tx(1, 0, 100);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        assert!(!checker.check_sequence(50));
-    }
-
-    #[test]
-    fn check_sequence_fails_when_input_disabled() {
-        let sequence = 0x64_u32 | SEQUENCE_LOCKTIME_DISABLE_FLAG;
-        let tx = make_tx(2, 0, sequence);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        assert!(!checker.check_sequence(50));
-    }
-
-    #[test]
-    fn check_sequence_fails_on_type_mismatch() {
-        // Input sequence: block-height type (value < TYPE_FLAG).
-        let tx = make_tx(2, 0, 100);
-        let prevouts = make_prevouts();
-        let checker_cache = SighashCache::new(&tx);
-        let checker =
-            TxSignatureChecker::new(&tx, 0, Amount::from_sat(50_000), &prevouts, &checker_cache);
-
-        // Required: time-based type (value >= TYPE_FLAG).
-        let time_based = i64::from(SEQUENCE_LOCKTIME_TYPE_FLAG) + 50;
-        assert!(!checker.check_sequence(time_based));
-    }
-
-    // =======================================================================
-    // Sighash.json corpus test (legacy path)
-    // =======================================================================
 
     #[test]
     fn sighash_json_corpus_legacy_path() {
