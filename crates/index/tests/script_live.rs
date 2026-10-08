@@ -8,6 +8,7 @@
 //! point deletes, fail-closed unresolvable spends, watermark independence
 //! from history, and seed-then-stamp ordering.
 
+#[path = "support/common.rs"]
 mod common;
 
 use common::MemoryStore;

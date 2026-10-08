@@ -1,4 +1,5 @@
 //! Roundtrip tests for electrs-shaped index rows over a small in-memory `KvStore`.
+#[path = "support/common.rs"]
 mod common;
 
 use common::MemoryStore;
