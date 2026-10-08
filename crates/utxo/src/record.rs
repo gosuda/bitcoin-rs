@@ -251,7 +251,12 @@ impl UtxoRecord {
         txid: Hash256,
         outputs: &[OwnedUtxoOut],
     ) -> Result<Self, UtxoError> {
-        Self::from_owned_parts(txid, outputs.len().min(INLINE_CAPACITY), outputs)
+        let buf = encode_record(
+            txid,
+            outputs.len().min(INLINE_CAPACITY),
+            &owned_parts(outputs),
+        )?;
+        Self::from_encoded(buf)
     }
 
     pub(crate) fn key(&self) -> UtxoKey {
@@ -644,17 +649,6 @@ impl UtxoRecord {
         let mut parts = Vec::with_capacity(self.header().output_count);
         parts.extend(self.outputs().map(|output| OutputParts::from_view(&output)));
         parts
-    }
-
-    /// Snapshot/untrusted boundary constructor: re-validates through
-    /// [`Self::from_encoded`].
-    fn from_owned_parts(
-        txid: Hash256,
-        inline_len: usize,
-        outputs: &[OwnedUtxoOut],
-    ) -> Result<Self, UtxoError> {
-        let buf = encode_record(txid, inline_len, &owned_parts(outputs))?;
-        Self::from_encoded(buf)
     }
 
     /// Internal constructor from borrowed descriptors. Every descriptor is

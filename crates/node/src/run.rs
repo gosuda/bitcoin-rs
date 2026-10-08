@@ -88,10 +88,21 @@ mod tests {
     }
 
     #[test]
-    fn bare_debug_directive_parses_successfully() {
-        let directive = build_filter_directive("debug");
-        EnvFilter::try_new(&directive).unwrap_or_else(|error| {
-            panic!("bare-debug directive with per-target caps must parse: {error}")
-        });
+    fn bare_levels_cap_storage_targets() {
+        for (level, expected) in [
+            ("", "info,fjall=warn,rocksdb=warn"),
+            ("info", "info,fjall=warn,rocksdb=warn"),
+            ("debug", "debug,fjall=warn,rocksdb=warn"),
+            ("warn", "warn,fjall=warn,rocksdb=warn"),
+            ("error", "error,fjall=warn,rocksdb=warn"),
+            ("trace", "trace,fjall=warn,rocksdb=warn"),
+            ("off", "off,fjall=warn,rocksdb=warn"),
+        ] {
+            let directive = build_filter_directive(level);
+            assert_eq!(directive, expected, "bare level {level:?}");
+            EnvFilter::try_new(&directive).unwrap_or_else(|error| {
+                panic!("bare level {level:?} with per-target caps must parse: {error}")
+            });
+        }
     }
 }

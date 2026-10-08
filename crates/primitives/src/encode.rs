@@ -33,11 +33,7 @@ impl Sink for Sha256Sink<'_> {
 /// Computes Bitcoin's double-SHA256 hash and returns the digest bytes as a little-endian hash.
 #[must_use]
 pub fn double_sha256(bytes: &[u8]) -> Hash256 {
-    let first = Sha256::new().chain_update(bytes).finalize();
-    let second = Sha256::new().chain_update(first).finalize();
-    let mut out = [0_u8; 32];
-    out.copy_from_slice(&second);
-    Hash256::from_le_bytes(&out)
+    finalize_double_sha256(Sha256::new().chain_update(bytes))
 }
 
 /// Finishes a streamed double-SHA256 over everything written to the engine.

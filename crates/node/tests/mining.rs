@@ -33,15 +33,27 @@ use std::{
     time::Duration,
 };
 
-fn open_regtest() -> anyhow::Result<NodeState> {
+fn open_network(network: Network) -> anyhow::Result<NodeState> {
     let dir = tempfile::tempdir()?;
-    let mut config = NodeConfig::default_for_network(Network::Regtest);
+    let mut config = NodeConfig::default_for_network(network);
     config.data_dir = dir.path().join("node");
     config.p2p.listen.clear();
-    // Keep the tempdir alive for the process lifetime of this test by leaking it.
     // NodeState retains open files under data_dir for the test duration.
     std::mem::forget(dir);
     NodeState::open(config, None)
+}
+
+fn open_at_genesis(network: Network) -> anyhow::Result<NodeState> {
+    let state = open_network(network)?;
+    let _ = state.apply_block(&network.genesis_block())?;
+    Ok(state)
+}
+
+/// Regtest node at its applied genesis tip plus the coordinator over it.
+fn regtest_mining() -> anyhow::Result<(NodeState, MiningCoordinator)> {
+    let state = open_at_genesis(Network::Regtest)?;
+    let mining = coordinator(&state);
+    Ok((state, mining))
 }
 
 fn coordinator(state: &NodeState) -> MiningCoordinator {
@@ -53,12 +65,6 @@ fn coordinator(state: &NodeState) -> MiningCoordinator {
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
     )
-}
-
-fn apply_genesis(state: &NodeState) -> anyhow::Result<()> {
-    let genesis = Network::Regtest.genesis_block();
-    let _ = state.apply_block(&genesis)?;
-    Ok(())
 }
 
 fn advance_mempool_sequence(state: &NodeState) -> anyhow::Result<()> {
@@ -75,21 +81,6 @@ fn advance_mempool_sequence(state: &NodeState) -> anyhow::Result<()> {
         ))
         .map_err(|error| anyhow::anyhow!("seed insert failed: {error}"))?;
     guard.clear();
-    Ok(())
-}
-
-fn open_network(network: Network) -> anyhow::Result<NodeState> {
-    let dir = tempfile::tempdir()?;
-    let mut config = NodeConfig::default_for_network(network);
-    config.data_dir = dir.path().join("node");
-    config.p2p.listen.clear();
-    std::mem::forget(dir);
-    NodeState::open(config, None)
-}
-
-fn apply_genesis_for(state: &NodeState, network: Network) -> anyhow::Result<()> {
-    let genesis = network.genesis_block();
-    let _ = state.apply_block(&genesis)?;
     Ok(())
 }
 
@@ -209,9 +200,7 @@ fn mempool_sequence_tx() -> Tx {
 
 #[test]
 fn cache_reuses_candidate_for_identical_generation_key() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
 
     let first = expect_template(mining.get_block_template(template_request(None))?);
@@ -243,7 +232,7 @@ fn watch_only_payout_lands_in_candidate_coinbase() -> anyhow::Result<()> {
     config.p2p.listen.clear();
     std::mem::forget(dir);
     let state = NodeState::open(config, None)?;
-    apply_genesis(&state)?;
+    let _ = state.apply_block(&Network::Regtest.genesis_block())?;
     let mining = coordinator(&state);
     mining.publish_generation();
     let template = expect_template(mining.get_block_template(template_request(None))?);
@@ -261,9 +250,7 @@ fn watch_only_payout_lands_in_candidate_coinbase() -> anyhow::Result<()> {
 
 #[test]
 fn network_hash_ps_answers_on_the_applied_tip() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let genesis_rate = mining.network_hash_ps(120, -1)?;
     assert!(
         genesis_rate.abs() < f64::EPSILON,
@@ -280,9 +267,7 @@ fn network_hash_ps_answers_on_the_applied_tip() -> anyhow::Result<()> {
 #[test]
 // CONTRACT: docs/contracts/external-api.md#API-06
 fn network_hash_ps_rejects_core_invalid_windows() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     match mining.network_hash_ps(0, -1) {
         Err(MiningControlError::InvalidRequest(message)) => {
             assert_eq!(
@@ -318,9 +303,7 @@ fn network_hash_ps_rejects_core_invalid_windows() -> anyhow::Result<()> {
 
 #[test]
 fn key_invalidation_rebuilds_after_mempool_sequence_change() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let first = expect_template(mining.get_block_template(template_request(None))?);
 
@@ -338,9 +321,8 @@ fn key_invalidation_rebuilds_after_mempool_sequence_change() -> anyhow::Result<(
 
 #[test]
 fn concurrent_requests_share_single_flight_assembly() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = Arc::new(coordinator(&state));
+    let (_state, mining) = regtest_mining()?;
+    let mining = Arc::new(mining);
     mining.publish_generation();
 
     let barrier = Arc::new(std::sync::Barrier::new(8));
@@ -376,9 +358,8 @@ fn concurrent_requests_share_single_flight_assembly() -> anyhow::Result<()> {
 
 #[test]
 fn long_poll_wakes_on_tip_change() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = Arc::new(coordinator(&state));
+    let (state, mining) = regtest_mining()?;
+    let mining = Arc::new(mining);
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
     let long_poll_id = CompactString::from(current.candidate.template_id.as_str());
@@ -421,9 +402,8 @@ fn long_poll_wakes_on_tip_change() -> anyhow::Result<()> {
 
 #[test]
 fn long_poll_wakes_on_mempool_sequence_change() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = Arc::new(coordinator(&state));
+    let (state, mining) = regtest_mining()?;
+    let mining = Arc::new(mining);
     mining.publish_generation();
     let current = expect_template(mining.get_block_template(template_request(None))?);
     let long_poll_id = CompactString::from(current.candidate.template_id.as_str());
@@ -458,9 +438,7 @@ fn long_poll_wakes_on_mempool_sequence_change() -> anyhow::Result<()> {
 
 #[test]
 fn proposal_has_no_side_effects() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let before = state
         .chainstate()
@@ -494,9 +472,7 @@ fn proposal_has_no_side_effects() -> anyhow::Result<()> {
 
 #[test]
 fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let before = state
         .chainstate()
@@ -533,9 +509,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
 // CONTRACT: API-19
 #[test]
 fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let mut block = mined_child(genesis.block_hash())?;
@@ -557,9 +531,7 @@ fn proposal_without_coinbase_is_bad_cb_missing() -> anyhow::Result<()> {
 // CONTRACT: API-19
 #[test]
 fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let mut block = mined_child(genesis.block_hash())?;
@@ -576,9 +548,7 @@ fn proposal_merkle_mismatch_is_bad_txnmrklroot() -> anyhow::Result<()> {
 // CONTRACT: API-21
 #[test]
 fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let mut block = solved_template_block(&mining)?;
     {
@@ -610,9 +580,7 @@ fn proposal_commitment_without_witness_nonce_is_bad_witness_nonce_size() -> anyh
 // CONTRACT: API-21
 #[test]
 fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let mut block = solved_template_block(&mining)?;
     {
@@ -649,9 +617,7 @@ fn proposal_witness_without_commitment_is_unexpected_witness() -> anyhow::Result
 // CONTRACT: API-21
 #[test]
 fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let mut block = solved_template_block(&mining)?;
     {
@@ -679,9 +645,7 @@ fn proposal_wrong_witness_commitment_is_bad_witness_merkle_match() -> anyhow::Re
 
 #[test]
 fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
@@ -700,9 +664,7 @@ fn accepted_submission_is_visible_before_return() -> anyhow::Result<()> {
 #[test]
 fn submit_block_with_bytes_refuses_foreign_bytes() -> anyhow::Result<()> {
     use bitcoin_rs_primitives::consensus_bytes;
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let block = mined_child(genesis.block_hash())?;
@@ -729,9 +691,7 @@ fn submit_block_with_bytes_refuses_foreign_bytes() -> anyhow::Result<()> {
 
 #[test]
 fn submit_block_fills_omitted_coinbase_witness() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let mut block = solved_template_block(&mining)?;
     let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
@@ -763,9 +723,7 @@ fn submit_block_fills_omitted_coinbase_witness() -> anyhow::Result<()> {
 #[test]
 fn submit_block_with_bytes_accepts_prefill_image_when_fill_applies() -> anyhow::Result<()> {
     use bitcoin_rs_primitives::consensus_bytes;
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let mut block = solved_template_block(&mining)?;
     let Some(input) = block.txs.first_mut().and_then(|tx| tx.inputs.first_mut()) else {
@@ -794,9 +752,7 @@ fn submit_block_with_bytes_accepts_prefill_image_when_fill_applies() -> anyhow::
 
 #[test]
 fn submit_header_admits_a_mined_child_and_is_idempotent() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
     let child_hash = Hash256::from(child.block_hash());
@@ -825,7 +781,7 @@ fn submit_header_admits_a_mined_child_and_is_idempotent() -> anyhow::Result<()> 
 
 #[test]
 fn submit_header_accepts_genesis_before_and_after_bootstrap() -> anyhow::Result<()> {
-    let state = open_regtest()?;
+    let state = open_network(Network::Regtest)?;
     let mining = coordinator(&state);
     let genesis = Network::Regtest.genesis_block();
     mining.submit_header(genesis.header)?;
@@ -835,7 +791,7 @@ fn submit_header_accepts_genesis_before_and_after_bootstrap() -> anyhow::Result<
     );
     assert!(state.chainstate().applied_tip_snapshot().is_none());
 
-    apply_genesis(&state)?;
+    let _ = state.apply_block(&Network::Regtest.genesis_block())?;
     let before = state.chainstate().snapshot();
 
     mining.submit_header(genesis.header)?;
@@ -852,9 +808,7 @@ fn submit_header_accepts_genesis_before_and_after_bootstrap() -> anyhow::Result<
 
 #[test]
 fn submit_header_rejects_an_invalid_parent_without_inserting_child() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     let genesis = Network::Regtest.genesis_block();
     let invalid = mined_child(genesis.block_hash())?;
     let child = mined_child(invalid.block_hash())?;
@@ -881,9 +835,7 @@ fn submit_header_rejects_an_invalid_parent_without_inserting_child() -> anyhow::
 
 #[test]
 fn submit_header_requires_the_previous_header() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let orphan = mined_child(BlockHash::from(Hash256::from_le_bytes(&[0x11; 32])))?;
     for bits in [orphan.header.bits, CompactTarget::from_consensus(0)] {
         let header = Header {
@@ -909,9 +861,7 @@ fn submit_header_requires_the_previous_header() -> anyhow::Result<()> {
 
 #[test]
 fn submit_header_rejects_bad_diffbits() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let genesis = Network::Regtest.genesis_block();
     let mut child = mined_child(genesis.block_hash())?;
     child.header.bits = CompactTarget::from_consensus(0x207f_fffe);
@@ -927,9 +877,7 @@ fn submit_header_rejects_bad_diffbits() -> anyhow::Result<()> {
 
 #[test]
 fn submit_header_rejects_time_too_new() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let genesis = Network::Regtest.genesis_block();
     let mut child = mined_child(genesis.block_hash())?;
     child.header.time = u32::MAX;
@@ -945,9 +893,7 @@ fn submit_header_rejects_time_too_new() -> anyhow::Result<()> {
 
 #[test]
 fn submit_header_rejects_bad_version_after_bip34_activation() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let genesis = Network::Regtest.genesis_block();
     let base_time = genesis.header.time;
     let mut prev = genesis.block_hash();
@@ -986,9 +932,7 @@ fn mined_regtest_header(prev: BlockHash, time: u32, version: i32) -> Header {
 
 #[test]
 fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let mut block = mined_child(BlockHash::from(Hash256::from_le_bytes(&[0x11; 32])))?;
     // Ensure PoW still valid for the mutated prev hash by remine.
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
@@ -1010,8 +954,7 @@ fn rejection_mapping_for_bad_prev_hash() -> anyhow::Result<()> {
 
 #[test]
 fn shutdown_ends_long_poll_without_wake() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
+    let state = open_at_genesis(Network::Regtest)?;
     let shutdown = state.shutdown();
     let mining = Arc::new(MiningCoordinator::new(
         state.mempool(),
@@ -1043,8 +986,7 @@ fn shutdown_ends_long_poll_without_wake() -> anyhow::Result<()> {
 
 #[test]
 fn mining_info_reports_default_signet_challenge() -> anyhow::Result<()> {
-    let state = open_network(Network::Signet)?;
-    apply_genesis_for(&state, Network::Signet)?;
+    let state = open_at_genesis(Network::Signet)?;
     let mining = coordinator(&state);
     let info = mining.mining_info()?;
     let Some(signet) = info.signet.as_ref() else {
@@ -1062,9 +1004,7 @@ fn mining_info_reports_default_signet_challenge() -> anyhow::Result<()> {
 
 #[test]
 fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let info = mining.mining_info()?;
     assert!(info.signet.is_none());
     Ok(())
@@ -1073,9 +1013,7 @@ fn mining_info_omits_signet_on_regtest() -> anyhow::Result<()> {
 // CONTRACT: API-07
 #[test]
 fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let template = expect_template(mining.get_block_template(BlockTemplateRequest {
         mode: BlockTemplateMode::Template,
@@ -1105,8 +1043,7 @@ fn template_does_not_echo_client_capabilities() -> anyhow::Result<()> {
 // CONTRACT: API-07
 #[test]
 fn signet_template_includes_challenge_and_signet_rule() -> anyhow::Result<()> {
-    let state = open_network(Network::Signet)?;
-    apply_genesis_for(&state, Network::Signet)?;
+    let state = open_at_genesis(Network::Signet)?;
     let mining = coordinator(&state);
     mining.publish_generation();
     let template = expect_template(mining.get_block_template(template_request(None))?);
@@ -1119,9 +1056,7 @@ fn signet_template_includes_challenge_and_signet_rule() -> anyhow::Result<()> {
 
 #[test]
 fn duplicate_submit_returns_duplicate() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
@@ -1138,9 +1073,7 @@ fn duplicate_submit_returns_duplicate() -> anyhow::Result<()> {
 
 #[test]
 fn concurrent_duplicate_submissions_leave_admission_open() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     let child = mined_child(Network::Regtest.genesis_block().block_hash())?;
     let start = std::sync::Barrier::new(3);
     let outcomes = thread::scope(|scope| {
@@ -1179,9 +1112,7 @@ fn concurrent_duplicate_submissions_leave_admission_open() -> anyhow::Result<()>
 
 #[test]
 fn unsolved_pow_is_rejected_by_proposal_and_submit() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let mut block = mined_child(genesis.block_hash())?;
@@ -1218,9 +1149,7 @@ fn unsolved_pow_is_rejected_by_proposal_and_submit() -> anyhow::Result<()> {
 
 #[test]
 fn duplicate_solved_submission_is_idempotent() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
@@ -1249,9 +1178,7 @@ fn duplicate_solved_submission_is_idempotent() -> anyhow::Result<()> {
 
 #[test]
 fn mining_info_reports_network_hashps_after_genesis() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let info = mining.mining_info()?;
     assert_eq!(info.blocks, 0);
     assert!(
@@ -1265,9 +1192,7 @@ fn mining_info_reports_network_hashps_after_genesis() -> anyhow::Result<()> {
 fn last_candidate_counts_include_the_coinbase() -> anyhow::Result<()> {
     use bitcoin_rs_mempool::MempoolEntry;
 
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let empty = expect_template(mining.get_block_template(template_request(None))?);
     let empty_info = mining.mining_info()?;
@@ -1327,9 +1252,7 @@ fn propose_block(
 // CONTRACT: API-18
 #[test]
 fn proposal_of_an_applied_block_is_duplicate() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     assert_eq!(
@@ -1345,9 +1268,7 @@ fn proposal_of_an_invalid_header_is_duplicate_invalid() -> anyhow::Result<()> {
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Hash256;
 
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = genesis.block_hash();
@@ -1374,9 +1295,7 @@ fn proposal_of_a_header_only_block_is_duplicate_inconclusive() -> anyhow::Result
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_primitives::Hash256;
 
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = Hash256::from_le_bytes(genesis.block_hash().as_bytes());
@@ -1421,9 +1340,7 @@ fn disconnect_applied(state: &NodeState, block: &Block) -> anyhow::Result<()> {
 // CONTRACT: API-18
 #[test]
 fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
@@ -1460,9 +1377,7 @@ fn proposal_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Resu
 // CONTRACT: API-18
 #[test]
 fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = Hash256::from(genesis.block_hash());
@@ -1487,9 +1402,7 @@ fn submit_of_a_disconnected_scripts_valid_block_is_duplicate() -> anyhow::Result
 // CONTRACT: API-18
 #[test]
 fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let genesis_hash = Hash256::from(genesis.block_hash());
@@ -1516,9 +1429,7 @@ fn applied_ancestor_with_unset_chain_tx_count_is_duplicate() -> anyhow::Result<(
 
 #[test]
 fn submit_block_applies_a_header_already_in_the_tree() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
@@ -1535,9 +1446,7 @@ fn submit_block_applies_a_header_already_in_the_tree() -> anyhow::Result<()> {
 
 #[test]
 fn active_ancestor_submit_is_duplicate() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
@@ -1564,9 +1473,8 @@ fn active_ancestor_submit_is_duplicate() -> anyhow::Result<()> {
 /// watchdog.
 #[test]
 fn concurrent_publish_generation_paths_do_not_deadlock() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = Arc::new(coordinator(&state));
+    let (_state, mining) = regtest_mining()?;
+    let mining = Arc::new(mining);
 
     let stop = Arc::new(AtomicBool::new(false));
 
@@ -1605,9 +1513,7 @@ fn concurrent_publish_generation_paths_do_not_deadlock() -> anyhow::Result<()> {
 /// pool write lock and calling it must return immediately, not deadlock.
 #[test]
 fn publish_generation_from_does_not_take_mempool_lock() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
 
     // Hold the mempool write lock for the duration of the call — a reentrant
     // read would deadlock (parking_lot RwLock is not reentrant).
@@ -1640,8 +1546,7 @@ fn publish_generation_from_does_not_take_mempool_lock() -> anyhow::Result<()> {
 /// `LONG_POLL_SLICE` (1 s) recheck delay.
 #[test]
 fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
+    let state = open_at_genesis(Network::Regtest)?;
 
     // Non-zero cooldown: the old code would wait up to `mempool_update_wait`
     // before returning on a mempool-only change. The fix returns immediately.
@@ -1701,9 +1606,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
 /// apply path before assembling the next; the last hash is the new tip.
 #[test]
 fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let hashes = mining.generate(GenerateRequest {
         payout: vec![0x51],
@@ -1728,9 +1631,7 @@ fn generate_mines_coinbase_only_blocks_to_the_tip() -> anyhow::Result<()> {
 /// API-05: a 64-character generateblock entry must already be in the mempool.
 #[test]
 fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let missing = Txid::from(Hash256::from_le_bytes(&[0xcd; 32]));
     let error = mining
         .generate(GenerateRequest {
@@ -1751,9 +1652,7 @@ fn generateblock_rejects_unknown_mempool_txid() -> anyhow::Result<()> {
 #[test]
 // CONTRACT: docs/contracts/external-api.md#API-27
 fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     mining.publish_generation();
     let raw = Tx {
         version: 2,
@@ -1799,9 +1698,7 @@ fn generateblock_raw_tx_does_not_require_mempool_admission() -> anyhow::Result<(
 /// getnetworkhashps window.
 #[test]
 fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (_state, mining) = regtest_mining()?;
     let info = mining.mining_info()?;
     let rate = mining.network_hash_ps(120, -1)?;
     assert!(
@@ -1815,9 +1712,7 @@ fn network_hash_ps_matches_mining_info_default_window() -> anyhow::Result<()> {
 /// API-05: submit=false dry-validates through the apply gates and does not persist.
 #[test]
 fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
-    let mining = coordinator(&state);
+    let (state, mining) = regtest_mining()?;
     mining.publish_generation();
     let before = state
         .chainstate()
@@ -1845,8 +1740,7 @@ fn generate_without_submit_does_not_advance_the_tip() -> anyhow::Result<()> {
 /// solving, and a refusal retains Core's API-30 rejection class and reason.
 #[test]
 fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> anyhow::Result<()> {
-    let state = open_regtest()?;
-    apply_genesis(&state)?;
+    let state = open_at_genesis(Network::Regtest)?;
     // The unreachable branch is valid to spend but counts 199 * 20 sigops.
     // IF + 199 CHECKMULTISIG + ENDIF also fits the 201-op execution limit.
     let redeem = [vec![0x00, 0x63], vec![0xae; 199], vec![0x68, 0x51]].concat();

@@ -1,6 +1,8 @@
 //! Roundtrip tests for electrs-shaped index rows over a small in-memory `KvStore`.
+mod common;
+
+use common::MemoryStore;
 use std::{
-    collections::BTreeMap,
     path::PathBuf,
     sync::{
         Arc,
@@ -93,90 +95,6 @@ fn stored_idle_version<S: KvStore>(store: &Arc<S>) -> Result<u64, Box<dyn std::e
         Some(bytes) if is_idle_marker(&bytes) => Ok(decode_u64_le(&bytes, 1)
             .ok_or_else(|| std::io::Error::other("idle marker truncated"))?),
         other => Err(std::io::Error::other(format!("reset state is not idle: {other:?}")).into()),
-    }
-}
-
-#[derive(Default)]
-struct MemoryStore {
-    cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
-}
-
-impl MemoryStore {
-    fn count(&self, cf: ColumnFamily) -> usize {
-        let guard = self.cfs.read();
-        guard[cf.index()].len()
-    }
-
-    fn rows(&self, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
-        let guard = self.cfs.read();
-        guard[cf.index()]
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
-    }
-}
-
-impl KvStore for MemoryStore {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        let guard = self.cfs.read();
-        Ok(guard[cf.index()].get(key).cloned())
-    }
-
-    #[expect(clippy::needless_collect)] // SPEC: returned KvIter must own cloned rows after the lock guard is dropped.
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let guard = self.cfs.read();
-        let rows = guard[cf.index()]
-            .iter()
-            .filter(|(key, _value)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
-    }
-
-    fn new_batch(&self) -> BufferedWriteBatch {
-        BufferedWriteBatch::default()
-    }
-
-    fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        let mut guard = self.cfs.write();
-        apply_ops(&mut guard, batch.into_ops());
-        Ok(())
-    }
-
-    fn write_durable_if(
-        &self,
-        conditions: &[WriteCondition<'_>],
-        batch: BufferedWriteBatch,
-    ) -> Result<bool, StorageError> {
-        // The check and the apply run under one write lock, matching the
-        // backend's atomic conditional write.
-        let mut guard = self.cfs.write();
-        let matched = conditions.iter().all(|condition| {
-            let (cf, key) = condition.location();
-            condition.matches(guard[cf.index()].get(key).map(Vec::as_slice))
-        });
-        if !matched {
-            return Ok(false);
-        }
-        apply_ops(&mut guard, batch.into_ops());
-        Ok(true)
-    }
-
-    fn flush(&self) -> Result<(), StorageError> {
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Result<Box<dyn KvSnapshot + '_>, StorageError> {
-        let guard = self.cfs.read();
-        Ok(Box::new(MemorySnapshot { cfs: guard.clone() }))
-    }
-
-    fn arm_persist_fault(&self, _fault: bitcoin_rs_storage::PersistFault) {
-        // In-memory double: no persistence boundary exists to fault.
     }
 }
 
@@ -437,56 +355,6 @@ fn restore_batch(ops: Vec<BatchOp>) -> BufferedWriteBatch {
         }
     }
     batch
-}
-
-/// Folds one batch's operations into the column families, in order.
-fn apply_ops(cfs: &mut [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()], ops: Vec<BatchOp>) {
-    for op in ops {
-        match op {
-            BatchOp::Put { cf, key, value } => {
-                cfs[cf.index()].insert(key, value.into());
-            }
-            BatchOp::Delete { cf, key } => {
-                cfs[cf.index()].remove(&key);
-            }
-            BatchOp::DeleteRange { cf, start, end } => {
-                let keys = cfs[cf.index()]
-                    .keys()
-                    .filter(|key| {
-                        key.as_slice() >= start.as_slice() && key.as_slice() < end.as_slice()
-                    })
-                    .cloned()
-                    .collect::<Vec<_>>();
-                for key in keys {
-                    cfs[cf.index()].remove(&key);
-                }
-            }
-        }
-    }
-}
-
-struct MemorySnapshot {
-    cfs: [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()],
-}
-
-impl KvSnapshot for MemorySnapshot {
-    fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(self.cfs[cf.index()].get(key).cloned())
-    }
-
-    #[expect(clippy::needless_collect)] // SPEC: returned KvIter owns cloned rows to match backend iterator ownership.
-    fn iter_prefix<'a>(
-        &'a self,
-        cf: ColumnFamily,
-        prefix: &[u8],
-    ) -> Result<KvIter<'a>, StorageError> {
-        let rows = self.cfs[cf.index()]
-            .iter()
-            .filter(|(key, _value)| key.starts_with(prefix))
-            .map(|(key, value)| Ok((key.clone(), value.clone())))
-            .collect::<Vec<_>>();
-        Ok(Box::new(rows.into_iter()))
-    }
 }
 
 /// CONTRACT: IDX-09 — canonical electrs row cardinality after an atomic commit.

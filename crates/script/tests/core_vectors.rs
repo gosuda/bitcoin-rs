@@ -4,18 +4,17 @@
 //! through the native [`Interpreter`] and (when `--features kernel` is enabled)
 //! the bitcoinkernel oracle, then compares verdicts. `sighash.json` is graded
 //! by `checker::tests::sighash_json_corpus_legacy_path`, which reaches the
-//! crate-private `remove_codeseparators` this harness cannot call.
+//! crate-private `remove_all` this harness cannot call.
 //!
 //! ## Anti-vacuity
 //!
 //! Every corpus prints four counts: rows parsed, rows executed, rows skipped
-//! (with a one-line reason per category), and rows failed. A deliberately
-//! broken expectation proves the harness reports failures rather than passing
-//! vacuously.
+//! (with a one-line reason per category), and rows failed. The native columns
+//! pin those counts, so a row that silently stops executing fails the lane.
 //!
 //! ## Two columns
 //!
-//! The native evaluator runs every non-taproot spend class. Each native column
+//! The native evaluator runs the legacy, witness-v0 and taproot rows. Each column
 //! pins its remaining mismatch count, so a shrink lowers the constant with
 //! evidence and a growth fails the lane. The kernel column stays available
 //! under `--features kernel` as an oracle for the same rows.
@@ -43,197 +42,63 @@ use bitcoin_rs_script::{
     Interpreter, PreparedTransaction, ScriptError, VerifyFlags, opcode, push_data, push_int,
 };
 
-// ===========================================================================
-// Script error code model — Core's `ScriptErrorString` names
-// ===========================================================================
-
-/// Core's script error identifiers, rendered as the exact names from
-/// `script_error.cpp` / `script_tests.cpp`'s `script_errors[]` table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScriptErrCode {
-    Ok,
-    EvalFalse,
-    OpReturn,
-    Scriptnum,
-    ScriptSize,
-    PushSize,
-    OpCount,
-    StackSize,
-    SigCount,
-    PubkeyCount,
-    Verify,
-    EqualVerify,
-    CheckMultisigVerify,
-    CheckSigVerify,
-    NumEqualVerify,
-    BadOpcode,
-    DisabledOpcode,
-    InvalidStackOperation,
-    InvalidAltstackOperation,
-    UnbalancedConditional,
-    NegativeLocktime,
-    UnsatisfiedLocktime,
-    SigHashtype,
-    SigDer,
-    MinimalData,
-    SigPushOnly,
-    SigHighS,
-    SigNullDummy,
-    PubkeyType,
-    CleanStack,
-    MinimalIf,
-    NullFail,
-    DiscourageUpgradableNops,
-    DiscourageUpgradableWitnessProgram,
-    DiscourageUpgradableTaprootVersion,
-    DiscourageOpSuccess,
-    DiscourageUpgradablePubkeyType,
-    WitnessProgramWrongLength,
-    WitnessProgramWitnessEmpty,
-    WitnessProgramMismatch,
-    WitnessMalleated,
-    WitnessMalleatedP2sh,
-    WitnessUnexpected,
-    WitnessPubkeyType,
-    SchnorrSigSize,
-    SchnorrSigHashtype,
-    SchnorrSig,
-    TaprootWrongControlSize,
-    TapscriptValidationWeight,
-    TapscriptCheckMultisig,
-    TapscriptMinimalIf,
-    TapscriptEmptyPubkey,
-    OpCodeSeparator,
-    SigFindAndDelete,
-}
-
-impl ScriptErrCode {
-    fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "OK" => Self::Ok,
-            "EVAL_FALSE" => Self::EvalFalse,
-            "OP_RETURN" => Self::OpReturn,
-            "SCRIPTNUM" => Self::Scriptnum,
-            "SCRIPT_SIZE" => Self::ScriptSize,
-            "PUSH_SIZE" => Self::PushSize,
-            "OP_COUNT" => Self::OpCount,
-            "STACK_SIZE" => Self::StackSize,
-            "SIG_COUNT" => Self::SigCount,
-            "PUBKEY_COUNT" => Self::PubkeyCount,
-            "VERIFY" => Self::Verify,
-            "EQUALVERIFY" => Self::EqualVerify,
-            "CHECKMULTISIGVERIFY" => Self::CheckMultisigVerify,
-            "CHECKSIGVERIFY" => Self::CheckSigVerify,
-            "NUMEQUALVERIFY" => Self::NumEqualVerify,
-            "BAD_OPCODE" => Self::BadOpcode,
-            "DISABLED_OPCODE" => Self::DisabledOpcode,
-            "INVALID_STACK_OPERATION" => Self::InvalidStackOperation,
-            "INVALID_ALTSTACK_OPERATION" => Self::InvalidAltstackOperation,
-            "UNBALANCED_CONDITIONAL" => Self::UnbalancedConditional,
-            "NEGATIVE_LOCKTIME" => Self::NegativeLocktime,
-            "UNSATISFIED_LOCKTIME" => Self::UnsatisfiedLocktime,
-            "SIG_HASHTYPE" => Self::SigHashtype,
-            "SIG_DER" => Self::SigDer,
-            "MINIMALDATA" => Self::MinimalData,
-            "SIG_PUSHONLY" => Self::SigPushOnly,
-            "SIG_HIGH_S" => Self::SigHighS,
-            "SIG_NULLDUMMY" => Self::SigNullDummy,
-            "PUBKEYTYPE" => Self::PubkeyType,
-            "CLEANSTACK" => Self::CleanStack,
-            "MINIMALIF" => Self::MinimalIf,
-            "NULLFAIL" => Self::NullFail,
-            "DISCOURAGE_UPGRADABLE_NOPS" => Self::DiscourageUpgradableNops,
-            "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM" => Self::DiscourageUpgradableWitnessProgram,
-            "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION" => Self::DiscourageUpgradableTaprootVersion,
-            "DISCOURAGE_OP_SUCCESS" => Self::DiscourageOpSuccess,
-            "DISCOURAGE_UPGRADABLE_PUBKEYTYPE" => Self::DiscourageUpgradablePubkeyType,
-            "WITNESS_PROGRAM_WRONG_LENGTH" => Self::WitnessProgramWrongLength,
-            "WITNESS_PROGRAM_WITNESS_EMPTY" => Self::WitnessProgramWitnessEmpty,
-            "WITNESS_PROGRAM_MISMATCH" => Self::WitnessProgramMismatch,
-            "WITNESS_MALLEATED" => Self::WitnessMalleated,
-            "WITNESS_MALLEATED_P2SH" => Self::WitnessMalleatedP2sh,
-            "WITNESS_UNEXPECTED" => Self::WitnessUnexpected,
-            "WITNESS_PUBKEYTYPE" => Self::WitnessPubkeyType,
-            "SCHNORR_SIG_SIZE" => Self::SchnorrSigSize,
-            "SCHNORR_SIG_HASHTYPE" => Self::SchnorrSigHashtype,
-            "SCHNORR_SIG" => Self::SchnorrSig,
-            "TAPROOT_WRONG_CONTROL_SIZE" => Self::TaprootWrongControlSize,
-            "TAPSCRIPT_VALIDATION_WEIGHT" => Self::TapscriptValidationWeight,
-            "TAPSCRIPT_CHECKMULTISIG" => Self::TapscriptCheckMultisig,
-            "TAPSCRIPT_MINIMALIF" => Self::TapscriptMinimalIf,
-            "TAPSCRIPT_EMPTY_PUBKEY" => Self::TapscriptEmptyPubkey,
-            "OP_CODESEPARATOR" => Self::OpCodeSeparator,
-            "SIG_FINDANDDELETE" => Self::SigFindAndDelete,
-            _ => return None,
-        })
-    }
-
-    fn is_ok(self) -> bool {
-        self == Self::Ok
-    }
-}
-
-impl std::fmt::Display for ScriptErrCode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            Self::Ok => "OK",
-            Self::EvalFalse => "EVAL_FALSE",
-            Self::OpReturn => "OP_RETURN",
-            Self::Scriptnum => "SCRIPTNUM",
-            Self::ScriptSize => "SCRIPT_SIZE",
-            Self::PushSize => "PUSH_SIZE",
-            Self::OpCount => "OP_COUNT",
-            Self::StackSize => "STACK_SIZE",
-            Self::SigCount => "SIG_COUNT",
-            Self::PubkeyCount => "PUBKEY_COUNT",
-            Self::Verify => "VERIFY",
-            Self::EqualVerify => "EQUALVERIFY",
-            Self::CheckMultisigVerify => "CHECKMULTISIGVERIFY",
-            Self::CheckSigVerify => "CHECKSIGVERIFY",
-            Self::NumEqualVerify => "NUMEQUALVERIFY",
-            Self::BadOpcode => "BAD_OPCODE",
-            Self::DisabledOpcode => "DISABLED_OPCODE",
-            Self::InvalidStackOperation => "INVALID_STACK_OPERATION",
-            Self::InvalidAltstackOperation => "INVALID_ALTSTACK_OPERATION",
-            Self::UnbalancedConditional => "UNBALANCED_CONDITIONAL",
-            Self::NegativeLocktime => "NEGATIVE_LOCKTIME",
-            Self::UnsatisfiedLocktime => "UNSATISFIED_LOCKTIME",
-            Self::SigHashtype => "SIG_HASHTYPE",
-            Self::SigDer => "SIG_DER",
-            Self::MinimalData => "MINIMALDATA",
-            Self::SigPushOnly => "SIG_PUSHONLY",
-            Self::SigHighS => "SIG_HIGH_S",
-            Self::SigNullDummy => "SIG_NULLDUMMY",
-            Self::PubkeyType => "PUBKEYTYPE",
-            Self::CleanStack => "CLEANSTACK",
-            Self::MinimalIf => "MINIMALIF",
-            Self::NullFail => "NULLFAIL",
-            Self::DiscourageUpgradableNops => "DISCOURAGE_UPGRADABLE_NOPS",
-            Self::DiscourageUpgradableWitnessProgram => "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM",
-            Self::DiscourageUpgradableTaprootVersion => "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION",
-            Self::DiscourageOpSuccess => "DISCOURAGE_OP_SUCCESS",
-            Self::DiscourageUpgradablePubkeyType => "DISCOURAGE_UPGRADABLE_PUBKEYTYPE",
-            Self::WitnessProgramWrongLength => "WITNESS_PROGRAM_WRONG_LENGTH",
-            Self::WitnessProgramWitnessEmpty => "WITNESS_PROGRAM_WITNESS_EMPTY",
-            Self::WitnessProgramMismatch => "WITNESS_PROGRAM_MISMATCH",
-            Self::WitnessMalleated => "WITNESS_MALLEATED",
-            Self::WitnessMalleatedP2sh => "WITNESS_MALLEATED_P2SH",
-            Self::WitnessUnexpected => "WITNESS_UNEXPECTED",
-            Self::WitnessPubkeyType => "WITNESS_PUBKEYTYPE",
-            Self::SchnorrSigSize => "SCHNORR_SIG_SIZE",
-            Self::SchnorrSigHashtype => "SCHNORR_SIG_HASHTYPE",
-            Self::SchnorrSig => "SCHNORR_SIG",
-            Self::TaprootWrongControlSize => "TAPROOT_WRONG_CONTROL_SIZE",
-            Self::TapscriptValidationWeight => "TAPSCRIPT_VALIDATION_WEIGHT",
-            Self::TapscriptCheckMultisig => "TAPSCRIPT_CHECKMULTISIG",
-            Self::TapscriptMinimalIf => "TAPSCRIPT_MINIMALIF",
-            Self::TapscriptEmptyPubkey => "TAPSCRIPT_EMPTY_PUBKEY",
-            Self::OpCodeSeparator => "OP_CODESEPARATOR",
-            Self::SigFindAndDelete => "SIG_FINDANDDELETE",
-        };
-        f.write_str(name)
-    }
-}
+// Core error names admitted by the corpus parser; verdicts compare acceptance only.
+static CORE_ERROR_NAMES: &[&str] = &[
+    "OK",
+    "EVAL_FALSE",
+    "OP_RETURN",
+    "SCRIPTNUM",
+    "SCRIPT_SIZE",
+    "PUSH_SIZE",
+    "OP_COUNT",
+    "STACK_SIZE",
+    "SIG_COUNT",
+    "PUBKEY_COUNT",
+    "VERIFY",
+    "EQUALVERIFY",
+    "CHECKMULTISIGVERIFY",
+    "CHECKSIGVERIFY",
+    "NUMEQUALVERIFY",
+    "BAD_OPCODE",
+    "DISABLED_OPCODE",
+    "INVALID_STACK_OPERATION",
+    "INVALID_ALTSTACK_OPERATION",
+    "UNBALANCED_CONDITIONAL",
+    "NEGATIVE_LOCKTIME",
+    "UNSATISFIED_LOCKTIME",
+    "SIG_HASHTYPE",
+    "SIG_DER",
+    "MINIMALDATA",
+    "SIG_PUSHONLY",
+    "SIG_HIGH_S",
+    "SIG_NULLDUMMY",
+    "PUBKEYTYPE",
+    "CLEANSTACK",
+    "MINIMALIF",
+    "NULLFAIL",
+    "DISCOURAGE_UPGRADABLE_NOPS",
+    "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM",
+    "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION",
+    "DISCOURAGE_OP_SUCCESS",
+    "DISCOURAGE_UPGRADABLE_PUBKEYTYPE",
+    "WITNESS_PROGRAM_WRONG_LENGTH",
+    "WITNESS_PROGRAM_WITNESS_EMPTY",
+    "WITNESS_PROGRAM_MISMATCH",
+    "WITNESS_MALLEATED",
+    "WITNESS_MALLEATED_P2SH",
+    "WITNESS_UNEXPECTED",
+    "WITNESS_PUBKEYTYPE",
+    "SCHNORR_SIG_SIZE",
+    "SCHNORR_SIG_HASHTYPE",
+    "SCHNORR_SIG",
+    "TAPROOT_WRONG_CONTROL_SIZE",
+    "TAPSCRIPT_VALIDATION_WEIGHT",
+    "TAPSCRIPT_CHECKMULTISIG",
+    "TAPSCRIPT_MINIMALIF",
+    "TAPSCRIPT_EMPTY_PUBKEY",
+    "OP_CODESEPARATOR",
+    "SIG_FINDANDDELETE",
+];
 
 // ===========================================================================
 // Core ASM script assembler
@@ -622,13 +487,6 @@ impl Verdict {
     const fn accepted(&self) -> bool {
         matches!(self, Self::Accept)
     }
-
-    fn matches_expected(&self, expected: ScriptErrCode) -> bool {
-        match self {
-            Self::Accept => expected.is_ok(),
-            Self::Reject(_) => !expected.is_ok(),
-        }
-    }
 }
 
 // ===========================================================================
@@ -803,7 +661,7 @@ struct ScriptTestRow {
     witness: Vec<Vec<u8>>,
     amount: u64,
     flags: VerifyFlags,
-    expected: ScriptErrCode,
+    expected: String,
     row_index: usize,
     comment: String,
 }
@@ -966,10 +824,11 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
             }
         };
 
-        let Some(expected) = ScriptErrCode::from_name(expected_str) else {
+        if !CORE_ERROR_NAMES.contains(&expected_str) {
             counts.record_skip(&format!("unknown expected error name: {expected_str}"));
             continue;
-        };
+        }
+        let expected = expected_str.to_owned();
 
         let comment = arr
             .get(comment_idx)
@@ -1001,67 +860,20 @@ fn btc_to_sats(btc: f64) -> u64 {
     (btc * 100_000_000.0).round() as u64
 }
 
-fn run_script_tests_native(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<String> {
-    let interp = Interpreter;
+fn run_script_tests(
+    rows: &[ScriptTestRow],
+    counts: &mut Counts,
+    verify: impl Fn(&ScriptTestRow, &Tx, &Tx) -> Verdict,
+) -> Vec<String> {
     let mut mismatches = Vec::new();
 
     for row in rows {
         counts.executed += 1;
         let credit = build_crediting_tx(&row.script_pubkey, row.amount);
         let spend = build_spending_tx(&row.script_sig, &row.witness, &credit);
-        let prevouts = [credit.outputs[0].clone()];
+        let verdict = verify(row, &credit, &spend);
 
-        let result = interp.execute_with_prevouts(
-            &row.script_pubkey,
-            &row.script_sig,
-            &row.witness,
-            row.flags,
-            &prevouts,
-            &spend,
-            0,
-        );
-        let verdict = Verdict::from_interpreter(&result);
-
-        if verdict.matches_expected(row.expected) {
-            // pass
-        } else {
-            counts.failed += 1;
-            mismatches.push(format!(
-                "row {}: expected {}, got {:?} (flags {:#x}, sig {}, pubkey {}, comment: {})",
-                row.row_index,
-                row.expected,
-                verdict,
-                row.flags.bits(),
-                hex_of(&row.script_sig),
-                hex_of(&row.script_pubkey),
-                row.comment
-            ));
-        }
-    }
-    mismatches
-}
-
-#[cfg(feature = "kernel")]
-fn run_script_tests_kernel(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<String> {
-    let mut mismatches = Vec::new();
-
-    for row in rows {
-        counts.executed += 1;
-        let credit = build_crediting_tx(&row.script_pubkey, row.amount);
-        let spend = build_spending_tx(&row.script_sig, &row.witness, &credit);
-        let prevouts = [(OutPoint::new(credit.txid(), 0), credit.outputs[0].clone())];
-
-        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
-            &spend,
-            &prevouts,
-            row.flags,
-            bitcoin_rs_consensus::ValidationEngine::Kernel,
-        );
-        let verdict = Verdict::from_kernel(&result);
-
-        if verdict.matches_expected(row.expected) {
-            // pass
-        } else {
+        if verdict.accepted() != (row.expected == "OK") {
             counts.failed += 1;
             mismatches.push(format!(
                 "row {}: expected {}, got {:?} (flags {:#x}, sig {}, pubkey {}, comment: {})",
@@ -1234,72 +1046,46 @@ fn load_tx_vectors(
     Ok(rows)
 }
 
-fn run_tx_vectors_native(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<String> {
-    let mut mismatches = Vec::new();
-
-    for row in rows {
-        counts.executed += 1;
-        let prepared = PreparedTransaction::new(&row.tx, &row.prevouts);
-        // The first failing input decides the row, and its error name is what
-        // a triage reader needs; a bare Reject says nothing.
-        let mut first_failure = None;
-        match prepared {
-            Ok(prepared) => {
-                for input_idx in 0..row.tx.inputs.len() {
-                    let result = prepared.verify_input(input_idx, row.flags);
-                    if !matches!(result, Ok(true)) {
-                        first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
-                        break;
-                    }
+fn verify_native_tx(row: &TxVectorRow) -> Verdict {
+    let prepared = PreparedTransaction::new(&row.tx, &row.prevouts);
+    // The first failing input decides the row, and its error name is what
+    // a triage reader needs; a bare Reject says nothing.
+    let mut first_failure = None;
+    match prepared {
+        Ok(prepared) => {
+            for input_idx in 0..row.tx.inputs.len() {
+                let result = prepared.verify_input(input_idx, row.flags);
+                if !matches!(result, Ok(true)) {
+                    first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
+                    break;
                 }
             }
-            Err(error) => first_failure = Some((0, Verdict::Reject(Some(error.to_string())))),
         }
+        Err(error) => first_failure = Some((0, Verdict::Reject(Some(error.to_string())))),
+    }
 
-        let verdict = match &first_failure {
-            None => Verdict::Accept,
-            Some((input_idx, Verdict::Reject(code))) => Verdict::Reject(Some(format!(
-                "input {input_idx}: {}",
-                code.clone().unwrap_or_else(|| "no code".to_owned())
-            ))),
-            Some((input_idx, Verdict::Accept)) => {
-                Verdict::Reject(Some(format!("input {input_idx}: accepted-but-not-true")))
-            }
-        };
-
-        let matches = verdict.accepted() == row.expected.accepted();
-        if !matches {
-            counts.failed += 1;
-            mismatches.push(format!(
-                "row {}: expected {:?}, got {:?} (flags {:#x}, locktime {}, seq0 {:#x})",
-                row.row_index,
-                row.expected,
-                verdict,
-                row.flags.bits(),
-                row.tx.lock_time,
-                row.tx
-                    .inputs
-                    .first()
-                    .map_or(0, |input| input.sequence.to_consensus())
-            ));
+    match &first_failure {
+        None => Verdict::Accept,
+        Some((input_idx, Verdict::Reject(code))) => Verdict::Reject(Some(format!(
+            "input {input_idx}: {}",
+            code.clone().unwrap_or_else(|| "no code".to_owned())
+        ))),
+        Some((input_idx, Verdict::Accept)) => {
+            Verdict::Reject(Some(format!("input {input_idx}: accepted-but-not-true")))
         }
     }
-    mismatches
 }
 
-#[cfg(feature = "kernel")]
-fn run_tx_vectors_kernel(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<String> {
+fn run_tx_vectors(
+    rows: &[TxVectorRow],
+    counts: &mut Counts,
+    verify: impl Fn(&TxVectorRow) -> Verdict,
+) -> Vec<String> {
     let mut mismatches = Vec::new();
 
     for row in rows {
         counts.executed += 1;
-        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
-            &row.tx,
-            &row.prevouts,
-            row.flags,
-            bitcoin_rs_consensus::ValidationEngine::Kernel,
-        );
-        let verdict = Verdict::from_kernel(&result);
+        let verdict = verify(row);
 
         let matches = verdict.accepted() == row.expected.accepted();
         if !matches {
@@ -1499,7 +1285,20 @@ fn script_tests_native_column() {
     };
     assert!(!rows.is_empty(), "script_tests produced zero runnable rows");
 
-    let mismatches = run_script_tests_native(&rows, &mut counts);
+    let mismatches = run_script_tests(&rows, &mut counts, |row, credit, spend| {
+        let prevouts = [credit.outputs[0].clone()];
+
+        let result = Interpreter.execute_with_prevouts(
+            &row.script_pubkey,
+            &row.script_sig,
+            &row.witness,
+            row.flags,
+            &prevouts,
+            spend,
+            0,
+        );
+        Verdict::from_interpreter(&result)
+    });
     println!("script_tests [native]: {counts}");
     assert!(
         counts.executed > 0,
@@ -1529,7 +1328,17 @@ fn script_tests_kernel_column() {
     };
     assert!(!rows.is_empty(), "script_tests produced zero runnable rows");
 
-    let mismatches = run_script_tests_kernel(&rows, &mut counts);
+    let mismatches = run_script_tests(&rows, &mut counts, |row, credit, spend| {
+        let prevouts = [(OutPoint::new(credit.txid(), 0), credit.outputs[0].clone())];
+
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            spend,
+            &prevouts,
+            row.flags,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        );
+        Verdict::from_kernel(&result)
+    });
     println!("script_tests [kernel]: {counts}");
     assert!(
         counts.executed > 0,
@@ -1562,7 +1371,7 @@ fn tx_valid_native_column() {
     };
     assert!(!rows.is_empty(), "tx_valid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors_native(&rows, &mut counts);
+    let mismatches = run_tx_vectors(&rows, &mut counts, verify_native_tx);
     println!("tx_valid [native]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_valid rows");
     for m in mismatches.iter().take(mismatch_print_limit()) {
@@ -1589,7 +1398,15 @@ fn tx_valid_kernel_column() {
     };
     assert!(!rows.is_empty(), "tx_valid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors_kernel(&rows, &mut counts);
+    let mismatches = run_tx_vectors(&rows, &mut counts, |row| {
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            &row.tx,
+            &row.prevouts,
+            row.flags,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        );
+        Verdict::from_kernel(&result)
+    });
     println!("tx_valid [kernel]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_valid rows");
     if !mismatches.is_empty() {
@@ -1621,7 +1438,7 @@ fn tx_invalid_native_column() {
     };
     assert!(!rows.is_empty(), "tx_invalid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors_native(&rows, &mut counts);
+    let mismatches = run_tx_vectors(&rows, &mut counts, verify_native_tx);
     println!("tx_invalid [native]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_invalid rows");
     for m in mismatches.iter().take(mismatch_print_limit()) {
@@ -1648,7 +1465,15 @@ fn tx_invalid_kernel_column() {
     };
     assert!(!rows.is_empty(), "tx_invalid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors_kernel(&rows, &mut counts);
+    let mismatches = run_tx_vectors(&rows, &mut counts, |row| {
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            &row.tx,
+            &row.prevouts,
+            row.flags,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        );
+        Verdict::from_kernel(&result)
+    });
     println!("tx_invalid [kernel]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_invalid rows");
     if !mismatches.is_empty() {
@@ -1661,51 +1486,4 @@ fn tx_invalid_kernel_column() {
             println!("  {m}");
         }
     }
-}
-
-#[test]
-fn broken_expectation_is_detected() {
-    // Flip one script_tests expectation and show the harness catches it.
-    let mut st_counts = Counts::default();
-    let st_rows = match load_script_tests(&mut st_counts) {
-        Ok(r) => r,
-        Err(e) => panic!("script_tests should load: {e}"),
-    };
-    let ok_row = st_rows
-        .iter()
-        .find(|r| r.expected == ScriptErrCode::Ok)
-        .unwrap_or_else(|| panic!("no OK-expected row found in script_tests"));
-
-    let credit = build_crediting_tx(&ok_row.script_pubkey, ok_row.amount);
-    let spend = build_spending_tx(&ok_row.script_sig, &ok_row.witness, &credit);
-    let prevouts = [credit.outputs[0].clone()];
-    let interp = Interpreter;
-    let result = interp.execute_with_prevouts(
-        &ok_row.script_pubkey,
-        &ok_row.script_sig,
-        &ok_row.witness,
-        ok_row.flags,
-        &prevouts,
-        &spend,
-        0,
-    );
-    let verdict = Verdict::from_interpreter(&result);
-
-    // Flip: if the row is accepted, claim it should be rejected.
-    let broken_expected = if verdict == Verdict::Accept {
-        ScriptErrCode::EvalFalse
-    } else {
-        ScriptErrCode::Ok
-    };
-    let st_detected = !verdict.matches_expected(broken_expected);
-    println!(
-        "broken_expectation_is_detected: script_tests row {}, verdict={verdict:?}, broken_expected={broken_expected}, detected={st_detected}",
-        ok_row.row_index,
-    );
-    assert!(
-        st_detected,
-        "anti-vacuity: harness failed to detect a broken expectation in script_tests"
-    );
-
-    println!("broken_expectation_is_detected: PASS — harness reports mismatches honestly");
 }

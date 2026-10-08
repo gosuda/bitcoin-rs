@@ -16,10 +16,8 @@ fn writer_refuses_an_applied_tip_off_the_active_best_ancestry()
 -> Result<(), Box<dyn std::error::Error>> {
     let (mut tree, best_tip_id, _) = chain_with_applied_height(3, 1)?;
     let genesis_hash = tree.node(NodeId::new(0))?.hash;
-    let mut fork = next_header(
-        BlockHash(genesis_hash),
-        u32::from(NETWORK.genesis_block_hash().to_le_bytes()[0]) + 1,
-    );
+    let mut fork = mined_regtest_header(BlockHash(genesis_hash), 1)?;
+    fork.time += 100;
     mine_header_to_declared_target(&mut fork)?;
     let fork_id = accept_headers(
         &mut tree,
