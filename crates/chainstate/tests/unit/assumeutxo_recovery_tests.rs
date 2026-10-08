@@ -393,6 +393,68 @@ fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
 }
 
 #[test]
+fn snapshot_base_checkpoint_rejects_coin_height_alias() -> TestResult {
+    use bitcoin_rs_storage::checkpoint::{
+        CHECKPOINT_ROOT, CURRENT_FILE, CheckpointManifestV1, CurrentV1, MANIFEST_FILE, hex_encode,
+    };
+    use sha2::{Digest, Sha256};
+
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let (active, manager) = activate(dir.path(), &fixture)?;
+    assert!(active.publish_checkpoint()?.is_some());
+    drop(manager);
+    drop(active);
+
+    let root = dir.path().join(CHECKPOINT_ROOT);
+    let current_path = root.join(CURRENT_FILE);
+    let mut current: CurrentV1 = serde_json::from_slice(&std::fs::read(&current_path)?)?;
+    let generation = root.join(&current.directory);
+    let manifest_path = generation.join(MANIFEST_FILE);
+    let mut manifest: CheckpointManifestV1 =
+        serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    let utxo_path = generation.join(&manifest.utxo.file);
+    let mut bytes = std::fs::read(&utxo_path)?;
+    // Snapshot header (52), transaction record header (45), vout height offset (12).
+    let offset = 52 + 45 + 12;
+    let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
+    assert!(height <= fixture.pinned.height);
+    let invalid_height = height | 0x8000_0000;
+    bytes[offset..offset + 4].copy_from_slice(&invalid_height.to_le_bytes());
+    let forged = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut std::io::Cursor::new(&bytes))?;
+    assert_eq!(
+        forged.set.lock_stable_view().hash_serialized_3()?,
+        fixture.pinned.hash_serialized,
+        "the high height bit must alias the commitment, not cause a hash rejection"
+    );
+    // Reauthenticate the artifact so the test reaches semantic validation.
+    // MuHash and CoinStats also alias the high bit and remain unchanged.
+    manifest.utxo.sha256 = hex_encode(&Sha256::digest(&bytes));
+    std::fs::write(&utxo_path, &bytes)?;
+    let manifest_bytes = serde_json::to_vec(&manifest)?;
+    current.manifest_sha256 = hex_encode(&Sha256::digest(&manifest_bytes));
+    std::fs::write(manifest_path, manifest_bytes)?;
+    std::fs::write(current_path, serde_json::to_vec(&current)?)?;
+
+    let error = crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned)
+        .err()
+        .ok_or("snapshot-base checkpoint accepted an impossible coin height")?;
+    assert!(matches!(
+        error.downcast_ref::<bitcoin_rs_utxo::UtxoError>(),
+        Some(bitcoin_rs_utxo::UtxoError::SnapshotCoinHeightOutOfRange {
+            height,
+            snapshot_height,
+        }) if *height == invalid_height && *snapshot_height == fixture.pinned.height
+    ));
+    assert_eq!(
+        std::fs::read(utxo_path)?,
+        bytes,
+        "refusal must preserve operator data"
+    );
+    Ok(())
+}
+
+#[test]
 fn snapshot_recovery_rejects_coin_height_alias() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
