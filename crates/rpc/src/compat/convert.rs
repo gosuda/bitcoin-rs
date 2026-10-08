@@ -291,20 +291,13 @@ fn omit_json_nulls(value: &mut Value) {
     }
 }
 
-/// Converts a transport value into a typed Core wire value, enforcing the
-/// pinned strict field set (`deny_unknown_fields` where the upstream type
-/// opts in).
-fn sonic_to_typed<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, RpcError> {
-    sonic_rs::from_value(value).map_err(RpcError::from)
-}
-
 /// Projects one output script into the versioned `scriptPubKey` object,
 /// reusing the transport renderer and validating against the pinned type.
 pub(crate) fn script_pub_key_typed(
     script: &[u8],
     network: Network,
 ) -> Result<corepc_types::ScriptPubKey, RpcError> {
-    sonic_to_typed(&tx_render::script_pub_key_json(script, network))
+    sonic_rs::from_value(&tx_render::script_pub_key_json(script, network)).map_err(RpcError::from)
 }
 
 /// Input script object (`asm` + `hex`).

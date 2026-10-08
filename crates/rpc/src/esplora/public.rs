@@ -25,6 +25,7 @@ use super::model::{
     RecentTransaction, ScriptSummary, TransactionValue,
 };
 use super::projection::{Confirmation, Projection};
+use crate::compat::convert;
 use crate::context::Context;
 use crate::handlers::Handler;
 use crate::rest::{
@@ -724,7 +725,7 @@ pub(super) fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Respo
     )
 }
 fn address_hash(ctx: &Context, a: &str) -> Result<ScriptHash, Response> {
-    let n = Projection::new(ctx).bitcoin_network();
+    let n = convert::bitcoin_network(ctx.chain.chain_network);
     let a = bitcoin::Address::from_str(a)
         .map_err(|_| bad_request("invalid address"))?
         .require_network(n)
