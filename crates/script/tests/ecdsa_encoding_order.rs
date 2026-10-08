@@ -225,7 +225,10 @@ fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
                 );
                 // A present but undecodable signature is rejected before the
                 // key is looked at whenever DER checking is on.
-                if flags.contains(VerifyFlags::DERSIG) || flags.contains(VerifyFlags::STRICTENC) {
+                if flags.contains(VerifyFlags::DERSIG)
+                    || flags.contains(VerifyFlags::LOW_S)
+                    || flags.contains(VerifyFlags::STRICTENC)
+                {
                     assert_eq!(
                         checker.check_ecdsa_signature(&[0], key, &[], version, flags),
                         Err(ScriptError::Invalid {

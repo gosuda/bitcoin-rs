@@ -8,9 +8,10 @@
 /// Opcode byte constants the workspace builds and inspects scripts with.
 pub mod opcode {
     macro_rules! opcodes {
-        ($($name:ident = $value:literal,)*) => {
+        ($($(#[$doc:meta])* $name:ident = $value:literal,)*) => {
             $(
                 #[doc = concat!("`", stringify!($name), "` (", stringify!($value), ").")]
+                $(#[$doc])*
                 pub const $name: u8 = $value;
             )*
         };
@@ -18,8 +19,11 @@ pub mod opcode {
 
     opcodes! {
         OP_0 = 0x00,
+        /// The next byte is the push length.
         OP_PUSHDATA1 = 0x4c,
+        /// The next two little-endian bytes are the push length.
         OP_PUSHDATA2 = 0x4d,
+        /// The next four little-endian bytes are the push length.
         OP_PUSHDATA4 = 0x4e,
         OP_1NEGATE = 0x4f,
         OP_PUSHNUM_1 = 0x51,
@@ -79,6 +83,7 @@ pub mod opcode {
         OP_HASH160 = 0xa9,
         OP_HASH256 = 0xaa,
         OP_CODESEPARATOR = 0xab,
+        /// Verifies a signature against the top public key.
         OP_CHECKSIG = 0xac,
         OP_CHECKSIGVERIFY = 0xad,
         OP_CHECKMULTISIG = 0xae,
