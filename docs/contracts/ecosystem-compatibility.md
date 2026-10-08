@@ -28,6 +28,11 @@ asserting compatibility from inside this repository.
   itself is missing or wrong.
 - bitcoin-rs internals are never reshaped merely to resemble Bitcoin Core or
   to satisfy a particular external harness.
+- This clause is the contract-side expression of the project compatibility
+  boundary ([README §External compatibility](../../README.md#external-compatibility)):
+  external interoperability is the stability contract; internal
+  compatibility — crate APIs, module boundaries, persistence formats — is not
+  guaranteed and is no reason to keep a worse design.
 
 ### `ECO-02`: Two-tier test ownership
 

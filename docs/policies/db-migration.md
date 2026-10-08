@@ -2,6 +2,8 @@
 
 `bitcoin-rs` supports exactly one persistent datadir format for authoritative chainstate bytes. It does not migrate, translate, or silently recover incompatible state from an older release. Fresh replay is the migration policy: a schema change increments `CURRENT_SCHEMA` and requires an explicit operator resync into a separately named directory.
 
+On-disk format is internal architecture under the project's [stable-external-contracts boundary](../../README.md#external-compatibility): a format break is a permitted redesign, not a defect — operator data safety, not format preservation, is the invariant this policy enforces. An optional, separate offline migration tool may supplement replay ([below](#optional-offline-migration-tooling)); it is never part of the node and never guaranteed.
+
 ## CURRENT_SCHEMA scope
 
 `CURRENT_SCHEMA` covers only authoritative chainstate bytes: the durable head, the coin set it commits, body and undo extents and references, and their identity metadata. Owner-local state does not belong to this marker. Fee estimator state, peer discovery state, and index-only layouts carry their own versions (see the owner-local section below).
@@ -52,6 +54,17 @@ A `CURRENT_SCHEMA` change has no in-place path. The operator resyncs into a sepa
 6. Switch the manifest to the new store atomically. The switch touches the new store only.
 
 The node performs the identity and digest verification, the fsync, and the atomic manifest switch. It never opens the old datadir with incompatible code.
+
+## Optional offline migration tooling
+
+A schema break never puts a converter inside the node, but a full resync is not the only possible operational path. When the cost justifies it, a separate, explicit, offline migration tool may be offered — for example a dedicated binary under `tools/`. No such tool exists today, and none is guaranteed for any epoch.
+
+Any such tool follows these rules:
+
+- The production node understands and writes only the current authoritative schema. Legacy decoders live in the tool, outside the node's runtime and build-dependency path.
+- Never in place: the tool reads the source datadir without mutating it, produces a new datadir, verifies network/chain identity and the applicable durability invariants, and leaves cutover to an explicit operator action. The source survives any failure.
+- Migrating bytes is not proof of consensus validity. The tool reuses only state whose provenance and integrity can be verified; anything else means revalidation or resync. Derived, rebuildable indexes are not migrated.
+- Optional, not guaranteed: no converter is owed for any schema revision, perpetual old-format support is never promised, and better internal designs are never blocked on migration tooling.
 
 ## Existing datadirs are untouched
 
