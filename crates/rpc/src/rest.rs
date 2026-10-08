@@ -1860,6 +1860,7 @@ mod tests {
         arm_rival(&ctx);
         let response = route(&ctx, "/rest/deploymentinfo.json", "", true);
         let value: Value = sonic_rs::from_slice(&response.body).expect("deploymentinfo JSON");
+        assert_eq!(value.get("deployments"), Some(&json!({})));
         assert_eq!(
             value.get("height").and_then(Value::as_u64),
             Some(u64::from(applied_height)),
