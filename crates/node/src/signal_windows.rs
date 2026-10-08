@@ -22,7 +22,10 @@ pub(crate) struct ShutdownHandler {
 }
 
 impl ShutdownHandler {
-    pub(crate) fn install(shutdown: Arc<AtomicBool>, shutdown_tx: Sender<()>) -> Result<Self> {
+    pub(crate) fn install(
+        request_shutdown: impl Fn() + Send + 'static,
+        shutdown_tx: Sender<()>,
+    ) -> Result<Self> {
         let received = Arc::new(AtomicBool::new(false));
         let mut registrations = Vec::new();
         for signal in [SIGINT, SIGTERM, SIGBREAK] {
@@ -43,7 +46,7 @@ impl ShutdownHandler {
                 Err(crossbeam_channel::RecvTimeoutError::Timeout)
             ) {
                 if received.swap(false, Ordering::Acquire) {
-                    shutdown.store(true, Ordering::Release);
+                    request_shutdown();
                     let _ = shutdown_tx.try_send(());
                 }
             }
@@ -92,8 +95,12 @@ mod tests {
         const CHILD: &str = "BITCOIN_RS_TEST_CRT_SIGNAL_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let shutdown_clone = std::sync::Arc::clone(&shutdown);
             let (sender, receiver) = crossbeam_channel::bounded(1);
-            let mut handler = super::ShutdownHandler::install(shutdown.clone(), sender)?;
+            let mut handler = super::ShutdownHandler::install(
+                move || shutdown_clone.store(true, std::sync::atomic::Ordering::Release),
+                sender,
+            )?;
             signal_hook::low_level::raise(signal_hook::consts::signal::SIGTERM)?;
             receiver.recv_timeout(std::time::Duration::from_secs(2))?;
             assert!(shutdown.load(std::sync::atomic::Ordering::Acquire));
@@ -120,10 +127,7 @@ mod tests {
     fn close_joins_once_and_allows_reinstallation() -> anyhow::Result<()> {
         for _ in 0..2 {
             let (sender, _receiver) = crossbeam_channel::bounded(1);
-            let mut handler = super::ShutdownHandler::install(
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                sender,
-            )?;
+            let mut handler = super::ShutdownHandler::install(|| {}, sender)?;
             handler.close_and_join()?;
             handler.close_and_join()?;
             assert!(handler.thread.is_none());

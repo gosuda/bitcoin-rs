@@ -124,7 +124,7 @@ impl DerivedIndexHost {
                 chainstate.chain_events_handle(),
             )),
             spawn.recovery_reporter,
-            chainstate.shutdown_handle(),
+            chainstate.shutdown_reader(),
             spawn.wake_rx,
         )
         .context("spawn txindex worker")?;

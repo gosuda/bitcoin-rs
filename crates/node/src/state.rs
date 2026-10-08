@@ -16,6 +16,7 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chainstate::events::ChainEventPublisher;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
@@ -31,9 +32,11 @@ use bitcoin_rs_storage::StorageBackend;
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
+#[cfg(any(test, feature = "test-seam"))]
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use storage::NodeStorage;
@@ -105,7 +108,7 @@ pub struct NodeState {
     /// Node-owned P2P-to-mempool ingress bridge. Unlike the service-owned
     /// header/block channels, this receiver is drained by node orchestration.
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
-    inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
+    inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundTx>>>,
     /// The transition domain minted for this node.
     ///
     /// Composition splits it: chainstate holds the mutation role, and every
@@ -230,7 +233,14 @@ impl NodeState {
         Arc::clone(self.followers.mining())
     }
 
+    /// Returns a read-only capability to observe the applied-block log.
+    #[must_use]
+    pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
+        self.followers.block_log_reader()
+    }
+
     /// Returns the shared block-records handle exposed to RPC handlers.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn blocks(&self) -> Arc<RwLock<BlockLog>> {
         Arc::clone(self.followers.block_log())
@@ -276,10 +286,11 @@ impl NodeState {
         self.inbound_tx_tx.clone()
     }
 
-    /// Returns the shared receiver handle drained by the tx-ingress consumer.
+    /// Takes the inbound transaction receiver for the single ingress consumer.
+    /// Returns `None` if the receiver has already been claimed.
     #[must_use]
-    pub fn inbound_tx_rx_handle(&self) -> Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>> {
-        Arc::clone(&self.inbound_tx_rx)
+    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundTx>> {
+        self.inbound_tx_rx.lock().take()
     }
 
     /// Returns the shared block-download orchestrator.
@@ -295,9 +306,21 @@ impl NodeState {
     }
 
     /// Returns the process-wide shutdown signal shared by all runtime workers.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn shutdown(&self) -> Arc<AtomicBool> {
         self.chainstate.shutdown_handle()
+    }
+
+    /// Returns a read-only capability to observe the process-wide shutdown signal.
+    #[must_use]
+    pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
+        self.chainstate.shutdown_reader()
+    }
+
+    /// Requests process shutdown across all runtime workers.
+    pub fn request_shutdown(&self) {
+        self.chainstate.request_shutdown();
     }
 
     /// Clone of the chainstate facade used by apply, reorg, and sync.

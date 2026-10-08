@@ -127,7 +127,14 @@ impl ChainFollowers {
         self.derived_index.is_some() || self.zmq.wants_rawblock()
     }
 
+    /// Returns a read-only capability to observe the applied-block log.
+    #[must_use]
+    pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
+        bitcoin_rs_index::BlockLogReader::new(Arc::clone(&self.blocks))
+    }
+
     /// Shared RPC block log owned by this committed-effect dispatcher.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub(crate) fn block_log(&self) -> &Arc<RwLock<BlockLog>> {
         &self.blocks

@@ -69,13 +69,15 @@ fn cancelled_ready_event_does_not_wait_for_an_unrelated_body_writer()
 #[test]
 fn empty_header_probe_is_paced_then_rotates_to_another_peer()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, peers, _, _, _) = sync_with_header_chain(1)?;
+    let (tree, _blocks) = mined_chain(1, 0)?;
+    let harness = SyncHarness::new(tree);
+    let sync = harness.sync;
+    let peers = harness.peers;
+    let headers = harness.inbound_headers_tx;
     let first = test_addr(9760, 2)?;
     let second = test_addr(9760, 3)?;
     let first_rx = connect_peer(&peers, synthetic_peer(first, 0));
     let second_rx = connect_peer(&peers, synthetic_peer(second, 0));
-    let (headers, receiver) = unbounded();
-    *sync.inbound_headers_rx.lock() = receiver;
     sync.tick();
     assert!(matches!(first_rx.try_recv()?, Message::GetHeaders(_)));
     assert!(second_rx.try_recv().is_err());
