@@ -165,9 +165,10 @@ pub struct UtxoSet {
 ///
 /// Every field is what the set can account for itself: the exact requested
 /// bytes of every boxed record payload and the estimated hash-table backing.
-/// What it cannot see — allocator size-class rounding, fragmentation, and
-/// allocator metadata — is exactly the residual against process RSS, which is
-/// the point.
+/// It does not measure allocator size-class rounding, fragmentation, or
+/// metadata. Process RSS also includes storage backends, runtime, indexes,
+/// and other owners: subtracting this accounting from RSS leaves an
+/// unattributed residual, not a measurement of allocator overhead.
 #[derive(Debug, Default)]
 pub struct UtxoMemoryReport {
     /// Transaction-level records held.
@@ -216,12 +217,9 @@ impl UtxoSetView<'_> {
 
     /// Accounts for what this set holds in memory, shard by shard.
     ///
-    /// Exists to attribute process RSS rather than to guess at it. The set is
-    /// fully memory-resident with no eviction tier, and the published
-    /// 13.83 GiB at height 645,804 is far above what the record encoding alone
-    /// predicts, so the gap between `record_payload_bytes + table_bytes` and
-    /// actual RSS is the number that decides whether an encoding change is worth
-    /// making at all.
+    /// The set is fully memory-resident with no eviction tier. Pair this report
+    /// with external RSS samples at the same chain state for attribution; the
+    /// returned bytes are not process RSS or a backing-store cache budget.
     ///
     /// Walks every record in every shard: O(records), for measurement only.
     #[must_use]

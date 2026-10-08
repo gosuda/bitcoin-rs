@@ -1,22 +1,34 @@
 # UTXO set memory and coin-record cells
 
-This document owns the UTXO set memory and coin-record cells of the target node. Coin records stay transaction-grouped (v5 directory layout) with full 256-bit txid identity and `u16` script-length bound (`UtxoError::ScriptTooLarge`); T10 persists only grouped changed records incrementally with exact before-images through the storage batch ladder, and T38 measures cache, allocation and I/O treatments one at a time. The prior attribution below (former checkpoint RSS hook, Apple Silicon fragmentation harness, height-412,732 chainstate load) is candidate evidence for the v5 layout and the arena rejection; it is not a full-node tip-RSS claim.
+This document owns the UTXO set memory and coin-record measurement cells.
+The production `UtxoSet` is a fully resident, 256-shard table of grouped v5
+records with full transaction/output identity. It has no eviction tier.
+Incremental coin persistence and a bounded cache are conditional on the
+full-node measurement decision in [#631](https://github.com/gosuda/bitcoin-rs/issues/631),
+not prerequisites for the existing
+[durable-head/checkpoint/replay recovery contract](../contracts/recovery.md).
+The `CoinRecords` column-family definition and historical persistent-coin work
+do not establish an integrated production backing store.
+
+The prior attribution below (former checkpoint RSS hook, Apple Silicon
+fragmentation harness, height-412,732 chainstate load) is historical evidence
+for the v5 layout and arena rejection, not a current full-tip RSS result.
 
 ## Cells it owns
 
 | Cell | Metric | Status |
 |---|---|---|
 | `utxo.record.bytes_per_output` | payload bytes per live output and RSS bytes per output on a real pinned chainstate, v5 layout, production allocator | `planned_not_executed` |
-| `utxo.commit.p95` | grouped-record commit p50/p95/p99/max on existing, uniform and concentrated fixtures through `write_durable_if` | `planned_not_executed` |
-| `utxo.cache.eviction_reload` | bounded-cache eviction reloads identical records; retained bytes stay at or below the resolved cache budget | `planned_not_executed` |
+| `utxo.commit.p95` | production grouped-record mutation p50/p95/p99/max; any conditional backing-store path must include its durability cost | `planned_not_executed` |
+| `utxo.cache.eviction_reload` | conditional on #631's decision: eviction reloads identical records and bounds total retained memory | `planned_not_executed` |
 | `utxo.fragmentation` | RSS growth after churn equal to twice the live set on the production allocator (mimalloc, x86-64 Linux) and on each additional measured configuration | `planned_not_executed` |
-| `node.tip_rss` | full-node RSS at the pinned stop identity including fjall, block record log and runtime; T02 baseline versus final | `planned_not_executed` |
+| `node.tip_rss` | full-node RSS at the pinned stop identity including backend and runtime; #631 baseline and conditional candidate | `planned_not_executed` |
 
 Accelerators (truncated prefixes) remain hints, never identity. No heap object per coin. No second database. An arena or pool proposal reopens only with attribution on its own production allocator and domain workload.
 
 ## Required identities per sample
 
-The six identities of [`README.md`](README.md), enforced by the T02 collector.
+The six identities of [`README.md`](README.md).
 
 ## Acceptance rule
 
@@ -25,7 +37,57 @@ The promotion, regression, reporting, retention and `BLOCKED` rules of [`README.
 
 ## Status
 
-`planned_not_executed`, as defined in [`README.md`](README.md).
+The end-state cells remain `planned_not_executed`, as defined in
+[`README.md`](README.md). The #631 decision is **unmeasured**: neither a need
+for a cache nor adequate full-tip memory headroom has been demonstrated.
+The 13.83 GiB observation stopped at height 645,804; v5 tip projections and
+synthetic commit measurements cannot complete this decision.
+
+## Full-tip decision evidence (#631)
+
+Use the shared [sample identities and acceptance rules](README.md) and the
+resource reporting boundary in
+[HPA-12/HPA-13](../contracts/hot-path-attribution.md#hpa-12-evidence-identity-per-sample).
+Full-tip evidence is separate from the frozen C150/Cmodern product cells; it
+does not extend their denominator or turn a bounded replay into full-tip proof.
+
+Pin the network, stop height/hash, source corpus digest, binary digest/commit,
+resolved configuration, features, allocator, toolchain, backend and durability
+posture, hardware, and resource limits. Include the default full-node resource
+profile (450 MiB `dbcache`, optional indexes and pruning off, Fjall and the
+production allocator). Explicitly disable assume-valid for the required
+full-validation run. Label optional index and pruning profiles separately.
+
+The [historical G14 target](end-to-end-sync.md#historical-performance-evidence) is
+16 GiB tip RSS with Fjall and txindex; it is not evidence that the current
+default profile meets a budget. Record the applicable supported profile,
+approved RSS limit, and required operating headroom before judging a run.
+`dbcache` budgets backend caches, not the resident UTXO set or total process RSS.
+
+| Evidence | Existing owner / remaining gap |
+|---|---|
+| Peak and steady process RSS, wall and CPU | External process monitoring; the offline comparator samples wall/CPU/peak RSS but does not capture steady-state samples or a full-tip default-node campaign. Retain the raw timeline and define the steady observation interval. |
+| UTXO attribution at the pinned state | `UtxoSetView::memory_report()` owns record/output counts, exact requested payload bytes, and **estimated** table bytes. The retained `utxo_commit --measure-memory` mode exercises small diagnostic fixtures, not a live full-tip node. A same-state full-node report is still needed. |
+| Other memory owners | Report backend, runtime, indexes, and allocator measurements where available. The difference between RSS and UTXO accounting is an **unattributed residual**, not an allocator-fragmentation measurement. Cache configuration is a limit, not observed allocation. |
+| Apply throughput/latency | Reuse the existing hot-path instrumentation with counts and percentile samples. Do not sum nested/parallel stage intervals or infer latency tails from total wall time. |
+| Disk, writes and compaction | Reuse the [offline storage-footprint utility](../contracts/storage-footprint.md) for a quiescent snapshot. It does not measure peak allocation, write amplification or compaction; those need separate observed counters or an explicit unsupported gap. |
+
+The existing [offline comparator](offline-full-validation.md) preserves corpus
+custody and correctness checks, but its fixture tests and C150/Cmodern scope
+do not supply this evidence. Reuse the existing tooling boundaries for a real
+campaign rather than adding a parallel benchmark framework. Until the pinned
+full-tip corpus, suitable host, attribution capture, and applicable resource
+target are available, record the missing prerequisites as `BLOCKED` in the
+run discussion; do not publish a budget verdict or treat harness tests as a
+measurement.
+
+Record the decision here with links to raw execution artifacts in the issue
+or PR. Within-budget evidence with sufficient headroom and no demonstrated
+low-memory requirement supports closing #631 without a cache. An over-budget
+result or supported low-memory requirement must quantify the RSS target and
+acceptable validation/I/O cost before implementing a cache, then compare
+matched baseline/candidate runs. Any backing store must preserve the existing
+chainstate recovery authority and grouped v5 identity.
 
 ## Prior candidate evidence (former checkpoint RSS hook, height-412,732 chainstate, 2026-08-16 correction)
 
