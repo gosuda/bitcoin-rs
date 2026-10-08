@@ -874,6 +874,47 @@ fn fork_tip_attests_its_shared_active_ancestor() -> TestResult {
 }
 
 #[test]
+fn fork_evidence_cannot_credit_a_tainted_ancestor_height() -> TestResult {
+    let (tree, blocks) = mined_chain(3, 0)?;
+    let SyncHarness {
+        sync,
+        peers,
+        block_tree,
+        inbound_headers_tx,
+        ..
+    } = SyncHarness::new(tree);
+    let peer = test_addr(9707, 0)?;
+    let _rx = connect_peer(&peers, synthetic_peer(peer, 0));
+    let fork = regtest_fixture::mined_regtest_header(blocks[0].block_hash(), 2)
+        .or_fail("regtest fixture header");
+    inbound_headers_tx.send(InboundHeaders {
+        headers: vec![fork],
+        source: Some(current_source(&peers, peer)),
+        wire_response: true,
+        body_fetch_owned: false,
+    })?;
+    sync.drain_inbound_headers();
+    let peer_height = || {
+        peers
+            .infos()
+            .into_iter()
+            .find(|info| info.addr == peer)
+            .map(|info| info.best_known_height)
+    };
+    assert_eq!(peer_height(), Some(1));
+    {
+        let mut tree = block_tree.write();
+        let ancestor = tree
+            .lookup(Hash256::from(blocks[0].block_hash()))
+            .ok_or("ancestor")?;
+        tree.node_mut(ancestor)?.height = 100;
+    }
+    sync.refresh_active_peer_credit();
+    assert_eq!(peer_height(), Some(1));
+    Ok(())
+}
+
+#[test]
 fn retained_unresolved_tips_are_deduplicated_and_capped() -> TestResult {
     // Unbounded fork evidence is a memory problem: a peer could announce
     // an arbitrary number of distinct side chains and grow the retained
