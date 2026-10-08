@@ -403,13 +403,8 @@ mod tests {
             ),
             "the embedded envelope carries the gateway's policy reason verbatim: {refusal}"
         );
-        assert!(
-            !node
-                .state
-                .mempool_reader()
-                .read()
-                .contains_txid(&orphan_txid)
-        );
+        let mempool = node.state.mempool_reader();
+        assert!(!mempool.read().contains_txid(&orphan_txid));
         assert!(
             publisher.sequence_events.lock().is_empty(),
             "a refused broadcast publishes nothing"
