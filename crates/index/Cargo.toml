@@ -13,6 +13,7 @@ workspace = true
 
 [features]
 default = []
+test-seam = []
 rocksdb = [
     "bitcoin-rs-storage/rocksdb",
     "bitcoin-rs-utxo/rocksdb",

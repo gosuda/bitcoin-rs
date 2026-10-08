@@ -21,6 +21,22 @@ use std::sync::Arc;
 /// metrics without naming the implementation's error types.
 pub type SyncChainError = Box<dyn core::error::Error + Send + Sync>;
 
+/// The next action after a bounded historical replay pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoricalAdvance {
+    /// No more historical work remains.
+    Complete,
+    /// More local replay remains; do not request a body yet.
+    ReplayPending,
+    /// The body is absent locally and can be fetched from peers.
+    MissingBody {
+        /// Height of the required block.
+        height: u32,
+        /// Hash of the required block.
+        hash: Hash256,
+    },
+}
+
 /// How the executor must treat a failed window commit or branch connect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowCommitDisposition {
@@ -208,6 +224,22 @@ impl core::fmt::Debug for BranchSwitchError {
 /// admission under the chain-transition lock, window commit, branch switch,
 /// and genesis bootstrap. The executor owns everything else.
 pub trait SyncChain: Send + Sync {
+    /// Pinned snapshot ancestor whose bodies historical validation requires.
+    /// This is independent of the moving foreground header tip.
+    fn historical_base(&self) -> Option<Hash256> {
+        None
+    }
+
+    /// Replays bounded retained snapshot history, distinguishing local work
+    /// from genuinely missing pinned-ancestry bodies.
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
+        Ok(HistoricalAdvance::Complete)
+    }
+
+    /// Validates a requested historical body through the chainstate owner.
+    fn connect_historical(&self, _block: &Block, _body: Bytes) -> Result<(), SyncChainError> {
+        Err("historical validation is not configured".into())
+    }
     /// Network the applied chain validates against.
     fn network(&self) -> Network;
 

@@ -1212,10 +1212,36 @@ impl MempoolGateway {
         )
     }
 
+    /// Retires entries and fee history tied to the pre-snapshot chain view.
+    /// The snapshot owner must hold this gateway's chain-change reservation.
+    pub fn clear_for_snapshot(
+        &self,
+        change: &ChainChangeGuard,
+    ) -> Result<MutationResult, ChainChangeError> {
+        if !change.owns(self) {
+            return Err(ChainChangeError::ForeignGuard);
+        }
+        self.commit(
+            AdmissionOrigin::Block,
+            |pool| {
+                let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
+                if fence.current(self) != Some(change.odd_generation()) {
+                    return Err(ChainChangeError::GenerationMoved);
+                }
+                let removed = pool.clear();
+                let mut lifecycle = self.lifecycle.lock();
+                lifecycle.orphans.clear();
+                lifecycle.clear_rejects();
+                Ok(removed)
+            },
+            |result| Some(result),
+        )
+    }
+
     /// Commits `pool.clear` and publishes its result.
     ///
-    /// Test seam: wholesale fixture reset; production retirements arrive
-    /// through block/reorg/commit paths, never a clear.
+    /// Test seam: wholesale fixture reset without a chain-change reservation.
+    /// Production snapshot replacement uses `clear_for_snapshot`.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn clear(&self, origin: AdmissionOrigin) -> MutationResult {
         self.commit_infallible(origin, Mempool::clear)
@@ -2031,6 +2057,65 @@ mod tests {
                     .collect::<Vec<_>>()
             )
         );
+    }
+
+    #[test]
+    fn snapshot_clear_requires_its_own_live_chain_change() {
+        let gateway = gateway_with(None);
+        let other = gateway_with(None);
+        let transaction = tx(14);
+        let orphan = Arc::new(tx(17));
+        let peer = crate::PeerToken {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
+            connection_id: 1,
+        };
+        gateway.lifecycle.lock().orphans.insert(orphan, peer, 0);
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&transaction))
+            .expect("insert");
+        let foreign = other.begin_chain_change().expect("foreign fence");
+        assert_eq!(
+            gateway.clear_for_snapshot(&foreign),
+            Err(ChainChangeError::ForeignGuard)
+        );
+        assert!(gateway.read().contains_txid(&transaction.txid()));
+        foreign.finish().expect("finish foreign");
+        let change = gateway.begin_chain_change().expect("snapshot fence");
+        let cleared = gateway.clear_for_snapshot(&change).expect("clear snapshot");
+        assert_eq!(cleared.changes.len(), 1);
+        assert_eq!(gateway.lifecycle.lock().orphans.len(), 0);
+        assert!(gateway.lifecycle.lock().orphans.take_ready().is_empty());
+        assert_eq!(
+            cleared.changes[0].outcome,
+            MutationOutcome::Removed(RemovalReason::Clear)
+        );
+        assert_eq!(gateway.stable_generation(), None);
+        change.finish().expect("settle snapshot");
+        assert!(gateway.stable_generation().is_some());
+    }
+
+    #[test]
+    fn snapshot_clear_publishes_removals_while_admission_is_fenced() {
+        let observer = Arc::new(RecordingObserver::default());
+        let gateway = gateway_with(Some(dyn_observer(&observer)));
+        let transaction = tx(14);
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&transaction))
+            .expect("insert");
+        observer.seen.lock().clear();
+        observer.origins.lock().clear();
+
+        let change = gateway.begin_chain_change().expect("snapshot fence");
+        gateway.clear_for_snapshot(&change).expect("clear snapshot");
+
+        assert_eq!(
+            *observer.seen.lock(),
+            vec![(hash(&transaction.txid()), removed(RemovalReason::Clear))]
+        );
+        assert_eq!(*observer.origins.lock(), vec![AdmissionOrigin::Block]);
+        assert!(!gateway.read().contains_txid(&transaction.txid()));
+        assert_eq!(gateway.stable_generation(), None);
+        change.finish().expect("settle snapshot");
     }
 
     #[test]

@@ -404,7 +404,6 @@ impl EntryArena {
         self.free.last().map_or(self.slots.len(), |&index| index)
     }
 
-    #[cfg(any(test, feature = "test-seam"))]
     fn clear(&mut self) {
         for slot in &mut self.slots {
             *slot = None;
@@ -641,9 +640,8 @@ impl Mempool {
     /// keeps the recorded confirmations and re-arms only the re-admitted
     /// entries — so chain recovery cannot silently discard fee history.
     ///
-    /// Test seam: fixture reset only; production retirements arrive through
-    /// block/reorg/commit paths, never a wholesale clear.
-    #[cfg(any(test, feature = "test-seam"))]
+    /// Production uses this only through the gateway's fenced snapshot
+    /// replacement. Ordinary block and reorg paths preserve fee history.
     pub fn clear(&mut self) -> MutationResult {
         // Every entry leaves the pool here, so this is the same retire funnel
         // Core walks during a bulk clear: fire `mempool:removed` per entry

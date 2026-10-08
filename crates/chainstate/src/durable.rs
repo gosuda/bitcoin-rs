@@ -78,6 +78,11 @@ pub(super) fn commit_connect_head(
         }
     }
     let next = DurableHead {
+        assumeutxo: prior
+            .as_ref()
+            .map_or(crate::AssumeUtxoDiskStatus::Uninitialized, |head| {
+                head.assumeutxo
+            }),
         commit_id: prior.as_ref().map_or(1, |head| head.commit_id + 1),
         height: facts.height,
         tip: facts.tip,
@@ -137,6 +142,14 @@ pub(super) fn commit_disconnect_head(
         });
     }
     let next = DurableHead {
+        assumeutxo: match head.assumeutxo {
+            crate::AssumeUtxoDiskStatus::Finalized { base_height, .. }
+                if parent_tip.height < base_height =>
+            {
+                crate::AssumeUtxoDiskStatus::Uninitialized
+            }
+            status => status,
+        },
         commit_id: head.commit_id + 1,
         height: parent_tip.height,
         tip: parent_tip.hash,
@@ -185,7 +198,7 @@ pub(crate) fn reconcile_at_boot(handles: &Chainstate) -> Result<(), ApplyError> 
     if restored.as_ref().is_some_and(|tip| tip.hash == head.tip) {
         return Ok(());
     }
-    replay_committed_gap(handles, head, restored.as_deref())
+    replay_committed_gap(handles, &head, restored.as_deref())
 }
 
 /// Reconciles disconnect evidence before the node accepts work.
@@ -527,10 +540,10 @@ fn rewound_parent(
 /// certified head chain when `restored` is `None`.
 fn replay_committed_gap(
     handles: &Chainstate,
-    head: DurableHead,
+    head: &DurableHead,
     restored: Option<&TipSnapshot>,
 ) -> Result<(), ApplyError> {
-    let unrecoverable = |reason: &'static str| gap_unrecoverable(&head, restored, reason);
+    let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
     // The first height the replay must re-apply: the restored tip's child,
     // or genesis when nothing was restored.
     let base_height = match restored {
@@ -680,12 +693,12 @@ fn relieve_replay_journal_backpressure<'a>(
 /// restart retries it from the same durable state.
 fn replay_gap_chain(
     handles: &Chainstate,
-    head: DurableHead,
+    head: &DurableHead,
     chain: Vec<(u32, Hash256)>,
     restored: Option<&TipSnapshot>,
     load_body: impl Fn(u32, Hash256) -> Result<(Block, Vec<u8>), ApplyError>,
 ) -> Result<(), ApplyError> {
-    let unrecoverable = |reason: &'static str| gap_unrecoverable(&head, restored, reason);
+    let unrecoverable = |reason: &'static str| gap_unrecoverable(head, restored, reason);
     let mut transition = Some(handles.begin_transition()?);
     // A length always fits u64; the metrics counter counts in u64.
     let replayed_blocks = u64::try_from(chain.len()).unwrap_or(u64::MAX);
@@ -698,7 +711,7 @@ fn replay_gap_chain(
             // proof for the retry because the first call consumes it even
             // when journal admission refuses before mutation.
             let outcome = match apply_replayed_gap_block(
-                handles, &head, restored, &block, &bytes, height, hash,
+                handles, head, restored, &block, &bytes, height, hash,
             ) {
                 Err(ApplyError::JournalBackpressure(error))
                     if matches!(
@@ -707,13 +720,13 @@ fn replay_gap_chain(
                     ) => {
                     relieve_replay_journal_backpressure(
                         handles,
-                        &head,
+                        head,
                         restored,
                         &mut transition,
                         height,
                         hash,
                     )?;
-                    apply_replayed_gap_block(handles, &head, restored, &block, &bytes, height, hash)
+                    apply_replayed_gap_block(handles, head, restored, &block, &bytes, height, hash)
                 }
                 result => result,
             }?;

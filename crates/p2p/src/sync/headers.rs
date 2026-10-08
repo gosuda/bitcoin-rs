@@ -52,7 +52,6 @@ struct PresyncOutcome {
 impl BlockSync {
     #[expect(clippy::too_many_lines)]
     pub(super) fn drain_inbound_headers(&self) {
-        let receiver = self.inbound_headers_rx.lock();
         let mut total_headers = 0_usize;
         let mut credit_refresh_needed = false;
         // Near-tip batches whose body the announcing connection can serve
@@ -63,7 +62,7 @@ impl BlockSync {
             source,
             wire_response,
             body_fetch_owned,
-        }) = receiver.try_recv()
+        }) = self.inbound_headers_rx.try_recv()
         {
             let batch_len = headers.len();
             total_headers = total_headers.saturating_add(batch_len);

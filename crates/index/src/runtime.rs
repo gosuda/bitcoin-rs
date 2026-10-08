@@ -32,7 +32,7 @@ use crate::{
 
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize};
 
-use crate::block_log::{BlockLog, record_at_height};
+use crate::block_log::{BlockLogReader, record_at_height};
 use crate::capabilities::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };

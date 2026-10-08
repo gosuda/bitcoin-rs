@@ -20,6 +20,7 @@ mod commit;
 mod frontier;
 mod headers;
 mod headers_presync;
+mod historical;
 mod peers;
 mod receive;
 mod requests;
@@ -178,6 +179,11 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 /// applied-chain seam. See `docs/contracts/architecture.md` for the
 /// download-window ownership contract.
 pub struct BlockSync {
+    /// Bounded historical downloads, independent of the foreground
+    /// download window. This short-held lock is also read by peer ingress.
+    historical: Mutex<historical::HistoricalDownload>,
+    /// Serializes historical replay and delivery without holding the ingress lock.
+    historical_work: Mutex<()>,
     /// Applied-chain seam: header admission, window commit, branch switch,
     /// and genesis bootstrap live behind it (node owns them, ARCH-07).
     pub(crate) chain: Arc<dyn SyncChain>,
@@ -187,8 +193,8 @@ pub struct BlockSync {
     /// [`crate::download_window::BlockDownloadPolicy`]; nothing else decides
     /// whether this node is still syncing.
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
-    inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+    inbound_headers_rx: Receiver<InboundHeaders>,
+    inbound_blocks_rx: Receiver<crate::InboundBlock>,
     /// One lock owns the coupled download, staged-body, header-request, and
     /// session-reconciliation state. Consensus and chain I/O stay outside
     /// this lock; each component's policy remains in the P2P crate.
@@ -375,12 +381,14 @@ impl BlockSync {
     pub fn new(
         chain: Arc<dyn SyncChain>,
         peer_table: Arc<PeerTable>,
-        inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
-        inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+        inbound_headers_rx: Receiver<InboundHeaders>,
+        inbound_blocks_rx: Receiver<crate::InboundBlock>,
         ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     ) -> Self {
         let budget = default_sync_budget(chain.network());
         Self {
+            historical: Mutex::new(historical::HistoricalDownload::new(budget)),
+            historical_work: Mutex::new(()),
             chain,
             peer_table,
             ibd,
@@ -406,6 +414,7 @@ impl BlockSync {
     /// the fast-sync opt-in at node open, and tests and benchmarks that
     /// exercise non-default capacity limits.
     pub fn install_budget(&self, budget: SyncBudget) {
+        *self.historical.lock() = historical::HistoricalDownload::new(budget);
         *self.scheduler.lock() = SchedulerState {
             window: DownloadWindow::new(budget),
             stager: BlockStager::new(budget),
@@ -464,6 +473,9 @@ impl BlockSync {
     ///   predecessor's request.
     #[must_use]
     pub(crate) fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
+        if self.historical.lock().window.pending_owner(&hash) == Some(source) {
+            return true;
+        }
         let scheduler = self.scheduler.lock();
         scheduler.window.pending_owner(&hash) == Some(source)
             || scheduler
@@ -480,7 +492,9 @@ impl BlockSync {
         self.chain.bootstrap_genesis();
         // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
+        self.advance_historical();
         self.drain_inbound_blocks();
+        self.advance_historical();
 
         let now = Instant::now();
         // One frontier observation feeds recovery, selection, and planning;

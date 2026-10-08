@@ -1,7 +1,6 @@
 //! Daemon signal wrapper over the node-owned lifecycle.
 
 use std::io::IsTerminal as _;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -50,8 +49,8 @@ fn build_filter_directive(level: &str) -> String {
 /// PRE: the node lifecycle owns the shutdown flag and teardown runs on it.
 /// POST: returns after an acquire read of the flag observes `true`.
 /// INVARIANT: waits no longer than 100 ms between observations.
-fn wait_for_shutdown(shutdown: &AtomicBool) {
-    while !shutdown.load(Ordering::Acquire) {
+fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader) {
+    while !shutdown.is_triggered() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -64,7 +63,8 @@ fn wait_for_shutdown(shutdown: &AtomicBool) {
 pub fn run(config: NodeConfig, runtime: RuntimeInputs) -> Result<()> {
     install_tracing(&config.observability.log_level);
     let node = crate::lifecycle::start_node(config, runtime, true)?;
-    wait_for_shutdown(&node.state.shutdown());
+    let shutdown_reader = node.state.shutdown_reader();
+    wait_for_shutdown(&shutdown_reader);
     node.shutdown_blocking()
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }

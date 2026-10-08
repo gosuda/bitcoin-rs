@@ -36,6 +36,7 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
     handles.durable_head.commit(
         None,
         &DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 0,
             tip: Hash256::from(genesis.block_hash()),

@@ -257,9 +257,8 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
     let handles =
         bitcoin_rs_chainstate::Chainstate::from_parts(bitcoin_rs_chainstate::ChainstateParts {
             network: Network::Regtest,
-            chain_tip: tree.tip_handle(),
-            applied_tip: Arc::new(ArcSwapOption::empty()),
-            block_tree: Arc::new(RwLock::new(tree)),
+            block_tree: tree,
+            restored_applied_tip: None,
             utxo: Arc::new(UtxoSet::new()),
             coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
                 bitcoin_rs_utxo::stats::CoinStats::default(),
@@ -268,7 +267,6 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             block_body_store: Some(Arc::new(Bodies::default())),
             undo_store: Arc::new(bitcoin_rs_storage::undo::InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
-            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             // This fixture drives chainstate alone: nothing reads through the
             // other role, so the domain it mints loses nothing when only the
             // mutation role is taken from it.
@@ -280,6 +278,7 @@ fn disconnect_readmits_the_package_in_order_and_drops_the_nonfinal_member()
             capture_rawtx: false,
             capture_block_bytes: true,
             retention: bitcoin_rs_storage::MandatoryRetention::in_memory(),
+            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
     handles.apply_block(&genesis, None)?;
     for block in &blocks {

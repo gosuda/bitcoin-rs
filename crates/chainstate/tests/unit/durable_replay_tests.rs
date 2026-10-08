@@ -29,6 +29,7 @@ fn install_head(
 ) -> Result<DurableHead, StorageError> {
     let hash = Hash256::from(child.block_hash());
     let head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 7,
         height: 1,
         tip: hash,
@@ -36,17 +37,17 @@ fn install_head(
         body_extent: None,
         undo_extent: None,
     };
-    install_arbitrary_head(handles, head, bodies)?;
+    install_arbitrary_head(handles, &head, bodies)?;
     Ok(head)
 }
 
 fn install_arbitrary_head(
     handles: &mut Chainstate,
-    head: DurableHead,
+    head: &DurableHead,
     bodies: Arc<MemoryBodies>,
 ) -> Result<(), StorageError> {
     let durable = Arc::new(InMemoryDurableHeadStore::new());
-    durable.commit(None, &head, &CommitRecords::default())?;
+    durable.commit(None, head, &CommitRecords::default())?;
     handles.durable_head = durable;
     handles.block_body_store = Some(bodies);
     Ok(())
@@ -99,6 +100,7 @@ fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::err
     // The tree derives 1 (genesis) + 1 (the child's single transaction) = 2;
     // the stored head certified a different total before the crash.
     let head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 7,
         height: 1,
         tip: Hash256::from(child.block_hash()),
@@ -106,7 +108,7 @@ fn replay_publishes_the_receipt_certified_count() -> Result<(), Box<dyn std::err
         body_extent: None,
         undo_extent: None,
     };
-    install_arbitrary_head(&mut handles, head, bodies)?;
+    install_arbitrary_head(&mut handles, &head, bodies)?;
 
     super::reconcile_at_boot(&handles)?;
 
@@ -266,6 +268,7 @@ fn matching_durable_head_requires_no_replay() -> Result<(), Box<dyn std::error::
         .load_full()
         .ok_or("restored tip missing")?;
     let head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 3,
         height: restored.height,
         tip: restored.hash,
@@ -273,7 +276,7 @@ fn matching_durable_head_requires_no_replay() -> Result<(), Box<dyn std::error::
         body_extent: None,
         undo_extent: None,
     };
-    install_arbitrary_head(&mut handles, head, Arc::new(MemoryBodies::default()))?;
+    install_arbitrary_head(&mut handles, &head, Arc::new(MemoryBodies::default()))?;
 
     super::reconcile_at_boot(&handles)?;
 
@@ -294,6 +297,7 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap()
         .load_full()
         .ok_or("restored tip missing")?;
     let head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 4,
         height: restored.height,
         tip: Hash256::from(child.block_hash()),
@@ -302,7 +306,7 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap()
         undo_extent: None,
     };
 
-    let Err(error) = super::replay_committed_gap(&handles, head, Some(&restored)) else {
+    let Err(error) = super::replay_committed_gap(&handles, &head, Some(&restored)) else {
         panic!("head at restored height is not a publication gap");
     };
     assert!(matches!(
@@ -332,6 +336,7 @@ fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::e
         bodies.persist_block_body(height, tip_hash, &consensus_bytes(&block))?;
     }
     let head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 5,
         height: u32::try_from(width)?,
         tip: tip_hash,
@@ -340,7 +345,7 @@ fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::e
         undo_extent: None,
     };
     let certified = (head.height, head.tip, head.chain_tx_count);
-    install_arbitrary_head(&mut handles, head, bodies)?;
+    install_arbitrary_head(&mut handles, &head, bodies)?;
 
     super::reconcile_at_boot(&handles)?;
 
@@ -373,6 +378,7 @@ fn committed_gap_body_must_hash_to_the_head_identity() -> Result<(), Box<dyn std
     bodies.persist_block_body(1, claimed, &consensus_bytes(&child))?;
     handles.block_body_store = Some(bodies);
     let head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 6,
         height: 1,
         tip: claimed,
@@ -381,7 +387,7 @@ fn committed_gap_body_must_hash_to_the_head_identity() -> Result<(), Box<dyn std
         undo_extent: None,
     };
 
-    let Err(error) = super::replay_committed_gap(&handles, head, Some(&restored)) else {
+    let Err(error) = super::replay_committed_gap(&handles, &head, Some(&restored)) else {
         panic!("body/hash mismatch must fail");
     };
     assert!(matches!(
@@ -408,6 +414,7 @@ fn committed_gap_must_descend_from_restored_tip() -> Result<(), Box<dyn std::err
     bodies.persist_block_body(1, child_hash, &consensus_bytes(&child))?;
     handles.block_body_store = Some(bodies);
     let head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 7,
         height: 1,
         tip: child_hash,
@@ -416,7 +423,7 @@ fn committed_gap_must_descend_from_restored_tip() -> Result<(), Box<dyn std::err
         undo_extent: None,
     };
 
-    let Err(error) = super::replay_committed_gap(&handles, head, Some(&wrong_restored)) else {
+    let Err(error) = super::replay_committed_gap(&handles, &head, Some(&wrong_restored)) else {
         panic!("head chain rooted elsewhere must fail");
     };
     assert!(matches!(
@@ -446,6 +453,7 @@ fn committed_gap_replay_failure_fails_closed() -> Result<(), Box<dyn std::error:
     let bodies = Arc::new(MemoryBodies::default());
     bodies.persist_block_body(1, child_hash, &consensus_bytes(&child))?;
     let head = DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id: 9,
         height: 1,
         tip: child_hash,
@@ -453,9 +461,9 @@ fn committed_gap_replay_failure_fails_closed() -> Result<(), Box<dyn std::error:
         body_extent: None,
         undo_extent: None,
     };
-    install_arbitrary_head(&mut handles, head, bodies)?;
+    install_arbitrary_head(&mut handles, &head, bodies)?;
 
-    let Err(error) = super::replay_committed_gap(&handles, head, Some(&restored)) else {
+    let Err(error) = super::replay_committed_gap(&handles, &head, Some(&restored)) else {
         panic!("a gap body that fails apply must fail the replay");
     };
     assert!(
@@ -508,7 +516,7 @@ fn committed_gap_append_gap_does_not_enter_retention_relief()
     let marker_before = std::fs::read(path.join(FULL_REVALIDATION_MARKER))?;
     let journal_head_before = std::fs::read(path.join("head.json"))?;
     JournalEmit::mark_append_gap(&mut writer, 1);
-    handles.journal = Some(shared_journal_writer(writer));
+    *handles.journal.write() = Some(shared_journal_writer(writer));
 
     let Err(ApplyError::JournalBackpressure(error)) = super::reconcile_at_boot(&handles) else {
         panic!("append gap must return the original journal refusal, not recovery publication");

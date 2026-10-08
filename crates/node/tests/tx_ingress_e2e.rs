@@ -52,7 +52,6 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
-use parking_lot::Mutex;
 
 /// Node-side socket read poll while waiting for peer frames.
 const READ_POLL: Duration = Duration::from_millis(200);
@@ -583,7 +582,9 @@ impl Harness {
         let gateway = state.mempool_gateway();
 
         let ingress_tx = state.inbound_tx_sender();
-        let ingress_rx = state.inbound_tx_rx_handle();
+        let ingress_rx = state
+            .take_inbound_tx_receiver()
+            .ok_or_else(|| anyhow::anyhow!("inbound tx receiver already taken"))?;
         let (relay, relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
         let mining = FakeMiningControl::unavailable("not implemented");
         let mining_control: Arc<dyn MiningControl> = mining.clone();
@@ -708,7 +709,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> anyhow::Re
         Arc::clone(&gateway),
         mining_control,
         Arc::clone(&shutdown),
-        Arc::new(Mutex::new(ingress_rx)),
+        ingress_rx,
         relay.clone(),
     )?;
 

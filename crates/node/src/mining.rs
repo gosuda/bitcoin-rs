@@ -48,15 +48,13 @@ use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::consensus_bytes;
 use compact_str::CompactString;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 /// Production mining coordinator owned by the node process.
 pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
     block_tree: BlockTreeReader,
     followers: ChainFollowers,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     service: MiningService,
 }
 
@@ -73,7 +71,7 @@ impl MiningCoordinator {
         let network = chainstate.network();
         let applied_tip = chainstate.applied_tip_reader();
         let block_tree = chainstate.block_tree_reader();
-        let shutdown = chainstate.shutdown_handle();
+        let shutdown = chainstate.shutdown_reader();
         let service = MiningService::new(
             network,
             Arc::new(AppliedTipAdapter { tip: applied_tip }),
@@ -87,7 +85,7 @@ impl MiningCoordinator {
                 network,
             }),
             coinbase_script,
-            Arc::clone(&shutdown),
+            shutdown.clone(),
         );
         let block_tree = chainstate.block_tree_reader();
         Self {
@@ -479,7 +477,7 @@ impl MiningControl for MiningCoordinator {
         }
         let mut generated = Vec::new();
         for _ in 0..request.count {
-            if self.shutdown.load(Ordering::Acquire) {
+            if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));
@@ -620,7 +618,11 @@ fn bip22_reject_reason(error: &ApplyError) -> Result<CompactString, MiningContro
         | ApplyError::DisconnectOffDurableHead { .. }
         | ApplyError::DurableHeadGapUnrecoverable { .. }
         | ApplyError::RecoveryPublication(_)
-        | ApplyError::CoinStatsRewind(_) => {
+        | ApplyError::CoinStatsRewind(_)
+        | ApplyError::DisconnectBelowSnapshotBase { .. }
+        | ApplyError::PruneDuringHistoricalValidation { .. }
+        | ApplyError::ConnectPastHistoricalTarget { .. }
+        | ApplyError::HistoricalTargetHashMismatch { .. } => {
             return Err(MiningControlError::Failed(CompactString::from(
                 error.to_string(),
             )));

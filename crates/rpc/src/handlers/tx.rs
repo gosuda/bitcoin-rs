@@ -1883,14 +1883,14 @@ mod tests {
     #[test]
     fn scan_does_not_hold_the_block_log_lock_across_a_body_load() {
         struct LockProbeSource {
-            blocks: Arc<parking_lot::RwLock<bitcoin_rs_index::block_log::BlockLog>>,
+            blocks: bitcoin_rs_index::BlockLogReader,
             bodies: Vec<(u32, Vec<u8>)>,
         }
 
         impl bitcoin_rs_chain::BlockBodySource for LockProbeSource {
             fn block_body(&self, height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
                 assert!(
-                    self.blocks.try_write().is_some(),
+                    self.blocks.raw_handle().try_write().is_some(),
                     "the block-record lock must not be held across a body load"
                 );
                 self.bodies
@@ -1906,7 +1906,7 @@ mod tests {
         };
 
         let mut ctx = Context::new();
-        let log = Arc::clone(&ctx.chain.blocks);
+        let log = ctx.chain.blocks.clone();
         let bodies = blocks
             .iter()
             .enumerate()

@@ -18,6 +18,7 @@ pub use bitcoin_rs_storage::KvUndoStore;
 pub use bitcoin_rs_storage::UndoStore;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_utxo::contract::{SpentOutputLookup, is_coinbase_tx};
+use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use bitcoin_rs_utxo::{UtxoCoin, UtxoSet};
 use connect::{apply_block_admitted, apply_committed_block_admitted};
 use disconnect::disconnect_block_admitted;
@@ -38,8 +39,15 @@ mod window;
 pub use prepare::bytes_are_block;
 pub use window::classify_apply_error;
 
+pub mod assumeutxo;
+pub use assumeutxo::{
+    ActiveChainstateSummary, AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager,
+    ChainstateRole, ChainstatesSummary, HistoricalChainstateSummary, HistoricalCheckpointRef,
+};
+
 mod checkpoint;
 use checkpoint::CheckpointError;
+mod assumeutxo_snapshot;
 /// Typed chainstate mutation failures.
 mod error;
 pub mod events;
@@ -215,13 +223,22 @@ pub struct PruneAuthority {
     admission: Arc<ApplyAdmission>,
     chain_transition: TransitionAuthority,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
+    role: Arc<RwLock<ChainstateRole>>,
 }
 
 impl PruneAuthority {
     /// Acquires exclusive chain-mutation authority for one pruning pass.
     pub fn begin(&self) -> core::result::Result<PruneGuard<'_>, ApplyError> {
+        let transition = begin_chain_transition(&self.admission, &self.chain_transition)?;
+        // Pruning removes a prefix, so a requested height above the snapshot
+        // base still removes the history needed to validate that base. Check
+        // under the same transition lock that publishes role changes.
+        let role = *self.role.read();
+        if let Some(base_height) = role.base_height() {
+            return Err(ApplyError::PruneDuringHistoricalValidation { base_height });
+        }
         Ok(PruneGuard {
-            _transition: begin_chain_transition(&self.admission, &self.chain_transition)?,
+            _transition: transition,
             applied_tip: &self.applied_tip,
         })
     }
@@ -424,7 +441,8 @@ pub struct Chainstate {
     /// engine-specific seams of the shared block/tx validation pipeline.
     pub(crate) validation_engine: bitcoin_rs_consensus::ValidationEngine,
     /// Chainstate-journal writer, when the journal is enabled (issue #230).
-    pub(crate) journal: Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>,
+    pub(crate) journal:
+        Arc<RwLock<Option<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter>>>,
     /// Publishes checkpoints to settle rolled-back disconnect debt after a
     /// non-fatal reorg. `None` in unit-test handle sets that never reorg.
     pub(crate) checkpoint_publisher: Option<Arc<crate::checkpoint::publisher::CheckpointPublisher>>,
@@ -438,18 +456,18 @@ pub struct Chainstate {
     pub(crate) retention: bitcoin_rs_storage::MandatoryRetention,
     /// Process-wide initial-block-download latch owned by the chainstate.
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    /// Operational role of this chainstate instance.
+    pub(crate) role: Arc<RwLock<ChainstateRole>>,
 }
 
 /// Construction inputs for one authoritative chainstate service.
 pub struct ChainstateParts {
     /// Consensus network.
     pub network: Network,
-    /// Best-work header-tip publication cell.
-    pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Authoritative applied-tip publication cell.
-    pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Shared header/block tree.
-    pub block_tree: Arc<RwLock<BlockTree>>,
+    /// Shared header/block tree, transferred by value to the owning chainstate.
+    pub block_tree: BlockTree,
+    /// Restored applied-tip snapshot, if any.
+    pub restored_applied_tip: Option<TipSnapshot>,
     /// Authoritative UTXO set.
     pub utxo: Arc<UtxoSet>,
     /// Coin-statistics listener attached to the UTXO set.
@@ -462,8 +480,6 @@ pub struct ChainstateParts {
     pub undo_store: Arc<dyn UndoStore>,
     /// Durable applied-head store.
     pub durable_head: Arc<dyn DurableHeadStore>,
-    /// Process shutdown signal.
-    pub shutdown: Arc<AtomicBool>,
     /// The mutation role over the transition domain composition minted.
     pub chain_transition: TransitionAuthority,
     /// Highest assume-valid height.
@@ -480,6 +496,8 @@ pub struct ChainstateParts {
     pub capture_block_bytes: bool,
     /// The mandatory retained-history capability storage/pruning granted.
     pub retention: bitcoin_rs_storage::MandatoryRetention,
+    /// Operational role of this chainstate instance.
+    pub role: ChainstateRole,
 }
 
 /// Held while new chain mutations are blocked.
@@ -565,21 +583,25 @@ impl<'a> ChainTransition<'a> {
 impl Chainstate {
     /// Creates the production service from lower-layer capabilities.
     #[must_use]
-    pub fn from_parts(parts: ChainstateParts) -> Self {
+    pub fn from_parts(mut parts: ChainstateParts) -> Self {
+        let chain_tip = parts.block_tree.tip_handle();
         let assume_valid_gate = Arc::new(AssumeValidGate::new(
             parts.network,
             parts.assume_valid_height,
         ));
-        assume_valid_gate.evaluate(&parts.block_tree.read());
+        assume_valid_gate.evaluate(&parts.block_tree);
+        let block_tree = Arc::new(RwLock::new(parts.block_tree));
+        let applied_tip = Arc::new(ArcSwapOption::new(parts.restored_applied_tip.map(Arc::new)));
         let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-            TipReader::new(Arc::clone(&parts.applied_tip)),
-            BlockTreeReader::new(Arc::clone(&parts.block_tree)),
+            TipReader::new(Arc::clone(&applied_tip)),
+            BlockTreeReader::new(Arc::clone(&block_tree)),
         ));
+        let shutdown = Arc::new(AtomicBool::new(false));
         Self {
             network: parts.network,
-            chain_tip: parts.chain_tip,
-            applied_tip: parts.applied_tip,
-            block_tree: parts.block_tree,
+            chain_tip,
+            applied_tip,
+            block_tree,
             utxo: parts.utxo,
             coin_stats: parts.coin_stats,
             chain_events: parts.chain_events,
@@ -587,19 +609,214 @@ impl Chainstate {
             undo_store: parts.undo_store,
             durable_head: parts.durable_head,
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown: parts.shutdown,
+            shutdown,
             chain_transition: parts.chain_transition,
             assume_valid_height: parts.assume_valid_height,
             assume_valid_gate,
             validation_mode: parts.validation_mode,
             validation_engine: parts.validation_engine,
-            journal: parts.journal,
+            journal: Arc::new(RwLock::new(parts.journal)),
             checkpoint_publisher: None,
             capture_rawtx: parts.capture_rawtx,
             capture_block_bytes: parts.capture_block_bytes,
             retention: parts.retention,
             ibd,
+            role: Arc::new(RwLock::new(parts.role)),
         }
+    }
+
+    /// Returns the operational role of this chainstate instance.
+    #[must_use]
+    pub fn role(&self) -> ChainstateRole {
+        *self.role.read()
+    }
+
+    /// Sets the operational role of this chainstate instance.
+    pub(crate) fn set_role(&self, role: ChainstateRole) {
+        let _transition = self.chain_transition.lock();
+        *self.role.write() = role;
+    }
+
+    /// Installs a verified UTXO snapshot and initializes the applied tip and chain tx count
+    /// at the snapshot base height and block hash.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing or inconsistent base headers, closed admission, or a
+    /// lifecycle record that cannot be persisted.
+    fn install_snapshot(
+        &self,
+        snapshot_set: bitcoin_rs_utxo::UtxoSet,
+        mut stats: bitcoin_rs_utxo::stats::CoinStats,
+        pinned: &bitcoin_rs_primitives::AssumeUtxoData,
+        persist: impl FnOnce(&BlockTree, &TipSnapshot) -> Result<(), AssumeUtxoError>,
+    ) -> Result<(), AssumeUtxoError> {
+        let _guard = self.admission.enter()?;
+        let _transition = self.chain_transition.lock();
+        let mut tree = self.block_tree.write();
+        let node_id = tree
+            .lookup(pinned.block_hash)
+            .ok_or(AssumeUtxoError::SnapshotHeaderMissing(pinned.block_hash))?;
+        let node = tree.node(node_id).map_err(ApplyError::from)?;
+        if node.height != pinned.height {
+            return Err(AssumeUtxoError::SnapshotHeaderHeightMismatch {
+                expected: pinned.height,
+                found: node.height,
+            });
+        }
+        let tip_snapshot = TipSnapshot {
+            tip_id: node_id,
+            height: pinned.height,
+            chainwork: node.chainwork,
+            hash: pinned.block_hash,
+            chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(pinned.chain_tx_count),
+        };
+        // All refusals precede publication. The transition stays held across the
+        // lifecycle record and the whole coin/statistics/tip installation.
+        persist(&tree, &tip_snapshot).inspect_err(|error| {
+            if !matches!(
+                error,
+                AssumeUtxoError::ActivationBehindTip | AssumeUtxoError::FullRevalidationRequired
+            ) {
+                self.fail_closed_for_recovery();
+            }
+        })?;
+        // This journal extends the old checkpoint, not the new snapshot root.
+        // Snapshot recovery uses its immutable anchor and the certified suffix.
+        *self.journal.write() = None;
+        tree.restore_chain_tx_count(node_id, tip_snapshot.chain_tx_count)
+            .map_err(ApplyError::from)
+            .inspect_err(|_| self.fail_closed_for_recovery())?;
+        self.utxo.replace_from(snapshot_set);
+        stats.tx_count = pinned.chain_tx_count;
+        self.coin_stats.reset(stats);
+        crate::publication::publish_applied(
+            self,
+            &tip_snapshot,
+            crate::events::HintKind::Connected,
+        );
+        *self.role.write() = ChainstateRole::AssumedActive {
+            base_height: pinned.height,
+            base_hash: pinned.block_hash,
+        };
+
+        Ok(())
+    }
+
+    /// Constructs an isolated historical chainstate from this chainstate.
+    /// The historical chainstate has an independent UTXO set, detached events,
+    /// separate transient undo/head stores, no body writer or active journal,
+    /// and no external follower side-effects. Reopening restores a published
+    /// historical checkpoint when the durable head names one.
+    fn create_historical_counterpart(
+        &self,
+        base_height: u32,
+        base_hash: Hash256,
+        undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
+    ) -> Result<Arc<Self>, crate::AssumeUtxoError> {
+        self.create_historical_counterpart_with_state(base_height, base_hash, undo, None)
+    }
+
+    /// Constructs an isolated historical chainstate from a validated
+    /// checkpoint state.  The active header tree remains the single header
+    /// authority; only the historical UTXO, statistics, and applied tip are
+    /// restored from the checkpoint artifacts.
+    fn create_historical_counterpart_with_state(
+        &self,
+        base_height: u32,
+        base_hash: Hash256,
+        undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
+        restored: Option<(UtxoSet, CoinStats, TipSnapshot)>,
+    ) -> Result<Arc<Self>, crate::AssumeUtxoError> {
+        let restored_tip = restored.as_ref().map(|(_, _, tip)| tip.clone());
+        let (mut historical_utxo, historical_stats) = restored.map_or_else(
+            || {
+                (
+                    bitcoin_rs_utxo::UtxoSet::new(),
+                    bitcoin_rs_utxo::stats::CoinStats::new(),
+                )
+            },
+            |(utxo, stats, _)| (utxo, stats),
+        );
+        let historical_coin_stats = Arc::new(CoinStatsListener::new(historical_stats));
+        historical_utxo.track_coin_stats((*historical_coin_stats).clone());
+
+        let transition = bitcoin_rs_chain::TransitionDomain::new();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
+        if let Some(restored_tip) = restored_tip.clone() {
+            applied_tip.store(Some(Arc::new(restored_tip)));
+        }
+        let historical_head = Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new());
+        if let Some(restored_tip) = restored_tip {
+            let head = bitcoin_rs_storage::DurableHead {
+                assumeutxo: crate::AssumeUtxoDiskStatus::Uninitialized,
+                commit_id: 0,
+                height: restored_tip.height,
+                tip: restored_tip.hash,
+                chain_tx_count: restored_tip.chain_tx_count.to_wire(),
+                body_extent: None,
+                undo_extent: None,
+            };
+            bitcoin_rs_storage::DurableHeadStore::commit(
+                &*historical_head,
+                None,
+                &head,
+                &bitcoin_rs_storage::CommitRecords::default(),
+            )?;
+        }
+        let chain_tip = Arc::new(arc_swap::ArcSwapOption::empty());
+        let assume_valid_gate = Arc::new(AssumeValidGate::new(self.network, 0));
+        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+            TipReader::new(Arc::clone(&applied_tip)),
+            BlockTreeReader::new(Arc::clone(&self.block_tree)),
+        ));
+
+        // Sharing the mutable header tree stays inside its chainstate owner;
+        // production composition transfers an owned tree through ChainstateParts.
+        let historical = Self {
+            network: self.network,
+            chain_tip,
+            applied_tip,
+            block_tree: Arc::clone(&self.block_tree),
+            utxo: Arc::new(historical_utxo),
+            coin_stats: historical_coin_stats,
+            chain_events: Arc::new(crate::events::ChainEventPublisher::detached(
+                self.chain_events.epoch(),
+            )),
+            block_body_store: None,
+            undo_store: undo,
+            durable_head: historical_head,
+            admission: Arc::new(ApplyAdmission::new()),
+            shutdown,
+            chain_transition: transition.authority(),
+            assume_valid_height: 0,
+            assume_valid_gate,
+            validation_mode: ValidationMode::Full,
+            validation_engine: self.validation_engine,
+            journal: Arc::new(RwLock::new(None)),
+            checkpoint_publisher: None,
+            capture_rawtx: false,
+            capture_block_bytes: false,
+            retention: self.retention.clone(),
+            ibd,
+            role: Arc::new(RwLock::new(ChainstateRole::Historical {
+                base_height,
+                base_hash,
+            })),
+        };
+        Ok(Arc::new(historical))
+    }
+
+    /// Returns a read-only capability to observe the process shutdown signal.
+    #[must_use]
+    pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
+        bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.shutdown))
+    }
+
+    /// Requests process shutdown across the node.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
     }
 
     /// Permanently closes chain mutation and asks the process to shut down.
@@ -769,7 +986,8 @@ impl Chainstate {
         self.block_body_store.clone()
     }
 
-    /// Clones the process shutdown signal.
+    /// Clones the process shutdown signal for testing.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.shutdown)
@@ -871,6 +1089,7 @@ impl Chainstate {
             admission: Arc::clone(&self.admission),
             chain_transition: self.chain_transition.clone(),
             applied_tip: Arc::clone(&self.applied_tip),
+            role: Arc::clone(&self.role),
         }
     }
 
@@ -900,7 +1119,13 @@ impl Chainstate {
         coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
         chain_events: Arc<crate::events::ChainEventPublisher>,
     ) -> Self {
-        Self::from_parts(ChainstateParts {
+        let assume_valid_gate = Arc::new(AssumeValidGate::new(network, 0));
+        assume_valid_gate.evaluate(&block_tree.read());
+        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+            TipReader::new(Arc::clone(&applied_tip)),
+            BlockTreeReader::new(Arc::clone(&block_tree)),
+        ));
+        Self {
             network,
             chain_tip,
             applied_tip,
@@ -911,16 +1136,21 @@ impl Chainstate {
             block_body_store: None,
             undo_store: Arc::new(InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
+            admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             chain_transition: TransitionDomain::new().authority(),
             assume_valid_height: 0,
+            assume_valid_gate,
             validation_mode: ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
-            journal: None,
+            journal: Arc::new(RwLock::new(None)),
+            checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: bitcoin_rs_storage::MandatoryRetention::in_memory(),
-        })
+            role: Arc::new(RwLock::new(ChainstateRole::Ordinary)),
+            ibd,
+        }
     }
 
     /// Copies the published applied tip and its transaction count.
@@ -985,7 +1215,9 @@ impl Chainstate {
         };
         match publisher.publish()? {
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => Ok(None),
-            crate::checkpoint::CheckpointWrite::Published { generation } => Ok(Some(generation)),
+            crate::checkpoint::CheckpointWrite::Published { reference } => {
+                Ok(Some(reference.generation))
+            }
         }
     }
 
@@ -1123,6 +1355,7 @@ impl Chainstate {
 }
 
 /// Everything a disconnect can refuse, decided before anything is mutated.
+#[derive(Debug)]
 struct DisconnectPlan {
     /// Parent tip with the cumulative count its tree node carries, which the
     /// disconnect commits and publishes unchanged.

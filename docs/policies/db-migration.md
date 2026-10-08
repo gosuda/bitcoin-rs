@@ -8,7 +8,7 @@ On-disk format is internal architecture, not a compatibility promise: a format b
 
 `CURRENT_SCHEMA` covers only authoritative chainstate bytes: the durable head, the coin set it commits, body and undo extents and references, and their identity metadata. Owner-local state does not belong to this marker. Fee estimator state, peer discovery state, and index-only layouts carry their own versions (see the owner-local section below).
 
-Every node datadir contains a small `CURRENT_SCHEMA` epoch record. Its current schema epoch is `0`. It is the sole authority for authoritative persistent-format compatibility. The node writes and syncs the marker before any authoritative store opens. Its file contents are synced everywhere; the containing directory is synced on platforms that expose a reliable directory-sync primitive.
+Every node datadir contains a small `CURRENT_SCHEMA` epoch record. Its current schema epoch is `2`. It is the sole authority for authoritative persistent-format compatibility. Epoch 2 binds the head's historical checkpoint reference to its publication-time manifest digest; epoch 0 and 1 datadirs require an explicit fresh resync into a separately named directory. The node writes and syncs the marker before any authoritative store opens. Its file contents are synced everywhere; the containing directory is synced on platforms that expose a reliable directory-sync primitive.
 
 Startup follows this contract:
 
@@ -16,8 +16,7 @@ Startup follows this contract:
 | --- | --- |
 | Empty directory | Create and sync the current `CURRENT_SCHEMA` epoch, then initialize the current schema |
 | `CURRENT_SCHEMA` matches the current epoch | Continue startup |
-| Non-empty directory without `CURRENT_SCHEMA`, while epoch `0` is current | Treat the datadir as baseline epoch `0`, publish the marker, then continue startup |
-| Non-empty directory without `CURRENT_SCHEMA`, while a later epoch is current | Treat the datadir as implicit epoch `0` and refuse open with `incompatible_schema` |
+| Non-empty directory without `CURRENT_SCHEMA` | Treat the datadir as implicit epoch `0` and refuse open with `incompatible_schema` |
 | Marker is malformed or has another epoch | Refuse open with `incompatible_schema` before opening persistent state |
 | Current marker with no durable head | Start cold; this is normal before the first committed head |
 | Durable head references missing or corrupt authoritative bytes | Refuse open with `incompatible_schema`; committed-range corruption is diagnosed, never silently accepted |
@@ -104,8 +103,9 @@ The `Cold` path is for a datadir with the current marker and no committed durabl
 
 | Epoch | Change | Status |
 | --- | --- | --- |
-| `0` | Initial baseline format. An unmarked non-empty datadir adopts it while it is current. | current |
-| `1` | The target durable layout moves authoritative chainstate bytes to the chainstate owner's durable store. The checkpoint commit point is replaced by the durable head. Open refuses with `incompatible_schema`; explicit operator resync is required. | planned |
+| `0` | Initial baseline format. Unmarked non-empty datadirs are implicit epoch `0` and are refused. | retired |
+| `1` | The durable head carries the AssumeUTXO anchor, lifecycle, pending-validation reference, and historical checkpoint reference (frame version 3). | retired |
+| `2` | The durable head binds the historical checkpoint generation to its publication-time manifest SHA256 (frame version 4). Older datadirs are refused with `incompatible_schema`; explicit operator resync into a separate directory is required. | current |
 
 ## Removed settings and changed input syntax
 

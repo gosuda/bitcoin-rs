@@ -77,7 +77,7 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossbeam_channel::unbounded;
 use evidence::{Cell, Interval, IntervalKind, LEDGER_SCHEMA, Ledger, Sample};
 use parking_lot::Mutex as ParkingMutex;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use tempfile::TempDir;
 
 const PROXY_BLOCKS: u32 = 32;
@@ -629,12 +629,9 @@ impl SyncFixture {
         let block_tree = Arc::new(RwLock::new(tree));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
-        let (_inbound_headers_tx, inbound_headers_rx_raw) =
+        let (_inbound_headers_tx, inbound_headers_rx) =
             unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
-            unbounded::<bitcoin_rs_p2p::InboundBlock>();
-        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let derived_index_runtime = tx_index_for_mode(tx_index_mode);
         let followers =
             bitcoin_rs_node::ChainFollowers::noop().with_tx_index(derived_index_runtime);
@@ -652,6 +649,7 @@ impl SyncFixture {
             inbound_headers_rx,
             inbound_blocks_rx,
             Arc::clone(&ibd),
+            None,
         );
 
         let outbound_rxs = install_synthetic_peers(&peer_table, peer_count);

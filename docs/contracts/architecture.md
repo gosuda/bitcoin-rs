@@ -362,6 +362,108 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   tests, which build fixture sets through
   `BlockChanges` + `commit_block_changes` on `fixture_set()`.
 
+### `ARCH-07b`: AssumeUTXO chainstate roles and single active authority
+
+- **Chainstate roles**:
+  `bitcoin_rs_chainstate::ChainstateRole` explicitly defines the lifecycle state
+  of every instantiated chainstate:
+  1. `Ordinary`: standard fully validated chainstate.
+  2. `AssumedActive`: snapshot-loaded chainstate actively driving the node tip,
+     retaining its snapshot base height and block hash.
+  3. `Historical`: background chainstate validating from genesis or an accepted
+     historical checkpoint up to the snapshot base height.
+- **Single active authority invariant**:
+  At all times, exactly one chainstate acts as the authoritative active chainstate
+  (`Ordinary` or `AssumedActive`). Only the active chainstate drives mempool admission,
+  mining block template assembly, RPC/ZMQ chain effects, indexer updates, and pruning
+  execution. The historical chainstate runs background validation using the consensus
+  connect path (`Chainstate::connect`), but its events are detached and never routed to
+  mempool, mining, RPC, ZMQ, or indexers.
+- **Snapshot activation and pinned metadata**:
+  Activation of an AssumeUTXO snapshot is coordinated exclusively by `AssumeUtxoManager`.
+  Snapshot height and block hash must match pinned network metadata (`AssumeUtxoData`).
+  The manager consumes the imported set and computes its `hash_serialized_3` commitment;
+  caller-supplied digests and snapshot trailers do not establish trust. This is Core's
+  `HASH_SERIALIZED` commitment, not MuHash. The pinned transaction count seeds the
+  active tip; it is independently checked during historical finalization. The base
+  header must already exist at the pinned height. Coin statistics are rebuilt from
+  the imported coins, and the resolved header supplies chainwork. Installation and
+  role changes serialize with chain transitions; failed validation publishes nothing.
+- **Background validation and convergence**:
+  The historical chainstate validates blocks up to the snapshot base height. It refuses
+  to connect blocks past the base height or blocks that diverge from the expected target
+  hash (`ApplyError::ConnectPastHistoricalTarget` and
+  `ApplyError::HistoricalTargetHashMismatch`, respectively). When validation reaches
+  the base height, the reconstructed `hash_serialized_3` and cumulative transaction
+  count must match the pinned metadata:
+  - If valid, the active chainstate transitions from `AssumedActive` to `Ordinary`, the
+    historical chainstate is retired, and disk status is marked `Finalized`.
+  - If invalid, the manager persists `AssumeUtxoDiskStatus::Failed`, marks the active
+    chainstate permanently closed for recovery (`Chainstate::fail_closed_for_recovery`), and
+    refuses subsequent restarts to protect operator data.
+  Historical replay uses its own isolated coins, transient durable-head and undo stores,
+  no body writer, and detached events. The manager archives validated body locators
+  and undo records together with lifecycle progress in the active durable-head batch.
+  These batches advance `commit_id` while preserving the active tip and transaction
+  count. They publish no active-chain notification. Transient undo is released after
+  the archive receipt, so it does not accumulate through the entire history.
+  Historical progress checkpoints reuse the chainstate checkpoint format in a
+  separate namespace. The durable head records the accepted generation, height,
+  and hash; startup restores that checkpoint and replays only its certified
+  archive suffix. Without an accepted checkpoint, startup safely falls back to
+  genesis replay. The summary exposes live progress separately.
+  Historical publication retains earlier generations until the head accepts
+  the replacement; recovery selects the head's generation independently of
+  `CURRENT`. Snapshot activation refuses an unresolved full-revalidation marker.
+  Replaying a block already covered by an archive receipt does not rewrite its
+  body or progress. Before checking a new body, the manager syncs its staged bytes and commits a
+  pending-validation reference in the same root. If a crash or terminal-status
+  write failure leaves that reference, startup reconstructs the dependencies and
+  completes the check before returning node state. A mismatch cannot be forgotten
+  by restarting after a failed `Failed` write. Finalization is durable before the
+  role becomes `Ordinary`; unresolved storage errors close both admissions.
+  Production sync pipelines bodies on the pinned base ancestry through a separate
+  instance of the existing download window and block stager: at most 32 pending
+  and staged bodies in total, 16 in flight per peer, and 64 MiB of staged wire
+  payload (plus the stager's one-front-body allowance to avoid a full-tail deadlock).
+  Decoded bodies also occupy bounded memory alongside their wire payloads.
+  Smaller configured budgets still apply. Archive-capable peers supply batches;
+  connection leases, timeouts, retry and backpressure use the shared download policy.
+  Body binding is checked before staging. Each historical pass makes at most nine
+  chain-owner calls, each replaying at most eight retained blocks, and admits at most
+  eight staged bodies in pinned ancestry order, refilling the window while later
+  bodies remain staged. A sync tick runs a pass before and
+  after draining deliveries. Replay retires overtaken downloads; completion clears
+  transient staging. Only validation publishes body locators and lifecycle progress.
+  Foreground and historical deliveries have separate owners. Mainnet throughput and
+  absolute restart-latency guarantees remain unproven follow-ups to #1288; the
+  restart contract is bounded by the historical checkpoint interval once an
+  accepted checkpoint exists.
+- **Reorg and pruning constraints**:
+  - Reorgs on the `AssumedActive` chainstate cannot disconnect blocks at or below the
+    snapshot base height (`ApplyError::DisconnectBelowSnapshotBase`).
+  - `PruneAuthority::begin` refuses prefix pruning while either chainstate has a
+    snapshot role. Even a requested height above the base would delete required
+    history. The role check shares the chain-transition lock with activation and
+    finalization, so pruning cannot race a role change.
+- **Operator observability**:
+  `AssumeUtxoManager::chainstates_summary` provides a unified read projection of both
+  active and background chainstates, reporting roles, tips, validation progress, and
+  commitments without exposing internal lock primitives.
+- **Durable activation and recovery**:
+  Immutable coin and header archives are synced before the active head commits the
+  pinned base and lifecycle status. That head is the only activation authority;
+  orphan import files do not activate a snapshot. Startup admits the current schema,
+  validates the root's network pin, and restores a compatible checkpoint or verifies
+  the snapshot archive, then replays the certified foreground suffix to the head.
+  A checkpoint remains an accelerator, including after finalized history is pruned.
+  Activation detaches the old checkpoint journal; anchored recovery does not replay
+  that journal across the snapshot jump. Node activation fences mempool admission,
+  clears old transactions, and wakes index/mining consumers. It does not manufacture
+  per-block ZMQ events for imported history. Historical undo makes below-base reorgs
+  possible after finalization; crossing below the base removes the snapshot anchor
+  in the disconnect's authoritative batch.
+
 ### `ARCH-08`: Durable pruning and reorg retention
 
 - Transaction-cache pruning must not remove transactions from a block above
@@ -369,6 +471,49 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   becomes eligible only after durability has been published through
   `CORE_REORG_SAFETY_MARGIN`; this protects reconsideration of disconnected
   transactions during reorg handling.
+
+### `ARCH-09`: Authoritative owners and read-only capability boundaries
+
+- Subsystems keep exactly one authoritative mutation owner for each piece of
+  state. External consumers and cross-subsystem adapters receive read-only
+  capabilities or single-consumer ownership rather than cloneable mutable handles:
+  - **`BlockLog`**: Exclusively owned and mutated by `ChainFollowers`. Consumers
+    (RPC handlers, derived index runtime, node queries) access block records
+    through the read-only capability `BlockLogReader`. Mutation methods
+    (`BlockLogReader::write`) and raw mutable handles (`BlockLogReader::raw_handle`)
+    are gated behind the explicit `test-seam` feature.
+  - **P2P Inbound Channels**: Single-consumer ownership is enforced for ingress
+    channels. Channel receivers (`inbound_headers_rx`, `inbound_blocks_rx`,
+    `inbound_tx_rx`) are moved by value to their respective worker loops
+    (`BlockSync`, `spawn_tx_ingress_consumer`) using single-take accessors
+    (`take_inbound_headers_receiver`, `take_inbound_blocks_receiver`,
+    `take_inbound_tx_receiver`). Exposing cloneable `Arc<Mutex<Receiver<...>>>`
+    handles in production runtime wiring is prohibited.
+  - **`Chainstate`**: Owns the block tree, applied/header tip cells, and process
+    shutdown signal. Construction via `ChainstateParts` consumes `BlockTree` by
+    value and `restored_applied_tip: Option<TipSnapshot>`, eliminating
+    construction-time mutable handle leaks. Mutation authority remains strictly
+    confined to chainstate methods; external consumers observe tip state via
+    `TipReader` and `BlockTreeReader`.
+  - **Shutdown and Ban Capabilities**: Cancellation and ban state are exposed
+    through read-only capabilities (`LatchReader`, `BannedReader`). Ordinary
+    workers and subsystems query ban status and observe shutdown through these
+    capabilities without holding mutable handles or raw atomic pointers.
+    Shutdown mutation authority remains strictly encapsulated behind
+    `request_shutdown()` and dedicated lifecycle handlers.
+- Intentional `Arc` / `Weak` shared ownership invariants:
+  - `Arc<PeerTable>`: Shared among P2P service, connection listeners, sync, and
+    RPC network handles. `PeerTable` is internally synchronized and owns peer
+    leases and address tracking.
+  - `Weak<MempoolGateway>`: Held by the P2P transaction relay observer
+    (`LocalTxRelayObserver`) to prevent cyclic reference cycles and ensure that
+    observer registration does not artificially prolong gateway lifetime.
+  - `UtxoReader`: Read-only projection of the authoritative `UtxoSet` (which is
+    mutated solely by chainstate under transition locks) to mempool and RPC.
+  - `InitialBlockDownload`: Supplies the shared IBD decision across sync and
+    header presync by observing chain progress through read-only capabilities
+    (`TipReader`, `BlockTreeReader`), while worker orchestration belongs to
+    `BlockSync`.
 
 ## Test and evidence isolation
 
@@ -448,3 +593,7 @@ backend construction), [ARCH-05](#arch-05-node-composition-and-orchestration-bou
 - `bin/bitcoin-rs/src/bitcoin_conf.rs` test
   `every_table_core_key_reaches_its_slot`: each `bitcoin.conf` key the option
   table names writes the slot the table names.
+- `crates/mempool/tests/gateway_tests.rs`, `crates/chain/tests/latch_tests.rs`,
+  `crates/index/tests/block_log_tests.rs`, and `crates/p2p/tests/service_tests.rs`
+  prove single mutation ownership, capability encapsulation, and single-consumer
+  channel ownership (`ARCH-09`).

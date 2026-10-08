@@ -64,11 +64,22 @@ fn segwit_block(prev_blockhash: BlockHash, height: u32, witness: bool) -> Block 
     .unwrap_or_else(|error| panic!("regtest fixture block: {error}"))
 }
 
+type SegwitSyncFixture = (
+    BlockSync,
+    Hash256,
+    Block,
+    Block,
+    crossbeam_channel::Sender<InboundHeaders>,
+);
+
 /// Sets up a `BlockSync` with genesis applied, a single segwit block header in
-/// the tree, and a default sync budget. Returns the sync, the block hash, and
-/// both body variants (correct and stripped).
-fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn std::error::Error>> {
-    let (sync, _peers, _applied_tip, _main, _blocks_tx) = sync_with_mined_chain(0)?;
+/// the tree, and a default sync budget. Returns the sync, the block hash, both
+/// body variants (correct and stripped), and the inbound-headers sender.
+fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>> {
+    let (tree, _blocks) = mined_chain(0, 0)?;
+    let harness = SyncHarness::new(tree);
+    let sync = harness.sync;
+    let headers_tx = harness.inbound_headers_tx;
     sync.chain.bootstrap_genesis();
     install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
 
@@ -95,7 +106,7 @@ fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn s
         "stripped and correct blocks must share the same hash"
     );
 
-    Ok((sync, block_hash, correct_block, stripped_block))
+    Ok((sync, block_hash, correct_block, stripped_block, headers_tx))
 }
 
 /// (g) A malformed (witness-stripped) body arrives first and is rejected for
@@ -104,7 +115,7 @@ fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn s
 /// source), but the stager must remain clean so the correct body can stage.
 #[test]
 fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, block_hash, correct_block, stripped_block) = segwit_sync_fixture()?;
+    let (sync, block_hash, correct_block, stripped_block, _) = segwit_sync_fixture()?;
 
     // Send the stripped (malformed) body first.
     let mut batch = vec![InboundBlock::from_decoded(stripped_block)];
@@ -136,7 +147,7 @@ fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::
 #[test]
 fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, block_hash, _correct_block, stripped_block) = segwit_sync_fixture()?;
+    let (sync, block_hash, _correct_block, stripped_block, _) = segwit_sync_fixture()?;
     let peer_a = test_addr(9750, 0)?;
     let peer_b = test_addr(9750, 1)?;
     let rx_a = connect_peer(&sync.peer_table, synthetic_peer(peer_a, 1));
@@ -176,7 +187,7 @@ fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash()
 #[test]
 fn altered_non_witness_body_dropped_then_correct_body_staged()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, block_hash, correct_block, _) = segwit_sync_fixture()?;
+    let (sync, block_hash, correct_block, _, _) = segwit_sync_fixture()?;
     let mut altered_block = correct_block.clone();
     altered_block.txs[0].outputs[0].value = Amount::from_sat(2);
     assert_eq!(
@@ -210,7 +221,7 @@ fn altered_non_witness_body_dropped_then_correct_body_staged()
 #[test]
 fn correct_body_staged_then_malformed_duplicate_is_ignored()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, block_hash, correct_block, stripped_block) = segwit_sync_fixture()?;
+    let (sync, block_hash, correct_block, stripped_block, _) = segwit_sync_fixture()?;
 
     // Send the correct body first.
     let mut batch = vec![InboundBlock::from_decoded(correct_block)];
@@ -251,13 +262,11 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored()
 #[test]
 fn idle_frontier_relearns_stale_peer_credit_after_rejected_body()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, hash, correct, stripped) = segwit_sync_fixture()?;
+    let (sync, hash, correct, stripped, headers_tx) = segwit_sync_fixture()?;
     let bad = test_addr(9765, 0)?;
     let good = test_addr(9765, 1)?;
     let bad_rx = connect_peer(&sync.peer_table, synthetic_peer(bad, 1));
     let good_rx = connect_peer(&sync.peer_table, synthetic_peer(good, 0));
-    let (headers_tx, headers_rx) = unbounded();
-    *sync.inbound_headers_rx.lock() = headers_rx;
     sync.tick();
     assert_eq!(
         witness_block_inventory(next_getdata(&bad_rx)?)?,

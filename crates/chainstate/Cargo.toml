@@ -58,9 +58,10 @@ rayon.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 bitcoin-rs-chainstate = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
-serde_json.workspace = true
 tempfile.workspace = true

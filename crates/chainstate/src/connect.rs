@@ -69,6 +69,26 @@ pub(super) fn apply_block_admitted<'b>(
         }
     };
 
+    if let crate::assumeutxo::ChainstateRole::Historical {
+        base_height,
+        base_hash,
+    } = handles.role()
+    {
+        if height > base_height {
+            return Err(ApplyError::ConnectPastHistoricalTarget {
+                height,
+                base_height,
+            });
+        }
+        if height == base_height && block_hash != base_hash {
+            return Err(ApplyError::HistoricalTargetHashMismatch {
+                base_height,
+                expected: base_hash,
+                found: block_hash,
+            });
+        }
+    }
+
     // Contextual header rules, shared with header admission: the difficulty
     // continuity, median-time-past, BIP94 timewarp, future-drift, and version
     // floors all come from the one gate, so a block whose header never passed
@@ -96,7 +116,7 @@ pub(super) fn apply_block_admitted<'b>(
         contextual_header_result?;
     }
     if intent == ApplyIntent::Commit
-        && let Some(journal) = &handles.journal
+        && let Some(journal) = handles.journal.read().clone()
     {
         let maintenance = {
             let mut journal = journal.lock();
@@ -979,7 +999,7 @@ fn build_journal_record(
 
 /// Emits one built journal record, best-effort.
 pub(super) fn emit_journal_record(handles: &Chainstate, built: BuiltJournalRecord, height: u32) {
-    let Some(journal) = handles.journal.as_ref() else {
+    let Some(journal) = handles.journal.read().clone() else {
         return;
     };
     let Some(record) = built else {

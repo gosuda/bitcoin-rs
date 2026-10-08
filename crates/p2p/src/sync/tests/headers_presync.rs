@@ -630,8 +630,8 @@ fn presync_fixture_refusing(
                 .with_minimum_chain_work(minimum_work),
         ))),
         Arc::clone(&peers),
-        Arc::new(Mutex::new(inbound_headers_rx)),
-        Arc::new(Mutex::new(inbound_blocks_rx)),
+        inbound_headers_rx,
+        inbound_blocks_rx,
         crate::sync::syncing_ibd_latch(),
     );
     install_budget(
