@@ -54,7 +54,7 @@ const FLAGS: [VerifyFlags; 6] = [
 const WITNESS_ELEMENTS_MAX: usize = 8;
 /// Largest framed script or witness element. The u16 wire length can never
 /// exceed this, so the bound is defensive, not a truncation of real vectors.
-const ELEMENT_LEN_MAX: usize = 0xFFFF;
+const ELEMENT_LEN_MAX: usize = 65_535;
 
 /// Selector value choosing the explicit-flags framing: the next four input
 /// bytes are little-endian `VerifyFlags` bits used verbatim, letting vector
