@@ -241,9 +241,6 @@ impl<S: KvStore> JournalWriter<S> {
         };
         self.write_head_atomic(&marker)?;
 
-        // The new head is now the logical commit point. Update in-memory state
-        // before best-effort physical cleanup so `resume` cannot republish the
-        // superseded base if cleanup reports an error.
         self.base_generation = checkpoint_generation;
         self.base_height = tip_height;
         self.base_hash = tip_hash;
@@ -299,9 +296,6 @@ impl<S: KvStore> JournalWriter<S> {
                 state: "already open",
             });
         }
-        // Publish the (possibly unchanged) head with the new base cursor. The
-        // durable cursor was already committed by freeze/compaction, so a
-        // redundant republish failure must not strand the runtime as Frozen.
         let publish_result = self.publish_head_now();
         self.state = WriterState::Open;
         self.last_boundary = Instant::now();

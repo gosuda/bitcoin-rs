@@ -125,9 +125,6 @@ impl DisconnectMarker {
 
     fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let Ok(fixed): Result<[u8; 37], _> = bytes.try_into() else {
-            // A marker that will not decode is still a marker. Treating a short
-            // read as "no disconnect was in flight" would let corruption clear
-            // the interlock, which is the one thing it must never do.
             return Err(StorageError::Backend(format!(
                 "disconnect marker is {} bytes, expected 37",
                 bytes.len()
@@ -396,8 +393,6 @@ mod tests {
             "arming records an unfinished rollback"
         );
 
-        // A checkpoint must refuse an unfinished rollback. Checkpointing
-        // half-rolled-back state captures the damage instead of repairing it.
         assert!(matches!(
             KvUndoStore::new(Arc::clone(&reopened)).disarm_disconnect(),
             Err(StorageError::InvalidOperation(_))
@@ -409,8 +404,6 @@ mod tests {
             "a checkpoint must not clear an in-flight marker"
         );
 
-        // Once the rollback completes, the same call clears it, or a node that
-        // disconnected cleanly could never start again.
         KvUndoStore::new(Arc::clone(&reopened)).complete_disconnect(140_003, block_hash)?;
         KvUndoStore::new(Arc::clone(&reopened)).disarm_disconnect()?;
         drop(reopened);

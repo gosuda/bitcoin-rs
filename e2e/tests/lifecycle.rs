@@ -33,6 +33,22 @@ fn startup_reports_regtest_identity() -> Result<()> {
     node.stop()
 }
 
+#[test]
+fn node_info_rpcs_answer() -> Result<()> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    let rpcinfo = node.rpc("getrpcinfo", &json!([]))?;
+    assert_eq!(rpcinfo.field("active_commands")?, &json!([]));
+    let datadir = node.take_datadir()?;
+    assert_eq!(
+        rpcinfo.str_field("logpath")?,
+        datadir.path().join("node/debug.log").to_string_lossy()
+    );
+    let memory = node.rpc("getmemoryinfo", &json!([]))?;
+    memory.field("locked")?.u64_field("used")?;
+    memory.field("locked")?.u64_field("free")?;
+    node.stop()
+}
+
 /// A mined tip survives SIGTERM and is visible after a clean restart
 /// over the same datadir.
 #[test]

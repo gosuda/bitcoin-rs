@@ -149,12 +149,17 @@ fn mining_info_and_hashps() -> Result<()> {
     assert_eq!(info.str_field("bits")?, "207fffff");
     assert_eq!(info["next"]["height"], json!(6));
 
-    // The two mining surfaces must report one estimate, not two.
+    let hashps = node.rpc("getnetworkhashps", &json!([]))?;
+    let value = hashps
+        .as_f64()
+        .ok_or_else(|| Error::Assertion("getnetworkhashps not numeric".into()))?;
+    assert!(value >= 0.0, "negative network hashrate: {value}");
     assert_eq!(
         info.field("networkhashps")?,
-        &node.rpc("getnetworkhashps", &json!([]))?,
+        &hashps,
         "getmininginfo and getnetworkhashps disagree"
     );
+    assert!(info.field("difficulty")?.as_f64().is_some());
     node.stop()
 }
 

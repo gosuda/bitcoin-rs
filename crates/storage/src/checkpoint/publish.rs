@@ -196,8 +196,6 @@ pub fn commit_publication(
         retention,
         ..
     } = stage;
-    // Caller built the manifest for a different generation than the stage
-    // reserved; publishing it would make CURRENT point at an unreadable checkpoint.
     if manifest.generation != generation {
         return Err(CheckpointError::Invalid(format!(
             "manifest generation {} does not match staged generation {generation}",
@@ -351,7 +349,6 @@ fn cleanup_after_publication(root: &CheckpointRoot, current: Option<&str>) {
     let entries = match root.entries() {
         Ok(entries) => entries,
         Err(error) => {
-            // Directory enumeration failed while retiring stale generations.
             tracing::warn!(%error, "failed to enumerate checkpoint cleanup entries");
             return;
         }
@@ -361,7 +358,6 @@ fn cleanup_after_publication(root: &CheckpointRoot, current: Option<&str>) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                // An entry could not be inspected during cleanup.
                 tracing::warn!(%error, "failed to inspect checkpoint cleanup entry");
                 continue;
             }
@@ -373,7 +369,6 @@ fn cleanup_after_publication(root: &CheckpointRoot, current: Option<&str>) {
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(error) => {
-                // File type inspection failed for a cleanup entry.
                 tracing::warn!(%error, entry = name, "failed to classify checkpoint cleanup entry");
                 continue;
             }
@@ -393,13 +388,11 @@ fn cleanup_after_publication(root: &CheckpointRoot, current: Option<&str>) {
             continue;
         };
         if let Err(error) = result {
-            // Removing a stale generation or CURRENT temporary failed.
             tracing::warn!(%error, entry = name, "failed to remove checkpoint cleanup entry");
         }
     }
     if attempted {
         if let Err(error) = root.sync() {
-            // Cleanup completed but its directory durability barrier failed.
             tracing::warn!(%error, "failed to sync checkpoint directory after cleanup");
         }
     }

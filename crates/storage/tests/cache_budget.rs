@@ -31,8 +31,6 @@ fn disabled_namespaces_redistribute_to_chainstate() {
     assert_eq!(shares[0].bytes, total, "chainstate takes the full budget");
     assert_eq!(shares[1].bytes, 0);
 
-    // With txindex enabled, chainstate gets the remainder and txindex keeps
-    // exactly 20%.
     let shares = split_cache_budget(total, true);
     assert_eq!(
         shares[1].bytes,
@@ -48,7 +46,6 @@ fn disabled_namespaces_redistribute_to_chainstate() {
 
 #[test]
 fn exact_percentages_at_a_clean_budget() {
-    // 1000 MiB divides cleanly into 800/200.
     let total = clamp_dbcache_bytes(1000);
     let shares = split_cache_budget(total, true);
     assert_eq!(shares[0].bytes, total * CHAINSTATE_CACHE_SHARE_PCT / 100);
@@ -57,8 +54,6 @@ fn exact_percentages_at_a_clean_budget() {
 
 #[test]
 fn minimum_budget_split_with_all_namespaces_enabled() {
-    // The documented floor with txindex enabled: both shares are nonzero,
-    // flooring loses nothing to rounding, and the whole budget is distributed.
     let total = clamp_dbcache_bytes(16);
     assert_eq!(total, MIN_DBCACHE_BYTES);
     let shares = split_cache_budget(total, true);

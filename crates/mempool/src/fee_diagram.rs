@@ -44,9 +44,7 @@ impl FeeWeight {
             .fee
             .checked_add(other.fee)
             .ok_or(FeeDiagramError::Arithmetic)?;
-        // All later rate comparisons multiply by a positive i32-sized weight.
-        // This covers every u64 base fee plus i64 overlay in a representable
-        // graph, and rejects synthetic wider facts before an infallible sort.
+        // Bound cross-products so rate sorting can multiply infallibly.
         fee.checked_mul(i128::from(i32::MAX))
             .ok_or(FeeDiagramError::Arithmetic)?;
         Ok(Self { fee, weight })
@@ -130,8 +128,6 @@ pub(crate) fn ordered_chunks(
             });
         }
     }
-    // Stable sorting keeps the dependency order of equal-rate chunks within
-    // a component. Chunks from different components have no dependencies.
     chunks.sort_by(|left, right| right.total.rate_cmp(left.total));
     Ok(chunks)
 }
@@ -225,9 +221,6 @@ pub(crate) fn linearize(
         let members: Vec<_> = (0..fees.len()).filter(|&i| remaining[i]).collect();
         let mut rate = sum_members(fees, &members)?;
         let mut optimal = None;
-        // As the tested rate increases, minimum source-side optimal closures
-        // shrink. A positive-gain step removes at least one node from the
-        // previous closure; at most n such steps precede the zero-gain cut.
         for _ in 0..=members.len() {
             let (flow, gain) = closure(fees, parents, &remaining, rate)?;
             if gain == 0 {
@@ -261,8 +254,6 @@ pub(crate) fn linearize(
                 minimal = Some(closed);
             }
         }
-        // A smallest nonempty residual closure is one sink SCC: it is a
-        // minimal maximum-rate chunk, rather than a union of equal-rate chunks.
         let members = minimal.ok_or(FeeDiagramError::Dependencies)?;
         let total = sum_members(fees, &members)?;
         if total.rate_cmp(rate) != Ordering::Equal {

@@ -6,10 +6,7 @@
 //! closure (`refresh_metadata`), so an acceptance pays for its
 //! neighborhood, not a full rebuild of the priority index. The full-rebuild
 //! pass, `recompute_all_metadata`, is test-only.
-// PERF: Criterion emits public harness items whose docs are irrelevant here.
 #![allow(missing_docs)]
-// A fixture that fails to build has no meaningful degraded mode: a fill that
-// silently indexed nothing would be timed as a win.
 #![allow(clippy::expect_used)]
 
 use std::hint::black_box;
@@ -26,8 +23,6 @@ use criterion::{Criterion, criterion_group, criterion_main};
 const POOL_SIZES: [u64; 5] = [200, 800, 3_200, 12_800, 51_200];
 
 fn spread_fee(seed: u64) -> u64 {
-    // Not monotonic in the seed: already ordered entries would benchmark only
-    // the priority index's best case.
     (seed.wrapping_mul(2_654_435_761) % 100_000).saturating_add(1)
 }
 
@@ -38,8 +33,6 @@ fn distinct_tx(seed: u64) -> Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            // Distinct prevouts: entries that conflict would be rejected rather
-            // than accepted, and the fill would measure the rejection path.
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&previous)), 0),
             script_sig: Script::new(),
             sequence: Sequence::MAX,
