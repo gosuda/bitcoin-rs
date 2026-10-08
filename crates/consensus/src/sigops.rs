@@ -116,7 +116,7 @@ mod tests {
         let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
         let p2wsh = [vec![0x00, 0x20], vec![2; 32]].concat();
         let multisig = vec![opcode::OP_PUSHNUM_1 + 1, opcode::OP_CHECKMULTISIG];
-        // (prevout script, scriptSig, witness, cost without WITNESS, cost with it)
+        // (prevout, scriptSig, witness, costs without/with WITNESS, including +4 output cost)
         let cases = [
             (p2sh.clone(), push_data(&multisig), Vec::new(), 12, 12),
             (p2wpkh.clone(), Vec::new(), Vec::new(), 4, 5),

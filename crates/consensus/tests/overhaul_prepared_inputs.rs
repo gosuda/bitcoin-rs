@@ -97,14 +97,18 @@ fn transaction_identities_match_reference_oracle() {
             bitcoin::consensus::deserialize(&bytes).expect("oracle decode");
         let materialized: Block = parsed.materialize();
         assert_eq!(materialized.txs.len(), oracle.txdata.len());
-        for (tx, reference) in materialized.txs.iter().zip(&oracle.txdata) {
+        for (index, (tx, reference)) in materialized.txs.iter().zip(&oracle.txdata).enumerate() {
             assert_eq!(
                 tx.txid().0,
-                Hash256::from_le_bytes(reference.compute_txid().as_byte_array())
+                Hash256::from_le_bytes(reference.compute_txid().as_byte_array()),
+                "txid {index} in {} byte block",
+                bytes.len()
             );
             assert_eq!(
                 tx.wtxid().0,
-                Hash256::from_le_bytes(reference.compute_wtxid().as_byte_array())
+                Hash256::from_le_bytes(reference.compute_wtxid().as_byte_array()),
+                "wtxid {index} in {} byte block",
+                bytes.len()
             );
         }
     }

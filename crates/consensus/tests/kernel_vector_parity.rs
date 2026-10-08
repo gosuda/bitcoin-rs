@@ -384,9 +384,9 @@ fn require_non_empty(rows: &[VectorRow], name: &str) -> Result<(), Box<dyn Error
 
 #[test]
 fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
-    for (name, expected, wrong) in [
-        ("tx_valid.json", Verdict::Accept, Verdict::Reject),
-        ("tx_invalid.json", Verdict::Reject, Verdict::Accept),
+    for (name, expected) in [
+        ("tx_valid.json", Verdict::Accept),
+        ("tx_invalid.json", Verdict::Reject),
     ] {
         let rows = load_vectors(name, expected)?;
         require_non_empty(&rows, name)?;
@@ -396,7 +396,6 @@ fn non_vacuous_wrong_verdict_goes_red() -> TestResult {
             .ok_or("no mandatory-flag rows found")?;
         let actual = kernel_verdict(&row.tx, &row.prevouts, row.flags);
         assert_eq!(actual, expected, "{name}");
-        assert_ne!(actual, wrong, "{name}");
     }
     Ok(())
 }

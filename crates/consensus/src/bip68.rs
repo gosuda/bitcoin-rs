@@ -58,8 +58,8 @@ pub const fn sequence_lock_is_time_based(sequence: u32) -> bool {
     sequence & SEQUENCE_LOCKTIME_TYPE_FLAG != 0
 }
 
-/// Returns whether a relative sequence lock is satisfied at `block_height` /
-/// `block_mtp`.
+/// Checks relative locks at `block_height` / `block_mtp`.
+/// Unconfirmed prevouts use `block_height`, so positive height locks fail.
 #[must_use]
 pub fn sequence_lock_satisfied(
     tx_version: i32,

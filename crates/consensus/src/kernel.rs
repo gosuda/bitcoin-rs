@@ -297,6 +297,7 @@ pub enum BlockParse {
 
 impl BlockParse {
     /// Parses `raw_block` once under `engine`.
+    /// Parse errors map to `Kernel`; unavailable engines to `UnsupportedEngine`.
     pub fn parse(raw_block: &[u8], engine: ValidationEngine) -> Result<Self, ConsensusError> {
         match engine {
             ValidationEngine::Native => native::NativeBlock::parse(raw_block).map(Self::Native),
@@ -397,6 +398,7 @@ pub(crate) fn verify_prepared_input(
 }
 
 /// Verifies every input script of `tx` under `engine`.
+/// `PrevoutCount` precedes execution; script/setup errors map to `Script`/`Kernel`.
 pub fn verify_tx_scripts(
     tx: &Tx,
     spent_outputs: &[(OutPoint, TxOut)],

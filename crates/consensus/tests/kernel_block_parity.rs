@@ -357,7 +357,7 @@ fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn E
         .iter()
         .map(|prevout| {
             Ok(TxOut {
-                value: bitcoin_rs_primitives::Amount::from_sat(prevout.amount_sat),
+                value: Amount::from_sat(prevout.amount_sat),
                 script_pubkey: decode_hex(&prevout.script_hex)?.into(),
             })
         })

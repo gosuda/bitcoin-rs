@@ -56,7 +56,7 @@ pub use verify_tx::{
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 use thiserror::Error;
 
-/// Minimal UTXO lookup contract used by the portable validator.
+/// Lookup returns the referenced coin or None when absent; borrowed views agree.
 pub trait UtxoView {
     /// Looks up a previous output by outpoint.
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut>;
@@ -72,6 +72,7 @@ where
 }
 
 /// The engine that rejected a script.
+/// Kernel rejections are retryable; native rejections are consensus-final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScriptEngine {
     /// Bitcoin Core's `bitcoinkernel` C++ engine (the `kernel` feature).

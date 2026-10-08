@@ -444,7 +444,6 @@ mod tests {
     use crate::block_view::BlockFacts;
     use bitcoin_rs_script::VerifyFlags;
 
-    /// (witness leaves, coinbase witness stack, verdict)
     type BindingCase = (Vec<[u8; 32]>, Vec<Vec<u8>>, Result<(), ConsensusError>);
 
     fn coinbase_tx() -> Tx {
