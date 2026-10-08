@@ -41,6 +41,18 @@ readonly HOST_TRIPLE
 
 log() { printf '[import-reference] %s\n' "$*"; }
 
+# --- 0. Required tools (QAC-03: verify before any staging or acquisition) ----
+for tool in git python3; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+        log "ABORT: required tool not found: ${tool}"
+        exit 1
+    fi
+done
+if ! "${CARGO_ENV[@]}" cargo fuzz --version >/dev/null 2>&1; then
+    log "ABORT: cargo-fuzz unavailable (cargo fuzz --version failed)"
+    exit 1
+fi
+
 # --- 1. Disk discipline: declare footprint, verify free space ---------------
 available_mb() {
     local available

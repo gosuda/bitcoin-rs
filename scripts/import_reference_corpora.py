@@ -48,13 +48,14 @@ def _harness_const(text: str, name: str) -> int:
     return int(match.group(1).replace("_", ""), 0)
 
 
-def script_contract(harness: Path) -> tuple[int, int, int]:
-    """(ELEMENT_LEN_MAX, WITNESS_ELEMENTS_MAX, EXPLICIT_FLAGS) from the target."""
+def script_contract(harness: Path) -> tuple[int, int, int, int]:
+    """(ELEMENT_LEN_MAX, WITNESS_ELEMENTS_MAX, EXPLICIT_FLAGS, TX_CONTEXT)."""
     text = harness.read_text()
     return (
         _harness_const(text, "ELEMENT_LEN_MAX"),
         _harness_const(text, "WITNESS_ELEMENTS_MAX"),
         _harness_const(text, "EXPLICIT_FLAGS"),
+        _harness_const(text, "TX_CONTEXT"),
     )
 
 
@@ -88,6 +89,33 @@ def flag_bits(script_src: Path) -> dict[str, int]:
 # flag column carries no script semantics; the seed keeps the flag bits at 0
 # while the malformed tx is the payload.
 PSEUDO_FLAGS = {"BADTX": 0}
+
+
+def _flag_bits(flags: str, flags_bits_map: dict[str, int]) -> tuple[int | None, str | None]:
+    """Resolve a row's flag csv to bits, mirroring VerifyFlags::from_core_names.
+    Returns (bits, None) or (None, unknown_name)."""
+    bits = 0
+    for name in flags.split(","):
+        name = name.strip()
+        if not name or name == "NONE":
+            continue
+        bit = flags_bits_map.get(name, PSEUDO_FLAGS.get(name))
+        if bit is None:
+            return None, name
+        bits |= bit
+    return bits, None
+
+
+def _flag_filled(bits: int, flags_bits_map: dict[str, int]) -> bool:
+    """VerifyFlags::filled(): CLEANSTACK implies WITNESS implies P2SH. A row
+    whose effective flags are not a filled combination is bad test data, which
+    Core reports rather than runs."""
+    filled = bits
+    if filled & flags_bits_map["CLEANSTACK"]:
+        filled |= flags_bits_map["WITNESS"]
+    if filled & flags_bits_map["WITNESS"]:
+        filled |= flags_bits_map["P2SH"]
+    return filled == bits
 
 
 # --- Core script assembly (src/test/script_tests.cpp ParseScript) ------------
@@ -460,9 +488,11 @@ def script_rows(path: Path) -> Iterator[tuple[str, str, str, list[str], int | No
         yield fields[0], fields[1], fields[2], witness, amount
 
 
-def tx_rows(path: Path) -> Iterator[tuple[list[tuple[str, int | None]], bytes, str]]:
+def tx_rows(path: Path) -> Iterator[tuple[list[tuple[str, int | None] | None], bytes, str]]:
     """tx_valid/tx_invalid rows -> ((prevout scriptPubKey asm, amount sat or
-    None) per input, serialized tx bytes, flag csv)."""
+    None) per input, serialized tx bytes, flag csv). Malformed prevout
+    entries keep their position as None so input i still pairs with
+    prevout i."""
     for row in _load_json(path):
         if (
             isinstance(row, list)
@@ -474,11 +504,16 @@ def tx_rows(path: Path) -> Iterator[tuple[list[tuple[str, int | None]], bytes, s
             blob = _hex(row[1])
             prevouts = [
                 (
-                    entry[2],
-                    entry[3] if len(entry) >= 4 and isinstance(entry[3], int) else None,
+                    (
+                        entry[2],
+                        entry[3] if len(entry) >= 4 and isinstance(entry[3], int) else None,
+                    )
+                    if isinstance(entry, list)
+                    and len(entry) >= 3
+                    and isinstance(entry[2], str)
+                    else None
                 )
                 for entry in row[0]
-                if isinstance(entry, list) and len(entry) >= 3 and isinstance(entry[2], str)
             ]
             if blob is not None:
                 yield prevouts, blob, row[2]
@@ -600,6 +635,9 @@ def blockfilter_blocks(path: Path) -> Iterator[bytes]:
 class Emitted:
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
+        # Basenames written into the target corpus dir, for the refresh
+        # inventory that removes stale reference seeds on later runs.
+        self.names: set[str] = set()
 
     def bump(self, reason: str, by: int = 1) -> None:
         self.counts[reason] = self.counts.get(reason, 0) + by
@@ -609,13 +647,18 @@ class Emitted:
         print(f"[import-reference] {name}: {detail}")
 
 
+def _emit(out: Path, seed: bytes, emitted: Emitted) -> None:
+    """Publish the seed and record its content-addressed name."""
+    emitted.names.add(hashlib.sha256(seed).hexdigest()[:32])
+    qa._emit(out, seed)
+
+
 def _script_seed(
     out: Path,
-    flags_bits_map: dict[str, int],
     explicit: int,
     element_limit: int,
     witness_max: int,
-    flags: str,
+    bits: int,
     script_sig: bytes,
     script_pubkey: bytes,
     witness: Sequence[bytes],
@@ -623,19 +666,6 @@ def _script_seed(
     max_bytes: int,
     emitted: Emitted,
 ) -> None:
-    try:
-        bits = 0
-        for name in flags.split(","):
-            name = name.strip()
-            if not name or name == "NONE":
-                continue
-            bit = flags_bits_map.get(name, PSEUDO_FLAGS.get(name))
-            if bit is None:
-                raise AssemblyError(name)
-            bits |= bit
-    except AssemblyError as error:
-        emitted.bump(f"skip_unknown_flag_{error}")
-        return
     cap = min(element_limit, 0xFFFF)
     if len(witness) > witness_max:
         # Truncating would drop the taproot script/control block tail, so the
@@ -664,7 +694,41 @@ def _script_seed(
     if len(frame) > max_bytes:
         emitted.bump("skip_oversize")
         return
-    qa._emit(out, bytes(frame))
+    _emit(out, bytes(frame), emitted)
+    emitted.bump("imported")
+
+
+def _context_seed(
+    out: Path,
+    context_selector: int,
+    bits: int,
+    tx_blob: bytes,
+    index: int,
+    prevouts: list[tuple[bytes, int]],
+    max_bytes: int,
+    emitted: Emitted,
+) -> None:
+    """TX_CONTEXT frame: the serialized spending tx, the input index, and the
+    resolved prevout for every input, so row signatures verify under their
+    original transaction context."""
+    if len(tx_blob) > 0xFFFF or len(prevouts) > 0xFF or index > 0xFFFF:
+        emitted.bump("skip_oversize")
+        return
+    if any(len(script_pubkey) > 0xFFFF for script_pubkey, _ in prevouts):
+        emitted.bump("skip_element_overflow")
+        return
+    frame = bytearray([context_selector])
+    frame += bits.to_bytes(4, "little")
+    frame += len(tx_blob).to_bytes(2, "little") + tx_blob
+    frame += index.to_bytes(2, "little")
+    frame.append(len(prevouts))
+    for script_pubkey, amount in prevouts:
+        frame += len(script_pubkey).to_bytes(2, "little") + script_pubkey
+        frame += amount.to_bytes(8, "little")
+    if len(frame) > max_bytes:
+        emitted.bump("skip_oversize")
+        return
+    _emit(out, bytes(frame), emitted)
     emitted.bump("imported")
 
 
@@ -675,7 +739,7 @@ def _object_seed(out: Path, blob: bytes, max_bytes: int, emitted: Emitted, trunc
         else:
             emitted.bump("skip_oversize")
             return
-    qa._emit(out, blob)
+    _emit(out, blob, emitted)
     emitted.bump("imported")
 
 
@@ -686,11 +750,11 @@ def map_script_tests(
     path: Path,
     out: Path,
     flags_bits_map: dict[str, int],
-    contract: tuple[int, int, int],
+    contract: tuple[int, int, int, int],
     max_bytes: int,
     emitted: Emitted,
 ) -> None:
-    element_limit, witness_max, explicit = contract
+    element_limit, witness_max, explicit, _context_selector = contract
     for script_sig_asm, script_pubkey_asm, flags, witness_raw, amount in script_rows(path):
         witness: list[bytes] = []
         last_script: bytes | None = None
@@ -716,9 +780,16 @@ def map_script_tests(
         except AssemblyError as error:
             emitted.bump(f"skip_asm_{str(error)[:24]}")
             continue
+        bits, unknown = _flag_bits(flags, flags_bits_map)
+        if bits is None:
+            emitted.bump(f"skip_unknown_flag_{unknown}")
+            continue
+        if not _flag_filled(bits, flags_bits_map):
+            emitted.bump("skip_bad_flag_combination")
+            continue
         _script_seed(
-            out, flags_bits_map, explicit, element_limit, witness_max,
-            flags, script_sig, script_pubkey, witness, amount, max_bytes, emitted,
+            out, explicit, element_limit, witness_max,
+            bits, script_sig, script_pubkey, witness, amount, max_bytes, emitted,
         )
 
 
@@ -727,12 +798,12 @@ def map_taproot_ref(
     tx_out: Path,
     script_out: Path,
     flags_bits_map: dict[str, int],
-    contract: tuple[int, int, int],
+    contract: tuple[int, int, int, int],
     max_bytes: int,
     tx_emitted: Emitted,
     script_emitted: Emitted,
 ) -> None:
-    element_limit, witness_max, explicit = contract
+    element_limit, witness_max, explicit, _context_selector = contract
     for row in taproot_ref_rows(directory):
         blob = _hex(row.get("tx"))
         if blob is not None:
@@ -742,9 +813,16 @@ def map_taproot_ref(
             script_emitted.bump("skip_malformed_spend")
             continue
         script_pubkey, script_sig, witness, flags, amount = spend
+        bits, unknown = _flag_bits(flags, flags_bits_map)
+        if bits is None:
+            script_emitted.bump(f"skip_unknown_flag_{unknown}")
+            continue
+        if not _flag_filled(bits, flags_bits_map):
+            script_emitted.bump("skip_bad_flag_combination")
+            continue
         _script_seed(
-            script_out, flags_bits_map, explicit, element_limit, witness_max,
-            flags, script_sig, script_pubkey, witness, amount, max_bytes, script_emitted,
+            script_out, explicit, element_limit, witness_max,
+            bits, script_sig, script_pubkey, witness, amount, max_bytes, script_emitted,
         )
 
 
@@ -753,15 +831,22 @@ def map_tx_rows(
     tx_out: Path,
     script_out: Path,
     flags_bits_map: dict[str, int],
-    contract: tuple[int, int, int],
+    contract: tuple[int, int, int, int],
     max_bytes: int,
     tx_emitted: Emitted,
     script_emitted: Emitted,
+    complement_mask: int | None = None,
 ) -> None:
     """Each row seeds tx_validate with the tx bytes and script_eval with one
     frame per parseable input: its scriptSig, the matching prevout
-    scriptPubKey, and the input's witness stack."""
-    element_limit, witness_max, explicit = contract
+    scriptPubKey, and the input's witness stack. When every prevout resolves
+    (script and amount) the row additionally emits a TX_CONTEXT frame per
+    input carrying the spending tx and all prevouts, so signatures verify
+    under their original transaction context.
+
+    Core's tx_valid.json names the flags it turns OFF, so its rows pass
+    complement_mask=FULL; tx_invalid and btcd's files name enabled flags."""
+    element_limit, witness_max, explicit, context_selector = contract
     for prevouts, blob, flags in tx_rows(path):
         _object_seed(tx_out, blob, max_bytes, tx_emitted, truncate=False)
         parsed = tx_inputs(blob)
@@ -773,15 +858,50 @@ def map_tx_rows(
             # the row is skipped rather than silently zipped to the shorter.
             script_emitted.bump("skip_input_prevout_mismatch")
             continue
-        for (script_sig, witness), (prevout, amount) in zip(parsed, prevouts):
+        bits, unknown = _flag_bits(flags, flags_bits_map)
+        if bits is None:
+            script_emitted.bump(f"skip_unknown_flag_{unknown}")
+            continue
+        if complement_mask is not None:
+            bits = complement_mask & ~bits
+        if not _flag_filled(bits, flags_bits_map):
+            script_emitted.bump("skip_bad_flag_combination")
+            continue
+        # The sighash commits to every prevout, so a context frame is emitted
+        # only when each declared prevout resolves to script bytes and an
+        # amount; a single malformed entry forfeits them for the row.
+        resolved: list[tuple[bytes, int] | None] = []
+        context_ok = True
+        for prevout in prevouts:
+            amount = prevout[1] if prevout is not None else None
             try:
-                script_pubkey = assemble(prevout)
+                script = assemble(prevout[0]) if prevout is not None else None
+            except AssemblyError:
+                script = None
+            if script is None or amount is None:
+                context_ok = False
+                resolved.append(None)
+            else:
+                resolved.append((script, amount))
+        if context_ok:
+            for index in range(len(parsed)):
+                _context_seed(
+                    script_out, context_selector, bits, blob, index,
+                    resolved, max_bytes, script_emitted,
+                )
+        for (script_sig, witness), prevout in zip(parsed, prevouts):
+            if prevout is None:
+                script_emitted.bump("skip_malformed_prevout")
+                continue
+            prevout_asm, amount = prevout
+            try:
+                script_pubkey = assemble(prevout_asm)
             except AssemblyError as error:
                 script_emitted.bump(f"skip_asm_{str(error)[:24]}")
                 continue
             _script_seed(
-                script_out, flags_bits_map, explicit, element_limit, witness_max,
-                flags, script_sig, script_pubkey, witness, amount, max_bytes, script_emitted,
+                script_out, explicit, element_limit, witness_max,
+                bits, script_sig, script_pubkey, witness, amount, max_bytes, script_emitted,
             )
 
 
@@ -798,7 +918,7 @@ def map_bip341(
     tx_out: Path,
     script_out: Path,
     flags_bits_map: dict[str, int],
-    contract: tuple[int, int, int],
+    contract: tuple[int, int, int, int],
     max_bytes: int,
     tx_emitted: Emitted,
     script_emitted: Emitted,
@@ -806,11 +926,15 @@ def map_bip341(
     txs, spks = bip341_vectors(path)
     for blob in txs:
         _object_seed(tx_out, blob, max_bytes, tx_emitted, truncate=False)
-    element_limit, witness_max, explicit = contract
+    element_limit, witness_max, explicit, _context_selector = contract
+    bits, unknown = _flag_bits("TAPROOT", flags_bits_map)
+    if bits is None:
+        script_emitted.bump(f"skip_unknown_flag_{unknown}")
+        return
     for spk in spks:
         _script_seed(
-            script_out, flags_bits_map, explicit, element_limit, witness_max,
-            "TAPROOT", b"", spk, [], None, max_bytes, script_emitted,
+            script_out, explicit, element_limit, witness_max,
+            bits, b"", spk, [], None, max_bytes, script_emitted,
         )
 
 
@@ -867,6 +991,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     for out in (tx_out, block_out, script_out, p2p_out, snapshot_out):
         out.mkdir(parents=True, exist_ok=True)
 
+    # Seeds a previous run imported from earlier pins must not survive a
+    # refresh: one that still earns coverage in cmin would be attributed to
+    # the new pins in the generated provenance. The inventory tracks only
+    # importer-emitted names; fuzzer-discovered and qa-assets seeds are never
+    # listed and never removed.
+    inventory_path = args.out_base.parent / ".reference-inventory.json"
+    prior: dict[str, object] = {}
+    if inventory_path.is_file():
+        try:
+            loaded = json.loads(inventory_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                prior = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
+    for out in (tx_out, block_out, script_out, p2p_out, snapshot_out):
+        names = prior.get(out.name)
+        if not isinstance(names, list):
+            continue
+        for name in names:
+            if isinstance(name, str) and Path(name).name == name:
+                (out / name).unlink(missing_ok=True)
+
+    # The union of every named flag bit is the mask Core's tx_valid rows are
+    # complemented against (transaction_tests.cpp:224).
+    full_mask = 0
+    for bit in flags_bits_map.values():
+        full_mask |= bit
+
     btcd_data = args.btcd / "txscript/data"
     btcd_blocks = args.btcd / "blockchain/testdata"
     btcd_wire = args.btcd / "wire/testdata"
@@ -883,10 +1035,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     emitted_snapshot = Emitted()
 
     for name in ("tx_valid.json", "tx_invalid.json"):
+        # Core's tx_valid flag column names the flags Core disables; every
+        # other file names the flags it enables.
+        complement = full_mask if name == "tx_valid.json" else None
         map_tx_rows(
             core_data / name,
             tx_out, script_out, flags_bits_map, contract, max_bytes,
             emitted_tx, emitted_script,
+            complement_mask=complement,
         )
         map_tx_rows(
             btcd_data / name,
@@ -944,6 +1100,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     emitted_script.report("script_eval")
     emitted_p2p.report("p2p_message")
     emitted_snapshot.report("utxo_snapshot")
+
+    inventory = {
+        out.name: sorted(emitted.names)
+        for out, emitted in (
+            (tx_out, emitted_tx),
+            (block_out, emitted_block),
+            (script_out, emitted_script),
+            (p2p_out, emitted_p2p),
+            (snapshot_out, emitted_snapshot),
+        )
+    }
+    inventory_path.write_text(json.dumps(inventory, indent=2) + "\n", encoding="utf-8")
     return 0
 
 

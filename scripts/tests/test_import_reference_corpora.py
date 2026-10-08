@@ -92,6 +92,8 @@ esac
             "cargo": '''
 [[ "${RUSTUP_TOOLCHAIN:-}" == nightly ]] || exit 98
 [[ ! -v RUSTC_WRAPPER && ! -v CARGO_BUILD_BUILD_DIR ]] || exit 97
+# Preflight runs `cargo fuzz --version`; only cmin invocations are logged.
+[[ "$1" == fuzz && "$2" == cmin ]] || exit 0
 printf '%s\\n' "${!#}" >> "$TEST_ROOT/cmin.log"
 [[ "${FAIL_STAGE:-}" != cmin ]] || exit ''' + str(CMIN_STATUS),
             "mv": f"[[ \"${{FAIL_STAGE:-}}\" != provenance_publish ]] || exit {PROVENANCE_PUBLISH_STATUS}\n"
