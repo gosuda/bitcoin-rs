@@ -74,7 +74,7 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
 
   # 4. Verify schema and compact block relay assertions
   P2P_CORE_INTEROP_EVIDENCE=target/core-differential/evidence.json \
-    cargo test -p bitcoin-rs-p2p --test core_interop_live -- --ignored
+    cargo test --locked -p bitcoin-rs-p2p --test core_interop_live -- --ignored
   ```
 - **Artifacts**: CI retains `target/core-differential/*.log` and `evidence.json`
   in the `core-differential-<run_attempt>` artifact for 7 days.
@@ -83,7 +83,7 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
 
 ## 2. Live Core block and transaction acceptance differential
 
-- **Tier**: Real external-consumer evidence.
+- **Tier**: In-tree live-reference differential evidence, not external-consumer interoperability verification. The in-repo `ProcessNode` harness invokes both nodes' public RPCs; the unmodified pinned Bitcoin Core binary acts as an independent behavioral oracle.
 - **Contract & clauses**: [`docs/contracts/core-differential.md`](contracts/core-differential.md) (`CORE-04`).
 - **Owner suites**: `e2e/tests/acceptance.rs` using `e2e::differential` and `ProcessNode`.
 - **What is verified**:
@@ -98,8 +98,14 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
     implemented.
 - **Reproduce**:
   ```sh
-  cargo build --release -p bitcoin-rs
-  cargo test --locked -p bitcoin-rs-e2e --test acceptance
+  # Install the pinned live Bitcoin Core reference.
+  scripts/install-bitcoind.sh --print-path
+
+  # Build and select the exact bitcoin-rs binary being compared.
+  cargo build --locked --release -p bitcoin-rs
+  BITCOIN_RS_NODE="$PWD/target/release/bitcoin-rs" \
+    BITCOIN_RS_REFERENCE_BITCOIND="$(scripts/install-bitcoind.sh --print-path)" \
+    cargo test --locked -p bitcoin-rs-e2e --test acceptance
   ```
 - **Artifacts**: `acceptance-*.json` files recorded under the test process evidence
   directory.
@@ -145,10 +151,10 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
     `ANYONECANPAY`, `DEFAULT`) for legacy, BIP143 (SegWit v0), and BIP341 (Taproot).
 - **Reproduce**:
   ```sh
-  cargo test -p bitcoin-rs-consensus --test shared_sighash
-  cargo test -p bitcoin-rs-script --test proptest
-  cargo test -p bitcoin-rs-primitives --test differential
-  cargo test -p bitcoin-rs-primitives --test bip_vectors
+  cargo test --locked -p bitcoin-rs-consensus --test shared_sighash
+  cargo test --locked -p bitcoin-rs-script --test proptest
+  cargo test --locked -p bitcoin-rs-primitives --test differential
+  cargo test --locked -p bitcoin-rs-primitives --test bip_vectors
   ```
 
 ---
@@ -156,7 +162,7 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
 ## 5. libbitcoinkernel oracle and scoped native parity
 
 - **Tier**: In-tree oracle & differential evidence.
-- **Contract & clauses**: [`docs/contracts/validation-default.md`](contracts/validation-default.md) (`VAL-02`).
+- **Related contract**: [`docs/contracts/validation-default.md`](contracts/validation-default.md) (`Proven by` evidence; no `VAL-02` clause is defined).
 - **Owner suites**:
   - `crates/consensus/tests/kernel_vector_parity.rs`: Core transaction vectors
     evaluated through `libbitcoinkernel`'s `verify_tx_scripts` against expected
@@ -189,8 +195,8 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
     boundaries, undo persistence atomicity, and BIP30 overwrite undo coin restoration.
 - **Reproduce**:
   ```sh
-  cargo test -p bitcoin-rs-chain header_sync::contextual_header_tests
-  cargo test -p bitcoin-rs-consensus verify_block::tests
+  cargo test --locked -p bitcoin-rs-chain header_sync::contextual_header_tests
+  cargo test --locked -p bitcoin-rs-consensus verify_block::tests
   cargo test --locked -p bitcoin-rs-chainstate --lib persistence_tests
   ```
 
@@ -224,7 +230,7 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
   ```sh
   # Native codec roundtrip check over corpus seeds:
   BITCOIN_RS_FUZZ_CORPUS=../bitcoin-rs-fuzz-corpus/corpus \
-    cargo test -p bitcoin-rs-primitives --test differential
+    cargo test --locked -p bitcoin-rs-primitives --test differential
 
   # Run a bounded fuzz campaign with target, seconds, corpus, and output paths:
   ./scripts/run-fuzz-campaign.sh \
@@ -257,8 +263,8 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
   cargo test --locked -p bitcoin-rs-chainstate --lib durable::tests
   cargo test --locked -p bitcoin-rs-chainstate \
     --features fjall --lib assumeutxo::tests::recovery
-  cargo test -p bitcoin-rs-storage --test durable_head_store
-  cargo test -p bitcoin-rs-e2e --test reorg
+  cargo test --locked -p bitcoin-rs-storage --test durable_head_store
+  cargo test --locked -p bitcoin-rs-e2e --test reorg
   ```
 
 ---
