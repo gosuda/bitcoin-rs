@@ -39,7 +39,10 @@ fn local_replay_budget_does_not_send_getdata() -> Result<(), Box<dyn std::error:
     *chain.historical_replay_pending.lock() = true;
 
     harness.sync.advance_historical();
-    assert!(rx.try_recv().is_err(), "local replay must not trigger getdata");
+    assert!(
+        rx.try_recv().is_err(),
+        "local replay must not trigger getdata"
+    );
     assert_eq!(harness.sync.historical.lock().window.pending_len(), 0);
 
     harness.sync.advance_historical();

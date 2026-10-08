@@ -29,7 +29,12 @@ pub enum HistoricalAdvance {
     /// More local replay remains; do not request a body yet.
     ReplayPending,
     /// The body is absent locally and can be fetched from peers.
-    MissingBody { height: u32, hash: Hash256 },
+    MissingBody {
+        /// Height of the required block.
+        height: u32,
+        /// Hash of the required block.
+        hash: Hash256,
+    },
 }
 
 /// How the executor must treat a failed window commit or branch connect.

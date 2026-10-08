@@ -322,7 +322,7 @@ pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256
     hash_serialized_3_stable_inner(view, None)
 }
 
-/// Commitment with the additional creation-height rule required by AssumeUTXO.
+/// Commitment with the additional creation-height rule required by `AssumeUTXO`.
 pub(crate) fn hash_serialized_3_stable_at_height(
     view: &UtxoSetView<'_>,
     snapshot_height: u32,

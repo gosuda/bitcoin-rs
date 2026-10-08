@@ -125,10 +125,14 @@ impl SyncChain for TestChain {
         if std::mem::take(&mut *self.historical_replay_pending.lock()) {
             return Ok(HistoricalAdvance::ReplayPending);
         }
-        Ok(self.historical.lock().front().copied().map_or(
-            HistoricalAdvance::Complete,
-            |(height, hash)| HistoricalAdvance::MissingBody { height, hash },
-        ))
+        Ok(self
+            .historical
+            .lock()
+            .front()
+            .copied()
+            .map_or(HistoricalAdvance::Complete, |(height, hash)| {
+                HistoricalAdvance::MissingBody { height, hash }
+            }))
     }
 
     fn connect_historical(
