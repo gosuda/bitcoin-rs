@@ -5,23 +5,32 @@
 //! `bitcoin::Block::witness_root` (rust-bitcoin's own BIP141 implementation),
 //! and against the byte layout of the `OP_RETURN` commitment script.
 
-use std::error::Error;
-use std::sync::Arc;
+#[path = "common/fixtures.rs"]
+mod common;
 
-use bitcoin::consensus::encode::{
-    deserialize as bitcoin_deserialize, serialize as bitcoin_serialize,
-};
+use std::error::Error;
+
+use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin::opcodes::all::{OP_PUSHBYTES_36, OP_RETURN};
-use bitcoin::{Transaction as BitcoinTransaction, block, pow};
-use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot};
+use bitcoin::{block, pow};
+use bitcoin_rs_mempool::{Mempool, MempoolLimits, MempoolMiningSnapshot};
 use bitcoin_rs_mining::{
     CandidateContext, WITNESS_RESERVED_VALUE, assemble_candidate, witness_commitment_script,
 };
-use bitcoin_rs_primitives::{
-    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, consensus_bytes,
-};
+use bitcoin_rs_primitives::{Amount, Hash256, Tx};
+use common::{PAYOUT, insert, oracle_transaction, witnessed_tx};
+
+fn context() -> CandidateContext {
+    CandidateContext {
+        previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),
+        height: 1,
+        min_time: 1_700_000_001,
+        current_time: 1_700_000_600,
+        locktime_cutoff: 1_700_000_000,
+        ..common::context()
+    }
+}
 
 /// Pinned commitment bytes for the vector below, derived by piping
 /// `witness_root || reserved_value` through `sha256sum` twice with coreutils,
@@ -36,7 +45,7 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
     let child = witnessed_tx(2, 40_000, Some(parent.txid()));
     let snapshot = snapshot_with(&[parent.clone(), child.clone()], &[2_000, 3_000])?;
 
-    let candidate = assemble_candidate(&vector_context(true), &snapshot, &payout())?;
+    let candidate = assemble_candidate(&context(), &snapshot, PAYOUT)?;
     let commitment = candidate
         .witness_commitment
         .ok_or("segwit-active candidate must carry a commitment")?;
@@ -64,9 +73,9 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
             nonce: 0,
         },
         txdata: vec![
-            bitcoin_tx(&candidate.coinbase)?,
-            bitcoin_tx(&parent)?,
-            bitcoin_tx(&child)?,
+            oracle_transaction(&candidate.coinbase)?,
+            oracle_transaction(&parent)?,
+            oracle_transaction(&child)?,
         ],
     };
     let oracle_root = oracle_block
@@ -113,9 +122,12 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
 
     // Legacy fallback: no commitment anywhere when segwit is inactive.
     let legacy = assemble_candidate(
-        &vector_context(false),
+        &CandidateContext {
+            segwit_active: false,
+            ..context()
+        },
         &snapshot_with(&[witnessed_tx(1, 50_000, None)], &[2_000])?,
-        &payout(),
+        PAYOUT,
     )?;
     assert!(legacy.witness_commitment.is_none());
     assert!(legacy.witness_merkle_root.is_none());
@@ -131,77 +143,13 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
     Ok(())
 }
 
-fn vector_context(segwit_active: bool) -> CandidateContext {
-    CandidateContext {
-        previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),
-        height: 1,
-        version: 0x2000_0000,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        min_time: 1_700_000_001,
-        current_time: 1_700_000_600,
-        locktime_cutoff: 1_700_000_000,
-        network: Network::Regtest,
-        csv_active: true,
-        segwit_active,
-        max_weight: 4_000_000,
-        max_size: 4_000_000,
-        max_sigops: 80_000,
-    }
-}
-
-fn payout() -> Vec<u8> {
-    vec![0x51]
-}
-
-fn witnessed_tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
-    Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(
-                parent.unwrap_or_else(|| {
-                    let mut bytes = [0_u8; 32];
-                    bytes[0] = label;
-                    Txid(Hash256::from_le_bytes(&bytes))
-                }),
-                0,
-            ),
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: vec![vec![label; 32]].into(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: vec![0x51, label].into(),
-        }],
-        lock_time: LockTime::ZERO,
-    }
-}
-
-// Build the snapshot through its owner so transitive ancestry and all
-// aggregate fields stay consistent. The witness-commitment oracle above
-// remains independent and its pinned expected bytes are unchanged.
 fn snapshot_with(txs: &[Tx], fees: &[u64]) -> Result<MempoolMiningSnapshot, Box<dyn Error>> {
     assert_eq!(txs.len(), fees.len());
     let mut pool = Mempool::new(MempoolLimits::default());
     for (tx, &fee) in txs.iter().zip(fees) {
-        pool.insert_entry(MempoolEntry::new(
-            Arc::new(tx.clone()),
-            u32::try_from(tx.vsize())?,
-            fee,
-            0,
-            0,
-            0,
-        ))?;
+        insert(&mut pool, tx.clone(), u32::try_from(tx.vsize())?, fee, 0, 0)?;
     }
     Ok(pool.mining_snapshot())
-}
-
-/// Decodes native consensus bytes into the rust-bitcoin oracle type so the
-/// witness root comparison rides the exact wire image the native codec made.
-fn bitcoin_tx(tx: &Tx) -> Result<BitcoinTransaction, Box<dyn Error>> {
-    // WHY consensus bytes: the oracle consumes the exact wire image the
-    // native codec produced, so wtxids and roots compare by construction.
-    Ok(bitcoin_deserialize(&consensus_bytes(tx))?)
 }
 
 /// `OP_RETURN OP_PUSHBYTES_36 aa21a9ed <32-byte commitment>`.

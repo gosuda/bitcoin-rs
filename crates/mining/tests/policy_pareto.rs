@@ -1,50 +1,61 @@
 #![allow(clippy::expect_used)]
 //! Package selection, limits, and adversarial candidate tests.
 
+#[path = "common/fixtures.rs"]
+mod common;
+
 use std::error::Error;
 use std::sync::Arc;
 
-use bitcoin_rs_mempool::{
-    Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot, SnapshotEntry,
-};
-use bitcoin_rs_mining::{CandidateContext, MiningError, assemble_candidate};
-use bitcoin_rs_primitives::{
-    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness,
-};
+use bitcoin_rs_mempool::SnapshotEntry;
+use bitcoin_rs_mining::{Candidate, CandidateContext, MiningError, assemble_candidate};
+use bitcoin_rs_primitives::{Hash256, LockTime, Network, Sequence, Txid};
+use common::{PAYOUT, forged_entry, insert, snapshot, tx, zero_fee_pool};
 use proptest::prelude::*;
+
+fn context() -> CandidateContext {
+    CandidateContext {
+        previous_block_hash: Hash256::from_le_bytes(&[0xcd; 32]),
+        ..common::context()
+    }
+}
+
+fn limits(max_weight: u64, max_size: u64, max_sigops: u64) -> CandidateContext {
+    CandidateContext {
+        max_weight,
+        max_size,
+        max_sigops,
+        ..context()
+    }
+}
+
+fn selected(candidate: &Candidate) -> Vec<Txid> {
+    candidate.transactions.iter().map(|tx| tx.txid).collect()
+}
 
 #[test]
 fn selects_independent_transactions_in_modified_fee_order() -> Result<(), Box<dyn Error>> {
-    let mut mempool = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
+    let mut mempool = zero_fee_pool();
     for index in 0_u32..50 {
-        let vsize = 100 + (index % 5);
         let fee = u64::from(50_u32 - index) * 1_000;
-        mempool.insert_entry(MempoolEntry::new(
-            Arc::new(independent_tx(u8::try_from(index)?)),
-            vsize,
+        insert(
+            &mut mempool,
+            tx(u8::try_from(index)?, 1_000, None),
+            100 + (index % 5),
             fee,
             u64::from(index),
             800_000,
-            0,
-        ))?;
+        )?;
     }
 
     let snapshot = mempool.mining_snapshot();
-    let candidate = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &snapshot, &[0x51])?;
+    let candidate = assemble_candidate(&context(), &snapshot, PAYOUT)?;
     assert_eq!(candidate.transactions.len(), 50);
 
     // Snapshot order is authoritative; the candidate must preserve package order
     // from walking that priority index.
     assert_eq!(
-        candidate
-            .transactions
-            .iter()
-            .map(|tx| tx.txid)
-            .collect::<Vec<_>>(),
+        selected(&candidate),
         snapshot
             .entries
             .iter()
@@ -56,25 +67,21 @@ fn selects_independent_transactions_in_modified_fee_order() -> Result<(), Box<dy
 
 #[test]
 fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dyn Error>> {
-    let mut mempool = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
-    let parent = chained_tx(1, 50_000, None);
+    let mut mempool = zero_fee_pool();
+    let parent = tx(1, 50_000, None);
     let parent_txid = parent.txid();
-    mempool.insert_entry(MempoolEntry::new(Arc::new(parent), 200, 1_000, 1, 100, 0))?;
+    insert(&mut mempool, parent, 200, 1_000, 1, 100)?;
     // High-fee child should outrank the parent individually and pull it in.
-    mempool.insert_entry(MempoolEntry::new(
-        Arc::new(chained_tx(2, 40_000, Some(parent_txid))),
+    insert(
+        &mut mempool,
+        tx(2, 40_000, Some(parent_txid)),
         200,
         10_000,
         2,
         100,
-        0,
-    ))?;
+    )?;
 
-    let snapshot = mempool.mining_snapshot();
-    let candidate = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &snapshot, &[0x51])?;
+    let candidate = assemble_candidate(&context(), &mempool.mining_snapshot(), PAYOUT)?;
     assert_eq!(candidate.transactions.len(), 2);
     assert_eq!(candidate.transactions[0].txid, parent_txid);
     assert_eq!(candidate.transactions[1].depends, vec![1]);
@@ -84,21 +91,17 @@ fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dy
 
 #[test]
 fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), Box<dyn Error>> {
-    let mut mempool = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
-    let low = independent_tx(1);
-    let high = independent_tx(2);
+    let mut mempool = zero_fee_pool();
+    let low = tx(1, 1_000, None);
     let low_txid = low.txid();
-    mempool.insert_entry(MempoolEntry::new(Arc::new(low), 200, 1_000, 1, 100, 0))?;
-    mempool.insert_entry(MempoolEntry::new(Arc::new(high), 200, 2_000, 2, 100, 0))?;
+    insert(&mut mempool, low, 200, 1_000, 1, 100)?;
+    insert(&mut mempool, tx(2, 1_000, None), 200, 2_000, 2, 100)?;
     mempool.prioritise(low_txid, 10_000)?;
 
     let snapshot = mempool.mining_snapshot();
     assert_eq!(snapshot.entries[0].txid, low_txid);
 
-    let candidate = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &snapshot, &[0x51])?;
+    let candidate = assemble_candidate(&context(), &snapshot, PAYOUT)?;
     assert_eq!(candidate.transactions[0].txid, low_txid);
     assert_eq!(candidate.transactions[0].fee, 1_000);
     assert_eq!(candidate.transactions[0].fee_delta, 10_000);
@@ -114,108 +117,83 @@ fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), Box<dyn Erro
 
 #[test]
 fn weight_size_and_sigop_limits_are_independent() -> Result<(), Box<dyn Error>> {
-    let heavy = snapshot_entry(
-        Arc::new(independent_tx(1)),
-        5_000,
-        0,
-        10_000,
-        100,
-        0,
-        vec![],
-    );
-    let wide = snapshot_entry(
-        Arc::new(independent_tx(2)),
-        5_000,
-        0,
-        100,
-        10_000,
-        0,
-        vec![],
-    );
-    let busy = snapshot_entry(
-        Arc::new(independent_tx(3)),
-        5_000,
-        0,
-        100,
-        100,
-        10_000,
-        vec![],
-    );
-    let fitting = snapshot_entry(Arc::new(independent_tx(4)), 1_000, 0, 100, 100, 1, vec![]);
-
-    // Weight-only ceiling rejects `heavy`, keeps `fitting`.
-    let weight_limited = assemble_candidate(
-        &context(2_000, 4_000_000, 80_000),
-        &MempoolMiningSnapshot {
-            sequence: 1,
-            entries: vec![heavy, fitting.clone()],
-        },
-        &[0x51],
-    )?;
-    assert_eq!(weight_limited.transactions.len(), 1);
-    assert_eq!(weight_limited.transactions[0].txid, fitting.txid);
-
-    // Serialized-size ceiling rejects `wide`.
-    let size_limited = assemble_candidate(
-        &context(4_000_000, 2_000, 80_000),
-        &MempoolMiningSnapshot {
-            sequence: 2,
-            entries: vec![wide, fitting.clone()],
-        },
-        &[0x51],
-    )?;
-    assert_eq!(size_limited.transactions.len(), 1);
-    assert_eq!(size_limited.transactions[0].txid, fitting.txid);
-
-    // Sigop ceiling rejects `busy`.
-    let sigop_limited = assemble_candidate(
-        &context(4_000_000, 4_000_000, 100),
-        &MempoolMiningSnapshot {
-            sequence: 3,
-            entries: vec![busy, fitting.clone()],
-        },
-        &[0x51],
-    )?;
-    assert_eq!(sigop_limited.transactions.len(), 1);
-    assert_eq!(sigop_limited.transactions[0].txid, fitting.txid);
+    let fitting = forged_entry(Arc::new(tx(4, 1_000, None)), 1_000, 0, 100, 100, 1, vec![]);
+    // Each oversized entry exceeds exactly one dimension of its own context.
+    let cases = [
+        (
+            forged_entry(
+                Arc::new(tx(1, 1_000, None)),
+                5_000,
+                0,
+                10_000,
+                100,
+                0,
+                vec![],
+            ),
+            limits(2_000, 4_000_000, 80_000),
+        ),
+        (
+            forged_entry(
+                Arc::new(tx(2, 1_000, None)),
+                5_000,
+                0,
+                100,
+                10_000,
+                0,
+                vec![],
+            ),
+            limits(4_000_000, 2_000, 80_000),
+        ),
+        (
+            forged_entry(
+                Arc::new(tx(3, 1_000, None)),
+                5_000,
+                0,
+                100,
+                100,
+                10_000,
+                vec![],
+            ),
+            limits(4_000_000, 4_000_000, 100),
+        ),
+    ];
+    for (sequence, (oversized, context)) in cases.into_iter().enumerate() {
+        let candidate = assemble_candidate(
+            &context,
+            &snapshot(u64::try_from(sequence)?, vec![oversized, fitting.clone()]),
+            PAYOUT,
+        )?;
+        assert_eq!(selected(&candidate), vec![fitting.txid]);
+    }
     Ok(())
 }
 
 // POL-05/06: one fee chunk is indivisible, and its positive unconfirmed
 // BIP68 lock is not final at the next block. The valid parent cannot be
-// retried separately after the whole child-parent chunk is skipped.
+// retried separately after the whole child-parent chunk is skipped; with CSV
+// inactive the same lock is ignored and the chunk is selected whole.
 #[test]
-fn bip68_unmet_unconfirmed_parent_package_is_skipped() -> Result<(), Box<dyn Error>> {
-    let parent = snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 400, 100, 0, vec![]);
-    let mut child_tx = chained_tx(2, 1_000, Some(parent.txid));
-    child_tx.inputs[0].sequence = Sequence::from_consensus(1);
-    let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 400, 100, 0, vec![1]);
-    let snapshot = MempoolMiningSnapshot {
-        sequence: 12,
-        entries: vec![child, parent],
-    };
-    let candidate = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &snapshot, &[0x51])?;
-    assert!(
-        candidate.transactions.is_empty(),
-        "the high-fee child and parent are one chunk"
-    );
-    Ok(())
-}
-
-#[test]
-fn bip68_unmet_lock_is_ignored_when_csv_is_inactive() -> Result<(), Box<dyn Error>> {
-    let parent = snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 400, 100, 0, vec![]);
-    let mut child_tx = chained_tx(2, 1_000, Some(parent.txid));
-    child_tx.inputs[0].sequence = Sequence::from_consensus(1);
-    let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 400, 100, 0, vec![1]);
-    let snapshot = MempoolMiningSnapshot {
-        sequence: 13,
-        entries: vec![child, parent],
-    };
-    let mut inactive = context(4_000_000, 4_000_000, 80_000);
-    inactive.csv_active = false;
-    let candidate = assemble_candidate(&inactive, &snapshot, &[0x51])?;
-    assert_eq!(candidate.transactions.len(), 2);
+fn unconfirmed_bip68_lock_skips_its_whole_chunk_only_while_csv_is_active()
+-> Result<(), Box<dyn Error>> {
+    for (csv_active, expected, sequence) in [(true, 0, 12), (false, 2, 13)] {
+        let parent = forged_entry(Arc::new(tx(1, 1_000, None)), 1_000, 0, 400, 100, 0, vec![]);
+        let mut child_tx = tx(2, 1_000, Some(parent.txid));
+        child_tx.inputs[0].sequence = Sequence::from_consensus(1);
+        let child = forged_entry(Arc::new(child_tx), 10_000, 0, 400, 100, 0, vec![1]);
+        let candidate = assemble_candidate(
+            &CandidateContext {
+                csv_active,
+                ..context()
+            },
+            &snapshot(sequence, vec![child, parent]),
+            PAYOUT,
+        )?;
+        assert_eq!(
+            candidate.transactions.len(),
+            expected,
+            "csv_active={csv_active} must select {expected} transactions"
+        );
+    }
     Ok(())
 }
 
@@ -225,16 +203,11 @@ fn bip68_unmet_lock_is_ignored_when_csv_is_inactive() -> Result<(), Box<dyn Erro
 // TestChunkBlockLimits, rather than extracting a parent from the failed chunk.
 #[test]
 fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dyn Error>> {
-    let payout = vec![0x51];
-    let empty = MempoolMiningSnapshot {
-        sequence: 4,
-        entries: vec![],
-    };
-    let reservation = assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &empty, &payout)?;
+    let reservation = assemble_candidate(&context(), &snapshot(4, vec![]), PAYOUT)?;
 
-    let parent = snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 40, 40, 4, vec![]);
-    let child = snapshot_entry(
-        Arc::new(chained_tx(2, 1_000, Some(parent.txid))),
+    let parent = forged_entry(Arc::new(tx(1, 1_000, None)), 1_000, 0, 40, 40, 4, vec![]);
+    let child = forged_entry(
+        Arc::new(tx(2, 1_000, Some(parent.txid))),
         10_000,
         0,
         60,
@@ -242,7 +215,7 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
         6,
         vec![1],
     );
-    let exact_limits = context(
+    let exact_limits = limits(
         reservation.weight + 100,
         reservation.size + 100,
         reservation.sigop_cost + 10,
@@ -250,161 +223,111 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
 
     let exact = assemble_candidate(
         &exact_limits,
-        &MempoolMiningSnapshot {
-            sequence: 5,
-            entries: vec![child.clone(), parent.clone()],
-        },
-        &payout,
+        &snapshot(5, vec![child.clone(), parent.clone()]),
+        PAYOUT,
     )?;
-    assert_eq!(
-        exact
-            .transactions
-            .iter()
-            .map(|transaction| transaction.txid)
-            .collect::<Vec<_>>(),
-        vec![parent.txid, child.txid]
-    );
+    assert_eq!(selected(&exact), vec![parent.txid, child.txid]);
     assert_eq!(exact.weight, exact_limits.max_weight);
     assert_eq!(exact.size, exact_limits.max_size);
     assert_eq!(exact.sigop_cost, exact_limits.max_sigops);
 
-    let mut overweight_child = child.clone();
-    overweight_child.weight += 1;
-    let overweight = assemble_candidate(
-        &exact_limits,
-        &MempoolMiningSnapshot {
-            sequence: 6,
-            entries: vec![overweight_child, parent.clone()],
-        },
-        &payout,
-    )?;
-    assert_eq!(
-        overweight
-            .transactions
-            .iter()
-            .map(|transaction| transaction.txid)
-            .collect::<Vec<_>>(),
-        vec![]
-    );
-
-    let mut oversized_child = child.clone();
-    oversized_child.size += 1;
-    let oversized = assemble_candidate(
-        &exact_limits,
-        &MempoolMiningSnapshot {
-            sequence: 7,
-            entries: vec![oversized_child, parent.clone()],
-        },
-        &payout,
-    )?;
-    assert_eq!(
-        oversized
-            .transactions
-            .iter()
-            .map(|transaction| transaction.txid)
-            .collect::<Vec<_>>(),
-        vec![]
-    );
-
-    let mut excess_sigops_child = child;
-    excess_sigops_child.sigop_cost += 1;
-    let excess_sigops = assemble_candidate(
-        &exact_limits,
-        &MempoolMiningSnapshot {
-            sequence: 8,
-            entries: vec![excess_sigops_child, parent],
-        },
-        &payout,
-    )?;
-    assert_eq!(
-        excess_sigops
-            .transactions
-            .iter()
-            .map(|transaction| transaction.txid)
-            .collect::<Vec<_>>(),
-        vec![]
-    );
+    let excesses: [fn(&mut SnapshotEntry); 3] = [
+        |entry| entry.weight += 1,
+        |entry| entry.size += 1,
+        |entry| entry.sigop_cost += 1,
+    ];
+    for (sequence, excess) in excesses.into_iter().enumerate() {
+        let mut over_limit = child.clone();
+        excess(&mut over_limit);
+        let candidate = assemble_candidate(
+            &exact_limits,
+            &snapshot(
+                6 + u64::try_from(sequence)?,
+                vec![over_limit, parent.clone()],
+            ),
+            PAYOUT,
+        )?;
+        assert!(
+            candidate.transactions.is_empty(),
+            "one excess unit must skip the whole chunk"
+        );
+    }
     Ok(())
 }
 
 #[test]
 fn coinbase_reservation_accepts_exact_limits_and_rejects_one_over() -> Result<(), Box<dyn Error>> {
     let payout = vec![0xac];
-    let snapshot = MempoolMiningSnapshot {
-        sequence: 9,
-        entries: vec![],
-    };
-    let reservation =
-        assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &snapshot, &payout)?;
+    let empty = snapshot(9, vec![]);
+    let reservation = assemble_candidate(&context(), &empty, &payout)?;
     assert!(reservation.weight > 0);
     assert!(reservation.size > 0);
     assert!(reservation.sigop_cost > 0);
 
-    let exact_limits = context(reservation.weight, reservation.size, reservation.sigop_cost);
-    let exact = assemble_candidate(&exact_limits, &snapshot, &payout)?;
+    let exact_limits = limits(reservation.weight, reservation.size, reservation.sigop_cost);
+    let exact = assemble_candidate(&exact_limits, &empty, &payout)?;
     assert_eq!(exact.weight, exact_limits.max_weight);
     assert_eq!(exact.size, exact_limits.max_size);
     assert_eq!(exact.sigop_cost, exact_limits.max_sigops);
 
-    assert!(matches!(
-        assemble_candidate(
-            &context(
+    let one_over = [
+        (
+            "weight",
+            limits(
                 reservation.weight - 1,
                 reservation.size,
                 reservation.sigop_cost,
             ),
-            &snapshot,
-            &payout,
         ),
-        Err(MiningError::CapacityExhausted { field: "weight" })
-    ));
-    assert!(matches!(
-        assemble_candidate(
-            &context(
+        (
+            "size",
+            limits(
                 reservation.weight,
                 reservation.size - 1,
                 reservation.sigop_cost,
             ),
-            &snapshot,
-            &payout,
         ),
-        Err(MiningError::CapacityExhausted { field: "size" })
-    ));
-    assert!(matches!(
-        assemble_candidate(
-            &context(
+        (
+            "sigops",
+            limits(
                 reservation.weight,
                 reservation.size,
                 reservation.sigop_cost - 1,
             ),
-            &snapshot,
-            &payout,
         ),
-        Err(MiningError::CapacityExhausted { field: "sigops" })
-    ));
+    ];
+    for (field, context) in one_over {
+        assert!(matches!(
+            assemble_candidate(&context, &empty, &payout),
+            Err(MiningError::CapacityExhausted { field: actual }) if actual == field
+        ));
+    }
     Ok(())
 }
 
 #[test]
 fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
-    let mut final_tx = independent_tx(1);
-    final_tx.lock_time = LockTime::ZERO;
-    let mut non_final = independent_tx(2);
+    let mut non_final = tx(2, 1_000, None);
     non_final.lock_time = LockTime::from_consensus(500_000_100);
     for input in &mut non_final.inputs {
         input.sequence = Sequence::ZERO;
     }
 
-    let snapshot = MempoolMiningSnapshot {
-        sequence: 4,
-        entries: vec![
-            snapshot_entry(Arc::new(non_final), 9_000, 0, 400, 100, 0, vec![]),
-            snapshot_entry(Arc::new(final_tx), 1_000, 0, 400, 100, 0, vec![]),
+    let snapshot = snapshot(
+        4,
+        vec![
+            forged_entry(Arc::new(non_final), 9_000, 0, 400, 100, 0, vec![]),
+            forged_entry(Arc::new(tx(1, 1_000, None)), 1_000, 0, 400, 100, 0, vec![]),
         ],
-    };
-    let mut context = context(4_000_000, 4_000_000, 80_000);
-    context.locktime_cutoff = 500_000_000;
-    let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
+    );
+    let candidate = assemble_candidate(
+        &CandidateContext {
+            locktime_cutoff: 500_000_000,
+            ..context()
+        },
+        &snapshot,
+        PAYOUT,
+    )?;
     assert_eq!(candidate.transactions.len(), 1);
     assert_eq!(candidate.fees, 1_000);
     Ok(())
@@ -412,10 +335,10 @@ fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn malformed_graph_snapshots_fail_with_typed_owner_errors() {
-    let missing = MempoolMiningSnapshot {
-        sequence: 1,
-        entries: vec![snapshot_entry(
-            Arc::new(independent_tx(1)),
+    let missing = snapshot(
+        1,
+        vec![forged_entry(
+            Arc::new(tx(1, 1_000, None)),
             1_000,
             0,
             100,
@@ -423,9 +346,9 @@ fn malformed_graph_snapshots_fail_with_typed_owner_errors() {
             0,
             vec![9],
         )],
-    };
+    );
     assert!(matches!(
-        assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &missing, &[0x51],),
+        assemble_candidate(&context(), &missing, PAYOUT),
         Err(MiningError::MissingAncestor { .. })
     ));
 
@@ -433,15 +356,15 @@ fn malformed_graph_snapshots_fail_with_typed_owner_errors() {
     // admission: assemble_candidate calls MempoolMiningSnapshot::fee_chunks,
     // whose mempool-owned fee-diagram validator rejects the forged cycle
     // with Dependencies. Mining propagates that failure without making an order.
-    let cyclic = MempoolMiningSnapshot {
-        sequence: 2,
-        entries: vec![
-            snapshot_entry(Arc::new(independent_tx(1)), 1_000, 0, 100, 100, 0, vec![1]),
-            snapshot_entry(Arc::new(independent_tx(2)), 1_000, 0, 100, 100, 0, vec![0]),
+    let cyclic = snapshot(
+        2,
+        vec![
+            forged_entry(Arc::new(tx(1, 1_000, None)), 1_000, 0, 100, 100, 0, vec![1]),
+            forged_entry(Arc::new(tx(2, 1_000, None)), 1_000, 0, 100, 100, 0, vec![0]),
         ],
-    };
+    );
     assert!(matches!(
-        assemble_candidate(&context(4_000_000, 4_000_000, 80_000), &cyclic, &[0x51]),
+        assemble_candidate(&context(), &cyclic, PAYOUT),
         Err(MiningError::FeeDiagram(
             bitcoin_rs_mempool::FeeDiagramError::Dependencies
         ))
@@ -452,19 +375,18 @@ fn malformed_graph_snapshots_fail_with_typed_owner_errors() {
 fn oversized_residual_package_is_skipped_atomically() -> Result<(), Box<dyn Error>> {
     // Coinbase reservation is ~476 WU with the default payout+commitment. Choose
     // limits so parent alone and parent+child both overflow, while `other` fits.
-    let parent = snapshot_entry(Arc::new(independent_tx(1)), 100, 0, 99_600, 100, 0, vec![]);
-    let mut child_tx = chained_tx(2, 1_000, Some(parent.txid));
+    let parent = forged_entry(Arc::new(tx(1, 1_000, None)), 100, 0, 99_600, 100, 0, vec![]);
+    let mut child_tx = tx(2, 1_000, Some(parent.txid));
     child_tx.lock_time = LockTime::ZERO;
-    let child = snapshot_entry(Arc::new(child_tx), 10_000, 0, 20_000, 100, 0, vec![1]);
-    let other = snapshot_entry(Arc::new(independent_tx(3)), 1_000, 0, 400, 100, 0, vec![]);
+    let child = forged_entry(Arc::new(child_tx), 10_000, 0, 20_000, 100, 0, vec![1]);
+    let other = forged_entry(Arc::new(tx(3, 1_000, None)), 1_000, 0, 400, 100, 0, vec![]);
 
-    let snapshot = MempoolMiningSnapshot {
-        sequence: 5,
-        entries: vec![child, parent, other.clone()],
-    };
-    let candidate = assemble_candidate(&context(100_000, 4_000_000, 80_000), &snapshot, &[0x51])?;
-    assert_eq!(candidate.transactions.len(), 1);
-    assert_eq!(candidate.transactions[0].txid, other.txid);
+    let candidate = assemble_candidate(
+        &limits(100_000, 4_000_000, 80_000),
+        &snapshot(5, vec![child, parent, other.clone()]),
+        PAYOUT,
+    )?;
+    assert_eq!(selected(&candidate), vec![other.txid]);
     Ok(())
 }
 
@@ -477,8 +399,8 @@ proptest! {
             .iter()
             .enumerate()
             .map(|(index, fee)| {
-                snapshot_entry(
-                    Arc::new(independent_tx(u8::try_from(index % 250).unwrap_or(0))),
+                forged_entry(
+                    Arc::new(tx(u8::try_from(index % 250).unwrap_or(0), 1_000, None)),
                     *fee,
                     0,
                     400,
@@ -488,117 +410,14 @@ proptest! {
                 )
             })
             .collect::<Vec<_>>();
-        let snapshot = MempoolMiningSnapshot {
-            sequence: 11,
-            entries,
-        };
-        let left = assemble_candidate(
-            &context(4_000_000, 4_000_000, 80_000),
-            &snapshot,
-            &[0x51],
-        )
-        .expect("left assembly");
-        let right = assemble_candidate(
-            &context(4_000_000, 4_000_000, 80_000),
-            &snapshot,
-            &[0x51],
-        )
-        .expect("right assembly");
-        assert_eq!(
-            left.transactions.iter().map(|tx| tx.txid).collect::<Vec<_>>(),
-            right.transactions.iter().map(|tx| tx.txid).collect::<Vec<_>>()
-        );
+        let snapshot = snapshot(11, entries);
+        let left = assemble_candidate(&context(), &snapshot, PAYOUT).expect("left assembly");
+        let right = assemble_candidate(&context(), &snapshot, PAYOUT).expect("right assembly");
+        assert_eq!(selected(&left), selected(&right));
         assert_eq!(left.fees, right.fees);
         assert_eq!(left.weight, right.weight);
         assert_eq!(left.size, right.size);
         assert_eq!(left.sigop_cost, right.sigop_cost);
         assert_eq!(left.coinbase_value, right.coinbase_value);
     }
-}
-
-fn context(max_weight: u64, max_size: u64, max_sigops: u64) -> CandidateContext {
-    CandidateContext {
-        previous_block_hash: Hash256::from_le_bytes(&[0xcd; 32]),
-        height: 100,
-        version: 0x2000_0000,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        min_time: 1,
-        current_time: 2,
-        locktime_cutoff: 1,
-        network: Network::Regtest,
-        csv_active: true,
-        segwit_active: true,
-        max_weight,
-        max_size,
-        max_sigops,
-    }
-}
-
-fn snapshot_entry(
-    tx: Arc<Tx>,
-    fee: u64,
-    fee_delta: i64,
-    weight: u64,
-    size: u32,
-    sigop_cost: u32,
-    ancestors: Vec<u32>,
-) -> SnapshotEntry {
-    SnapshotEntry {
-        txid: tx.txid(),
-        wtxid: tx.wtxid(),
-        vsize: size.max(1),
-        bip141_vsize: size.max(1),
-        size,
-        weight,
-        sigop_cost,
-        fee,
-        fee_delta,
-        time: 0,
-        height: 0,
-        ancestor_size: u64::from(size.max(1)),
-        ancestor_fee: fee,
-        ancestor_fee_delta: i128::from(fee_delta),
-        ancestors,
-        tx,
-    }
-}
-
-fn independent_tx(label: u8) -> Tx {
-    Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: outpoint(label),
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1_000),
-            script_pubkey: vec![0x51, label].into(),
-        }],
-        lock_time: LockTime::ZERO,
-    }
-}
-
-fn chained_tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
-    Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(parent.unwrap_or_else(|| outpoint(label).txid), 0),
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: vec![0x51, label].into(),
-        }],
-        lock_time: LockTime::ZERO,
-    }
-}
-
-fn outpoint(label: u8) -> OutPoint {
-    let mut bytes = [0_u8; 32];
-    bytes[0] = label;
-    OutPoint::new(Txid::from(Hash256::from_le_bytes(&bytes)), 0)
 }

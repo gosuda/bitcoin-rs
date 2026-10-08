@@ -4,6 +4,9 @@
 //! `CompactSize` transaction count. POL-05 keeps fee chunks indivisible and
 //! configured capacity inclusive.
 
+#[path = "common/fixtures.rs"]
+mod common;
+
 use std::error::Error;
 use std::sync::Arc;
 
@@ -12,9 +15,10 @@ use bitcoin_rs_mining::{
     Candidate, CandidateContext, MiningError, assemble_candidate, assemble_ordered_candidate,
 };
 use bitcoin_rs_primitives::{
-    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, encode::consensus_bytes,
+    Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    encode::consensus_bytes,
 };
+use common::measured_entry;
 
 type TestResult = Result<(), Box<dyn Error>>;
 type Assemble =
@@ -93,9 +97,9 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
 fn count_encoding_growth_skips_a_whole_package_and_its_descendant() -> TestResult {
     for segwit_active in [false, true] {
         let mut snapshot = snapshot(250, segwit_active)?;
-        let parent = entry(251, None, 100, segwit_active, vec![])?;
-        let child = entry(252, Some(parent.txid), 1_000, segwit_active, vec![250])?;
-        let descendant = entry(253, Some(child.txid), 1, segwit_active, vec![250, 251])?;
+        let parent = entry(251, None, 100, segwit_active, vec![]);
+        let child = entry(252, Some(parent.txid), 1_000, segwit_active, vec![250]);
+        let descendant = entry(253, Some(child.txid), 1, segwit_active, vec![250, 251]);
         snapshot.entries.extend([parent, child]);
         // 250 independent transactions plus this two-member fee chunk produce
         // 253 total transactions including coinbase, growing CompactSize by 2.
@@ -159,7 +163,7 @@ fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
 /// Supplies independent transactions with equal fees so count boundaries decide selection.
 fn snapshot(count: usize, witness: bool) -> Result<MempoolMiningSnapshot, Box<dyn Error>> {
     let entries = (1..=count)
-        .map(|label| entry(u16::try_from(label)?, None, 10_000, witness, vec![]))
+        .map(|label| Ok(entry(u16::try_from(label)?, None, 10_000, witness, vec![])))
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     Ok(MempoolMiningSnapshot {
         sequence: 1,
@@ -168,13 +172,14 @@ fn snapshot(count: usize, witness: bool) -> Result<MempoolMiningSnapshot, Box<dy
 }
 
 /// Creates a measured transaction with optional witness and an explicit dependency edge.
+/// Labels run past 252, so the outpoint takes two label bytes rather than one.
 fn entry(
     label: u16,
     parent: Option<Txid>,
     fee: u64,
     witness: bool,
     ancestors: Vec<u32>,
-) -> Result<SnapshotEntry, Box<dyn Error>> {
+) -> SnapshotEntry {
     let mut hash = [0; 32];
     hash[..2].copy_from_slice(&label.to_le_bytes());
     let tx = Arc::new(Tx {
@@ -198,43 +203,12 @@ fn entry(
         }],
         lock_time: LockTime::ZERO,
     });
-    let size = u32::try_from(tx.total_size())?;
-    let vsize = u32::try_from(tx.vsize())?;
-    Ok(SnapshotEntry {
-        txid: tx.txid(),
-        wtxid: tx.wtxid(),
-        size,
-        weight: tx.weight(),
-        vsize,
-        bip141_vsize: vsize,
-        sigop_cost: 0,
-        fee,
-        fee_delta: 0,
-        time: 0,
-        height: 0,
-        ancestor_size: u64::from(vsize),
-        ancestor_fee: fee,
-        ancestor_fee_delta: 0,
-        ancestors,
-        tx,
-    })
+    measured_entry(&tx, fee, 0, ancestors)
 }
 
-/// Uses generous regtest limits; each test narrows only the dimension under examination.
 fn context(segwit_active: bool) -> CandidateContext {
     CandidateContext {
-        previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
-        height: 100,
-        version: 0x2000_0000,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        min_time: 1,
-        current_time: 2,
-        locktime_cutoff: 1,
-        network: Network::Regtest,
-        csv_active: true,
         segwit_active,
-        max_weight: 4_000_000,
-        max_size: 4_000_000,
-        max_sigops: 80_000,
+        ..common::context()
     }
 }

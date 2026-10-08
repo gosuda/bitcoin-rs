@@ -60,9 +60,7 @@ const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
 /// Applied-tip hash plus mempool sequence that identify one candidate generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) struct GenerationKey {
-    /// Applied tip hash in consensus little-endian storage order.
     pub tip_hash: Hash256,
-    /// Mempool sequence captured with the tip.
     pub mempool_sequence: u64,
 }
 
@@ -74,49 +72,28 @@ impl GenerationKey {
     }
 }
 
-/// Single in-flight assembly record.
 #[derive(Debug)]
 struct InFlight {
-    /// Generation key the flight assembles for.
     key: GenerationKey,
     /// Monotonic identity assigned when the flight was installed.
     id: u64,
-    /// Result shared with same-key waiters once assembly finishes.
+    /// Shared with same-key waiters once assembly finishes.
     result: Option<Result<Arc<Candidate>, MiningControlError>>,
 }
 
 /// Bounded template cache, single-flight guard, and published generation.
 #[derive(Debug, Default)]
 struct CoordinatorState {
-    /// Last generation published to long-poll waiters.
     published: Option<GenerationKey>,
-    /// Bounded LRU of assembled candidates keyed by template id.
     cache: HashMap<TemplateId, Arc<Candidate>>,
     /// Insertion order for deterministic eviction of the oldest entry.
     cache_order: VecDeque<TemplateId>,
-    /// Single in-flight assembly, if any.
     in_flight: Option<InFlight>,
-    /// Monotonically increasing identity for each installed flight.
     next_flight_id: u64,
-    /// Facts from the most recently assembled candidate.
     last_candidate: Option<LastCandidateInfo>,
 }
 
 impl CoordinatorState {
-    /// Creates the empty lifecycle state.
-    #[must_use]
-    fn new() -> Self {
-        Self {
-            published: None,
-            cache: HashMap::new(),
-            cache_order: VecDeque::new(),
-            in_flight: None,
-            next_flight_id: 0,
-            last_candidate: None,
-        }
-    }
-
-    /// Returns the cached candidate for `id`, if one is retained.
     fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
         self.cache.get(id).cloned()
     }
@@ -238,17 +215,12 @@ pub trait ChainContextSource: Send + Sync {
 pub struct MiningService {
     /// Network whose genesis anchors an empty applied chain.
     network: Network,
-    /// Immutable coinbase payout script for assembled candidates.
     coinbase_script: Vec<u8>,
-    /// Shared shutdown flag checked by every unbounded wait.
+    /// Checked by every unbounded wait.
     shutdown: Arc<AtomicBool>,
-    /// Applied-chain tip publisher.
     applied_tip: Arc<dyn AppliedTipSource>,
-    /// Read-only mempool facts.
     mempool: Arc<dyn MempoolSnapshotSource>,
-    /// Applied-tree facts.
     chain: Arc<dyn ChainContextSource>,
-    /// Cache, single-flight, and publication state.
     state: Mutex<CoordinatorState>,
     /// Wake for long-poll and single-flight waiters.
     wake: Condvar,
@@ -276,7 +248,7 @@ impl MiningService {
             chain,
             coinbase_script,
             shutdown,
-            state: Mutex::new(CoordinatorState::new()),
+            state: Mutex::new(CoordinatorState::default()),
             wake: Condvar::new(),
         }
     }
@@ -287,15 +259,7 @@ impl MiningService {
     /// mutation and before any dependent notification. The published key is
     /// captured from live applied-tip / mempool state under the coordinator lock.
     pub fn publish_generation(&self) {
-        let key = self.live_generation_key();
-        let mut state = self.state.lock();
-        if let Some(previous) = state.published
-            && previous != key
-        {
-            state.invalidate_key(previous);
-        }
-        state.published = Some(key);
-        self.wake.notify_all();
+        self.publish(self.live_generation_key());
     }
 
     /// Publishes a generation key built from `applied_tip` and `sequence`
@@ -307,14 +271,13 @@ impl MiningService {
     /// [`Self::publish_generation`] instead, which captures the live sequence
     /// safely (no write lock is held on that path).
     pub fn publish_generation_from(&self, sequence: u64) {
-        let tip_hash = self
-            .applied_tip
-            .applied_tip()
-            .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash);
-        let key = GenerationKey {
-            tip_hash,
+        self.publish(GenerationKey {
+            tip_hash: self.tip_hash(),
             mempool_sequence: sequence,
-        };
+        });
+    }
+
+    fn publish(&self, key: GenerationKey) {
         let mut state = self.state.lock();
         if let Some(previous) = state.published
             && previous != key
@@ -325,15 +288,16 @@ impl MiningService {
         self.wake.notify_all();
     }
 
-    fn live_generation_key(&self) -> GenerationKey {
-        let tip_hash = self
-            .applied_tip
+    fn tip_hash(&self) -> Hash256 {
+        self.applied_tip
             .applied_tip()
-            .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash);
-        let mempool_sequence = self.mempool.current_sequence();
+            .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash)
+    }
+
+    fn live_generation_key(&self) -> GenerationKey {
         GenerationKey {
-            tip_hash,
-            mempool_sequence,
+            tip_hash: self.tip_hash(),
+            mempool_sequence: self.mempool.current_sequence(),
         }
     }
 
@@ -507,7 +471,10 @@ impl MiningService {
                     }
                     last_race = Some(generation_race());
                 }
-                Err(error) if is_generation_race(&error) => last_race = Some(error),
+                Err(error) if matches!(&error, MiningControlError::Unavailable(message) if message == GENERATION_RACE) =>
+                {
+                    last_race = Some(error);
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -697,11 +664,8 @@ impl MempoolSequenceWake for MiningService {
     }
 }
 
-/// Clears an abandoned single-flight slot if candidate assembly unwinds.
-///
-/// Release/quickstart builds abort on panic, but test, development, and other
-/// unwind-enabled profiles must not leave same-key callers blocked behind a
-/// permanently in-flight generation.
+/// Clears an abandoned single-flight slot when assembly unwinds, so
+/// unwind-enabled profiles cannot leave same-key callers blocked forever.
 struct InFlightAssemblyGuard<'a> {
     service: &'a MiningService,
     key: GenerationKey,
@@ -907,11 +871,6 @@ fn generation_race() -> MiningControlError {
     MiningControlError::Unavailable(CompactString::from(GENERATION_RACE))
 }
 
-/// Reports whether `error` is the generation-race error.
-fn is_generation_race(error: &MiningControlError) -> bool {
-    matches!(error, MiningControlError::Unavailable(message) if message.as_str() == GENERATION_RACE)
-}
-
 /// Parses a BIP22/BIP23 long-poll id into its generation key.
 #[must_use]
 fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
@@ -931,42 +890,18 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
 /// Signet challenge and flag for `network`, or `None` off signet.
 #[must_use]
 fn signet_info(network: Network) -> Option<SignetMiningInfo> {
-    const DEFAULT_SIGNET_CHALLENGE: &str = concat!(
-        "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430",
-        "210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
-    );
+    // Core's default 1-of-2 signet challenge.
+    const DEFAULT_SIGNET_CHALLENGE: [u8; 71] = [
+        0x51, 0x21, 0x03, 0xad, 0x5e, 0x0e, 0xda, 0xd1, 0x8c, 0xb1, 0xf0, 0xfc, 0x0d, 0x28, 0xa3,
+        0xd4, 0xf1, 0xf3, 0xe4, 0x45, 0x64, 0x03, 0x37, 0x48, 0x9a, 0xbb, 0x10, 0x40, 0x4f, 0x2d,
+        0x1e, 0x08, 0x6b, 0xe4, 0x30, 0x21, 0x03, 0x59, 0xef, 0x50, 0x21, 0x96, 0x4f, 0xe2, 0x2d,
+        0x6f, 0x8e, 0x05, 0xb2, 0x46, 0x3c, 0x95, 0x40, 0xce, 0x96, 0x88, 0x3f, 0xe3, 0xb2, 0x78,
+        0x76, 0x0f, 0x04, 0x8f, 0x51, 0x89, 0xf2, 0xe6, 0xc4, 0x52, 0xae,
+    ];
 
-    if network != Network::Signet {
-        return None;
-    }
-    let challenge = hex_decode(DEFAULT_SIGNET_CHALLENGE)
-        .unwrap_or_else(|| panic!("Bitcoin Core's default Signet challenge is invalid hex"));
-    Some(SignetMiningInfo { challenge })
-}
-
-/// Decodes a lowercase hex string to bytes. Returns `None` on invalid input.
-fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let mut chars = hex.as_bytes().iter();
-    while let Some(&hi) = chars.next() {
-        let &lo = chars.next()?;
-        let high = decode_nibble(hi)?;
-        let low = decode_nibble(lo)?;
-        bytes.push((high << 4) | low);
-    }
-    Some(bytes)
-}
-
-fn decode_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    (network == Network::Signet).then(|| SignetMiningInfo {
+        challenge: DEFAULT_SIGNET_CHALLENGE.to_vec(),
+    })
 }
 
 #[cfg(test)]

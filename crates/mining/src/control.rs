@@ -376,41 +376,26 @@ pub struct FakeMiningControl {
 }
 
 #[cfg(any(test, feature = "test-seam"))]
-impl FakeMiningControl {
-    /// Builds a control that fails every result-returning operation with
-    /// [`MiningControlError::Unavailable`] and counts publication wakes.
-    ///
-    /// The placeholder mining info is never returned through the control:
-    /// an armed failure short-circuits before it can be read.
-    pub fn unavailable(reason: &str) -> Arc<Self> {
-        Arc::new(Self {
+impl Default for FakeMiningControl {
+    fn default() -> Self {
+        Self {
             template: Mutex::new(None),
             proposal: Mutex::new(BlockValidationResult::Accepted),
             submit: Mutex::new(BlockValidationResult::Accepted),
-            info: Mutex::new(placeholder_mining_info()),
-            last_request: Mutex::new(None),
-            last_hash_ps: Mutex::new(None),
-            last_generate: Mutex::new(None),
-            template_calls: AtomicUsize::new(0),
-            submit_calls: AtomicUsize::new(0),
-            info_calls: AtomicUsize::new(0),
-            fail: Mutex::new(Some(MiningControlError::Unavailable(CompactString::from(
-                reason,
-            )))),
-            publishes: AtomicU64::new(0),
-            published_from: Mutex::new(Vec::new()),
-        })
-    }
-
-    /// Builds a control that answers template requests with `template` and
-    /// mining-info reads with `info`. Submissions and proposals are accepted
-    /// by default; no failure is armed and every counter starts at zero.
-    pub fn with_template(template: BlockTemplate, info: MiningInfo) -> Arc<Self> {
-        Arc::new(Self {
-            template: Mutex::new(Some(template)),
-            proposal: Mutex::new(BlockValidationResult::Accepted),
-            submit: Mutex::new(BlockValidationResult::Accepted),
-            info: Mutex::new(info),
+            info: Mutex::new(MiningInfo {
+                blocks: 0,
+                last_candidate: None,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                difficulty: 1.0,
+                network_hashes_per_second: 0.0,
+                pooled_transactions: 0,
+                network: Network::Regtest,
+                next_bits: CompactTarget::from_consensus(0x207f_ffff),
+                next_difficulty: 1.0,
+                minimum_fee_rate: 0,
+                signet: None,
+                warnings: Vec::new(),
+            }),
             last_request: Mutex::new(None),
             last_hash_ps: Mutex::new(None),
             last_generate: Mutex::new(None),
@@ -420,6 +405,34 @@ impl FakeMiningControl {
             fail: Mutex::new(None),
             publishes: AtomicU64::new(0),
             published_from: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-seam"))]
+impl FakeMiningControl {
+    /// Builds a control that fails every result-returning operation with
+    /// [`MiningControlError::Unavailable`] and counts publication wakes.
+    ///
+    /// The placeholder mining info is never returned through the control:
+    /// an armed failure short-circuits before it can be read.
+    pub fn unavailable(reason: &str) -> Arc<Self> {
+        Arc::new(Self {
+            fail: Mutex::new(Some(MiningControlError::Unavailable(CompactString::from(
+                reason,
+            )))),
+            ..Self::default()
+        })
+    }
+
+    /// Builds a control that answers template requests with `template` and
+    /// mining-info reads with `info`. Submissions and proposals are accepted
+    /// by default; no failure is armed and every counter starts at zero.
+    pub fn with_template(template: BlockTemplate, info: MiningInfo) -> Arc<Self> {
+        Arc::new(Self {
+            template: Mutex::new(Some(template)),
+            info: Mutex::new(info),
+            ..Self::default()
         })
     }
 
@@ -521,24 +534,6 @@ impl MiningControl for FakeMiningControl {
 impl crate::coordinator::MempoolSequenceWake for FakeMiningControl {
     fn publish_generation_from(&self, sequence: u64) {
         self.published_from.lock().push(sequence);
-    }
-}
-
-#[cfg(any(test, feature = "test-seam"))]
-fn placeholder_mining_info() -> MiningInfo {
-    MiningInfo {
-        blocks: 0,
-        last_candidate: None,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        difficulty: 1.0,
-        network_hashes_per_second: 0.0,
-        pooled_transactions: 0,
-        network: Network::Regtest,
-        next_bits: CompactTarget::from_consensus(0x207f_ffff),
-        next_difficulty: 1.0,
-        minimum_fee_rate: 0,
-        signet: None,
-        warnings: Vec::new(),
     }
 }
 

@@ -21,13 +21,26 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_mining::{CandidateContext, assemble_candidate};
 use bitcoin_rs_primitives::{
-    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness,
+    Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use parking_lot::RwLock;
 use serde_json::{Value, json};
 
+#[path = "common/fixtures.rs"]
+mod common;
+
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+fn context() -> CandidateContext {
+    CandidateContext {
+        previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),
+        height: 201,
+        min_time: 1_700_000_001,
+        current_time: 1_700_000_600,
+        locktime_cutoff: 1_700_000_000,
+        ..common::context()
+    }
+}
 const CLUSTERS: u32 = 100;
 const MEMBERS: u32 = 64;
 
@@ -121,24 +134,6 @@ impl AdmissionChain for Chain {
             csv_active: true,
             ..ChainAdmissionSnapshot::default()
         })
-    }
-}
-
-fn context() -> CandidateContext {
-    CandidateContext {
-        previous_block_hash: Hash256::from_le_bytes(&[0xab; 32]),
-        height: 201,
-        version: 0x2000_0000,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        min_time: 1_700_000_001,
-        current_time: 1_700_000_600,
-        locktime_cutoff: 1_700_000_000,
-        network: Network::Regtest,
-        csv_active: true,
-        segwit_active: true,
-        max_weight: 4_000_000,
-        max_size: 4_000_000,
-        max_sigops: 80_000,
     }
 }
 

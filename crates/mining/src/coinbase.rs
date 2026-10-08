@@ -6,7 +6,6 @@ use thiserror::Error;
 
 const MAX_COINBASE_SCRIPT_SIG_LEN: usize = 100;
 const MIN_COINBASE_SCRIPT_SIG_LEN: usize = 2;
-const WITNESS_COMMITMENT_TAG: [u8; 4] = [0xaa, 0x21, 0xa9, 0xed];
 /// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed` prefix. Core `MINIMUM_WITNESS_COMMITMENT` is 38 bytes.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
@@ -103,9 +102,7 @@ pub(crate) fn build_coinbase(
 /// Builds the BIP141 `OP_RETURN` witness-commitment script (`6a24aa21a9ed || commitment`).
 pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
     let mut script = Vec::with_capacity(38);
-    script.push(0x6a); // OP_RETURN
-    script.push(36); // PUSH36
-    script.extend_from_slice(&WITNESS_COMMITMENT_TAG);
+    script.extend_from_slice(&WITNESS_COMMITMENT_PREFIX);
     script.extend_from_slice(commitment.as_byte_array());
     script
 }
@@ -205,32 +202,27 @@ mod uncommitted_witness_tests {
         }
     }
 
+    /// The reserved nonce is inserted only for an active-segwit block that
+    /// already commits and carries no coinbase witness; every other shape is
+    /// left byte-for-byte alone.
     #[test]
-    fn fills_reserved_nonce_when_commitment_present_and_witness_empty() {
-        let mut block = commitment_block(Vec::new(), true);
-        update_uncommitted_block_structures(&mut block, true);
-        assert_eq!(
-            block.txs[0].inputs[0].witness,
-            Witness::from_stack(vec![WITNESS_RESERVED_VALUE.to_vec()])
-        );
-    }
-
-    #[test]
-    fn leaves_an_existing_coinbase_witness_alone() {
+    fn reserved_nonce_fills_only_an_empty_witness_under_a_commitment() {
         let custom = vec![vec![0x11; 32]];
-        let mut block = commitment_block(custom.clone(), true);
-        update_uncommitted_block_structures(&mut block, true);
-        assert_eq!(block.txs[0].inputs[0].witness, Witness::from_stack(custom));
-    }
-
-    #[test]
-    fn skips_without_commitment_or_when_segwit_is_inactive() {
-        let mut no_commitment = commitment_block(Vec::new(), false);
-        update_uncommitted_block_structures(&mut no_commitment, true);
-        assert!(no_commitment.txs[0].inputs[0].witness.is_empty());
-
-        let mut pre_segwit = commitment_block(Vec::new(), true);
-        update_uncommitted_block_structures(&mut pre_segwit, false);
-        assert!(pre_segwit.txs[0].inputs[0].witness.is_empty());
+        let reserved = vec![WITNESS_RESERVED_VALUE.to_vec()];
+        for (witness, with_commitment, segwit_active, want) in [
+            (Vec::new(), true, true, reserved),
+            (custom.clone(), true, true, custom.clone()),
+            (Vec::new(), false, true, Vec::new()),
+            (Vec::new(), true, false, Vec::new()),
+            (custom.clone(), false, true, custom),
+        ] {
+            let mut block = commitment_block(witness, with_commitment);
+            update_uncommitted_block_structures(&mut block, segwit_active);
+            assert_eq!(
+                block.txs[0].inputs[0].witness,
+                Witness::from_stack(want.clone()),
+                "commitment={with_commitment} segwit={segwit_active} want={want:?}"
+            );
+        }
     }
 }

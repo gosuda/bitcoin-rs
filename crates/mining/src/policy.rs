@@ -151,10 +151,6 @@ fn chunk_package(
 ) -> Result<SelectedPackage, MiningError> {
     #[cfg(test)]
     CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
-    if indices.len() == 1 {
-        let index = indices[0];
-        return Ok(single_entry_package(&snapshot.entries[index], index));
-    }
     let mut fee = 0_u64;
     let mut weight = 0_u64;
     let mut size = 0_u64;
@@ -182,16 +178,6 @@ fn chunk_package(
         size,
         sigop_cost,
     })
-}
-
-fn single_entry_package(entry: &SnapshotEntry, index: usize) -> SelectedPackage {
-    SelectedPackage {
-        indices: vec![index],
-        fee: entry.fee,
-        weight: entry.weight,
-        size: u64::from(entry.size),
-        sigop_cost: u64::from(entry.sigop_cost),
-    }
 }
 
 fn package_is_final(
@@ -262,18 +248,14 @@ mod tests {
             sequence: 1,
             entries: vec![filler, leftover],
         };
-
-        CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
-        let weight_full = select_packages(&context(1_004, 4_000_000, 80_000), &snapshot, 0, 0, 0)
-            .expect("weight-full selection");
-        assert_eq!(weight_full.0, vec![0]);
-        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
-
-        CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
-        let size_full = select_packages(&context(4_000_000, 1_001, 80_000), &snapshot, 0, 0, 0)
-            .expect("size-full selection");
-        assert_eq!(size_full.0, vec![0]);
-        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
+        for limits in [(1_004, 4_000_000), (4_000_000, 1_001)] {
+            CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
+            let selected =
+                select_packages(&context(limits.0, limits.1, 80_000), &snapshot, 0, 0, 0)
+                    .expect("selection under a full dimension");
+            assert_eq!(selected.0, vec![0], "limits {limits:?}");
+            assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
+        }
     }
 
     /// Even an empty body needs one byte to encode its reserved coinbase count.
