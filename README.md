@@ -38,10 +38,9 @@ Bitcoin is unusually well suited to independent implementation because its
 behavior can be checked against Bitcoin Core, `libbitcoinkernel`, historical
 chain data, consensus test vectors, fuzzing, and differential tests.
 
-Bitcoin Core prioritizes stability, compatibility, and minimizing change risk.
-Those properties are essential for the reference implementation, but they also
-make large architectural changes difficult to explore within the same
-codebase.
+However, Bitcoin Core prioritizes stability, compatibility, and minimizing
+change risk. While essential for the reference implementation, these priorities
+make large architectural changes difficult to explore within the same codebase.
 
 **That is why we built `bitcoin-rs`: to preserve Bitcoin's consensus while
 making architectural experimentation practical—build alternatives, verify them
@@ -87,8 +86,15 @@ Use the `quickstart` profile for initial exploration. For sustained IBD or
 benchmarking, use `cargo build --release -p bitcoin-rs` and record the exact
 profile and feature set with the result. No build-time ratio is claimed here.
 
-This starts a mainnet node storing state in `.bitcoin-rs` and listening for
-JSON-RPC on `127.0.0.1:8332`.
+This starts a mainnet node using `fjall` storage and native Rust script
+verification, storing state in `.bitcoin-rs` and listening for JSON-RPC on
+`127.0.0.1:8332`. The shipped Docker image instead selects kernel verification
+through its default configuration.
+
+Mainnet skips historical script verification up to the pinned assume-valid
+anchor by default. Add `--assume-valid-height 0` to verify all scripts from
+genesis. See [Getting started](docs/getting-started.md) for configuration,
+cache, indexing, and pruning options.
 
 Verify the node is responding and syncing:
 
@@ -149,23 +155,6 @@ Core & domain: crates/consensus, crates/script, crates/utxo, crates/chain, crate
 - Indexing: `txindex` runs as an independent consumer, advancing its cursor and
   rollback metadata atomically.
 
-## Default posture
-
-| Setting | Default |
-|---|---|
-| Storage backend | `fjall` |
-| Validation engine | Native Rust interpreter (`validation.engine = "native"`, the code default in every build); `libbitcoinkernel` when selected at runtime with `validation.engine = "kernel"` on a `--features kernel` build. The released Docker image presets `validation_engine = "kernel"` via its shipped `/etc/bitcoin-rs/default.toml`, overridable by env, config file, or CLI |
-| Kernel feature | Off by default in every crate; `--features kernel` compiles in `libbitcoinkernel` support without selecting it |
-| Database cache | 450 MiB (`--dbcache-mb`, split 80/20 when txindex is enabled) |
-| Multi-peer download | On (10 outbound peers: 8 full-relay, 2 block-relay-only; 256-block window) |
-| Transaction index | Off |
-| Script index | Off |
-| Pruning | Off |
-
-Mainnet defaults to skipping historical script verification up to the pinned
-assume-valid anchor. Pass `--assume-valid-height 0` to verify all scripts from
-genesis.
-
 ## Build and test
 
 ```sh
@@ -179,64 +168,59 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-## External compatibility
+## Validation and verification
 
-**Stable external contracts. Replaceable internal architecture.**
+bitcoin-rs verifies consensus, networking, and storage through multiple independent
+evidence lanes rather than relying on in-tree unit tests alone. Evidence is
+separated into real external-consumer evidence (unmodified external software
+exercising the public boundary) and in-tree reference/differential suites.
 
-bitcoin-rs preserves Bitcoin consensus and its established external interfaces
-while freely redesigning the implementation behind them. The project does not
-reproduce Bitcoin Core's internal architecture or carry forward its
-implementation constraints: when a simpler, faster, safer, or more coherent
-design is demonstrated, internal APIs, crate and module boundaries, persistence
-formats, and execution pipelines may all be replaced — even when that requires
-a full resync. Compatibility is evaluated only at externally observable
-boundaries, never by preserving implementation history.
+For reproduction commands, prerequisites, and artifact custody for each lane, see
+the [validation tooling index](docs/validation-tooling.md).
 
-The preserved boundaries:
+Implemented and tested lanes:
 
-- Bitcoin consensus: valid/invalid block and transaction decisions, chain
-  selection and reorg semantics, and the resulting canonical chainstate.
-- Bitcoin P2P and synchronization: interoperability with other Bitcoin nodes
-  and correct synchronization/recovery outcomes. The internal synchronization
-  algorithm may be replaced; the observable protocol contract may not.
-- The supported Bitcoin Core JSON-RPC methods and the supported
-  Esplora-compatible APIs, including their parameters, responses, errors, and
-  pagination/reorg semantics. *Supported* is load-bearing: it does not imply
-  every upstream method or endpoint is implemented, and it tracks the upstream
-  contract — when Core changes or removes a method, the endpoint follows in a
-  clean cutover, not behind a compatibility shim.
-- Other advertised external integrations — for example ZMQ and the typed
-  `embed::Node` in-process API — keep their documented observable contracts.
+- [Core vectors](docs/validation-tooling.md#3-bitcoin-core-script-and-transaction-vectors):
+  native script evaluation with pinned skips; consensus transaction tests cover
+  loading and deserialization, not validity.
+- [Sighash differentials](docs/validation-tooling.md#4-native-sighash-checks-against-independent-implementation):
+  legacy, SegWit v0, and Taproot checks against independent implementations.
+- [Kernel oracle and scoped parity](docs/validation-tooling.md#5-libbitcoinkernel-oracle-and-scoped-native-parity):
+  Core script-vector verdicts and selected native/kernel fixture comparisons,
+  not a full-corpus differential.
+- [Contextual consensus rules](docs/validation-tooling.md#6-contextual-consensus-rule-tests):
+  difficulty, activation rules, and undo persistence.
+- [Fuzzing and corpus regression](docs/validation-tooling.md#7-daily-fuzz-targets-and-qa-assets-corpus-provenance):
+  five targets, pinned reference seeds, and codec invariants.
+- [Crash recovery and reorgs](docs/validation-tooling.md#8-chainstate-crash-recovery-and-reorg-evidence):
+  durable commits, process-death boundaries, and restart consistency.
+- [Live Core acceptance](docs/validation-tooling.md#2-live-core-block-and-transaction-acceptance-differential):
+  curated block/transaction cases compared by an in-tree harness against pinned live Bitcoin Core.
 
-Not guaranteed: internal Rust APIs and crate boundaries (the workspace semver
-policy governs how such breaks are released, not whether), object ownership,
-abstraction layers, execution pipelines, database schema and on-disk layout,
-and parity with Bitcoin Core's code organization. A schema-breaking change may require an explicit fresh resync —
-an acceptable tradeoff, not a bug — but it must never silently reinterpret
-incompatible persisted data or corrupt operator state: an incompatible
-authoritative chainstate format fails closed, and replay — or an optional
-offline migration tool, when offered — is the migration route.
+External evidence and remaining work:
 
-Internal breaking changes are acceptable with clear rationale and the evidence
-the boundary demands; breaking a supported external contract is a regression.
+- [Live Core P2P](docs/validation-tooling.md#1-live-bitcoin-core-p2p-and-chain-identity-differential):
+  externally verified handshake, sync, compact blocks, and chain identity.
+- [bitcoinfuzz integration](https://github.com/bitcoinfuzz/bitcoinfuzz/issues/662):
+  integration effort in progress to add bitcoin-rs as a differential fuzzing module.
+- [Offline full-validation comparator](docs/validation-tooling.md#9-offline-full-validation-comparator):
+  harness tested; full-mainnet campaigns not yet executed.
+- [Ecosystem compatibility](docs/validation-tooling.md#10-external-ecosystem-compatibility-matrix):
+  P2P externally verified; other surfaces tracked separately.
+- [USDT observability](docs/validation-tooling.md#11-usdt--bpftrace-observability-validation):
+  probe ABI tested; live tracing remains planned.
 
-Compatibility claims are tied to external evidence, not only to in-tree
-implementation status. The [ecosystem compatibility
-contract](docs/contracts/ecosystem-compatibility.md) states the strategy —
-Core-compatible protocol/API boundaries, independent internals, black-box
-evidence from real ecosystem consumers — and the
-[evidence matrix](docs/api/ecosystem-compat.toml) records per surface what
-has actually been exercised by an external consumer. A surface is called
-*externally verified* only when a real external consumer has run against it;
-everything else is reported honestly as implemented or weaker.
+## Independent architecture, Bitcoin compatibility
 
-Today the one real external-consumer lane is live interoperability with an
-unmodified Bitcoin Core peer ([Core differential
-contract](docs/contracts/core-differential.md)): black-box handshake, sync,
-relay, and chain identity. JSON-RPC, REST, ZMQ, GBT/mining, and the
-Core-compatible USDT probes are implemented and covered by in-tree tests,
-but not yet externally verified; the matrix names the evidence and the
-planned representative consumers.
+bitcoin-rs explores new architectures behind Bitcoin's established consensus,
+protocol, and supported API boundaries. Internal designs are replaceable:
+changes must earn their place through reproducible evidence, not resemblance
+to Bitcoin Core.
+
+We check compatibility against real ecosystem consumers and reference
+implementations. See the [validation tooling index](docs/validation-tooling.md)
+for tested scope and the [compatibility matrix](docs/api/ecosystem-compat.toml)
+for per-interface status.
 
 ## Contributing
 
@@ -247,6 +231,7 @@ verification commands, CI workflows, and crate architecture conventions.
 
 - [docs/getting-started.md](docs/getting-started.md) — Node setup and configuration
 - [docs/README.md](docs/README.md) — Documentation index
+- [docs/validation-tooling.md](docs/validation-tooling.md) — Validation tooling and evidence index
 - [docs/contracts/](docs/contracts/) — Normative architecture and protocol contracts
 - [docs/contracts/ecosystem-compatibility.md](docs/contracts/ecosystem-compatibility.md) — External ecosystem compatibility strategy
 - [docs/api/ecosystem-compat.toml](docs/api/ecosystem-compat.toml) — External compatibility evidence matrix
