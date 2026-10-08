@@ -270,15 +270,15 @@ fn error_kind(error: &DecodeError) -> String {
 }
 
 // Both corpus gates enforce the QAC-05 round-trip contract
-// (docs/contracts/qa-corpus.md) through the pinned verdict manifest.
+// (docs/contracts/qa-corpus.md) through the pinned verdict manifest. One
+// test walks both targets: each enforce pass read-modify-writes the shared
+// manifest.json under CORPUS_MANIFEST_WRITE, and parallel tests doing that
+// concurrently lose each other's section.
 #[test]
-fn tx_corpus_seeds_match_expected_verdicts() {
-    enforce_corpus_verdicts("tx_validate");
-}
-
-#[test]
-fn block_corpus_seeds_match_expected_verdicts() {
-    enforce_corpus_verdicts("block_validate");
+fn corpus_seeds_match_expected_verdicts() {
+    for target in ["tx_validate", "block_validate"] {
+        enforce_corpus_verdicts(target);
+    }
 }
 
 #[test]
