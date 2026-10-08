@@ -105,15 +105,6 @@ impl VerifyFlags {
         self.0
     }
 
-    /// Rebuilds flags from raw bits previously returned by [`Self::bits`].
-    /// Bits that match no defined flag are carried through unchanged; they
-    /// select no check this crate runs. Named after `bitflags`'
-    /// `from_bits_retain`: infallible, retaining unknown bits.
-    #[must_use]
-    pub const fn from_bits_retain(bits: u32) -> Self {
-        Self(bits)
-    }
-
     /// Returns the full consensus-authority bit set, including taproot for bitcoinkernel.
     #[must_use]
     pub const fn kernel_bits(self) -> u32 {
