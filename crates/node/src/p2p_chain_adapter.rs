@@ -11,8 +11,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bitcoin_rs_p2p::sync::chain::{
-    BranchSwitchError, HeaderAdmission, SyncChain, SyncChainError, WindowCommitDisposition,
-    WindowCommitError,
+    BranchSwitchError, HeaderAdmission, HistoricalAdvance, SyncChain, SyncChainError,
+    WindowCommitDisposition, WindowCommitError,
 };
 use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256, Header, Network};
@@ -166,12 +166,24 @@ impl SyncChain for NodeSyncChain {
         }
     }
 
-    fn advance_historical(&self) -> Result<Option<(u32, Hash256)>, SyncChainError> {
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
         let Some(manager) = &self.assumeutxo else {
-            return Ok(None);
+            return Ok(HistoricalAdvance::Complete);
         };
         manager
             .advance_historical()
+            .map(|progress| match progress {
+                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::Complete => {
+                    HistoricalAdvance::Complete
+                }
+                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::ReplayPending => {
+                    HistoricalAdvance::ReplayPending
+                }
+                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::MissingBody {
+                    height,
+                    hash,
+                } => HistoricalAdvance::MissingBody { height, hash },
+            })
             .map_err(|error| -> SyncChainError {
                 self.handles.fail_closed_for_recovery();
                 Box::new(error)

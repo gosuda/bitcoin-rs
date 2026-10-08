@@ -21,6 +21,17 @@ use std::sync::Arc;
 /// metrics without naming the implementation's error types.
 pub type SyncChainError = Box<dyn core::error::Error + Send + Sync>;
 
+/// The next action after a bounded historical replay pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoricalAdvance {
+    /// No more historical work remains.
+    Complete,
+    /// More local replay remains; do not request a body yet.
+    ReplayPending,
+    /// The body is absent locally and can be fetched from peers.
+    MissingBody { height: u32, hash: Hash256 },
+}
+
 /// How the executor must treat a failed window commit or branch connect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowCommitDisposition {
@@ -214,10 +225,10 @@ pub trait SyncChain: Send + Sync {
         None
     }
 
-    /// Replays bounded retained snapshot history and names the next missing
-    /// pinned-ancestry body. Foreground tip and notifications do not change.
-    fn advance_historical(&self) -> Result<Option<(u32, Hash256)>, SyncChainError> {
-        Ok(None)
+    /// Replays bounded retained snapshot history, distinguishing local work
+    /// from genuinely missing pinned-ancestry bodies.
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
+        Ok(HistoricalAdvance::Complete)
     }
 
     /// Validates a requested historical body through the chainstate owner.

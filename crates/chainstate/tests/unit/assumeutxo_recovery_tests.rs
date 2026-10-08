@@ -124,7 +124,10 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
         .and_then(|store| store.append_cursor());
     assert_eq!(
         manager.advance_historical()?,
-        Some((2, fixture.pinned.block_hash))
+        HistoricalAdvance::MissingBody {
+            height: 2,
+            hash: fixture.pinned.block_hash,
+        }
     );
     assert_eq!(active.durable_head.load()?, archived_head);
     assert_eq!(
@@ -385,6 +388,31 @@ fn snapshot_base_checkpoint_is_bound_to_the_pinned_commitment() -> TestResult {
     assert_eq!(
         restored.utxo.lock_stable_view().hash_serialized_3()?,
         fixture.pinned.hash_serialized
+    );
+    Ok(())
+}
+
+#[test]
+fn snapshot_recovery_rejects_coin_height_alias() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let (active, manager) = activate(dir.path(), &fixture)?;
+    drop(manager);
+    drop(active);
+    let path = dir
+        .path()
+        .join("assumeutxo")
+        .join(fixture.pinned.block_hash.to_string())
+        .join("coins.dat");
+    let mut bytes = std::fs::read(&path)?;
+    let offset = 52 + 45 + 12;
+    let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
+    assert!(height <= fixture.pinned.height);
+    bytes[offset..offset + 4].copy_from_slice(&(height | 0x8000_0000).to_le_bytes());
+    std::fs::write(&path, bytes)?;
+    assert!(
+        crate::recovery::restore_snapshot(dir.path(), Network::Regtest, &fixture.pinned).is_err(),
+        "recovery must reject a commitment-preserving coin height mutation"
     );
     Ok(())
 }

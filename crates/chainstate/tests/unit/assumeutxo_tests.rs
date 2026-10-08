@@ -185,6 +185,34 @@ fn untrusted_snapshot_cannot_assert_its_own_commitment() -> TestResult {
 }
 
 #[test]
+fn snapshot_rejects_coin_height_alias_with_identical_commitment() -> TestResult {
+    let fixture = Fixture::new()?;
+    let mut bytes = fixture.snapshot.clone();
+    // Snapshot header (52), transaction record header (45), vout height offset (12).
+    let offset = 52 + 45 + 12;
+    let height = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
+    assert!(height <= fixture.pinned.height);
+    bytes[offset..offset + 4].copy_from_slice(&(height | 0x8000_0000).to_le_bytes());
+    let forged = read_snapshot_strict_v4(&mut Cursor::new(&bytes))?;
+    assert_eq!(
+        forged.set.lock_stable_view().hash_serialized_3()?,
+        fixture.pinned.hash_serialized,
+        "the encoded commitment aliases the high height bit"
+    );
+    let dir = tempfile::tempdir()?;
+    let manager = fixture.manager(dir.path())?;
+    assert!(matches!(
+        manager.activate_pinned_snapshot(forged, &fixture.pinned),
+        Err(AssumeUtxoError::Utxo(
+            bitcoin_rs_utxo::UtxoError::SnapshotCoinHeightOutOfRange { .. }
+        ))
+    ));
+    assert_eq!(manager.status()?, AssumeUtxoDiskStatus::Uninitialized);
+    assert!(fixture.active.applied_tip_snapshot().is_none());
+    Ok(())
+}
+
+#[test]
 fn snapshot_installs_coins_statistics_and_resolved_header_together() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;

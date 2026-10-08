@@ -40,6 +40,14 @@ pub enum UtxoError {
     /// Encoded UTXO record bytes are truncated, trailing, or noncanonical.
     #[error("invalid encoded UTXO record")]
     CorruptRecord,
+    /// A snapshot coin must have been created no later than its base height.
+    #[error("snapshot coin height {height} exceeds snapshot base {snapshot_height}")]
+    SnapshotCoinHeightOutOfRange {
+        /// Invalid creation height.
+        height: u32,
+        /// Pinned snapshot base height.
+        snapshot_height: u32,
+    },
     /// Snapshot I/O failed.
     #[error("snapshot I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -231,6 +239,14 @@ impl UtxoSetView<'_> {
     /// Computes Bitcoin Core's `hash_serialized_3` commitment for this stable view.
     pub fn hash_serialized_3(&self) -> Result<Hash256, UtxoError> {
         crate::snapshot::hash_serialized_3_stable(self)
+    }
+
+    /// Computes the snapshot commitment while rejecting impossible coin heights.
+    ///
+    /// Keeping this validation in the commitment traversal prevents a high-bit
+    /// height alias from passing the pinned hash with different spend metadata.
+    pub fn hash_serialized_3_at_height(&self, snapshot_height: u32) -> Result<Hash256, UtxoError> {
+        crate::snapshot::hash_serialized_3_stable_at_height(self, snapshot_height)
     }
 
     /// Scans every live output for exact scriptPubKey matches.

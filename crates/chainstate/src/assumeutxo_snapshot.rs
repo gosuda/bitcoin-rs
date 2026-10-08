@@ -138,7 +138,7 @@ pub(super) fn load_verified(
         bail!("snapshot coin archive identity mismatch");
     }
     let mut stats = set.with_stable_view(|view| {
-        if view.hash_serialized_3()? != pinned.hash_serialized {
+        if view.hash_serialized_3_at_height(pinned.height)? != pinned.hash_serialized {
             return Err(bitcoin_rs_utxo::UtxoError::CorruptRecord);
         }
         bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)

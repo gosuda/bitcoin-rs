@@ -32,6 +32,22 @@ fn deliver(sync: &BlockSync, block: &Block, source: PeerSource) {
 }
 
 #[test]
+fn local_replay_budget_does_not_send_getdata() -> Result<(), Box<dyn std::error::Error>> {
+    let (harness, chain, _blocks) = fixture(3)?;
+    let addr = test_addr(28211, 0)?;
+    let rx = connect_peer(&harness.peers, synthetic_peer(addr, 3));
+    *chain.historical_replay_pending.lock() = true;
+
+    harness.sync.advance_historical();
+    assert!(rx.try_recv().is_err(), "local replay must not trigger getdata");
+    assert_eq!(harness.sync.historical.lock().window.pending_len(), 0);
+
+    harness.sync.advance_historical();
+    assert!(matches!(rx.try_recv()?, Message::GetData(_)));
+    Ok(())
+}
+
+#[test]
 fn historical_pipeline_bounds_pending_and_staged_and_applies_in_order()
 -> Result<(), Box<dyn std::error::Error>> {
     let (harness, chain, blocks) = fixture(40)?;

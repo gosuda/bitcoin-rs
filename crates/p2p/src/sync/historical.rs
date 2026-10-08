@@ -8,6 +8,7 @@ use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_primitives::Hash256;
 
 use super::BlockSync;
+use super::chain::HistoricalAdvance;
 use crate::block_stager::StagedBlock;
 use crate::download_window::{
     BlockDownloadPolicy, DownloadWindow, SyncBudget, servable_floor, serves_requested_height,
@@ -60,9 +61,13 @@ impl BlockSync {
                     return;
                 }
             };
-            let Some((height, hash)) = required else {
-                self.historical.lock().clear();
-                return;
+            let (height, hash) = match required {
+                HistoricalAdvance::Complete => {
+                    self.historical.lock().clear();
+                    return;
+                }
+                HistoricalAdvance::ReplayPending => return,
+                HistoricalAdvance::MissingBody { height, hash } => (height, hash),
             };
             let staged = {
                 let tree = self.chain.block_tree();

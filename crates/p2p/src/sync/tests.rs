@@ -34,8 +34,8 @@ use parking_lot::RwLock;
 mod historical;
 
 use super::chain::{
-    BranchSwitchError, HeaderAdmission, SyncChain, SyncChainError, WindowCommitDisposition,
-    WindowCommitError,
+    BranchSwitchError, HeaderAdmission, HistoricalAdvance, SyncChain, SyncChainError,
+    WindowCommitDisposition, WindowCommitError,
 };
 use super::receive::unrequested_body_admissible;
 use super::{BlockSync, Inventory};
@@ -66,6 +66,7 @@ pub(crate) struct TestChain {
     scripted_branch_switch: Mutex<Option<ScriptedBranchSwitch>>,
     historical: Mutex<std::collections::VecDeque<(u32, Hash256)>>,
     historical_connected: Mutex<Vec<Hash256>>,
+    historical_replay_pending: Mutex<bool>,
 }
 
 impl TestChain {
@@ -84,6 +85,7 @@ impl TestChain {
             scripted_branch_switch: Mutex::new(None),
             historical: Mutex::new(std::collections::VecDeque::new()),
             historical_connected: Mutex::new(Vec::new()),
+            historical_replay_pending: Mutex::new(false),
         }
     }
 }
@@ -119,8 +121,14 @@ impl SyncChain for TestChain {
         self.historical.lock().back().map(|(_, hash)| *hash)
     }
 
-    fn advance_historical(&self) -> Result<Option<(u32, Hash256)>, SyncChainError> {
-        Ok(self.historical.lock().front().copied())
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
+        if std::mem::take(&mut *self.historical_replay_pending.lock()) {
+            return Ok(HistoricalAdvance::ReplayPending);
+        }
+        Ok(self.historical.lock().front().copied().map_or(
+            HistoricalAdvance::Complete,
+            |(height, hash)| HistoricalAdvance::MissingBody { height, hash },
+        ))
     }
 
     fn connect_historical(

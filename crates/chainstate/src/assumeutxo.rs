@@ -147,6 +147,22 @@ pub use bitcoin_rs_storage::assumeutxo::{AssumeUtxoDiskStatus, HistoricalCheckpo
 
 const DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL: u32 = 1024;
 
+/// Result of one bounded historical replay pass, independent of P2P scheduling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoricalAdvance {
+    /// Historical validation is finished (or has no active role).
+    Complete,
+    /// The replay budget was used; another local pass must run before requesting.
+    ReplayPending,
+    /// The required body is not in the committed archive and must be fetched.
+    MissingBody {
+        /// Required historical block height.
+        height: u32,
+        /// Required block hash on the pinned ancestry.
+        hash: Hash256,
+    },
+}
+
 /// Errors produced by `AssumeUTXO` management and validation.
 #[derive(Debug, thiserror::Error)]
 pub enum AssumeUtxoError {
@@ -586,7 +602,7 @@ impl AssumeUtxoManager {
         // assert the commitment on behalf of the verifier.
         let (commitment, stats) = snapshot_load.set.with_stable_view(|view| {
             Ok::<_, bitcoin_rs_utxo::UtxoError>((
-                view.hash_serialized_3()?,
+                view.hash_serialized_3_at_height(pinned.height)?,
                 bitcoin_rs_utxo::stats::scan_coin_stats(view, pinned.height, true)?,
             ))
         })?;
@@ -860,12 +876,12 @@ impl AssumeUtxoManager {
         )))
     }
 
-    /// Replays a bounded retained prefix, returning the next missing body to
-    /// download. The runtime invokes this automatically alongside foreground sync.
-    pub fn advance_historical(&self) -> Result<Option<(u32, Hash256)>, AssumeUtxoError> {
+    /// Replays a bounded retained prefix, distinguishing missing bodies from
+    /// locally available work that exhausted this pass's replay budget.
+    pub fn advance_historical(&self) -> Result<HistoricalAdvance, AssumeUtxoError> {
         for _ in 0..8 {
             let Some((height, hash)) = self.next_historical_block()? else {
-                return Ok(None);
+                return Ok(HistoricalAdvance::Complete);
             };
             if height == 0 {
                 self.step_historical(&self.network.genesis_block(), None)?;
@@ -876,7 +892,7 @@ impl AssumeUtxoManager {
                 None => None,
             };
             let Some(bytes) = bytes else {
-                return Ok(Some((height, hash)));
+                return Ok(HistoricalAdvance::MissingBody { height, hash });
             };
             let block: Block =
                 bitcoin_rs_primitives::deserialize(&bytes).map_err(anyhow::Error::from)?;
@@ -885,7 +901,11 @@ impl AssumeUtxoManager {
             }
             self.step_historical(&block, Some(bytes::Bytes::from(bytes)))?;
         }
-        self.next_historical_block()
+        if self.next_historical_block()?.is_some() {
+            Ok(HistoricalAdvance::ReplayPending)
+        } else {
+            Ok(HistoricalAdvance::Complete)
+        }
     }
 
     /// Produces a summary of active and historical chainstates for operator reporting.
