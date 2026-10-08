@@ -549,17 +549,28 @@ fn mismatch_closes_admission_even_when_failure_record_cannot_be_written() -> Tes
 fn finalization_io_failure_keeps_assumed_role_and_closes_both_admissions() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
-    let manager = fixture.manager(dir.path())?;
+    let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
+        Network::Regtest,
+        fixture.active.clone(),
+        Some(dir.path().to_path_buf()),
+        1,
+    )?;
     fixture.activate(&manager)?;
     for block in &fixture.blocks[..2] {
         manager.step_historical(block, None)?;
     }
     fixture.head.fail_terminal.store(true, Ordering::Release);
+    let root = dir
+        .path()
+        .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT);
+    let checkpoint_entries = std::fs::read_dir(&root)?.count();
+    assert!(checkpoint_entries > 1);
     assert!(matches!(
         manager.step_historical(&fixture.blocks[2], None),
         Err(AssumeUtxoError::Storage(_))
     ));
     assert!(fixture.active.role().is_assumed_active());
+    assert_eq!(std::fs::read_dir(root)?.count(), checkpoint_entries);
     assert!(matches!(
         manager.status()?,
         AssumeUtxoDiskStatus::Validating { .. }

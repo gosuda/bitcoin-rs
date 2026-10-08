@@ -430,12 +430,13 @@ impl AssumeUtxoManager {
         manager.recover_pending().inspect_err(|_| {
             manager.active_chainstate.fail_closed_for_recovery();
         })?;
-        if let AssumeUtxoDiskStatus::Validating {
-            checkpoint: Some(checkpoint),
-            ..
-        } = manager.status()?
-        {
-            manager.retire_historical_checkpoint(checkpoint.checkpoint);
+        match manager.status()? {
+            AssumeUtxoDiskStatus::Validating {
+                checkpoint: Some(checkpoint),
+                ..
+            } => manager.cleanup_historical_checkpoints(Some(checkpoint.checkpoint)),
+            AssumeUtxoDiskStatus::Finalized { .. } => manager.cleanup_historical_checkpoints(None),
+            _ => {}
         }
         Ok(manager)
     }
@@ -1224,27 +1225,35 @@ impl AssumeUtxoManager {
                 _ => None,
             };
             if previous != Some(checkpoint) {
-                self.retire_historical_checkpoint(checkpoint.checkpoint);
+                self.cleanup_historical_checkpoints(Some(checkpoint.checkpoint));
             }
+        } else if matches!(status, AssumeUtxoDiskStatus::Finalized { .. }) {
+            self.cleanup_historical_checkpoints(None);
         }
         Ok(())
     }
 
-    fn retire_historical_checkpoint(
+    fn cleanup_historical_checkpoints(
         &self,
-        reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
+        retained: Option<bitcoin_rs_storage::checkpoint::CheckpointReference>,
     ) {
         let Some(data_dir) = &self.data_dir else {
             return;
         };
         let cleanup = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
             .map_err(bitcoin_rs_storage::checkpoint::CheckpointError::from)
-            .and_then(|data| {
-                bitcoin_rs_storage::checkpoint::retire_checkpoint_generations_at(
+            .and_then(|data| match retained {
+                Some(reference) => {
+                    bitcoin_rs_storage::checkpoint::retire_checkpoint_generations_at(
+                        &data,
+                        bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+                        reference.generation,
+                    )
+                }
+                None => bitcoin_rs_storage::checkpoint::clear_checkpoint_generations_at(
                     &data,
                     bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
-                    reference.generation,
-                )
+                ),
             });
         if let Err(error) = cleanup {
             tracing::warn!(%error, "historical checkpoint cleanup deferred");

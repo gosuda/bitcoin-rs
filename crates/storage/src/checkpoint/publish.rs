@@ -255,7 +255,7 @@ pub fn commit_publication(
     injected_io(failpoint, CheckpointFailpoint::CurrentRootSync)?;
     sync_root(&root)?;
     if matches!(retention, super::CheckpointRetention::Replace) {
-        cleanup_after_publication(&root, &paths.directory);
+        cleanup_after_publication(&root, Some(&paths.directory));
     }
     Ok(reference)
 }
@@ -267,7 +267,21 @@ pub fn retire_checkpoint_generations_at(
     generation: u64,
 ) -> Result<(), CheckpointError> {
     if let Some(root) = CheckpointRoot::open_existing(data_dir, root_name)? {
-        cleanup_after_publication(&root, &generation_name(generation));
+        cleanup_after_publication(&root, Some(&generation_name(generation)));
+    }
+    Ok(())
+}
+
+/// Clears checkpoint generations and CURRENT when the owner no longer needs them.
+///
+/// Unknown namespace entries are preserved; cleanup failures are logged and may
+/// be retried without blocking recovery.
+pub fn clear_checkpoint_generations_at(
+    data_dir: &Dir,
+    root_name: &str,
+) -> Result<(), CheckpointError> {
+    if let Some(root) = CheckpointRoot::open_existing(data_dir, root_name)? {
+        cleanup_after_publication(&root, None);
     }
     Ok(())
 }
@@ -333,7 +347,7 @@ fn generation_paths(generation: u64) -> GenerationPaths {
         directory,
     }
 }
-fn cleanup_after_publication(root: &CheckpointRoot, current: &str) {
+fn cleanup_after_publication(root: &CheckpointRoot, current: Option<&str>) {
     let entries = match root.entries() {
         Ok(entries) => entries,
         Err(error) => {
@@ -365,12 +379,14 @@ fn cleanup_after_publication(root: &CheckpointRoot, current: &str) {
             }
         };
         let result = if file_type.is_dir()
-            && name != current
+            && Some(name) != current
             && (valid_generation_name(name) || valid_staging_name(name))
         {
             attempted = true;
             remove_known_dir(root, name)
-        } else if file_type.is_file() && valid_current_temp_name(name) {
+        } else if file_type.is_file()
+            && (valid_current_temp_name(name) || (current.is_none() && name == super::CURRENT_FILE))
+        {
             attempted = true;
             root.remove_file(name)
         } else {

@@ -295,6 +295,39 @@ fn historical_publication_retains_head_generation_until_explicit_retirement()
 }
 
 #[test]
+fn clearing_checkpoint_namespace_preserves_unknown_entries_and_other_namespaces()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    clear_checkpoint_generations_at(&data, HISTORICAL_CHECKPOINT_ROOT)?;
+    publish_fixture(&data, None)?;
+    for _ in 0..2 {
+        publish_fixture_at(
+            &data,
+            HISTORICAL_CHECKPOINT_ROOT,
+            CheckpointRetention::UntilReferenced,
+            None,
+        )?;
+    }
+    let root = dir.path().join(HISTORICAL_CHECKPOINT_ROOT);
+    fs::create_dir(root.join(".gen-00000000000000000003.tmp"))?;
+    fs::write(root.join(".CURRENT-00000000000000000003.tmp"), b"partial")?;
+    fs::write(root.join("operator-notes"), b"keep")?;
+    fs::create_dir(root.join("operator-backup"))?;
+    for _ in 0..2 {
+        clear_checkpoint_generations_at(&data, HISTORICAL_CHECKPOINT_ROOT)?;
+        assert_eq!(fs::read_dir(&root)?.count(), 2);
+        assert_eq!(fs::read(root.join("operator-notes"))?, b"keep");
+        assert!(root.join("operator-backup").is_dir());
+        assert!(matches!(
+            open_current_checkpoint(&data)?,
+            CheckpointOpen::Selected { .. }
+        ));
+    }
+    Ok(())
+}
+
+#[test]
 fn direct_and_current_selection_share_publication_digest_validation()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;

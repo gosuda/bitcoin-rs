@@ -141,6 +141,10 @@ directly, even when `CURRENT` is ahead. Historical publication explicitly retain
 generations until the new reference commits. Retirement runs after that commit and
 again at startup after the accepted generation has been validated, using the same
 cleanup routine without a second durable cleanup record.
+After `Finalized` commits, the historical namespace's recognized generations,
+staging files and `CURRENT` are removed. Startup retries this cleanup for a
+committed `Finalized` head. Cleanup failures are warnings, not recovery failures;
+ordinary checkpoints and unknown files are preserved.
 
 Snapshot recovery is exercised by
 `crates/chainstate/tests/unit/assumeutxo_tests.rs` (commitment verification,

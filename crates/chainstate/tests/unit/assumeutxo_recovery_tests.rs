@@ -334,6 +334,84 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
+    assert_eq!(
+        std::fs::read_dir(
+            dir.path()
+                .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
+        )?
+        .count(),
+        0,
+        "finalized commit must retire the last historical checkpoint"
+    );
+    Ok(())
+}
+
+#[test]
+fn finalized_checkpoint_cleanup_failure_is_retried_on_restart() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let (active, manager) = activate(dir.path(), &fixture)?;
+    drop(manager);
+    let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
+        Network::Regtest,
+        active.clone(),
+        Some(dir.path().to_path_buf()),
+        1,
+    )?;
+    for block in &fixture.blocks[..2] {
+        manager.step_historical(block, None)?;
+    }
+    let root = dir
+        .path()
+        .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT);
+    let generation = std::fs::read_dir(&root)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|entry| entry.path().is_dir())
+        .ok_or("missing historical generation")?
+        .path();
+    // An unknown nested directory prevents removing the generation without
+    // relying on permissions (which differ for elevated users and platforms).
+    let blocker = generation.join("operator-backup");
+    std::fs::create_dir(&blocker)?;
+    manager.step_historical(&fixture.blocks[2], None)?;
+    assert!(matches!(
+        manager.status()?,
+        AssumeUtxoDiskStatus::Finalized { .. }
+    ));
+    assert!(active.role().is_ordinary());
+    assert!(manager.historical_chainstate().is_none());
+    assert!(generation.is_dir());
+    assert!(active.begin_transition().is_ok());
+    let finalized_head = active.durable_head.load()?;
+    drop(manager);
+    drop(active);
+
+    // Startup remains available while cleanup still fails, and retries after
+    // the obstruction is removed without another durable-head update.
+    let active = open_persistent(dir.path(), &fixture.pinned)?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        active.clone(),
+        Some(dir.path().to_path_buf()),
+    )?;
+    assert!(active.role().is_ordinary());
+    assert!(manager.historical_chainstate().is_none());
+    assert_eq!(active.durable_head.load()?, finalized_head);
+    assert!(generation.is_dir());
+    drop(manager);
+    drop(active);
+    std::fs::remove_dir(&blocker)?;
+    let active = open_persistent(dir.path(), &fixture.pinned)?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        active.clone(),
+        Some(dir.path().to_path_buf()),
+    )?;
+    assert!(active.role().is_ordinary());
+    assert!(manager.historical_chainstate().is_none());
+    assert_eq!(active.durable_head.load()?, finalized_head);
+    assert_eq!(std::fs::read_dir(root)?.count(), 0);
     Ok(())
 }
 
@@ -610,7 +688,7 @@ fn crash_writer() -> TestResult {
         Network::Regtest,
         active.clone(),
         Some(dir.clone()),
-        if checkpoint_phase {
+        if checkpoint_phase || phase == "finalized" {
             1
         } else {
             DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL
@@ -697,6 +775,13 @@ fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestR
         child.kill()?;
         child.wait()?;
         assert!(ready, "{phase} failed to reach its durable boundary");
+        let historical_root = dir
+            .path()
+            .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT);
+        if phase == "finalized" {
+            assert!(historical_root.join("CURRENT").exists());
+            assert!(std::fs::read_dir(&historical_root)?.count() > 1);
+        }
         let active = open_persistent(dir.path(), &fixture.pinned)?;
         if phase == "import" {
             assert!(active.applied_tip_snapshot().is_none());
@@ -743,6 +828,9 @@ fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestR
             );
         } else if phase == "finalized" || phase == "checking" {
             assert!(active.role().is_ordinary());
+            if phase == "finalized" {
+                assert_eq!(std::fs::read_dir(historical_root)?.count(), 0);
+            }
         } else {
             assert!(active.role().is_assumed_active());
             assert!(

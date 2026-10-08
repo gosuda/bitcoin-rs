@@ -19,6 +19,7 @@ pub use load::open_current_checkpoint_at;
 pub use publish::begin_publication_at;
 #[cfg(any(test, feature = "test-seam"))]
 pub use publish::begin_publication_at_with_failpoint;
+pub use publish::clear_checkpoint_generations_at;
 pub use publish::retire_checkpoint_generations_at;
 
 use cap_std::fs::File;
