@@ -617,13 +617,15 @@ fn readiness_deadline_reaps_the_child() {
 
 // A local transport peer exercises the same HTTP owner; it never stands in
 // for either node in the compatibility scenario above.
-fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle<()>) {
+fn serve_once(
+    respond: impl FnOnce(TcpStream, Instant) + Send + 'static,
+) -> (SocketAddr, JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback responder");
     let addr = listener.local_addr().expect("loopback address");
     listener.set_nonblocking(true).expect("bounded accept");
     let server = std::thread::spawn(move || {
         let deadline = Instant::now() + Duration::from_secs(2);
-        let mut stream = loop {
+        let stream = loop {
             match listener.accept() {
                 Ok((stream, _)) => break stream,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -639,6 +641,13 @@ fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle
         stream
             .set_write_timeout(Some(Duration::from_secs(1)))
             .expect("write bound");
+        respond(stream, deadline);
+    });
+    (addr, server)
+}
+
+fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle<()>) {
+    serve_once(move |mut stream, deadline| {
         // Drain the entire bounded request before closing, so unread request
         // bytes cannot turn a malformed reply into a TCP reset instead.
         let mut request = Vec::new();
@@ -680,8 +689,7 @@ fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle
         std::thread::sleep(delay);
         // A timed-out client may have already closed its socket.
         let _write_result = stream.write_all(reply);
-    });
-    (addr, server)
+    })
 }
 
 /// REF-07d: malformed HTTP and JSON are transport failures, not comparisons.
@@ -707,27 +715,7 @@ fn malformed_http_and_json_replies_are_transport_failures() {
 /// REF-07c: a readable socket must not renew the total response deadline.
 #[test]
 fn dribbled_http_response_cannot_renew_the_request_deadline() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback responder");
-    let addr = listener.local_addr().expect("loopback address");
-    let server = std::thread::spawn(move || {
-        listener.set_nonblocking(true).expect("bounded accept");
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut stream = loop {
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(Instant::now() < deadline, "client must connect");
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("accept: {error}"),
-            }
-        };
-        stream
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .expect("bounded read");
-        stream
-            .set_write_timeout(Some(Duration::from_secs(1)))
-            .expect("bounded write");
+    let (addr, server) = serve_once(|mut stream, deadline| {
         let mut request = [0_u8; 4096];
         loop {
             match stream.read(&mut request) {
@@ -772,18 +760,7 @@ fn dribbled_http_response_cannot_renew_the_request_deadline() {
 /// REF-07c: a slow request reader cannot renew the upload deadline.
 #[test]
 fn slow_http_request_reader_obeys_one_total_deadline() {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback fixture");
-    let addr = listener.local_addr().expect("fixture address");
-    listener.set_nonblocking(true).expect("bounded accept");
-    let server = std::thread::spawn(move || {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut stream = loop {
-            if let Ok((stream, _)) = listener.accept() {
-                break stream;
-            }
-            assert!(Instant::now() < deadline, "client never connected");
-            std::thread::sleep(Duration::from_millis(2));
-        };
+    let (addr, server) = serve_once(|mut stream, deadline| {
         stream
             .set_read_timeout(Some(Duration::from_millis(50)))
             .expect("bounded read");
