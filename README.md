@@ -179,6 +179,29 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+## Validation and verification
+
+bitcoin-rs verifies consensus, networking, and storage through multiple independent
+evidence lanes rather than relying on in-tree unit tests alone. Evidence is
+separated into real external-consumer evidence (unmodified external software
+exercising the public boundary) and in-tree reference/differential suites.
+
+For reproduction commands, prerequisites, and artifact custody for each lane, see
+the [validation tooling index](docs/validation-tooling.md).
+
+| Evidence lane | Scope | Status | Canonical owner |
+|---|---|---|---|
+| Live Bitcoin Core P2P & chain identity | Unmodified Bitcoin Core 31.1 peer handshake, IBD sync, compact blocks (BIP152), disconnects, and chain identity | Externally verified | [Core differential contract](docs/contracts/core-differential.md) · [`scripts/run-p2p-core-interop.sh`](scripts/run-p2p-core-interop.sh) |
+| Bitcoin Core script & transaction vectors | Pinned Core `script_tests.json`, `tx_valid.json`, `tx_invalid.json` consensus vectors | Implemented / tested | [`crates/script/tests/core_vectors.rs`](crates/script/tests/core_vectors.rs) · [`crates/consensus/tests/vectors.rs`](crates/consensus/tests/vectors.rs) |
+| Native sighash differential | Legacy, SegWit v0 (BIP143), and Taproot (BIP341) sighash checked against independent `rust-bitcoin` engine and Core vectors | Implemented / tested | [`crates/consensus/tests/shared_sighash.rs`](crates/consensus/tests/shared_sighash.rs) · [`crates/primitives/tests/differential.rs`](crates/primitives/tests/differential.rs) |
+| Native ↔ `libbitcoinkernel` differential | Script engine verdicts compared against C++ `libbitcoinkernel` on Core vectors and mutated mainnet block fixtures | Implemented / tested | [`crates/consensus/tests/kernel_vector_parity.rs`](crates/consensus/tests/kernel_vector_parity.rs) · [`crates/consensus/tests/kernel_block_parity.rs`](crates/consensus/tests/kernel_block_parity.rs) |
+| Contextual consensus rules | MTP, BIP94 timewarp, difficulty adjustment, BIP30/BIP34/BIP68/BIP141 softfork rules, and undo persistence atomicity | Implemented / tested | [`crates/chain/src/header_sync.rs`](crates/chain/src/header_sync.rs) · [`crates/consensus/src/verify_block.rs`](crates/consensus/src/verify_block.rs) · [`crates/chainstate/src/connect.rs`](crates/chainstate/src/connect.rs) |
+| Live Core block & transaction acceptance | Curated live `submitblock` and `testmempoolaccept` differential against Core 31.1 (`CORE-04`); broader differential fuzzing planned (#1323) | Implemented / tested (curated); Planned (#1323) | [Core differential contract](docs/contracts/core-differential.md) · [`e2e/tests/acceptance.rs`](e2e/tests/acceptance.rs) |
+| Fuzzing & QA-assets corpus | Pinned seeds from `qa-assets`, `bitcoin/bitcoin`, and `btcd` feeding 5 fuzz targets; native codec roundtrip and invariant checks (`QAC-01`..`QAC-05`) | Implemented / tested | [QA corpus contract](docs/contracts/qa-corpus.md) · [`fuzz/CORPUS_PROVENANCE.md`](fuzz/CORPUS_PROVENANCE.md) |
+| Chainstate crash recovery & reorgs | Atomic durable head commits, process termination (SIGKILL) mid-progress, lost receipt retention, and deep reorg consistency | Implemented / tested | [Recovery contract](docs/contracts/recovery.md) · [`crates/chainstate/tests/unit/assumeutxo_recovery_tests.rs`](crates/chainstate/tests/unit/assumeutxo_recovery_tests.rs) |
+| Offline full-validation comparator | Dual-node replay over hash-pinned Core-framed archive comparing certified state (MuHash, UTXO, total amount) and timing | Harness tested; Campaign planned / not yet executed | [Offline full-validation](docs/benchmarks/offline-full-validation.md) · [`tools/benchmark-campaign/`](tools/benchmark-campaign/) |
+| External ecosystem compatibility matrix | Per-surface consumability tracking across JSON-RPC, REST, ZMQ, Esplora, GBT/mining, P2P, and USDT probes | P2P verified; Other surfaces implemented | [Ecosystem compatibility contract](docs/contracts/ecosystem-compatibility.md) · [Evidence matrix](docs/api/ecosystem-compat.toml) |
+
 ## External compatibility
 
 **Stable external contracts. Replaceable internal architecture.**
@@ -247,6 +270,7 @@ verification commands, CI workflows, and crate architecture conventions.
 
 - [docs/getting-started.md](docs/getting-started.md) — Node setup and configuration
 - [docs/README.md](docs/README.md) — Documentation index
+- [docs/validation-tooling.md](docs/validation-tooling.md) — Validation tooling and evidence index
 - [docs/contracts/](docs/contracts/) — Normative architecture and protocol contracts
 - [docs/contracts/ecosystem-compatibility.md](docs/contracts/ecosystem-compatibility.md) — External ecosystem compatibility strategy
 - [docs/api/ecosystem-compat.toml](docs/api/ecosystem-compat.toml) — External compatibility evidence matrix
