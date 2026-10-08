@@ -659,13 +659,7 @@ fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
 
 fn tagged_hash(tag: &[u8], msg: &[u8]) -> Hash256 {
     let tag_hash = Sha256::digest(tag);
-    let mut engine = Sha256::new();
-    Digest::update(&mut engine, tag_hash);
-    Digest::update(&mut engine, tag_hash);
-    Digest::update(&mut engine, msg);
-    let mut out = [0_u8; 32];
-    out.copy_from_slice(&engine.finalize());
-    Hash256::from_le_bytes(&out)
+    Hash256::from_le_bytes(&sha256_parts(&[&tag_hash, &tag_hash, msg]))
 }
 
 #[cfg(test)]
