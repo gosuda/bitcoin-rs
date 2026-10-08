@@ -70,9 +70,7 @@ against reproducible evidence, and keep iterating on the implementation.**
 Bitcoin is not defined by the continued preservation of one codebase. **The code
 can change; consensus is what must remain.** `bitcoin-rs` aims to provide an
 independently designed implementation that can be compared against Bitcoin Core
-and other implementations through reproducible evidence. The boundary the
-implementation may freely cross — and the one it may not — is stated under
-[External compatibility](#external-compatibility).
+and other implementations through reproducible evidence.
 
 ## Quick start
 
@@ -206,9 +204,7 @@ The preserved boundaries:
   pagination/reorg semantics. *Supported* is load-bearing: it does not imply
   every upstream method or endpoint is implemented, and it tracks the upstream
   contract — when Core changes or removes a method, the endpoint follows in a
-  clean cutover under the
-  [RPC deprecation policy](docs/policies/source-compatibility.md), not behind
-  a compatibility shim.
+  clean cutover, not behind a compatibility shim.
 - Other advertised external integrations — for example ZMQ and the typed
   `embed::Node` in-process API — keep their documented observable contracts.
 
@@ -217,14 +213,12 @@ policy governs how such breaks are released, not whether), object ownership,
 abstraction layers, execution pipelines, database schema and on-disk layout,
 and parity with Bitcoin Core's code organization. A schema-breaking change may require an explicit fresh resync —
 an acceptable tradeoff, not a bug — but it must never silently reinterpret
-incompatible persisted data or corrupt operator state; the
-[datadir format policy](docs/policies/db-migration.md) owns the fail-closed
-procedure and the optional-offline-migration rule.
+incompatible persisted data or corrupt operator state: a format break fails
+closed, and replay — or an optional offline migration tool — is the migration
+route.
 
 Internal breaking changes are acceptable with clear rationale and the evidence
 the boundary demands; breaking a supported external contract is a regression.
-The review expectations for architectural changes live in
-[CONTRIBUTING.md](CONTRIBUTING.md).
 
 Compatibility claims are tied to external evidence, not only to in-tree
 implementation status. The [ecosystem compatibility
