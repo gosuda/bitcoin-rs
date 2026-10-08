@@ -1323,6 +1323,11 @@ impl MempoolGateway {
 
 /// Owns an active chain-change reservation: the exact odd generation and the
 /// reserved next even value.
+///
+/// No `Drop` path reopens admission: early return or unwinding leaves the
+/// gateway odd. Only a successful [`Self::finish`] restores the reserved even
+/// generation; a failed finish does not release the reservation.
+/// One guard covers one coherent connect, disconnect, apply window, or reorg.
 #[derive(Debug)]
 pub struct ChainChangeGuard {
     gateway: Arc<MempoolGateway>,
