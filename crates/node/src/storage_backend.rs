@@ -22,21 +22,7 @@ pub(crate) trait StoreConsumer {
         S: KvStore;
 }
 
-/// Opens the selected chainstate backend exactly once and transfers its whole
-/// ownership unit to `consumer`.
-pub(crate) fn open_chainstate<C>(
-    backend: StorageBackend,
-    path: &Path,
-    cache_bytes: Option<u64>,
-    consumer: C,
-) -> Result<C::Output, C::Error>
-where
-    C: StoreConsumer,
-{
-    open_generic("chainstate", backend, path, cache_bytes, consumer)
-}
-
-fn open_generic<C>(
+pub(crate) fn open_generic<C>(
     namespace: &str,
     backend: StorageBackend,
     path: &Path,
