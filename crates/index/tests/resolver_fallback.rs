@@ -1,6 +1,7 @@
 //! Exact resolution of a lossy eight-byte funding-row prefix.
 #![allow(clippy::expect_used)]
 
+#[path = "support/common.rs"]
 mod common;
 
 use std::sync::Arc;

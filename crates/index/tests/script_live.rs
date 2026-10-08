@@ -8,6 +8,7 @@
 //! point deletes, fail-closed unresolvable spends, watermark independence
 //! from history, and seed-then-stamp ordering.
 
+#[path = "support/common.rs"]
 mod common;
 
 use common::MemoryStore;
@@ -609,7 +610,7 @@ fn seed_stream_fenced_write_failure_does_not_publish_watermark()
 -> Result<(), Box<dyn std::error::Error>> {
     let store = Arc::new(MemoryStore::default());
     let mut writer = IndexWriter::open(Arc::clone(&store), 0)?;
-    store.fail_next_durable.store(true, Ordering::SeqCst);
+    store.fail_next_fenced_write.store(true, Ordering::SeqCst);
     let scripthash = ScriptHash::from_script_bytes(script(0x46).as_bytes());
     let coins = (0_u32..4_096)
         .map(|vout| {
