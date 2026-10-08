@@ -26,7 +26,10 @@ fn checkpoint_transaction_counts_must_agree_when_known() -> Result<(), Box<dyn s
         let CheckpointLoad::Complete(restored) = load_checkpoint(dir.path(), config())? else {
             return Err("valid checkpoint did not load".into());
         };
-        assert_eq!(restored.chain_tx_count, chain_tx_count);
+        assert_eq!(
+            restored.applied_tip.chain_tx_count.to_wire(),
+            chain_tx_count
+        );
         assert_eq!(restored.coin_stats.tx_count, 1);
 
         mutate_authenticated_manifest(dir.path(), |manifest| {
