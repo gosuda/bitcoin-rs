@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use bitcoin::consensus::encode::{deserialize_hex, serialize_hex};
-use bitcoin::{Address, Block, Network, OutPoint};
+use bitcoin::consensus::encode::deserialize_hex;
+use bitcoin::{Block, OutPoint};
 use serde_json::{Value, json};
 
 use crate::error::{Error, Result};
@@ -96,19 +96,8 @@ pub fn mine_common_chain(
             "common funding bound is 1..=102 blocks".into(),
         ));
     }
-    let private = helpers::funding_key()?;
-    let public = private.public_key(&bitcoin::secp256k1::Secp256k1::new());
-    let address = Address::p2pkh(public, Network::Regtest);
-    // Startup anchors the tip at genesis but applies the block only on the
-    // first one-second sync tick (BlockSync::tick calls ensure_genesis_tip),
-    // so no synchronous genesis apply exists to rely on here. A submit that
-    // races the tick supplies the apply; one after it returns a duplicate
-    // result string. Both orders converge on one applied genesis.
-    let genesis = bitcoin::constants::genesis_block(Network::Regtest);
-    let reply = node.rpc("submitblock", &json!([serialize_hex(&genesis)]))?;
-    if !(reply.is_null() || reply.as_str() == Some("duplicate")) {
-        return Err(Error::Assertion(format!("submitblock(genesis): {reply}")));
-    }
+    let address = helpers::funding_address()?;
+    helpers::submit_genesis(node)?;
     let hashes = core.rpc("generatetoaddress", &json!([blocks, address.to_string()]))?;
     let hashes = hashes
         .as_array()
@@ -182,25 +171,11 @@ impl CommonFunds {
         sequence: bitcoin::Sequence,
     ) -> Result<bitcoin::Transaction> {
         let (outpoint, output) = self.confirmed_output(0)?;
-        let value = output
-            .value
-            .to_sat()
-            .checked_sub(fee_sats)
-            .ok_or_else(|| Error::Protocol("funding below fee".into()))?;
-        let mut spend = bitcoin::Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![bitcoin::TxIn {
-                previous_output: outpoint,
-                script_sig: bitcoin::ScriptBuf::new(),
-                sequence,
-                witness: bitcoin::Witness::new(),
-            }],
-            output: vec![bitcoin::TxOut {
-                value: bitcoin::Amount::from_sat(value),
-                script_pubkey: output.script_pubkey.clone(),
-            }],
-        };
+        if output.value.to_sat() < fee_sats {
+            return Err(Error::Protocol("funding below fee".into()));
+        }
+        let mut spend =
+            helpers::raw_spend_to(outpoint, &output, fee_sats, sequence, &output.script_pubkey);
         helpers::sign_p2pkh_inputs(&mut spend, std::slice::from_ref(&output))?;
         Ok(spend)
     }

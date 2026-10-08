@@ -27,7 +27,7 @@ pub use bitcoin::constants::COINBASE_MATURITY;
 const FUNDING_SECRET: [u8; 32] = [1_u8; 32];
 
 /// The deterministic funding key used across scenarios.
-pub(crate) fn funding_key() -> Result<PrivateKey> {
+fn funding_key() -> Result<PrivateKey> {
     let secret = bitcoin::secp256k1::SecretKey::from_slice(&FUNDING_SECRET)
         .map_err(|e| Error::Assertion(e.to_string()))?;
     Ok(PrivateKey::new(secret, Network::Regtest))
