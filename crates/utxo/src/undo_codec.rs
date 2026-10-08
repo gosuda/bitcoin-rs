@@ -298,39 +298,30 @@ mod tests {
         UndoCodecError, UtxoAdd, decode, encode,
     };
     use crate::contract::UndoBatch;
-    use bitcoin_rs_primitives::{Hash256, OutPoint, TxOut};
+    use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 
-    pub(super) fn hash(byte: u8) -> Hash256 {
+    fn hash(byte: u8) -> Hash256 {
         Hash256::from_le_bytes(&[byte; 32])
     }
 
-    pub(super) fn txout(sats: u64) -> TxOut {
-        TxOut {
-            value: bitcoin_rs_primitives::Amount::from_sat(sats),
-            script_pubkey: vec![0x51, byte_of(sats)].into(),
-        }
+    fn outpoint(txid: u8, vout: u32) -> OutPoint {
+        OutPoint::new(hash(txid).into(), vout)
     }
 
-    fn byte_of(sats: u64) -> u8 {
-        u8::try_from(sats % 251).unwrap_or(0)
+    fn restore(batch: &mut UndoBatch, op: OutPoint, sats: u64, coinbase: bool, height: u32) {
+        let txout = TxOut {
+            value: Amount::from_sat(sats),
+            script_pubkey: vec![0x51, u8::try_from(sats % 251).unwrap_or(0)].into(),
+        };
+        batch.restore(UtxoAdd::new(op, txout, coinbase, height));
     }
 
     fn sample() -> UndoBatch {
         let mut batch = UndoBatch::empty();
-        batch.restore(UtxoAdd::new(
-            OutPoint::new(hash(1).into(), 0),
-            txout(50_000),
-            true,
-            11,
-        ));
-        batch.restore(UtxoAdd::new(
-            OutPoint::new(hash(2).into(), 7),
-            txout(1),
-            false,
-            12,
-        ));
-        batch.remove(OutPoint::new(hash(3).into(), 0));
-        batch.remove(OutPoint::new(hash(3).into(), 1));
+        restore(&mut batch, outpoint(1, 0), 50_000, true, 11);
+        restore(&mut batch, outpoint(2, 7), 1, false, 12);
+        batch.remove(outpoint(3, 0));
+        batch.remove(outpoint(3, 1));
         batch
     }
 
@@ -357,25 +348,34 @@ mod tests {
         Ok(())
     }
 
+    fn assert_refused(
+        bytes: &[u8],
+        block_hash: Hash256,
+        expected: impl FnOnce(&UndoCodecError) -> bool,
+    ) {
+        match decode(bytes, block_hash) {
+            Err(error) => assert!(expected(&error), "unexpected {error:?}"),
+            Ok(_) => panic!("corrupt or foreign record accepted"),
+        }
+    }
+
     #[test]
     fn a_record_for_another_block_is_refused() {
-        // The trap this check exists for: a stale record from an abandoned
-        // branch must never be replayed against a different block.
+        // A stale record from an abandoned branch must never be replayed
+        // against a different block.
         let bytes = encode(&sample(), hash(1));
-        assert!(matches!(
-            decode(&bytes, hash(2)),
-            Err(UndoCodecError::BlockHashMismatch { .. })
-        ));
+        assert_refused(&bytes, hash(2), |e| {
+            matches!(e, UndoCodecError::BlockHashMismatch { .. })
+        });
     }
 
     #[test]
     fn an_unknown_version_is_refused() {
         let mut bytes = encode(&sample(), hash(1));
         bytes[0] = UNDO_FORMAT_VERSION.wrapping_add(1);
-        assert!(matches!(
-            decode(&bytes, hash(1)),
-            Err(UndoCodecError::UnsupportedVersion { .. })
-        ));
+        assert_refused(&bytes, hash(1), |e| {
+            matches!(e, UndoCodecError::UnsupportedVersion { .. })
+        });
     }
 
     #[test]
@@ -393,73 +393,53 @@ mod tests {
     fn trailing_bytes_are_refused() {
         let mut bytes = encode(&sample(), hash(1));
         bytes.push(0);
-        assert!(matches!(
-            decode(&bytes, hash(1)),
-            Err(UndoCodecError::TrailingBytes { trailing: 1 })
-        ));
+        assert_refused(&bytes, hash(1), |e| {
+            matches!(e, UndoCodecError::TrailingBytes { trailing: 1 })
+        });
     }
 
     #[test]
     fn an_impossible_entry_count_is_refused_without_looping() {
         let mut bytes = encode(&UndoBatch::empty(), hash(1));
-        // Overwrite the restore count with a value no record could hold.
-        let count = RESTORE_COUNT_OFFSET..RESTORE_COUNT_OFFSET + COUNT_BYTES;
-        bytes[count].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(matches!(
-            decode(&bytes, hash(1)),
-            Err(UndoCodecError::CountTooLarge { .. })
-        ));
+        bytes[RESTORE_COUNT_OFFSET..RESTORE_COUNT_OFFSET + COUNT_BYTES]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_refused(&bytes, hash(1), |e| {
+            matches!(e, UndoCodecError::CountTooLarge { .. })
+        });
     }
 
     #[test]
     fn a_non_canonical_coinbase_flag_is_refused() {
         let mut batch = UndoBatch::empty();
-        batch.restore(UtxoAdd::new(
-            OutPoint::new(hash(1).into(), 0),
-            txout(10),
-            false,
-            5,
-        ));
+        restore(&mut batch, outpoint(1, 0), 10, false, 5);
         let mut bytes = encode(&batch, hash(1));
         let flag = bytes.len() - RESTORE_TRAILER_BYTES;
         bytes[flag] = 2;
-        assert!(matches!(
-            decode(&bytes, hash(1)),
-            Err(UndoCodecError::InvalidCoinbase { found: 2 })
-        ));
+        assert_refused(&bytes, hash(1), |e| {
+            matches!(e, UndoCodecError::InvalidCoinbase { found: 2 })
+        });
     }
 
     #[test]
     fn a_repeated_outpoint_is_refused() {
         let mut batch = UndoBatch::empty();
-        batch.remove(OutPoint::new(hash(5).into(), 0));
-        batch.remove(OutPoint::new(hash(5).into(), 0));
-        assert!(matches!(
-            decode(&encode(&batch, hash(1)), hash(1)),
-            Err(UndoCodecError::DuplicateOutpoint { .. })
-        ));
+        batch.remove(outpoint(5, 0));
+        batch.remove(outpoint(5, 0));
+        assert_refused(&encode(&batch, hash(1)), hash(1), |e| {
+            matches!(e, UndoCodecError::DuplicateOutpoint { .. })
+        });
     }
-}
 
-#[cfg(test)]
-mod cross_half_tests {
-    use super::tests::{hash, txout};
-    use super::{UndoCodecError, UtxoAdd, decode, encode};
-    use crate::contract::UndoBatch;
-    use bitcoin_rs_primitives::OutPoint;
-
-    /// A block cannot both spend and create the same outpoint: the apply path
-    /// filters same-block spends out of both halves. An outpoint appearing in
-    /// both is therefore a corrupt record, not a legal one.
     #[test]
     fn an_outpoint_in_both_halves_is_refused() {
-        let shared = OutPoint::new(hash(6).into(), 3);
+        // The apply path filters same-block spends out of both halves, so an
+        // outpoint in both is corrupt, not legal.
+        let shared = outpoint(6, 3);
         let mut batch = UndoBatch::empty();
-        batch.restore(UtxoAdd::new(shared, txout(10), false, 4));
+        restore(&mut batch, shared, 10, false, 4);
         batch.remove(shared);
-        assert!(matches!(
-            decode(&encode(&batch, hash(1)), hash(1)),
-            Err(UndoCodecError::DuplicateOutpoint { .. })
-        ));
+        assert_refused(&encode(&batch, hash(1)), hash(1), |e| {
+            matches!(e, UndoCodecError::DuplicateOutpoint { .. })
+        });
     }
 }
