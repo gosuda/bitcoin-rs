@@ -109,10 +109,9 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn 
     batch.put(ColumnFamily::ScriptLive, &malformed, &[]);
     store.write(batch)?;
 
-    let error = writer
-        .indexer()
-        .iter_live_outpoints(scripthash)
-        .unwrap_err();
+    let Err(error) = writer.indexer().iter_live_outpoints(scripthash) else {
+        return Err(std::io::Error::other("malformed live-row key must fail").into());
+    };
     assert!(
         matches!(error, IndexError::InvalidPrefixRowLength { len: 40 }),
         "malformed live-row key must report its length: {error:?}"
@@ -603,7 +602,7 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
 #[test]
 fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
 -> Result<(), Box<dyn std::error::Error>> {
-    use super::{IndexCapability, IndexReader, IndexWatermark, TxIndexSnapshot};
+    use super::{IndexCapability, IndexReader, IndexWatermark};
 
     let (_dir, writer) = writer()?;
     let anchor = IndexWatermark {
@@ -674,7 +673,7 @@ fn stored_rows(indexer: &Indexer<RocksDbStore>) -> Result<StoredRows, Box<dyn st
         }
     }
     rows.sort_by(|left, right| {
-        (left.0.as_str(), left.1.as_slice()).cmp(&(right.0.as_str(), right.1.as_slice()))
+        (left.0.name(), left.1.as_slice()).cmp(&(right.0.name(), right.1.as_slice()))
     });
     Ok(rows)
 }
