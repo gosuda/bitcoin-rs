@@ -37,205 +37,95 @@ use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid,
     Witness, deserialize,
 };
+use bitcoin_rs_script::checker::remove_codeseparators;
 use bitcoin_rs_script::{
     Interpreter, ScriptError, VerifyFlags, opcode, push_data, push_int, taproot,
 };
 
-// ===========================================================================
-// Script error code model — Core's `ScriptErrorString` names
-// ===========================================================================
+/// Core's script error identifiers, exactly as `script_error.cpp` /
+/// `script_tests.cpp`'s `script_errors[]` table renders them. A row naming
+/// anything outside this table is skipped and counted, so a corpus update
+/// that introduces a new rule cannot slip through as a silent pass.
+static CORE_ERROR_NAMES: &[&str] = &[
+    "OK",
+    "EVAL_FALSE",
+    "OP_RETURN",
+    "SCRIPTNUM",
+    "SCRIPT_SIZE",
+    "PUSH_SIZE",
+    "OP_COUNT",
+    "STACK_SIZE",
+    "SIG_COUNT",
+    "PUBKEY_COUNT",
+    "VERIFY",
+    "EQUALVERIFY",
+    "CHECKMULTISIGVERIFY",
+    "CHECKSIGVERIFY",
+    "NUMEQUALVERIFY",
+    "BAD_OPCODE",
+    "DISABLED_OPCODE",
+    "INVALID_STACK_OPERATION",
+    "INVALID_ALTSTACK_OPERATION",
+    "UNBALANCED_CONDITIONAL",
+    "NEGATIVE_LOCKTIME",
+    "UNSATISFIED_LOCKTIME",
+    "SIG_HASHTYPE",
+    "SIG_DER",
+    "MINIMALDATA",
+    "SIG_PUSHONLY",
+    "SIG_HIGH_S",
+    "SIG_NULLDUMMY",
+    "PUBKEYTYPE",
+    "CLEANSTACK",
+    "MINIMALIF",
+    "NULLFAIL",
+    "DISCOURAGE_UPGRADABLE_NOPS",
+    "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM",
+    "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION",
+    "DISCOURAGE_OP_SUCCESS",
+    "DISCOURAGE_UPGRADABLE_PUBKEYTYPE",
+    "WITNESS_PROGRAM_WRONG_LENGTH",
+    "WITNESS_PROGRAM_WITNESS_EMPTY",
+    "WITNESS_PROGRAM_MISMATCH",
+    "WITNESS_MALLEATED",
+    "WITNESS_MALLEATED_P2SH",
+    "WITNESS_UNEXPECTED",
+    "WITNESS_PUBKEYTYPE",
+    "SCHNORR_SIG_SIZE",
+    "SCHNORR_SIG_HASHTYPE",
+    "SCHNORR_SIG",
+    "TAPROOT_WRONG_CONTROL_SIZE",
+    "TAPSCRIPT_VALIDATION_WEIGHT",
+    "TAPSCRIPT_CHECKMULTISIG",
+    "TAPSCRIPT_MINIMALIF",
+    "TAPSCRIPT_EMPTY_PUBKEY",
+    "OP_CODESEPARATOR",
+    "SIG_FINDANDDELETE",
+];
 
-/// Core's script error identifiers, rendered as the exact names from
-/// `script_error.cpp` / `script_tests.cpp`'s `script_errors[]` table.
+/// One row's expected outcome: Core's error name, or `OK` for acceptance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScriptErrCode {
-    Ok,
-    EvalFalse,
-    OpReturn,
-    Scriptnum,
-    ScriptSize,
-    PushSize,
-    OpCount,
-    StackSize,
-    SigCount,
-    PubkeyCount,
-    Verify,
-    EqualVerify,
-    CheckMultisigVerify,
-    CheckSigVerify,
-    NumEqualVerify,
-    BadOpcode,
-    DisabledOpcode,
-    InvalidStackOperation,
-    InvalidAltstackOperation,
-    UnbalancedConditional,
-    NegativeLocktime,
-    UnsatisfiedLocktime,
-    SigHashtype,
-    SigDer,
-    MinimalData,
-    SigPushOnly,
-    SigHighS,
-    SigNullDummy,
-    PubkeyType,
-    CleanStack,
-    MinimalIf,
-    NullFail,
-    DiscourageUpgradableNops,
-    DiscourageUpgradableWitnessProgram,
-    DiscourageUpgradableTaprootVersion,
-    DiscourageOpSuccess,
-    DiscourageUpgradablePubkeyType,
-    WitnessProgramWrongLength,
-    WitnessProgramWitnessEmpty,
-    WitnessProgramMismatch,
-    WitnessMalleated,
-    WitnessMalleatedP2sh,
-    WitnessUnexpected,
-    WitnessPubkeyType,
-    SchnorrSigSize,
-    SchnorrSigHashtype,
-    SchnorrSig,
-    TaprootWrongControlSize,
-    TapscriptValidationWeight,
-    TapscriptCheckMultisig,
-    TapscriptMinimalIf,
-    TapscriptEmptyPubkey,
-    OpCodeSeparator,
-    SigFindAndDelete,
-}
+struct Expectation(&'static str);
 
-impl ScriptErrCode {
+impl Expectation {
     fn from_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "OK" => Self::Ok,
-            "EVAL_FALSE" => Self::EvalFalse,
-            "OP_RETURN" => Self::OpReturn,
-            "SCRIPTNUM" => Self::Scriptnum,
-            "SCRIPT_SIZE" => Self::ScriptSize,
-            "PUSH_SIZE" => Self::PushSize,
-            "OP_COUNT" => Self::OpCount,
-            "STACK_SIZE" => Self::StackSize,
-            "SIG_COUNT" => Self::SigCount,
-            "PUBKEY_COUNT" => Self::PubkeyCount,
-            "VERIFY" => Self::Verify,
-            "EQUALVERIFY" => Self::EqualVerify,
-            "CHECKMULTISIGVERIFY" => Self::CheckMultisigVerify,
-            "CHECKSIGVERIFY" => Self::CheckSigVerify,
-            "NUMEQUALVERIFY" => Self::NumEqualVerify,
-            "BAD_OPCODE" => Self::BadOpcode,
-            "DISABLED_OPCODE" => Self::DisabledOpcode,
-            "INVALID_STACK_OPERATION" => Self::InvalidStackOperation,
-            "INVALID_ALTSTACK_OPERATION" => Self::InvalidAltstackOperation,
-            "UNBALANCED_CONDITIONAL" => Self::UnbalancedConditional,
-            "NEGATIVE_LOCKTIME" => Self::NegativeLocktime,
-            "UNSATISFIED_LOCKTIME" => Self::UnsatisfiedLocktime,
-            "SIG_HASHTYPE" => Self::SigHashtype,
-            "SIG_DER" => Self::SigDer,
-            "MINIMALDATA" => Self::MinimalData,
-            "SIG_PUSHONLY" => Self::SigPushOnly,
-            "SIG_HIGH_S" => Self::SigHighS,
-            "SIG_NULLDUMMY" => Self::SigNullDummy,
-            "PUBKEYTYPE" => Self::PubkeyType,
-            "CLEANSTACK" => Self::CleanStack,
-            "MINIMALIF" => Self::MinimalIf,
-            "NULLFAIL" => Self::NullFail,
-            "DISCOURAGE_UPGRADABLE_NOPS" => Self::DiscourageUpgradableNops,
-            "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM" => Self::DiscourageUpgradableWitnessProgram,
-            "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION" => Self::DiscourageUpgradableTaprootVersion,
-            "DISCOURAGE_OP_SUCCESS" => Self::DiscourageOpSuccess,
-            "DISCOURAGE_UPGRADABLE_PUBKEYTYPE" => Self::DiscourageUpgradablePubkeyType,
-            "WITNESS_PROGRAM_WRONG_LENGTH" => Self::WitnessProgramWrongLength,
-            "WITNESS_PROGRAM_WITNESS_EMPTY" => Self::WitnessProgramWitnessEmpty,
-            "WITNESS_PROGRAM_MISMATCH" => Self::WitnessProgramMismatch,
-            "WITNESS_MALLEATED" => Self::WitnessMalleated,
-            "WITNESS_MALLEATED_P2SH" => Self::WitnessMalleatedP2sh,
-            "WITNESS_UNEXPECTED" => Self::WitnessUnexpected,
-            "WITNESS_PUBKEYTYPE" => Self::WitnessPubkeyType,
-            "SCHNORR_SIG_SIZE" => Self::SchnorrSigSize,
-            "SCHNORR_SIG_HASHTYPE" => Self::SchnorrSigHashtype,
-            "SCHNORR_SIG" => Self::SchnorrSig,
-            "TAPROOT_WRONG_CONTROL_SIZE" => Self::TaprootWrongControlSize,
-            "TAPSCRIPT_VALIDATION_WEIGHT" => Self::TapscriptValidationWeight,
-            "TAPSCRIPT_CHECKMULTISIG" => Self::TapscriptCheckMultisig,
-            "TAPSCRIPT_MINIMALIF" => Self::TapscriptMinimalIf,
-            "TAPSCRIPT_EMPTY_PUBKEY" => Self::TapscriptEmptyPubkey,
-            "OP_CODESEPARATOR" => Self::OpCodeSeparator,
-            "SIG_FINDANDDELETE" => Self::SigFindAndDelete,
-            _ => return None,
-        })
+        CORE_ERROR_NAMES
+            .iter()
+            .copied()
+            .find(|known| *known == name)
+            .map(Self)
     }
 
     fn is_ok(self) -> bool {
-        self == Self::Ok
+        self.0 == "OK"
     }
 }
 
-impl std::fmt::Display for ScriptErrCode {
+impl std::fmt::Display for Expectation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            Self::Ok => "OK",
-            Self::EvalFalse => "EVAL_FALSE",
-            Self::OpReturn => "OP_RETURN",
-            Self::Scriptnum => "SCRIPTNUM",
-            Self::ScriptSize => "SCRIPT_SIZE",
-            Self::PushSize => "PUSH_SIZE",
-            Self::OpCount => "OP_COUNT",
-            Self::StackSize => "STACK_SIZE",
-            Self::SigCount => "SIG_COUNT",
-            Self::PubkeyCount => "PUBKEY_COUNT",
-            Self::Verify => "VERIFY",
-            Self::EqualVerify => "EQUALVERIFY",
-            Self::CheckMultisigVerify => "CHECKMULTISIGVERIFY",
-            Self::CheckSigVerify => "CHECKSIGVERIFY",
-            Self::NumEqualVerify => "NUMEQUALVERIFY",
-            Self::BadOpcode => "BAD_OPCODE",
-            Self::DisabledOpcode => "DISABLED_OPCODE",
-            Self::InvalidStackOperation => "INVALID_STACK_OPERATION",
-            Self::InvalidAltstackOperation => "INVALID_ALTSTACK_OPERATION",
-            Self::UnbalancedConditional => "UNBALANCED_CONDITIONAL",
-            Self::NegativeLocktime => "NEGATIVE_LOCKTIME",
-            Self::UnsatisfiedLocktime => "UNSATISFIED_LOCKTIME",
-            Self::SigHashtype => "SIG_HASHTYPE",
-            Self::SigDer => "SIG_DER",
-            Self::MinimalData => "MINIMALDATA",
-            Self::SigPushOnly => "SIG_PUSHONLY",
-            Self::SigHighS => "SIG_HIGH_S",
-            Self::SigNullDummy => "SIG_NULLDUMMY",
-            Self::PubkeyType => "PUBKEYTYPE",
-            Self::CleanStack => "CLEANSTACK",
-            Self::MinimalIf => "MINIMALIF",
-            Self::NullFail => "NULLFAIL",
-            Self::DiscourageUpgradableNops => "DISCOURAGE_UPGRADABLE_NOPS",
-            Self::DiscourageUpgradableWitnessProgram => "DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM",
-            Self::DiscourageUpgradableTaprootVersion => "DISCOURAGE_UPGRADABLE_TAPROOT_VERSION",
-            Self::DiscourageOpSuccess => "DISCOURAGE_OP_SUCCESS",
-            Self::DiscourageUpgradablePubkeyType => "DISCOURAGE_UPGRADABLE_PUBKEYTYPE",
-            Self::WitnessProgramWrongLength => "WITNESS_PROGRAM_WRONG_LENGTH",
-            Self::WitnessProgramWitnessEmpty => "WITNESS_PROGRAM_WITNESS_EMPTY",
-            Self::WitnessProgramMismatch => "WITNESS_PROGRAM_MISMATCH",
-            Self::WitnessMalleated => "WITNESS_MALLEATED",
-            Self::WitnessMalleatedP2sh => "WITNESS_MALLEATED_P2SH",
-            Self::WitnessUnexpected => "WITNESS_UNEXPECTED",
-            Self::WitnessPubkeyType => "WITNESS_PUBKEYTYPE",
-            Self::SchnorrSigSize => "SCHNORR_SIG_SIZE",
-            Self::SchnorrSigHashtype => "SCHNORR_SIG_HASHTYPE",
-            Self::SchnorrSig => "SCHNORR_SIG",
-            Self::TaprootWrongControlSize => "TAPROOT_WRONG_CONTROL_SIZE",
-            Self::TapscriptValidationWeight => "TAPSCRIPT_VALIDATION_WEIGHT",
-            Self::TapscriptCheckMultisig => "TAPSCRIPT_CHECKMULTISIG",
-            Self::TapscriptMinimalIf => "TAPSCRIPT_MINIMALIF",
-            Self::TapscriptEmptyPubkey => "TAPSCRIPT_EMPTY_PUBKEY",
-            Self::OpCodeSeparator => "OP_CODESEPARATOR",
-            Self::SigFindAndDelete => "SIG_FINDANDDELETE",
-        };
-        f.write_str(name)
+        f.write_str(self.0)
     }
 }
-
-// ===========================================================================
-// Core ASM script assembler
-// ===========================================================================
 
 /// Parses a Core test-vector script string into raw bytes.
 ///
@@ -286,9 +176,25 @@ fn is_decimal_int(s: &str) -> bool {
     bytes[start..].iter().all(u8::is_ascii_digit)
 }
 
+/// Linear search through the opcode table. Test-only, so O(n) is fine.
 fn resolve_opcode(name: &str) -> Option<u8> {
     let bare = name.strip_prefix("OP_").unwrap_or(name);
-    lookup_opcode(bare)
+    OPCODE_BYTES
+        .iter()
+        .find(|(_, names)| names.contains(&bare))
+        .map(|&(byte, _)| byte)
+        .or_else(|| {
+            let suffix = bare.strip_prefix("SUCCESS_")?;
+            let index = suffix.parse::<u8>().ok()?;
+            if suffix != index.to_string() {
+                return None;
+            }
+            match index {
+                0 => Some(0x50),
+                80..=191 => Some(index + 46),
+                _ => None,
+            }
+        })
 }
 
 static OPCODE_BYTES: &[(u8, &[&str])] = &[
@@ -409,137 +315,6 @@ static OPCODE_BYTES: &[(u8, &[&str])] = &[
     (0xff, &["INVALIDOPCODE"]),
 ];
 
-static OP_SUCCESS_NAMES: &[(u8, &str)] = &[
-    (0x50, "SUCCESS_0"),
-    (0x7e, "SUCCESS_80"),
-    (0x7f, "SUCCESS_81"),
-    (0x80, "SUCCESS_82"),
-    (0x81, "SUCCESS_83"),
-    (0x82, "SUCCESS_84"),
-    (0x83, "SUCCESS_85"),
-    (0x84, "SUCCESS_86"),
-    (0x85, "SUCCESS_87"),
-    (0x86, "SUCCESS_88"),
-    (0x87, "SUCCESS_89"),
-    (0x88, "SUCCESS_90"),
-    (0x89, "SUCCESS_91"),
-    (0x8a, "SUCCESS_92"),
-    (0x8b, "SUCCESS_93"),
-    (0x8c, "SUCCESS_94"),
-    (0x8d, "SUCCESS_95"),
-    (0x8e, "SUCCESS_96"),
-    (0x8f, "SUCCESS_97"),
-    (0x90, "SUCCESS_98"),
-    (0x91, "SUCCESS_99"),
-    (0x92, "SUCCESS_100"),
-    (0x93, "SUCCESS_101"),
-    (0x94, "SUCCESS_102"),
-    (0x95, "SUCCESS_103"),
-    (0x96, "SUCCESS_104"),
-    (0x97, "SUCCESS_105"),
-    (0x98, "SUCCESS_106"),
-    (0x99, "SUCCESS_107"),
-    (0x9a, "SUCCESS_108"),
-    (0x9b, "SUCCESS_109"),
-    (0x9c, "SUCCESS_110"),
-    (0x9d, "SUCCESS_111"),
-    (0x9e, "SUCCESS_112"),
-    (0x9f, "SUCCESS_113"),
-    (0xa0, "SUCCESS_114"),
-    (0xa1, "SUCCESS_115"),
-    (0xa2, "SUCCESS_116"),
-    (0xa3, "SUCCESS_117"),
-    (0xa4, "SUCCESS_118"),
-    (0xa5, "SUCCESS_119"),
-    (0xa6, "SUCCESS_120"),
-    (0xa7, "SUCCESS_121"),
-    (0xa8, "SUCCESS_122"),
-    (0xa9, "SUCCESS_123"),
-    (0xaa, "SUCCESS_124"),
-    (0xab, "SUCCESS_125"),
-    (0xac, "SUCCESS_126"),
-    (0xad, "SUCCESS_127"),
-    (0xae, "SUCCESS_128"),
-    (0xaf, "SUCCESS_129"),
-    (0xb0, "SUCCESS_130"),
-    (0xb1, "SUCCESS_131"),
-    (0xb2, "SUCCESS_132"),
-    (0xb3, "SUCCESS_133"),
-    (0xb4, "SUCCESS_134"),
-    (0xb5, "SUCCESS_135"),
-    (0xb6, "SUCCESS_136"),
-    (0xb7, "SUCCESS_137"),
-    (0xb8, "SUCCESS_138"),
-    (0xb9, "SUCCESS_139"),
-    (0xba, "SUCCESS_140"),
-    (0xbb, "SUCCESS_141"),
-    (0xbc, "SUCCESS_142"),
-    (0xbd, "SUCCESS_143"),
-    (0xbe, "SUCCESS_144"),
-    (0xbf, "SUCCESS_145"),
-    (0xc0, "SUCCESS_146"),
-    (0xc1, "SUCCESS_147"),
-    (0xc2, "SUCCESS_148"),
-    (0xc3, "SUCCESS_149"),
-    (0xc4, "SUCCESS_150"),
-    (0xc5, "SUCCESS_151"),
-    (0xc6, "SUCCESS_152"),
-    (0xc7, "SUCCESS_153"),
-    (0xc8, "SUCCESS_154"),
-    (0xc9, "SUCCESS_155"),
-    (0xca, "SUCCESS_156"),
-    (0xcb, "SUCCESS_157"),
-    (0xcc, "SUCCESS_158"),
-    (0xcd, "SUCCESS_159"),
-    (0xce, "SUCCESS_160"),
-    (0xcf, "SUCCESS_161"),
-    (0xd0, "SUCCESS_162"),
-    (0xd1, "SUCCESS_163"),
-    (0xd2, "SUCCESS_164"),
-    (0xd3, "SUCCESS_165"),
-    (0xd4, "SUCCESS_166"),
-    (0xd5, "SUCCESS_167"),
-    (0xd6, "SUCCESS_168"),
-    (0xd7, "SUCCESS_169"),
-    (0xd8, "SUCCESS_170"),
-    (0xd9, "SUCCESS_171"),
-    (0xda, "SUCCESS_172"),
-    (0xdb, "SUCCESS_173"),
-    (0xdc, "SUCCESS_174"),
-    (0xdd, "SUCCESS_175"),
-    (0xde, "SUCCESS_176"),
-    (0xdf, "SUCCESS_177"),
-    (0xe0, "SUCCESS_178"),
-    (0xe1, "SUCCESS_179"),
-    (0xe2, "SUCCESS_180"),
-    (0xe3, "SUCCESS_181"),
-    (0xe4, "SUCCESS_182"),
-    (0xe5, "SUCCESS_183"),
-    (0xe6, "SUCCESS_184"),
-    (0xe7, "SUCCESS_185"),
-    (0xe8, "SUCCESS_186"),
-    (0xe9, "SUCCESS_187"),
-    (0xea, "SUCCESS_188"),
-    (0xeb, "SUCCESS_189"),
-    (0xec, "SUCCESS_190"),
-    (0xed, "SUCCESS_191"),
-];
-
-/// Linear search through the opcode tables. Test-only, so O(n) is fine.
-fn lookup_opcode(bare: &str) -> Option<u8> {
-    for &(byte, names) in OPCODE_BYTES {
-        if names.contains(&bare) {
-            return Some(byte);
-        }
-    }
-    for &(byte, name) in OP_SUCCESS_NAMES {
-        if name == bare {
-            return Some(byte);
-        }
-    }
-    None
-}
-
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
     if !hex.len().is_multiple_of(2) {
         return Err(format!("odd length: {}", hex.len()));
@@ -550,9 +325,7 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
-// ===========================================================================
 // Transaction construction — Core's BuildCrediting/BuildSpending
-// ===========================================================================
 
 fn build_crediting_tx(script_pubkey: &[u8], amount: u64) -> Tx {
     Tx {
@@ -589,9 +362,7 @@ fn build_spending_tx(script_sig: &[u8], witness: &[Vec<u8>], credit_tx: &Tx) -> 
     }
 }
 
-// ===========================================================================
 // Verdict model
-// ===========================================================================
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Verdict {
@@ -627,7 +398,7 @@ impl Verdict {
         matches!(self, Self::Accept)
     }
 
-    fn matches_expected(&self, expected: ScriptErrCode) -> bool {
+    fn matches_expected(&self, expected: Expectation) -> bool {
         match self {
             Self::Accept => expected.is_ok(),
             Self::Reject(_) => !expected.is_ok(),
@@ -635,9 +406,7 @@ impl Verdict {
     }
 }
 
-// ===========================================================================
 // Counters for anti-vacuity
-// ===========================================================================
 
 #[derive(Default, Debug)]
 struct Counts {
@@ -712,9 +481,7 @@ fn assert_pinned_native_column(
     );
 }
 
-// ===========================================================================
 // Corpus 1: script_tests.json
-// ===========================================================================
 
 // Core's `script_json_test` fills three markers the JSON corpus cannot express
 // as hex (`src/test/script_tests.cpp:925-945`, `:968-974`):
@@ -818,7 +585,7 @@ struct ScriptTestRow {
     witness: Vec<Vec<u8>>,
     amount: u64,
     flags: VerifyFlags,
-    expected: ScriptErrCode,
+    expected: Expectation,
     row_index: usize,
     comment: String,
 }
@@ -981,7 +748,7 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
             }
         };
 
-        let Some(expected) = ScriptErrCode::from_name(expected_str) else {
+        let Some(expected) = Expectation::from_name(expected_str) else {
             counts.record_skip(&format!("unknown expected error name: {expected_str}"));
             continue;
         };
@@ -1093,9 +860,7 @@ fn run_script_tests_kernel(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<S
     mismatches
 }
 
-// ===========================================================================
 // Corpus 2 & 3: tx_valid.json / tx_invalid.json
-// ===========================================================================
 
 struct TxVectorRow {
     tx: Tx,
@@ -1342,9 +1107,7 @@ fn run_tx_vectors_kernel(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<Strin
     mismatches
 }
 
-// ===========================================================================
 // Corpus 4: sighash.json
-// ===========================================================================
 
 struct SighashRow {
     tx: Tx,
@@ -1429,7 +1192,7 @@ fn run_sighash_vectors(rows: &[SighashRow], counts: &mut Counts) -> Vec<String> 
         // Core's SignatureHash calls SerializeScriptCode which strips
         // OP_CODESEPARATOR (0xab) opcode bytes before hashing. Strip them
         // here to match, so the sighash rows containing CS can be tested.
-        let script_code = strip_codeseparators(&row.script_code);
+        let script_code = remove_codeseparators(&row.script_code);
         let cache = SighashCache::new(&row.tx);
         let result = cache.legacy_signature_hash(row.input_index, &script_code, row.hash_type);
 
@@ -1452,57 +1215,7 @@ fn run_sighash_vectors(rows: &[SighashRow], counts: &mut Counts) -> Vec<String> 
     mismatches
 }
 
-// ===========================================================================
 // Helpers
-// ===========================================================================
-
-/// Removes `OP_CODESEPARATOR` (0xab) opcodes from a script, matching Core's
-/// `CTransactionSignatureSerializer::SerializeScriptCode`. Bytes inside data
-/// pushes are preserved.
-fn strip_codeseparators(script: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(script.len());
-    let mut pos = 0;
-    while pos < script.len() {
-        let op = script[pos];
-        if op == 0xab {
-            pos += 1;
-        } else if (0x01..=0x4b).contains(&op) {
-            let end = pos + 1 + usize::from(op);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4c {
-            let len_pos = pos + 1;
-            let len = script.get(len_pos).copied().unwrap_or(0);
-            let end = len_pos + 1 + usize::from(len);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4d {
-            let len_pos = pos + 1;
-            let len = u16::from_le_bytes([
-                script.get(len_pos).copied().unwrap_or(0),
-                script.get(len_pos + 1).copied().unwrap_or(0),
-            ]);
-            let end = len_pos + 2 + usize::from(len);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else if op == 0x4e {
-            let len_pos = pos + 1;
-            let len = u32::from_le_bytes([
-                script.get(len_pos).copied().unwrap_or(0),
-                script.get(len_pos + 1).copied().unwrap_or(0),
-                script.get(len_pos + 2).copied().unwrap_or(0),
-                script.get(len_pos + 3).copied().unwrap_or(0),
-            ]);
-            let end = len_pos + 4 + usize::try_from(len).unwrap_or(usize::MAX);
-            out.extend_from_slice(&script[pos..end.min(script.len())]);
-            pos = end;
-        } else {
-            out.push(op);
-            pos += 1;
-        }
-    }
-    out
-}
 
 /// How many mismatch lines to print per corpus.
 ///
@@ -1626,10 +1339,6 @@ fn reference_path(name: &str) -> std::path::PathBuf {
     }
     candidates[0].clone()
 }
-
-// ===========================================================================
-// Tests
-// ===========================================================================
 
 #[test]
 #[expect(
@@ -1917,7 +1626,7 @@ fn broken_expectation_is_detected() {
     };
     let ok_row = st_rows
         .iter()
-        .find(|r| r.expected == ScriptErrCode::Ok)
+        .find(|r| r.expected.is_ok())
         .unwrap_or_else(|| panic!("no OK-expected row found in script_tests"));
 
     let credit = build_crediting_tx(&ok_row.script_pubkey, ok_row.amount);
@@ -1937,9 +1646,9 @@ fn broken_expectation_is_detected() {
 
     // Flip: if the row is accepted, claim it should be rejected.
     let broken_expected = if verdict == Verdict::Accept {
-        ScriptErrCode::EvalFalse
+        Expectation("EVAL_FALSE")
     } else {
-        ScriptErrCode::Ok
+        Expectation("OK")
     };
     let st_detected = !verdict.matches_expected(broken_expected);
     println!(

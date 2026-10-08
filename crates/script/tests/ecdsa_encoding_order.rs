@@ -91,116 +91,81 @@ fn negative_check_script(pubkey: &[u8], multisig: bool) -> Vec<u8> {
     script
 }
 
+/// An empty ECDSA signature is a clean `false`, but Core still rejects a
+/// badly encoded key first: an unparseable key under `STRICTENC` in the legacy
+/// path, an uncompressed key under `WITNESS_PUBKEYTYPE` in the v0 path.
 #[test]
-fn empty_signature_cannot_bypass_legacy_key_encoding() {
-    let tx = fixture();
-    for multisig in [false, true] {
-        let script = negative_check_script(&[], multisig);
-        let prevout = TxOut {
-            value: Amount::from_sat(VALUE),
-            script_pubkey: Script::from_bytes(script.clone()),
-        };
-        // The test changes only INPUT's script; fill the other slot for the full-set API.
-        let prevouts = vec![prevout.clone(); tx.inputs.len()];
-        let script_sig = if multisig {
-            vec![0x00, 0x00]
-        } else {
-            vec![0x00]
-        };
-        assert_eq!(
-            Interpreter.execute_with_prevouts(
-                &script,
-                &script_sig,
-                &[],
-                VerifyFlags::NONE,
-                &prevouts,
-                &tx,
-                INPUT,
-            ),
-            Ok(true),
-        );
-        assert_eq!(
-            Interpreter.execute_with_prevouts(
-                &script,
-                &script_sig,
-                &[],
-                VerifyFlags::STRICTENC,
-                &prevouts,
-                &tx,
-                INPUT,
-            ),
-            Err(ScriptError::Invalid {
-                code: ScriptErrCode::PubkeyType,
-            }),
-        );
-    }
-}
-
-#[test]
-fn empty_signature_cannot_bypass_witness_compressed_key_policy() {
+fn empty_signature_cannot_bypass_key_encoding_policy() {
     let tx = fixture();
     let uncompressed = PublicKey::from_secret_key(SECP256K1, &test_key()).serialize_uncompressed();
-    for multisig in [false, true] {
-        let script = negative_check_script(&uncompressed, multisig);
-        let mut program = vec![0x00, 0x20]; // witness v0, 32-byte script hash
-        program.extend_from_slice(&Sha256::digest(&script));
-        let prevout = TxOut {
-            value: Amount::from_sat(VALUE),
-            script_pubkey: Script::from_bytes(program),
-        };
-        let mut witness = vec![Vec::new()];
-        if multisig {
-            witness.push(Vec::new());
+    // (key, policy flag on top of the permissive baseline, rejection code)
+    let cases = [
+        (
+            Vec::new(),
+            VerifyFlags::STRICTENC,
+            ScriptErrCode::PubkeyType,
+            false,
+        ),
+        (
+            uncompressed.to_vec(),
+            VerifyFlags::WITNESS_PUBKEYTYPE,
+            ScriptErrCode::WitnessPubkeyType,
+            true,
+        ),
+    ];
+    for (key, policy, code, witness) in cases {
+        for multisig in [false, true] {
+            let script = negative_check_script(&key, multisig);
+            let mut witness_stack = vec![Vec::new()];
+            if multisig {
+                witness_stack.push(Vec::new());
+            }
+            witness_stack.push(script.clone());
+            let script_sig = if multisig {
+                vec![0x00, 0x00]
+            } else {
+                vec![0x00]
+            };
+            let baseline = if witness {
+                VerifyFlags::MANDATORY
+            } else {
+                VerifyFlags::NONE
+            };
+            let run = |flags: VerifyFlags| {
+                if witness {
+                    let mut program = vec![0x00, 0x20]; // witness v0, 32-byte script hash
+                    program.extend_from_slice(&Sha256::digest(&script));
+                    let prevout = TxOut {
+                        value: Amount::from_sat(VALUE),
+                        script_pubkey: Script::from_bytes(program),
+                    };
+                    verify_witness(&tx, &prevout, &witness_stack, flags)
+                } else {
+                    // Only INPUT's prevout is read; fill the other slot for the full-set API.
+                    let prevout = TxOut {
+                        value: Amount::from_sat(VALUE),
+                        script_pubkey: Script::from_bytes(script.clone()),
+                    };
+                    let prevouts = vec![prevout; tx.inputs.len()];
+                    Interpreter.execute_with_prevouts(
+                        &script,
+                        &script_sig,
+                        &[],
+                        flags,
+                        &prevouts,
+                        &tx,
+                        INPUT,
+                    )
+                }
+            };
+            assert_eq!(run(baseline), Ok(true), "multisig={multisig}, {code:?}");
+            assert_eq!(
+                run(baseline.union(policy)),
+                Err(ScriptError::Invalid { code }),
+                "multisig={multisig}, {code:?}",
+            );
         }
-        witness.push(script);
-        assert_eq!(
-            verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY),
-            Ok(true),
-        );
-        assert_eq!(
-            verify_witness(
-                &tx,
-                &prevout,
-                &witness,
-                VerifyFlags::MANDATORY.union(VerifyFlags::WITNESS_PUBKEYTYPE),
-            ),
-            Err(ScriptError::Invalid {
-                code: ScriptErrCode::WitnessPubkeyType,
-            }),
-        );
     }
-}
-
-#[test]
-fn encoding_error_precedence_matches_core() {
-    let tx = fixture();
-    let prevouts = vec![p2wpkh_prevout(); tx.inputs.len()];
-    let mut checker = TxSignatureChecker::new(&tx, INPUT, Amount::from_sat(VALUE), &prevouts);
-    for version in [SigVersion::Base, SigVersion::WitnessV0] {
-        assert_eq!(
-            checker.check_ecdsa_signature(&[], &[], &[], version, VerifyFlags::DERSIG),
-            Ok(false),
-        );
-        assert_eq!(
-            checker.check_ecdsa_signature(&[], &[], &[], version, VerifyFlags::STRICTENC),
-            Err(ScriptError::Invalid {
-                code: ScriptErrCode::PubkeyType,
-            }),
-        );
-        assert_eq!(
-            checker.check_ecdsa_signature(&[0], &[], &[], version, VerifyFlags::STRICTENC),
-            Err(ScriptError::Invalid {
-                code: ScriptErrCode::SigDer,
-            }),
-        );
-    }
-    let flags = VerifyFlags::STRICTENC.union(VerifyFlags::WITNESS_PUBKEYTYPE);
-    assert_eq!(
-        checker.check_ecdsa_signature(&[], &[], &[], SigVersion::WitnessV0, flags),
-        Err(ScriptError::Invalid {
-            code: ScriptErrCode::PubkeyType,
-        }),
-    );
 }
 
 #[test]
@@ -258,6 +223,17 @@ fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
                     expected,
                     "mask={mask:#x}, version={version:?}, key={key:?}",
                 );
+                // A present but undecodable signature is rejected before the
+                // key is looked at whenever DER checking is on.
+                if flags.contains(VerifyFlags::DERSIG) || flags.contains(VerifyFlags::STRICTENC) {
+                    assert_eq!(
+                        checker.check_ecdsa_signature(&[0], key, &[], version, flags),
+                        Err(ScriptError::Invalid {
+                            code: ScriptErrCode::SigDer,
+                        }),
+                        "der precedence: mask={mask:#x}, version={version:?}",
+                    );
+                }
             }
         }
     }

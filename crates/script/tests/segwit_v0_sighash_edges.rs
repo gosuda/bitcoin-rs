@@ -222,69 +222,6 @@ fn published_bip143_digest_and_signature_anchor_reference() {
 }
 
 #[test]
-fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
-    let key = test_key();
-    let pubkey = PublicKey::from_secret_key(SECP256K1, &key)
-        .serialize()
-        .to_vec();
-    let script = hex(SCRIPT_CODE);
-    let prevout = p2wpkh_prevout();
-    for output_count in [1, 2] {
-        // input 1 has no matching output in the one-output fixture. SINGLE
-        // must still hash a complete BIP143 preimage and allow a valid signature.
-        let (tx, oracle) = fixture(output_count);
-        let mut cache = SighashCache::new(&tx);
-        for byte in 0_u8..=u8::MAX {
-            let raw = u32::from(byte);
-            let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
-            assert_eq!(
-                cache
-                    .segwit_v0_signature_hash_raw(INPUT, &script, Amount::from_sat(VALUE), raw)
-                    .expect("raw BIP143 digest")
-                    .as_byte_array(),
-                &expected,
-                "outputs={output_count}, raw={raw:#x}",
-            );
-            let message = Message::from_digest(expected);
-            let mut signature = SECP256K1
-                .sign_ecdsa(&message, &key)
-                .serialize_der()
-                .to_vec();
-            signature.push(byte);
-            let witness = vec![signature, pubkey.clone()];
-            assert_eq!(
-                verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY),
-                Ok(true),
-                "consensus: outputs={output_count}, raw={raw:#x}",
-            );
-            let mut wrong_amount = prevout.clone();
-            wrong_amount.value = Amount::from_sat(wrong_amount.value.to_sat() + 1);
-            assert_eq!(
-                verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
-                Err(ScriptError::Invalid {
-                    code: ScriptErrCode::EvalFalse,
-                }),
-                "amount commitment: outputs={output_count}, raw={raw:#x}",
-            );
-            #[cfg(feature = "kernel")]
-            kernel_witness_parity(&tx, &prevout, &witness);
-            let strict = VerifyFlags::MANDATORY.union(VerifyFlags::STRICTENC);
-            let result = verify_witness(&tx, &prevout, &witness, strict);
-            if matches!(byte, 1 | 2 | 3 | 0x81 | 0x82 | 0x83) {
-                assert_eq!(result, Ok(true));
-            } else {
-                assert_eq!(
-                    result,
-                    Err(ScriptError::Invalid {
-                        code: ScriptErrCode::SigHashtype,
-                    }),
-                );
-            }
-        }
-    }
-}
-
-#[test]
 fn raw_segwit_hash_commits_all_32_bits_and_checks_input_bounds() {
     let script = hex(SCRIPT_CODE);
     for output_count in [1, 2] {
@@ -353,91 +290,6 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
     }
 }
 
-// Each script executes its first separator, retains separator-valued pushed
-// data, and leaves a later separator in an unexecuted branch. BIP143 commits
-// the suffix after the executed separator verbatim (bip-0143, Specification).
-fn separator_witness_script(pubkey: &[u8], multisig: bool, verify: bool) -> Vec<u8> {
-    let mut script = vec![0xab, 0x02, 0xab, 0xab, 0x75]; // CODESEPARATOR, push, DROP
-    if multisig {
-        script.push(0x51);
-    }
-    script.push(u8::try_from(pubkey.len()).expect("short public key"));
-    script.extend_from_slice(pubkey);
-    if multisig {
-        script.push(0x51);
-    }
-    script.push(match (multisig, verify) {
-        (false, false) => 0xac, // CHECKSIG
-        (false, true) => 0xad,  // CHECKSIGVERIFY
-        (true, false) => 0xae,  // CHECKMULTISIG
-        (true, true) => 0xaf,   // CHECKMULTISIGVERIFY
-    });
-    if verify {
-        script.push(0x51); // successful VERIFY still needs a true final stack
-    }
-    script.extend_from_slice(&[0x00, 0x63, 0xab, 0x68]); // false IF CODESEPARATOR ENDIF
-    script
-}
-
-#[test]
-fn every_hashtype_verifies_all_witness_ecdsa_opcodes_with_separators() {
-    let key = test_key();
-    let pubkey = PublicKey::from_secret_key(SECP256K1, &key).serialize();
-    for (multisig, verify) in [(false, false), (false, true), (true, false), (true, true)] {
-        let script = separator_witness_script(&pubkey, multisig, verify);
-        let mut program = vec![0x00, 0x20];
-        program.extend_from_slice(&Sha256::digest(&script));
-        let prevout = TxOut {
-            value: Amount::from_sat(VALUE),
-            script_pubkey: Script::from_bytes(program),
-        };
-        let failure = match (multisig, verify) {
-            (false, true) => ScriptErrCode::CheckSigVerify,
-            (true, true) => ScriptErrCode::CheckMultisigVerify,
-            (_, false) => ScriptErrCode::EvalFalse,
-        };
-        for output_count in [1, 2] {
-            let (tx, oracle) = fixture(output_count);
-            for byte in 0_u8..=u8::MAX {
-                let digest = reference_bip143(&oracle, INPUT, &script[1..], VALUE, u32::from(byte));
-                let mut signature = SECP256K1
-                    .sign_ecdsa(&Message::from_digest(digest), &key)
-                    .serialize_der()
-                    .to_vec();
-                signature.push(byte);
-                let mut witness = Vec::new();
-                if multisig {
-                    witness.push(Vec::new()); // CHECKMULTISIG dummy, not a signature
-                }
-                witness.extend([signature, script.clone()]);
-                assert_eq!(
-                    verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY),
-                    Ok(true),
-                    "multisig={multisig}, verify={verify}, outputs={output_count}, raw={byte:#x}",
-                );
-                let mut wrong_amount = prevout.clone();
-                wrong_amount.value = Amount::from_sat(wrong_amount.value.to_sat() + 1);
-                assert_eq!(
-                    verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
-                    Err(ScriptError::Invalid { code: failure }),
-                    "wrong amount: multisig={multisig}, verify={verify}, raw={byte:#x}",
-                );
-                let strict = VerifyFlags::MANDATORY.union(VerifyFlags::STRICTENC);
-                let expected = if matches!(byte, 1 | 2 | 3 | 0x81 | 0x82 | 0x83) {
-                    Ok(true)
-                } else {
-                    Err(ScriptError::Invalid {
-                        code: ScriptErrCode::SigHashtype,
-                    })
-                };
-                assert_eq!(verify_witness(&tx, &prevout, &witness, strict), expected);
-                #[cfg(feature = "kernel")]
-                kernel_witness_parity(&tx, &prevout, &witness);
-            }
-        }
-    }
-}
-
 #[test]
 fn raw_segwit_script_code_is_verbatim_across_compactsize_boundaries() {
     // These are digest-API inputs, not necessarily executable scripts. Mixing
@@ -465,6 +317,118 @@ fn raw_segwit_script_code_is_verbatim_across_compactsize_boundaries() {
                         "outputs={output_count}, script_len={size}, value={value}, raw={raw:#x}",
                     );
                 }
+            }
+        }
+    }
+}
+
+// Each script executes its first separator, retains separator-valued pushed
+// data, and leaves a later separator in an unexecuted branch. BIP143 commits
+// the suffix after the executed separator verbatim (bip-0143, Specification).
+fn separator_witness_script(pubkey: &[u8], multisig: bool, verify: bool) -> Vec<u8> {
+    let mut script = vec![0xab, 0x02, 0xab, 0xab, 0x75]; // CODESEPARATOR, push, DROP
+    if multisig {
+        script.push(0x51);
+    }
+    script.push(u8::try_from(pubkey.len()).expect("short public key"));
+    script.extend_from_slice(pubkey);
+    if multisig {
+        script.push(0x51);
+    }
+    script.push(match (multisig, verify) {
+        (false, false) => 0xac, // CHECKSIG
+        (false, true) => 0xad,  // CHECKSIGVERIFY
+        (true, false) => 0xae,  // CHECKMULTISIG
+        (true, true) => 0xaf,   // CHECKMULTISIGVERIFY
+    });
+    if verify {
+        script.push(0x51); // successful VERIFY still needs a true final stack
+    }
+    script.extend_from_slice(&[0x00, 0x63, 0xab, 0x68]); // false IF CODESEPARATOR ENDIF
+    script
+}
+
+/// (signed script code, witness script, prevout, multisig, rejection code)
+type Shape = (Vec<u8>, Vec<u8>, TxOut, bool, ScriptErrCode);
+
+#[test]
+fn every_hashtype_verifies_all_witness_ecdsa_opcodes() {
+    let key = test_key();
+    let pubkey = PublicKey::from_secret_key(SECP256K1, &key).serialize();
+    // The P2WPKH shape signs the interpreter's implicit script code; the P2WSH
+    // shapes sign the suffix after their executed CODESEPARATOR.
+    let mut shapes: Vec<Shape> = vec![(
+        hex(SCRIPT_CODE),
+        Vec::new(),
+        p2wpkh_prevout(),
+        false,
+        ScriptErrCode::EvalFalse,
+    )];
+    for (multisig, verify) in [(false, false), (false, true), (true, false), (true, true)] {
+        let script = separator_witness_script(&pubkey, multisig, verify);
+        let mut program = vec![0x00, 0x20];
+        program.extend_from_slice(&Sha256::digest(&script));
+        let failure = match (multisig, verify) {
+            (false, true) => ScriptErrCode::CheckSigVerify,
+            (true, true) => ScriptErrCode::CheckMultisigVerify,
+            (_, false) => ScriptErrCode::EvalFalse,
+        };
+        shapes.push((
+            script[1..].to_vec(),
+            script.clone(),
+            TxOut {
+                value: Amount::from_sat(VALUE),
+                script_pubkey: Script::from_bytes(program),
+            },
+            multisig,
+            failure,
+        ));
+    }
+
+    for (script_code, witness_script, prevout, multisig, failure) in shapes {
+        for output_count in [1, 2] {
+            let (tx, oracle) = fixture(output_count);
+            for byte in 0_u8..=u8::MAX {
+                let digest = reference_bip143(&oracle, INPUT, &script_code, VALUE, u32::from(byte));
+                let mut signature = SECP256K1
+                    .sign_ecdsa(&Message::from_digest(digest), &key)
+                    .serialize_der()
+                    .to_vec();
+                signature.push(byte);
+                let mut witness = Vec::new();
+                if multisig {
+                    witness.push(Vec::new()); // CHECKMULTISIG dummy, not a signature
+                }
+                witness.push(signature);
+                if witness_script.is_empty() {
+                    witness.push(pubkey.to_vec());
+                } else {
+                    witness.push(witness_script.clone());
+                }
+                assert_eq!(
+                    verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY),
+                    Ok(true),
+                    "outputs={output_count}, raw={byte:#x}",
+                );
+                // Every BIP143 mode commits to the spent amount.
+                let mut wrong_amount = prevout.clone();
+                wrong_amount.value = Amount::from_sat(wrong_amount.value.to_sat() + 1);
+                assert_eq!(
+                    verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
+                    Err(ScriptError::Invalid { code: failure }),
+                    "wrong amount: outputs={output_count}, raw={byte:#x}",
+                );
+                let strict = VerifyFlags::MANDATORY.union(VerifyFlags::STRICTENC);
+                let expected = if matches!(byte, 1 | 2 | 3 | 0x81 | 0x82 | 0x83) {
+                    Ok(true)
+                } else {
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::SigHashtype,
+                    })
+                };
+                assert_eq!(verify_witness(&tx, &prevout, &witness, strict), expected);
+                #[cfg(feature = "kernel")]
+                kernel_witness_parity(&tx, &prevout, &witness);
             }
         }
     }

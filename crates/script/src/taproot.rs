@@ -216,97 +216,59 @@ mod tests {
         assert!(verify_taproot_keypath(&signature, &message, &public_key));
     }
 
-    /// Rule: a control block of an invalid size must be rejected.
-    ///
-    /// Mirrors Core's `TAPROOT_WRONG_CONTROL_SIZE` check in
-    /// `VerifyWitnessProgram`. The driver rejects control blocks smaller
-    /// than the base size, larger than the max, or not a multiple of the
-    /// node size.
+    /// BIP341 commitment rules: the valid single-leaf tree verifies, its
+    /// merkle root is the tapleaf hash, and every perturbation of the control
+    /// block or output key fails the tweak check.
     #[test]
-    fn control_block_wrong_size_is_rejected() {
-        let fixture = TaprootFixture::build(&[0x51]);
+    fn taproot_commitment_accepts_the_valid_tree_and_rejects_perturbations() {
+        for script in [[0x51].as_slice(), &[0x51, 0x52, 0x53]] {
+            let fixture = TaprootFixture::build(script);
+            assert!(verify_taproot_commitment(
+                &fixture.control,
+                &fixture.output,
+                &fixture.tapleaf
+            ));
+            assert_eq!(
+                compute_taproot_merkle_root(&fixture.control, &fixture.tapleaf).as_byte_array(),
+                fixture.tapleaf.as_byte_array(),
+            );
 
-        // Valid control block passes.
-        assert!(verify_taproot_commitment(
-            &fixture.control,
-            &fixture.output,
-            &fixture.tapleaf
-        ));
+            let mut too_small = fixture.control.clone();
+            too_small.pop();
+            let mut padded = fixture.control.clone();
+            padded.extend([0_u8; 33]);
+            let mut extra_node = fixture.control.clone();
+            extra_node.extend([0xab_u8; 32]);
+            let mut wrong_internal = fixture.control.clone();
+            wrong_internal[1] ^= 1;
+            let mut flipped_parity = fixture.control.clone();
+            flipped_parity[0] ^= 1;
+            let mut wrong_output = fixture.output;
+            wrong_output[0] ^= 1;
 
-        // Too small: 32 bytes (one less than base).
-        let mut too_small = fixture.control.clone();
-        too_small.pop();
-        assert!(!verify_taproot_commitment(
-            &too_small,
-            &fixture.output,
-            &fixture.tapleaf
-        ));
-
-        // Too large: base + 33 bytes (not a multiple of node size).
-        let mut too_large = fixture.control.clone();
-        too_large.extend(vec![0u8; 33]);
-        assert!(!verify_taproot_commitment(
-            &too_large,
-            &fixture.output,
-            &fixture.tapleaf
-        ));
-    }
-
-    /// Rule: a merkle path that does not reconstruct the output key must be
-    /// rejected.
-    ///
-    /// Mirrors Core's `VerifyTaprootCommitment` / `XOnlyPubKey::CheckTapTweak`.
-    /// A control block with a wrong internal key or a corrupted merkle node
-    /// produces a different tweaked output and must fail the commitment check.
-    #[test]
-    fn merkle_path_mismatch_is_rejected() {
-        let fixture = TaprootFixture::build(&[0x51]);
-
-        // Valid commitment passes.
-        assert!(verify_taproot_commitment(
-            &fixture.control,
-            &fixture.output,
-            &fixture.tapleaf
-        ));
-
-        // Wrong output key: flip a bit in the output.
-        let mut wrong_output = fixture.output;
-        wrong_output[0] ^= 1;
-        assert!(!verify_taproot_commitment(
-            &fixture.control,
-            &wrong_output,
-            &fixture.tapleaf
-        ));
-
-        // Wrong internal key: flip a bit in the control block's key portion.
-        let mut wrong_control = fixture.control.clone();
-        wrong_control[1] ^= 1;
-        assert!(!verify_taproot_commitment(
-            &wrong_control,
-            &fixture.output,
-            &fixture.tapleaf
-        ));
-    }
-
-    /// Rule: a valid script-path spend must be accepted.
-    ///
-    /// Mirrors Core's `VerifyTaprootCommitment` succeeding for a correctly
-    /// constructed single-leaf taproot tree. The merkle root recomputed from
-    /// the control block must match the output key's tweak.
-    #[test]
-    fn valid_script_path_commitment_is_accepted() {
-        let fixture = TaprootFixture::build(&[0x51, 0x52, 0x53]);
-
-        // The commitment check must pass for a valid control block + output.
-        assert!(verify_taproot_commitment(
-            &fixture.control,
-            &fixture.output,
-            &fixture.tapleaf
-        ));
-
-        // The merkle root for a single leaf equals the tapleaf hash.
-        let merkle = compute_taproot_merkle_root(&fixture.control, &fixture.tapleaf);
-        assert_eq!(merkle.as_byte_array(), fixture.tapleaf.as_byte_array());
+            let rejected: [(&str, &[u8], &[u8]); 6] = [
+                ("control block one byte short", &too_small, &fixture.output),
+                (
+                    "control block padded past a node boundary",
+                    &padded,
+                    &fixture.output,
+                ),
+                (
+                    "extra merkle node in the path",
+                    &extra_node,
+                    &fixture.output,
+                ),
+                ("internal key bit flipped", &wrong_internal, &fixture.output),
+                ("parity bit flipped", &flipped_parity, &fixture.output),
+                ("output key bit flipped", &fixture.control, &wrong_output),
+            ];
+            for (label, control, program) in rejected {
+                assert!(
+                    !verify_taproot_commitment(control, program, &fixture.tapleaf),
+                    "{label}"
+                );
+            }
+        }
     }
 
     fn fixture_hex(text: &str) -> Result<Vec<u8>, std::num::ParseIntError> {

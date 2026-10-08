@@ -16,154 +16,13 @@ use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 
 use crate::checker::{SigVersion, TxSignatureChecker};
-use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
-use crate::script::{Instruction, instructions, opcode, push_data};
+use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags, invalid};
+use crate::script::{Instruction, instruction_len, instructions, opcode, push_data};
 use crate::stack::{ScriptItem, Stack};
 
 use bitcoin_hashes::{Hash as _, ripemd160, sha1};
 
-/// `OP_NOP` (0x61).
-pub const OP_NOP: u8 = 0x61;
-/// `OP_IF` (0x63).
-pub const OP_IF: u8 = 0x63;
-/// `OP_NOTIF` (0x64).
-pub const OP_NOTIF: u8 = 0x64;
-/// `OP_ELSE` (0x67).
-pub const OP_ELSE: u8 = 0x67;
-/// `OP_ENDIF` (0x68).
-pub const OP_ENDIF: u8 = 0x68;
-/// `OP_VERIFY` (0x69).
-pub const OP_VERIFY: u8 = 0x69;
-/// `OP_RETURN` (0x6a).
-pub const OP_RETURN: u8 = 0x6a;
-/// `OP_TOALTSTACK` (0x6b).
-pub const OP_TOALTSTACK: u8 = 0x6b;
-/// `OP_FROMALTSTACK` (0x6c).
-pub const OP_FROMALTSTACK: u8 = 0x6c;
-/// `OP_2DROP` (0x6d).
-pub const OP_2DROP: u8 = 0x6d;
-/// `OP_2DUP` (0x6e).
-pub const OP_2DUP: u8 = 0x6e;
-/// `OP_3DUP` (0x6f).
-pub const OP_3DUP: u8 = 0x6f;
-/// `OP_2OVER` (0x70).
-pub const OP_2OVER: u8 = 0x70;
-/// `OP_2ROT` (0x71).
-pub const OP_2ROT: u8 = 0x71;
-/// `OP_2SWAP` (0x72).
-pub const OP_2SWAP: u8 = 0x72;
-/// `OP_IFDUP` (0x73).
-pub const OP_IFDUP: u8 = 0x73;
-/// `OP_DEPTH` (0x74).
-pub const OP_DEPTH: u8 = 0x74;
-/// `OP_DROP` (0x75).
-pub const OP_DROP: u8 = 0x75;
-/// `OP_DUP` (0x76).
-pub const OP_DUP: u8 = 0x76;
-/// `OP_NIP` (0x77).
-pub const OP_NIP: u8 = 0x77;
-/// `OP_OVER` (0x78).
-pub const OP_OVER: u8 = 0x78;
-/// `OP_PICK` (0x79).
-pub const OP_PICK: u8 = 0x79;
-/// `OP_ROLL` (0x7a).
-pub const OP_ROLL: u8 = 0x7a;
-/// `OP_ROT` (0x7b).
-pub const OP_ROT: u8 = 0x7b;
-/// `OP_SWAP` (0x7c).
-pub const OP_SWAP: u8 = 0x7c;
-/// `OP_TUCK` (0x7d).
-pub const OP_TUCK: u8 = 0x7d;
-/// `OP_SIZE` (0x82).
-pub const OP_SIZE: u8 = 0x82;
-/// `OP_EQUAL` (0x87).
-pub const OP_EQUAL: u8 = 0x87;
-/// `OP_EQUALVERIFY` (0x88).
-pub const OP_EQUALVERIFY: u8 = 0x88;
-/// `OP_1NEGATE` (0x4f).
-pub const OP_1NEGATE: u8 = 0x4f;
-/// `OP_1ADD` (0x8b).
-pub const OP_1ADD: u8 = 0x8b;
-/// `OP_1SUB` (0x8c).
-pub const OP_1SUB: u8 = 0x8c;
-/// `OP_NEGATE` (0x8f).
-pub const OP_NEGATE: u8 = 0x8f;
-/// `OP_ABS` (0x90).
-pub const OP_ABS: u8 = 0x90;
-/// `OP_NOT` (0x91).
-pub const OP_NOT: u8 = 0x91;
-/// `OP_0NOTEQUAL` (0x92).
-pub const OP_0NOTEQUAL: u8 = 0x92;
-/// `OP_ADD` (0x93).
-pub const OP_ADD: u8 = 0x93;
-/// `OP_SUB` (0x94).
-pub const OP_SUB: u8 = 0x94;
-/// `OP_BOOLAND` (0x9a).
-pub const OP_BOOLAND: u8 = 0x9a;
-/// `OP_BOOLOR` (0x9b).
-pub const OP_BOOLOR: u8 = 0x9b;
-/// `OP_NUMEQUAL` (0x9c).
-pub const OP_NUMEQUAL: u8 = 0x9c;
-/// `OP_NUMEQUALVERIFY` (0x9d).
-pub const OP_NUMEQUALVERIFY: u8 = 0x9d;
-/// `OP_NUMNOTEQUAL` (0x9e).
-pub const OP_NUMNOTEQUAL: u8 = 0x9e;
-/// `OP_LESSTHAN` (0x9f).
-pub const OP_LESSTHAN: u8 = 0x9f;
-/// `OP_GREATERTHAN` (0xa0).
-pub const OP_GREATERTHAN: u8 = 0xa0;
-/// `OP_LESSTHANOREQUAL` (0xa1).
-pub const OP_LESSTHANOREQUAL: u8 = 0xa1;
-/// `OP_GREATERTHANOREQUAL` (0xa2).
-pub const OP_GREATERTHANOREQUAL: u8 = 0xa2;
-/// `OP_MIN` (0xa3).
-pub const OP_MIN: u8 = 0xa3;
-/// `OP_MAX` (0xa4).
-pub const OP_MAX: u8 = 0xa4;
-/// `OP_WITHIN` (0xa5).
-pub const OP_WITHIN: u8 = 0xa5;
-/// `OP_RIPEMD160` (0xa6).
-pub const OP_RIPEMD160: u8 = 0xa6;
-/// `OP_SHA1` (0xa7).
-pub const OP_SHA1: u8 = 0xa7;
-/// `OP_SHA256` (0xa8).
-pub const OP_SHA256: u8 = 0xa8;
-/// `OP_HASH160` (0xa9).
-pub const OP_HASH160: u8 = 0xa9;
-/// `OP_HASH256` (0xaa).
-pub const OP_HASH256: u8 = 0xaa;
-/// `OP_CODESEPARATOR` (0xab).
-pub const OP_CODESEPARATOR: u8 = 0xab;
-/// `OP_CHECKSIG` (0xac).
-pub const OP_CHECKSIG: u8 = 0xac;
-/// `OP_CHECKSIGVERIFY` (0xad).
-pub const OP_CHECKSIGVERIFY: u8 = 0xad;
-/// `OP_CHECKMULTISIG` (0xae).
-pub const OP_CHECKMULTISIG: u8 = 0xae;
-/// `OP_CHECKMULTISIGVERIFY` (0xaf).
-pub const OP_CHECKMULTISIGVERIFY: u8 = 0xaf;
-/// `OP_NOP1` (0xb0).
-pub const OP_NOP1: u8 = 0xb0;
-/// `OP_CHECKLOCKTIMEVERIFY` (0xb1).
-pub const OP_CHECKLOCKTIMEVERIFY: u8 = 0xb1;
-/// `OP_CHECKSEQUENCEVERIFY` (0xb2).
-pub const OP_CHECKSEQUENCEVERIFY: u8 = 0xb2;
-/// `OP_NOP4` (0xb3).
-pub const OP_NOP4: u8 = 0xb3;
-/// `OP_NOP5` (0xb4).
-pub const OP_NOP5: u8 = 0xb4;
-/// `OP_NOP6` (0xb5).
-pub const OP_NOP6: u8 = 0xb5;
-/// `OP_NOP7` (0xb6).
-pub const OP_NOP7: u8 = 0xb6;
-/// `OP_NOP8` (0xb7).
-pub const OP_NOP8: u8 = 0xb7;
-/// `OP_NOP9` (0xb8).
-pub const OP_NOP9: u8 = 0xb8;
-/// `OP_NOP10` (0xb9).
-pub const OP_NOP10: u8 = 0xb9;
-/// `OP_CHECKSIGADD` (0xba), tapscript only.
-pub const OP_CHECKSIGADD: u8 = 0xba;
+pub use crate::script::opcode::*;
 
 /// Maximum serialized script size accepted for `Base`/`WitnessV0` evaluation.
 pub const MAX_SCRIPT_SIZE: usize = 10_000;
@@ -248,9 +107,7 @@ impl ConditionStack {
 /// `f_require_minimal`. Malformed input maps to `SCRIPT_ERR_SCRIPTNUM`.
 fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i64, ScriptError> {
     if bytes.len() > max_size {
-        return Err(ScriptError::Invalid {
-            code: ScriptErrCode::ScriptNum,
-        });
+        return Err(invalid(ScriptErrCode::ScriptNum));
     }
     if require_minimal && !bytes.is_empty() {
         // Check that the number is encoded with the minimum possible number
@@ -260,9 +117,7 @@ fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i6
         if last.trailing_zeros() >= 7 {
             let second_to_last_significant = bytes.len() > 1 && bytes[bytes.len() - 2] & 0x80 != 0;
             if bytes.len() == 1 || !second_to_last_significant {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::ScriptNum,
-                });
+                return Err(invalid(ScriptErrCode::ScriptNum));
             }
         }
     }
@@ -278,14 +133,10 @@ fn script_num(bytes: &[u8], require_minimal: bool, max_size: usize) -> Result<i6
         let magnitude = value & mask;
         // A 5-byte negative number can exceed i64's positive range in raw
         // form but its magnitude is at most 2^39-1, so the negation fits.
-        let magnitude = i64::try_from(magnitude).map_err(|_| ScriptError::Invalid {
-            code: ScriptErrCode::ScriptNum,
-        })?;
+        let magnitude = i64::try_from(magnitude).map_err(|_| invalid(ScriptErrCode::ScriptNum))?;
         Ok(-magnitude)
     } else {
-        i64::try_from(value).map_err(|_| ScriptError::Invalid {
-            code: ScriptErrCode::ScriptNum,
-        })
+        i64::try_from(value).map_err(|_| invalid(ScriptErrCode::ScriptNum))
     }
 }
 
@@ -318,7 +169,6 @@ fn script_num_serialize(value: i64) -> Bytes {
 fn cast_to_bool(bytes: &[u8]) -> bool {
     for (index, byte) in bytes.iter().enumerate() {
         if *byte != 0 {
-            // Can be negative zero.
             return !(index == bytes.len() - 1 && *byte == 0x80);
         }
     }
@@ -375,16 +225,12 @@ pub fn eval_script(
                 Ok(Instruction::Op(op)) => op,
                 Ok(Instruction::PushBytes(_)) => continue,
                 Err(_) => {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::BadOpcode,
-                    });
+                    return Err(invalid(ScriptErrCode::BadOpcode));
                 }
             };
             if is_op_success(op) {
                 if flags.contains(VerifyFlags::DISCOURAGE_OP_SUCCESS) {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::DiscourageOpSuccess,
-                    });
+                    return Err(invalid(ScriptErrCode::DiscourageOpSuccess));
                 }
                 return Ok(());
             }
@@ -394,9 +240,7 @@ pub fn eval_script(
     if (sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0)
         && script.len() > MAX_SCRIPT_SIZE
     {
-        return Err(ScriptError::Invalid {
-            code: ScriptErrCode::ScriptSize,
-        });
+        return Err(invalid(ScriptErrCode::ScriptSize));
     }
 
     let require_minimal = flags.contains(VerifyFlags::MINIMALDATA);
@@ -414,9 +258,7 @@ pub fn eval_script(
             Ok(instruction) => instruction,
             // Core's GetOp returning false is a BAD_OPCODE.
             Err(_) => {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::BadOpcode,
-                });
+                return Err(invalid(ScriptErrCode::BadOpcode));
             }
         };
         let opcode_byte = match instruction {
@@ -426,9 +268,7 @@ pub fn eval_script(
                 // before testing fExec — a >520-byte push in a non-executed
                 // branch is still PUSH_SIZE.
                 if data.len() > MAX_SCRIPT_ELEMENT_SIZE {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::PushSize,
-                    });
+                    return Err(invalid(ScriptErrCode::PushSize));
                 }
                 if conditions.all_true() {
                     // Core checks MINIMALDATA only in executed branches
@@ -436,9 +276,7 @@ pub fn eval_script(
                     if flags.contains(VerifyFlags::MINIMALDATA)
                         && !check_minimal_push(data, opcode_byte)
                     {
-                        return Err(ScriptError::Invalid {
-                            code: ScriptErrCode::MinimalData,
-                        });
+                        return Err(invalid(ScriptErrCode::MinimalData));
                     }
                     push_bytes(stack, data)?;
                 }
@@ -461,17 +299,13 @@ pub fn eval_script(
             if opcode_byte > opcode::OP_PUSHNUM_16 {
                 op_count += 1;
                 if op_count > MAX_OPS_PER_SCRIPT {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::OpCount,
-                    });
+                    return Err(invalid(ScriptErrCode::OpCount));
                 }
             }
         }
 
         if is_disabled(opcode_byte) {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::DisabledOpcode,
-            });
+            return Err(invalid(ScriptErrCode::DisabledOpcode));
         }
 
         // With CONST_SCRIPTCODE, OP_CODESEPARATOR in non-segwit script is
@@ -480,9 +314,7 @@ pub fn eval_script(
             && sigversion == SigVersion::Base
             && flags.contains(VerifyFlags::CONST_SCRIPTCODE)
         {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::OpCodeSeparator,
-            });
+            return Err(invalid(ScriptErrCode::OpCodeSeparator));
         }
 
         let f_exec = conditions.all_true();
@@ -507,9 +339,7 @@ pub fn eval_script(
         }
 
         if stack.len() + altstack.len() > MAX_STACK_SIZE {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            });
+            return Err(invalid(ScriptErrCode::StackSize));
         }
 
         advance(&mut remaining, opcode_byte, 0);
@@ -517,9 +347,7 @@ pub fn eval_script(
     }
 
     if !conditions.is_empty() {
-        return Err(ScriptError::Invalid {
-            code: ScriptErrCode::UnbalancedConditional,
-        });
+        return Err(invalid(ScriptErrCode::UnbalancedConditional));
     }
     Ok(())
 }
@@ -543,9 +371,10 @@ fn advance(remaining: &mut &[u8], op: u8, data_len: usize) {
 /// Returns the push opcode byte at the head of `remaining` for a
 /// `PushBytes` instruction, reconstructing it from the length encoding.
 fn push_opcode_for(remaining: &[u8]) -> Result<u8, ScriptError> {
-    let head = remaining.first().copied().ok_or(ScriptError::Invalid {
-        code: ScriptErrCode::BadOpcode,
-    })?;
+    let head = remaining
+        .first()
+        .copied()
+        .ok_or_else(|| invalid(ScriptErrCode::BadOpcode))?;
     if (0x01..=0x4b).contains(&head) {
         Ok(head)
     } else {
@@ -553,9 +382,7 @@ fn push_opcode_for(remaining: &[u8]) -> Result<u8, ScriptError> {
             opcode::OP_PUSHDATA1 | opcode::OP_PUSHDATA2 | opcode::OP_PUSHDATA4 | opcode::OP_0 => {
                 Ok(head)
             }
-            _ => Err(ScriptError::Invalid {
-                code: ScriptErrCode::BadOpcode,
-            }),
+            _ => Err(invalid(ScriptErrCode::BadOpcode)),
         }
     }
 }
@@ -564,9 +391,7 @@ fn push_opcode_for(remaining: &[u8]) -> Result<u8, ScriptError> {
 fn push_bytes(stack: &mut Stack, data: &[u8]) -> Result<(), ScriptError> {
     stack
         .push(ScriptItem::Bytes(SmallVec::from_slice(data)))
-        .map_err(|_| ScriptError::Invalid {
-            code: ScriptErrCode::StackSize,
-        })
+        .map_err(|_| invalid(ScriptErrCode::StackSize))
 }
 
 /// Core's disabled opcode set (CVE-2010-5137).
@@ -607,20 +432,16 @@ const fn is_op_success(op: u8) -> bool {
 /// Core's `CheckMinimalPush`.
 fn check_minimal_push(data: &[u8], op: u8) -> bool {
     if data.is_empty() {
-        // Should have used OP_0.
         return op == opcode::OP_0;
     }
     let first = data.first().copied().unwrap_or(0);
     if data.len() == 1 && (1..=16).contains(&first) {
-        // Should have used OP_1 .. OP_16.
         return false;
     }
     if data.len() == 1 && first == 0x81 {
-        // Should have used OP_1NEGATE.
         return false;
     }
     if data.len() <= 75 {
-        // Must have used a direct push.
         return usize::from(op) == data.len();
     }
     if data.len() <= 255 {
@@ -662,9 +483,7 @@ fn dispatch(
     if !f_exec && !(OP_IF..=OP_ENDIF).contains(&op) {
         return Ok(());
     }
-    let invalid_stack = || ScriptError::Invalid {
-        code: ScriptErrCode::InvalidStackOperation,
-    };
+    let invalid_stack = || invalid(ScriptErrCode::InvalidStackOperation);
 
     // Push value: OP_1NEGATE and the OP_1..OP_16 small integers. OP_RESERVED
     // (0x50) sits between them and pushes nothing - it falls through to the
@@ -685,14 +504,10 @@ fn dispatch(
                 let top = stack.peek().map_err(|_| invalid_stack())?;
                 let locktime = script_num(&item_bytes(top), require_minimal, 5)?;
                 if locktime < 0 {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::NegativeLocktime,
-                    });
+                    return Err(invalid(ScriptErrCode::NegativeLocktime));
                 }
                 if !checker.check_locktime(locktime) {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::UnsatisfiedLocktime,
-                    });
+                    return Err(invalid(ScriptErrCode::UnsatisfiedLocktime));
                 }
             } else {
                 // Not enabled; treat as NOP2.
@@ -703,15 +518,11 @@ fn dispatch(
                 let top = stack.peek().map_err(|_| invalid_stack())?;
                 let sequence = script_num(&item_bytes(top), require_minimal, 5)?;
                 if sequence < 0 {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::NegativeLocktime,
-                    });
+                    return Err(invalid(ScriptErrCode::NegativeLocktime));
                 }
                 // Disabled-flag operands behave as a NOP.
                 if sequence & (1 << 31) == 0 && !checker.check_sequence(sequence) {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::UnsatisfiedLocktime,
-                    });
+                    return Err(invalid(ScriptErrCode::UnsatisfiedLocktime));
                 }
             } else {
                 // Not enabled; treat as NOP3.
@@ -719,9 +530,7 @@ fn dispatch(
         }
         OP_NOP1 | OP_NOP4..=OP_NOP10 => {
             if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_NOPS) {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::DiscourageUpgradableNops,
-                });
+                return Err(invalid(ScriptErrCode::DiscourageUpgradableNops));
             }
         }
         OP_IF | OP_NOTIF => {
@@ -730,18 +539,14 @@ fn dispatch(
                 let bytes = item_bytes(&top).into_owned();
                 if sigversion == SigVersion::Tapscript {
                     if bytes.len() > 1 || (bytes.len() == 1 && bytes[0] != 1) {
-                        return Err(ScriptError::Invalid {
-                            code: ScriptErrCode::TapscriptMinimalIf,
-                        });
+                        return Err(invalid(ScriptErrCode::TapscriptMinimalIf));
                     }
                 }
                 if sigversion == SigVersion::WitnessV0
                     && flags.contains(VerifyFlags::MINIMALIF)
                     && (bytes.len() > 1 || (bytes.len() == 1 && bytes[0] != 1))
                 {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::MinimalIf,
-                    });
+                    return Err(invalid(ScriptErrCode::MinimalIf));
                 }
                 let parsed = cast_to_bool(&bytes);
                 if op == OP_NOTIF { !parsed } else { parsed }
@@ -752,17 +557,13 @@ fn dispatch(
         }
         OP_ELSE => {
             if conditions.is_empty() {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::UnbalancedConditional,
-                });
+                return Err(invalid(ScriptErrCode::UnbalancedConditional));
             }
             conditions.toggle_top();
         }
         OP_ENDIF => {
             if conditions.is_empty() {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::UnbalancedConditional,
-                });
+                return Err(invalid(ScriptErrCode::UnbalancedConditional));
             }
             conditions.pop();
         }
@@ -770,31 +571,26 @@ fn dispatch(
             let top = stack.pop().map_err(|_| invalid_stack())?;
             let bytes = item_bytes(&top).into_owned();
             if cast_to_bool(&bytes) {
-                // Popped above; success leaves the stack unchanged.
             } else {
-                stack.push(top).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::StackSize,
-                })?;
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::Verify,
-                });
+                stack
+                    .push(top)
+                    .map_err(|_| invalid(ScriptErrCode::StackSize))?;
+                return Err(invalid(ScriptErrCode::Verify));
             }
         }
         OP_RETURN => {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::OpReturn,
-            });
+            return Err(invalid(ScriptErrCode::OpReturn));
         }
         OP_TOALTSTACK => {
             let top = stack.pop().map_err(|_| invalid_stack())?;
-            altstack.push(top).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::InvalidAltstackOperation,
-            })?;
+            altstack
+                .push(top)
+                .map_err(|_| invalid(ScriptErrCode::InvalidAltstackOperation))?;
         }
         OP_FROMALTSTACK => {
-            let top = altstack.pop().map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::InvalidAltstackOperation,
-            })?;
+            let top = altstack
+                .pop()
+                .map_err(|_| invalid(ScriptErrCode::InvalidAltstackOperation))?;
             push_bytes(stack, &item_bytes(&top))?;
         }
         OP_2DROP => {
@@ -804,54 +600,54 @@ fn dispatch(
         OP_2DUP => {
             let second = stack.peek_at(1).map_err(|_| invalid_stack())?.clone();
             let first = stack.peek().map_err(|_| invalid_stack())?.clone();
-            stack.push(second).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
-            stack.push(first).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
+            stack
+                .push(second)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
+            stack
+                .push(first)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
         }
         OP_3DUP => {
             let third = stack.peek_at(2).map_err(|_| invalid_stack())?.clone();
             let second = stack.peek_at(1).map_err(|_| invalid_stack())?.clone();
             let first = stack.peek().map_err(|_| invalid_stack())?.clone();
-            stack.push(third).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
-            stack.push(second).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
-            stack.push(first).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
+            stack
+                .push(third)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
+            stack
+                .push(second)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
+            stack
+                .push(first)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
         }
         OP_2OVER => {
             // Core: push stacktop(-4) then stacktop(-3) — the pair two positions
             // below the top, in their original order.
             let pair_first = stack.peek_at(3).map_err(|_| invalid_stack())?.clone();
             let pair_second = stack.peek_at(2).map_err(|_| invalid_stack())?.clone();
-            stack.push(pair_first).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
-            stack.push(pair_second).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
+            stack
+                .push(pair_first)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
+            stack
+                .push(pair_second)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
         }
         OP_2ROT => {
             let top_six = stack.drain(6).map_err(|_| invalid_stack())?;
             let x1 = top_six.first().cloned().unwrap_or_default();
             let x2 = top_six.get(1).cloned().unwrap_or_default();
             for item in top_six.into_iter().skip(2) {
-                stack.push(item).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::StackSize,
-                })?;
+                stack
+                    .push(item)
+                    .map_err(|_| invalid(ScriptErrCode::StackSize))?;
             }
-            stack.push(x1).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
-            stack.push(x2).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
+            stack
+                .push(x1)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
+            stack
+                .push(x2)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
         }
         OP_2SWAP => {
             // Core: swap(stacktop(-4), stacktop(-3)) then swap(stacktop(-2),
@@ -864,17 +660,15 @@ fn dispatch(
             let bytes = item_bytes(top).into_owned();
             if cast_to_bool(&bytes) {
                 let copy = top.clone();
-                stack.push(copy).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::StackSize,
-                })?;
+                stack
+                    .push(copy)
+                    .map_err(|_| invalid(ScriptErrCode::StackSize))?;
             }
         }
         OP_DEPTH => {
-            let depth = script_num_serialize(i64::try_from(stack.len()).map_err(|_| {
-                ScriptError::Invalid {
-                    code: ScriptErrCode::StackSize,
-                }
-            })?);
+            let depth = script_num_serialize(
+                i64::try_from(stack.len()).map_err(|_| invalid(ScriptErrCode::StackSize))?,
+            );
             push_bytes(stack, &depth)?;
         }
         OP_DROP => {
@@ -882,22 +676,22 @@ fn dispatch(
         }
         OP_DUP => {
             let top = stack.peek().map_err(|_| invalid_stack())?.clone();
-            stack.push(top).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
+            stack
+                .push(top)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
         }
         OP_NIP => {
             let top = stack.pop().map_err(|_| invalid_stack())?;
             stack.remove_at(0).map_err(|_| invalid_stack())?;
-            stack.push(top).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
+            stack
+                .push(top)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
         }
         OP_OVER => {
             let second = stack.peek_at(1).map_err(|_| invalid_stack())?.clone();
-            stack.push(second).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
+            stack
+                .push(second)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
         }
         OP_PICK | OP_ROLL => {
             let n_item = stack.pop().map_err(|_| invalid_stack())?;
@@ -912,21 +706,21 @@ fn dispatch(
             }
             if op == OP_PICK {
                 let item = stack.peek_at(depth).map_err(|_| invalid_stack())?.clone();
-                stack.push(item).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::StackSize,
-                })?;
+                stack
+                    .push(item)
+                    .map_err(|_| invalid(ScriptErrCode::StackSize))?;
             } else {
                 let item = stack.remove_at(depth).map_err(|_| invalid_stack())?;
-                stack.push(item).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::StackSize,
-                })?;
+                stack
+                    .push(item)
+                    .map_err(|_| invalid(ScriptErrCode::StackSize))?;
             }
         }
         OP_ROT => {
             let x1 = stack.remove_at(2).map_err(|_| invalid_stack())?;
-            stack.push(x1).map_err(|_| ScriptError::Invalid {
-                code: ScriptErrCode::StackSize,
-            })?;
+            stack
+                .push(x1)
+                .map_err(|_| invalid(ScriptErrCode::StackSize))?;
         }
         OP_SWAP => {
             stack.swap().map_err(|_| invalid_stack())?;
@@ -937,12 +731,10 @@ fn dispatch(
         }
         OP_SIZE => {
             let top = stack.peek().map_err(|_| invalid_stack())?;
-            let size =
-                script_num_serialize(i64::try_from(item_bytes(top).len()).map_err(|_| {
-                    ScriptError::Invalid {
-                        code: ScriptErrCode::PushSize,
-                    }
-                })?);
+            let size = script_num_serialize(
+                i64::try_from(item_bytes(top).len())
+                    .map_err(|_| invalid(ScriptErrCode::PushSize))?,
+            );
             push_bytes(stack, &size)?;
         }
         OP_EQUAL | OP_EQUALVERIFY => {
@@ -954,9 +746,7 @@ fn dispatch(
                 if equal {
                     stack.pop().map_err(|_| invalid_stack())?;
                 } else {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::EqualVerify,
-                    });
+                    return Err(invalid(ScriptErrCode::EqualVerify));
                 }
             }
         }
@@ -971,9 +761,7 @@ fn dispatch(
                 OP_NOT => Some(i64::from(value == 0)),
                 _ => Some(i64::from(value != 0)),
             }
-            .ok_or(ScriptError::Invalid {
-                code: ScriptErrCode::ScriptNum,
-            })?;
+            .ok_or_else(|| invalid(ScriptErrCode::ScriptNum))?;
             push_bytes(stack, &script_num_serialize(result))?;
         }
         OP_ADD
@@ -1007,9 +795,7 @@ fn dispatch(
                 OP_MIN => Some(b1.min(b2)),
                 _ => Some(b1.max(b2)),
             }
-            .ok_or(ScriptError::Invalid {
-                code: ScriptErrCode::ScriptNum,
-            })?;
+            .ok_or_else(|| invalid(ScriptErrCode::ScriptNum))?;
             push_bytes(stack, &script_num_serialize(result))?;
             if op == OP_NUMEQUALVERIFY {
                 let top = stack.peek().map_err(|_| invalid_stack())?;
@@ -1017,9 +803,7 @@ fn dispatch(
                 if cast_to_bool(&bytes) {
                     stack.pop().map_err(|_| invalid_stack())?;
                 } else {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::NumEqualVerify,
-                    });
+                    return Err(invalid(ScriptErrCode::NumEqualVerify));
                 }
             }
         }
@@ -1043,10 +827,8 @@ fn dispatch(
             // Core sets pbegincodehash = pc (the byte *after* the CODESEPARATOR
             // opcode, since GetOp already advanced pc). The scriptCode for
             // sighash must start after the CODESEPARATOR byte, not at it.
-            *codeseparator_pos =
-                u32::try_from(instruction_start + 1).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::ScriptSize,
-                })?;
+            *codeseparator_pos = u32::try_from(instruction_start + 1)
+                .map_err(|_| invalid(ScriptErrCode::ScriptSize))?;
         }
         OP_CHECKSIG | OP_CHECKSIGVERIFY => {
             let pubkey = stack.pop().map_err(|_| invalid_stack())?;
@@ -1068,17 +850,13 @@ fn dispatch(
                 if success {
                     stack.pop().map_err(|_| invalid_stack())?;
                 } else {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::CheckSigVerify,
-                    });
+                    return Err(invalid(ScriptErrCode::CheckSigVerify));
                 }
             }
         }
         OP_CHECKSIGADD => {
             if sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0 {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::BadOpcode,
-                });
+                return Err(invalid(ScriptErrCode::BadOpcode));
             }
             let pubkey = stack.pop().map_err(|_| invalid_stack())?;
             let num = stack.pop().map_err(|_| invalid_stack())?;
@@ -1098,16 +876,12 @@ fn dispatch(
             )?;
             let result = value
                 .checked_add(i64::from(success))
-                .ok_or(ScriptError::Invalid {
-                    code: ScriptErrCode::ScriptNum,
-                })?;
+                .ok_or_else(|| invalid(ScriptErrCode::ScriptNum))?;
             push_bytes(stack, &script_num_serialize(result))?;
         }
         OP_CHECKMULTISIG | OP_CHECKMULTISIGVERIFY => {
             if sigversion == SigVersion::Tapscript {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::TapscriptCheckMultiSig,
-                });
+                return Err(invalid(ScriptErrCode::TapscriptCheckMultiSig));
             }
             check_multisig(
                 stack,
@@ -1123,9 +897,7 @@ fn dispatch(
             )?;
         }
         _ => {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::BadOpcode,
-            });
+            return Err(invalid(ScriptErrCode::BadOpcode));
         }
     }
     Ok(())
@@ -1187,44 +959,6 @@ fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
     (out, removed)
 }
 
-/// Returns the total byte length of the instruction at the head of `script`.
-fn instruction_len(script: &[u8]) -> usize {
-    let Some(&op) = script.first() else {
-        return 0;
-    };
-    let (header, payload) = if (0x01..=0x4b).contains(&op) {
-        (1_usize, usize::from(op))
-    } else {
-        match op {
-            opcode::OP_PUSHDATA1 => {
-                let len = usize::from(script.get(1).copied().unwrap_or(0));
-                (2, len)
-            }
-            opcode::OP_PUSHDATA2 => {
-                let len = u16::from_le_bytes([
-                    script.get(1).copied().unwrap_or(0),
-                    script.get(2).copied().unwrap_or(0),
-                ]);
-                (3, usize::from(len))
-            }
-            opcode::OP_PUSHDATA4 => {
-                let bytes = [
-                    script.get(1).copied().unwrap_or(0),
-                    script.get(2).copied().unwrap_or(0),
-                    script.get(3).copied().unwrap_or(0),
-                    script.get(4).copied().unwrap_or(0),
-                ];
-                // u32 always fits in usize (>= 32 bits) on supported targets.
-                let wide = u64::from(u32::from_le_bytes(bytes));
-                let len = usize::try_from(wide).unwrap_or(usize::MAX);
-                (5, len)
-            }
-            _ => (1, 0),
-        }
-    };
-    header.saturating_add(payload).min(script.len())
-}
-
 /// Core's `EvalChecksig`: dispatches to pre-tapscript (ECDSA) or tapscript
 /// (Schnorr) handling, returning whether the signature check succeeded.
 #[expect(
@@ -1251,16 +985,12 @@ fn eval_checksig(
                 let (cleaned, found) = remove_all(&code, &needle);
                 code = cleaned;
                 if found > 0 && flags.contains(VerifyFlags::CONST_SCRIPTCODE) {
-                    return Err(ScriptError::Invalid {
-                        code: ScriptErrCode::SigFindAndDelete,
-                    });
+                    return Err(invalid(ScriptErrCode::SigFindAndDelete));
                 }
             }
             let success = checker.check_ecdsa_signature(sig, pubkey, &code, sigversion, flags)?;
             if !success && flags.contains(VerifyFlags::NULLFAIL) && !sig.is_empty() {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::SigNullFail,
-                });
+                return Err(invalid(ScriptErrCode::SigNullFail));
             }
             Ok(success)
         }
@@ -1270,16 +1000,12 @@ fn eval_checksig(
                 if let Some(left) = validation_weight_left.as_mut() {
                     *left -= VALIDATION_WEIGHT_PER_SIGOP_PASSED;
                     if *left < 0 {
-                        return Err(ScriptError::Invalid {
-                            code: ScriptErrCode::TapscriptValidationWeight,
-                        });
+                        return Err(invalid(ScriptErrCode::TapscriptValidationWeight));
                     }
                 }
             }
             if pubkey.is_empty() {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::TapscriptEmptyPubkey,
-                });
+                return Err(invalid(ScriptErrCode::TapscriptEmptyPubkey));
             }
             if pubkey.len() == 32 {
                 if success {
@@ -1292,9 +1018,7 @@ fn eval_checksig(
                     )?;
                 }
             } else if flags.contains(VerifyFlags::DISCOURAGE_UPGRADABLE_PUBKEYTYPE) {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::DiscourageUpgradablePubkeyType,
-                });
+                return Err(invalid(ScriptErrCode::DiscourageUpgradablePubkeyType));
             }
             Ok(success)
         }
@@ -1324,9 +1048,7 @@ fn check_multisig(
     script: &[u8],
     verify_only: bool,
 ) -> Result<(), ScriptError> {
-    let invalid_stack = || ScriptError::Invalid {
-        code: ScriptErrCode::InvalidStackOperation,
-    };
+    let invalid_stack = || invalid(ScriptErrCode::InvalidStackOperation);
     if stack.is_empty() {
         return Err(invalid_stack());
     }
@@ -1336,23 +1058,15 @@ fn check_multisig(
         4,
     )?;
     if n_keys < 0 {
-        return Err(ScriptError::Invalid {
-            code: ScriptErrCode::PubkeyCount,
-        });
+        return Err(invalid(ScriptErrCode::PubkeyCount));
     }
-    let keys = usize::try_from(n_keys).map_err(|_| ScriptError::Invalid {
-        code: ScriptErrCode::PubkeyCount,
-    })?;
+    let keys = usize::try_from(n_keys).map_err(|_| invalid(ScriptErrCode::PubkeyCount))?;
     if keys > MAX_PUBKEYS_PER_MULTISIG {
-        return Err(ScriptError::Invalid {
-            code: ScriptErrCode::PubkeyCount,
-        });
+        return Err(invalid(ScriptErrCode::PubkeyCount));
     }
     *op_count += keys;
     if *op_count > MAX_OPS_PER_SCRIPT {
-        return Err(ScriptError::Invalid {
-            code: ScriptErrCode::OpCount,
-        });
+        return Err(invalid(ScriptErrCode::OpCount));
     }
     if stack.len() < keys + 2 {
         return Err(invalid_stack());
@@ -1363,13 +1077,9 @@ fn check_multisig(
         4,
     )?;
     if n_sigs < 0 || n_sigs > n_keys {
-        return Err(ScriptError::Invalid {
-            code: ScriptErrCode::SigCount,
-        });
+        return Err(invalid(ScriptErrCode::SigCount));
     }
-    let sigs = usize::try_from(n_sigs).map_err(|_| ScriptError::Invalid {
-        code: ScriptErrCode::SigCount,
-    })?;
+    let sigs = usize::try_from(n_sigs).map_err(|_| invalid(ScriptErrCode::SigCount))?;
     if stack.len() < keys + sigs + 3 {
         return Err(invalid_stack());
     }
@@ -1385,9 +1095,7 @@ fn check_multisig(
             let (cleaned, found) = remove_all(&code, &needle);
             code = cleaned;
             if found > 0 && flags.contains(VerifyFlags::CONST_SCRIPTCODE) {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::SigFindAndDelete,
-                });
+                return Err(invalid(ScriptErrCode::SigFindAndDelete));
             }
         }
     }
@@ -1414,16 +1122,13 @@ fn check_multisig(
         }
     }
 
-    // Clean up the actual arguments (keys + sigs + the two counts).
     let mut args = keys + sigs + 2;
     let mut key_scan = keys + 2;
     while args > 0 {
         if !success && flags.contains(VerifyFlags::NULLFAIL) && key_scan == 0 {
             let top = stack.peek().map_err(|_| invalid_stack())?;
             if !item_bytes(top).is_empty() {
-                return Err(ScriptError::Invalid {
-                    code: ScriptErrCode::SigNullFail,
-                });
+                return Err(invalid(ScriptErrCode::SigNullFail));
             }
         }
         key_scan = key_scan.saturating_sub(1);
@@ -1438,9 +1143,7 @@ fn check_multisig(
     if flags.contains(VerifyFlags::NULLDUMMY)
         && !item_bytes(stack.peek().map_err(|_| invalid_stack())?).is_empty()
     {
-        return Err(ScriptError::Invalid {
-            code: ScriptErrCode::SigNullDummy,
-        });
+        return Err(invalid(ScriptErrCode::SigNullDummy));
     }
     stack.pop().map_err(|_| invalid_stack())?;
 
@@ -1449,9 +1152,7 @@ fn check_multisig(
         if success {
             stack.pop().map_err(|_| invalid_stack())?;
         } else {
-            return Err(ScriptError::Invalid {
-                code: ScriptErrCode::CheckMultisigVerify,
-            });
+            return Err(invalid(ScriptErrCode::CheckMultisigVerify));
         }
     }
     Ok(())

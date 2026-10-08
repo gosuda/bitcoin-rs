@@ -40,15 +40,6 @@ pub fn count_segwit(script: &[u8], witness: &[Vec<u8>]) -> u32 {
         .map_or(0, |witness_script| count_accurate(witness_script))
 }
 
-/// Counts taproot sigops under BIP342's per-input budget model.
-///
-/// Taproot does not contribute to the legacy per-block sigop cost. Tapscript's
-/// `OP_CHECKSIG` and `OP_CHECKSIGADD` budget is enforced per input by the
-/// executing validator, so this block-level counter returns zero.
-pub const fn count_taproot(_script: &[u8], _witness: &[Vec<u8>]) -> u32 {
-    0
-}
-
 /// Counts the sigop cost visible without a UTXO set: legacy counts of every
 /// input's `scriptSig` and every output's `scriptPubKey` (the previous
 /// `Transaction::total_sigop_cost(|_| None)` shape).
@@ -100,21 +91,26 @@ fn count_script(script: &[u8], accurate: bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use bitcoin::ScriptBuf as OracleScriptBuf;
-
     use bitcoin_rs_primitives::{
         Amount, Block, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     };
+
+    use super::{count_block, count_legacy, count_segwit, count_tx_legacy};
+    use crate::script::{opcode, push_data};
 
     const fn pushnum(n: u8) -> u8 {
         opcode::OP_PUSHNUM_1 + (n - 1)
     }
 
-    use super::{count_block, count_legacy, count_segwit, count_tx_legacy};
-    use crate::script::{opcode, push_data};
-
+    /// Legacy counting always charges 20 per `CHECKMULTISIG`; accurate counting
+    /// charges the declared key count only when an `OP_1..OP_16` push is the
+    /// immediately preceding opcode. Core v31.1 `CScript::GetSigOpCount`
+    /// advances `lastOpcode` after every opcode, so an intervening sigop opcode
+    /// resets the key count — rust-bitcoin 0.32 does not, which is why the
+    /// oracle cross-check below is limited to the legacy rule.
     #[test]
-    fn legacy_count_matches_oracle_multisig_rule() {
-        let script: Vec<u8> = [
+    fn sigop_counts_follow_core_multisig_rules() {
+        let three_keys: Vec<u8> = [
             vec![opcode::OP_PUSHNUM_1],
             push_data(&[3; 33]),
             push_data(&[3; 33]),
@@ -122,91 +118,92 @@ mod tests {
             vec![pushnum(3), opcode::OP_CHECKMULTISIG],
         ]
         .concat();
-        assert_eq!(count_legacy(&script), 20);
-
-        let oracle = OracleScriptBuf::from_bytes(script);
-        assert_eq!(
-            count_legacy(oracle.as_bytes()),
-            u32::try_from(oracle.count_sigops_legacy()).unwrap_or(u32::MAX)
-        );
-    }
-
-    #[test]
-    fn accurate_segwit_count_charges_declared_multisig_keys() {
-        let witness_script: Vec<u8> = [
+        let two_keys: Vec<u8> = [
             push_data(&[9; 33]),
             push_data(&[9; 33]),
             vec![pushnum(2), opcode::OP_CHECKMULTISIG],
         ]
         .concat();
-        let p2wsh: Vec<u8> = [vec![0x00, 0x20], vec![7; 32]].concat();
-        assert_eq!(
-            count_segwit(&p2wsh, &[witness_script]),
-            2,
-            "accurate counting charges the declared key count"
-        );
 
-        let p2wpkh: Vec<u8> = [vec![0x00, 0x14], vec![7; 20]].concat();
-        assert_eq!(count_segwit(&p2wpkh, &[]), 1);
-        assert_eq!(count_segwit(&[opcode::OP_DUP], &[]), 0);
-    }
-
-    /// Core v31.1 `CScript::GetSigOpCount` updates `lastOpcode` for every opcode.
-    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/script/script.cpp>
-    #[test]
-    fn accurate_multisig_requires_an_immediately_preceding_pushnum() {
-        // Core advances lastOpcode after EVERY opcode. rust-bitcoin 0.32's
-        // count_sigops retains the old OP_N across sigop opcodes, so it is not
-        // an oracle for these cases. These expected costs are direct Core
-        // vectors: one CHECKSIG plus the default 20, or two plus 20.
-        for (script, expected) in [
+        // (name, script, legacy cost, accurate cost)
+        let cases: [(&str, Vec<u8>, u32, u32); 7] = [
             (
+                // Core updates lastOpcode for every opcode, so OP_NOP (0x61)
+                // between the pushnum and the multisig loses the key count.
+                "a non-sigop opcode clearing the cached key count",
+                vec![pushnum(2), 0x61, opcode::OP_CHECKMULTISIG],
+                20,
+                20,
+            ),
+            ("a pushnum-terminated 3-of-3", three_keys, 20, 3),
+            ("a pushnum-terminated 2-of-2", two_keys, 20, 2),
+            ("a bare CHECKSIG", vec![opcode::OP_CHECKSIG], 1, 1),
+            (
+                "a CHECKSIG between the pushnum and the multisig",
                 vec![pushnum(2), opcode::OP_CHECKSIG, opcode::OP_CHECKMULTISIG],
+                21,
                 21,
             ),
             (
+                "a multisig consuming the pushnum before the next one",
                 vec![
                     pushnum(2),
                     opcode::OP_CHECKMULTISIG,
                     opcode::OP_CHECKMULTISIG,
                 ],
+                40,
                 22,
             ),
             (
+                "the VERIFY forms counting like their plain forms",
                 vec![
                     pushnum(2),
                     opcode::OP_CHECKSIGVERIFY,
                     opcode::OP_CHECKMULTISIGVERIFY,
                 ],
                 21,
+                21,
             ),
-        ] {
-            assert_eq!(super::count_accurate(&script), expected);
-            let p2wsh = [vec![0x00, 0x20], vec![7; 32]].concat();
-            assert_eq!(count_segwit(&p2wsh, &[script]), expected);
+        ];
+
+        for (name, script, legacy, accurate) in cases {
+            assert_eq!(count_legacy(&script), legacy, "legacy: {name}");
+            assert_eq!(super::count_accurate(&script), accurate, "accurate: {name}");
+            let oracle = OracleScriptBuf::from_bytes(script.clone());
+            assert_eq!(
+                count_legacy(oracle.as_bytes()),
+                u32::try_from(oracle.count_sigops_legacy()).unwrap_or(u32::MAX),
+                "oracle: {name}"
+            );
+
+            // A P2WSH spend counts its witness script accurately; anything that
+            // is not a witness program costs nothing.
+            let p2wsh: Vec<u8> = [vec![0x00, 0x20], vec![7; 32]].concat();
+            assert_eq!(count_segwit(&p2wsh, &[script]), accurate, "p2wsh: {name}");
         }
+
+        let p2wpkh: Vec<u8> = [vec![0x00, 0x14], vec![7; 20]].concat();
+        assert_eq!(count_segwit(&p2wpkh, &[]), 1);
+        assert_eq!(count_segwit(&[opcode::OP_DUP], &[]), 0);
     }
 
     #[test]
     fn tx_and_block_counts_cover_script_sig_and_script_pubkey() {
-        let script_sig: Vec<u8> = vec![opcode::OP_CHECKSIG];
-        let script_pubkey: Vec<u8> = vec![opcode::OP_CHECKMULTISIG];
         let tx = Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: script_sig.into(),
+                script_sig: vec![opcode::OP_CHECKSIG].into(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
                 value: Amount::SAT,
-                script_pubkey: script_pubkey.into(),
+                script_pubkey: vec![opcode::OP_CHECKMULTISIG].into(),
             }],
             lock_time: LockTime::ZERO,
         };
         assert_eq!(count_tx_legacy(&tx), 1 + 20);
-
         let block = Block {
             header: bitcoin_rs_primitives::Header::default(),
             txs: vec![tx.clone(), tx],
