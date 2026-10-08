@@ -204,7 +204,11 @@ The preserved boundaries:
 - The supported Bitcoin Core JSON-RPC methods and the supported
   Esplora-compatible APIs, including their parameters, responses, errors, and
   pagination/reorg semantics. *Supported* is load-bearing: it does not imply
-  every upstream method or endpoint is implemented.
+  every upstream method or endpoint is implemented, and it tracks the upstream
+  contract — when Core changes or removes a method, the endpoint follows in a
+  clean cutover under the
+  [RPC deprecation policy](docs/policies/source-compatibility.md), not behind
+  a compatibility shim.
 - Other advertised external integrations — for example ZMQ and the typed
   `embed::Node` in-process API — keep their documented observable contracts.
 
