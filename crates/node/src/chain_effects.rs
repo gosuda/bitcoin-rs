@@ -376,11 +376,11 @@ impl ChainFollowers {
 /// RPC listener binds, the sync tick itself) funnels through this one
 /// owner. Idempotent — a populated applied tip returns immediately.
 ///
-/// Any connect failure is returned so startup can abort instead of binding
-/// RPC onto a chainstate that cannot serve an applied tip — a refused
-/// connect leaves the slot empty, and a failed settlement has already
-/// closed chain admission and requested shutdown. The sync tick logs the
-/// failure and stays retryable.
+/// Either connect failure is returned so startup can abort instead of
+/// binding RPC onto a chainstate that cannot serve an applied tip. Only a
+/// refused connect leaves the slot empty for the sync tick to retry; a
+/// failed settlement publishes its tip but has already closed chain
+/// admission and requested shutdown, so there is nothing to retry.
 pub(crate) fn bootstrap_genesis(
     handles: &bitcoin_rs_chainstate::Chainstate,
     followers: &ChainFollowers,
