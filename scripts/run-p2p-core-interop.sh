@@ -252,8 +252,8 @@ echo "==> core p2p: ${CORE_P2P_PORT} rpc: ${CORE_RPC_PORT}; bitcoin-rs p2p: ${RS
 
 # The workdir is kept across runs (--workdir implies KEEP=1) and CI caches it
 # under target/, so a restored datadir can carry an obsolete schema epoch that
-# the node correctly refuses to open. Node state is per-run: always start from
-# empty datadirs and let each side write its own CURRENT_SCHEMA marker.
+# bitcoin-rs correctly refuses to open. Node state is per-run: always start
+# from empty datadirs so bitcoin-rs writes a fresh CURRENT_SCHEMA marker.
 rm -rf -- "${CORE_DATADIR:?core datadir unset}" "${RS_DATADIR:?rs datadir unset}"
 mkdir -p "${CORE_DATADIR}" "${RS_DATADIR}"
 
