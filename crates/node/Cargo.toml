@@ -17,7 +17,7 @@ workspace = true
 
 # Exposes the internal `NodeState` composition root to integration tests and
 # benchmarks. Production embedders use the typed `Node` surface instead.
-test-seam = []
+test-seam = ["bitcoin-rs-mempool/test-seam"]
 
 # A node is non-functional without a storage backend, and its `NodeStorage` /
 # `TxIndexStorage` enums are entirely backend-cfg-gated — with zero backends the

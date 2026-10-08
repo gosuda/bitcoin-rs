@@ -826,7 +826,7 @@ mod tests {
         let state = crate::state::NodeState::open(config, None)?;
         let followers = settlement_breaking_followers(state.mempool_gateway(), 3);
         let mining = crate::MiningCoordinator::new(
-            state.mempool(),
+            state.mempool_reader(),
             state.chainstate(),
             state.stable_read(),
             followers,

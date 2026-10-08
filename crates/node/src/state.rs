@@ -21,6 +21,7 @@ use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
 use bitcoin_rs_index::runtime::REDB_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::Mempool;
 #[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_primitives::Block;
@@ -198,7 +199,14 @@ impl NodeState {
         self.followers.zmq_publisher()
     }
 
-    /// Returns the shared mempool handle.
+    /// Returns the cloneable read-only mempool capability.
+    #[must_use]
+    pub fn mempool_reader(&self) -> bitcoin_rs_mempool::MempoolReader {
+        self.mempool_gateway.reader()
+    }
+
+    /// Raw pool access for test fixture staging only.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn mempool(&self) -> Arc<RwLock<Mempool>> {
         Arc::clone(self.mempool_gateway.pool())

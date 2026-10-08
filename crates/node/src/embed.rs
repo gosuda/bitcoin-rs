@@ -116,7 +116,11 @@ impl Node {
     /// that the transaction does not exist. A complete negative lookup is
     /// `NodeError::NotFound`.
     pub async fn tx_by_id(&self, txid: Txid) -> Result<Tx, NodeError> {
-        let pooled = self.state.mempool().read().transaction_by_txid(&txid);
+        let pooled = self
+            .state
+            .mempool_reader()
+            .read()
+            .transaction_by_txid(&txid);
         if let Some(tx) = pooled {
             return Ok((*tx).clone());
         }
@@ -135,14 +139,14 @@ impl Node {
     /// Returns aggregate mempool information from one read snapshot.
     #[must_use]
     pub fn mempool_info(&self) -> MempoolStats {
-        self.state.mempool().read().stats()
+        self.state.mempool_reader().read().stats()
     }
 
     /// Returns a history-based fee estimate, or `None` with insufficient history.
     #[must_use]
     pub fn fee_estimate(&self, confirmation_target_blocks: u32) -> Option<FeeRate> {
         self.state
-            .mempool()
+            .mempool_reader()
             .read()
             .estimate_fee_rate(confirmation_target_blocks)
     }
@@ -399,7 +403,13 @@ mod tests {
             ),
             "the embedded envelope carries the gateway's policy reason verbatim: {refusal}"
         );
-        assert!(!node.state.mempool().read().contains_txid(&orphan_txid));
+        assert!(
+            !node
+                .state
+                .mempool_reader()
+                .read()
+                .contains_txid(&orphan_txid)
+        );
         assert!(
             publisher.sequence_events.lock().is_empty(),
             "a refused broadcast publishes nothing"
