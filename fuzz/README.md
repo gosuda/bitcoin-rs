@@ -4,8 +4,9 @@ Five `cargo-fuzz` harnesses covering the untrusted-input surfaces of
 bitcoin-rs: P2P wire messages, block/transaction **consensus** after
 rust-bitcoin deserialization, the production script interpreter, and UTXO
 snapshot loading. Seed corpora under `fuzz/corpus/` are imported from
-rust-bitcoin/qa-assets by `scripts/import-qa-assets.sh`; see
-`fuzz/CORPUS_PROVENANCE.md` for upstream commit, license, and mapping.
+rust-bitcoin/qa-assets by `scripts/import-qa-assets.sh` and from Bitcoin
+Core and btcd test vectors by `scripts/import-reference-corpora.sh`; see
+`fuzz/CORPUS_PROVENANCE.md` for upstream commits, licenses, and mapping.
 Parser-only rust-bitcoin decode targets are not kept.
 
 ## Prerequisites
