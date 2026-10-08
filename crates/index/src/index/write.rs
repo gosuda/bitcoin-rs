@@ -262,8 +262,8 @@ impl<S: KvStore> IndexWriter<S> {
     /// Commits one serialized block through the prepared-write owner.
     ///
     /// The successful return is the commit point: prepared rows and the
-    /// watermark become durable together. A failed call is ambiguous to the
-    /// caller; the supervised index worker owns retry from the last confirmed
+    /// watermark become durable together. Storage-write failures can leave the
+    /// commit uncertain; the supervised worker owns retry from the last confirmed
     /// watermark, or reset and rebuild.
     ///
     /// Selects [`IndexCapabilities::HISTORICAL`]. Callers maintaining
@@ -408,10 +408,10 @@ impl<S: KvStore> IndexWriter<S> {
     ///
     /// The commit point is the successful return from the durable conditional
     /// write, so recovery sees either the prior state or the complete rollback.
-    /// An error never proves the write did not reach the backend: the caller
-    /// must reacquire a fence and reconcile the stored watermark and cursor
-    /// before retrying. Same fenced batch as [`Self::commit_forward`]; see
-    /// `IDX-06` / `IDX-07` in `docs/contracts/indexing.md`.
+    /// Preparation and fence failures precede the rollback write. Storage-write
+    /// errors can leave its commit uncertain; reacquire a fence and reconcile the
+    /// stored watermark and cursor before retrying. Same fenced batch as
+    /// [`Self::commit_forward`]; see `IDX-06` / `IDX-07` in `docs/contracts/indexing.md`.
     pub fn commit_rollback_one_for_with_cursor_with_spent_scripts(
         &mut self,
         fence: IndexWriteFence,

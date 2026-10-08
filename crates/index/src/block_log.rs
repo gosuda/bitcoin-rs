@@ -100,7 +100,7 @@ const _: () = assert!(
     "BlockRecord grew past the 64-byte bound; re-measure the per-block saving"
 );
 
-/// Applied block records with constant-time body-size and transaction-prefix sums.
+/// Applied block records with cached body-size and transaction-prefix sums.
 #[derive(Clone, Debug, Default)]
 pub struct BlockLog {
     records: Vec<BlockRecord>,
