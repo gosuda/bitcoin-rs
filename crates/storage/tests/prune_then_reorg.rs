@@ -1176,7 +1176,13 @@ fn apply_ops(families: &mut Families, batch: BufferedWriteBatch) {
                 families[cf.index()].remove(&key);
             }
             BatchOp::DeleteRange { cf, start, end } => {
-                families[cf.index()].retain(|key, _value| key < &start || key >= &end);
+                let keys = families[cf.index()]
+                    .range(start..end)
+                    .map(|(key, _value)| key.clone())
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    families[cf.index()].remove(&key);
+                }
             }
         }
     }

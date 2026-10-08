@@ -1,8 +1,8 @@
 //! Contract tests for the process cache-budget split.
 
 use bitcoin_rs_storage::cache_budget::{
-    MAX_DBCACHE_BYTES, MIN_DBCACHE_BYTES, TXINDEX_CACHE_SHARE_PCT, clamp_dbcache_bytes,
-    split_cache_budget,
+    CHAINSTATE_CACHE_SHARE_PCT, MAX_DBCACHE_BYTES, MIN_DBCACHE_BYTES, TXINDEX_CACHE_SHARE_PCT,
+    clamp_dbcache_bytes, split_cache_budget,
 };
 
 #[test]
@@ -44,6 +44,15 @@ fn disabled_namespaces_redistribute_to_chainstate() {
         total,
         "redistributed remainder lands on chainstate"
     );
+}
+
+#[test]
+fn exact_percentages_at_a_clean_budget() {
+    // 1000 MiB divides cleanly into 800/200.
+    let total = clamp_dbcache_bytes(1000);
+    let shares = split_cache_budget(total, true);
+    assert_eq!(shares[0].bytes, total * CHAINSTATE_CACHE_SHARE_PCT / 100);
+    assert_eq!(shares[1].bytes, total * TXINDEX_CACHE_SHARE_PCT / 100);
 }
 
 #[test]

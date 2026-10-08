@@ -1113,6 +1113,27 @@ mod tests {
         Ok(())
     }
 
+    /// A reopened store starts from the files it finds, not from zero.
+    #[test]
+    fn disk_usage_is_seeded_from_an_existing_directory() -> Result<(), crate::StorageError> {
+        let data_dir = tempdir()?;
+        let expected = {
+            let store = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
+            let _ = store.persist(None, 1, hash(1), b"first")?;
+            let _ = store.persist(None, 2, hash(2), b"second")?;
+            store.disk_usage()
+        };
+        assert!(expected > 0, "the fixture must write something");
+
+        let reopened = FlatFileBlockStore::open_with_max_file_bytes(data_dir.path(), 120, None)?;
+        assert_eq!(
+            reopened.disk_usage(),
+            expected,
+            "a reopened store must account for the files already there"
+        );
+        Ok(())
+    }
+
     #[test]
     fn round_trips_and_rolls_over_without_large_allocations() -> Result<(), crate::StorageError> {
         let data_dir = tempdir()?;
