@@ -61,6 +61,10 @@ def _strip_comment(value):
 
 def _toml_scalar(value, number):
     if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        # Escapes would need real decoding; reject them rather than return a
+        # value tomllib would have read differently.
+        if "\\" in value:
+            raise SystemExit(f"unsupported escape in manifest value at line {number}")
         return value[1:-1]
     if value in ("true", "false"):
         return value == "true"
