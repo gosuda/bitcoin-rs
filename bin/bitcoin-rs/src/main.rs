@@ -63,39 +63,38 @@ mod tests {
     use bitcoin_rs_chainstate::ValidationMode;
     use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
 
+    fn load_file(
+        flag: &str,
+        text: &str,
+        args: &[&str],
+        vars: impl Iterator<Item = (OsString, OsString)>,
+    ) -> anyhow::Result<bitcoin_rs_node::NodeConfig> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        std::fs::write(&path, text)?;
+        let mut argv = vec![
+            OsString::from("bitcoin-rs"),
+            OsString::from(flag),
+            path.into_os_string(),
+        ];
+        argv.extend(args.iter().map(OsString::from));
+        super::load(argv, vars)
+    }
+
     #[test]
     fn bitcoin_conf_is_applied_before_environment_and_cli() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("bitcoin.conf");
-        std::fs::write(&path, "prune=777\n").unwrap_or_else(|error| panic!("write conf: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--bitcoin-conf",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid bitcoin.conf configuration: {error}"));
+        let config = load_file("--bitcoin-conf", "prune=777\n", &[], std::iter::empty())
+            .unwrap_or_else(|error| panic!("valid bitcoin.conf configuration: {error}"));
 
         assert_eq!(config.storage.prune_target_mb, 777);
     }
 
     #[test]
     fn bitcoin_conf_is_overridden_by_cli() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("bitcoin.conf");
-        std::fs::write(&path, "prune=777\n").unwrap_or_else(|error| panic!("write conf: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--bitcoin-conf",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-                "--prune-target-mb",
-                "100",
-            ],
+        let config = load_file(
+            "--bitcoin-conf",
+            "prune=777\n",
+            &["--prune-target-mb", "100"],
             std::iter::empty(),
         )
         .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
@@ -105,19 +104,10 @@ mod tests {
 
     #[test]
     fn earlier_toml_connect_survives_later_cli_network() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(&path, "connect = [\"10.0.0.5:8333\"]\n")
-            .unwrap_or_else(|error| panic!("write toml: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-                "--network",
-                "regtest",
-            ],
+        let config = load_file(
+            "--config",
+            "connect = [\"10.0.0.5:8333\"]\n",
+            &["--network", "regtest"],
             std::iter::empty(),
         )
         .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
@@ -241,16 +231,10 @@ mod tests {
             "unsupported-build error must say so, got {error:#}"
         );
 
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(&path, "validation_engine = \"kernel\"\n")
-            .unwrap_or_else(|error| panic!("write toml: {error}"));
-        let error = match super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
+        let error = match load_file(
+            "--config",
+            "validation_engine = \"kernel\"\n",
+            &[],
             std::iter::empty::<(OsString, OsString)>(),
         ) {
             Ok(_) => panic!("unsupported engine must fail startup from TOML too"),
@@ -297,10 +281,8 @@ mod tests {
 
     #[test]
     fn toml_groups_zmq_topics_by_endpoint() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(
-            &path,
+        let config = load_file(
+            "--config",
             r#"
 [[notifications.zmq]]
 endpoint = "tcp://127.0.0.1:28332"
@@ -311,15 +293,7 @@ endpoint = "tcp://127.0.0.1:28333"
 topics = ["hashtx", "rawtx"]
 hwm = 5000
 "#,
-        )
-        .unwrap_or_else(|error| panic!("write toml: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
+            &[],
             std::iter::empty(),
         )
         .unwrap_or_else(|error| panic!("valid toml configuration: {error}"));
@@ -333,17 +307,10 @@ hwm = 5000
 
     #[test]
     fn legacy_flat_zmq_toml_is_rejected() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(&path, r#"zmqpubhashblock = ["tcp://127.0.0.1:28332"]"#)
-            .unwrap_or_else(|error| panic!("write toml: {error}"));
-
-        let error = match super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
+        let error = match load_file(
+            "--config",
+            r#"zmqpubhashblock = ["tcp://127.0.0.1:28332"]"#,
+            &[],
             std::iter::empty(),
         ) {
             Ok(_) => panic!("legacy flat ZMQ keys must not be silently accepted"),
@@ -474,24 +441,14 @@ hwm = 5000
 
     #[test]
     fn toml_chainstate_journal_is_overridden_by_environment() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(
-            &path,
+        let config = load_file(
+            "--config",
             r"
 [chainstate_journal]
 enabled = true
 blocks = 100
 ",
-        )
-        .unwrap_or_else(|error| panic!("write toml: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
+            &[],
             std::iter::once(("BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", "200"))
                 .map(|(key, value)| (OsString::from(key), OsString::from(value))),
         )
