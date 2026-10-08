@@ -59,7 +59,7 @@ Authored content lives above this heading.
 | Field | bitcoin/bitcoin | btcsuite/btcd |
 |---|---|---|
 | Upstream commit | 9dfde64cc3262329051fd05fffe40eecc786a99f | b48125d0a3565b1441522ee10422f7815db03216 |
-| Import date | 2026-10-08T00:42:51Z | 2026-10-08T00:42:51Z |
+| Import date | 2026-10-08T11:24:16Z | 2026-10-08T11:24:16Z |
 | License | MIT | ISC |
 | Import tool | scripts/import-reference-corpora.sh + scripts/import_reference_corpora.py | (same) |
 | Size policy | rows and payloads larger than 65536 bytes are skipped or truncated and counted in the import log; witness stacks longer than the harness cap and framed elements over the u16 bound are skipped, never truncated |
