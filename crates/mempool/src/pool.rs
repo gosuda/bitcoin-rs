@@ -1209,7 +1209,8 @@ impl Mempool {
 
     /// Returns the txids of every entry in the pool.
     ///
-    /// Order is the underlying slab iteration order, not fee-rate sorted.
+    /// Order is the underlying slab iteration order (i.e., NOT fee-rate sorted;
+    /// use `iter_by_fee_rate_desc` for that).
     #[must_use]
     pub fn iter_txids(&self) -> Vec<Txid> {
         self.entries.iter().map(|(_id, entry)| entry.txid).collect()
@@ -1550,6 +1551,26 @@ impl Mempool {
         self.entry(id)
     }
 
+    /// Returns mempool entry ids in order of descending `fee_rate` (sat/kvB).
+    ///
+    /// Walks `entries` and sorts; cost O(N log N) per call. Actual-fee-ordered
+    /// traversal without going through `ParetoFront` (which ranks on signed
+    /// modified fees with ancestor-aware package scoring).
+    #[cfg(test)]
+    #[must_use]
+    fn iter_by_fee_rate_desc(&self) -> Vec<EntryId> {
+        let mut pairs: Vec<(u64, EntryId)> = self
+            .entries
+            .iter()
+            .filter_map(|(index, entry)| {
+                let id = EntryId::try_from(index).ok()?;
+                Some((entry.fee_rate, id))
+            })
+            .collect();
+        pairs.sort_by_key(|pair| core::cmp::Reverse(pair.0));
+        pairs.into_iter().map(|(_, id)| id).collect()
+    }
+
     /// Returns the minimum `fee_rate` (sat/kvB) among all entries, or `None`
     /// for an empty pool.
     ///
@@ -1570,6 +1591,19 @@ impl Mempool {
             "cached fee-rate floor drifted from its multiset"
         );
         self.derived.fee_rate_floor
+    }
+
+    /// Returns mempool entry ids whose `fee_rate` >= `threshold_sat_per_kvb`.
+    ///
+    /// Linear scan over `entries`: a fee-rate cohort without sorting.
+    #[cfg(test)]
+    #[must_use]
+    fn iter_above_fee_rate(&self, threshold_sat_per_kvb: u64) -> Vec<EntryId> {
+        self.entries
+            .iter()
+            .filter(|(_index, entry)| entry.fee_rate >= threshold_sat_per_kvb)
+            .filter_map(|(index, _entry)| EntryId::try_from(index).ok())
+            .collect()
     }
 
     /// Returns whether any in-pool transaction spends `outpoint`.
@@ -2663,6 +2697,50 @@ mod tests {
     }
 
     #[test]
+    fn iter_by_fee_rate_desc_orders_highest_first() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        // Two distinct txs with different fee rates.
+        let low_tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: Vec::new(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
+            }],
+        };
+        let low_txid = low_tx.txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0));
+        let high_tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: Vec::new(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x52].into(),
+            }],
+        };
+        let high_txid = high_tx.txid();
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0));
+        let ordered = pool.iter_by_fee_rate_desc();
+        assert_eq!(ordered.len(), 2);
+        let Some(&first_id) = ordered.first() else {
+            panic!("expected at least one entry");
+        };
+        let Some(first_entry) = pool.entry(first_id) else {
+            panic!("first entry missing");
+        };
+        assert_eq!(first_entry.tx.txid(), high_txid);
+        let Some(&second_id) = ordered.get(1) else {
+            panic!("expected two entries");
+        };
+        let Some(second_entry) = pool.entry(second_id) else {
+            panic!("second entry missing");
+        };
+        assert_eq!(second_entry.tx.txid(), low_txid);
+    }
+
+    #[test]
     fn fee_rate_aggregate_tracks_duplicate_rates_and_removals() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
@@ -2882,6 +2960,37 @@ mod tests {
             "replacement must not drop the bystander min",
         );
         Ok(())
+    }
+
+    #[test]
+    fn iter_above_fee_rate_filters_to_high_fee_only() {
+        let mut pool = Mempool::new(MempoolLimits::default());
+        let low_tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: Vec::new(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: vec![0x51].into(),
+            }],
+        };
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0)); // fee_rate = 1000
+        let high_tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: Vec::new(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(99_000),
+                script_pubkey: vec![0x52].into(),
+            }],
+        };
+        let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0)); // fee_rate = 100_000
+        let high_only = pool.iter_above_fee_rate(50_000);
+        assert_eq!(high_only.len(), 1);
+        let both = pool.iter_above_fee_rate(500);
+        assert_eq!(both.len(), 2);
+        let none = pool.iter_above_fee_rate(200_000);
+        assert_eq!(none.len(), 0);
     }
 
     #[test]
