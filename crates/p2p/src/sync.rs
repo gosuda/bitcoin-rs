@@ -30,7 +30,6 @@ mod telemetry;
 use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::NodeId;
-use bitcoin_rs_chain::plan_reorg;
 use bitcoin_rs_primitives::Hash256;
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
@@ -617,12 +616,18 @@ impl BlockSync {
         {
             return Some(successor_height);
         }
-        let first = plan_reorg(tree, applied_id, target)
-            .ok()?
-            .connect
-            .into_iter()
-            .next()?;
-        Some(tree.node(first).ok()?.height)
+        let ancestor = tree.find_common_ancestor(applied_id, target)?;
+        if ancestor == target {
+            return None;
+        }
+        let mut first = target;
+        loop {
+            let node = tree.node(first).ok()?;
+            if node.parent? == ancestor {
+                return Some(node.height);
+            }
+            first = node.parent?;
+        }
     }
 
     /// The chain-side frontier: both tips and the canonical next-required

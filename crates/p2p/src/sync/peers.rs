@@ -126,14 +126,8 @@ pub(super) fn shared_active_height(
     active_tip: NodeId,
     hash: Hash256,
 ) -> Option<u32> {
-    let mut node_id = tree.lookup(hash)?;
-    loop {
-        let node = tree.node(node_id).ok()?;
-        if tree.node_at_height_from(active_tip, node.height) == Some(node_id) {
-            return Some(node.height);
-        }
-        node_id = node.parent?;
-    }
+    let ancestor = tree.find_common_ancestor(active_tip, tree.lookup(hash)?)?;
+    Some(tree.node(ancestor).ok()?.height)
 }
 
 pub(super) fn active_demonstrated_height(

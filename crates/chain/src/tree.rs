@@ -153,33 +153,54 @@ impl BlockTree {
     /// Returns the highest shared ancestor of `a` and `b`, walking parent pointers.
     ///
     /// Returns `None` when either node is unknown or the chains share no common
-    /// ancestor (e.g. disconnected roots). Used by reorg planning to identify the
-    /// rollback point.
+    /// ancestor (e.g. disconnected roots). Trusted active-index entries answer
+    /// active-prefix queries; otherwise ancestry follows bounded parent walks
+    /// without relying on heights.
     #[must_use]
     pub fn find_common_ancestor(&self, a: NodeId, b: NodeId) -> Option<NodeId> {
-        let mut a_ancestors: hashbrown::HashSet<NodeId> = hashbrown::HashSet::new();
-
-        let mut cursor = Some(a);
-        while let Some(id) = cursor {
-            let Ok(node) = self.node(id) else {
+        if self.active_by_height.is_trusted() {
+            for (active, mut other) in [(a, b), (b, a)] {
+                let height = self.node(active).ok()?.height;
+                if self.active_by_height.get(height) != Some(active) {
+                    continue;
+                }
+                for _ in 0..self.len() {
+                    let node = self.node(other).ok()?;
+                    if self.active_by_height.get(node.height) == Some(other) {
+                        return self.active_by_height.get(height.min(node.height));
+                    }
+                    other = node.parent?;
+                }
                 return None;
-            };
-            a_ancestors.insert(id);
-            cursor = node.parent;
-        }
-
-        let mut cursor = Some(b);
-        while let Some(id) = cursor {
-            let Ok(node) = self.node(id) else {
-                return None;
-            };
-            if a_ancestors.contains(&id) {
-                return Some(id);
             }
-            cursor = node.parent;
         }
 
-        None
+        let ancestry = |mut id| {
+            for depth in 0..self.len() {
+                match self.node(id).ok()?.parent {
+                    Some(parent) => id = parent,
+                    None => return Some((id, depth)),
+                }
+            }
+            None
+        };
+        let (a_root, a_depth) = ancestry(a)?;
+        let (b_root, b_depth) = ancestry(b)?;
+        if a_root != b_root {
+            return None;
+        }
+        let (mut a, mut b) = (a, b);
+        for _ in b_depth..a_depth {
+            a = self.node(a).ok()?.parent?;
+        }
+        for _ in a_depth..b_depth {
+            b = self.node(b).ok()?.parent?;
+        }
+        while a != b {
+            a = self.node(a).ok()?.parent?;
+            b = self.node(b).ok()?.parent?;
+        }
+        Some(a)
     }
 
     /// Looks up a node id by header hash.
@@ -1268,6 +1289,52 @@ mod tests {
         let leaf_b = tree.insert_node(Some(genesis_id), variant_b, NodeStatus::HeaderValid)?;
 
         assert_eq!(tree.find_common_ancestor(leaf_a, leaf_b), Some(genesis_id));
+        Ok(())
+    }
+
+    #[test]
+    fn find_common_ancestor_resolves_uneven_branches_after_index_taint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let trunk = insert_branch(&mut tree, None, 0..=8)?;
+        let side = insert_branch(&mut tree, Some(trunk[2]), 101..=103)?;
+        let other = insert_branch(&mut tree, Some(trunk[4]), 201..=202)?;
+        let cases = [
+            (trunk[8], trunk[4], trunk[4]),
+            (trunk[1], side[2], trunk[1]),
+            (trunk[8], side[2], trunk[2]),
+            (side[2], other[1], trunk[2]),
+            (side[1], side[2], side[1]),
+            (side[2], side[2], side[2]),
+        ];
+        assert!(tree.active_by_height.is_trusted());
+        for tainted in [false, true] {
+            if tainted {
+                tree.node_mut(trunk[4])?.height = 100;
+            }
+            for (a, b, expected) in cases {
+                assert_eq!(tree.find_common_ancestor(a, b), Some(expected));
+                assert_eq!(tree.find_common_ancestor(b, a), Some(expected));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn find_common_ancestor_refuses_disconnected_and_broken_chains()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut tree = BlockTree::new();
+        let a = insert_branch(&mut tree, None, 0..=3)?;
+        let b = insert_branch(&mut tree, None, 101..=103)?;
+        let unknown = NodeId::new(u32::MAX);
+        for (left, right) in [(a[3], b[2]), (a[3], unknown), (unknown, a[3])] {
+            assert_eq!(tree.find_common_ancestor(left, right), None);
+        }
+        tree.node_mut(a[1])?.parent = Some(unknown);
+        assert_eq!(tree.find_common_ancestor(a[3], a[2]), None);
+        tree.node_mut(a[1])?.parent = Some(a[2]);
+        assert_eq!(tree.find_common_ancestor(a[3], b[2]), None);
+        assert_eq!(tree.find_common_ancestor(b[2], a[3]), None);
         Ok(())
     }
 
