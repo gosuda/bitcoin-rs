@@ -6,8 +6,9 @@ under `corpus/<target>/` — this document stays the single owner of their
 provenance (per `docs/contracts/qa-corpus.md`, `QAC-01`). They were imported
 from the sources recorded in the run-dependent sections below:
 rust-bitcoin/qa-assets (this section) and the upstream reference corpora
-(`## Reference corpora`). Importers publish into the checkout named by
-`FUZZ_CORPUS_DIR` (default: a sibling `bitcoin-rs-fuzz-corpus` clone).
+(`## Reference corpora`). Importers publish into the corpus directory named
+by `FUZZ_CORPUS_DIR` (default: the `corpus/` directory of a sibling
+`bitcoin-rs-fuzz-corpus` clone).
 
 Seeds from [rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets),
 license [CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)
@@ -40,7 +41,7 @@ as the corpus change (see `docs/contracts/qa-corpus.md`, clause `QAC-01`).
 | tx_validate | bitcoin-core | src/test/data/tx_valid.json, tx_invalid.json, sighash.json, bip341_wallet_vectors.json | tx hex decoded to consensus bytes |
 | tx_validate | btcd | txscript/data/tx_valid.json, tx_invalid.json, sighash.json, many_inputs_tx.hex, taproot-ref/*.json (`tx` field) | tx hex decoded to consensus bytes; the BADTX pseudo-flag only marks rows whose tx fails CheckTransaction |
 | script_eval | qa-assets | fuzz_corpora/bitcoin_deserialize_script, fuzz_corpora/bitcoin_script_bytes_to_asm_fmt | raw script bytes wrapped into the script_eval framing (selector from the harness FLAGS entry NONE); files >= 32 bytes also emit a P2TR key-path variant (selector from its TAPROOT entry) |
-| script_eval | bitcoin-core | src/test/data/script_tests.json, tx_valid.json, tx_invalid.json, bip341_wallet_vectors.json | row ASM assembled with the Core opcode table; flags encoded via the harness EXPLICIT_FLAGS framing from the row's own flag names — tx_valid names the flags Core turns OFF, so its seeds carry `FULL & ~listed`; rows that declare a prevout amount (witness rows, tx prevouts) append it as a trailing u64 of satoshis; `#SCRIPT#`/`#CONTROLBLOCK#`/`#TAPROOTOUTPUT#` markers resolve the BIP341 tweaked key and control block the upstream harness generates (internal key = key0); tx rows emit one frame per input (scriptSig + prevout scriptPubKey + witness) and, when every declared prevout resolves, one TX_CONTEXT frame per input carrying the spending tx and all prevouts so signatures verify under their original context |
+| script_eval | bitcoin-core | src/test/data/script_tests.json, tx_valid.json, tx_invalid.json, bip341_wallet_vectors.json | row ASM assembled with the Core opcode table; flags encoded via the harness EXPLICIT_FLAGS framing from the row's own flag names — tx_valid names the flags Core turns OFF, so its seeds carry `FULL & ~listed`; rows that declare a prevout amount (witness rows, tx prevouts) append it as a trailing u64 of satoshis; `#SCRIPT#`/`#CONTROLBLOCK#`/`#TAPROOTOUTPUT#` markers resolve the BIP341 tweaked key and control block the upstream harness generates (internal key = key0); tx rows emit one frame per input (scriptSig + prevout scriptPubKey + witness) and, when every declared prevout resolves, one TX_CONTEXT frame per input carrying the spending tx and all prevouts so signatures verify under their original context; bip341_wallet_vectors.json rows use a separate transform — each row's expected scriptPubKey is wrapped verbatim as a TAPROOT key-path seed rather than assembled from row ASM |
 | script_eval | btcd | txscript/data/script_tests.json, tx_valid.json, tx_invalid.json, taproot-ref/*.json | same framing; taproot-ref rows take the spent output's scriptPubKey and amount from `prevouts[index]` and the witness/scriptSig from `success`/`failure` |
 | utxo_snapshot | btcd | blockchain/testdata/277647.utxostore.bz2 | foreign-format serialized UTXO store truncated to the seed bound; negative seed for the strict v4 snapshot decoder |
 

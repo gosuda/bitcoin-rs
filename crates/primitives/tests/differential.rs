@@ -1,13 +1,16 @@
 //! Native codec, hashing, and sighash contracts: round-trip fixtures, Core
 //! `sighash.json` vectors, and fuzz-corpus self-consistency.
 //!
-//! Fuzz-corpus gates read `BITCOIN_RS_FUZZ_CORPUS/<target>` first (a checkout of
-//! gosuda/bitcoin-rs-fuzz-corpus, the canonical seed home) and fall back to a
-//! local `fuzz/corpus/<target>/` overlay; they loud-skip (with a stderr note)
-//! only when neither exists. A present-but-empty corpus, or seeds that all
-//! fail to parse, fails. Seeds are gated by the native-consensus-codec
-//! round-trip contract `QAC-05` (docs/contracts/qa-corpus.md): every seed must
-//! decode to a typed verdict, and accepted seeds re-encode byte-identically.
+//! Fuzz-corpus gates read `BITCOIN_RS_FUZZ_CORPUS/<target>` first (the
+//! `corpus/` directory of a gosuda/bitcoin-rs-fuzz-corpus checkout, the
+//! canonical seed home) and fall back to a local `fuzz/corpus/<target>/`
+//! overlay; they loud-skip (with a stderr note) only when neither exists. A
+//! present-but-empty corpus fails. The corpus evolves in the companion
+//! repository, so the gate pins the verdict *shape*, not per-seed verdicts: a
+//! seed may legitimately change classification (rejected↔accepted) as the
+//! corpus or codec evolves — only a seed that fails to decode to a typed
+//! verdict fails. Accepted seeds re-encode byte-identically (`QAC-05`,
+//! docs/contracts/qa-corpus.md).
 
 #![expect(
     clippy::expect_used,
@@ -65,7 +68,11 @@ fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
     let dir = std::env::var_os("BITCOIN_RS_FUZZ_CORPUS")
         .map_or_else(|| repo_root().join("fuzz/corpus"), PathBuf::from)
         .join(target);
-    let entries = std::fs::read_dir(&dir).ok()?;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("{}: {error}", dir.display()),
+    };
     let mut seeds = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();

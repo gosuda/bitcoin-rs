@@ -122,9 +122,8 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         self.assertEqual(list((self.root / "fuzz").glob(".corpus-provenance.*")), [],
                          "provenance staging leaked after importer exit")
         self.assertEqual(
-            [p for p in (self.root / "fuzz/corpus").rglob("*") if not p.is_symlink()
-             and not p.is_dir()],
-            [], "no seeds may remain under the in-repo fuzz/corpus staging")
+            [p for p in (self.root / "fuzz/corpus").rglob("*")],
+            [], "nothing may remain under the in-repo fuzz/corpus staging")
         return result
 
     def test_success_maps_then_minimizes_and_records_provenance(self):

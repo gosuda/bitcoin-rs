@@ -80,13 +80,13 @@ available_mb() {
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/reference-corpora.XXXXXX")"
 readonly WORKDIR
 PROVENANCE_TMP=""
-CORPUS_LINKS=()
+STAGED_DIRS=()
 cleanup() {
     if [[ -n "${PROVENANCE_TMP}" ]]; then
         rm -f -- "${PROVENANCE_TMP}"
     fi
-    for link in "${CORPUS_LINKS[@]:-}"; do
-        rm -f -- "${link}"
+    for dir in "${STAGED_DIRS[@]:-}"; do
+        rm -rf -- "${dir}"
     done
     rm -rf -- "${WORKDIR:?workdir unset}"
 }
@@ -106,6 +106,14 @@ if [ "${FREE_TMP_MB:?free space unknown}" -lt "${NEEDED_MB}" ] ||
     exit 1
 fi
 log "disk ok: ${FREE_TMP_MB} MiB free for the clones (>= ${NEEDED_MB} MiB), ${FREE_REPO_MB} MiB free on repo (>= ${NEEDED_REPO_MB} MiB)"
+# The corpus volume may differ from the repo filesystem; a full volume must
+# stop the import before publication touches prior seeds.
+FREE_CORPUS_MB="$(available_mb "${OUT_BASE}")"
+readonly FREE_CORPUS_MB
+if [ "${FREE_CORPUS_MB:?free space unknown}" -lt "${NEEDED_REPO_MB}" ]; then
+    log "ABORT: free ${FREE_CORPUS_MB} MiB on corpus volume < needed ${NEEDED_REPO_MB} MiB"
+    exit 1
+fi
 
 # --- 2. Clone pinned to the provenance commits -------------------------------
 # CORPUS_PROVENANCE.md records these exact commits; a rerun must reproduce
@@ -152,24 +160,35 @@ readonly FUZZ_DIR="${REPO_ROOT}/fuzz"
     --out-base "${OUT_BASE}" --max-seed-bytes "${FUZZ_MAX_SEED_BYTES}"
 
 # --- 4. Minimize each target corpus with cargo fuzz cmin ---------------------
-# cargo-fuzz only operates on fuzz/corpus/<target>; stage each entry as a
-# symlink into the external corpus so cmin minimizes it in place. A real
-# directory means a legacy in-repo corpus — refuse to clobber it.
+# cargo-fuzz only operates on fuzz/corpus/<target> and replaces that path
+# atomically, so the external corpus is staged as a real directory: cmin
+# minimizes it, and the result publishes back to ${OUT_BASE}. A pre-existing
+# entry aborts rather than clobbering a user-managed corpus.
 for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; do
-    existing="${FUZZ_DIR}/corpus/${target}"
-    if [[ -e "${existing}" && ! -L "${existing}" ]]; then
-        log "ERROR: ${existing} is a real directory; move its seeds into the fuzz-corpus checkout first"
+    staged="${FUZZ_DIR}/corpus/${target}"
+    if [[ -e "${staged}" ]]; then
+        log "ERROR: ${staged} already exists; move it aside before running the importer"
         exit 1
     fi
-    mkdir -p "${OUT_BASE}/${target}" "${FUZZ_DIR}/corpus"
-    ln -sfn "${OUT_BASE}/${target}" "${existing}"
-    CORPUS_LINKS+=("${existing}")
+    mkdir -p "${OUT_BASE}/${target}" "${staged}"
+    cp -a "${OUT_BASE}/${target}/." "${staged}/"
+    STAGED_DIRS+=("${staged}")
 done
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" script_eval
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" utxo_snapshot
+# Publish the minimized sets back: seeds the minimizer dropped are removed
+# from the external corpus (names are flat basenames).
+for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; do
+    staged="${FUZZ_DIR}/corpus/${target}"
+    for old in "${OUT_BASE}/${target}"/*; do
+        [ -e "${old}" ] || continue
+        [[ -e "${staged}/${old##*/}" ]] || rm -f -- "${old}"
+    done
+    cp -a "${staged}/." "${OUT_BASE}/${target}/"
+done
 
 # --- 5. Provenance ------------------------------------------------------------
 readonly PROVENANCE="${FUZZ_DIR}/CORPUS_PROVENANCE.md"

@@ -58,12 +58,16 @@ end-state evidence roles.
 
 - **Owner**: `crates/primitives/tests/differential.rs` enforces the contract
   over `tx_validate` and `block_validate` seeds read from
-  `BITCOIN_RS_FUZZ_CORPUS/<target>` (a `gosuda/bitcoin-rs-fuzz-corpus`
-  checkout) or, when the variable is unset, a local `fuzz/corpus/<target>/`
-  overlay. The gate loud-skips only when no corpus directory exists.
+  `BITCOIN_RS_FUZZ_CORPUS/<target>` (the variable names the companion
+  repository's `corpus/` directory — a checkout-root value is wrong and the
+  gate skips) or, when the variable is unset, a local `fuzz/corpus/<target>/`
+  overlay. The gate loud-skips only when no corpus directory exists; other
+  `read_dir` failures surface as test failures.
 - The corpus evolves in the companion repository — the scheduled campaign
   minimizes and grows it continuously — so the gate cannot pin per-seed
-  verdicts. It pins the verdict *shape* every seed must satisfy:
+  verdicts. A seed may legitimately change classification (rejected↔accepted)
+  as the corpus or codec evolves: this is not pinned. What the gate pins is
+  the verdict *shape* every seed must satisfy:
   - `accepted`: the native consensus codec decodes the seed under the exact-consume
     `deserialize` entry the wire codec uses, and re-encodes it byte-identically;
   - `rejected:<kind>`: the native codec rejects the seed with a typed error

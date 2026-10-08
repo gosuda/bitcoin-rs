@@ -49,7 +49,8 @@ fi
 # passes the corpus dir directly as CORPUS_DIR, so this seeding only fills a
 # fresh local campaign dir.
 FUZZ_CORPUS_DIR="${FUZZ_CORPUS_DIR:-${REPO_ROOT}/../bitcoin-rs-fuzz-corpus/corpus}"
-if [[ -d "${FUZZ_CORPUS_DIR}/${TARGET}" ]]; then
+if [[ -d "${FUZZ_CORPUS_DIR}/${TARGET}" ]] &&
+    [[ "$(cd "${FUZZ_CORPUS_DIR}/${TARGET}" && pwd -P)" != "$(cd "${CORPUS_DIR}" && pwd -P)" ]]; then
     cp -a "${FUZZ_CORPUS_DIR}/${TARGET}/." "${CORPUS_DIR}/"
 fi
 
