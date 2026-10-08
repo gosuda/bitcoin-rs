@@ -4,70 +4,59 @@
 mod common;
 
 use std::error::Error;
-use std::sync::Arc;
 
-// rust-bitcoin differential oracle: sha256d engine for witness commitment.
-use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
-// rust-bitcoin differential oracle: witness merkle root.
+// rust-bitcoin differential oracles: witness merkle root and sha256d commitment.
 use bitcoin::Wtxid as OracleWtxid;
-use bitcoin_rs_mempool::{Mempool, MempoolEntry, MempoolLimits};
+use bitcoin::hashes::{Hash as _, HashEngine as _, sha256d};
 use bitcoin_rs_mining::{
     CandidateContext, TemplateId, WITNESS_RESERVED_VALUE, assemble_candidate,
     assemble_ordered_candidate, solve_block,
 };
-use bitcoin_rs_primitives::{
-    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness,
-};
-use common::context;
+use bitcoin_rs_primitives::{CompactTarget, Hash256, Network, Txid};
+use common::{PAYOUT, context, insert, selected_fees, tx, zero_fee_pool};
+
+fn txids(transactions: &[bitcoin_rs_mining::CandidateTransaction]) -> Vec<Txid> {
+    transactions.iter().map(|tx| tx.txid).collect()
+}
 
 /// Checks whole-block scalars and selected dependency indexes against wire and hash oracles.
 #[test]
 #[expect(clippy::too_many_lines)]
 fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {
-    let mut mempool = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
+    let mut mempool = zero_fee_pool();
     let parent = tx(1, 50_000, None);
     let parent_txid = parent.txid();
-    mempool.insert_entry(MempoolEntry::new(Arc::new(parent), 150, 1_500, 1, 100, 0))?;
-    mempool.insert_entry(MempoolEntry::new(
-        Arc::new(tx(2, 40_000, Some(parent_txid))),
+    insert(&mut mempool, parent, 150, 1_500, 1, 100)?;
+    insert(
+        &mut mempool,
+        tx(2, 40_000, Some(parent_txid)),
         150,
         2_500,
         2,
         100,
-        0,
-    ))?;
+    )?;
     for index in 3_u8..12 {
-        mempool.insert_entry(MempoolEntry::new(
-            Arc::new(tx(index, 1_000, None)),
+        insert(
+            &mut mempool,
+            tx(index, 1_000, None),
             120,
             1_000 + u64::from(index),
             u64::from(index),
             100,
-            0,
-        ))?;
+        )?;
     }
 
     let snapshot = mempool.mining_snapshot();
     let context = CandidateContext {
-        previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
         height: 250,
         version: 0x2000_0001,
         bits: CompactTarget::from_consensus(0x1d00_ffff),
         min_time: 10,
         current_time: 20,
         locktime_cutoff: 10,
-        network: Network::Regtest,
-        csv_active: true,
-        segwit_active: true,
-        max_weight: 4_000_000,
-        max_size: 4_000_000,
-        max_sigops: 80_000,
+        ..context()
     };
-    let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
+    let candidate = assemble_candidate(&context, &snapshot, PAYOUT)?;
 
     assert_eq!(
         candidate.template_id,
@@ -146,48 +135,31 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
 
 #[test]
 fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dyn Error>> {
-    let mut mempool = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
+    let mut mempool = zero_fee_pool();
     for label in 1_u8..=5 {
-        mempool.insert_entry(MempoolEntry::new(
-            Arc::new(tx(label, 1_000, None)),
+        insert(
+            &mut mempool,
+            tx(label, 1_000, None),
             200,
             2_000,
             u64::from(label),
             100,
-            0,
-        ))?;
+        )?;
     }
     let snapshot = mempool.mining_snapshot();
-    let context = CandidateContext {
+    let legacy = CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0x22; 32]),
         height: 10,
         version: 1,
         csv_active: false,
-        ..context(false, 80_000)
+        segwit_active: false,
+        ..context()
     };
-    let first = assemble_candidate(&context, &snapshot, &[0x51])?;
-    let second = assemble_candidate(&context, &snapshot, &[0x51])?;
+    let first = assemble_candidate(&legacy, &snapshot, PAYOUT)?;
+    let second = assemble_candidate(&legacy, &snapshot, PAYOUT)?;
+    assert_eq!(txids(&first.transactions), txids(&second.transactions));
     assert_eq!(
-        first
-            .transactions
-            .iter()
-            .map(|tx| tx.txid)
-            .collect::<Vec<_>>(),
-        second
-            .transactions
-            .iter()
-            .map(|tx| tx.txid)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        first
-            .transactions
-            .iter()
-            .map(|tx| tx.txid)
-            .collect::<Vec<_>>(),
+        txids(&first.transactions),
         snapshot
             .entries
             .iter()
@@ -198,72 +170,30 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
     Ok(())
 }
 
-fn tx(label: u8, value: u64, parent: Option<Txid>) -> Tx {
-    let mut bytes = [0_u8; 32];
-    bytes[0] = label;
-    Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::new(
-                parent.unwrap_or_else(|| Txid(Hash256::from_le_bytes(&bytes))),
-                0,
-            ),
-            script_sig: Script::new(),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: vec![0x51, label].into(),
-        }],
-        lock_time: LockTime::ZERO,
-    }
-}
-
 #[test]
 fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
-    let payout = vec![0x51];
-    let empty = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
     let context = CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
         version: 1,
-        ..context(true, 80_000)
+        ..context()
     };
-    let zero = assemble_candidate(&context, &empty.mining_snapshot(), &payout)?;
+    let zero = assemble_candidate(&context, &zero_fee_pool().mining_snapshot(), PAYOUT)?;
     assert_eq!(
         zero.transactions.len(),
         0,
         "coinbase-only candidate has zero non-coinbase txs"
     );
 
-    let mut one_pool = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
-    one_pool.insert_entry(MempoolEntry::new(
-        Arc::new(tx(1, 1_000, None)),
-        120,
-        1_000,
-        1,
-        100,
-        0,
-    ))?;
-    let one = assemble_candidate(&context, &one_pool.mining_snapshot(), &payout)?;
+    let mut one_pool = zero_fee_pool();
+    insert(&mut one_pool, tx(1, 1_000, None), 120, 1_000, 1, 100)?;
+    let one = assemble_candidate(&context, &one_pool.mining_snapshot(), PAYOUT)?;
     assert_eq!(one.transactions.len(), 1);
     Ok(())
 }
 
 #[test]
 fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
-    let snapshot = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    })
-    .mining_snapshot();
-    let payout = vec![0x51];
+    let snapshot = zero_fee_pool().mining_snapshot();
     for (csv_active, segwit_active) in [(false, false), (true, false), (false, true), (true, true)]
     {
         let candidate = assemble_candidate(
@@ -272,10 +202,11 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
                 height: 432,
                 version: 1,
                 csv_active,
-                ..context(segwit_active, 80_000)
+                segwit_active,
+                ..context()
             },
             &snapshot,
-            &payout,
+            PAYOUT,
         )?;
         assert_eq!(candidate.csv_active, csv_active);
         assert_eq!(candidate.segwit_active, segwit_active);
@@ -286,17 +217,12 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
 /// API-05: solving searches nonces until the compact target is met.
 #[test]
 fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
-    let mempool = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
-    let snapshot = mempool.mining_snapshot();
     let context = CandidateContext {
         height: 1,
         version: 1,
-        ..context(true, 80_000)
+        ..context()
     };
-    let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
+    let candidate = assemble_candidate(&context, &zero_fee_pool().mining_snapshot(), PAYOUT)?;
     let unsolved = candidate.into_unsolved_block()?;
     assert_eq!(unsolved.txs.len(), 1);
     assert_eq!(unsolved.header.nonce, 0);
@@ -315,40 +241,20 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
 /// API-05: generateblock keeps listed order and does not add those fees to the coinbase.
 #[test]
 fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
-    let mut mempool = Mempool::new(MempoolLimits {
-        min_relay_fee_sat_per_kvb: 0,
-        ..MempoolLimits::default()
-    });
-    mempool.insert_entry(MempoolEntry::new(
-        Arc::new(tx(1, 10_000, None)),
-        150,
-        1_000,
-        1,
-        100,
-        0,
-    ))?;
-    mempool.insert_entry(MempoolEntry::new(
-        Arc::new(tx(2, 10_000, None)),
-        150,
-        1_000,
-        1,
-        100,
-        0,
-    ))?;
+    let mut mempool = zero_fee_pool();
+    insert(&mut mempool, tx(1, 10_000, None), 150, 1_000, 1, 100)?;
+    insert(&mut mempool, tx(2, 10_000, None), 150, 1_000, 1, 100)?;
     let snapshot = mempool.mining_snapshot();
     let context = CandidateContext {
         height: 1,
         version: 1,
-        ..context(true, 80_000)
+        ..context()
     };
-    let candidate = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
+    let candidate = assemble_ordered_candidate(&context, &snapshot, PAYOUT)?;
+    assert_eq!(selected_fees(&candidate), 2_000);
     assert_eq!(candidate.coinbase_value, 5_000_000_000);
     assert_eq!(
-        candidate
-            .transactions
-            .iter()
-            .map(|tx| tx.txid)
-            .collect::<Vec<_>>(),
+        txids(&candidate.transactions),
         snapshot
             .entries
             .iter()
