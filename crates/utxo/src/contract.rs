@@ -586,7 +586,7 @@ pub fn rollback_block(
     store
         .arm_disconnect(height, hash)
         .map_err(RollbackError::Refused)?;
-    rewind_applied_coins(
+    rollback_block_recovery(
         utxo,
         coin_stats,
         height,
@@ -606,29 +606,8 @@ pub fn rollback_block(
     })
 }
 
-/// The coins side of one rollback step: UTXO undo plus the coinstats
-/// rewind, shared by an ordinary disconnect and by marker recovery.
-fn rewind_applied_coins(
-    utxo: &UtxoSet,
-    coin_stats: &CoinStatsListener,
-    height: u32,
-    parent_height: u32,
-    tx_count_delta: u64,
-    undo: &UndoBatch,
-) -> Result<(), RollbackError> {
-    // Refuse mismatched stats before the UTXO mutation: a recovery that
-    // fails closed after undoing the block would retry against a partially
-    // rewound set.
-    coin_stats
-        .check_rewind(height, tx_count_delta)
-        .map_err(RollbackError::CoinStats)?;
-    utxo.undo_block(undo).map_err(RollbackError::Utxo)?;
-    coin_stats
-        .rewind_block(height, parent_height, tx_count_delta)
-        .map_err(RollbackError::CoinStats)
-}
-
 /// Recovery's rollback step: the coin rewind without the marker lifecycle.
+/// Also used by an ordinary disconnect after its marker is armed.
 ///
 /// The marker recovery carries is the evidence being reconciled — re-arming
 /// would overwrite its identity and completing would fake a finished
@@ -648,14 +627,16 @@ pub fn rollback_block_recovery(
     tx_count_delta: u64,
     undo: &UndoBatch,
 ) -> Result<(), RollbackError> {
-    rewind_applied_coins(
-        utxo,
-        coin_stats,
-        height,
-        parent_height,
-        tx_count_delta,
-        undo,
-    )
+    // Refuse mismatched stats before the UTXO mutation: a recovery that
+    // fails closed after undoing the block would retry against a partially
+    // rewound set.
+    coin_stats
+        .check_rewind(height, tx_count_delta)
+        .map_err(RollbackError::CoinStats)?;
+    utxo.undo_block(undo).map_err(RollbackError::Utxo)?;
+    coin_stats
+        .rewind_block(height, parent_height, tx_count_delta)
+        .map_err(RollbackError::CoinStats)
 }
 
 #[cfg(test)]
