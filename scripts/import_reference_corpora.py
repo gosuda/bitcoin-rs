@@ -825,6 +825,33 @@ def map_taproot_ref(
             script_out, explicit, element_limit, witness_max,
             bits, script_sig, script_pubkey, witness, amount, max_bytes, script_emitted,
         )
+        # Taproot signatures commit to the serialized row tx and all of its
+        # prevouts, so the signed spend also emits a TX_CONTEXT frame with the
+        # original transaction context whenever every TxOut resolves and the
+        # declared prevouts cover every input.
+        if blob is None:
+            continue
+        parsed = tx_inputs(blob)
+        index = row.get("index")
+        raw_prevouts = row.get("prevouts")
+        if parsed is None or not isinstance(index, int) or not isinstance(raw_prevouts, list):
+            continue
+        resolved: list[tuple[bytes, int]] = []
+        context_ok = len(parsed) == len(raw_prevouts) and 0 <= index < len(raw_prevouts)
+        for raw in raw_prevouts:
+            if not context_ok:
+                break
+            txout = _hex(raw)
+            script = _txout_script(txout) if txout is not None else None
+            if txout is None or len(txout) < 8 or script is None:
+                context_ok = False
+            else:
+                resolved.append((script, int.from_bytes(txout[:8], "little")))
+        if context_ok:
+            _context_seed(
+                script_out, _context_selector, bits, blob, index,
+                resolved, max_bytes, script_emitted,
+            )
 
 
 def map_tx_rows(
@@ -869,16 +896,20 @@ def map_tx_rows(
             script_emitted.bump("skip_bad_flag_combination")
             continue
         # The sighash commits to every prevout, so a context frame is emitted
-        # only when each declared prevout resolves to script bytes and an
-        # amount; a single malformed entry forfeits them for the row.
+        # only when each declared prevout resolves to script bytes. Legacy
+        # rows that omit amounts (151 upstream) get amount 0 per the
+        # kernel_vector_parity contract — a pre-segwit sighash does not commit
+        # to it — while a witness input missing its amount forfeits the row.
         resolved: list[tuple[bytes, int] | None] = []
         context_ok = True
-        for prevout in prevouts:
+        for (_script_sig, witness), prevout in zip(parsed, prevouts):
             amount = prevout[1] if prevout is not None else None
             try:
                 script = assemble(prevout[0]) if prevout is not None else None
             except AssemblyError:
                 script = None
+            if amount is None and not witness:
+                amount = 0
             if script is None or amount is None:
                 context_ok = False
                 resolved.append(None)
