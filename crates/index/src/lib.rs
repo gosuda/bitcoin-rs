@@ -3,6 +3,7 @@
 
 /// Applied-block records shared with derived-index readers.
 pub mod block_log;
+pub use block_log::{BlockLog, BlockLogReader, BlockRecord};
 /// Core-compatible capability status projection.
 mod capabilities;
 /// Confirmed block indexing over the workspace key-value store.

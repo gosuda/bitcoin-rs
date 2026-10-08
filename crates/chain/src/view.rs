@@ -41,9 +41,15 @@ impl TipReader {
 ///
 /// The flag cell stays private, so consumers can observe the latch but
 /// cannot set it; only the owner writes.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LatchReader {
     inner: Arc<AtomicBool>,
+}
+
+impl From<Arc<AtomicBool>> for LatchReader {
+    fn from(inner: Arc<AtomicBool>) -> Self {
+        Self::new(inner)
+    }
 }
 
 impl LatchReader {

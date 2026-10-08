@@ -4,7 +4,6 @@
 //! The daemon and embedding surfaces both enter this lifecycle directly.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -113,7 +112,7 @@ fn bind_rpc(
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),
             progress: chainstate.chain_progress_reader(),
-            blocks: state.blocks(),
+            blocks: state.block_log_reader(),
             utxo: chainstate.utxo_reader(),
             coin_stats: chainstate.coin_stats_handle(),
             block_tree: chainstate.block_tree_reader(),
@@ -254,7 +253,7 @@ impl NodeServices {
         self.teardown_started = true;
         let _stage = shutdown::mark_shutdown_stage();
         if let Some(state) = state {
-            state.shutdown().store(true, Ordering::Release);
+            state.request_shutdown();
             state.p2p().shutdown();
         }
         if let Some(tx) = self.event_loop_signal.take() {
@@ -577,14 +576,17 @@ pub(crate) fn start_node(
         bitcoin_rs_p2p::PeerRelaySink::new(state.peer_table()),
         relay_rx,
         Arc::downgrade(&gateway),
-        Arc::clone(&shutdown),
+        state.shutdown_reader(),
     )?);
+    let inbound_tx_rx = state
+        .take_inbound_tx_receiver()
+        .ok_or_else(|| anyhow::anyhow!("inbound tx receiver already taken"))?;
     guard.services.tx_ingress = Some(crate::tx_ingress::spawn_tx_ingress_consumer(
         state,
         Arc::clone(&gateway),
         Arc::clone(&mining_control),
-        Arc::clone(&shutdown),
-        state.inbound_tx_rx_handle(),
+        state.shutdown_reader(),
+        inbound_tx_rx,
         relay_queue.clone(),
     )?);
     gateway

@@ -370,6 +370,46 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   `CORE_REORG_SAFETY_MARGIN`; this protects reconsideration of disconnected
   transactions during reorg handling.
 
+### `ARCH-09`: Authoritative owners and read-only capability boundaries
+
+- Subsystems keep exactly one authoritative mutation owner for each piece of
+  state. External consumers and cross-subsystem adapters receive read-only
+  capabilities or single-consumer ownership rather than cloneable mutable handles:
+  - **`BlockLog`**: Exclusively owned and mutated by `ChainFollowers`. Consumers
+    (RPC handlers, derived index runtime, node queries) access block records
+    through the read-only capability `BlockLogReader`. Mutation methods
+    (`BlockLogReader::write`) and raw mutable handles (`BlockLogReader::raw_handle`)
+    are gated behind the explicit `test-seam` feature.
+  - **P2P Inbound Channels**: Single-consumer ownership is enforced for ingress
+    channels. Channel receivers (`inbound_headers_rx`, `inbound_blocks_rx`,
+    `inbound_tx_rx`) are moved by value to their respective worker loops
+    (`BlockSync`, `spawn_tx_ingress_consumer`) using single-take accessors
+    (`take_inbound_headers_receiver`, `take_inbound_blocks_receiver`,
+    `take_inbound_tx_receiver`). Exposing cloneable `Arc<Mutex<Receiver<...>>>`
+    handles in production runtime wiring is prohibited.
+  - **`Chainstate`**: Owns the block tree, applied/header tip cells, and process
+    shutdown signal. Construction via `ChainstateParts` consumes `BlockTree` by
+    value and `restored_applied_tip: Option<TipSnapshot>`, eliminating
+    construction-time mutable handle leaks. Mutation authority remains strictly
+    confined to chainstate methods; external consumers observe tip state via
+    `TipReader` and `BlockTreeReader`.
+  - **Shutdown and Ban Capabilities**: Cancellation and ban state are exposed
+    through read-only capabilities (`LatchReader`, `BannedReader`). Connection
+    listeners and peer workers query ban status and shutdown signals through
+    these capabilities without holding mutable handles or raw atomic pointers.
+- Intentional `Arc` / `Weak` shared ownership invariants:
+  - `Arc<PeerTable>`: Shared among P2P service, connection listeners, sync, and
+    RPC network handles. `PeerTable` is internally synchronized and owns peer
+    leases and address tracking.
+  - `Weak<MempoolGateway>`: Held by the P2P transaction relay observer
+    (`LocalTxRelayObserver`) to prevent cyclic reference cycles and ensure that
+    observer registration does not artificially prolong gateway lifetime.
+  - `UtxoReader`: Read-only projection of the authoritative `UtxoSet` (which is
+    mutated solely by chainstate under transition locks) to mempool and RPC.
+  - `InitialBlockDownload`: Coordinates chain sync and headers presync by
+    observing chain progress through read-only capabilities (`TipReader`,
+    `BlockTreeReader`).
+
 ## Test and evidence isolation
 
 Default production builds contain no storage persistence fault slots,

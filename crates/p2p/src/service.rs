@@ -237,6 +237,47 @@ struct ActiveOutbound {
     manual: bool,
 }
 
+/// Cloneable, read-only capability for querying the active manual ban list.
+///
+/// Ban mutations remain with the P2P service; connection workers only test
+/// addresses against the active table.
+#[derive(Clone, Debug)]
+pub struct BannedReader {
+    inner: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+}
+
+impl BannedReader {
+    /// Wraps the shared ban table in a read-only reader capability.
+    #[must_use]
+    pub const fn new(inner: Arc<RwLock<Vec<crate::BannedSubnet>>>) -> Self {
+        Self { inner }
+    }
+
+    /// Acquires a shared read lock on the ban list.
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, Vec<crate::BannedSubnet>> {
+        self.inner.read()
+    }
+
+    /// Returns whether the given IP is banned at the given time.
+    #[must_use]
+    pub fn is_banned(&self, ip: std::net::IpAddr, now: SystemTime) -> bool {
+        crate::subnet::is_banned(&self.inner.read(), ip, now)
+    }
+
+    /// Returns an empty fixture reader for tests.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn fixture_empty() -> Self {
+        Self::new(Arc::new(RwLock::new(Vec::new())))
+    }
+}
+
+impl From<Arc<RwLock<Vec<crate::BannedSubnet>>>> for BannedReader {
+    fn from(inner: Arc<RwLock<Vec<crate::BannedSubnet>>>) -> Self {
+        Self::new(inner)
+    }
+}
+
 /// The sole runtime owner of P2P control state and workers.
 pub struct P2pService {
     config: P2pServiceConfig,
@@ -249,9 +290,9 @@ pub struct P2pService {
     outbound_tx: Sender<OutboundDial>,
     outbound_rx: Arc<Mutex<Receiver<OutboundDial>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
-    inbound_headers_rx: Arc<Mutex<Receiver<crate::InboundHeaders>>>,
+    inbound_headers_rx: Mutex<Option<Receiver<crate::InboundHeaders>>>,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+    inbound_blocks_rx: Mutex<Option<Receiver<crate::InboundBlock>>>,
     workers: Mutex<Option<Workers>>,
     /// Per-start cancellation observed by listener and connection threads.
     /// A failed start leaves this token asserted; the next start installs a
@@ -288,9 +329,9 @@ impl P2pService {
             outbound_tx,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             inbound_headers_tx,
-            inbound_headers_rx: Arc::new(Mutex::new(inbound_headers_rx)),
+            inbound_headers_rx: Mutex::new(Some(inbound_headers_rx)),
             inbound_blocks_tx,
-            inbound_blocks_rx: Arc::new(Mutex::new(inbound_blocks_rx)),
+            inbound_blocks_rx: Mutex::new(Some(inbound_blocks_rx)),
             workers: Mutex::new(None),
         }
     }
@@ -324,7 +365,7 @@ impl P2pService {
 
         let mut shared = crate::listener::ConnectionShared::new(
             Arc::clone(&self.peer_table),
-            Arc::clone(&self.banned),
+            self.banned_reader(),
             Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
                 &self.network_active,
             ))),
@@ -420,7 +461,7 @@ impl P2pService {
                 let mut handles = Vec::new();
                 let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
                 while !shutdown.load(Ordering::Acquire)
-                    && !shared.session_cancel.load(Ordering::Acquire)
+                    && !shared.session_cancel.load()
                 {
                     reap_finished_outbound_connections(&mut active, &mut handles);
                     let now = Instant::now();
@@ -707,6 +748,12 @@ impl P2pService {
         self.banned.write().clear();
     }
 
+    /// Returns a read-only reader for the active manual bans.
+    #[must_use]
+    pub fn banned_reader(&self) -> BannedReader {
+        BannedReader::new(Arc::clone(&self.banned))
+    }
+
     /// Returns a snapshot of current manual bans.
     #[must_use]
     pub fn banned(&self) -> Vec<crate::BannedSubnet> {
@@ -761,16 +808,14 @@ impl P2pService {
         self.outbound_tx.send(OutboundDial::auto(addr))
     }
 
-    /// Returns a cloned inbound headers receiver for the node sync coordinator.
-    #[must_use]
-    pub fn inbound_headers_receiver(&self) -> Arc<Mutex<Receiver<crate::InboundHeaders>>> {
-        Arc::clone(&self.inbound_headers_rx)
+    /// Takes the inbound headers receiver for the single coordinator.
+    pub fn take_inbound_headers_receiver(&self) -> Option<Receiver<crate::InboundHeaders>> {
+        self.inbound_headers_rx.lock().take()
     }
 
-    /// Returns a cloned inbound block receiver for the node sync coordinator.
-    #[must_use]
-    pub fn inbound_blocks_receiver(&self) -> Arc<Mutex<Receiver<crate::InboundBlock>>> {
-        Arc::clone(&self.inbound_blocks_rx)
+    /// Takes the inbound block receiver for the single coordinator.
+    pub fn take_inbound_blocks_receiver(&self) -> Option<Receiver<crate::InboundBlock>> {
+        self.inbound_blocks_rx.lock().take()
     }
 
     /// Returns a sender for inbound block notifications.

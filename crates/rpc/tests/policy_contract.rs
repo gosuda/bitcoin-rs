@@ -1613,7 +1613,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),
             progress: chainstate.chain_progress_reader(),
-            blocks: state.blocks(),
+            blocks: state.block_log_reader(),
             utxo: chainstate.utxo_reader(),
             coin_stats: chainstate.coin_stats_handle(),
             block_tree: chainstate.block_tree_reader(),

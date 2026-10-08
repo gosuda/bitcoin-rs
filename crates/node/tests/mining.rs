@@ -445,7 +445,7 @@ fn proposal_has_no_side_effects() -> anyhow::Result<()> {
         .applied_tip_snapshot()
         .unwrap_or_else(|| panic!("applied tip missing before proposal"));
     let before_seq = state.mempool().read().sequence_number();
-    let before_blocks = state.blocks().read().len();
+    let before_blocks = state.block_log_reader().read().len();
 
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
@@ -466,7 +466,7 @@ fn proposal_has_no_side_effects() -> anyhow::Result<()> {
         .unwrap_or_else(|| panic!("applied tip missing after proposal"));
     assert_eq!(before.hash, after.hash);
     assert_eq!(before_seq, state.mempool().read().sequence_number());
-    assert_eq!(before_blocks, state.blocks().read().len());
+    assert_eq!(before_blocks, state.block_log_reader().read().len());
     Ok(())
 }
 
@@ -479,7 +479,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
         .applied_tip_snapshot()
         .unwrap_or_else(|| panic!("applied tip missing before proposal"));
     let before_seq = state.mempool().read().sequence_number();
-    let before_blocks = state.blocks().read().len();
+    let before_blocks = state.block_log_reader().read().len();
 
     let genesis = Network::Regtest.genesis_block();
     let child = excess_coinbase_child(genesis.block_hash())?;
@@ -502,7 +502,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
         .unwrap_or_else(|| panic!("applied tip missing after proposal"));
     assert_eq!(before.hash, after.hash);
     assert_eq!(before_seq, state.mempool().read().sequence_number());
-    assert_eq!(before_blocks, state.blocks().read().len());
+    assert_eq!(before_blocks, state.block_log_reader().read().len());
     Ok(())
 }
 

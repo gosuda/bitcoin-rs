@@ -17,7 +17,6 @@ use bitcoin_rs_p2p::sync::chain::{
 use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256, Header, Network};
 use crossbeam_channel::Receiver;
-use parking_lot::Mutex;
 
 pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
 
@@ -37,8 +36,8 @@ pub fn block_sync(
     handles: Arc<bitcoin_rs_chainstate::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     peer_table: Arc<PeerTable>,
-    inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    inbound_headers_rx: Receiver<InboundHeaders>,
+    inbound_blocks_rx: Receiver<bitcoin_rs_p2p::InboundBlock>,
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
 ) -> BlockSync {
     let block_tree = handles.block_tree_reader();
