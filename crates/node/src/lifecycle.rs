@@ -596,6 +596,13 @@ pub(crate) fn start_node(
         )
         .map_err(anyhow::Error::msg)?;
 
+    // A fresh chainstate leaves the applied-tip slot empty until the sync
+    // loop's first tick; applying genesis before the listener binds keeps
+    // RPC from answering mining calls it cannot yet serve, and a refused
+    // or unsettled connect aborts startup rather than serving that broken
+    // state.
+    crate::chain_effects::bootstrap_genesis(&chainstate, &state.chain_followers())
+        .map_err(|error| anyhow::Error::new(error).context("failed to bootstrap genesis"))?;
     let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source)?;
     let rpc_local_addr = rpc_server.local_addr()?;
     tracing::info!(addr = %rpc_local_addr, "rpc listener bound");

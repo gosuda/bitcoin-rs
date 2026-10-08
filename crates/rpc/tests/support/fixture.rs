@@ -672,7 +672,7 @@ fn validate_provenance(
             path.display()
         )));
     }
-    if provenance.core_binary_sha256 != release.bitcoind_sha256.to_lower_hex_string() {
+    if provenance.core_binary_sha256 != release.capture_bitcoind_sha256().to_lower_hex_string() {
         return Err(LoadError::Violation(format!(
             "{}: pinned binary digest does not match the selected Core release",
             path.display()
@@ -1018,7 +1018,7 @@ mod tests {
                 "source_commit" => {
                     edited.source_commit = "0000000000000000000000000000000000000000".to_owned();
                 }
-                "bitcoind_sha256" => edited.bitcoind_sha256 = [0; 32],
+                "bitcoind_sha256" => edited.canonical.bitcoind_sha256 = [0; 32],
                 "version_output" => {
                     edited.version_output = "Bitcoin Core daemon version v31.2.0".to_owned();
                 }
