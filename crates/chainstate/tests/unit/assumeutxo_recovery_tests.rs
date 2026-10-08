@@ -263,11 +263,20 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     };
     assert_eq!(checkpoint.height, 1);
     assert_eq!(checkpoint.hash, fixture.blocks[1].block_hash().0);
-    // Simulate repeated crashes after publication but before the durable-head
-    // reference commits. CURRENT leads, while the accepted coins stay intact.
     let historical = manager
         .historical_chainstate()
         .ok_or("missing historical")?;
+    let accepted_coins = historical.utxo.lock_stable_view().hash_serialized_3()?;
+    let accepted_stats = historical.coin_stats.snapshot();
+    // Advance only the isolated validator, leaving the active durable head at
+    // height 1. Publishing this distinct height-2 state models a crash before
+    // its reference is accepted; following CURRENT must not pass this test.
+    historical
+        .lock_transition()?
+        .into_transition()
+        .connect(&fixture.blocks[2], None)?;
+    let unaccepted_coins = historical.utxo.lock_stable_view().hash_serialized_3()?;
+    assert_ne!(unaccepted_coins, accepted_coins);
     let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir.path())?;
     let config = crate::checkpoint::headers::HeaderCheckpointConfig {
         network: Network::Regtest,
@@ -285,6 +294,29 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
             bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
         )?;
     }
+    let crate::checkpoint::CheckpointLoad::Complete(current) =
+        crate::checkpoint::load_checkpoint_from_dir_at(
+            &data,
+            config,
+            bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+        )?
+    else {
+        return Err("unaccepted CURRENT generation was not published".into());
+    };
+    assert_ne!(current.generation, checkpoint.checkpoint.generation);
+    assert_eq!(current.applied_tip.height, 2);
+    assert_eq!(current.applied_tip.hash, fixture.blocks[2].block_hash().0);
+    assert_eq!(current.coin_stats.tx_count, 3);
+    assert_eq!(
+        current.utxo.lock_stable_view().hash_serialized_3()?,
+        unaccepted_coins
+    );
+    assert_eq!(
+        manager.status()?,
+        status,
+        "publication cannot advance the durable head"
+    );
+    drop(current);
     drop(historical);
     drop(data);
     assert!(
@@ -312,7 +344,11 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     assert_eq!(restored_tip.height, 1);
     assert_eq!(restored_tip.hash, fixture.blocks[1].block_hash().0);
     assert_eq!(restored_tip.chain_tx_count.to_wire(), 2);
-    assert_eq!(historical.coin_stats.snapshot().tx_count, 2);
+    assert_eq!(historical.coin_stats.snapshot(), accepted_stats);
+    assert_eq!(
+        historical.utxo.lock_stable_view().hash_serialized_3()?,
+        accepted_coins
+    );
     let generations = std::fs::read_dir(
         dir.path()
             .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT),
