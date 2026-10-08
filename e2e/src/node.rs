@@ -443,9 +443,7 @@ impl ProcessNode {
             launch_command(kind, datadir.path(), rpc_addr, p2p_addr, options)?;
         command.args(options.extra_args);
         let executable = Path::new(command.get_program());
-        let mut engine = sha256::Hash::engine();
-        std::io::copy(&mut File::open(executable)?, &mut engine)?;
-        let digest = sha256::Hash::from_engine(engine);
+        let digest = file_sha256(executable)?;
         let config = match kind {
             Kind::BitcoinRs => Some(fs::read_to_string(datadir.path().join("node.toml"))?),
             Kind::Core => None,
@@ -455,7 +453,7 @@ impl ProcessNode {
             serde_json::to_vec_pretty(&json!({
                 "binary": format!("{kind:?}"),
                 "executable": executable,
-                "executable_sha256": digest.to_string(),
+                "executable_sha256": digest,
                 "argv": command.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>(),
                 "config": config,
                 "datadir": datadir.path(),
