@@ -2103,71 +2103,92 @@ mod tests {
     /// and both mutations are in the pool.
     #[test]
     fn gated_callback_lets_concurrent_mutation_enqueue_and_return() {
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let observer = Arc::new(GatedObserver {
-            entered: Mutex::new(Some(entered_tx)),
-            release: Mutex::new(Some(release_rx)),
-            stream: Mutex::new(Vec::new()),
-        });
-        let gateway = Arc::new(MempoolGateway::new(
-            Arc::clone(&pool),
-            Some(dyn_observer(&observer)),
-            ValidationEngine::Native,
-        ));
+        for (first_admission, second_admission) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let observer = Arc::new(GatedObserver {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(Some(release_rx)),
+                stream: Mutex::new(Vec::new()),
+            });
+            let gateway = gateway_with(Some(dyn_observer(&observer)));
 
-        let first_txid = tx(20).txid();
-        let first = Arc::clone(&gateway);
-        let first_handle = std::thread::spawn(move || {
-            first
-                .insert_entry(AdmissionOrigin::Rpc, entry(&tx(20)))
-                .expect("first in")
-        });
-        entered_rx
-            .recv_timeout(core::time::Duration::from_secs(10))
-            .expect("first observer call started");
+            let first_tx = if first_admission {
+                standard_tx(20)
+            } else {
+                tx(20)
+            };
+            let first_txid = first_tx.txid();
+            let first = Arc::clone(&gateway);
+            let first_handle =
+                std::thread::spawn(move || commit_ordering_tx(&first, &first_tx, first_admission));
+            entered_rx
+                .recv_timeout(core::time::Duration::from_secs(10))
+                .expect("first observer call started");
 
-        let second_txid = tx(21).txid();
-        let second = Arc::clone(&gateway);
-        let second_handle = std::thread::spawn(move || {
-            let result = second
-                .insert_entry(AdmissionOrigin::Rpc, entry(&tx(21)))
-                .expect("second in");
-            let _ = done_tx.send(result);
-        });
+            let second_tx = if second_admission {
+                standard_tx(21)
+            } else {
+                tx(21)
+            };
+            let second_txid = second_tx.txid();
+            let second = Arc::clone(&gateway);
+            let second_handle = std::thread::spawn(move || {
+                let result = commit_ordering_tx(&second, &second_tx, second_admission);
+                let _ = done_tx.send(result);
+            });
 
-        // The concurrent mutation must enqueue and return while the first
-        // callback is still gated: its thread hands back the committed
-        // result with the next sequence even though nothing has published.
-        let queued_result = done_rx
-            .recv_timeout(core::time::Duration::from_secs(10))
-            .expect("the concurrent mutation must return while the callback is gated");
-        assert_eq!(
-            queued_result.sequence_base, 2,
-            "the enqueued batch keeps its committed sequence"
-        );
+            // The concurrent mutation must enqueue and return while the first
+            // callback is still gated: its thread hands back the committed
+            // result with the next sequence even though nothing has published.
+            let queued_result = done_rx
+                .recv_timeout(core::time::Duration::from_secs(10))
+                .expect("the concurrent mutation must return while the callback is gated");
+            assert_eq!(
+                queued_result.sequence_base, 2,
+                "the enqueued batch keeps its committed sequence"
+            );
 
-        // Nothing may publish while the gate is closed.
-        assert_eq!(
-            observer.stream.lock().len(),
-            1,
-            "only the gated first batch is published so far"
-        );
+            // Nothing may publish while the gate is closed.
+            assert_eq!(
+                observer.stream.lock().len(),
+                1,
+                "only the gated first batch is published so far"
+            );
 
-        release_tx.send(()).expect("gate thread alive");
-        first_handle.join().expect("first publisher");
-        second_handle.join().expect("second publisher");
+            release_tx.send(()).expect("gate thread alive");
+            first_handle.join().expect("first publisher");
+            second_handle.join().expect("second publisher");
 
-        assert_eq!(
-            *observer.stream.lock(),
-            vec![1, 2],
-            "publish order matches sequence order"
-        );
-        let pool_read = gateway.read();
-        assert!(pool_read.contains_txid(&first_txid));
-        assert!(pool_read.contains_txid(&second_txid));
+            assert_eq!(
+                *observer.stream.lock(),
+                vec![1, 2],
+                "publish order matches sequence order"
+            );
+            let pool_read = gateway.read();
+            assert!(pool_read.contains_txid(&first_txid));
+            assert!(pool_read.contains_txid(&second_txid));
+        }
+    }
+
+    fn commit_ordering_tx(
+        gateway: &MempoolGateway,
+        tx: &Tx,
+        admission: bool,
+    ) -> crate::mutation::MutationResult {
+        if !admission {
+            return gateway
+                .insert_entry(AdmissionOrigin::Rpc, entry(tx))
+                .expect("inserted");
+        }
+        let outcome = gateway.admit_transaction(admit_request(gateway, tx, AdmissionOrigin::Rpc));
+        let Ok(AdmitOutcome::Committed(result)) = outcome else {
+            panic!("admission did not commit: {outcome:?}");
+        };
+        result
     }
 
     /// An observer that re-enters the gateway from its first callback and
