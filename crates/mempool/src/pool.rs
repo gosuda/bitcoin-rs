@@ -2089,7 +2089,7 @@ impl Mempool {
     }
 
     /// Returns the descendant-package count for `id` (inclusive of `id`
-    /// itself).
+    /// itself), saturating at `u32::MAX`.
     #[must_use]
     pub fn descendant_count_inclusive(&self, id: EntryId) -> u32 {
         let mut descendants = Vec::new();

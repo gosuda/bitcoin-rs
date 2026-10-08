@@ -383,7 +383,7 @@ fn pool_fingerprint(pool: &Mempool) -> PoolFingerprint {
 
 #[test]
 fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Error>> {
-    // (a) BIP125 rules pass, but the pool min-relay floor rejects before mutation.
+    // BIP125 rules pass, but the pool min-relay floor rejects before mutation.
     {
         let mut pool = Mempool::new(MempoolLimits::default());
         let original = tx_from_inputs(20, &[(outpoint(1, 0), 0xFFFF_FFFD)], 1);
