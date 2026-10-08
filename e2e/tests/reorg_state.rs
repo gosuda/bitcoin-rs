@@ -189,8 +189,8 @@ fn equal_work_then_one_block_reorg_matches_clean_sync() -> Result<()> {
     );
     let rival_coinbase = rival.txdata[0].compute_txid().to_string();
     assert!(!compare_coin(&mut core, &mut reorg, &mut clean, &rival_coinbase, false)?.is_null());
-    assert!(sorted_mempool(&mut reorg)?.is_empty());
-    assert!(sorted_mempool(&mut clean)?.is_empty());
+    assert_eq!(sorted_mempool(&mut reorg)?, Vec::<String>::new());
+    assert_eq!(sorted_mempool(&mut clean)?, Vec::<String>::new());
     reorg.stop()?;
     clean.stop()?;
     core.stop()
