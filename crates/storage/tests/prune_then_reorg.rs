@@ -1024,7 +1024,7 @@ enum WriteDurableOutcome {
 const EXECUTED_FRONTIER_KEY: &[u8] = b"node:prune_executed";
 
 struct MemoryStore {
-    cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
+    cfs: RwLock<Families>,
     /// Armed outcome for the next `write_durable`.
     write_durable_outcome: Mutex<Option<WriteDurableOutcome>>,
     /// Reads of `node:prune_executed` fail once this many have succeeded,
@@ -1111,26 +1111,7 @@ impl KvStore for MemoryStore {
     }
 
     fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        let mut guard = self.cfs.write();
-        for op in batch.into_ops() {
-            match op {
-                BatchOp::Put { cf, key, value } => {
-                    guard[cf.index()].insert(key, value.into());
-                }
-                BatchOp::Delete { cf, key } => {
-                    guard[cf.index()].remove(&key);
-                }
-                BatchOp::DeleteRange { cf, start, end } => {
-                    let keys = guard[cf.index()]
-                        .range(start..end)
-                        .map(|(key, _value)| key.clone())
-                        .collect::<Vec<_>>();
-                    for key in keys {
-                        guard[cf.index()].remove(&key);
-                    }
-                }
-            }
-        }
+        apply_ops(&mut self.cfs.write(), batch);
         Ok(())
     }
 
@@ -1165,25 +1146,7 @@ impl KvStore for MemoryStore {
                 return Ok(false);
             }
         }
-        for op in batch.into_ops() {
-            match op {
-                BatchOp::Put { cf, key, value } => {
-                    guard[cf.index()].insert(key, value.into());
-                }
-                BatchOp::Delete { cf, key } => {
-                    guard[cf.index()].remove(&key);
-                }
-                BatchOp::DeleteRange { cf, start, end } => {
-                    let keys = guard[cf.index()]
-                        .range(start..end)
-                        .map(|(key, _value)| key.clone())
-                        .collect::<Vec<_>>();
-                    for key in keys {
-                        guard[cf.index()].remove(&key);
-                    }
-                }
-            }
-        }
+        apply_ops(&mut guard, batch);
         Ok(true)
     }
 
@@ -1201,8 +1164,32 @@ impl KvStore for MemoryStore {
     }
 }
 
+type Families = [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()];
+
+fn apply_ops(families: &mut Families, batch: BufferedWriteBatch) {
+    for op in batch.into_ops() {
+        match op {
+            BatchOp::Put { cf, key, value } => {
+                families[cf.index()].insert(key, value.into());
+            }
+            BatchOp::Delete { cf, key } => {
+                families[cf.index()].remove(&key);
+            }
+            BatchOp::DeleteRange { cf, start, end } => {
+                let keys = families[cf.index()]
+                    .range(start..end)
+                    .map(|(key, _value)| key.clone())
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    families[cf.index()].remove(&key);
+                }
+            }
+        }
+    }
+}
+
 struct MemorySnapshot {
-    cfs: [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()],
+    cfs: Families,
 }
 
 impl KvSnapshot for MemorySnapshot {

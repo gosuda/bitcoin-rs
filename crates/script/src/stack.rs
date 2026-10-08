@@ -88,16 +88,6 @@ impl Stack {
         Ok(())
     }
 
-    /// Swaps the top two items.
-    pub(crate) fn swap(&mut self) -> Result<(), StackError> {
-        if self.items.len() < 2 {
-            return Err(StackError::Underflow);
-        }
-        let len = self.items.len();
-        self.items.swap(len - 1, len - 2);
-        Ok(())
-    }
-
     /// Swaps the items at the given depths (0 = top, 1 = second-from-top, …).
     pub(crate) fn swap_at(&mut self, depth_a: usize, depth_b: usize) -> Result<(), StackError> {
         let len = self.items.len();

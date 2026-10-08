@@ -97,6 +97,12 @@ archive = "bitcoin-31.1-arm64-apple-darwin.tar.gz"
 archive_sha256 = "16a097c09fbd7eb78b240ce1dae123663ea2e5e377cfd6a951e71e227e23cf2f"
 bitcoind_sha256 = "d55c12b0b02001cc16b1481c4075361dcba193100a8143924abda911174c09ec"
 
+[[reference.release.platforms]]
+target = "win64"
+archive = "bitcoin-31.1-win64.zip"
+archive_sha256 = "c99ef173471c58e6766d9eebd12e6c35349082eeed3939bc99eed58ef57db587"
+bitcoind_sha256 = "f79eeb94e1379986df9f7be4c78c8fc8e18dc9be64a31cbaa8acad249d3db77a"
+
 # Replay corpora, pinned by stop identity. `manifest_sha256` is produced when
 # the corpus archive is exported; until then it stays ABSENT (a placeholder
 # digest would be an invented one, so the loader reports the corpus as

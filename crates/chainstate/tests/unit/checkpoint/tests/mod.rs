@@ -6,6 +6,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
+use bitcoin_rs_chain::regtest_fixture::mined_regtest_header;
 use bitcoin_rs_chain::{BlockTree, NodeId, TipSnapshot, accept_headers, compact_is_met_by};
 use bitcoin_rs_primitives::{
     Amount, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, TxOut, Txid,
@@ -119,7 +120,7 @@ fn write_checkpoint(
 fn chain_with_applied_height(
     best_height: u32,
     applied_height: u32,
-) -> Result<(BlockTree, NodeId, headers::HeaderCheckpointPoint), headers::HeaderCheckpointError> {
+) -> Result<(BlockTree, NodeId, headers::HeaderCheckpointPoint), Box<dyn std::error::Error>> {
     let genesis = NETWORK.genesis_block().header;
     let mut tree = BlockTree::new();
     let mut current = accept_headers(
@@ -131,8 +132,7 @@ fn chain_with_applied_height(
     )?[0];
     for height in 1..=best_height {
         let prev = BlockHash(tree.node(current)?.hash);
-        let mut header = next_header(prev, height);
-        mine_header_to_declared_target(&mut header)?;
+        let header = mined_regtest_header(prev, height)?;
         current = accept_headers(
             &mut tree,
             core::slice::from_ref(&header),
@@ -152,17 +152,6 @@ fn chain_with_applied_height(
         current,
         headers::HeaderCheckpointPoint { height, hash },
     ))
-}
-
-fn next_header(prev_blockhash: BlockHash, height: u32) -> Header {
-    Header {
-        version: 1,
-        prev_blockhash,
-        merkle_root: Hash256::default(),
-        time: 1_296_688_602_u32.saturating_add(height),
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        nonce: 0,
-    }
 }
 
 fn mine_header_to_declared_target(

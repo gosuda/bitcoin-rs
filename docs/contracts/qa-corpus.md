@@ -12,15 +12,20 @@ end-state evidence roles.
 ### `QAC-01`: Fuzz seed provenance and corpus maintenance
 
 - **Owner**: `fuzz/CORPUS_PROVENANCE.md` owns fuzz seed provenance (seeds
-  imported from `rust-bitcoin/qa-assets`, CC0-1.0, minimized with `cargo fuzz cmin`).
+  imported from `rust-bitcoin/qa-assets` (CC0-1.0) and from the
+  `bitcoin/bitcoin` (MIT) and `btcsuite/btcd` (ISC) reference corpora,
+  minimized with `cargo fuzz cmin`).
 - **Scope**: seeds under `fuzz/corpus/` feeding fuzz targets
-  `fuzz/fuzz_targets/p2p_message.rs`, `block_validate.rs`, `tx_validate.rs`, and
-  `script_eval.rs`.
+  `fuzz/fuzz_targets/p2p_message.rs`, `block_validate.rs`, `tx_validate.rs`,
+  `script_eval.rs`, and `utxo_snapshot.rs`. Each upstream source has its own
+  run-dependent record section in the provenance document; the
+  `## Reference corpora` section is owned and refreshed by
+  `scripts/import-reference-corpora.sh`.
 - `scripts/fuzz-policy.sh` owns `FUZZ_MAX_SEED_BYTES`, the input-size bound
   shared by QA import and scheduled corpus evolution. Provenance publishes the
   current value; it does not own a second copy.
 - Provenance rows must be updated in the same commit as any corpus re-import via
-  `scripts/import-qa-assets.sh`.
+  `scripts/import-qa-assets.sh` or `scripts/import-reference-corpora.sh`.
 
 ### `QAC-04`: Published seed-file permissions
 
@@ -31,10 +36,11 @@ end-state evidence roles.
 
 ### `QAC-02`: End-state evidence roles
 
-- G0 pins: the pinned `rust-bitcoin/qa-assets` commit and the minimized seed
-  set are recorded in `fuzz/CORPUS_PROVENANCE.md` and mirrored by the
-  reference set. The identity is a commit hash and a manifest digest, not a
-  repository tag alone.
+- G0 pins: the pinned `rust-bitcoin/qa-assets`, `bitcoin/bitcoin`, and
+  `btcsuite/btcd` commits and the minimized seed set are recorded in
+  `fuzz/CORPUS_PROVENANCE.md`; the reference-set digests identify replay
+  corpora separately. The fuzz-source identity is its upstream commit pins,
+  not a repository tag alone.
 - G5 replay and parity arms: the QA corpus feeds parser, transaction, block,
   P2P message, and script-evaluation fuzz targets. Invalid and
   nonstandard-but-consensus-valid inputs are counted and classified.
@@ -63,8 +69,10 @@ end-state evidence roles.
 
 ### `QAC-03`: Importer acquisition and provenance publication
 
-`scripts/import-qa-assets.sh` first verifies that its required tools are
-available and creates its isolated staging paths. Setup failures propagate the
+`scripts/import-qa-assets.sh` and `scripts/import-reference-corpora.sh` first
+verify that their required tools are available and create their isolated
+staging paths. What follows describes the importer pattern both scripts
+implement. Setup failures propagate the
 failing tool status and remove any staging path before acquisition begins.
 After setup succeeds, the importer uses fail-closed acquisition and publication
 semantics:
@@ -72,7 +80,7 @@ semantics:
 - the pinned upstream commit check, clone-size measurement, each corpus
   minimization, and the UTC import timestamp must succeed; a nonzero tool status
   is not hidden by valid output from that tool;
-- provenance is not replaced until mapping and all four minimization commands
+- provenance is not replaced until mapping and all minimization commands
   have succeeded;
 - a refresh is written to a same-directory staging file, completed successfully,
   set to repository-document mode `0644`, and then atomically replaces the
@@ -95,6 +103,9 @@ nonzero-status propagation; they are not stable public status-code assignments.
   license, per-target mapping, and refresh rule.
 - `scripts/tests/test_import_qa_assets_provenance.py`: `QAC-03` acquisition,
   minimization, cleanup, mode, and failure-atomic provenance publication.
+- `scripts/tests/test_import_reference_corpora.py`: `QAC-03` pinned-clone
+  acquisition, per-source provenance-section refresh, authored-head
+  preservation, and failure atomicity for the reference importer.
 - `bin/bitcoin-rs/tests/overhaul_reference_set.rs`: G0 pin; rejects
   a corpus absent from the manifest and reports an unpinned manifest digest
   as custody-blocked (the upstream qa-assets commit is pinned by

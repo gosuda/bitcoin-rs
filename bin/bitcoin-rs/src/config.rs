@@ -398,15 +398,21 @@ listen=0
 mod compat_tests {
     use super::user_config_from_bitcoin_conf;
     use anyhow::Result;
-    use bitcoin_rs_node::{Auth, Network, resolve};
+    use bitcoin_rs_node::{Auth, Network, NodeConfig, resolve};
     use std::fs;
+
+    fn load_conf(text: &str, network: Network) -> Result<NodeConfig> {
+        let temp = tempfile::tempdir()?;
+        let conf_path = temp.path().join("bitcoin.conf");
+        fs::write(&conf_path, text)?;
+        let layers = user_config_from_bitcoin_conf(&conf_path, network)?;
+        let layer_refs: Vec<_> = layers.iter().collect();
+        resolve(&layer_refs)
+    }
 
     #[test]
     fn bitcoin_conf_core_keys_map_into_config() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let conf_path = temp.path().join("bitcoin.conf");
-        fs::write(
-            &conf_path,
+        let config = load_conf(
             r"
 # Global Core options may carry a leading dash.
 -prune=550
@@ -417,11 +423,8 @@ mod compat_tests {
 -txindex=1
 -dbcache=768
 ",
+            Network::Mainnet,
         )?;
-
-        let layer = user_config_from_bitcoin_conf(&conf_path, Network::Mainnet)?;
-        let layer_refs: Vec<_> = layer.iter().collect();
-        let config = resolve(&layer_refs)?;
 
         assert_eq!(config.storage.prune_target_mb, 550);
         assert_auth(&config.rpc.auth, "foo", "bar");
@@ -433,10 +436,7 @@ mod compat_tests {
 
     #[test]
     fn bitcoin_conf_network_sections_override_globals_for_selected_network() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let conf_path = temp.path().join("bitcoin.conf");
-        fs::write(
-            &conf_path,
+        let config = load_conf(
             r"
 -prune=550
 [regtest]
@@ -444,11 +444,8 @@ mod compat_tests {
 -rpcuser=regtest-user
 -rpcpassword=regtest-pass
 ",
+            Network::Regtest,
         )?;
-
-        let layer = user_config_from_bitcoin_conf(&conf_path, Network::Regtest)?;
-        let layer_refs: Vec<_> = layer.iter().collect();
-        let config = resolve(&layer_refs)?;
 
         assert_eq!(config.storage.prune_target_mb, 900);
         assert_auth(&config.rpc.auth, "regtest-user", "regtest-pass");
@@ -457,10 +454,7 @@ mod compat_tests {
 
     #[test]
     fn bitcoin_conf_zmq_keys_are_not_promoted_into_node_config() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let conf_path = temp.path().join("bitcoin.conf");
-        fs::write(
-            &conf_path,
+        let config = load_conf(
             r"
 -zmqpubhashblock=tcp://127.0.0.1:28332
 -zmqpubhashblock=tcp://127.0.0.1:28333
@@ -471,11 +465,8 @@ mod compat_tests {
 -zmqpubsequence=tcp://127.0.0.1:28335
 -zmqpubsequencehwm=7
 ",
+            Network::Regtest,
         )?;
-
-        let layer = user_config_from_bitcoin_conf(&conf_path, Network::Regtest)?;
-        let layer_refs: Vec<_> = layer.iter().collect();
-        let config = resolve(&layer_refs)?;
 
         assert_eq!(config.notifications.zmq, []);
         Ok(())
@@ -483,18 +474,12 @@ mod compat_tests {
 
     #[test]
     fn bitcoin_conf_assumevalid_is_not_mapped_to_height_only_setting() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let conf_path = temp.path().join("bitcoin.conf");
-        fs::write(
-            &conf_path,
+        let config = load_conf(
             r"
 assumevalid=0000000000000000000000000000000000000000000000000000000000000000
 ",
+            Network::Mainnet,
         )?;
-
-        let layer = user_config_from_bitcoin_conf(&conf_path, Network::Mainnet)?;
-        let layer_refs: Vec<_> = layer.iter().collect();
-        let config = resolve(&layer_refs)?;
 
         assert_eq!(
             config.validation.assume_valid_height,

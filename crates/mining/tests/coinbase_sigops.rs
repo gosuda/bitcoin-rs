@@ -4,6 +4,7 @@
 //! then returns immediately for coinbase. rust-bitcoin supplies an independent
 //! transaction-cost oracle; admitted snapshot costs are already scaled.
 
+#[path = "common/fixtures.rs"]
 mod common;
 
 use std::error::Error;

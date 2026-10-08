@@ -2,14 +2,7 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-#[cfg(any(
-    target_vendor = "apple",
-    target_os = "linux",
-    target_os = "android",
-    target_os = "redox"
-))]
-use cap_fs_ext::OpenOptionsMaybeDirExt;
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
@@ -262,16 +255,32 @@ pub fn sync_dir(dir: &Dir) -> io::Result<()> {
     dir.open_with(".", &options)?.sync_all()
 }
 
+#[cfg(windows)]
+/// Flushes a directory entry to durable storage.
+///
+/// Windows flushes a directory handle only when it carries `GENERIC_WRITE`
+/// (`FlushFileBuffers` fails with `ERROR_ACCESS_DENIED` on a read-only
+/// handle), so the reopen requests write access. `maybe_dir` makes the
+/// open add `FILE_FLAG_BACKUP_SEMANTICS`, which directories require.
+pub fn sync_dir(dir: &Dir) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .maybe_dir(true)
+        .follow(FollowSymlinks::No);
+    dir.open_with(".", &options)?.sync_all()
+}
+
 #[cfg(not(any(
     target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
-    target_os = "redox"
+    target_os = "redox",
+    windows
 )))]
 /// Returns success when the platform cannot fsync directory handles.
 pub fn sync_dir(_dir: &Dir) -> io::Result<()> {
-    // Windows does not support flushing a directory handle with the access
-    // mode used by cap-std. File contents are still flushed by File::sync_all.
     Ok(())
 }
 
@@ -288,5 +297,7 @@ pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<
             dir.remove_file(file_name)?;
         }
     }
+    // Windows refuses RemoveDirectory while a handle on the target is open.
+    drop(dir);
     root.remove_dir(name)
 }

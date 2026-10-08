@@ -45,10 +45,11 @@ recorded under `[reference.release]` in the manifest:
 - `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`
 
 Additional platform artifacts live under `[[reference.release.platforms]]`
-rows of the same shape, each pinned by target (currently `arm64-apple-darwin`)
-so the live lanes can run the same pinned Core release on other hosts. The
-canonical row is the fixture-capture platform and is never inferred from the
-host: fixture provenance always compares against the canonical `bitcoind_sha256`.
+rows of the same shape, each pinned by target (currently `arm64-apple-darwin`
+and `win64`) so the live lanes can run the same pinned Core release on other
+hosts. The canonical row is the fixture-capture platform and is never
+inferred from the host: fixture provenance always compares against the
+canonical `bitcoind_sha256`.
 
 This is the behavioral reference. No compatibility claim may be made against a
 version string or a source snapshot alone.

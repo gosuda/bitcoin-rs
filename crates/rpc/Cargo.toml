@@ -55,4 +55,10 @@ bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-utxo = { workspace = true, features = ["test-seam"] }
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
 rustix.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+cap-std.workspace = true
+cap-fs-ext.workspace = true

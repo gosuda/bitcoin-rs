@@ -582,47 +582,41 @@ mod tests {
     use super::{ChainTxData, Network};
     use crate::Hash256;
 
-    #[test]
-    fn bip16_p2sh_exception_matches_core_block_170060() -> Result<(), Box<dyn std::error::Error>> {
-        let exception = Hash256::from_str_be(
-            "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22",
-        )?;
-
-        assert!(Network::Mainnet.is_bip16_p2sh_exception(exception));
-
-        // Only mainnet has this grandfathered block.
-        assert!(!Network::Testnet3.is_bip16_p2sh_exception(exception));
-        assert!(!Network::Regtest.is_bip16_p2sh_exception(exception));
-
-        // A different hash is not the exception, even on mainnet.
-        assert!(!Network::Mainnet.is_bip16_p2sh_exception(Network::Mainnet.genesis_block_hash()));
-        assert!(!Network::Mainnet.is_bip16_p2sh_exception(Hash256::from_le_bytes(&[0u8; 32])));
-
-        Ok(())
-    }
+    const NETWORKS: [Network; 5] = [
+        Network::Mainnet,
+        Network::Testnet3,
+        Network::Testnet4,
+        Network::Signet,
+        Network::Regtest,
+    ];
 
     #[test]
-    fn bip16_p2sh_exception_matches_core_testnet3_block_394()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let exception = Hash256::from_str_be(
-            "00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105",
-        )?;
-
-        assert!(Network::Testnet3.is_bip16_p2sh_exception(exception));
-
-        // The testnet3 grandfathered block is not the mainnet exception, and other
-        // networks have no such block.
-        assert!(!Network::Mainnet.is_bip16_p2sh_exception(exception));
-        assert!(!Network::Testnet4.is_bip16_p2sh_exception(exception));
-        assert!(!Network::Regtest.is_bip16_p2sh_exception(exception));
-
-        // Cross-network isolation: the mainnet 170060 exception hash must NOT be excepted
-        // on testnet3.
-        let mainnet_exception = Hash256::from_str_be(
-            "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22",
-        )?;
-        assert!(!Network::Testnet3.is_bip16_p2sh_exception(mainnet_exception));
-
+    fn bip16_p2sh_exceptions_are_isolated_to_their_core_networks() -> Result<(), crate::HashError> {
+        for (owner, hex) in [
+            (
+                Network::Mainnet,
+                "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22",
+            ),
+            (
+                Network::Testnet3,
+                "00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105",
+            ),
+        ] {
+            let exception = Hash256::from_str_be(hex)?;
+            for network in NETWORKS {
+                assert_eq!(
+                    network.is_bip16_p2sh_exception(exception),
+                    network == owner,
+                    "{network:?}: {hex}"
+                );
+                for ordinary in [network.genesis_block_hash(), Hash256::default()] {
+                    assert!(
+                        !network.is_bip16_p2sh_exception(ordinary),
+                        "{network:?}: {ordinary}"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -665,48 +659,23 @@ mod tests {
 
     #[test]
     fn pow_difficulty_parameters_match_core_chainparams() {
-        for network in [
-            Network::Mainnet,
-            Network::Testnet3,
-            Network::Testnet4,
-            Network::Signet,
-            Network::Regtest,
+        for (network, timespan, min_difficulty, no_retarget, bip94) in [
+            (Network::Mainnet, 14 * 24 * 60 * 60, false, false, false),
+            (Network::Testnet3, 14 * 24 * 60 * 60, true, false, false),
+            (Network::Testnet4, 14 * 24 * 60 * 60, true, false, true),
+            (Network::Signet, 14 * 24 * 60 * 60, false, false, false),
+            (Network::Regtest, 24 * 60 * 60, true, true, false),
         ] {
-            assert_eq!(network.target_spacing_seconds(), 600);
+            assert_eq!(network.target_spacing_seconds(), 600, "{network:?}");
+            assert_eq!(network.target_timespan_seconds(), timespan, "{network:?}");
+            assert_eq!(
+                network.allow_min_difficulty_blocks(),
+                min_difficulty,
+                "{network:?}"
+            );
+            assert_eq!(network.pow_no_retargeting(), no_retarget, "{network:?}");
+            assert_eq!(network.enforce_bip94(), bip94, "{network:?}");
         }
-
-        assert_eq!(
-            Network::Mainnet.target_timespan_seconds(),
-            14 * 24 * 60 * 60
-        );
-        assert_eq!(
-            Network::Testnet3.target_timespan_seconds(),
-            14 * 24 * 60 * 60
-        );
-        assert_eq!(
-            Network::Testnet4.target_timespan_seconds(),
-            14 * 24 * 60 * 60
-        );
-        assert_eq!(Network::Signet.target_timespan_seconds(), 14 * 24 * 60 * 60);
-        assert_eq!(Network::Regtest.target_timespan_seconds(), 24 * 60 * 60);
-
-        assert!(!Network::Mainnet.allow_min_difficulty_blocks());
-        assert!(Network::Testnet3.allow_min_difficulty_blocks());
-        assert!(Network::Testnet4.allow_min_difficulty_blocks());
-        assert!(!Network::Signet.allow_min_difficulty_blocks());
-        assert!(Network::Regtest.allow_min_difficulty_blocks());
-
-        assert!(!Network::Mainnet.pow_no_retargeting());
-        assert!(!Network::Testnet3.pow_no_retargeting());
-        assert!(!Network::Testnet4.pow_no_retargeting());
-        assert!(!Network::Signet.pow_no_retargeting());
-        assert!(Network::Regtest.pow_no_retargeting());
-
-        assert!(!Network::Mainnet.enforce_bip94());
-        assert!(!Network::Testnet3.enforce_bip94());
-        assert!(Network::Testnet4.enforce_bip94());
-        assert!(!Network::Signet.enforce_bip94());
-        assert!(!Network::Regtest.enforce_bip94());
     }
 
     #[test]
@@ -734,53 +703,38 @@ mod tests {
 
     #[test]
     fn softfork_activations_match_core_chainparams() {
-        fn assert_activation(
-            is_active: impl Fn(Network, u32) -> bool,
-            network: Network,
-            activation: u32,
-        ) {
-            if activation == 0 {
-                assert!(is_active(network, 0));
-            } else {
-                assert!(!is_active(network, activation - 1));
-                assert!(is_active(network, activation));
+        type Activation = fn(Network, u32) -> bool;
+        let activations: [(&str, Activation, [u32; 5]); 5] = [
+            (
+                "BIP65",
+                Network::is_bip65_active,
+                [388_381, 581_885, 1, 1, 1_351],
+            ),
+            (
+                "BIP66",
+                Network::is_bip66_active,
+                [363_725, 330_776, 1, 1, 1_251],
+            ),
+            ("CSV", Network::is_csv_active, [419_328, 770_112, 1, 1, 432]),
+            (
+                "Segwit",
+                Network::is_segwit_active,
+                [481_824, 834_624, 0, 0, 0],
+            ),
+            (
+                "Taproot",
+                Network::is_taproot_active,
+                [709_632, 2_017_256, 0, 0, 0],
+            ),
+        ];
+        for (rule, is_active, heights) in activations {
+            for (network, activation) in NETWORKS.into_iter().zip(heights) {
+                if activation > 0 {
+                    assert!(!is_active(network, activation - 1), "{network:?}: {rule}");
+                }
+                assert!(is_active(network, activation), "{network:?}: {rule}");
             }
         }
-
-        // BIP65
-        assert_activation(Network::is_bip65_active, Network::Mainnet, 388_381);
-        assert_activation(Network::is_bip65_active, Network::Testnet3, 581_885);
-        assert_activation(Network::is_bip65_active, Network::Testnet4, 1);
-        assert_activation(Network::is_bip65_active, Network::Signet, 1);
-        assert_activation(Network::is_bip65_active, Network::Regtest, 1_351);
-
-        // BIP66
-        assert_activation(Network::is_bip66_active, Network::Mainnet, 363_725);
-        assert_activation(Network::is_bip66_active, Network::Testnet3, 330_776);
-        assert_activation(Network::is_bip66_active, Network::Testnet4, 1);
-        assert_activation(Network::is_bip66_active, Network::Signet, 1);
-        assert_activation(Network::is_bip66_active, Network::Regtest, 1_251);
-
-        // CSV
-        assert_activation(Network::is_csv_active, Network::Mainnet, 419_328);
-        assert_activation(Network::is_csv_active, Network::Testnet3, 770_112);
-        assert_activation(Network::is_csv_active, Network::Testnet4, 1);
-        assert_activation(Network::is_csv_active, Network::Signet, 1);
-        assert_activation(Network::is_csv_active, Network::Regtest, 432);
-
-        // Segwit
-        assert_activation(Network::is_segwit_active, Network::Mainnet, 481_824);
-        assert_activation(Network::is_segwit_active, Network::Testnet3, 834_624);
-        assert_activation(Network::is_segwit_active, Network::Testnet4, 0);
-        assert_activation(Network::is_segwit_active, Network::Signet, 0);
-        assert_activation(Network::is_segwit_active, Network::Regtest, 0);
-
-        // Taproot
-        assert_activation(Network::is_taproot_active, Network::Mainnet, 709_632);
-        assert_activation(Network::is_taproot_active, Network::Testnet3, 2_017_256);
-        assert_activation(Network::is_taproot_active, Network::Testnet4, 0);
-        assert_activation(Network::is_taproot_active, Network::Signet, 0);
-        assert_activation(Network::is_taproot_active, Network::Regtest, 0);
     }
     #[test]
     fn every_network_carries_chain_tx_data() {

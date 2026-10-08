@@ -9,7 +9,6 @@
 //! exact Core provenance (version, binary digest, network).
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use bitcoin::hex::DisplayHex as _;
@@ -306,46 +305,22 @@ fn load_corpus_from(
     dir: &Path,
     release: &reference_set::ReleaseIdentity,
 ) -> Result<BTreeMap<String, Fixture>, LoadError> {
-    // Root custody: the corpus directory itself is opened no-follow, and
-    // every entry is read from and opened relative to that one descriptor.
-    // A replacement of the directory name after this point cannot redirect
+    // Root custody: the corpus directory itself is opened once, and every
+    // entry is read from and opened relative to that one handle. A
+    // replacement of the directory name after this point cannot redirect
     // any child open, because no child is ever resolved by full pathname.
-    let dir_fd = rustix::fs::open(
-        dir,
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC
-            | rustix::fs::OFlags::DIRECTORY,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|error| {
-        LoadError::Violation(format!(
-            "{}: corpus directory could not be opened no-follow: {error}",
-            dir.display()
-        ))
-    })?;
-    let entries = rustix::fs::Dir::read_from(&dir_fd).map_err(|error| {
-        LoadError::Violation(format!(
-            "{}: corpus directory could not be enumerated: {error}",
-            dir.display()
-        ))
-    })?;
+    let corpus_dir = corpus_io::open(dir)?;
+    // Enumeration streams: the entry-count ceiling below stops the walk at
+    // the first over-limit item instead of materializing a directory of
+    // unbounded size.
+    let entries = corpus_io::entries(&corpus_dir, dir)?;
     let mut fixture_count = 0_usize;
     let mut corpus_bytes = 0_u64;
     let mut fixtures = BTreeMap::new();
-    // One dirfd walk does both custody accounting and reading: there is no
+    // One custody walk does both custody accounting and reading: there is no
     // second pathname-based pass whose view could disagree with this one.
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            LoadError::Violation(format!(
-                "{}: corpus directory entry could not be read: {error}",
-                dir.display()
-            ))
-        })?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name == "." || name == ".." {
-            continue;
-        }
+    for name in entries {
+        let name = name?;
         // Every entry counts against the ceiling BEFORE any name-shape
         // filtering: unlimited non-JSON junk can no longer bypass the cap.
         fixture_count += 1;
@@ -364,7 +339,7 @@ fn load_corpus_from(
                 path.display()
             )));
         }
-        let bytes = read_regular_bounded(&dir_fd, &name, &path)?;
+        let bytes = corpus_io::read_regular_bounded(&corpus_dir, &name, &path)?;
         let actual = len_u64(bytes.len());
         corpus_bytes += actual;
         if corpus_bytes > MAX_CORPUS_BYTES {
@@ -393,65 +368,264 @@ fn load_corpus_from(
     Ok(fixtures)
 }
 
-/// Reads one fixture from the corpus directory descriptor with no window
-/// between the type check and the read: `openat` refuses to follow a final
-/// symlink, `fstat` interrogates the *same* descriptor the bytes come from,
-/// and the read is bounded by one extra byte past the ceiling so a lying
-/// `st_size` cannot widen it.
-///
-/// # Errors
-/// [`LoadError::Violation`] when the entry is not a regular file or exceeds
-/// the per-fixture ceiling.
-pub(crate) fn read_regular_bounded(
-    dir_fd: &rustix::fd::OwnedFd,
-    name: &str,
-    path: &Path,
-) -> Result<Vec<u8>, LoadError> {
-    let refuse = |why: &str| {
-        LoadError::Violation(format!(
-            "{}: only regular files may carry fixtures; symlinks and directories are \
-             refused ({why})",
-            path.display()
-        ))
-    };
-    // `NOFOLLOW` refuses a final symlink outright; `NONBLOCK` keeps a FIFO
-    // from blocking the open itself, so its type can be judged by `fstat`.
-    let file_fd = rustix::fs::openat(
-        dir_fd,
-        name,
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::NONBLOCK
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    )
-    .map_err(|error| {
-        if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::MLINK {
-            refuse("is a symbolic link")
-        } else {
-            LoadError::Violation(format!("{}: could not be opened: {error}", path.display()))
+/// Corpus I/O under custody of one directory handle. Both arms provide the
+/// same three guarantees: the root is opened once and refused when it is not
+/// a real directory, entries are enumerated from that open handle, and every
+/// fixture read is relative to it with no path re-resolution in between.
+#[cfg(unix)]
+mod corpus_io {
+    use std::io::Read as _;
+    use std::path::Path;
+
+    use super::{LoadError, MAX_FIXTURE_BYTES, len_u64};
+
+    /// Unix custody is the raw directory descriptor `openat` works against.
+    pub(super) type CorpusDir = rustix::fd::OwnedFd;
+
+    /// Opens the corpus root no-follow as a directory descriptor.
+    pub(super) fn open(dir: &Path) -> Result<CorpusDir, LoadError> {
+        rustix::fs::open(
+            dir,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| {
+            LoadError::Violation(format!(
+                "{}: corpus directory could not be opened no-follow: {error}",
+                dir.display()
+            ))
+        })
+    }
+
+    /// Streams the corpus root's entry names through the open descriptor.
+    pub(super) fn entries<'a>(
+        dir: &'a CorpusDir,
+        path: &'a Path,
+    ) -> Result<Box<dyn Iterator<Item = Result<String, LoadError>> + 'a>, LoadError> {
+        let inner = rustix::fs::Dir::read_from(dir).map_err(|error| {
+            LoadError::Violation(format!(
+                "{}: corpus directory could not be enumerated: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(Box::new(inner.filter_map(move |entry| match entry {
+            Err(error) => Some(Err(LoadError::Violation(format!(
+                "{}: corpus directory entry could not be read: {error}",
+                path.display()
+            )))),
+            Ok(entry) => {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (!matches!(name.as_str(), "." | "..")).then_some(Ok(name))
+            }
+        })))
+    }
+
+    /// Reads one fixture from the corpus directory descriptor with no window
+    /// between the type check and the read: `openat` refuses to follow a
+    /// final symlink, `fstat` interrogates the *same* descriptor the bytes
+    /// come from, and the read is bounded by one extra byte past the ceiling
+    /// so a lying `st_size` cannot widen it.
+    ///
+    /// # Errors
+    /// [`LoadError::Violation`] when the entry is not a regular file or
+    /// exceeds the per-fixture ceiling.
+    pub(super) fn read_regular_bounded(
+        dir: &CorpusDir,
+        name: &str,
+        path: &Path,
+    ) -> Result<Vec<u8>, LoadError> {
+        let refuse = |why: &str| {
+            LoadError::Violation(format!(
+                "{}: only regular files may carry fixtures; symlinks and directories are \
+                 refused ({why})",
+                path.display()
+            ))
+        };
+        // `NOFOLLOW` refuses a final symlink outright; `NONBLOCK` keeps a
+        // FIFO from blocking the open itself, so its type can be judged by
+        // `fstat`.
+        let file_fd = rustix::fs::openat(
+            dir,
+            name,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::LOOP || error == rustix::io::Errno::MLINK {
+                refuse("is a symbolic link")
+            } else {
+                LoadError::Violation(format!("{}: could not be opened: {error}", path.display()))
+            }
+        })?;
+        // The type is now a property of this open description, not of a name
+        // that another process could have replaced in the meantime.
+        let stat = rustix::fs::fstat(&file_fd).map_err(|error| {
+            LoadError::Violation(format!("{}: fstat failed: {error}", path.display()))
+        })?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+            return Err(refuse("is not a regular file"));
         }
-    })?;
-    // The type is now a property of this open description, not of a name
-    // that another process could have replaced in the meantime.
-    let stat = rustix::fs::fstat(&file_fd).map_err(|error| {
-        LoadError::Violation(format!("{}: fstat failed: {error}", path.display()))
-    })?;
-    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
-        return Err(refuse("is not a regular file"));
+        let mut bytes = Vec::new();
+        std::fs::File::from(file_fd)
+            .take(MAX_FIXTURE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(LoadError::Io)?;
+        if len_u64(bytes.len()) > MAX_FIXTURE_BYTES {
+            return Err(LoadError::Violation(format!(
+                "{} is above the per-fixture ceiling of {MAX_FIXTURE_BYTES} bytes",
+                path.display()
+            )));
+        }
+        Ok(bytes)
     }
-    let mut bytes = Vec::new();
-    std::fs::File::from(file_fd)
-        .take(MAX_FIXTURE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(LoadError::Io)?;
-    if len_u64(bytes.len()) > MAX_FIXTURE_BYTES {
-        return Err(LoadError::Violation(format!(
-            "{} is above the per-fixture ceiling of {MAX_FIXTURE_BYTES} bytes",
-            path.display()
-        )));
+}
+
+/// Windows custody through cap-std: the capability handle plays the role the
+/// dirfd plays on unix — entries are enumerated from it, names are opened
+/// relative to it, and `follow: No` opens a reparse point itself rather than
+/// its target.
+#[cfg(windows)]
+mod corpus_io {
+    use std::io::Read as _;
+    use std::path::Path;
+
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+    use cap_std::fs::{Dir, OpenOptions};
+
+    use super::{LoadError, MAX_FIXTURE_BYTES, len_u64};
+
+    /// Windows custody is the capability directory handle relative opens go
+    /// through.
+    pub(super) type CorpusDir = Dir;
+
+    /// Opens the corpus root as a capability directory. `OPEN_REPARSE_POINT`
+    /// makes the open deliver the reparse object itself rather than resolving
+    /// a junction or symlink, so the type judgment is a property of the
+    /// opened handle — the same open-then-verify the unix `NOFOLLOW|DIRECTORY`
+    /// arm performs, with no pre-check a swapped entry could race.
+    pub(super) fn open(dir: &Path) -> Result<CorpusDir, LoadError> {
+        use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+
+        // `BACKUP_SEMANTICS` admits a directory as a file handle;
+        // `OPEN_REPARSE_POINT` opens a junction or symlink as the reparse
+        // object instead of its target.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+        let file = std::fs::File::options()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(dir)
+            .map_err(|error| {
+                LoadError::Violation(format!(
+                    "{}: corpus directory could not be opened no-follow: {error}",
+                    dir.display()
+                ))
+            })?;
+        let metadata = file.metadata().map_err(|error| {
+            LoadError::Violation(format!(
+                "{}: corpus directory could not be opened no-follow: {error}",
+                dir.display()
+            ))
+        })?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_dir() {
+            return Err(LoadError::Violation(format!(
+                "{}: corpus directory could not be opened no-follow: not a directory",
+                dir.display()
+            )));
+        }
+        Ok(Dir::from_std_file(file))
     }
-    Ok(bytes)
+
+    /// Streams the corpus root's entry names through the open handle.
+    pub(super) fn entries<'a>(
+        dir: &'a CorpusDir,
+        path: &'a Path,
+    ) -> Result<Box<dyn Iterator<Item = Result<String, LoadError>> + 'a>, LoadError> {
+        let inner = dir.entries().map_err(|error| {
+            LoadError::Violation(format!(
+                "{}: corpus directory could not be enumerated: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(Box::new(inner.map(move |entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|error| {
+                    LoadError::Violation(format!(
+                        "{}: corpus directory entry could not be read: {error}",
+                        path.display()
+                    ))
+                })
+        })))
+    }
+
+    /// Reads one fixture from the corpus directory handle. The verdict
+    /// mirrors the unix arm: a symbolic link is named as such, any other
+    /// non-regular entry is refused, and the open itself does not follow a
+    /// final reparse — a symlink swapped in after the pre-check is opened as
+    /// the reparse object and judged on the opened handle's own metadata, so
+    /// the type check is never a property of a stale name. The read is
+    /// bounded by one extra byte past the ceiling so a lying size cannot
+    /// widen it.
+    ///
+    /// # Errors
+    /// [`LoadError::Violation`] when the entry is not a regular file or
+    /// exceeds the per-fixture ceiling.
+    pub(super) fn read_regular_bounded(
+        dir: &CorpusDir,
+        name: &str,
+        path: &Path,
+    ) -> Result<Vec<u8>, LoadError> {
+        let refuse = |why: &str| {
+            LoadError::Violation(format!(
+                "{}: only regular files may carry fixtures; symlinks and directories are \
+                 refused ({why})",
+                path.display()
+            ))
+        };
+        let metadata = dir.symlink_metadata(name).map_err(|error| {
+            LoadError::Violation(format!("{}: could not be opened: {error}", path.display()))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(refuse("is a symbolic link"));
+        }
+        if !metadata.is_file() {
+            return Err(refuse("is not a regular file"));
+        }
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        let file = dir.open_with(name, &options).map_err(|error| {
+            LoadError::Violation(format!("{}: could not be opened: {error}", path.display()))
+        })?;
+        if !file
+            .metadata()
+            .map_err(|error| {
+                LoadError::Violation(format!("{}: fstat failed: {error}", path.display()))
+            })?
+            .is_file()
+        {
+            return Err(refuse("is not a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_FIXTURE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(LoadError::Io)?;
+        if len_u64(bytes.len()) > MAX_FIXTURE_BYTES {
+            return Err(LoadError::Violation(format!(
+                "{} is above the per-fixture ceiling of {MAX_FIXTURE_BYTES} bytes",
+                path.display()
+            )));
+        }
+        Ok(bytes)
+    }
 }
 
 /// Absolute path of the checked-in corpus.
