@@ -6,8 +6,10 @@ direction, storage engine confinement, and composition boundaries.
 These boundaries are internal architecture under the project's
 [stable-external-contracts policy](../../README.md#external-compatibility):
 they are the replaceable side of the boundary, not a compatibility promise.
-A demonstrated better internal design may redraw them through the `ARCH-06`
-change process.
+A demonstrated better internal design may redraw them — the `ARCH-06`
+change process when layer assignments or workspace dependency boundaries
+change, the [architectural review
+expectations](../../CONTRIBUTING.md#architectural-changes) otherwise.
 
 Owners:
 - `Cargo.toml`, `crates/*/Cargo.toml`, `bin/bitcoin-rs/Cargo.toml`
