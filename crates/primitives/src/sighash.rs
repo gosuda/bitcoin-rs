@@ -219,7 +219,7 @@ impl<'t> SighashCache<'t> {
     /// nowhere else. [`Self::segwit_v0_signature_hash`] hashes its script code
     /// verbatim and zeroes whole fields instead, and
     /// [`Self::taproot_signature_hash`] commits to field-level aggregates with
-    /// no script-code concept at all — none of the three share a code path.
+    /// no script-code concept at all.
     pub fn legacy_signature_hash(
         &self,
         input_index: usize,
