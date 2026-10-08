@@ -1072,12 +1072,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arc_swap::ArcSwapOption;
-    use bitcoin_rs_chain::BlockTree;
+
     use bitcoin_rs_primitives::Network;
     use bitcoin_rs_utxo::UtxoSet;
-    use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
-    use parking_lot::RwLock;
+
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
@@ -1091,21 +1089,9 @@ mod tests {
         fn reconsider_disconnected(&mut self, _: &Block) {}
     }
 
-    fn chainstate() -> Chainstate {
-        Chainstate::new(
-            Network::Regtest,
-            Arc::new(ArcSwapOption::empty()),
-            Arc::new(ArcSwapOption::empty()),
-            Arc::new(RwLock::new(BlockTree::new())),
-            Arc::new(UtxoSet::new()),
-            Arc::new(CoinStatsListener::new(CoinStats::default())),
-            Arc::new(crate::events::ChainEventPublisher::detached(0)),
-        )
-    }
-
     #[test]
     fn fatal_pretransition_settlement_closes_admission() {
-        let handles = chainstate();
+        let handles = crate::test_fixtures::handles(Network::Regtest, Arc::new(UtxoSet::new()));
         let shutdown = handles.shutdown_handle();
         let mut observer = NoopObserver;
         let mut settle = |_: &mut NoopObserver, _: core::result::Result<(), ReorgError>| {
