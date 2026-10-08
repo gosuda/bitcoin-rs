@@ -402,6 +402,12 @@ pub struct JournalWriter<S: KvStore> {
     /// next pre-apply check must retry that boundary regardless of configured
     /// lag thresholds before permitting another chainstate mutation.
     durability_retry_required: bool,
+    /// A fork below the checkpoint base destroyed this generation
+    /// (`invalidate_generation`): segments and the head are gone, and the
+    /// writer stays Frozen until a checkpoint publication installs a new
+    /// base. `freeze` is then a no-op, `compact_to_checkpoint` skips the
+    /// durable-identity check, and `resume` refuses until compaction lands.
+    generation_invalidated: bool,
     state: WriterState,
     #[cfg(any(test, feature = "test-seam"))]
     failpoint: Option<JournalWriterFailpoint>,

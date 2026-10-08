@@ -168,6 +168,11 @@ impl<S: KvStore> JournalWriter<S> {
     /// last buffered record; publish the final head. Called by the publication
     /// primitive with admission already closed.
     pub(crate) fn freeze(&mut self) -> Result<(), JournalWriterError> {
+        // An invalidated generation is already frozen with nothing left to
+        // make durable; publication proceeds straight to compaction.
+        if self.generation_invalidated {
+            return Ok(());
+        }
         self.ensure_appendable()?;
         self.state = WriterState::Frozen;
         match self.advance_durability() {
@@ -204,9 +209,12 @@ impl<S: KvStore> JournalWriter<S> {
         if let Some(height) = self.append_gap_height {
             return Err(JournalWriterError::AppendGap { height });
         }
-        if self.durable.height != tip_height
-            || self.durable_block_hash != tip_hash
-            || self.durable_chain_tx_count != chain_tx_count
+        // Invalidation destroyed the durable head this checkpoint replaces,
+        // so the frozen-identity check has nothing left to compare.
+        if !self.generation_invalidated
+            && (self.durable.height != tip_height
+                || self.durable_block_hash != tip_hash
+                || self.durable_chain_tx_count != chain_tx_count)
         {
             return Err(JournalWriterError::CursorMismatch(format!(
                 "checkpoint tip {tip_height} does not match frozen journal head {}",
@@ -257,6 +265,7 @@ impl<S: KvStore> JournalWriter<S> {
             JournalWriterError::CursorMismatch("checkpoint height overflow".to_owned())
         })?;
         self.pending_records.clear();
+        self.generation_invalidated = false;
         self.state = WriterState::Compacted;
 
         let entries: Vec<String> = self
@@ -278,6 +287,13 @@ impl<S: KvStore> JournalWriter<S> {
 
     /// §2.5 resume: reopen appends against the (possibly new) base.
     pub(crate) fn resume(&mut self) -> Result<(), JournalWriterError> {
+        // Without a completed compaction the only head available is the
+        // destroyed generation's stale cursor; refuse to republish it.
+        if self.generation_invalidated {
+            return Err(JournalWriterError::NotOpen {
+                state: "invalidated",
+            });
+        }
         if self.state == WriterState::Open {
             return Err(JournalWriterError::NotOpen {
                 state: "already open",

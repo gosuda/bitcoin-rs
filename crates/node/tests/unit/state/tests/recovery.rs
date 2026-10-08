@@ -65,6 +65,97 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A fork below the journal's checkpoint base invalidates the whole
+/// generation: the writer stays frozen and cannot disarm the marker itself.
+/// The disconnect-debt settlement must still publish the replacement
+/// checkpoint, compact a fresh base onto it, and reopen appends — the wedge
+/// where `freeze`/`compact` refused the invalidated writer left the marker
+/// armed and every later apply inconclusive until restart.
+#[test]
+fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let data_dir = dir.path().join("node");
+    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+    config.data_dir = data_dir.clone();
+    config.p2p.listen.clear();
+    let state = NodeState::open(config, None)?;
+    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    state.apply_block(&genesis)?;
+    let block_one = regtest_fixture::mined_regtest_child_at_time(
+        genesis.block_hash(),
+        genesis.header.time + 1,
+        1,
+    )?;
+    state.apply_block(&block_one)?;
+    state.publish_checkpoint()?;
+    let block_two = regtest_fixture::mined_regtest_child_at_time(
+        block_one.block_hash(),
+        genesis.header.time + 2,
+        2,
+    )?;
+    state.apply_block(&block_two)?;
+
+    let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+        data_dir.join("chainstate-checkpoints/CURRENT"),
+    )?)?
+    .get("generation")
+    .and_then(serde_json::Value::as_u64)
+    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+
+    // Forking at genesis crosses below the checkpoint base at height 1.
+    crate::reorg::invalidate_block(
+        &state.chainstate(),
+        &state.chain_followers(),
+        Hash256::from(block_one.block_hash()),
+    )?;
+
+    let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+        data_dir.join("chainstate-checkpoints/CURRENT"),
+    )?)?
+    .get("generation")
+    .and_then(serde_json::Value::as_u64)
+    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+    assert!(
+        current_after > current_before,
+        "settlement must publish the rolled-back checkpoint"
+    );
+    assert!(
+        !data_dir
+            .join(CHAINSTATE_JOURNAL_DIR)
+            .join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER)
+            .exists(),
+        "the settlement checkpoint retires the full-revalidation marker"
+    );
+    let tip = state
+        .chainstate()
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| anyhow::anyhow!("applied tip missing after invalidation"))?;
+    assert_eq!(
+        (tip.height, tip.hash),
+        (0, Hash256::from(genesis.block_hash()))
+    );
+
+    // The reopened journal tracks new applies on the rebuilt branch.
+    let mut previous = genesis.block_hash();
+    for height in 1..=2 {
+        let replacement = regtest_fixture::mined_regtest_child_at_time(
+            previous,
+            genesis.header.time + 10 + height,
+            height,
+        )?;
+        previous = replacement.block_hash();
+        state.apply_block(&replacement)?;
+    }
+    let tip = state
+        .chainstate()
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| anyhow::anyhow!("rebuilt tip missing"))?;
+    assert_eq!(tip.height, 2);
+    Ok(())
+}
+
 #[test]
 fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
