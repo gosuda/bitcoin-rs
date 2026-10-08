@@ -91,9 +91,6 @@ pub struct MutationResult {
     pub changes: Vec<MutationChange>,
     /// Mempool sequence assigned to `changes[0]`; each later change took the
     /// next value. `0` when `changes` is empty.
-    ///
-    /// The pool advances its sequence exactly once per emitted change under
-    /// the write lock, so a batch's sequences are contiguous.
     pub sequence_base: u64,
 }
 
@@ -129,11 +126,6 @@ impl MutationResult {
     }
 
     /// The txid of every change that left the pool, in commit order.
-    ///
-    /// Converts each record's native txid back to the pool's `Txid` at
-    /// this seam — the inverse of the `change` helper — so callers
-    /// comparing against entry or wire txids need no conversion of their
-    /// own.
     #[must_use]
     pub fn removed_txids(&self) -> Vec<Txid> {
         self.changes
@@ -145,9 +137,6 @@ impl MutationResult {
 }
 
 /// Identifies the network peer a transaction arrived from.
-///
-/// Plain data by contract: the mempool crate never depends on the p2p
-/// stack, so the node passes a token it minted at connection time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PeerToken {
     /// The peer's wire address.
@@ -157,10 +146,6 @@ pub struct PeerToken {
 }
 
 /// How the transaction behind a committed mutation entered the node.
-///
-/// [`AdmissionOrigin::Peer`] is emitted by P2P ingress
-/// (`crates/node/src/tx_ingress.rs`). [`AdmissionOrigin::Block`] is emitted
-/// by the apply-path sweep (`crates/node/src/apply.rs`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionOrigin {
     /// Submitted through RPC `sendrawtransaction` or the embedded

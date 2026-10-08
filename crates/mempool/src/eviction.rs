@@ -110,12 +110,9 @@ pub(crate) fn evict_lowest_fee_packages(
 }
 
 /// Local pressure-floor heuristic projected by `getmempoolinfo`.
-/// It differs from Core's rolling minimum and decay, as recorded in POL-05.
 ///
-/// When the pool occupies at least half of `max_total_bytes`, new admissions
-/// must pay more than the cheapest currently-evictable entry by
-/// `incremental_relay_fee_sat_per_kvb`. Below that pressure threshold the
-/// configured min-relay fee is returned unchanged.
+/// With a nonzero byte limit, at least half full uses the lowest live rate plus
+/// incremental relay fee, floored at min-relay. Otherwise it returns min-relay.
 #[must_use]
 pub fn mempool_min_fee_sat_per_kvb(pool: &Mempool, incremental_relay_fee_sat_per_kvb: u64) -> u64 {
     let maxmempool = pool.limits.max_total_bytes;
@@ -158,10 +155,8 @@ mod tests {
             min_relay_fee_sat_per_kvb: 1_000,
             ..MempoolLimits::default()
         });
-        // 200 vbytes is exactly half of 400 — pressure threshold.
         pool.insert_entry(MempoolEntry::new(Arc::new(tx(1)), 200, 400, 1, 1, 0))
             .expect("insert");
-        // fee_rate = 400 * 1000 / 200 = 2_000 sat/kvB
         assert_eq!(mempool_min_fee_sat_per_kvb(&pool, 1_000), 3_000);
     }
 

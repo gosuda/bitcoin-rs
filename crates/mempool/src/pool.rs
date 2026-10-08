@@ -129,10 +129,9 @@ pub struct Mempool {
     /// consistent: inserts account through [`Mempool::account_insert`], and
     /// removals reverse through [`Derived::account_remove`].
     derived: Derived,
-    /// Nodes examined by graph walks since the last reset. Instrumentation
-    /// for the bounded-work contract; one increment per walked entry. Atomic
-    /// only because the pool must stay `Sync` behind the gateway's shared
-    /// lock.
+    /// Nodes examined by graph walks since the last reset. Instrumentation for
+    /// the bounded-work contract; one increment per walked entry. Atomic only
+    /// because the pool must stay `Sync` behind the gateway's shared lock.
     graph_steps: AtomicU64,
     /// Active mempool policy limits.
     pub limits: MempoolLimits,
@@ -146,9 +145,7 @@ pub struct Mempool {
     /// Token for metadata-only fee changes, separate from the public
     /// membership sequence. Prepared policy work captures both tokens.
     fee_delta_sequence: u64,
-    /// Fee-rate history this pool owns and feeds from its own mutations:
-    /// admissions record arrivals, non-mined removals record departures, and
-    /// `remove_for_block` records confirmations.
+    /// Fee-rate history this pool owns and feeds from its own mutations.
     estimator: FeeEstimator,
     /// Mempool sequence: advanced once per emitted mutation change while the
     /// write lock is held. Reported by [`Mempool::sequence_number`], carried
@@ -202,9 +199,8 @@ struct Derived {
     /// Exact running sum of `fee` over `entries`. A `u32` entry id bounds the
     /// successful-entry sum below `u128::MAX`.
     total_fee: u128,
-    /// Fee-rate counts and vsize sums keyed by each live `MempoolEntry.fee_rate`.
-    /// Mutation paths maintain both values; the first key also maintains
-    /// `fee_rate_floor`, and the vsize sums feed Esplora histograms.
+    /// Fee-rate counts and vsize sums keyed by each live
+    /// `MempoolEntry.fee_rate`.
     fee_rate_aggregates: std::collections::BTreeMap<u64, FeeRateAggregate>,
     /// Cached first key of `fee_rate_aggregates`. Reads are `O(1)`; inserts and
     /// removals maintain it together with the aggregates.
@@ -213,18 +209,8 @@ struct Derived {
 
 impl Derived {
     /// Reverses one entry's accounting across the derived indexes and totals.
-    ///
-    /// PRE: `entry` was accounted exactly once — its txid and wtxid rows are
-    /// live in the indexes, its outputs and inputs hold funding and spending
-    /// rows for `id`, and its vsize, fee, and fee rate sit in the running
-    /// totals. POST: those eight contributions are gone — the txid, wtxid,
-    /// funding, and spending indexes name nothing for `id`, and
-    /// `fee_rate_floor` advances to the next lowest live rate when this was
-    /// the last occurrence of the floor rate. The priority index retires `id`
-    /// in the same mutation through `refresh_metadata`, which is its sole
-    /// removal owner. INVARIANT: a fee rate the multiset never tracked stays
-    /// a debug assertion, so accounting drift fails a test instead of
-    /// silently corrupting the floor.
+    /// The entry must have been accounted once. Priority-index retirement
+    /// belongs to `refresh_metadata`; an untracked fee rate is an invariant error.
     fn account_remove(&mut self, id: EntryId, entry: &MempoolEntry) {
         self.total_vsize = self.total_vsize.saturating_sub(u64::from(entry.vsize));
         self.total_fee -= u128::from(entry.fee);
@@ -259,9 +245,6 @@ impl Derived {
         }
         self.by_txid.remove(&entry.txid);
         self.by_wtxid.remove(&entry.wtxid);
-        // The priority index and the funding rows settle through the
-        // removal's own metadata refresh: `refresh_metadata` retires ids
-        // that no longer resolve, so no duplicate removal happens here.
         for output in &entry.tx.outputs {
             let _ = self
                 .funding
@@ -291,14 +274,7 @@ struct LiveEntry {
     entry: MempoolEntry,
 }
 /// Parent and child entry ids of one pooled transaction.
-///
-/// The spend indexes answer "who funds this script" and "who spends this
-/// outpoint" by range scan against raw scripts and outpoints. The links
-/// hold the same adjacency already resolved against in-pool membership, so
-/// graph walks read a `Vec` per step instead of re-deriving neighbours.
-/// Both directions are written symmetrically on insert and removal, so a
-/// link never names a removed entry, and both lists stay sorted and
-/// deduplicated.
+/// Both directions stay symmetric, sorted and deduplicated across mutations.
 #[derive(Debug, Default)]
 struct GraphLinks {
     parents: Vec<EntryId>,
@@ -428,11 +404,6 @@ impl EntryArena {
 }
 
 /// Membership bitset over entry ids that remembers insertion order.
-///
-/// The words grow to whatever the largest inserted id needs, so a walk's
-/// visited set is bounded by the ids it actually touches -- configured
-/// cluster limits decide the bound, never a fixed single word of sixty-four
-/// members. The member list gives walks a deterministic id order for free.
 #[derive(Debug, Default)]
 struct VisitSet {
     words: Vec<u64>,
@@ -502,12 +473,6 @@ pub struct MempoolStats {
 }
 
 /// One mempool entry copied into a [`MempoolMiningSnapshot`].
-///
-/// A pure record of what selection consumed at capture time. `ancestors`
-/// holds the snapshot positions of the entry's transitive unconfirmed
-/// ancestors — its in-pool parents, their parents, and so on — so package
-/// walks stay inside the snapshot; an entry with no in-pool parent chain
-/// carries an empty vector.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SnapshotEntry {
     /// Tx payload, shared with the pool entry by `Arc`.
@@ -661,9 +626,6 @@ impl Mempool {
             txids.push(entry.txid);
         }
         self.entries.clear();
-        // One assignment instead of a second inventory of the derived
-        // fields: a field added to `Derived` starts empty here without this
-        // list having to learn about it.
         self.derived = Derived::default();
         self.graph_steps.store(0, Ordering::Relaxed);
 
@@ -700,11 +662,6 @@ impl Mempool {
     }
 
     /// Bitcoin Core `RemovalReasonToString` mapping for `mempool:removed`.
-    ///
-    /// Core publishes `expiry`, `sizelimit`, `reorg`, `block`, `conflict`,
-    /// `replaced`, and `unknown`; this pool adds a descendant-of-replacement
-    /// class (emitted as `replaced`) and maps an explicit pool clear to
-    /// `unknown`.
     const fn core_removal_reason(reason: RemovalReason) -> &'static str {
         match reason {
             RemovalReason::BlockInclusion => "block",
@@ -762,15 +719,6 @@ impl Mempool {
     }
 
     /// Preflights one entry against the pool's structural and cluster limits.
-    ///
-    /// PRE: `entry` carries fee, vsize, and sigop accounting already resolved
-    /// against the current chain; `excluded` is the set an in-flight
-    /// replacement removes before this entry lands.
-    /// POST: the returned prepared insert commits without further limit work.
-    /// INVARIANT: the cluster limits run under every enforcement mode — Core
-    /// does not let `bypassLimits` skip `CalculateMemPoolAncestors`; what a
-    /// deferred re-admission skips is the min-relay floor below, because Core
-    /// skips `GetMinFee` on the same path.
     pub(crate) fn validate_insert(
         &self,
         mut entry: MempoolEntry,
@@ -823,8 +771,6 @@ impl Mempool {
         let ancestor_fee = ancestors.iter().fold(entry.fee, |total, id| {
             total.saturating_add(self.entry(*id).map_or(0, |ancestor| ancestor.fee))
         });
-        // Modified fees affect policy ordering; actual fees remain unchanged
-        // for accounting and coinbase construction.
         entry.ancestor_size = ancestor_size;
         entry.ancestor_fee = ancestor_fee;
         entry.ancestor_fee_delta = i128::from(entry.fee_delta);
@@ -842,11 +788,6 @@ impl Mempool {
         let txid = entry.txid;
         let added_vsize = u64::from(entry.vsize);
         let added_fee = entry.fee;
-        // Neighbours are resolved while the candidate is still outside the
-        // arena: parents through the txid index, children through the spend
-        // rows that already name this txid's outputs — an orphan promotion or
-        // out-of-order relay can have those in place long before the parent
-        // arrives. Joining them merges every component they sit in.
         let parents = self.in_pool_parents(&entry.tx);
         let children = self.in_pool_children(txid);
         let component = self.merge_neighbour_components(&parents, &children, &entry);
@@ -856,9 +797,6 @@ impl Mempool {
         };
         for parent in &parents {
             if let Some(slot) = self.entries.slot_mut(*parent) {
-                // Slot ids are recycled, so a new id can be smaller than the
-                // ones already linked: insert at the sorted position instead
-                // of appending.
                 let position = slot
                     .links
                     .children
@@ -885,11 +823,6 @@ impl Mempool {
         self.push_change(&mut changes, txid, MutationOutcome::Accepted);
         let admitted_sequence = self.mempool_sequence;
         self.account_insert(id, admitted_sequence);
-        // The closure is taken after the txid, wtxid, and spend indexes hold
-        // the entry, because a transaction can arrive after something that
-        // already spends its outputs — an orphan promotion, or plain
-        // out-of-order relay — and those descendants only become reachable
-        // once this entry is in the spend indexes.
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
         // Core fires `mempool:added` from `CTxMemPool::addUnchecked`, the
@@ -906,13 +839,6 @@ impl Mempool {
     }
 
     /// Accounts one admitted entry across the derived indexes and totals.
-    ///
-    /// PRE: `id` names a live, freshly linked arena slot that no derived
-    /// structure accounts yet, and `admitted_sequence` is the sequence value
-    /// the entry's `Accepted` change took. POST: the txid, wtxid, funding,
-    /// and spending indexes name `id`, and the vsize, fee, and fee-rate
-    /// totals include the entry exactly once. INVARIANT: this method is the
-    /// sole insert-path writer of those eight derived fields.
     fn account_insert(&mut self, id: EntryId, admitted_sequence: u64) {
         let Some(entry) = self.entry(id) else {
             debug_assert!(false, "account_insert called for a missing entry");
@@ -1006,12 +932,6 @@ impl Mempool {
 
     /// Joins the candidate into one component spanning every distinct
     /// component its in-pool neighbours sit in, returning the component id.
-    ///
-    /// Joining one component — a chain, a new leaf on a hub — is a single
-    /// summary read. Joining several is a merge: the later components are
-    /// relabelled onto the first with one bounded walk each and their ids
-    /// recycled. The candidate is still outside the arena here, so the walks
-    /// cannot reach it.
     fn merge_neighbour_components(
         &mut self,
         parents: &[EntryId],
@@ -1088,7 +1008,6 @@ impl Mempool {
             let id = u32::try_from(self.derived.components.len() - 1);
             match id {
                 Ok(id) => id,
-                // Component ids index the u32 entry-id space by construction.
                 Err(error) => panic!("component count exceeds the u32 entry-id space: {error}"),
             }
         })
@@ -1144,9 +1063,6 @@ impl Mempool {
     }
 
     /// Returns `true` when `txid` is present in the mempool.
-    ///
-    /// Constant-time wrapper over `by_txid.contains_key`. Cheaper than `entry()`
-    /// for callers that only need a presence check.
     #[must_use]
     pub fn contains_txid(&self, txid: &Txid) -> bool {
         self.derived.by_txid.contains_key(txid)
@@ -1154,9 +1070,6 @@ impl Mempool {
 
     /// Returns a reference to the `MempoolEntry` for `txid`, or `None` if the
     /// transaction is not in the pool.
-    ///
-    /// Composite of `self.entry_id_by_txid(txid)` and `self.entry(id)`. Saves the
-    /// 2-step lookup pattern at HTTP/RPC handler callsites.
     #[must_use]
     pub fn entry_by_txid(&self, txid: &Txid) -> Option<&MempoolEntry> {
         self.entry(self.entry_id_by_txid(txid)?)
@@ -1174,22 +1087,12 @@ impl Mempool {
 
     /// Returns the public entry id for `txid`, or `None` when the transaction
     /// is not in the pool.
-    ///
-    /// The id is a slab index, so it is valid only while the pool is not
-    /// mutated: a removal can recycle the slot behind it. Re-resolve through
-    /// this lookup after dropping and re-acquiring a pool lock.
     #[must_use]
     pub fn entry_id_by_txid(&self, txid: &Txid) -> Option<EntryId> {
         self.derived.by_txid.get(txid).map(|indexed| indexed.id)
     }
 
     /// Returns the resident entry only when its acceptance has `sequence`.
-    ///
-    /// Compare with the sequence of an `Accepted` mutation change from this
-    /// pool. Removal and re-admission invalidate the old receipt, even when
-    /// the same transaction allocation is reused. Unrelated mutations and fee
-    /// prioritisation do not invalidate it. The returned reference shares the
-    /// pool borrow, so identity and body are observed together.
     #[must_use]
     pub fn entry_by_txid_at_sequence(&self, txid: &Txid, sequence: u64) -> Option<&MempoolEntry> {
         let indexed = self.derived.by_txid.get(txid)?;
@@ -1229,10 +1132,6 @@ impl Mempool {
 
     /// Returns the relay-policy snapshot this pool enforces, for the RPC
     /// `getmempoolinfo` projection and the transaction-admission surface.
-    ///
-    /// Standardness reads [`crate::standardness::StandardnessPolicy::default`]:
-    /// the pool holds no separate standardness knob, so the enforced default
-    /// is the single source of those values.
     #[must_use]
     pub fn policy_snapshot(&self) -> MempoolPolicySnapshot {
         MempoolPolicySnapshot::from_enforced(
@@ -1242,11 +1141,6 @@ impl Mempool {
     }
 
     /// Returns the total virtual size of all entries.
-    ///
-    /// Answers from the sum `account_insert` and `Derived::account_remove`
-    /// maintain, so a read is constant time; the release-safe fold comparison
-    /// in `running_totals_track_inserts_removals_and_prioritise` holds the
-    /// sum to the entries it summarizes.
     #[must_use]
     pub fn total_vsize(&self) -> u64 {
         self.derived.total_vsize
@@ -1256,21 +1150,12 @@ impl Mempool {
     /// below `max_bytes`. Each evicted entry — and each descendant swept with
     /// its package — commits as one `Removed(PolicyEviction)` change, in
     /// eviction commit order.
-    ///
-    /// Delegates to the free-function `evict_lowest_fee_packages`, which
-    /// removes through `remove_entry_and_descendants_into`.
     pub fn enforce_size_limit(&mut self, max_bytes: u64) -> Result<MutationResult, MempoolError> {
         let changes = crate::evict_lowest_fee_packages(self, max_bytes)?;
         Ok(self.finish_mutation(changes))
     }
 
     /// Returns the sum of fees of all entries in the pool, in satoshis.
-    ///
-    /// Used by `getmempoolinfo.total_fee` (BTC = sats / 1e8). The exact internal
-    /// sum preserves saturating `u64` semantics after removals and fee decreases;
-    /// the release-safe fold comparison in
-    /// `running_totals_track_inserts_removals_and_prioritise` holds it to the
-    /// entries it summarizes.
     #[must_use]
     fn aggregate_fees(&self) -> u64 {
         u64::try_from(self.derived.total_fee).unwrap_or(u64::MAX)
@@ -1290,32 +1175,6 @@ impl Mempool {
     }
 
     /// Estimates the heap this pool occupies, in bytes.
-    ///
-    /// This is `getmempoolinfo`'s `usage`, and it is a different quantity from
-    /// `bytes`: `bytes` is the sum of virtual sizes, a consensus-facing measure
-    /// of the transactions, while this is how much memory holding them costs.
-    /// The two differ by a large constant factor — per-entry accounting, four
-    /// indexes, and the allocations inside each transaction.
-    ///
-    /// An estimate, as it is in Bitcoin Core, whose own `DynamicMemoryUsage`
-    /// carries the comment "Estimate the overhead of mapTx to be 9 pointers …
-    /// as no exact formula for `boost::multi_index_container` is implemented".
-    /// The figure is Core's *shape*, not Core's number: it counts this node's
-    /// structures, which are not Core's.
-    ///
-    /// Counted here: the entry arena and the txid map at their **allocated
-    /// capacity**, each live transaction's own heap, and the indexes keyed off
-    /// those entries -- with the priority index answering for itself, because
-    /// it stores every entry twice.
-    ///
-    /// Capacity rather than length for the structure that retains it: the
-    /// entry arena does not hand its allocation back on removal or on
-    /// `clear`, so a pool that peaked and then drained is still holding that
-    /// memory, and a figure read off `len()` answers "nothing" at exactly
-    /// the moment someone is asking where it went. The derived indexes are
-    /// different: `clear` replaces `derived` wholesale
-    /// (`Derived::default()`), releasing the txid map and priority-index
-    /// allocations along with the entries.
     #[must_use]
     pub fn dynamic_memory_usage(&self) -> u64 {
         use core::mem::size_of;
@@ -1342,8 +1201,6 @@ impl Mempool {
             .map(|(_index, entry)| transaction_heap_usage(&entry.tx))
             .fold(0_u64, u64::saturating_add);
 
-        // `by_txid` is a hash map, so it carries slack; the other three are
-        // B-tree sets of fixed-size keys.
         let by_txid = u64::try_from(self.derived.by_txid.capacity())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<(Txid, IndexedEntry)>()).unwrap_or(0));
@@ -1356,9 +1213,6 @@ impl Mempool {
         let by_wtxid = u64::try_from(self.derived.by_wtxid.capacity())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<(Wtxid, EntryId)>()).unwrap_or(0));
-        // The graph links are per-entry `Vec`s inside the arena slots: their
-        // headers ride in the slot size above, their payload is charged by
-        // capacity. The component summaries are the other cached arena.
         let links = self.entries.iter_links().fold(0_u64, |total, link| {
             let payload = link
                 .parents
@@ -1373,10 +1227,6 @@ impl Mempool {
         let components = u64::try_from(self.derived.components.capacity())
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(size_of::<ComponentSummary>()).unwrap_or(0));
-        // The priority index stores every entry twice -- once ordered by
-        // priority, once keyed by id so a removal need not search for what to
-        // remove -- so it answers for itself rather than being charged one
-        // `EntryId` per transaction here.
         let pareto = self.derived.pareto.dynamic_memory_usage();
 
         arena
@@ -1494,18 +1344,12 @@ impl Mempool {
     }
 
     /// Walks every live entry in slab order.
-    ///
-    /// This is the pool's own scan. Callers that used to iterate `entries`
-    /// directly come through here so the arena stays inside the module.
     pub fn iter_entries(&self) -> impl Iterator<Item = &MempoolEntry> + '_ {
         self.entries.iter().map(|(_id, entry)| entry)
     }
 
-    /// Returns one ascending `(fee_rate, total_vsize)` pair per distinct actual rate.
-    ///
-    /// PRE: The caller retains this pool view while consuming the iterator.
-    /// POST: Each vsize sums entries at that actual fee rate.
-    /// INVARIANT: Rates are unique and the vsize sums equal `stats().bytes`.
+    /// Returns one ascending `(fee_rate, total_vsize)` pair per distinct
+    /// actual rate.
     pub fn fee_rate_histogram(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.derived
             .fee_rate_aggregates
@@ -1514,9 +1358,6 @@ impl Mempool {
     }
 
     /// Returns every in-pool entry that funds `script_hash`.
-    ///
-    /// Walks the funding index rather than the entry arena, so a script with
-    /// no mempool outputs costs a range probe, not a scan of the pool.
     pub fn entries_funding_script(
         &self,
         script_hash: ScriptHash,
@@ -1532,16 +1373,12 @@ impl Mempool {
     }
 
     /// Returns whether any in-pool transaction has `wtxid`.
-    ///
-    /// Indexed by `by_wtxid`; O(1) lookup.
     #[must_use]
     pub(crate) fn contains_wtxid(&self, wtxid: &Wtxid) -> bool {
         self.derived.by_wtxid.contains_key(wtxid)
     }
 
     /// Returns the in-pool entry for `wtxid`, or `None` if none matches.
-    ///
-    /// Indexed by `by_wtxid`; O(1) lookup.
     #[must_use]
     pub(crate) fn entry_by_wtxid(&self, wtxid: &Wtxid) -> Option<&MempoolEntry> {
         let id = *self.derived.by_wtxid.get(wtxid)?;
@@ -1570,13 +1407,6 @@ impl Mempool {
 
     /// Returns the minimum `fee_rate` (sat/kvB) among all entries, or `None`
     /// for an empty pool.
-    ///
-    /// Reads the cached first key of the maintained fee-rate multiset so
-    /// admission tightening does not scan `entries` or descend the tree.
-    /// The min is over `MempoolEntry.fee_rate`, which is pre-computed at insert
-    /// time; the debug assertion below holds the cached floor to its multiset,
-    /// and `lowest_fee_rate_tracks_duplicate_rates_and_every_removal_path`
-    /// holds the multiset to the entries across removals and replacements.
     #[must_use]
     pub(crate) fn lowest_fee_rate(&self) -> Option<u64> {
         debug_assert_eq!(
@@ -1604,10 +1434,6 @@ impl Mempool {
     }
 
     /// Returns whether any in-pool transaction spends `outpoint`.
-    ///
-    /// A range probe over the spending index: the presence of any
-    /// `(outpoint, entry)` row is the answer, and the entries themselves are
-    /// never touched.
     #[must_use]
     pub fn is_outpoint_spent(&self, outpoint: &OutPoint) -> bool {
         self.derived
@@ -1620,16 +1446,6 @@ impl Mempool {
     /// Returns the in-pool spender of `outpoint`: the spending entry and the
     /// exact input (`vin`) of its transaction that spends it, or `None` when
     /// nothing in the pool spends it.
-    ///
-    /// Resolved through the spending index, so callers never see index
-    /// tuples. If an inconsistent pool indexed more than one spender for one
-    /// outpoint, the first in `EntryId` order wins — the entry a first-match
-    /// scan over `entries` would have settled on. A spending index row that
-    /// names a missing entry, or an entry whose transaction does not spend
-    /// `outpoint`, is [`MempoolError::InconsistentSpendingIndex`].
-    ///
-    /// The returned entry borrows the pool and is valid only while the pool
-    /// is not mutated.
     pub fn outpoint_spender(
         &self,
         outpoint: OutPoint,
@@ -1653,25 +1469,6 @@ impl Mempool {
     }
 
     /// Adds `fee_delta` satoshis to `txid`'s signed mining-only fee overlay.
-    ///
-    /// The overlay is additive and persistent, matching Bitcoin Core's
-    /// `PrioritiseTransaction`: deltas accumulate across calls, may be stored
-    /// before the transaction is ever admitted, apply on admission, survive
-    /// ordinary removal and replacement, and are erased only when the
-    /// transaction is mined (see [`Mempool::remove_for_block`]). The overlay
-    /// changes modified package ordering only — the entry's actual fee, fee
-    /// rate, and every aggregate over actual fees stay exactly as they were,
-    /// so admission policy, RBF accounting, and fee reporting never observe
-    /// it.
-    ///
-    /// Returns [`PrioritiseError::FeeDeltaOverflow`] and leaves the overlay
-    /// untouched when the accumulated total would leave the signed satoshi
-    /// range; the alternative — saturating — would silently break
-    /// additivity, which is this operation's whole contract.
-    ///
-    /// The mempool sequence does not move: prioritisation emits no mutation
-    /// change (only pool membership does), so template consumers are woken
-    /// explicitly by the caller instead of through the sequence.
     pub fn prioritise(&mut self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
         if fee_delta == 0 {
             return Ok(());
@@ -1697,14 +1494,6 @@ impl Mempool {
             entry.fee_delta = accumulated;
         }
 
-        // The entry's overlay is the only thing that moved, so the modified
-        // package aggregates of its relatives follow from the graph — the
-        // same refresh an insertion does, which also reindexes every
-        // descendant whose modified ancestor fee rate the delta lifted.
-        // Without that reindex a descendant kept the priority key it had
-        // before its ancestor was bumped, and `prioritisetransaction` —
-        // which exists to move transactions in the miner's template — was
-        // defeated for exactly the packages it was aimed at.
         let affected = self.metadata_closure(&[id]);
         self.refresh_metadata(&affected);
         Ok(())
@@ -1760,23 +1549,6 @@ impl Mempool {
     /// history. Every removed entry commits as one `Removed(BlockInclusion)`
     /// change, in commit order: block-transaction order, each removal
     /// committing parent before descendants.
-    ///
-    /// For each block transaction, this mirrors Bitcoin Core's
-    /// `removeForBlock`: the mined entry leaves the pool, while its unmined
-    /// descendants stay there with refreshed ancestor metadata because they
-    /// now spend confirmed coins. Other entries spending the same inputs
-    /// — double spends the block just settled — leave with their descendants,
-    /// and the overlay stored for the txid is erased whether or not the
-    /// transaction was ever admitted (a pre-admission delta for a directly
-    /// mined transaction must not survive into a later re-admission). Entries
-    /// removed only because a conflict was mined were not confirmed
-    /// themselves: they keep their overlay and are recorded as departures,
-    /// not confirmations.
-    ///
-    /// `block_txids` contains the validated txid for each transaction in
-    /// `block_txs`, in the same order. `height` is the connected block's
-    /// height; the fee history ages one height per call even when the block
-    /// confirms nothing the pool tracked.
     pub fn remove_for_block(
         &mut self,
         block_txs: &[&Tx],
@@ -1788,9 +1560,6 @@ impl Mempool {
             block_txids.len(),
             "block transactions and validated txids must stay aligned"
         );
-        // Confirmations are recorded before the removals take the entries
-        // out: the removal path reports departures, and a confirmed txid must
-        // not be demoted to a departure before the estimator sees it.
         self.estimator.block_connected(block_txids, height);
 
         let mut changes = Vec::new();
@@ -1817,10 +1586,6 @@ impl Mempool {
 
     /// Removes the entries named by `txids`, each with its descendants, as
     /// `Removed(Reorg)` changes in commit order.
-    ///
-    /// The gateway decides which resident entries the current chain no
-    /// longer supports; this method owns only the reason-carrying removal.
-    /// Unknown txids are ignored.
     pub fn remove_for_reorg(&mut self, txids: &[Txid]) -> MutationResult {
         let mut changes = Vec::new();
         for txid in txids {
@@ -1883,9 +1648,6 @@ impl Mempool {
     }
 
     /// Returns all ancestor entry ids for `id`, excluding `id` itself.
-    ///
-    /// Walks the cached parent links, so the cost is the ancestors plus the
-    /// edges between them — not a per-input txid lookup per step.
     #[must_use]
     pub fn ancestor_ids_for_entry(&self, id: EntryId) -> Vec<EntryId> {
         self.collect_ancestors(
@@ -1896,9 +1658,6 @@ impl Mempool {
     }
 
     /// Returns all descendant entry ids for `id`, EXCLUDING `id` itself.
-    ///
-    /// Walks the spend graph forward via output references. Empty Vec when the
-    /// entry has no descendants or is unknown.
     #[must_use]
     pub fn descendant_ids_for_entry(&self, id: EntryId) -> Vec<EntryId> {
         let mut ids = Vec::new();
@@ -1913,16 +1672,8 @@ impl Mempool {
         removals: &[(EntryId, RemovalReason)],
         changes: &mut Vec<MutationChange>,
     ) {
-        // Collected first: once an entry is out of the arena its ancestors can no
-        // longer be walked, and they are exactly the entries whose descendant
-        // totals this removal invalidates. Surviving descendants are in the
-        // closure too — `remove_entries` is reached from eviction paths that
-        // remove arbitrary sets, not only from the one that takes descendants
-        // along with their parent.
         let ids: Vec<EntryId> = removals.iter().map(|(id, _reason)| *id).collect();
         let affected = self.metadata_closure(&ids);
-        // Component state the removals disturb: the components losing
-        // members, and the surviving neighbours that seed their re-derivation.
         let mut dirty_components: Vec<u32> = Vec::new();
         let mut survivor_seeds: Vec<EntryId> = Vec::new();
         let mut seen_seeds = VisitSet::new();
@@ -1946,9 +1697,6 @@ impl Mempool {
                     entry.time,
                 )
             });
-            // The component shrinks by exactly this member; the survivors may
-            // still be one component, or several, and that is settled once
-            // every removal has been applied.
             if let Some(summary) = self.component_summary_mut(retired.component) {
                 summary.member_count = summary.member_count.saturating_sub(1);
                 summary.weight = summary.weight.saturating_sub(entry.policy_weight());
@@ -1956,7 +1704,6 @@ impl Mempool {
                     dirty_components.push(retired.component);
                 }
             }
-            // Unlink symmetrically: a link never names a removed entry.
             for parent in &retired.links.parents {
                 if let Some(slot) = self.entries.slot_mut(*parent) {
                     slot.links.children.retain(|child| child != id);
@@ -1975,9 +1722,6 @@ impl Mempool {
             }
             self.derived.account_remove(*id, &entry);
             self.push_change(changes, entry.txid, MutationOutcome::Removed(*reason));
-            // A departure that is not a confirmation: eviction, replacement,
-            // conflict, and reorg removal all free the estimator's pending
-            // slot without saying anything about fee-rate success.
             self.estimator.tx_left(&entry.txid);
         }
         self.recompute_dirty_components(&survivor_seeds, &dirty_components);
@@ -1985,16 +1729,6 @@ impl Mempool {
     }
 
     /// Settles the components the removals disturbed.
-    ///
-    /// A union-find cannot see a split: when the removed set was holding one
-    /// side of a component together, the survivors fall into several parts
-    /// that no single summary describes. Every survivor part touches a
-    /// removed entry — in a connected graph, each part of the remainder has
-    /// a neighbour in the removed set — so walking outward from those
-    /// neighbours repartitions exactly the affected components, each walk
-    /// bounded by the component it re-derives. Components that emptied
-    /// entirely are freed; a component that did not split is relabelled in
-    /// place with one walk.
     fn recompute_dirty_components(&mut self, seeds: &[EntryId], dirty: &[u32]) {
         let mut visited = VisitSet::new();
         for component in dirty {
@@ -2043,16 +1777,6 @@ impl Mempool {
     }
     /// Recomputes one entry's six package totals directly from the spend
     /// graph.
-    ///
-    /// This is the invariant written out: an entry's ancestor totals are its
-    /// own plus every transitive in-mempool parent, and its descendant totals
-    /// are its own plus every transitive in-mempool child — once for actual
-    /// `recompute_all_metadata` arrives at the same numbers by a
-    /// reset-then-accumulate pass over the whole pool; this arrives at them
-    /// for one entry.
-    ///
-    /// Cost is bounded by the ancestor and descendant *policy* limits — 25 each
-    /// by default — not by the number of entries in the pool.
     fn recompute_entry_totals(&mut self, id: EntryId) {
         let Some(entry) = self.entry(id) else {
             return;
@@ -2091,18 +1815,6 @@ impl Mempool {
     }
 
     /// Every entry whose totals a change at `seeds` can have altered.
-    ///
-    /// Linking one transaction into the spend graph changes package totals for
-    /// its transitive ancestors, itself, and its transitive descendants — and
-    /// for nothing else. An entry `x` outside that set gains no new ancestor,
-    /// because `x` is not a descendant of the seed; and gains no new descendant,
-    /// because every new path runs through the seed, which would put `x` among
-    /// its ancestors. That argument is what makes the incremental update exact
-    /// rather than approximate, and
-    /// `incremental_metadata_matches_the_full_recompute` holds it to it.
-    ///
-    /// Collected before the mutation on a removal, because a removed entry's
-    /// ancestors cannot be walked once it is gone.
     fn metadata_closure(&self, seeds: &[EntryId]) -> Vec<EntryId> {
         let mut affected = Vec::new();
         for seed in seeds {
@@ -2121,10 +1833,6 @@ impl Mempool {
     }
 
     /// Recomputes package totals and priority keys for `affected` only.
-    ///
-    /// Entries that no longer exist are skipped rather than resurrected: a
-    /// removal's closure is collected before the removal, so it names entries
-    /// that are deliberately gone by the time this runs.
     fn refresh_metadata(&mut self, affected: &[EntryId]) {
         for id in affected {
             self.recompute_entry_totals(*id);
@@ -2140,14 +1848,6 @@ impl Mempool {
     }
 
     /// Rebuilds every entry's package totals and the whole priority index.
-    ///
-    /// Nothing in the pool calls this any more, and that is the change: it is
-    /// `n` walks of the spend graph, and doing it per accepted transaction is
-    /// what made `insert_entry` quadratic in mempool size. It is kept, compiled
-    /// only under `cfg(test)`, as the oracle that
-    /// `incremental_metadata_matches_the_full_recompute` compares the
-    /// incremental path against — an oracle nothing in production can drift
-    /// away from, because production no longer has a path to it.
     #[cfg(test)]
     fn recompute_all_metadata(&mut self) {
         let ids = self
@@ -2212,25 +1912,11 @@ impl Mempool {
 
     /// Returns every entry reachable from `seeds` through spend edges in
     /// either direction: the union of the connected components they sit in.
-    ///
-    /// This is Bitcoin Core's cluster, and it is deliberately not
-    /// [`Self::metadata_closure`]. That one is ancestors, self, and
-    /// descendants -- a chain through one transaction. A cluster is a
-    /// connected component, so two children of one parent belong to it even
-    /// though neither is an ancestor or a descendant of the other, and a walk
-    /// that only follows the chain silently under-counts every fan-out.
-    ///
-    /// The frontier alternates directions rather than expanding one and then
-    /// the other, because reaching a sibling needs an up-edge followed by a
-    /// down-edge, and reaching a cousin needs that twice.
     fn cluster_ids_seeded_by(
         &self,
         seeds: &[EntryId],
         excluded: &HashSet<EntryId>,
     ) -> Vec<EntryId> {
-        // The visited set is a growing bitset, not a scanned Vec: membership
-        // is one word test regardless of how many members the walk has seen,
-        // and the words grow to whatever the configured cluster limit admits.
         let mut seen = VisitSet::new();
         let mut frontier: Vec<EntryId> = Vec::new();
         for seed in seeds {
@@ -2240,8 +1926,6 @@ impl Mempool {
         }
         while let Some(id) = frontier.pop() {
             self.graph_steps.fetch_add(1, Ordering::Relaxed);
-            // In-pool adjacency is the cached link list; no per-step re-scan
-            // of the spend index.
             let Some(links) = self.links(id) else {
                 continue;
             };
@@ -2257,21 +1941,6 @@ impl Mempool {
     }
 
     /// Refuses a transaction that would join a cluster over either limit.
-    ///
-    /// The candidate is not in the pool yet, so its cluster is seeded from
-    /// both directions: the in-pool parents it spends, and any in-pool
-    /// transaction that already spends *its* outputs. The second half is not
-    /// hypothetical -- `insert_entry` documents that a transaction can arrive
-    /// after something spending it, through orphan promotion or out-of-order
-    /// relay -- and a seed set of parents alone would miss the descendants
-    /// this transaction is about to connect.
-    ///
-    /// With nothing excluded the answer comes from the component cache: the
-    /// candidate's cluster is itself plus the union of its neighbours'
-    /// components, and the cache holds that union's count and vsize. With
-    /// evictions excluded the walk stays authoritative, because removing the
-    /// evicted set can cut a component into pieces and a summary cannot see
-    /// which piece the candidate would join.
     fn check_cluster_limits(
         &self,
         tx: &Tx,
@@ -2280,8 +1949,6 @@ impl Mempool {
     ) -> Result<(), PolicyError> {
         if excluded.is_empty() {
             let cached = self.check_cluster_limits_cached(tx, weight);
-            // The cache and the walk must agree while nothing is excluded;
-            // running both under debug keeps a drift loud instead of latent.
             debug_assert_eq!(
                 self.check_cluster_limits_by_walk(tx, weight, excluded),
                 cached
@@ -2334,8 +2001,6 @@ impl Mempool {
         seeds.extend(self.in_pool_children(txid));
         let cluster = self.cluster_ids_seeded_by(&seeds, excluded);
         if cluster.is_empty() {
-            // A cluster of one. Still checked, so a single oversized
-            // transaction cannot pass a limit its cluster would fail.
             return cluster_within_limits(1, weight, &self.limits);
         }
         let count = u32::try_from(cluster.len())
@@ -2411,11 +2076,6 @@ impl Mempool {
 
     /// Returns the txids of in-pool transactions whose inputs reference `id`,
     /// in `EntryId` order and deduplicated.
-    ///
-    /// This is Bitcoin Core's `spentby` field. The answer is the cached
-    /// child-link list — each link was resolved against in-pool membership
-    /// when the child was admitted — where re-deriving it per query is a
-    /// range scan of the spending index per output.
     #[must_use]
     pub fn spender_txids(&self, id: EntryId) -> Vec<Txid> {
         let Some(links) = self.links(id) else {
@@ -2428,9 +2088,8 @@ impl Mempool {
             .collect()
     }
 
-    /// Returns the descendant-package count for `id` (inclusive of `id` itself).
-    ///
-    /// Saturates at `u32::MAX` for pathological packages.
+    /// Returns the descendant-package count for `id` (inclusive of `id`
+    /// itself), saturating at `u32::MAX`.
     #[must_use]
     pub fn descendant_count_inclusive(&self, id: EntryId) -> u32 {
         let mut descendants = Vec::new();
@@ -2439,10 +2098,6 @@ impl Mempool {
     }
 
     /// Returns the ancestor-package count for `id` (inclusive of `id` itself).
-    ///
-    /// Saturates at `u32::MAX` for pathological packages. Composes
-    /// `ancestor_ids_for_entry` + plus-one (caller is itself an ancestor of
-    /// the inclusive count).
     #[must_use]
     pub fn ancestor_count_inclusive(&self, id: EntryId) -> u32 {
         let ancestors = self.ancestor_ids_for_entry(id);
@@ -2457,11 +2112,6 @@ impl Mempool {
 }
 
 /// Spending-index key over the raw 36-byte `OutPoint` consensus encoding.
-///
-/// `primitives::OutPoint` is a packed layout type without `Ord`; the index
-/// needs only a total order that groups one outpoint's rows contiguously, so
-/// it keys on the encoded bytes — little-endian txid then little-endian vout,
-/// whose fixed-width byte order matches numeric vout order.
 #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct SpendingKey([u8; 36]);
 
@@ -2475,9 +2125,6 @@ impl From<OutPoint> for SpendingKey {
 }
 
 /// Applies both cluster limits to a candidate cluster's count and vsize.
-///
-/// Separate from the walk so the limits are checked in one place whether or
-/// not the candidate has any in-pool neighbours.
 const fn cluster_within_limits(
     count: u32,
     weight: u64,
@@ -2496,11 +2143,6 @@ const fn cluster_within_limits(
 }
 
 /// Heap a single transaction owns, beyond the `Tx` struct itself.
-///
-/// The input and output vectors, and the script and witness bytes inside them.
-/// Counted from the structures rather than from the serialized length, because
-/// a `Vec` costs its capacity and a serialized form costs neither the vector
-/// headers nor the per-field overhead.
 fn transaction_heap_usage(tx: &Tx) -> u64 {
     use core::mem::size_of;
 
@@ -2587,15 +2229,7 @@ mod tests {
             ..MempoolLimits::default()
         };
         let mut pool = Mempool::new(limits);
-        let tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let tx = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
         let entry = MempoolEntry::new(Arc::new(tx), 100, 100, 1, 7, 0);
         let result = pool.insert_entry(entry);
 
@@ -2687,8 +2321,6 @@ mod tests {
         assert_eq!(pool.aggregate_fees(), u64::MAX);
         pool.prioritise(prioritised_txid, -100)
             .expect("overlay delta applies");
-        // The overlay is mining-only: actual fees — and therefore the
-        // aggregate — never move for it.
         assert_eq!(pool.aggregate_fees(), u64::MAX);
         Ok(())
     }
@@ -2697,26 +2329,10 @@ mod tests {
     fn iter_by_fee_rate_desc_orders_highest_first() {
         let mut pool = Mempool::new(MempoolLimits::default());
         // Two distinct txs with different fee rates.
-        let low_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let low_tx = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
         let low_txid = low_tx.txid();
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0));
-        let high_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(99_000),
-                script_pubkey: vec![0x52].into(),
-            }],
-        };
+        let high_tx = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
         let high_txid = high_tx.txid();
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0));
         let ordered = pool.iter_by_fee_rate_desc();
@@ -2905,20 +2521,12 @@ mod tests {
             txid: txid_of([0x11; 32]),
             vout: 0,
         };
-        let original = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: prev,
-                script_sig: Script::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let original = single_output_tx(
+            &[prev],
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+            1_000,
+            vec![0x51].into(),
+        );
         pool.insert_entry(MempoolEntry::new(Arc::new(original), 1_000, 2_000, 1, 7, 0))?;
         pool.insert_entry(MempoolEntry::new(
             Arc::new(tx(8, Vec::new())),
@@ -2930,20 +2538,12 @@ mod tests {
         ))?;
         assert_floor(&pool, Some(1_500), "before replacement");
 
-        let replacement = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: prev,
-                script_sig: Script::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(900),
-                script_pubkey: vec![0x52].into(),
-            }],
-        };
+        let replacement = single_output_tx(
+            &[prev],
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+            900,
+            vec![0x52].into(),
+        );
         pool.replace_transaction(
             &crate::ReplacementCandidate::new(Arc::new(replacement), 1_000, 4_000, 1)
                 .with_sigop_cost(4),
@@ -2962,25 +2562,9 @@ mod tests {
     #[test]
     fn iter_above_fee_rate_filters_to_high_fee_only() {
         let mut pool = Mempool::new(MempoolLimits::default());
-        let low_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let low_tx = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(low_tx), 100, 1_000, 1, 7, 0)); // fee_rate = 1000
-        let high_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(99_000),
-                script_pubkey: vec![0x52].into(),
-            }],
-        };
+        let high_tx = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(high_tx), 100, 10_000, 1, 7, 0)); // fee_rate = 100_000
         let high_only = pool.iter_above_fee_rate(50_000);
         assert_eq!(high_only.len(), 1);
@@ -3060,15 +2644,7 @@ mod tests {
     #[test]
     fn clear_removes_all_entries_and_bumps_sequence() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
-        let tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(99_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let tx = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x51].into());
         let _id = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))?;
         let seq_before_clear = pool.sequence_number();
 
@@ -3094,8 +2670,6 @@ mod tests {
             txid: txid_of([0xaa; 32]),
             vout: 7,
         };
-        // A decoy input first, so the spending input sits at vin 1 rather
-        // than the position every trivial fixture happens to use.
         let decoy = OutPoint {
             txid: txid_of([0xbb; 32]),
             vout: 3,
@@ -3150,22 +2724,16 @@ mod tests {
         });
         let matching = vec![0x51];
         let other = vec![0x52];
-        let funder = |script: Vec<u8>, tag: u8| Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: OutPoint {
+        let funder = |script: Vec<u8>, tag: u8| {
+            single_output_tx(
+                &[OutPoint {
                     txid: txid_of([tag; 32]),
                     vout: 0,
-                },
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(50_000),
-                script_pubkey: script.into(),
-            }],
+                }],
+                Sequence::MAX,
+                50_000,
+                script.into(),
+            )
         };
         let matching_tx = funder(matching.clone(), 0xaa);
         let matching_txid = matching_tx.txid();
@@ -3209,7 +2777,6 @@ mod tests {
             txid: txid_of([0xee; 32]),
             vout: 0,
         };
-        // No entry was ever inserted, so this row dangles.
         pool.derived
             .spending
             .insert((SpendingKey::from(outpoint), 9_999));
@@ -3233,27 +2800,13 @@ mod tests {
             txid: txid_of([0xcc; 32]),
             vout: 5,
         };
-        let tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: unrelated,
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(99_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let tx = single_output_tx(&[unrelated], Sequence::MAX, 99_000, vec![0x51].into());
         let entry_txid = tx.txid();
         pool.insert_entry(MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0))
             .expect("insertion succeeds");
         let id = pool
             .entry_id_by_txid(&entry_txid)
             .expect("inserted entry id resolves");
-        // A row the entry's inputs never earn.
         pool.derived
             .spending
             .insert((SpendingKey::from(indexed), id));
@@ -3273,20 +2826,8 @@ mod tests {
             txid: txid_of([0x11; 32]),
             vout: 0,
         };
-        let spender_tx = |fee: u64| Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: outpoint,
-                script_sig: Script::new(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(fee),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let spender_tx =
+            |fee: u64| single_output_tx(&[outpoint], Sequence::MAX, fee, vec![0x51].into());
         let first = spender_tx(99_000);
         let first_txid = first.txid();
         let _ = pool.insert_entry(MempoolEntry::new(Arc::new(first), 100, 10_000, 1, 7, 0));
@@ -3466,8 +3007,6 @@ mod tests {
         assert_eq!(entry.fee, 1_000);
         assert_eq!(entry.fee_rate, 10_000);
         assert_eq!(entry.modified_fee(), -1_000);
-        // A negative modified fee ranks below every actual fee, including
-        // zero — that is the signed order the priority index keeps.
         assert_eq!(
             pool.derived.pareto.len(),
             1,
@@ -3627,8 +3166,6 @@ mod tests {
 
         pool.prioritise(txid, 1_500)
             .expect("an absent txid stores its delta");
-        // Nothing a template or long-poll waiter can observe changed yet, so
-        // the sequence — the invalidation key they ride on — must not move.
         assert!(!pool.contains_txid(&txid));
         assert_eq!(pool.sequence_number(), before);
 
@@ -3681,7 +3218,6 @@ mod tests {
         let child = tx(11, vec![OutPoint::new(parent_txid, 0)]);
         let child_txid = child.txid();
         pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 7, 0))?;
-        // A delta stored for a transaction that never reached the pool.
         let stranger = tx(12, Vec::new());
         let stranger_txid = stranger.txid();
 
@@ -3712,7 +3248,6 @@ mod tests {
         );
         assert!(pool.contains_txid(&child_txid));
 
-        // Readmission answers from the surviving state alone.
         pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 1_000, 1, 7, 0))?;
         assert_eq!(
             pool.entry_by_txid(&parent_txid)
@@ -3782,7 +3317,6 @@ mod tests {
         let snapshot = pool.mining_snapshot();
         assert_eq!(snapshot.sequence, pool.sequence_number());
         assert_eq!(snapshot.entries.len(), 2);
-        // The child pays the higher actual fee rate, so it ranks first.
         let [child_entry, parent_entry] = &snapshot.entries[..] else {
             panic!("snapshot must hold both entries");
         };
@@ -3893,10 +3427,6 @@ mod tests {
             "arrivals alone are not confirmation evidence"
         );
 
-        // Two confirmations, not one: every sample is stored post-decay, so a
-        // single confirmation decays to 0.998 within its own block — under
-        // the estimator's one-decayed-observation minimum. The test feeds
-        // that gate rather than weakening it.
         pool.remove_for_block(&[&first, &second], &[first_txid, second_txid], 8);
         assert!(
             pool.estimate_fee_rate(2).is_some(),
@@ -3916,27 +3446,11 @@ mod tests {
             min_relay_fee_sat_per_kvb: 0,
             ..MempoolLimits::default()
         });
-        let low = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let low = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
         let low_txid = low.txid();
         pool.insert_entry(MempoolEntry::new(Arc::new(low), 100, 100, 1, 7, 0))?;
 
-        let high = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(99_000),
-                script_pubkey: vec![0x52].into(),
-            }],
-        };
+        let high = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
         let high_txid = high.txid();
         pool.insert_entry(MempoolEntry::new(Arc::new(high), 100, 10_000, 1, 7, 0))?;
 
@@ -3955,27 +3469,11 @@ mod tests {
             ..MempoolLimits::default()
         });
 
-        let low = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let low = single_output_tx(&[], Sequence::MAX, 1_000, vec![0x51].into());
         let low_txid = low.txid();
         pool.insert_entry(MempoolEntry::new(Arc::new(low), 500, 100, 1, 7, 0))?;
 
-        let high = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: vec![TxOut {
-                value: Amount::from_sat(99_000),
-                script_pubkey: vec![0x52].into(),
-            }],
-        };
+        let high = single_output_tx(&[], Sequence::MAX, 99_000, vec![0x52].into());
         let high_txid = high.txid();
         pool.insert_entry(MempoolEntry::new(Arc::new(high), 500, 10_000, 1, 7, 0))?;
 
@@ -3998,15 +3496,12 @@ mod tests {
         let mut pool = Mempool::new(limits);
 
         for nonce in 0..2_u32 {
-            let tx = Tx {
-                version: 2,
-                lock_time: LockTime::ZERO,
-                inputs: Vec::new(),
-                outputs: vec![TxOut {
-                    value: Amount::from_sat(1_000 + u64::from(nonce)),
-                    script_pubkey: vec![0x51, u8::try_from(nonce).unwrap_or(0)].into(),
-                }],
-            };
+            let tx = single_output_tx(
+                &[],
+                Sequence::MAX,
+                1_000 + u64::from(nonce),
+                vec![0x51, u8::try_from(nonce).unwrap_or(0)].into(),
+            );
             let fee = 100_u64.saturating_add(u64::from(nonce).saturating_mul(50));
 
             let _ = pool.insert_entry(MempoolEntry::new(Arc::new(tx), 600, fee, 1, 7, 0));
@@ -4024,15 +3519,12 @@ mod tests {
     #[test]
     fn capacity_rejection_is_atomic_and_a_better_arrival_can_enter() {
         fn tx_paying(nonce: u8) -> Arc<Tx> {
-            Arc::new(Tx {
-                version: 2,
-                lock_time: LockTime::ZERO,
-                inputs: Vec::new(),
-                outputs: vec![TxOut {
-                    value: Amount::from_sat(1_000 + u64::from(nonce)),
-                    script_pubkey: vec![0x51, nonce].into(),
-                }],
-            })
+            Arc::new(single_output_tx(
+                &[],
+                Sequence::MAX,
+                1_000 + u64::from(nonce),
+                vec![0x51, nonce].into(),
+            ))
         }
 
         let limits = MempoolLimits {
@@ -4042,7 +3534,6 @@ mod tests {
         };
         let mut pool = Mempool::new(limits);
 
-        // Fills the pool at a rate the arrivals below are measured against.
         let seated = pool.insert_entry(MempoolEntry::new(tx_paying(1), 900, 90_000, 1, 7, 0));
         assert!(seated.is_ok(), "the first transaction fits: {seated:?}");
 
@@ -4053,7 +3544,6 @@ mod tests {
         assert_eq!(pool.sequence_number(), before.0);
         assert_eq!(pool.estimator_history(), before.1);
 
-        // The paired accept: pays more, so the trim takes the other one.
         let admitted = pool.insert_entry(MempoolEntry::new(tx_paying(3), 900, 900_000, 3, 7, 0));
         let Ok(_result) = admitted else {
             panic!("a better-paying transaction must be admitted: {admitted:?}");
@@ -4075,33 +3565,21 @@ mod tests {
         };
         let mut pool = Mempool::new(limits);
 
-        // Shared prevout so the replacement directly conflicts with the
-        // original — both spend the same outpoint.
         let prev = OutPoint {
             txid: txid_of([0x11; 32]),
             vout: 0,
         };
 
-        // Original: 100 vbytes, low fee rate (100 sat/vbyte).
-        let original = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: prev,
-                script_sig: Script::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: vec![0x51].into(),
-            }],
-        };
+        let original = single_output_tx(
+            &[prev],
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+            1_000,
+            vec![0x51].into(),
+        );
         let original_txid = original.txid();
         let seated = pool.insert_entry(MempoolEntry::new(Arc::new(original), 100, 10_000, 1, 7, 0));
         assert!(seated.is_ok(), "original must fit: {seated:?}");
 
-        // Bystander: 850 vbytes, high fee rate (10_000 sat/vbyte), fills pool.
         let bystander = tx(8, Vec::new());
         let seated_by = pool.insert_entry(MempoolEntry::new(
             Arc::new(bystander),
@@ -4121,20 +3599,12 @@ mod tests {
         // (166 vs 10_000). After evicting the original (100 vbytes freed),
         // the pool has 850 + 900 = 1750 > 1000, so the trim evicts the
         // lowest-fee-rate entry — the replacement itself.
-        let replacement = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: prev,
-                script_sig: Script::new(),
-                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(100),
-                script_pubkey: vec![0x52].into(),
-            }],
-        };
+        let replacement = single_output_tx(
+            &[prev],
+            Sequence::ENABLE_RBF_NO_LOCKTIME,
+            100,
+            vec![0x52].into(),
+        );
         let replacement_txid = replacement.txid();
         let before = (
             pool.mining_snapshot().entries,
@@ -4179,9 +3649,6 @@ mod tests {
 
     /// Builds a pool whose spend graph has every shape the closure argument
     /// rests on: a chain, a fan-out, a fan-in, and an isolated entry.
-    ///
-    /// Returns the pool and the outpoint of each inserted transaction's first
-    /// output so a caller can extend the graph further.
     fn graph_pool() -> Result<(Mempool, Vec<OutPoint>), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
         let mut outs = Vec::new();
@@ -4204,28 +3671,19 @@ mod tests {
             Ok(OutPoint::new(txid, 0))
         };
 
-        // root -> mid -> leaf: a chain.
         let root = add(&mut pool, 1, vec![OutPoint::default()])?;
         let mid = add(&mut pool, 2, vec![root])?;
         let leaf = add(&mut pool, 3, vec![mid])?;
-        // root also funds a second child: a fan-out.
         let sibling = add(&mut pool, 4, vec![root])?;
-        // one transaction spending two unrelated parents: a fan-in.
         let joined = add(&mut pool, 5, vec![leaf, sibling])?;
-        // an entry connected to nothing.
         let lonely = add(&mut pool, 6, vec![OutPoint::default()])?;
 
         outs.extend([root, mid, leaf, sibling, joined, lonely]);
         Ok((pool, outs))
     }
 
-    /// The incremental update must land on exactly what a full recompute would.
-    ///
-    /// `insert_entry` and `remove_entries` now refresh only the entries a change
-    /// can have touched. That is an argument about the spend graph, so this
-    /// checks it against the implementation that made no argument and simply
-    /// recomputed everything: run the incremental path, then run the full
-    /// recompute, and assert nothing moved.
+    /// The incremental update must land on exactly what a full recompute
+    /// would.
     #[test]
     fn incremental_metadata_matches_the_full_recompute() -> Result<(), MempoolError> {
         let (mut pool, _outs) = graph_pool()?;
@@ -4241,22 +3699,6 @@ mod tests {
     }
 
     /// The same, after a removal that leaves surviving relatives behind.
-    ///
-    /// Every entry in the fixture is removed in turn, from a fresh pool each
-    /// time, rather than one chosen entry. Each victim exercises a different
-    /// shape: removing the middle of the chain leaves a parent that must forget
-    /// descendants and a child that must forget an ancestor, and removing
-    /// `leaf` takes the fan-in `joined` with it while `sibling` — `joined`'s
-    /// *other* parent — survives and has to drop it from its descendant totals.
-    /// That last one is not reachable by removing any single entry the closure
-    /// names directly, and is the case a chosen victim is most likely to miss.
-    ///
-    /// The victim is addressed by entry id, which is the slab index and so
-    /// follows insertion order. An earlier revision picked it out of
-    /// `pool.derived.by_txid`, a `HashMap` whose iteration order is randomized per
-    /// process: the test removed a different entry on every run, and under a
-    /// mutation that took the closure after the removal instead of before it,
-    /// it went red in only 36 of 60 runs.
     #[test]
     fn incremental_metadata_matches_the_full_recompute_after_removals() -> Result<(), MempoolError>
     {
@@ -4286,12 +3728,6 @@ mod tests {
     }
 
     /// The eviction path is a `remove_entries` caller nothing else drives.
-    ///
-    /// `insert_entry` calls `enforce_size_limit` when an acceptance puts the
-    /// pool over `max_total_bytes`, and that removes packages the caller never
-    /// named. The refresh has to leave both the package totals and the priority
-    /// index in the state a full rebuild would, from inside the insertion that
-    /// triggered it.
     #[test]
     fn eviction_during_insertion_leaves_metadata_a_rebuild_agrees_with() -> Result<(), MempoolError>
     {
@@ -4360,15 +3796,6 @@ mod tests {
     }
 
     /// The running totals must survive every mutation, not just insertion.
-    ///
-    /// The accessors answer from maintained sums, not from a fold, so a read
-    /// never re-derives them: a drift surfaces only where a consumer compares
-    /// the total against membership. `total_vsize` is consulted by
-    /// `insert_entry` on every acceptance, but `aggregate_fees` is only
-    /// reached through `stats`, and deleting the fee bookkeeping in *both*
-    /// the removal path and `prioritise` turned nothing red. This calls both
-    /// accessors after each kind of mutation, and compares against an
-    /// independent fold, which is the check a release build keeps.
     #[test]
     fn running_totals_track_inserts_removals_and_prioritise() -> Result<(), MempoolError> {
         fn folded(pool: &Mempool) -> (u64, u64) {
@@ -4393,10 +3820,6 @@ mod tests {
         let (mut pool, outs) = graph_pool()?;
         check(&pool, "inserts");
 
-        // Addressed through the fixture's own handles, in insertion order.
-        // `pool.derived.by_txid` is a `HashMap`, so picking from it would choose a
-        // different subject on every run — see
-        // `incremental_metadata_matches_the_full_recompute_after_removals`.
         let Some(root) = outs.first().map(|out| out.txid) else {
             panic!("fixture must hold entries");
         };
@@ -4408,8 +3831,6 @@ mod tests {
             .expect("prioritise down must apply");
         check(&pool, "a negative fee delta");
 
-        // `mid`: only the mined entry leaves; its descendants stay, while
-        // both a surviving parent and an unrelated entry remain behind.
         let Some(victim_txid) = outs.get(1).map(|out| out.txid) else {
             panic!("fixture must hold a second entry");
         };
@@ -4430,19 +3851,12 @@ mod tests {
         Ok(())
     }
 
-    /// Bumping a transaction's fee must reindex the transactions it drags with it.
-    ///
-    /// Before the refresh replaced the hand-applied delta loops, `prioritise`
-    /// updated each descendant's `ancestor_fee` and then never reindexed it, so
-    /// the descendant kept the priority key it had before its ancestor was
-    /// bumped. Comparing the index against a full rebuild is what catches that:
-    /// the totals were already right, only the keys derived from them were
-    /// stale.
+    /// Bumping a transaction's fee must reindex the transactions it drags with
+    /// it.
     #[test]
     fn prioritise_reindexes_the_descendants_it_lifts() -> Result<(), MempoolError> {
         let (mut pool, outs) = graph_pool()?;
 
-        // Lift the chain root, which every entry in the chain descends from.
         let Some(txid) = outs.first().map(|out| out.txid) else {
             panic!("fixture must hold entries");
         };
@@ -4472,12 +3886,8 @@ mod tests {
         Ok(())
     }
 
-    /// A transaction can arrive after something that already spends its outputs.
-    ///
-    /// The closure is taken after the entry is put in the spend indexes for
-    /// exactly this reason: taken before, the pre-existing child would not be
-    /// reachable and would keep ancestor totals that no longer count its new
-    /// parent.
+    /// A transaction can arrive after something that already spends its
+    /// outputs.
     #[test]
     fn inserting_a_parent_after_its_child_refreshes_the_child() -> Result<(), MempoolError> {
         let mut pool = Mempool::new(MempoolLimits::default());
@@ -4486,9 +3896,7 @@ mod tests {
         let parent_out = OutPoint::new(parent.txid(), 0);
         let child = tx(12, vec![parent_out]);
 
-        // Child first: at this point it has no in-mempool ancestor.
         pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 0, 1, 0))?;
-        // Then the parent it spends from.
         pool.insert_entry(MempoolEntry::new(Arc::new(parent), 200, 4_000, 1, 1, 0))?;
 
         let incremental = totals(&pool);
@@ -4499,6 +3907,31 @@ mod tests {
             "a child inserted before its parent kept stale ancestor totals"
         );
         Ok(())
+    }
+
+    fn single_output_tx(
+        previous_outputs: &[OutPoint],
+        sequence: Sequence,
+        value: u64,
+        script_pubkey: Script,
+    ) -> Tx {
+        Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: previous_outputs
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: Script::new(),
+                    sequence,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            outputs: vec![TxOut {
+                value: Amount::from_sat(value),
+                script_pubkey,
+            }],
+        }
     }
 
     fn tx(label: u8, previous_outputs: Vec<OutPoint>) -> Tx {
@@ -4563,15 +3996,6 @@ mod spend_index_tests {
         }
     }
 
-    /// ```text
-    ///   root ──vout 0──> child_a ──vout 0──> child_c
-    ///        ──vout 1──> child_b
-    ///        ──vout 2──> child_b
-    /// ```
-    ///
-    /// `child_b` spends **two of the root's outputs**, so walking the index
-    /// reaches it twice and a missing dedup shows up as a repeat. Nothing in a
-    /// fixture where each child spends one output can catch that.
     fn graph_pool() -> (Mempool, Txid) {
         let confirmed = OutPoint::new(txid_of([7_u8; 32]), 0);
         let root = tx_with(&[confirmed], 3, 1);
@@ -4596,13 +4020,6 @@ mod spend_index_tests {
     }
 
     /// A cluster is a connected component, not an ancestor package.
-    ///
-    /// `child_a` and `child_b` both spend the root and neither is an ancestor
-    /// or a descendant of the other, so a walk that follows only the chain
-    /// through one transaction reports a smaller cluster than exists. That is
-    /// the whole difference between `cluster_ids_seeded_by` and
-    /// `metadata_closure`, and it is asserted against `metadata_closure`
-    /// directly so that reusing the wrong one fails here.
     #[test]
     fn a_cluster_holds_siblings_that_no_ancestor_walk_reaches() {
         let (pool, root_txid) = graph_pool();
@@ -4661,9 +4078,6 @@ mod spend_index_tests {
             let Ok(_id) = pool.insert_entry(root_entry) else {
                 panic!("root must be admitted");
             };
-            // Two siblings spending distinct root outputs: neither is an
-            // ancestor of the other, so only a cluster walk counts them
-            // together.
             let mut outcomes = Vec::new();
             for vout in 0..2_u32 {
                 let child = tx_with(
@@ -4677,8 +4091,6 @@ mod spend_index_tests {
             outcomes
         };
 
-        // Root plus two siblings is three: a limit of two must refuse the
-        // second sibling, and a limit of three must take it.
         let refused = build(2);
         assert!(refused[0].is_ok(), "the first sibling fits: {refused:?}");
         assert!(
@@ -4697,22 +4109,6 @@ mod spend_index_tests {
     }
 
     /// Admission counts the candidate's cousins, not just its own chain.
-    ///
-    /// ```text
-    ///   A ──vout 0──> B ──vout 0──> D (candidate)
-    ///     ──vout 1──> C
-    /// ```
-    ///
-    /// Seeding from D's only parent B and walking ancestors-and-descendants
-    /// reaches `{A, B}` and stops: C is a sibling of B, so no chain through B
-    /// contains it. The real cluster is `{A, B, C}`, so D is the fourth
-    /// member and a limit of three must refuse it.
-    ///
-    /// This is the case that makes the walk load-bearing at the admission
-    /// site. A fixture where every transaction hangs directly off one root
-    /// cannot separate the two walks -- there the chain through the root
-    /// happens to be the whole component -- and swapping
-    /// `cluster_ids_seeded_by` for `metadata_closure` passes it.
     #[test]
     fn admission_counts_a_cousin_that_no_chain_through_the_parent_reaches() {
         let confirmed = OutPoint::new(txid_of([17_u8; 32]), 0);
@@ -4753,7 +4149,6 @@ mod spend_index_tests {
         let root_txid = root.txid();
 
         let limits = MempoolLimits {
-            // High enough that the count limit cannot be what refuses.
             cluster_count: 100,
             cluster_size_vbytes: 250,
             ..MempoolLimits::default()
@@ -4777,10 +4172,6 @@ mod spend_index_tests {
 
     /// A transaction already spending the candidate's outputs joins its
     /// cluster, so the candidate cannot be admitted by looking only upstream.
-    ///
-    /// Reachable in production: `insert_entry` documents that a transaction
-    /// can arrive after something that spends it, through orphan promotion or
-    /// out-of-order relay.
     #[test]
     fn a_cluster_includes_transactions_that_already_spend_the_candidate() {
         let confirmed = OutPoint::new(txid_of([13_u8; 32]), 0);
@@ -4794,13 +4185,10 @@ mod spend_index_tests {
         };
         let mut pool = Mempool::new(limits);
 
-        // The child lands first; nothing in the pool is its parent yet.
         let Ok(_id) = pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 10_000, 1, 7, 0))
         else {
             panic!("the child must be admitted into an empty pool");
         };
-        // Now its parent arrives. Seeding the walk from parents alone would
-        // find nothing and admit it into a cluster of two.
         let outcome = pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 10_000, 1, 7, 0));
         assert!(
             matches!(
@@ -4811,8 +4199,6 @@ mod spend_index_tests {
         );
     }
 
-    /// The defaults are Bitcoin Core's, and the reader follows configuration
-    /// so `getmempoolinfo` cannot report a constant.
     #[test]
     fn cluster_limits_default_to_cores_values_and_follow_configuration() {
         let pool = Mempool::new(MempoolLimits::default());
@@ -4833,15 +4219,11 @@ mod spend_index_tests {
         );
     }
 
-    /// A replacement that evicts a member of a cluster at the count limit
-    /// must be judged against the post-eviction cluster. Counting the
-    /// soon-removed original would reject a replacement that does not grow
-    /// the cluster.
+    /// A replacement that evicts a member of a cluster at the count limit must
+    /// be judged against the post-eviction cluster. Counting the soon-removed
+    /// original would reject a replacement that does not grow the cluster.
     #[test]
     fn a_replacement_that_evicts_from_a_full_cluster_is_admitted() {
-        // root → A (RBF), root → B. Cluster {root, A, B} is at the limit
-        // of three. Replacing A with another spend of the same input leaves
-        // the cluster at three.
         let confirmed = OutPoint::new(txid_of([21_u8; 32]), 0);
         let root = tx_with(&[confirmed], 2, 1);
         let root_txid = root.txid();
@@ -5014,7 +4396,6 @@ mod spend_index_tests {
                 panic!("entry index {index} does not fit an EntryId");
             };
 
-            // The scan the index replaces, written out rather than reused.
             let mut expected: Vec<Txid> = Vec::new();
             for (_other_index, candidate) in pool.entries.iter() {
                 if candidate
@@ -5148,8 +4529,6 @@ mod dynamic_memory_usage_tests {
     #[test]
     fn an_empty_pool_reports_no_transaction_memory() {
         let pool = Mempool::new(MempoolLimits::default());
-        // Only whatever the empty containers hold, which for unallocated ones is
-        // nothing. The point is that it does not report a phantom footprint.
         assert_eq!(pool.dynamic_memory_usage(), 0);
     }
 
@@ -5195,17 +4574,6 @@ mod dynamic_memory_usage_tests {
     }
 
     /// A grown-then-emptied pool still holds its arena, and still says so.
-    ///
-    /// The slot array keeps its backing allocation across removals and across
-    /// `clear`; nothing here hands it back. Charging the arena from `len()`
-    /// therefore reported that retained memory as **zero** at exactly the
-    /// moment an operator reads `usage` to find out where the memory went --
-    /// a pool that peaked at a million transactions and then drained answers
-    /// "nothing", while the process RSS says otherwise.
-    ///
-    /// The figure below is the arena alone: after `clear` there are no live
-    /// entries and the derived state is a fresh default, so the one
-    /// allocation that survives is the arena.
     #[test]
     fn the_arena_is_charged_after_the_pool_is_cleared() {
         use core::mem::size_of;
@@ -5226,9 +4594,6 @@ mod dynamic_memory_usage_tests {
             "a cleared pool must report its arena and nothing else: {cleared} vs {arena}"
         );
 
-        // Against a pool that never grew, which is the difference the old
-        // accounting erased: both have no live entries, and only one of them
-        // is holding memory.
         let fresh = Mempool::new(MempoolLimits {
             max_total_bytes: 0,
             ..MempoolLimits::default()
@@ -5242,17 +4607,6 @@ mod dynamic_memory_usage_tests {
     }
 
     /// The priority index is charged for both copies of every entry.
-    ///
-    /// `ParetoFront` stores each entry in an ordered set *and* in a map from
-    /// id, because a removal is given an id and the set is keyed by priority.
-    /// Charging one `EntryId` per transaction, as this did, counted four bytes
-    /// where the index holds two whole keys -- an under-report on every
-    /// non-empty pool, growing with the pool.
-    ///
-    /// A lower bound, not a measurement: a B-tree leaves its nodes partly
-    /// filled, so the real footprint is above this and depends on insertion
-    /// order. The bound is what a test can state; that it scales with what is
-    /// stored is what the old term did not do.
     #[test]
     fn the_priority_index_is_charged_for_both_of_its_key_collections() {
         use core::mem::size_of;
@@ -5262,20 +4616,12 @@ mod dynamic_memory_usage_tests {
         let mut pool = pool_with(u8::try_from(COUNT).unwrap_or(0), 64);
         let index = pool.derived.pareto.dynamic_memory_usage();
 
-        // The floor on what two key collections cost lives in `pareto.rs`,
-        // beside the private key type it is stated in terms of. This is the
-        // half that belongs here: that the pool charges what the index says.
         let one_id_each = COUNT.saturating_mul(u64::try_from(size_of::<EntryId>()).unwrap_or(0));
         assert!(
             index > one_id_each.saturating_mul(4),
             "the index holds two keys per entry, not one id: {index} vs {one_id_each}"
         );
 
-        // What the pool's total actually attributes to the index: empty the
-        // index and leave everything else standing. Asserting only that the
-        // total is *at least* the index term would pass while the total was
-        // still computing its own figure from the entry count and ignoring the
-        // index entirely, which is the term this replaces.
         let with_index = pool.dynamic_memory_usage();
         pool.derived.pareto = ParetoFront::default();
         let without_index = pool.dynamic_memory_usage();
@@ -5301,7 +4647,6 @@ mod entry_overhead_tests {
     fn empty_tx(tag: u32) -> Tx {
         Tx {
             version: 2,
-            // The only thing distinguishing them, so they get distinct txids.
             lock_time: LockTime::from_consensus(tag),
             inputs: alloc::vec::Vec::new(),
             outputs: alloc::vec::Vec::new(),
@@ -5328,9 +4673,6 @@ mod entry_overhead_tests {
         let entry_bytes = u64::try_from(size_of::<MempoolEntry>()).unwrap_or(0);
         let tx_bytes = u64::try_from(size_of::<Tx>()).unwrap_or(0);
 
-        // These transactions have no inputs, so the funding and spending indexes
-        // are empty and cannot make up the difference. Dropping the per-entry
-        // term leaves the estimate below this bound.
         assert!(
             pool.dynamic_memory_usage()
                 >= live.saturating_mul(entry_bytes.saturating_add(tx_bytes)),
@@ -5371,7 +4713,6 @@ mod graph_tests {
         }
 
         fn below(&mut self, bound: usize) -> usize {
-            // Truncation is wanted: fixture fuzzing, not cryptography.
             let bound = u64::try_from(bound).unwrap_or(u64::MAX);
             usize::try_from(self.next() % bound).unwrap_or(0)
         }
@@ -5483,7 +4824,6 @@ mod graph_tests {
     /// Every structural invariant the mutation paths must maintain,
     /// checked against the reference calculation and the raw totals.
     fn assert_graph_exact(pool: &Mempool) {
-        // Cached partition matches the independent calculation.
         let mut cached: Vec<Vec<EntryId>> = Vec::new();
         let mut by_component: HashMap<u32, Vec<EntryId>> = HashMap::new();
         for (index, _entry) in pool.entries.iter() {
@@ -5498,7 +4838,6 @@ mod graph_tests {
         cached.sort();
         assert_eq!(cached, reference_components(pool), "component partition");
 
-        // Each cached summary equals its members' enumeration.
         for (component, members) in &by_component {
             let summary = pool
                 .component_summary(*component)
@@ -5520,7 +4859,6 @@ mod graph_tests {
             );
         }
 
-        // Links are symmetric, sorted, deduplicated, and live.
         for (index, _entry) in pool.entries.iter() {
             let id = EntryId::try_from(index).expect("slot index fits u32");
             let links = pool.links(id).expect("live entry has links");
@@ -5564,7 +4902,6 @@ mod graph_tests {
         assert_graph_exact(&pool);
         assert_eq!(reference_components(&pool).len(), 2, "two disjoint chains");
 
-        // A bridge spending into both chains merges them into one cluster.
         let bridge = insert_ok(
             &mut pool,
             6,
@@ -5576,8 +4913,6 @@ mod graph_tests {
         assert_eq!(merged.len(), 1, "bridge joins the chains: {merged:?}");
         assert_eq!(merged[0].len(), 6);
 
-        // Removing the bridge splits the component again — a union-find
-        // could never see this.
         let bridge_id = pool.entry_id_by_txid(&bridge).expect("bridge is pooled");
         let mut changes = Vec::new();
         pool.remove_entries_with_reasons(
@@ -5677,11 +5012,6 @@ mod graph_tests {
         let c = insert_ok(&mut pool, 3, &[], 100);
         let d = insert_ok(&mut pool, 4, &[OutPoint::new(c, 0)], 100);
 
-        // Two separate 2-member clusters. A candidate spending an output of
-        // each chain joins both plus itself — five over the limit of four.
-        // The cached summaries answer before anything commits.
-        // b's and d's outputs are the unspent ones; spending them joins both
-        // 2-member clusters plus the candidate.
         let joiner = graph_tx(5, &[OutPoint::new(b, 0), OutPoint::new(d, 0)], false);
         let entry = MempoolEntry::new(Arc::new(joiner.clone()), 100, 1_000, TIME, HEIGHT, 0);
         let error = pool
@@ -5694,7 +5024,6 @@ mod graph_tests {
         assert_eq!(pool.len(), 4, "rejection commits nothing");
         assert!(!pool.contains_txid(&joiner.txid()));
 
-        // The acceptance preview quotes the same verdict.
         assert!(matches!(
             pool.check_replacement(&crate::ReplacementCandidate::new(
                 Arc::new(joiner),
@@ -5707,7 +5036,6 @@ mod graph_tests {
             )))
         ));
 
-        // A candidate inside the limit is admitted through the same path.
         let _e = insert_ok(&mut pool, 6, &[OutPoint::new(a, 0)], 100);
         assert_graph_exact(&pool);
     }
@@ -5748,8 +5076,6 @@ mod graph_tests {
             })
         }
 
-        // Merge: the candidate spends one output of each of two chains, so
-        // its cluster spans five entries against a limit of four.
         let mut pool = shape_pool(4);
         let parent_one = insert_ok(&mut pool, 1, &[], 100);
         let child_one = insert_ok(&mut pool, 2, &[OutPoint::new(parent_one, 0)], 100);
@@ -5762,9 +5088,6 @@ mod graph_tests {
         );
         agrees(&pool, &joiner, 400, Err(PolicyError::ClusterCountLimit));
 
-        // Bridge: one parent with two pooled children; the candidate spends
-        // one child, so its cluster reaches the sibling only through an
-        // up-edge followed by a down-edge. Four members at the limit of four.
         let mut pool = shape_pool(4);
         let probe = insert_ok(&mut pool, 1, &[], 100);
         let c1 = insert_ok(&mut pool, 2, &[OutPoint::new(probe, 0)], 100);
@@ -5772,10 +5095,6 @@ mod graph_tests {
         let sibling_spender = graph_tx(4, &[OutPoint::new(c1, 0)], false);
         agrees(&pool, &sibling_spender, 400, Ok(()));
 
-        // Split: removing the middle entry partitions a three-chain; with a
-        // limit of three the rejoiner of one side is admissible only if the
-        // cached summaries describe the partition, not the old merged
-        // component (a stale summary counts four and refuses).
         let mut pool = shape_pool(3);
         let split_root = insert_ok(&mut pool, 1, &[], 100);
         let split_mid = insert_ok(&mut pool, 2, &[OutPoint::new(split_root, 0)], 100);
@@ -5790,8 +5109,6 @@ mod graph_tests {
         let rejoiner = graph_tx(4, &[OutPoint::new(split_root, 0)], false);
         agrees(&pool, &rejoiner, 400, Ok(()));
 
-        // Oversized: inside the member-count limit but over the vbytes one,
-        // which the cached path answers from the merged summary weight.
         let mut pool = Mempool::new(MempoolLimits {
             max_total_bytes: 0,
             min_relay_fee_sat_per_kvb: 0,
@@ -5804,9 +5121,6 @@ mod graph_tests {
         let overweight = graph_tx(3, &[OutPoint::new(oversize_mid, 0)], false);
         agrees(&pool, &overweight, 400, Err(PolicyError::ClusterSizeLimit));
 
-        // In-pool child: the candidate's output is already spent by a pooled
-        // child (out-of-order arrival), so the candidate's cluster seeds
-        // downward through the spend index.
         let mut pool = shape_pool(4);
         let parent_tx = graph_tx(1, &[], false);
         let parent_txid = parent_tx.txid();
@@ -5824,7 +5138,6 @@ mod graph_tests {
             cluster_size_vbytes: 1_000_000,
             ..MempoolLimits::default()
         });
-        // Diamond with a tail: root, two siblings, sink, then a chain.
         let root = insert_ok(&mut pool, 1, &[], 100);
         let left = insert_ok(&mut pool, 2, &[OutPoint::new(root, 0)], 100);
         let right = insert_ok(&mut pool, 3, &[OutPoint::new(root, 0)], 100);
@@ -5839,7 +5152,6 @@ mod graph_tests {
         assert_graph_exact(&pool);
         assert_eq!(reference_components(&pool)[0].len(), 6);
 
-        // Removing the sink cuts the diamond from the tail.
         let sink_id = pool.entry_id_by_txid(&sink).expect("pooled");
         let mut changes = Vec::new();
         pool.remove_entries_with_reasons(&[(sink_id, RemovalReason::PolicyEviction)], &mut changes);
@@ -5848,7 +5160,6 @@ mod graph_tests {
         assert_eq!(parts.len(), 2, "the sink held the two halves: {parts:?}");
         assert_eq!(parts[0].len() + parts[1].len(), 5);
 
-        // Cousins survive: root still has both siblings.
         let root_id = pool.entry_id_by_txid(&root).expect("pooled");
         assert_eq!(pool.links(root_id).expect("pooled").children.len(), 2);
         let _ = end;
@@ -5863,7 +5174,6 @@ mod graph_tests {
             cluster_size_vbytes: 1_000_000,
             ..MempoolLimits::default()
         });
-        // Forty chains of ten: 400 entries in forty small clusters.
         let mut nonce = 0_u32;
         for _chain in 0..40 {
             let mut parent = insert_ok(&mut pool, nonce, &[], 100);
@@ -5875,13 +5185,11 @@ mod graph_tests {
         }
         assert_eq!(pool.len(), 400);
 
-        // A new root joins nothing: no walk at all, whatever the pool size.
         pool.graph_steps.store(0, Ordering::Relaxed);
         let _ = insert_ok(&mut pool, nonce, &[], 100);
         nonce += 1;
         assert!(graph_steps(&pool) < 8, "isolated insert walked the pool");
 
-        // A leaf on one chain pays for that chain, not for the pool.
         let live = pool.iter_txids();
         let anchor = live[live.len() / 2];
         pool.graph_steps.store(0, Ordering::Relaxed);
@@ -5892,7 +5200,6 @@ mod graph_tests {
             graph_steps(&pool)
         );
 
-        // Splitting a chain re-derives only the two halves.
         let middle = live[live.len() / 4];
         let middle_id = pool.entry_id_by_txid(&middle).expect("pooled");
         pool.graph_steps.store(0, Ordering::Relaxed);
@@ -5944,16 +5251,13 @@ mod graph_tests {
             let mut rng = XorShift::new(seed);
             let mut nonce = 0_u32;
             let mut txs: Vec<Tx> = Vec::new();
-            // Every committed slot identity, including slots since recycled.
             let mut history: Vec<(EntryId, Txid)> = Vec::new();
 
             for _round in 0..350 {
                 let live = pool.iter_txids();
-                // Each round's budget is its own: reset before the mutation.
                 pool.graph_steps.store(0, Ordering::Relaxed);
                 match rng.below(10) {
                     0..=4 => {
-                        // Attach to one to three live parents.
                         if live.is_empty() {
                             continue;
                         }
@@ -5992,8 +5296,6 @@ mod graph_tests {
                         }
                     }
                     7 if !txs.is_empty() => {
-                        // Confirmations of pooled fixtures; txids the pool no
-                        // longer holds are ignored by contract.
                         let count = 1 + rng.below(3.min(txs.len()));
                         let confirmed = (0..count)
                             .map(|_| txs[rng.below(txs.len())].clone())
@@ -6003,9 +5305,6 @@ mod graph_tests {
                         let _ = pool.remove_for_block(&confirmed_refs, &confirmed_ids, HEIGHT + 1);
                     }
                     8 if !live.is_empty() => {
-                        // Replacement shape: evict a random entry's conflicts
-                        // and descendants, then land a new spender of the same
-                        // outpoint. Validation runs before anything commits.
                         let victim = live[rng.below(live.len())];
                         let Some(victim_entry) = pool.entry_by_txid(&victim) else {
                             continue;
@@ -6057,7 +5356,6 @@ mod graph_tests {
                     _ => {}
                 }
 
-                // The per-mutation contracts.
                 assert!(
                     graph_steps(&pool) < 64 * 8 + 128,
                     "walk budget exceeded: {}",

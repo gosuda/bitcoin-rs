@@ -34,9 +34,6 @@ const MIN_OBSERVATIONS: f64 = 1.0;
 const MAX_PENDING_ENTRIES: usize = 10_000;
 
 /// Fee rate in satoshis per kilo-virtual-byte (sat/kvB).
-///
-/// One sat/vB equals 1 000 sat/kvB. This unit matches
-/// [`MempoolEntry`](crate::MempoolEntry).
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct FeeRate(u64);
 
@@ -49,9 +46,7 @@ impl FeeRate {
 }
 
 /// Why a persisted estimator-history payload was not adopted.
-///
 /// CONTRACT: docs/policies/db-migration.md — every rejection degrades to
-/// insufficient-data status; none of them fails startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HistoryReject {
     /// Leading magic bytes are not the estimator's.
@@ -74,18 +69,6 @@ struct Bucket {
     confirmed_within: [f64; MAX_CONF_TARGET],
     /// Decayed count of transactions RESOLVED for each target: confirmed
     /// within it, or still unconfirmed once it expired.
-    ///
-    /// One denominator per target rather than one for all of them. A single
-    /// count incremented on entry made every pending transaction an immediate
-    /// failure at every target, so two fresh arrivals could drop ten prior
-    /// one-block successes to 10/12 and silence the estimator before either
-    /// arrival had missed anything.
-    ///
-    /// Sampling at resolution also fixes the decay. The numerator and the
-    /// denominator now enter together and decay from the same block, where
-    /// before the denominator had been decaying since entry while the
-    /// confirmation arrived fresh, reporting 81 successes out of 100 as
-    /// roughly 85%.
     resolved_within: [f64; MAX_CONF_TARGET],
 }
 
@@ -108,20 +91,10 @@ struct PendingEntry {
     /// Block height at which the transaction entered the mempool.
     entry_height: u32,
     /// Highest target already sampled for this transaction, 0 for none.
-    ///
-    /// Carried per entry rather than derived from the height, so the sampling
-    /// cannot double-count or skip. Deriving it would assume `block_connected`
-    /// is called exactly once for every height, and a skipped or repeated call
-    /// would then lose failures or record them twice.
     resolved_through: usize,
 }
 
 /// History-based fee estimator with exponential buckets and per-block decay.
-///
-/// Call [`FeeEstimator::tx_entered`] when a transaction enters the mempool
-/// and [`FeeEstimator::block_connected`] for each connected block. Then use
-/// [`FeeEstimator::estimate`] to obtain a fee-rate estimate for a given
-/// confirmation target.
 #[derive(Debug)]
 pub struct FeeEstimator {
     buckets: Vec<Bucket>,
@@ -130,21 +103,6 @@ pub struct FeeEstimator {
     last_decayed_height: Option<u32>,
     pending: HashMap<Txid, PendingEntry>,
     /// Heights at which tracked txids were recorded as confirmed.
-    ///
-    /// A reorg disconnects a confirming block, the reconsideration walk
-    /// re-admits its transactions as fresh pending entries, and a later
-    /// switch back to that block confirms them again. One physical
-    /// confirmation must stay one recorded success, so a block that
-    /// re-confirms a txid at the height already recorded here only untracks
-    /// the entry. A confirmation at a different height — the transaction
-    /// missed its block, was re-admitted, and confirmed elsewhere — is a
-    /// genuine new observation and records exactly once.
-    ///
-    /// [`Self::advance_height`] drops entries once more than
-    /// `MAX_CONF_TARGET` heights passed: a re-admitted entry expires from
-    /// the pending set after outliving every target, so a record older than
-    /// that window can never again meet a pending txid of the same
-    /// transaction. Bounded window, bounded map.
     confirmed_at: HashMap<Txid, u32>,
 }
 
@@ -161,15 +119,7 @@ impl FeeEstimator {
     }
 
     /// Records that a transaction entered the mempool.
-    ///
-    /// Call this when a transaction is accepted into the mempool.
-    /// `fee_rate_sat_per_kvb` is the effective fee rate
-    /// (fee / vsize * 1 000). `height` is the current block height.
     pub fn tx_entered(&mut self, txid: Txid, fee_rate_sat_per_kvb: u64, height: u32) {
-        // A second admission of the same txid must not reset its clock. It is
-        // the same transaction waiting since the same height, and overwriting
-        // the entry would make it look freshly arrived every time a caller
-        // re-announced it.
         if self.pending.contains_key(&txid) {
             return;
         }
@@ -177,8 +127,6 @@ impl FeeEstimator {
             return;
         }
         let bucket_index = self.bucket_index_for_rate(fee_rate_sat_per_kvb);
-        // No denominator here. A transaction that just arrived has not missed
-        // any target yet; it is sampled as each target resolves.
         self.pending.insert(
             txid,
             PendingEntry {
@@ -190,27 +138,11 @@ impl FeeEstimator {
     }
 
     /// Records that a transaction left the mempool without confirming.
-    ///
-    /// Call this on eviction, replacement, or any other departure. Without it
-    /// the pending map only ever shrinks on confirmation, so departures
-    /// accumulate until the `MAX_PENDING_ENTRIES` guard silently drops every
-    /// future transaction and the estimator is stuck forever.
-    ///
-    /// Untracks only. No failure is recorded, matching Core's
-    /// `removeTx(hash, inBlock = false)`: an eviction or a replacement says
-    /// something about the mempool, not about whether the transaction would
-    /// have confirmed by any deadline. Real misses are sampled by
-    /// `expire_targets` as each target passes.
     pub fn tx_left(&mut self, txid: &Txid) {
         self.pending.remove(txid);
     }
 
     /// Records confirmations from a connected block and applies decay.
-    ///
-    /// Call this for each connected block. `confirmed_txids` are the txids of
-    /// transactions confirmed in that block. `block_height` is the height of
-    /// the connected block. Transactions not tracked by the estimator are
-    /// silently ignored.
     pub fn block_connected(&mut self, confirmed_txids: &[Txid], block_height: u32) {
         let advances_height = match self.last_decayed_height {
             Some(last_height) => block_height > last_height,
@@ -225,10 +157,6 @@ impl FeeEstimator {
             }
         }
         for txid in confirmed_txids {
-            // A re-connected block finds its transactions re-admitted as
-            // pending: the reconsideration walk re-entered them after the
-            // disconnect. The success was recorded when the block first
-            // connected, so the entry only leaves the pending set again.
             if self.confirmed_at.get(txid) == Some(&block_height) {
                 self.pending.remove(txid);
                 continue;
@@ -250,10 +178,6 @@ impl FeeEstimator {
         self.expire_targets(block_height);
         self.last_decayed_height = Some(block_height);
         self.apply_decay();
-        // Confirmation records only matter while their transaction can still
-        // sit in the pending set: a re-admitted entry is dropped once it
-        // outlives every target, so past `MAX_CONF_TARGET` heights a record
-        // can never again meet a pending entry of the same transaction.
         let prune_window = u32::try_from(MAX_CONF_TARGET).unwrap_or(u32::MAX);
         self.confirmed_at.retain(|_, confirmed_height| {
             block_height.saturating_sub(*confirmed_height) <= prune_window
@@ -261,13 +185,6 @@ impl FeeEstimator {
     }
 
     /// Samples a failure for every target that expired on this block.
-    ///
-    /// Blocks arrive one at a time, so a transaction crosses exactly one target
-    /// boundary per block: the one whose window equals how long it has now
-    /// waited. Targets it has already outlived were sampled on earlier blocks.
-    ///
-    /// A transaction that outlives the longest target is dropped. It can no
-    /// longer affect any estimate, and keeping it would fill the pending map.
     fn expire_targets(&mut self, block_height: u32) {
         let mut outlived = Vec::new();
         for (txid, entry) in &mut self.pending {
@@ -289,11 +206,6 @@ impl FeeEstimator {
 
     /// Estimates the minimum fee rate for confirmation within
     /// `conf_target_blocks`.
-    ///
-    /// Returns the lowest fee-rate bucket whose historical success rate at
-    /// the given confirmation target clears the threshold (0.85), or [`None`]
-    /// when there is insufficient data. A [`None`] result is an honest
-    /// refusal — a fabricated estimate is worse than no estimate.
     #[must_use]
     pub fn estimate(&self, conf_target_blocks: u32) -> Option<FeeRate> {
         let target = usize::try_from(conf_target_blocks)
@@ -348,37 +260,16 @@ impl FeeEstimator {
         }
         let bucket = &mut self.buckets[bucket_index];
         if waited > MAX_CONF_TARGET {
-            // Confirmed past the longest target, so it missed every one of
-            // them. Reachable only when heights were skipped, because
-            // `expire_targets` drops a transaction once it outlives the last
-            // target. Dropping the evidence outright would let a slow
-            // confirmation cost the estimator nothing.
             for target in entry.resolved_through..MAX_CONF_TARGET {
                 bucket.resolved_within[target] += 1.0;
             }
             return;
         }
-        // Targets shorter than `waited` were missed. `expire_targets` samples
-        // those as they pass, but it never sees this transaction again once the
-        // confirmation removes it, so any target that expired since the last
-        // call — every one of them if heights were skipped — has to be sampled
-        // here. Without this a transaction entering at 100 and confirming in a
-        // call for 105 contributes successes to targets 5 and up and no
-        // failures to 1 through 4, biasing the short targets upward.
         for target in entry.resolved_through.saturating_add(1)..waited {
             bucket.resolved_within[target - 1] += 1.0;
         }
-        // Confirming at `waited` blocks satisfies every target from `waited`
-        // up, and resolves each of them at the same moment, so numerator and
-        // denominator decay together from here.
-        //
-        // Shorter targets are not touched: this transaction missed them, and
-        // `expire_targets` already sampled those failures on the blocks where
-        // they expired.
         for target in waited..=MAX_CONF_TARGET {
             bucket.confirmed_within[target - 1] += 1.0;
-            // Only targets not already sampled as failures, so a late
-            // confirmation cannot resolve a target twice.
             if target > entry.resolved_through {
                 bucket.resolved_within[target - 1] += 1.0;
             }
@@ -405,10 +296,6 @@ impl FeeEstimator {
     }
 
     /// Decodes a history payload written by [`Self::to_history_bytes`].
-    ///
-    /// Any payload this build cannot interpret exactly — wrong magic,
-    /// unknown version, drifted layout, impossible counts — is rejected and
-    /// the caller keeps a fresh, insufficient-data estimator.
     pub(crate) fn from_history_bytes(bytes: &[u8]) -> Result<Self, HistoryReject> {
         history_codec::decode(bytes)
     }
@@ -420,20 +307,7 @@ impl Default for FeeEstimator {
 }
 
 /// Owner-local persistence of the estimator's recoverable state.
-///
 /// CONTRACT: docs/policies/db-migration.md — the format carries an
-/// estimator-owned version outside `CURRENT_SCHEMA`. A corrupt, missing, or
-/// unknown-version payload degrades to insufficient data; it never fails
-/// startup and never fabricates a rate. There is no legacy reader and no
-/// conversion: a version bump orphans the old bytes by definition.
-///
-/// Layout (all integers little-endian), version 1:
-/// magic `[u8; 8]`, version `u32`, `last_decayed_height` as present flag
-/// `u8` plus `u32` when present, bucket count `u32` then per bucket the
-/// lower bound `u64` and both 25-entry `f64` count arrays, pending count
-/// `u32` then per entry txid `[u8; 32]`, bucket index `u32`, entry height
-/// `u32`, resolved-through `u32`, and finally the confirmation-record count
-/// `u32` then per record txid `[u8; 32]` and confirming height `u32`.
 mod history_codec {
     use super::{
         Bucket, FeeEstimator, HistoryReject, MAX_CONF_TARGET, MAX_PENDING_ENTRIES, PendingEntry,
@@ -774,43 +648,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn duplicate_height_confirmation_does_not_advance_or_decay() {
-        let txid = test_txid(210);
-        let mut actual = estimator_at_height_105_with_pending(txid);
-        let mut expected = estimator_at_height_105_with_pending(txid);
-
-        let Some(entry) = expected.pending.remove(&txid) else {
-            panic!("the duplicate-height confirmation must start pending");
-        };
-        expected.record_confirmation(&entry, 105_u32.saturating_sub(entry.entry_height).max(1));
-        actual.block_connected(&[txid], 105);
-
-        assert_estimator_state_eq(&actual, &expected);
-        assert_eq!(actual.last_decayed_height, Some(105));
-    }
-
-    #[test]
-    fn backward_height_confirmation_does_not_lower_high_water_or_decay() {
-        let txid = test_txid(211);
-        let mut actual = estimator_at_height_105_with_pending(txid);
-        let mut expected = estimator_at_height_105_with_pending(txid);
-
-        let Some(entry) = expected.pending.remove(&txid) else {
-            panic!("the backward-height confirmation must start pending");
-        };
-        expected.record_confirmation(&entry, 104_u32.saturating_sub(entry.entry_height).max(1));
-        actual.block_connected(&[txid], 104);
-
-        assert_estimator_state_eq(&actual, &expected);
-        assert_eq!(actual.last_decayed_height, Some(105));
-    }
-
     /// Fresh arrivals must not be counted as failures.
-    ///
-    /// The old denominator was incremented on entry and used for every target,
-    /// so a burst of pending transactions erased a good estimate before any of
-    /// them had missed anything.
     #[test]
     fn a_burst_of_fresh_arrivals_does_not_erase_a_good_estimate() {
         let mut est = FeeEstimator::new();
@@ -825,8 +663,6 @@ mod tests {
             "ten one-block confirmations must estimate"
         );
 
-        // A hundred transactions that arrived this instant and have missed
-        // nothing at all.
         for n in 100..200_u32 {
             est.tx_entered(wide_txid(n), 10_000, 101);
         }
@@ -843,7 +679,6 @@ mod tests {
         let mut est = FeeEstimator::new();
         let txid = test_txid(1);
         est.tx_entered(txid, 10_000, 100);
-        // Same txid, five blocks later, as a duplicate announcement would.
         est.tx_entered(txid, 10_000, 105);
 
         let Some(entry) = est.pending.get(&txid) else {
@@ -856,10 +691,6 @@ mod tests {
     }
 
     /// Departures must free capacity, or the estimator wedges.
-    ///
-    /// The pending map only ever shrank on confirmation, so evicted and
-    /// replaced transactions accumulated until the guard silently ignored
-    /// every future transaction.
     #[test]
     fn a_departure_frees_capacity_for_new_transactions() {
         let mut est = FeeEstimator::new();
@@ -888,18 +719,11 @@ mod tests {
     }
 
     /// A confirmation after skipped heights must still record its misses.
-    ///
-    /// `expire_targets` samples a miss as each target passes, but it never sees
-    /// the transaction again once the confirmation removes it. If heights were
-    /// skipped, every target that expired in the gap has to be sampled by the
-    /// confirmation itself.
     #[test]
     fn a_confirmation_after_skipped_heights_records_the_targets_it_missed() {
         let mut est = FeeEstimator::new();
         let txid = test_txid(5);
         est.tx_entered(txid, 10_000, 100);
-        // Five blocks elapse but only one notification arrives, carrying the
-        // confirmation. Targets 1 through 4 were missed.
         est.block_connected(&[txid], 105);
 
         let bucket_index = est.bucket_index_for_rate(10_000);
@@ -933,7 +757,6 @@ mod tests {
             let confirmed: Vec<Txid> = (0..10_u8).map(test_txid).collect();
             est.block_connected(&confirmed, 101);
         }
-        // The same height announced four more times.
         for _ in 0..4 {
             twice.block_connected(&[], 101);
         }
@@ -951,12 +774,6 @@ mod tests {
     }
 
     /// A target resolves once, even if the same height is processed twice.
-    ///
-    /// `block_connected` is public and takes the height from its caller, so
-    /// nothing structurally prevents it being called twice for one height. When
-    /// that happens the first call expires a target and the second confirms
-    /// against the same one, and without the guard both would land in the
-    /// denominator for a single transaction.
     #[test]
     fn a_target_resolves_once_when_a_height_is_processed_twice() {
         let bucket_index = {
@@ -964,15 +781,12 @@ mod tests {
             est.bucket_index_for_rate(10_000)
         };
 
-        // Reference run: the height is processed once, the normal case.
         let mut once = FeeEstimator::new();
         let txid = test_txid(3);
         once.tx_entered(txid, 10_000, 100);
         once.block_connected(&[], 101);
         once.block_connected(&[txid], 102);
 
-        // Same sequence, but height 102 arrives twice: once with no
-        // confirmation, then again carrying it.
         let mut twice = FeeEstimator::new();
         twice.tx_entered(txid, 10_000, 100);
         twice.block_connected(&[], 101);
@@ -1067,8 +881,6 @@ mod tests {
         let after_first_connect = total_confirmations(&est);
         assert!(after_first_connect > 0.0, "the confirmation must record");
 
-        // The reorg walk re-admits the transaction below the disconnected
-        // block, then the same block reconnects and confirms it again.
         est.tx_entered(test_txid(1), 2_000, 104);
         est.block_connected(&[test_txid(1)], 105);
 
@@ -1093,10 +905,6 @@ mod tests {
         est.tx_entered(test_txid(1), 2_000, 100);
         est.block_connected(&[test_txid(1)], 101);
 
-        // The block disconnected permanently; the transaction re-entered the
-        // mempool and confirmed in a different block. That is a genuine new
-        // observation: exactly one more success, not a suppressed one and
-        // not a double one.
         est.tx_entered(test_txid(1), 2_000, 100);
         est.block_connected(&[test_txid(1)], 103);
 
@@ -1112,6 +920,29 @@ mod tests {
         );
     }
 
+    /// A confirmation at or below the high-water height records the
+    /// observation without advancing or re-decaying the estimator.
+    #[test]
+    fn non_advancing_height_confirmation_records_without_decay() {
+        for (case, tag, height) in [
+            ("duplicate height", 210, 105_u32),
+            ("backward height", 211, 104),
+        ] {
+            let txid = test_txid(tag);
+            let mut actual = estimator_at_height_105_with_pending(txid);
+            let mut expected = estimator_at_height_105_with_pending(txid);
+
+            let Some(entry) = expected.pending.remove(&txid) else {
+                panic!("{case} confirmation must start pending");
+            };
+            expected.record_confirmation(&entry, height.saturating_sub(entry.entry_height).max(1));
+            actual.block_connected(&[txid], height);
+
+            assert_estimator_state_eq(&actual, &expected);
+            assert_eq!(actual.last_decayed_height, Some(105), "{case}");
+        }
+    }
+
     #[test]
     fn confirmation_records_expire_with_the_target_window() {
         let mut est = FeeEstimator::new();
@@ -1119,9 +950,6 @@ mod tests {
         est.block_connected(&[test_txid(1)], 105);
         assert!(!est.confirmed_at.is_empty());
 
-        // Past the confirmation-target window the record can no longer meet
-        // a pending entry of the same transaction (re-admitted entries
-        // expire after outliving every target), so the dedup state drops.
         for height in 106..=105 + 26 {
             est.block_connected(&[], height);
         }
@@ -1154,75 +982,54 @@ mod tests {
         assert_eq!(est.to_history_bytes(), est.to_history_bytes());
     }
 
+    /// Every payload shape the version-1 decoder must refuse. Offsets follow
+    /// the layout magic(8) version(4) height-flag(1) bucket-count(4) buckets.
     #[test]
-    fn history_rejects_bad_magic() {
-        let mut bytes = FeeEstimator::new().to_history_bytes();
-        bytes[0] = b'X';
-        assert!(matches!(
-            FeeEstimator::from_history_bytes(&bytes),
-            Err(HistoryReject::BadMagic)
-        ));
-    }
-
-    #[test]
-    fn history_rejects_unknown_version() {
-        let mut bytes = FeeEstimator::new().to_history_bytes();
-        bytes[HISTORY_MAGIC.len()] = 99;
-        assert!(matches!(
-            FeeEstimator::from_history_bytes(&bytes),
-            Err(HistoryReject::UnknownVersion(99))
-        ));
-    }
-
-    #[test]
-    fn history_rejects_truncated_and_trailing_bytes() {
-        let bytes = FeeEstimator::new().to_history_bytes();
-        assert!(matches!(
-            FeeEstimator::from_history_bytes(&bytes[..bytes.len() - 1]),
-            Err(HistoryReject::Corrupt)
-        ));
-        let mut trailing = bytes;
-        trailing.push(0);
-        assert!(matches!(
-            FeeEstimator::from_history_bytes(&trailing),
-            Err(HistoryReject::Corrupt)
-        ));
-    }
-
-    #[test]
-    fn history_rejects_non_finite_counts_and_drifted_buckets() {
-        // First bucket's first confirmed count sits right after its bound.
-        let mut nan = FeeEstimator::new().to_history_bytes();
-        let first_count = HISTORY_MAGIC.len() + 4 + 1 + 4 + 8;
-        nan[first_count..first_count + 8].copy_from_slice(&f64::NAN.to_le_bytes());
-        assert!(matches!(
-            FeeEstimator::from_history_bytes(&nan),
-            Err(HistoryReject::Corrupt)
-        ));
-
-        // A drifted bucket lower bound means the payload was written by a
-        // layout this build does not compute.
-        let mut drifted = FeeEstimator::new().to_history_bytes();
+    fn history_rejects_every_corrupt_payload_shape() {
+        let base = FeeEstimator::new().to_history_bytes();
+        let patch = |offset: usize, bytes: &[u8]| {
+            let mut out = base.clone();
+            out[offset..offset + bytes.len()].copy_from_slice(bytes);
+            out
+        };
         let first_bound = HISTORY_MAGIC.len() + 4 + 1 + 4;
-        drifted[first_bound..first_bound + 8].copy_from_slice(&7_u64.to_le_bytes());
-        assert!(matches!(
-            FeeEstimator::from_history_bytes(&drifted),
-            Err(HistoryReject::Corrupt)
-        ));
-    }
-
-    #[test]
-    fn history_rejects_an_impossible_pending_count() {
-        let mut bytes = FeeEstimator::new().to_history_bytes();
-        // Layout: magic(8) version(4) height flag(1) bucket count(4) then
-        // every bucket (141 of them) before the pending count.
         let bucket_bytes = 8 + 2 * MAX_CONF_TARGET * 8;
-        let buckets = build_buckets().len();
-        let pending_offset = HISTORY_MAGIC.len() + 4 + 1 + 4 + bucket_bytes * buckets;
-        bytes[pending_offset..pending_offset + 4].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert!(matches!(
-            FeeEstimator::from_history_bytes(&bytes),
-            Err(HistoryReject::Corrupt)
-        ));
+        let pending_offset = first_bound + bucket_bytes * build_buckets().len();
+        let mut truncated = base.clone();
+        truncated.pop();
+        let mut trailing = base.clone();
+        trailing.push(0);
+
+        for (case, bytes, expected) in [
+            ("bad magic", patch(0, b"X"), HistoryReject::BadMagic),
+            (
+                "unknown version",
+                patch(HISTORY_MAGIC.len(), &[99]),
+                HistoryReject::UnknownVersion(99),
+            ),
+            ("truncated", truncated, HistoryReject::Corrupt),
+            ("trailing byte", trailing, HistoryReject::Corrupt),
+            (
+                "non-finite confirmed count",
+                patch(first_bound + 8, &f64::NAN.to_le_bytes()),
+                HistoryReject::Corrupt,
+            ),
+            (
+                "drifted bucket bound",
+                patch(first_bound, &7_u64.to_le_bytes()),
+                HistoryReject::Corrupt,
+            ),
+            (
+                "impossible pending count",
+                patch(pending_offset, &u32::MAX.to_le_bytes()),
+                HistoryReject::Corrupt,
+            ),
+        ] {
+            assert_eq!(
+                FeeEstimator::from_history_bytes(&bytes).err(),
+                Some(expected),
+                "{case}"
+            );
+        }
     }
 }
