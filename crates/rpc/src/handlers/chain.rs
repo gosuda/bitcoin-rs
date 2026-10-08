@@ -1771,34 +1771,21 @@ mod tests {
     }
 
     #[test]
-    fn percentiles_by_weight_empty_scores_are_zero() {
-        let mut scores = Vec::new();
-
-        assert_eq!(percentiles_by_weight(&mut scores, 0), [0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn percentiles_by_weight_single_tx_fills_all_slots() {
-        let mut scores = vec![(12, 400)];
-
-        assert_eq!(
-            percentiles_by_weight(&mut scores, 400),
-            [12, 12, 12, 12, 12]
-        );
-    }
-
-    #[test]
-    fn percentiles_by_weight_two_txs_use_core_thresholds() {
-        let mut scores = vec![(20, 100), (5, 100)];
-
-        assert_eq!(percentiles_by_weight(&mut scores, 200), [5, 5, 5, 20, 20]);
-    }
-
-    #[test]
-    fn percentiles_by_weight_fills_remaining_slots_with_last_rate() {
-        let mut scores = vec![(2, 1), (5, 1)];
-
-        assert_eq!(percentiles_by_weight(&mut scores, 100), [5, 5, 5, 5, 5]);
+    fn percentiles_by_weight_matches_core_thresholds() {
+        for (scores, total_weight, expected) in [
+            (vec![], 0_u64, [0, 0, 0, 0, 0]),
+            (vec![(12, 400)], 400, [12, 12, 12, 12, 12]),
+            (vec![(20, 100), (5, 100)], 200, [5, 5, 5, 20, 20]),
+            (vec![(2, 1), (5, 1)], 100, [5, 5, 5, 5, 5]),
+            (vec![(3, 70), (1, 10), (2, 20)], 100, [1, 2, 3, 3, 3]),
+        ] {
+            let mut scores = scores;
+            assert_eq!(
+                percentiles_by_weight(&mut scores, total_weight),
+                expected,
+                "{scores:?} of {total_weight}"
+            );
+        }
     }
 
     #[test]
@@ -1820,32 +1807,16 @@ mod tests {
         assert_eq!(fields, FeeFields::default());
     }
 
-    /// Unknown hashes must not produce empty hex or zero-filled block JSON.
-    ///
-    /// The removed fallback fabricated successful blocks at the current height,
-    /// so both verbosity forms returned HTTP-level success for absent identity.
     #[test]
-    fn getblock_reports_not_found_for_an_unknown_hash() {
+    fn unknown_hashes_are_not_found_on_every_block_response_form() {
         let ctx = Arc::new(Context::new());
         let hash = Hash256::from_le_bytes(&[0xab_u8; 32]).to_string_be();
-
         for verbosity in [0, 1, 2] {
             assert!(matches!(
                 getblock(&ctx, &json!([hash.as_str(), verbosity])),
                 Err(RpcError::NotFound("block not found"))
             ));
         }
-    }
-
-    /// Unknown hashes must not produce empty hex or zero-filled header JSON.
-    ///
-    /// The removed fallback made both header response forms look like valid
-    /// blocks even though the tree had never seen the requested identity.
-    #[test]
-    fn getblockheader_reports_not_found_for_an_unknown_hash() {
-        let ctx = Arc::new(Context::new());
-        let hash = Hash256::from_le_bytes(&[0xcd_u8; 32]).to_string_be();
-
         for verbose in [false, true] {
             assert!(matches!(
                 getblockheader(&ctx, &json!([hash.as_str(), verbose])),
@@ -1975,10 +1946,6 @@ mod tests {
         );
         Ok(())
     }
-    /// Corrupt cached body bytes must not become synthetic zero-valued JSON.
-    ///
-    /// The old decode fallback hid storage corruption behind a successful block
-    /// response, preventing callers from distinguishing damage from real data.
     #[test]
     fn getblock_reports_corrupt_stored_body() {
         let genesis = fixture_genesis();
@@ -2081,13 +2048,6 @@ mod tests {
     }
 
     #[test]
-    fn gettxoutsetinfo_rejects_unknown_hash_type() {
-        let ctx = Arc::new(Context::new());
-        let result = gettxoutsetinfo(&ctx, &json!(["sha3"]));
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn gettxoutsetinfo_accepts_production_muhash_triplet() {
         let ctx = Arc::new(Context::new());
         let result = gettxoutsetinfo(&ctx, &json!(["muhash", null, false]))
@@ -2101,8 +2061,15 @@ mod tests {
     }
 
     #[test]
-    fn gettxoutsetinfo_rejects_historical_query_without_coinstatsindex() {
+    fn gettxoutsetinfo_refuses_unsupported_arguments() {
         let ctx = Arc::new(Context::new());
+        let unknown_type = gettxoutsetinfo(&ctx, &json!(["sha3"]))
+            .expect_err("an unknown hash type must be refused");
+        assert_eq!(
+            unknown_type.to_string(),
+            "invalid params: hash_type must be one of: hash_serialized_3, muhash, none"
+        );
+
         let historical_hash = "aa".repeat(32);
         for params in [
             json!(["muhash", 1000, false]),
@@ -2123,15 +2090,10 @@ mod tests {
                 "{error}"
             );
         }
-    }
 
-    /// Contract clause: `docs/contracts/muhash-rpc.md` `MRPC-01`.
-    #[test]
-    fn gettxoutsetinfo_rejects_trailing_parameters() {
-        let ctx = Arc::new(Context::new());
-        let error = gettxoutsetinfo(&ctx, &json!(["muhash", null, false, true]))
+        let trailing = gettxoutsetinfo(&ctx, &json!(["muhash", null, false, true]))
             .expect_err("trailing parameters must be refused");
-        assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error}");
+        assert_eq!(trailing.code(), RpcError::INVALID_PARAMS, "{trailing}");
     }
 
     /// One publication supplies the scan height and the reported height and
@@ -2300,41 +2262,32 @@ mod tests {
     }
 
     #[test]
-    fn confirmations_uses_applied_height_not_header_tip() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let Fork {
-            ctx,
-            applied: applied_hash,
-            ..
-        } = forked_ctx()?;
-
-        // Header tip is height 2, applied tip height 1. The applied block is one
-        // deep, not two: the header chain does not count.
-        assert_eq!(
-            confirmations(&ctx, &ctx.chain.applied_view(), applied_hash, 1),
-            1
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn confirmations_is_negative_one_for_a_block_that_lost_the_reorg()
+    fn confirmations_count_applied_depth_and_answer_minus_one_off_the_chain()
     -> Result<(), Box<dyn std::error::Error>> {
         let Fork {
             ctx,
             applied: applied_hash,
             fork: fork_hash,
+            header_tip: header_tip_hash,
             ..
         } = forked_ctx()?;
+        let view = ctx.chain.applied_view();
+
+        assert_eq!(confirmations(&ctx, &view, applied_hash, 1), 1);
 
         assert_ne!(applied_hash, fork_hash, "the fixture branches must differ");
-        // Same height as the applied block, different chain. Deriving the answer
-        // from height alone reports 1 here, which says "in the chain, one deep".
-        assert_eq!(
-            confirmations(&ctx, &ctx.chain.applied_view(), fork_hash, 1),
-            -1,
-            "a block off the applied chain is not in it at any depth"
-        );
+        let unknown = Hash256::from_le_bytes(&[0xab_u8; 32]);
+        for (label, hash, height) in [
+            ("a branch that lost the reorg", fork_hash, 1),
+            ("a header above the applied tip", header_tip_hash, 2),
+            ("a hash the tree never saw", unknown, 1),
+        ] {
+            assert_eq!(
+                confirmations(&ctx, &view, hash, height),
+                -1,
+                "{label} is not in the applied chain at any depth"
+            );
+        }
         Ok(())
     }
 
@@ -2460,22 +2413,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn confirmations_is_negative_one_for_a_header_above_the_applied_tip()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let Fork {
-            ctx,
-            header_tip: header_tip_hash,
-            ..
-        } = forked_ctx()?;
-
-        // Known header, never connected. Core's m_chain does not contain it.
-        assert_eq!(
-            confirmations(&ctx, &ctx.chain.applied_view(), header_tip_hash, 2),
-            -1
-        );
-        Ok(())
-    }
     /// Header-only tree nodes remain addressable even without a log record.
     ///
     /// Rejecting unknown identities must not accidentally require active-chain
@@ -2519,19 +2456,6 @@ mod tests {
             Some(u64::from(fork_header.nonce))
         );
         assert_eq!(verbose.get("nTx").as_u64(), Some(0));
-        Ok(())
-    }
-
-    #[test]
-    fn confirmations_is_negative_one_for_a_hash_the_tree_never_saw()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let Fork { ctx, .. } = forked_ctx()?;
-        let unknown = Hash256::from_le_bytes(&[0xab_u8; 32]);
-
-        assert_eq!(
-            confirmations(&ctx, &ctx.chain.applied_view(), unknown, 1),
-            -1
-        );
         Ok(())
     }
 
@@ -2671,93 +2595,48 @@ mod tests {
     }
 
     #[test]
-    fn reorged_block_reports_negative_confirmations_with_the_block_stored()
+    fn reorged_block_reports_negative_confirmations_stored_or_pruned()
     -> Result<(), Box<dyn std::error::Error>> {
-        assert_reorged_block_reports_negative_confirmations(true)
+        for with_body in [true, false] {
+            assert_reorged_block_reports_negative_confirmations(with_body)?;
+        }
+        Ok(())
     }
 
     #[test]
-    fn reorged_block_reports_negative_confirmations_without_the_block_stored()
-    -> Result<(), Box<dyn std::error::Error>> {
-        assert_reorged_block_reports_negative_confirmations(false)
-    }
-
-    #[test]
-    fn verificationprogress_reports_half_when_applied_is_half_of_headers() {
-        let ctx = Arc::new(Context::new());
-        let hash = Hash256::from_le_bytes(&[7_u8; 32]);
-        ctx.chain.chain_tip.store(Some(Arc::new(TipSnapshot {
-            tip_id: NodeId::new(0),
-            height: 100,
-            chainwork: ChainWork::ZERO,
-            hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
-        })));
-        ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
-            tip_id: NodeId::new(0),
-            height: 50,
-            chainwork: ChainWork::ZERO,
-            hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
-        })));
-        let result = getblockchaininfo(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
-        let Some(progress) = result
-            .get("verificationprogress")
-            .and_then(JsonValueTrait::as_f64)
-        else {
-            panic!("verificationprogress missing: {result:?}");
+    fn getblockchaininfo_verificationprogress_follows_the_two_tips() {
+        let tip = |height: u32| {
+            Arc::new(TipSnapshot {
+                tip_id: NodeId::new(0),
+                height,
+                chainwork: ChainWork::ZERO,
+                hash: Hash256::from_le_bytes(&[7_u8; 32]),
+                chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
+            })
         };
-        assert!(
-            (progress - 0.5).abs() < 1e-6,
-            "expected ~0.5, got {progress}"
-        );
-    }
+        let cases: [(&str, Option<u32>, Option<u32>, f64); 3] = [
+            ("half applied", Some(100), Some(50), 0.5),
+            ("no header tip", None, None, 0.0),
+            ("applied past headers", Some(50), Some(100), 1.0),
+        ];
 
-    #[test]
-    fn verificationprogress_reports_zero_when_headers_unset() {
-        let ctx = Arc::new(Context::new());
-        let result = getblockchaininfo(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
-        let Some(progress) = result
-            .get("verificationprogress")
-            .and_then(JsonValueTrait::as_f64)
-        else {
-            panic!("verificationprogress missing: {result:?}");
-        };
-        assert!(
-            progress.abs() < f64::EPSILON,
-            "expected 0.0, got {progress}"
-        );
-    }
-
-    #[test]
-    fn verificationprogress_is_capped_when_applied_tip_is_temporarily_higher() {
-        let ctx = Arc::new(Context::new());
-        let hash = Hash256::from_le_bytes(&[8_u8; 32]);
-        ctx.chain.chain_tip.store(Some(Arc::new(TipSnapshot {
-            tip_id: NodeId::new(0),
-            height: 50,
-            chainwork: ChainWork::ZERO,
-            hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
-        })));
-        ctx.chain.applied_tip.store(Some(Arc::new(TipSnapshot {
-            tip_id: NodeId::new(0),
-            height: 100,
-            chainwork: ChainWork::ZERO,
-            hash,
-            chain_tx_count: bitcoin_rs_chain::ChainTxCount::UNKNOWN,
-        })));
-
-        let result = getblockchaininfo(&ctx, &json!([]))
-            .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
-        assert_eq!(
-            result
+        for (label, headers, applied, expected) in cases {
+            let ctx = Arc::new(Context::new());
+            ctx.chain.chain_tip.store(headers.map(tip));
+            ctx.chain.applied_tip.store(applied.map(tip));
+            let result = getblockchaininfo(&ctx, &json!([]))
+                .unwrap_or_else(|err| panic!("getblockchaininfo failed: {err}"));
+            let Some(progress) = result
                 .get("verificationprogress")
-                .and_then(JsonValueTrait::as_f64),
-            Some(1.0)
-        );
+                .and_then(JsonValueTrait::as_f64)
+            else {
+                panic!("{label}: verificationprogress missing: {result:?}");
+            };
+            assert!(
+                (progress - expected).abs() < 1e-6,
+                "{label}: expected {expected}, got {progress}"
+            );
+        }
     }
 
     #[test]
@@ -2890,13 +2769,6 @@ mod tests {
         );
     }
 
-    /// `size_on_disk` reports what the block store says, not the record sum.
-    ///
-    /// The record sum keeps counting blocks whose bytes pruning has deleted, so
-    /// it cannot be what a field named "size on disk" reports. This gives the
-    /// context a store that answers with a figure deliberately unrelated to the
-    /// records, so a handler that quietly went on summing them fails here rather
-    /// than looking right by coincidence.
     #[test]
     fn getblockchaininfo_size_on_disk_comes_from_the_block_store() {
         struct SizedStore(u64);
@@ -3066,11 +2938,6 @@ mod tests {
         log
     }
 
-    /// A complete genesis-to-height prefix is a chain total; anything else is not.
-    ///
-    /// Height 3 is recorded twice in the fixture. The prefix through that
-    /// height includes both records. A log that starts after genesis cannot
-    /// answer at all — the sum would be an under-count, not a chain total.
     #[test]
     fn cumulative_tx_count_through_requires_a_genesis_prefix() {
         let log = shaped_log();
@@ -3096,11 +2963,6 @@ mod tests {
         );
     }
 
-    /// The running sums are the log's only aggregates; push, pop, clear and the
-    /// `tx_count_before` clamp are pinned to hand-computed fixture values.
-    ///
-    /// Catches stale totals after disconnect or clear and an unclamped prefix
-    /// lookup that panics when the requested count exceeds the log length.
     #[test]
     fn block_log_running_sums_track_push_pop_and_clear() {
         let mut log = shaped_log();
@@ -3122,12 +2984,6 @@ mod tests {
         assert_eq!(log.total_tx_count(), 0, "clear must reset the running sums");
     }
 
-    /// The running sums must use saturating `u64` addition.
-    ///
-    /// A previous implementation wrapped the body-size and tx-count totals
-    /// on the very next push after saturation (`u64::MAX + 1` became `0`).
-    /// The max-sized first push and the following `+1` push together catch
-    /// that concrete wrapping bug.
     #[test]
     fn block_log_running_sums_saturate_instead_of_wrapping() {
         let max = usize::try_from(u64::MAX).unwrap_or(usize::MAX);
@@ -3452,74 +3308,43 @@ mod pruneblockchain_tests {
     }
 
     #[test]
-    fn pruneblockchain_returns_requested_height_after_service_succeeds() {
+    fn pruneblockchain_answers_the_service_height_and_refuses_unsafe_requests() {
         let ctx = pruning_context();
         set_applied_tip(&ctx, 400);
-
-        let result = pruneblockchain(&ctx, &json!([100]))
+        let requested = pruneblockchain(&ctx, &json!([100]))
             .unwrap_or_else(|err| panic!("pruneblockchain failed: {err}"));
+        assert_eq!(requested.as_u64(), Some(100));
 
-        assert_eq!(result.as_u64(), Some(100));
-    }
+        assert!(matches!(
+            pruneblockchain(&ctx, &json!([200])),
+            Err(RpcError::InvalidParams(
+                "prune height is within reorg safety margin"
+            ))
+        ));
+        assert!(matches!(
+            pruneblockchain(&ctx, &json!([401])),
+            Err(RpcError::InvalidParams(
+                "prune height cannot exceed applied tip"
+            ))
+        ));
 
-    #[test]
-    fn pruneblockchain_returns_service_pruneheight() {
-        let mut ctx = Context::new();
-        ctx.chain.prune_service = Some(Arc::new(FakePruneService {
+        let mut reporting = Context::new();
+        reporting.chain.prune_service = Some(Arc::new(FakePruneService {
             status: crate::context::PruneStatus {
                 pruned: true,
                 pruneheight: Some(150),
             },
             result_pruneheight: Some(150),
         }));
-        let ctx = Arc::new(ctx);
-        set_applied_tip(&ctx, 400);
-
-        let result = pruneblockchain(&ctx, &json!([100]))
+        let reporting = Arc::new(reporting);
+        set_applied_tip(&reporting, 400);
+        let served = pruneblockchain(&reporting, &json!([100]))
             .unwrap_or_else(|err| panic!("pruneblockchain failed: {err}"));
-
-        assert_eq!(result.as_u64(), Some(150));
-    }
-
-    #[test]
-    fn pruneblockchain_returns_method_disabled_without_service() {
-        let ctx = Arc::new(Context::new());
-
-        let result = pruneblockchain(&ctx, &json!([100]));
+        assert_eq!(served.as_u64(), Some(150));
 
         assert!(matches!(
-            result,
+            pruneblockchain(&Arc::new(Context::new()), &json!([100])),
             Err(RpcError::MethodDisabled("pruning is disabled"))
-        ));
-    }
-
-    #[test]
-    fn pruneblockchain_rejects_unsafe_height() {
-        let ctx = pruning_context();
-        set_applied_tip(&ctx, 400);
-
-        let result = pruneblockchain(&ctx, &json!([200]));
-
-        assert!(matches!(
-            result,
-            Err(RpcError::InvalidParams(
-                "prune height is within reorg safety margin"
-            ))
-        ));
-    }
-
-    #[test]
-    fn pruneblockchain_rejects_height_above_tip() {
-        let ctx = pruning_context();
-        set_applied_tip(&ctx, 400);
-
-        let result = pruneblockchain(&ctx, &json!([401]));
-
-        assert!(matches!(
-            result,
-            Err(RpcError::InvalidParams(
-                "prune height cannot exceed applied tip"
-            ))
         ));
     }
 
@@ -4200,27 +4025,18 @@ mod verifychain_tests {
     use super::*;
 
     #[test]
-    fn verifychain_returns_true_on_empty_chain() {
+    fn verifychain_accepts_core_parameters_and_refuses_oversized_nblocks() {
         let ctx = Arc::new(Context::new());
-        let result =
-            verifychain(&ctx, &json!([])).unwrap_or_else(|err| panic!("verifychain failed: {err}"));
-        assert_eq!(result.as_bool(), Some(true));
-    }
+        for params in [json!([]), json!([3, 6]), json!([0, 6]), json!([4, 0])] {
+            let result = verifychain(&ctx, &params)
+                .unwrap_or_else(|err| panic!("verifychain{params:?} failed: {err}"));
+            assert_eq!(result.as_bool(), Some(true), "{params:?}");
+        }
 
-    #[test]
-    fn verifychain_accepts_default_params() {
-        let ctx = Arc::new(Context::new());
-        let result = verifychain(&ctx, &json!([3, 6]))
-            .unwrap_or_else(|err| panic!("verifychain failed: {err}"));
-        assert_eq!(result.as_bool(), Some(true));
-    }
-
-    #[test]
-    fn verifychain_returns_true_for_checklevel_zero() {
-        let ctx = Arc::new(Context::new());
-        let result = verifychain(&ctx, &json!([0, 6]))
-            .unwrap_or_else(|err| panic!("verifychain failed: {err}"));
-        assert_eq!(result.as_bool(), Some(true));
+        match verifychain(&ctx, &json!([3, u64::from(u32::MAX) + 1])) {
+            Ok(value) => panic!("oversized nblocks succeeded: {value:?}"),
+            Err(err) => assert_eq!(err.to_string(), "invalid params: nblocks exceeds u32"),
+        }
     }
 }
 
@@ -4371,22 +4187,31 @@ mod chaintxstats_durability_tests {
     }
 
     #[test]
-    fn txcount_comes_from_the_selected_node_not_the_in_process_log() {
-        let value = stats_of(&restarted_ctx(Some(1_315_805_869)));
+    fn stats_come_from_the_selected_node_not_the_in_process_log() {
+        let known = stats_of(&restarted_ctx(Some(1_315_805_869)));
         assert_eq!(
-            value.get("txcount").and_then(JsonValueTrait::as_u64),
+            known.get("txcount").and_then(JsonValueTrait::as_u64),
             Some(1_315_805_869),
             "folding the empty log would have reported zero"
         );
-    }
+        assert_eq!(
+            known.get("time").and_then(JsonValueTrait::as_u64),
+            Some(u64::from(TIP_TIME)),
+            "the tree knows the tip's timestamp; the log does not have to"
+        );
 
-    #[test]
-    fn txcount_is_zero_when_the_selected_node_count_is_unknown() {
-        let ctx = restarted_ctx(None);
-        let Some(tip) = ctx.chain.applied_tip.load_full() else {
+        let unknown = restarted_ctx(None);
+        assert_eq!(
+            stats_of(&unknown)
+                .get("txcount")
+                .and_then(JsonValueTrait::as_u64),
+            Some(0),
+            "it must not invent a count it does not have"
+        );
+        let Some(tip) = unknown.chain.applied_tip.load_full() else {
             panic!("fixture has no applied tip");
         };
-        ctx.chain.add_block(BlockRecord {
+        unknown.chain.add_block(BlockRecord {
             hash: BlockHash::from(tip.hash),
             height: tip.height,
             body_size: 0,
@@ -4395,32 +4220,11 @@ mod chaintxstats_durability_tests {
             time: TIP_TIME,
         });
         assert_eq!(
-            stats_of(&ctx)
+            stats_of(&unknown)
                 .get("txcount")
                 .and_then(JsonValueTrait::as_u64),
             Some(0),
             "an unknown node count must not fall back to the in-process log"
-        );
-    }
-
-    #[test]
-    fn txcount_is_zero_when_the_node_count_is_unknown_and_the_log_is_empty() {
-        assert_eq!(
-            stats_of(&restarted_ctx(None))
-                .get("txcount")
-                .and_then(JsonValueTrait::as_u64),
-            Some(0),
-            "it must not invent a count it does not have"
-        );
-    }
-
-    #[test]
-    fn time_is_the_applied_tips_block_time_even_with_no_record_for_it() {
-        let value = stats_of(&restarted_ctx(Some(10)));
-        assert_eq!(
-            value.get("time").and_then(JsonValueTrait::as_u64),
-            Some(u64::from(TIP_TIME)),
-            "the tree knows the tip's timestamp; the log does not have to"
         );
     }
 
@@ -4788,11 +4592,6 @@ mod chaintxstats_window_tests {
         value.get(key).and_then(JsonValueTrait::as_i64)
     }
 
-    /// The window is measured between two median times, as Core measures it.
-    ///
-    /// The raw-timestamp difference is asserted to be a *different* number, so
-    /// the previous implementation could not have passed this: it subtracted
-    /// the earliest raw timestamp in the window from the tip's.
     #[test]
     fn window_interval_is_the_difference_of_two_median_times() {
         let ctx = chain_ctx(&TIMES);
@@ -4899,10 +4698,6 @@ mod chaintxstats_window_tests {
         );
     }
 
-    /// A window of no blocks is not a window, and Core reports nothing about it.
-    ///
-    /// The three window fields are absent rather than zero: a zero interval and
-    /// a zero count are measurements, and none was taken.
     #[test]
     fn a_zero_block_window_reports_no_window_fields() {
         let result = stats(&chain_ctx(&TIMES), &json!([0]));
@@ -4912,10 +4707,6 @@ mod chaintxstats_window_tests {
         assert!(result.get("txrate").is_none(), "{result:?}");
     }
 
-    /// A rate needs a window that advanced. This one does not.
-    ///
-    /// The count is still reported -- the transactions are real -- but dividing
-    /// by a non-positive interval is not a rate, so Core omits it.
     #[test]
     fn txrate_is_omitted_when_the_window_does_not_advance() {
         // Eleven identical times, so every median time in the chain is equal
@@ -4951,10 +4742,6 @@ mod chaintxstats_window_tests {
         assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
     }
 
-    /// The default window is clamped, because the caller did not choose it.
-    ///
-    /// Core clamps its own default to `height - 1` and refuses only what a
-    /// caller asked for explicitly.
     #[test]
     fn the_default_window_is_clamped_to_the_chain() {
         let result = stats(&chain_ctx(&TIMES), &json!([]));
@@ -5526,159 +5313,73 @@ mod scantxoutset_tests {
     }
 
     #[test]
-    fn scantxoutset_rejects_empty_scanobjects() {
+    fn scantxoutset_refuses_malformed_requests() {
         let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(&ctx, &json!(["start", []])) {
-            Ok(value) => panic!("empty scanobjects succeeded: {value:?}"),
-            Err(err) => err,
-        };
+        let cases: &[(&str, Value, &str)] = &[
+            (
+                "missing scanobjects",
+                json!(["start"]),
+                "scanobjects are required",
+            ),
+            (
+                "non-array scanobjects",
+                json!(["start", "addr(1111111111111111111114oLvT2)"]),
+                "scanobjects must be an array",
+            ),
+            (
+                "empty scanobjects",
+                json!(["start", []]),
+                "scanobjects must not be empty",
+            ),
+            (
+                "object without desc",
+                json!(["start", [{"range": 0}]]),
+                "missing desc",
+            ),
+            (
+                "ranged descriptor",
+                json!(["start", [{"desc": "addr(foo*)", "range": 1}]]),
+                "ranged scantxoutset descriptors are not supported",
+            ),
+            (
+                "inverted range",
+                json!(["start", [{"desc": "addr(1111111111111111111114oLvT2)", "range": [2, 1]}]]),
+                "range start must not exceed end",
+            ),
+            (
+                "unsupported descriptor in object form",
+                json!(["start", [{"desc": "raw(51)"}]]),
+                "only addr() is supported",
+            ),
+            (
+                "unsupported descriptor",
+                json!(["start", ["raw(51)"]]),
+                "only addr() is supported",
+            ),
+            (
+                "bad descriptor checksum",
+                json!(["start", ["addr(1111111111111111111114oLvT2)#badbadba"]]),
+                "checksum mismatch",
+            ),
+            (
+                "address from another network",
+                json!([
+                    "start",
+                    ["addr(tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx)"]
+                ]),
+                "Address is not valid",
+            ),
+        ];
 
-        assert!(
-            err.to_string().contains("scanobjects must not be empty"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_scanobject_without_desc() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(&ctx, &json!(["start", [{"range": 0}]])) {
-            Ok(value) => panic!("scanobject without desc succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("missing desc"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_ranged_scan_descriptor() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(
-            &ctx,
-            &json!(["start", [{"desc": "addr(foo*)", "range": 1}]]),
-        ) {
-            Ok(value) => panic!("ranged descriptor succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string()
-                .contains("ranged scantxoutset descriptors are not supported"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_malformed_scanobject_range() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(
-            &ctx,
-            &json!(["start", [{"desc": "addr(1111111111111111111114oLvT2)", "range": [2, 1]}]]),
-        ) {
-            Ok(value) => panic!("bad range succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("range start must not exceed end"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_object_form_unsupported_scan_descriptor() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(&ctx, &json!(["start", [{"desc": "raw(51)"}]])) {
-            Ok(value) => panic!("unsupported object descriptor succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("only addr() is supported"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_unsupported_scan_descriptors() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(&ctx, &json!(["start", ["raw(51)"]])) {
-            Ok(value) => panic!("unsupported descriptor succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("only addr() is supported"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_bad_descriptor_checksum() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(
-            &ctx,
-            &json!(["start", ["addr(1111111111111111111114oLvT2)#badbadba"]]),
-        ) {
-            Ok(value) => panic!("bad checksum succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("checksum mismatch"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_wrong_network_address() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(
-            &ctx,
-            &json!([
-                "start",
-                ["addr(tb1qfm7h7nh4jjmzm0m2z8q9nu4n4yhndxj3x6gzt4)"]
-            ]),
-        ) {
-            Ok(value) => panic!("wrong network address succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("Address is not valid"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_non_array_scanobjects() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(&ctx, &json!(["start", "addr(1111111111111111111114oLvT2)"])) {
-            Ok(value) => panic!("non-array scanobjects succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("scanobjects must be an array"),
-            "wrong error: {err}"
-        );
-    }
-
-    #[test]
-    fn scantxoutset_rejects_missing_scanobjects() {
-        let ctx = Arc::new(Context::new());
-        let err = match scantxoutset(&ctx, &json!(["start"])) {
-            Ok(value) => panic!("missing scanobjects succeeded: {value:?}"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("scanobjects are required"),
-            "wrong error: {err}"
-        );
+        for (name, params, message) in cases {
+            match scantxoutset(&ctx, params) {
+                Ok(value) => panic!("{name} succeeded: {value:?}"),
+                Err(err) => assert!(
+                    err.to_string().contains(message),
+                    "{name}: wanted {message:?}, got {err}"
+                ),
+            }
+        }
     }
 
     #[test]

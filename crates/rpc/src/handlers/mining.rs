@@ -893,15 +893,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn getblocktemplate_requires_mining_control() {
-        let ctx = Arc::new(Context::new());
-        let error = getblocktemplate(&ctx, &json!([{"rules":["segwit"]}]))
-            .expect_err("missing control must fail");
-        assert!(matches!(&error, RpcError::MethodNotFound(name) if name == "getblocktemplate"));
-        assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
-    }
-
     fn register_dummy_peer(ctx: &Context) {
         let (tx, _rx) = crossbeam_channel::bounded::<bitcoin_rs_p2p::Message>(1);
         ctx.network.peer_table.register(
@@ -1224,14 +1215,33 @@ mod tests {
     }
 
     #[test]
-    // CONTRACT: API-15
-    fn submitblock_requires_mining_control_and_rejects_garbage_encoding() {
-        let missing = Arc::new(Context::new());
-        let error = submitblock(&missing, &json!(["00"]))
-            .expect_err("submitblock without control must fail");
-        assert!(matches!(&error, RpcError::MethodNotFound(name) if name == "submitblock"));
-        assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
+    fn mining_methods_without_a_control_answer_method_not_found() {
+        type Method = fn(&Arc<Context>, &Value) -> Result<Value, RpcError>;
+        let ctx = Arc::new(Context::new());
+        let cases: [(&str, Method, Value); 4] = [
+            (
+                "getblocktemplate",
+                getblocktemplate,
+                json!([{"rules":["segwit"]}]),
+            ),
+            ("getmininginfo", getmininginfo, json!([])),
+            ("getnetworkhashps", getnetworkhashps, json!([])),
+            ("submitblock", submitblock, json!(["00"])),
+        ];
 
+        for (name, method, params) in cases {
+            let error = method(&ctx, &params).expect_err("missing control must fail");
+            assert!(
+                matches!(&error, RpcError::MethodNotFound(method) if method == name),
+                "{name}: {error}"
+            );
+            assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND, "{name}");
+        }
+    }
+
+    #[test]
+    // CONTRACT: API-15
+    fn submitblock_rejects_garbage_encoding() {
         let control = FakeMiningControl::with_template(sample_template(), sample_mining_info());
         let ctx = ctx_with_control(control);
         for hex in ["", "00", "zz", "0", "deadbeef"] {
@@ -1404,14 +1414,6 @@ mod tests {
     }
 
     #[test]
-    fn getmininginfo_requires_mining_control() {
-        let ctx = Arc::new(Context::new());
-        let error = getmininginfo(&ctx, &json!([])).expect_err("missing control must fail");
-        assert!(matches!(&error, RpcError::MethodNotFound(name) if name == "getmininginfo"));
-        assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
-    }
-
-    #[test]
     fn prioritisetransaction_calls_mempool_prioritise_directly() {
         use bitcoin_rs_mempool::MempoolEntry;
 
@@ -1454,24 +1456,19 @@ mod tests {
     }
 
     #[test]
-    fn prioritisetransaction_rejects_nonzero_dummy_like_core() {
+    fn prioritisetransaction_rejects_core_argument_errors() {
         let ctx = Arc::new(Context::new());
         let txid = "11".repeat(32);
-        let error = prioritisetransaction(&ctx, &json!([txid.as_str(), 1, 500]))
+        let nonzero_dummy = prioritisetransaction(&ctx, &json!([txid.as_str(), 1, 500]))
             .expect_err("nonzero dummy must fail");
-        assert!(matches!(error, RpcError::InvalidParameter(_)));
-        assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
-        assert_eq!(error.to_string(), PRIORITISE_DUMMY_ERROR);
-    }
+        assert!(matches!(nonzero_dummy, RpcError::InvalidParameter(_)));
+        assert_eq!(nonzero_dummy.code(), RpcError::CORE_INVALID_PARAMETER);
+        assert_eq!(nonzero_dummy.to_string(), PRIORITISE_DUMMY_ERROR);
 
-    #[test]
-    fn prioritisetransaction_requires_fee_delta_as_third_parameter() {
-        let ctx = Arc::new(Context::new());
-        let txid = "11".repeat(32);
-        let error = prioritisetransaction(&ctx, &json!([txid.as_str(), 500]))
+        let two_args = prioritisetransaction(&ctx, &json!([txid.as_str(), 500]))
             .expect_err("two-arg form must not treat dummy as fee_delta");
-        assert!(matches!(error, RpcError::InvalidType(_)));
-        assert_eq!(error.code(), RpcError::CORE_INVALID_TYPE);
+        assert!(matches!(two_args, RpcError::InvalidType(_)));
+        assert_eq!(two_args.code(), RpcError::CORE_INVALID_TYPE);
     }
 
     fn dust_priority_tx() -> Tx {
@@ -1668,14 +1665,6 @@ mod tests {
             result.get("chain").and_then(JsonValueTrait::as_str),
             Some("testnet4")
         );
-    }
-
-    #[test]
-    fn getnetworkhashps_requires_mining_control() {
-        let ctx = Arc::new(Context::new());
-        let error = getnetworkhashps(&ctx, &json!([])).expect_err("missing control must fail");
-        assert!(matches!(&error, RpcError::MethodNotFound(name) if name == "getnetworkhashps"));
-        assert_eq!(error.code(), RpcError::METHOD_NOT_FOUND);
     }
 
     #[test]

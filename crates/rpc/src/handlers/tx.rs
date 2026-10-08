@@ -2216,11 +2216,6 @@ mod acceptance_tests {
         consensus_bytes(tx).to_lower_hex_string()
     }
 
-    /// The transaction must land in the mempool.
-    ///
-    /// It previously went into a side `HashMap` that nothing else treated as
-    /// the mempool: `getmempoolinfo` reported an empty pool, mining saw no
-    /// candidates, and no policy check ran at all.
     #[test]
     fn sendrawtransaction_admits_the_transaction_to_the_mempool() {
         let ctx = Arc::new(Context::new());
@@ -2236,12 +2231,6 @@ mod acceptance_tests {
         assert!(ctx.mempool.gateway.read().contains_txid(&tx.txid()));
     }
 
-    /// The default fee guard stops a transaction that burns its change.
-    ///
-    /// The classic shape: an input worth 1 BTC, an output worth a hundredth of
-    /// it, and the rest handed to the miner. Core refuses that by default and
-    /// the sender has to say they meant it. This node used to send it, and a
-    /// fee is not recoverable once the transaction confirms.
     #[test]
     fn sendrawtransaction_refuses_an_absurd_fee_by_default() {
         let ctx = Arc::new(Context::new());
@@ -2418,13 +2407,6 @@ mod acceptance_tests {
         );
     }
 
-    /// An RBF-evicted transaction is no longer known.
-    ///
-    /// Admission used to copy every accepted tx into the RPC lookup cache and
-    /// treat a cache hit as already-known success. After a replacement swept
-    /// the original out of the pool, resubmitting it still returned the txid
-    /// and `getrawtransaction` still served the body — a wallet retry would
-    /// believe the old transaction was pending.
     #[test]
     fn sendrawtransaction_does_not_treat_an_evicted_tx_as_already_known() {
         let ctx = Arc::new(Context::new());
@@ -2562,12 +2544,6 @@ mod acceptance_tests {
         );
     }
 
-    /// Standardness is relay policy, enforced on mainnet.
-    ///
-    /// The mempool crate tests the gate itself; this covers the wiring that
-    /// passes the policy through. Network-based relaxation (regtest) is not
-    /// wired in the admission path yet — see the `require_standard` field
-    /// gap in `PackageTxContext` / `evaluate_one`.
     #[test]
     fn standardness_is_enforced_on_mainnet() {
         let mainnet = Arc::new(Context::new());
