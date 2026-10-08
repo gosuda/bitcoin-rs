@@ -250,6 +250,11 @@ trap cleanup EXIT
 echo "==> workdir: ${WORKDIR}"
 echo "==> core p2p: ${CORE_P2P_PORT} rpc: ${CORE_RPC_PORT}; bitcoin-rs p2p: ${RS_P2P_PORT} rpc: ${RS_RPC_PORT}"
 
+# The workdir is kept across runs (--workdir implies KEEP=1) and CI caches it
+# under target/, so a restored datadir can carry an obsolete schema epoch that
+# the node correctly refuses to open. Node state is per-run: always start from
+# empty datadirs and let each side write its own CURRENT_SCHEMA marker.
+rm -rf -- "${CORE_DATADIR}" "${RS_DATADIR}"
 mkdir -p "${CORE_DATADIR}" "${RS_DATADIR}"
 
 echo "==> starting bitcoind"
