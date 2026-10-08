@@ -77,10 +77,7 @@ impl Entry {
 struct TableView {
     map: HashMap<SocketAddr, Entry>,
     /// Counter sets of dropped connections whose teardown may still be in
-    /// flight. Shared (`Arc`), so bytes a dying connection records after its
-    /// entry left land in `traffic_totals` whenever they settle — a
-    /// removal-time snapshot of the count would lose them. Each entry folds
-    /// into `settled_*` once the table holds the last `Arc`.
+    /// flight.
     retired: Vec<Arc<PeerCounters>>,
     /// Final byte counts of fully torn-down retired connections.
     settled_recv: u64,
@@ -215,8 +212,6 @@ impl PeerTable {
     }
 
     /// Publishes handshake metadata for the connection `lease` refers to.
-    /// Returns `false` (and publishes nothing) when that connection is no
-    /// longer the live one at `addr`.
     pub fn publish_info(&self, addr: SocketAddr, lease: &PeerLease, info: PeerInfo) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&addr) {
@@ -229,9 +224,7 @@ impl PeerTable {
     }
 
     /// Records that the live connection accepted `tip_hash` and raises its
-    /// active-chain credit when `height` is supplied. See P2P-03 in
-    /// `docs/contracts/p2p-wire.md`. Returns `false` for a stale or unpublished
-    /// connection and `true` for any live published connection.
+    /// active-chain credit when `height` is supplied.
     pub(crate) fn note_announced_tip(
         &self,
         source: PeerSource,
@@ -347,7 +340,6 @@ impl PeerTable {
 
     /// Raises the compact-block relay preference for `source` — its live
     /// connection accepted a post-verack `sendcmpct` with a known version.
-    /// Returns `false` for a stale or unpublished connection.
     pub(crate) fn note_compact_relay(&self, source: PeerSource) -> bool {
         let mut entries = self.entries.write();
         match entries.get_mut(&source.addr) {
@@ -363,8 +355,7 @@ impl PeerTable {
     }
 
     /// Reports whether the live published connection at `addr` requested
-    /// compact-block relay. Fetch-side eligibility reads this instead of a
-    /// stale per-connection guess.
+    /// compact-block relay.
     pub(crate) fn compact_relay_of(&self, addr: SocketAddr) -> bool {
         let entries = self.entries.read();
         entries.get(&addr).is_some_and(|entry| {
@@ -436,9 +427,7 @@ impl PeerTable {
 
     /// Retains a dropped connection's counter set so `traffic_totals` keeps
     /// counting it after the entry is gone; unpublished connections carry no
-    /// counters to retain. Shared (`Arc`), so bytes a dying connection records
-    /// after its entry left still land in `traffic_totals` whenever they
-    /// settle.
+    /// counters to retain.
     fn retire(entries: &mut TableView, removed: &Entry) {
         if let Some(info) = removed.info.as_ref() {
             entries.retired.push(Arc::clone(&info.counters));
@@ -600,9 +589,7 @@ impl PeerTable {
         infos.into_iter().map(|(_, info)| info.clone()).collect()
     }
 
-    /// Metadata of the one connection at `addr`, if it completed its
-    /// handshake. The lookup reads the table once — unlike [`Self::infos`],
-    /// it does not snapshot every peer to answer for one.
+    /// Metadata of the one connection at `addr`, if it completed its handshake.
     #[must_use]
     pub(crate) fn info_of(&self, addr: SocketAddr) -> Option<PeerInfo> {
         self.entries
@@ -838,7 +825,6 @@ mod tests {
         let table = PeerTable::new();
         let first = inbound_lease();
         assert!(table.try_register_inbound(addr(1), first, 1).is_some());
-        // The unpublished (handshaking) lease already occupies capacity.
         assert_eq!(table.live_inbound_count(), 1);
         let second = inbound_lease();
         assert!(
@@ -909,9 +895,6 @@ mod tests {
                 .is_some(),
             "capacity must admit the first inbound lease"
         );
-        // An external conviction cancels the lease; its owning thread has
-        // not yet run the identity-checked teardown, so the entry stays in
-        // the table while sitting outside the live count.
         displaced.cancel();
         assert_eq!(
             table.live_inbound_count(),
@@ -1031,7 +1014,6 @@ mod tests {
         assert_eq!(session_ports, ports);
     }
 
-    // P2P-02: source-checked operations reject replacements and already-cancelled leases.
     #[test]
     fn with_current_rejects_stale_source_and_holds_live_identity() {
         let table = PeerTable::new();
@@ -1048,8 +1030,6 @@ mod tests {
         assert!(!table.with_current(stale_source, || called = true));
         assert!(!called);
         assert!(table.with_current(current_source, || {
-            // A replacement needs this write lock. Queueing while the
-            // operation holds table authority must linearize before it.
             assert!(table.entries.try_write().is_none());
             assert!(current.send(crate::Message::Ping(1)).is_ok());
             called = true;
@@ -1098,11 +1078,9 @@ mod tests {
         let current_source = current.source(addr(1));
         assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
 
-        // The stale source must not inherit the replacement's credit slot.
         assert!(!table.note_announced_height(stale_source, 42));
         assert_eq!(table.infos()[0].best_known_height, 10);
 
-        // The live connection raises the entry it owns.
         assert!(table.note_announced_height(current_source, 42));
         assert_eq!(table.infos()[0].best_known_height, 42);
     }
@@ -1115,16 +1093,12 @@ mod tests {
         let source = current.source(addr(1));
         assert!(table.publish_info(addr(1), &current, info(addr(1), 100)));
 
-        // A terminal page caps the horizon at the demonstrated cursor.
         assert!(table.note_headers_horizon(source, 5));
 
-        // Verified progress at or below the cap changes nothing.
         assert!(table.note_headers_progress(source, 5));
         let sessions = table.sessions();
         assert_eq!(sessions[0].headers_horizon, Some(5));
 
-        // Verified progress past the cap lifts it entirely: the peer
-        // proved the earlier terminal page was not its tip.
         assert!(table.note_headers_progress(source, 12));
         let sessions = table.sessions();
         assert_eq!(sessions[0].headers_horizon, None);
@@ -1143,20 +1117,15 @@ mod tests {
         let source = current.source(addr(1));
         assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
 
-        // Equal height: no update.
         assert!(!table.note_announced_height(source, 10));
         assert_eq!(table.infos()[0].best_known_height, 10);
 
-        // Lower height: no update (monotonic).
         assert!(!table.note_announced_height(source, 9));
         assert_eq!(table.infos()[0].best_known_height, 10);
 
-        // Higher height: update.
         assert!(table.note_announced_height(source, 12));
         assert_eq!(table.infos()[0].best_known_height, 12);
 
-        // Accepted-tip evidence is retained with the live connection so the
-        // node can re-evaluate it if a later fork becomes active.
         let demonstrated_tip = Hash256::from_le_bytes(&[7_u8; 32]);
         assert!(table.note_announced_tip(source, demonstrated_tip, Some(13)));
         assert_eq!(table.infos()[0].best_known_height, 13);
@@ -1165,12 +1134,10 @@ mod tests {
             vec![demonstrated_tip]
         );
 
-        // Unknown address: no update.
         let other = lease();
         let other_source = other.source(addr(2));
         assert!(!table.note_announced_height(other_source, 99));
 
-        // Registered but unpublished peer: no update.
         table.register(addr(3), lease());
         let Some(unpublished) = table.lease(addr(3)) else {
             return;
@@ -1179,8 +1146,6 @@ mod tests {
         assert!(!table.note_announced_height(unpublished_source, 50));
     }
 
-    // CONTRACT: docs/policies/p2p-compatibility.md#4-handshake-contract (the
-    // published BIP152 relay preference feeds compact-fetch eligibility).
     #[test]
     fn note_compact_relay_credits_only_the_delivering_connection() {
         let table = PeerTable::new();
@@ -1197,22 +1162,17 @@ mod tests {
         let current_source = current.source(addr(1));
         assert!(table.publish_info(addr(1), &current, info(addr(1), 10)));
 
-        // The stale connection cannot raise the replacement's preference.
         assert!(!table.note_compact_relay(stale_source));
         assert!(!table.compact_relay_of(addr(1)));
 
-        // The live connection raises its own entry.
         assert!(table.note_compact_relay(current_source));
         assert!(table.compact_relay_of(addr(1)));
 
-        // Unknown and unpublished addresses never report relay.
         assert!(!table.compact_relay_of(addr(2)));
         table.register(addr(3), lease());
         assert!(!table.compact_relay_of(addr(3)));
     }
 
-    // `getnettotals` contract: totals persist across every removal path and
-    // keep counting bytes a dying connection records after its entry left.
     #[test]
     fn traffic_totals_stay_monotonic_across_removals() {
         use std::io::{Cursor, Write as _};
@@ -1226,7 +1186,6 @@ mod tests {
         let table = PeerTable::new();
         assert_eq!(table.traffic_totals(), (0, 0));
 
-        // Same-address replacement retires the predecessor's counters.
         let first = lease();
         let counters_first = Arc::new(crate::counters::PeerCounters::default());
         table.register(addr(1), first.clone());
@@ -1242,8 +1201,6 @@ mod tests {
         assert!(table.register(addr(1), second.clone()));
         assert_eq!(table.traffic_totals(), (0, 10));
 
-        // disconnect() retires counters; bytes the dying connection records
-        // after its entry left still land in the totals.
         let counters_second = Arc::new(crate::counters::PeerCounters::default());
         table.publish_info(
             addr(1),
@@ -1257,7 +1214,6 @@ mod tests {
         assert!(stream_second.write_all(&[0_u8; 5]).is_ok());
         assert_eq!(table.traffic_totals(), (0, 35));
 
-        // disconnect_matching retires counters too.
         let third = lease();
         let counters_third = Arc::new(crate::counters::PeerCounters::default());
         table.register(addr(2), third.clone());
@@ -1271,8 +1227,6 @@ mod tests {
         assert_eq!(removed, vec![addr(2)]);
         assert_eq!(table.traffic_totals(), (0, 42));
 
-        // Fully torn-down counters fold into settled totals, bounding the
-        // retired list, and nothing already counted is lost.
         drop(stream_second);
         drop(counters_first);
         drop(counters_second);
@@ -1284,8 +1238,6 @@ mod tests {
         assert_eq!(table.traffic_totals(), (0, 42));
     }
 
-    /// Slot arithmetic counts automatic outbound connections by relay role.
-    /// Inbound, manual, and cancelled leases hold no automatic slot.
     #[test]
     fn outbound_role_counts_split_by_relay_role() {
         let table = PeerTable::new();

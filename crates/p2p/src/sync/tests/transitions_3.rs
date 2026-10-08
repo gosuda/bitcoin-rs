@@ -1,8 +1,7 @@
 use super::*;
 
 #[test]
-fn tick_skips_getheaders_when_header_tip_matches_peer_height()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_skips_getheaders_when_header_tip_matches_peer_height() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
     let applied_snapshot = {
         let tree = block_tree.read();

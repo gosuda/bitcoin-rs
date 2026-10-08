@@ -51,15 +51,10 @@ impl<S: KvStore> Indexer<S> {
 
     /// Iterates confirmed funding rows for `scripthash`.
     ///
-    /// Returns every `HashPrefixRow` whose 8-byte prefix matches the scripthash's
-    /// scan prefix, decoded from `ColumnFamily::Funding`. Rows are returned in
-    /// the iteration order of the underlying store (lexicographic by key bytes).
-    ///
-    /// **Height ordering:** the 4-byte height suffix is big-endian (format 5),
-    /// so lexicographic byte order matches numeric height order within one
-    /// prefix: prefix-range scans arrive in chronological order.
-    ///
-    /// The 8-byte prefix is lossy: callers MUST resolve heights back to full
+    /// Returns every `HashPrefixRow` in `ColumnFamily::Funding` whose 8-byte
+    /// prefix matches, in store iteration order. The 4-byte height suffix is
+    /// big-endian (format 5), so that order is chronological within a prefix.
+    /// The prefix is lossy: callers MUST resolve heights back to full
     /// transactions via block storage to confirm scripthash identity.
     pub fn iter_funding_rows(
         &self,

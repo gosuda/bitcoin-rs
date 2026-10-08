@@ -167,9 +167,6 @@ impl OrphanPool {
     }
 
     /// PRE: `claim` and `announcer` name one pair this pool issued.
-    /// POST: true only while that exact body is resident and still lists that
-    /// announcer.
-    /// INVARIANT: a stale claim never reaches a different witness variant.
     pub(crate) fn is_current(&self, claim: &HeldOrphan, announcer: &PeerToken) -> bool {
         self.entries.get(&claim.tx.wtxid()).is_some_and(|current| {
             current.announcers.contains(announcer) && Arc::ptr_eq(&current.tx, &claim.tx)
@@ -196,16 +193,6 @@ impl OrphanPool {
     }
 
     /// Stores one peer-origin body together with the peer that announced it.
-    ///
-    /// PRE: the body passed `can_hold_orphan`; its txid and wtxid are stable.
-    /// POST: one body exists per wtxid; a new `(wtxid, announcer)` pair is
-    /// present exactly once; a same wtxid from the same peer changes nothing;
-    /// a different wtxid stays resident even when its txid equals another
-    /// resident's; the resident weight counts each wtxid once; an existing
-    /// wtxid keeps its FIFO position and first-seen time. Both global limits
-    /// hold on return.
-    /// INVARIANT: no index holds a txid as the resident identity, and the
-    /// parent, ready, weight and per-peer counters agree with `entries`.
     pub(crate) fn insert(&mut self, tx: Arc<Tx>, announcer: PeerToken, time: u64) {
         let wtxid = tx.wtxid();
         if self.entries.contains_key(&wtxid) {
@@ -252,10 +239,6 @@ impl OrphanPool {
     }
 
     /// Removes every resident body whose txid equals `txid`.
-    ///
-    /// PRE: the caller holds a transaction-wide refusal or has admitted that
-    /// txid into the mempool, so no variant can be admitted again.
-    /// POST: no resident shares the txid; unrelated residents stay.
     pub(crate) fn remove_transaction_variants(&mut self, txid: Txid) {
         let variants: Vec<Wtxid> = self
             .entries
@@ -270,9 +253,6 @@ impl OrphanPool {
 
     /// PRE: `wtxid` may name a resident body; `preferred` may be one of its
     /// announcers.
-    /// POST: a resident wtxid holds at most one claim, assigned to a current
-    /// announcer; an already-queued wtxid keeps its existing claim.
-    /// INVARIANT: readiness is keyed by wtxid, never by txid.
     pub(crate) fn mark_ready(&mut self, wtxid: Wtxid, preferred: PeerToken) {
         let announcer = {
             let Some(held) = self.entries.get(&wtxid) else {
@@ -294,12 +274,6 @@ impl OrphanPool {
 
     /// Makes every resident body spending an output of `parent` eligible for
     /// reconsideration.
-    ///
-    /// PRE: `parent` names an applied, spendable transaction.
-    /// POST: every resident wtxid indexed under that parent holds at most one
-    /// claim, assigned to one current announcer; each variant is eligible on
-    /// its own.
-    /// INVARIANT: readiness is keyed by wtxid, not txid.
     pub(crate) fn parent_ready(&mut self, parent: Txid) {
         let claims: Vec<(Wtxid, PeerToken)> = self
             .by_parent
@@ -321,9 +295,6 @@ impl OrphanPool {
 
     /// Claim one bounded snapshot. Bodies remain resident across transient
     /// failures.
-    ///
-    /// POST: each pair names one resident body and one of its current
-    /// announcers; a claim whose body was removed is discarded.
     pub(crate) fn take_ready(&mut self) -> Vec<(HeldOrphan, PeerToken)> {
         self.ready_ids.clear();
         self.ready
@@ -341,13 +312,6 @@ impl OrphanPool {
     }
 
     /// Removes expired bodies and the announcements of departed connections.
-    ///
-    /// PRE: the caller supplies one identity-bound snapshot of live peers.
-    /// POST: expired bodies are removed; otherwise only an announcer absent
-    /// from the live set is dropped, and a body goes only after its last
-    /// announcer goes. Returns the number of removed bodies.
-    /// INVARIANT: a same-address reconnect never inherits the old token, so an
-    /// orphan with another live announcer stays resident.
     pub(crate) fn maintain(&mut self, now: u64, live_peers: &HashSet<PeerToken>) -> usize {
         let expired: Vec<Wtxid> = self
             .entries
@@ -383,9 +347,6 @@ impl OrphanPool {
     }
 
     /// Drops one peer's announcement of one body.
-    ///
-    /// POST: true when the body lost its last announcer and was removed. The
-    /// per-peer counters follow the announcement.
     fn remove_announcer(&mut self, wtxid: Wtxid, announcer: PeerToken) -> bool {
         let charge = {
             let Some(held) = self.entries.get_mut(&wtxid) else {
@@ -410,10 +371,6 @@ impl OrphanPool {
 
     /// Restores both global bounds by trimming announcements of the highest
     /// scoring peer.
-    ///
-    /// POST: each step drops one announcement of the peer with the largest
-    /// `DoS` rank; a body goes only with its last announcer. A peer within its
-    /// allowance is trimmed only after every peer over its own.
     fn evict_to_limits(&mut self) {
         while self.entries.len() > self.quota || self.total_weight > self.max_weight {
             let Some(victim) = self.highest_scoring_peer() else {
@@ -432,7 +389,6 @@ impl OrphanPool {
                 let rank = left
                     .rank(&self.peer_allowance)
                     .cmp(&right.rank(&self.peer_allowance));
-                // A newer connection token wins an exact tie.
                 rank.then_with(|| {
                     (left_peer.connection_id, left_peer.addr)
                         .cmp(&(right_peer.connection_id, right_peer.addr))
@@ -564,13 +520,6 @@ impl Default for AdmissionLifecycle {
 }
 impl AdmissionLifecycle {
     /// Caches one refusal and retires the resident work it covers.
-    ///
-    /// PRE: `tx` is the exact body the failure was observed on.
-    /// POST: a witness refusal removes only the resident body with that
-    /// wtxid; a transaction refusal removes every resident variant of that
-    /// txid. The wtxid is always cached; the txid only for a transaction
-    /// refusal.
-    /// INVARIANT: a witness refusal never retires another witness variant.
     pub(crate) fn reject(&mut self, tx: &Tx, scope: RejectScope) {
         match scope {
             RejectScope::Witness => {
@@ -667,7 +616,6 @@ mod tests {
         assert_eq!(pool.len(), 0);
         assert_eq!(pool.total_weight(), 0);
         assert!(pool.get(tx.wtxid()).is_none());
-        // Nothing is indexed under the parent, so readiness stays empty.
         pool.parent_ready(tx.inputs[0].previous_output.txid);
         assert!(pool.take_ready().is_empty());
         assert!(pool.by_parent.is_empty());
@@ -682,15 +630,12 @@ mod tests {
         pool.insert(Arc::clone(&first), source(1), 1);
         pool.insert(tx(2, parent), source(1), 2);
         assert_eq!(pool.total_weight(), base_weight * 2);
-        // A different witness with the same txid is a second resident body.
         let changed = re_witnessed(&first, 1);
         pool.insert(Arc::clone(&changed), source(2), 3);
         assert_eq!(pool.len(), 3);
         assert_eq!(pool.total_weight(), changed.weight() + base_weight * 2);
         assert!(pool.get(first.wtxid()).is_some());
         assert!(pool.get(changed.wtxid()).is_some());
-        // Re-announcing the same body adds an announcer and changes nothing
-        // else: each peer's announce order and the first-seen time stay put.
         pool.insert(Arc::clone(&first), source(3), 4);
         assert_eq!(pool.len(), 3);
         assert_eq!(pool.total_weight(), changed.weight() + base_weight * 2);
@@ -702,7 +647,6 @@ mod tests {
             pool.get(first.wtxid()).map(|held| held.arrival_time),
             Some(1)
         );
-        // The 120-second residency clock stays anchored at first arrival.
         let live = HashSet::from([source(1), source(2), source(3)]);
         assert_eq!(pool.maintain(121, &live), 1);
         assert!(pool.get(first.wtxid()).is_none());
@@ -721,13 +665,10 @@ mod tests {
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].1, source(1));
         assert_eq!(pool.len(), 1);
-        // Eviction prefers an announcement that is not ready for
-        // reconsideration, so the queued claim survives it.
         pool.mark_ready(child.wtxid(), source(1));
         pool.insert(tx(2, parent), source(1), 0);
         assert!(pool.get(child.wtxid()).is_some());
         assert_eq!(pool.take_ready().len(), 1);
-        // Removing the body itself clears its queued claim.
         pool.mark_ready(child.wtxid(), source(1));
         assert!(pool.ready_ids.contains(&child.wtxid()));
         pool.remove(child.wtxid());
@@ -754,8 +695,6 @@ mod tests {
         pool.parent_ready(parent);
         pool.insert(Arc::clone(&second), source(1), 0);
 
-        // One peer announced both bodies, so its oldest non-ready announcement
-        // is trimmed first and the bound holds again.
         assert_eq!(pool.len(), 1);
         assert!(pool.get(first.wtxid()).is_some());
         assert!(pool.get(second.wtxid()).is_none());
@@ -764,7 +703,6 @@ mod tests {
         let ready = pool.take_ready();
         assert_eq!(ready.len(), 1);
         assert!(Arc::ptr_eq(&ready[0].0.tx, &first));
-        // The surviving body stays charged to its one announcer.
         assert_eq!(pool.peer_usage.len(), 1);
         assert_eq!(
             pool.peer_usage
@@ -803,7 +741,6 @@ mod tests {
         pool.insert(Arc::clone(&predecessor), source(1), 0);
         pool.insert(Arc::clone(&successor), source(2), 119);
 
-        // Both tokens share one address. Only the replacement connection is live.
         let live = HashSet::from([source(2)]);
         assert_eq!(pool.maintain(120, &live), 1);
         assert!(pool.get(predecessor.wtxid()).is_none());
@@ -835,7 +772,6 @@ mod tests {
         assert!(state.orphans.get_by_txid(resident.txid()).is_some());
         state.reject(&rejected, RejectScope::Transaction);
         assert_eq!(state.orphans.total_weight(), sibling.weight());
-        // No variant of the rejected txid stays selectable by txid.
         assert!(state.orphans.get_by_txid(resident.txid()).is_none());
         assert!(state.orphans.get(resident.wtxid()).is_none());
         assert!(state.orphans.get(rejected.wtxid()).is_none());
@@ -852,7 +788,6 @@ mod tests {
         let mut pool = OrphanPool::new(10);
         let first = tx(1, parent);
         pool.insert(Arc::clone(&first), source(1), 0);
-        // A second peer re-announces the same body late in the window.
         pool.insert(Arc::clone(&first), source(2), 119);
 
         let live = HashSet::from([source(1), source(2)]);
@@ -916,7 +851,6 @@ mod tests {
                 .any(|(held, _)| Arc::ptr_eq(&held.tx, &sibling))
         );
 
-        // The exact witness rejection removes only its own body.
         state.reject(&resident, RejectScope::Witness);
         assert_eq!(state.orphans.len(), 1);
         assert!(state.orphans.get(resident.wtxid()).is_none());
@@ -940,7 +874,6 @@ mod tests {
             Some(2)
         );
 
-        // One announcer's connection is gone. The body stays with the other.
         let live = HashSet::from([source(1)]);
         assert_eq!(pool.maintain(1, &live), 0);
         assert!(pool.get(body.wtxid()).is_some());
@@ -950,7 +883,6 @@ mod tests {
         assert!(Arc::ptr_eq(&ready[0].0.tx, &body));
         assert_eq!(ready[0].1, source(1));
 
-        // The last announcer leaving removes the body.
         let live = HashSet::new();
         assert_eq!(pool.maintain(2, &live), 1);
         assert!(pool.get(body.wtxid()).is_none());
@@ -977,9 +909,6 @@ mod tests {
         pool.insert(Arc::clone(&first), source(2), 1);
         pool.insert(Arc::clone(&second), source(2), 2);
 
-        // Over the count bound. The peer with two announcements is trimmed,
-        // and its own oldest announcement goes first; the single-announcement
-        // peer keeps its body even though it arrived earliest.
         assert_eq!(pool.len(), 2);
         assert!(pool.get(protected.wtxid()).is_some());
         assert!(pool.get(first.wtxid()).is_none());

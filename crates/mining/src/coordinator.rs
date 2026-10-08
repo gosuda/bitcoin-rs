@@ -74,33 +74,26 @@ impl GenerationKey {
 
 /// Single in-flight assembly record.
 struct InFlight {
-    /// Generation key the flight assembles for.
     key: GenerationKey,
     /// Monotonic identity assigned when the flight was installed.
     id: u64,
-    /// Result shared with same-key waiters once assembly finishes.
+    /// Shared with same-key waiters once assembly finishes.
     result: Option<Result<Arc<Candidate>, MiningControlError>>,
 }
 
 /// Bounded template cache, single-flight guard, and published generation.
 #[derive(Default)]
 struct CoordinatorState {
-    /// Last generation published to long-poll waiters.
     published: Option<GenerationKey>,
-    /// Bounded LRU of assembled candidates keyed by template id.
     cache: HashMap<TemplateId, Arc<Candidate>>,
     /// Insertion order for deterministic eviction of the oldest entry.
     cache_order: VecDeque<TemplateId>,
-    /// Single in-flight assembly, if any.
     in_flight: Option<InFlight>,
-    /// Monotonically increasing identity for each installed flight.
     next_flight_id: u64,
-    /// Facts from the most recently assembled candidate.
     last_candidate: Option<LastCandidateInfo>,
 }
 
 impl CoordinatorState {
-    /// Returns the cached candidate for `id`, if one is retained.
     fn cache_get(&self, id: &TemplateId) -> Option<Arc<Candidate>> {
         self.cache.get(id).cloned()
     }
@@ -222,17 +215,13 @@ pub trait ChainContextSource: Send + Sync {
 pub struct MiningService {
     /// Network whose genesis anchors an empty applied chain.
     network: Network,
-    /// Immutable coinbase payout script for assembled candidates.
     coinbase_script: Vec<u8>,
     /// Shared shutdown flag checked by every unbounded wait.
     shutdown: bitcoin_rs_chain::LatchReader,
     /// Applied-chain tip publisher.
     applied_tip: Arc<dyn AppliedTipSource>,
-    /// Read-only mempool facts.
     mempool: Arc<dyn MempoolSnapshotSource>,
-    /// Applied-tree facts.
     chain: Arc<dyn ChainContextSource>,
-    /// Cache, single-flight, and publication state.
     state: Mutex<CoordinatorState>,
     /// Wake for long-poll and single-flight waiters.
     wake: Condvar,
@@ -484,7 +473,10 @@ impl MiningService {
                     }
                     last_race = Some(generation_race());
                 }
-                Err(error) if is_generation_race(&error) => last_race = Some(error),
+                Err(error) if matches!(&error, MiningControlError::Unavailable(message) if message == GENERATION_RACE) =>
+                {
+                    last_race = Some(error);
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -658,11 +650,8 @@ impl MiningService {
     }
 }
 
-/// Clears an abandoned single-flight slot if candidate assembly unwinds.
-///
-/// Release/quickstart builds abort on panic, but test, development, and other
-/// unwind-enabled profiles must not leave same-key callers blocked behind a
-/// permanently in-flight generation.
+/// Clears an abandoned single-flight slot when assembly unwinds, so
+/// unwind-enabled profiles cannot leave same-key callers blocked forever.
 struct InFlightAssemblyGuard<'a> {
     service: &'a MiningService,
     key: GenerationKey,
@@ -867,11 +856,6 @@ fn generation_race() -> MiningControlError {
     MiningControlError::Unavailable(CompactString::from(GENERATION_RACE))
 }
 
-/// Reports whether `error` is the generation-race error.
-fn is_generation_race(error: &MiningControlError) -> bool {
-    matches!(error, MiningControlError::Unavailable(message) if message.as_str() == GENERATION_RACE)
-}
-
 /// Parses a BIP22/BIP23 long-poll id into its generation key.
 #[must_use]
 fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
@@ -891,39 +875,18 @@ fn parse_long_poll_id(id: &str) -> Option<GenerationKey> {
 /// Signet challenge and flag for `network`, or `None` off signet.
 #[must_use]
 fn signet_info(network: Network) -> Option<SignetMiningInfo> {
-    /// Bitcoin Core's default signet challenge.
-    const DEFAULT_SIGNET_CHALLENGE: &str = concat!(
-        "512103ad5e0edad18cb1f0fc0d28a3d4f1f3e445640337489abb10404f2d1e086be430",
-        "210359ef5021964fe22d6f8e05b2463c9540ce96883fe3b278760f048f5189f2e6c452ae",
-    );
-    const CHALLENGE: [u8; DEFAULT_SIGNET_CHALLENGE.len() / 2] =
-        decode_hex(DEFAULT_SIGNET_CHALLENGE);
+    // Core's default 1-of-2 signet challenge.
+    const DEFAULT_SIGNET_CHALLENGE: [u8; 71] = [
+        0x51, 0x21, 0x03, 0xad, 0x5e, 0x0e, 0xda, 0xd1, 0x8c, 0xb1, 0xf0, 0xfc, 0x0d, 0x28, 0xa3,
+        0xd4, 0xf1, 0xf3, 0xe4, 0x45, 0x64, 0x03, 0x37, 0x48, 0x9a, 0xbb, 0x10, 0x40, 0x4f, 0x2d,
+        0x1e, 0x08, 0x6b, 0xe4, 0x30, 0x21, 0x03, 0x59, 0xef, 0x50, 0x21, 0x96, 0x4f, 0xe2, 0x2d,
+        0x6f, 0x8e, 0x05, 0xb2, 0x46, 0x3c, 0x95, 0x40, 0xce, 0x96, 0x88, 0x3f, 0xe3, 0xb2, 0x78,
+        0x76, 0x0f, 0x04, 0x8f, 0x51, 0x89, 0xf2, 0xe6, 0xc4, 0x52, 0xae,
+    ];
 
     (network == Network::Signet).then(|| SignetMiningInfo {
-        challenge: CHALLENGE.to_vec(),
+        challenge: DEFAULT_SIGNET_CHALLENGE.to_vec(),
     })
-}
-
-/// Compile-time hex decode; invalid input fails the build.
-const fn decode_hex<const N: usize>(hex: &str) -> [u8; N] {
-    let bytes = hex.as_bytes();
-    assert!(bytes.len() == 2 * N, "hex literal must match output width");
-    let mut out = [0u8; N];
-    let mut i = 0;
-    while i < N {
-        out[i] = (decode_nibble(bytes[2 * i]) << 4) | decode_nibble(bytes[2 * i + 1]);
-        i += 1;
-    }
-    out
-}
-
-const fn decode_nibble(byte: u8) -> u8 {
-    match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        b'A'..=b'F' => byte - b'A' + 10,
-        _ => panic!("invalid hex digit"),
-    }
 }
 
 #[cfg(test)]

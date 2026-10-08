@@ -187,32 +187,27 @@ mod uncommitted_witness_tests {
         }
     }
 
+    /// The reserved nonce is inserted only for an active-segwit block that
+    /// already commits and carries no coinbase witness; every other shape is
+    /// left byte-for-byte alone.
     #[test]
-    fn fills_reserved_nonce_when_commitment_present_and_witness_empty() {
-        let mut block = commitment_block(Vec::new(), true);
-        update_uncommitted_block_structures(&mut block, true);
-        assert_eq!(
-            block.txs[0].inputs[0].witness,
-            Witness::from_stack(vec![WITNESS_RESERVED_VALUE.to_vec()])
-        );
-    }
-
-    #[test]
-    fn leaves_an_existing_coinbase_witness_alone() {
+    fn reserved_nonce_fills_only_an_empty_witness_under_a_commitment() {
         let custom = vec![vec![0x11; 32]];
-        let mut block = commitment_block(custom.clone(), true);
-        update_uncommitted_block_structures(&mut block, true);
-        assert_eq!(block.txs[0].inputs[0].witness, Witness::from_stack(custom));
-    }
-
-    #[test]
-    fn skips_without_commitment_or_when_segwit_is_inactive() {
-        let mut no_commitment = commitment_block(Vec::new(), false);
-        update_uncommitted_block_structures(&mut no_commitment, true);
-        assert!(no_commitment.txs[0].inputs[0].witness.is_empty());
-
-        let mut pre_segwit = commitment_block(Vec::new(), true);
-        update_uncommitted_block_structures(&mut pre_segwit, false);
-        assert!(pre_segwit.txs[0].inputs[0].witness.is_empty());
+        let reserved = vec![WITNESS_RESERVED_VALUE.to_vec()];
+        for (witness, with_commitment, segwit_active, want) in [
+            (Vec::new(), true, true, reserved),
+            (custom.clone(), true, true, custom.clone()),
+            (Vec::new(), false, true, Vec::new()),
+            (Vec::new(), true, false, Vec::new()),
+            (custom.clone(), false, true, custom),
+        ] {
+            let mut block = commitment_block(witness, with_commitment);
+            update_uncommitted_block_structures(&mut block, segwit_active);
+            assert_eq!(
+                block.txs[0].inputs[0].witness,
+                Witness::from_stack(want.clone()),
+                "commitment={with_commitment} segwit={segwit_active} want={want:?}"
+            );
+        }
     }
 }

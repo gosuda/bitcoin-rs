@@ -63,6 +63,15 @@ mod tests {
     use bitcoin_rs_chainstate::ValidationMode;
     use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
 
+    fn resolved(args: &[&str], vars: &[(&str, &str)]) -> bitcoin_rs_node::NodeConfig {
+        super::load(
+            args.iter().copied(),
+            vars.iter()
+                .map(|(key, value)| (OsString::from(*key), OsString::from(*value))),
+        )
+        .unwrap_or_else(|error| panic!("valid configuration: {error}"))
+    }
+
     fn load_file(
         flag: &str,
         text: &str,
@@ -122,8 +131,8 @@ mod tests {
 
     #[test]
     fn environment_is_overridden_by_cli() {
-        let config = super::load(
-            [
+        let config = resolved(
+            &[
                 "bitcoin-rs",
                 "--network",
                 "regtest",
@@ -132,15 +141,12 @@ mod tests {
                 "--rpc-user",
                 "cli-user",
             ],
-            [
+            &[
                 ("BITCOIN_RS_NETWORK", "testnet4"),
                 ("BITCOIN_RS_DATA_DIR", "/tmp/env-node"),
                 ("BITCOIN_RS_RPC_USER", "env-user"),
-            ]
-            .into_iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+            ],
+        );
 
         assert_eq!(config.network, Network::Regtest);
         assert_eq!(config.data_dir, std::path::PathBuf::from("/tmp/cli-node"));
@@ -155,47 +161,30 @@ mod tests {
 
     #[test]
     fn environment_parses_script_index() {
-        let config = super::load(
-            ["bitcoin-rs"],
-            std::iter::once(("BITCOIN_RS_SCRIPTINDEX", "full"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid environment configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_SCRIPTINDEX", "full")]);
 
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
     }
 
     #[test]
     fn environment_parses_script_index_utxo() {
-        let config = super::load(
-            ["bitcoin-rs"],
-            std::iter::once(("BITCOIN_RS_SCRIPTINDEX", "utxo"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid environment configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_SCRIPTINDEX", "utxo")]);
 
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
     }
 
     #[test]
     fn fast_sync_defaults_off_and_enables_from_flag_or_environment() {
-        let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())
-            .unwrap_or_else(|error| panic!("valid default configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[]);
         assert!(!config.p2p.fast_sync);
 
-        let config = super::load(
-            ["bitcoin-rs", "--fast-sync"],
-            std::iter::empty::<(OsString, OsString)>(),
-        )
-        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+        let config = resolved(&["bitcoin-rs", "--fast-sync"], &[]);
         assert!(config.p2p.fast_sync);
 
-        let config = super::load(
-            ["bitcoin-rs", "--fast-sync=false"],
-            std::iter::once(("BITCOIN_RS_FAST_SYNC", "true"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs", "--fast-sync=false"],
+            &[("BITCOIN_RS_FAST_SYNC", "true")],
+        );
         assert!(!config.p2p.fast_sync);
     }
 
@@ -250,31 +239,25 @@ mod tests {
     fn validation_engine_defaults_to_native_and_layers_flag_over_environment() {
         use bitcoin_rs_node::ValidationEngine;
 
-        let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())
-            .unwrap_or_else(|error| panic!("valid default configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[]);
         assert_eq!(config.validation.engine, ValidationEngine::Native);
 
-        let config = super::load(
-            ["bitcoin-rs", "--validation-engine", "native"],
-            std::iter::once(("BITCOIN_RS_VALIDATION_ENGINE", "kernel"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs", "--validation-engine", "native"],
+            &[("BITCOIN_RS_VALIDATION_ENGINE", "kernel")],
+        );
         assert_eq!(config.validation.engine, ValidationEngine::Native);
     }
 
     #[test]
     fn validation_mode_defaults_to_assume_valid_and_layers_flag_over_environment() {
-        let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())
-            .unwrap_or_else(|error| panic!("valid default configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[]);
         assert_eq!(config.validation.mode, ValidationMode::AssumeValid);
 
-        let config = super::load(
-            ["bitcoin-rs", "--validation-mode", "full"],
-            std::iter::once(("BITCOIN_RS_VALIDATION_MODE", "fast"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs", "--validation-mode", "full"],
+            &[("BITCOIN_RS_VALIDATION_MODE", "fast")],
+        );
         assert_eq!(config.validation.mode, ValidationMode::Full);
         assert_eq!(ValidationMode::parse("lenient"), None);
     }
@@ -321,8 +304,8 @@ hwm = 5000
 
     #[test]
     fn cli_network_profile_precedes_cli_explicit_p2p_overrides() {
-        let config = super::load(
-            [
+        let config = resolved(
+            &[
                 "bitcoin-rs",
                 "--network",
                 "drynet4",
@@ -333,9 +316,8 @@ hwm = 5000
                 "--dns-seeds-enabled",
                 "false",
             ],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+            &[],
+        );
 
         assert_eq!(config.network, Network::Mainnet);
         assert_eq!(config.p2p.magic, [1, 2, 3, 4]);
@@ -346,11 +328,7 @@ hwm = 5000
     /// IDX-01: `--scriptindex` without a value means `full`.
     #[test]
     fn cli_scriptindex_flag_enables_full_index() {
-        let config = super::load(
-            ["bitcoin-rs", "--txindex=false", "--scriptindex"],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+        let config = resolved(&["bitcoin-rs", "--txindex=false", "--scriptindex"], &[]);
 
         assert!(!config.indexes.txindex);
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
@@ -359,11 +337,10 @@ hwm = 5000
     /// IDX-01: `--scriptindex=utxo` enables `ScriptLive` only.
     #[test]
     fn cli_scriptindex_utxo_enables_live_only_index() {
-        let config = super::load(
-            ["bitcoin-rs", "--txindex=false", "--scriptindex=utxo"],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs", "--txindex=false", "--scriptindex=utxo"],
+            &[],
+        );
 
         assert!(!config.indexes.txindex);
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
@@ -371,8 +348,8 @@ hwm = 5000
 
     #[test]
     fn cli_parses_socket_and_peer_lists() {
-        let config = super::load(
-            [
+        let config = resolved(
+            &[
                 "bitcoin-rs",
                 "--network",
                 "regtest",
@@ -384,9 +361,8 @@ hwm = 5000
                 "--connect",
                 "localhost:18444,10.0.0.2:8333",
             ],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+            &[],
+        );
 
         assert_eq!(
             config.p2p.listen,
@@ -410,12 +386,10 @@ hwm = 5000
 
     #[test]
     fn environment_cookie_auth_is_resolved_and_redacted() {
-        let config = super::load(
-            ["bitcoin-rs"],
-            std::iter::once(("BITCOIN_RS_RPC_COOKIE", "/secret/.cookie"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid environment configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs"],
+            &[("BITCOIN_RS_RPC_COOKIE", "/secret/.cookie")],
+        );
 
         assert_eq!(
             config.rpc.auth,

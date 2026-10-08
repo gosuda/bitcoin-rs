@@ -9,7 +9,9 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
-use bitcoin_rs_index::{ScriptHash, ScriptHashRow, SpendingPrefixRow};
+use bitcoin_rs_index::{
+    PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHash, ScriptHashRow, SpendingPrefixRow,
+};
 use bitcoin_rs_primitives::OutPoint;
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, StorageError,
@@ -207,4 +209,26 @@ pub(crate) fn put_spending_row(
         &SpendingPrefixRow::row(outpoint, height).to_db_row(),
         &[],
     )
+}
+
+pub(crate) fn single_block_batch(block: PreparedBlock) -> PreparedBatch {
+    batch_with_limits(
+        block,
+        PreparedBatchLimits {
+            max_rows: 100,
+            max_bytes: 1_000_000,
+        },
+    )
+}
+
+pub(crate) fn batch_with_limits(
+    block: PreparedBlock,
+    limits: PreparedBatchLimits,
+) -> PreparedBatch {
+    let mut prepared = PreparedBatch::new(limits);
+    assert!(
+        prepared.try_push(block).is_ok(),
+        "batch limits reject the block"
+    );
+    prepared
 }

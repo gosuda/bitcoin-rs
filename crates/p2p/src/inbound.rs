@@ -30,12 +30,9 @@ pub struct InboundHeaders {
     /// not a response to an outstanding `getheaders` and must not consume
     /// its pending-request state.
     pub wire_response: bool,
-    /// `true` when the source already has this batch's tip body fetch in
-    /// flight outside the download window — a compact `getblocktxn` or a
-    /// fallback `getdata` issued during compact handling. The window records
-    /// the hash as pending so it does not schedule a duplicate request;
-    /// delivery, expiry, or disconnect resolves it exactly like a window
-    /// request.
+    /// `true` when the source already has this batch's tip body fetch in flight
+    /// outside the download window — a compact `getblocktxn` or a fallback
+    /// `getdata` issued during compact handling.
     pub body_fetch_owned: bool,
 }
 

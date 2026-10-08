@@ -18,7 +18,7 @@ use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
     encode::consensus_bytes,
 };
-use common::context;
+use common::measured_entry;
 
 type TestResult = Result<(), Box<dyn Error>>;
 type Assemble =
@@ -32,7 +32,7 @@ fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult 
     let snapshot = snapshot(0, false)?;
     for segwit_active in [false, true] {
         for assemble in ASSEMBLERS {
-            let mut context = context(segwit_active, 80_000);
+            let mut context = context(segwit_active);
             let candidate = assemble(&context, &snapshot, &[0x51])?;
             assert_serialized_limits(&candidate)?;
             let size = u64::try_from(candidate.into_unsolved_block()?.total_size())?;
@@ -61,7 +61,7 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
         for body_count in [251, 252] {
             let snapshot = snapshot(body_count, segwit_active)?;
             for assemble in ASSEMBLERS {
-                let mut context = context(segwit_active, 80_000);
+                let mut context = context(segwit_active);
                 let candidate = assemble(&context, &snapshot, &[0x51])?;
                 assert_eq!(candidate.transactions.len(), body_count);
                 assert_serialized_limits(&candidate)?;
@@ -98,13 +98,13 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
 fn count_encoding_growth_skips_a_whole_package_and_its_descendant() -> TestResult {
     for segwit_active in [false, true] {
         let mut snapshot = snapshot(250, segwit_active)?;
-        let parent = entry(251, None, 100, segwit_active, vec![])?;
-        let child = entry(252, Some(parent.txid), 1_000, segwit_active, vec![250])?;
-        let descendant = entry(253, Some(child.txid), 1, segwit_active, vec![250, 251])?;
+        let parent = entry(251, None, 100, segwit_active, vec![]);
+        let child = entry(252, Some(parent.txid), 1_000, segwit_active, vec![250]);
+        let descendant = entry(253, Some(child.txid), 1, segwit_active, vec![250, 251]);
         snapshot.entries.extend([parent, child]);
         // 250 independent transactions plus this two-member fee chunk produce
         // 253 total transactions including coinbase, growing CompactSize by 2.
-        let mut context = context(segwit_active, 80_000);
+        let mut context = context(segwit_active);
         let boundary = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
         assert_serialized_limits(&boundary)?;
         snapshot.entries.push(descendant);
@@ -175,7 +175,7 @@ fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
 /// Supplies independent transactions with equal fees so count boundaries decide selection.
 fn snapshot(count: usize, witness: bool) -> Result<MempoolMiningSnapshot, Box<dyn Error>> {
     let entries = (1..=count)
-        .map(|label| entry(u16::try_from(label)?, None, 10_000, witness, vec![]))
+        .map(|label| Ok(entry(u16::try_from(label)?, None, 10_000, witness, vec![])))
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     Ok(MempoolMiningSnapshot {
         sequence: 1,
@@ -190,7 +190,7 @@ fn entry(
     fee: u64,
     witness: bool,
     ancestors: Vec<u32>,
-) -> Result<SnapshotEntry, Box<dyn Error>> {
+) -> SnapshotEntry {
     let mut hash = [0; 32];
     hash[..2].copy_from_slice(&label.to_le_bytes());
     let tx = Arc::new(Tx {
@@ -214,24 +214,12 @@ fn entry(
         }],
         lock_time: LockTime::ZERO,
     });
-    let size = u32::try_from(tx.total_size())?;
-    let vsize = u32::try_from(tx.vsize())?;
-    Ok(SnapshotEntry {
-        txid: tx.txid(),
-        wtxid: tx.wtxid(),
-        size,
-        weight: tx.weight(),
-        vsize,
-        bip141_vsize: vsize,
-        sigop_cost: 0,
-        fee,
-        fee_delta: 0,
-        time: 0,
-        height: 0,
-        ancestor_size: u64::from(vsize),
-        ancestor_fee: fee,
-        ancestor_fee_delta: 0,
-        ancestors,
-        tx,
-    })
+    measured_entry(&tx, fee, 0, ancestors)
+}
+
+fn context(segwit_active: bool) -> CandidateContext {
+    CandidateContext {
+        segwit_active,
+        ..common::context()
+    }
 }

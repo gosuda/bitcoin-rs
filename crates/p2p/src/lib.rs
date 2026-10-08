@@ -52,6 +52,9 @@ pub mod wire;
 /// BIP339 wtxid-relay state.
 pub(crate) mod wtxid;
 
+#[cfg(test)]
+mod test_support;
+
 pub(crate) use block_stager::BlockStager;
 pub use chain_query::ActiveChainQuery;
 pub use compact_blocks::{CompactBlockHints, Reconstruction};

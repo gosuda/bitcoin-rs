@@ -47,12 +47,6 @@ impl FjallStore {
             .map_err(StorageError::backend)?;
         let mut keyspaces = Vec::with_capacity(ColumnFamily::ALL.len());
         for cf in ColumnFamily::ALL.iter().copied() {
-            // Fjall's default compression policy is [None, None, Lz4] — LZ4 only
-            // on the last level. L0 and L1 data blocks are uncompressed, which
-            // means data that has not yet compacted to the final level is stored
-            // raw. For a node whose working set lives in L0 (small chain, or
-            // recently written data), this wastes disk. Apply LZ4 on every
-            // level, matching RocksDB's configuration.
             let opts = KeyspaceCreateOptions::default()
                 .data_block_compression_policy(CompressionPolicy::all(CompressionType::Lz4));
             keyspaces.push(
@@ -142,8 +136,6 @@ impl FjallStore {
         for (index, op) in ops.into_iter().enumerate() {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    // Only retain keys that a later range in this family may
-                    // need: point-only batches require no tracking allocation.
                     if last_range[cf.index()].is_some_and(|last| index < last) {
                         staged_puts[cf.index()].insert(key.clone());
                     }
@@ -171,9 +163,6 @@ impl FjallStore {
                     for key in keys {
                         fjall_batch.remove(keyspace, key);
                     }
-                    // The keyspace iterator sees committed rows only. Remove
-                    // earlier staged puts too, at this position in the batch,
-                    // so a subsequent put can still replace the tombstone.
                     staged_puts[cf.index()].retain(|key| {
                         if start <= *key && *key < end {
                             fjall_batch.remove(keyspace, key.as_slice());
@@ -257,7 +246,6 @@ impl KvStore for FjallStore {
         if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Flush) {
             return Err(fault.injected_error());
         }
-        // Fjall journals are crash-consistent before fsync; SyncAll requests full durability.
         self.db
             .persist(PersistMode::SyncAll)
             .map_err(StorageError::backend)

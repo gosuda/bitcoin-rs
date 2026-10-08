@@ -4,15 +4,28 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{BlockTree, ChainTxCount, TipSnapshot};
-use bitcoin_rs_primitives::{Hash256, Network};
+use bitcoin_rs_primitives::{Amount, Hash256, Network, OutPoint, TxOut, Txid};
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyStore;
+use bitcoin_rs_storage::chainstate_journal::Coin;
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use hashbrown::HashMap;
 use parking_lot::RwLock;
 
 use crate::{ApplyError, Chainstate};
+
+pub(crate) fn journal_coin(marker: u8, height: u32, value: u64) -> Coin {
+    Coin {
+        outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
+        txout: TxOut {
+            value: Amount::from_sat(value),
+            script_pubkey: vec![0x51].into(),
+        },
+        height,
+        coinbase: true,
+    }
+}
 
 /// An empty in-memory chainstate over `utxo`.
 pub(crate) fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {

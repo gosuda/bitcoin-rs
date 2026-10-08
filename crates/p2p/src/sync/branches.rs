@@ -173,9 +173,7 @@ impl BlockSync {
         }
         let tree = self.chain.block_tree();
         let applied_id = tree.lookup(applied.hash)?;
-        // Normal IBD extends the applied chain. Its trusted height index proves
-        // ancestry without allocating a plan for the entire remaining chain.
-        // Keep the parent-walk planner for actual forks and disconnected roots.
+        // Normal IBD extends the applied chain.
         let applied_height = tree.node(applied_id).ok()?.height;
         if Self::is_ancestor_at_height(&tree, applied_id, applied_height, chain_tip.tip_id) {
             return None;

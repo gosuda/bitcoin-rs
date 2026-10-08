@@ -1,14 +1,12 @@
 use super::*;
 
-// SYNC-FRONTIER-01: an invalidated height index must preserve the
-// unchanged parent-plan result even when public node_mut leaves a gap.
 #[test]
-fn request_frontier_retains_parent_plan_on_height_gaps() -> Result<(), Box<dyn std::error::Error>> {
+fn request_frontier_retains_parent_plan_on_height_gaps() -> TestResult {
     let mut tree = BlockTree::new();
     let root = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
     let root_hash = tree.node(root)?.hash;
     let header = regtest_fixture::mined_regtest_header(BlockHash::from(root_hash), 1)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let child = tree.insert_node(Some(root), header, NodeStatus::HeaderValid)?;
     tree.node_mut(child)?.height = 2;
     let plan = bitcoin_rs_chain::plan_reorg(&tree, root, child)?;
@@ -23,16 +21,16 @@ fn request_frontier_retains_parent_plan_on_height_gaps() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::error::Error>> {
+fn fork_getdata_starts_at_common_ancestor_child() -> TestResult {
     let genesis = genesis_header();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
 
     let losing1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
     let losing2 = regtest_fixture::mined_regtest_header(losing1.compute_hash(), 2)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(losing2_id)?;
@@ -46,13 +44,13 @@ fn fork_getdata_starts_at_common_ancestor_child() -> Result<(), Box<dyn std::err
     };
 
     let winning1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let winning1_id = tree.insert_node(Some(genesis_id), winning1, NodeStatus::HeaderValid)?;
     let winning2 = regtest_fixture::mined_regtest_header(winning1.compute_hash(), 102)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let winning2_id = tree.insert_node(Some(winning1_id), winning2, NodeStatus::HeaderValid)?;
     let winning3 = regtest_fixture::mined_regtest_header(winning2.compute_hash(), 103)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     tree.insert_node(Some(winning2_id), winning3, NodeStatus::HeaderValid)?;
     let expected = vec![
         winning1.compute_hash(),
@@ -97,10 +95,10 @@ fn pending_reorg_fixture()
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis_header(), NodeStatus::HeaderValid)?;
     let losing1 = regtest_fixture::mined_regtest_header(genesis_header().compute_hash(), 1)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
     let losing2 = regtest_fixture::mined_regtest_header(losing1.compute_hash(), 2)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(losing2_id)?;
@@ -122,7 +120,7 @@ fn pending_reorg_fixture()
             tag,
             vec![regtest_fixture::coinbase(tag)],
         )
-        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+        .or_fail("regtest fixture block");
         parent = tree.insert_node(Some(parent), block.header, NodeStatus::HeaderValid)?;
         prev = block.block_hash();
         winning.push(block);
@@ -133,11 +131,8 @@ fn pending_reorg_fixture()
     Ok((harness, applied, winning))
 }
 
-// SYNC-FRONTIER-01: while a heavier branch is pending, the apply-side
-// frontier is the first connect node above the common ancestor — not the
-// winner-branch node at `applied_height + 1`.
 #[test]
-fn pending_reorg_frontier_is_first_connect_node() -> Result<(), Box<dyn std::error::Error>> {
+fn pending_reorg_frontier_is_first_connect_node() -> TestResult {
     let (harness, _applied, winning) = pending_reorg_fixture()?;
     let first_connect = Hash256::from(winning[0].block_hash());
     assert_eq!(
@@ -148,12 +143,8 @@ fn pending_reorg_frontier_is_first_connect_node() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-// A winning-branch body staged above the fork must wait for the branch
-// switch instead of churning through the extension commit: its parent lies
-// on the winning branch — never on the applied tip — so the commit could
-// never consume it and would restore-drop and re-request it every tick.
 #[test]
-fn apply_buffered_blocks_waits_for_pending_reorg() -> Result<(), Box<dyn std::error::Error>> {
+fn apply_buffered_blocks_waits_for_pending_reorg() -> TestResult {
     let (harness, applied, winning) = pending_reorg_fixture()?;
     let sync = &harness.sync;
     let head = &winning[2];
@@ -180,7 +171,7 @@ fn apply_buffered_blocks_waits_for_pending_reorg() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn tick_does_not_resend_same_getheaders_while_pending() -> Result<(), Box<dyn std::error::Error>> {
+fn tick_does_not_resend_same_getheaders_while_pending() -> TestResult {
     let (sync, peers, _block_tree, _applied_tip, _expected) = sync_with_header_chain(3)?;
     install_budget(
         &sync,
@@ -204,7 +195,7 @@ fn tick_does_not_resend_same_getheaders_while_pending() -> Result<(), Box<dyn st
 }
 
 #[test]
-fn inbound_headers_response_releases_getheaders_gate() -> Result<(), Box<dyn std::error::Error>> {
+fn inbound_headers_response_releases_getheaders_gate() -> TestResult {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -234,7 +225,7 @@ fn inbound_headers_response_releases_getheaders_gate() -> Result<(), Box<dyn std
     }
 
     let header = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![header],
         source: Some(current_source(&peers, addr)),
@@ -256,8 +247,7 @@ fn inbound_headers_response_releases_getheaders_gate() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn rejected_matching_peer_headers_release_gate_and_retry_immediately()
--> Result<(), Box<dyn std::error::Error>> {
+fn rejected_matching_peer_headers_release_gate_and_retry_immediately() -> TestResult {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -286,11 +276,9 @@ fn rejected_matching_peer_headers_release_gate_and_retry_immediately()
         return Err(std::io::Error::other("expected first getheaders").into());
     }
 
-    // A syntactically valid response consumes the matching request even when
-    // acceptance rejects its headers. Otherwise one bad response stalls sync.
     let orphan_prev = BlockHash(Hash256::from_le_bytes(&[0x11; 32]));
-    let orphan = regtest_fixture::mined_regtest_header(orphan_prev, 5)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+    let orphan =
+        regtest_fixture::mined_regtest_header(orphan_prev, 5).or_fail("regtest fixture header");
     inbound_headers_tx.send(InboundHeaders {
         headers: vec![orphan],
         source: Some(current_source(&peers, addr)),
@@ -309,7 +297,7 @@ fn rejected_matching_peer_headers_release_gate_and_retry_immediately()
 }
 
 #[test]
-fn orphan_headers_keep_source_peer_connected() -> Result<(), Box<dyn std::error::Error>> {
+fn orphan_headers_keep_source_peer_connected() -> TestResult {
     let HeaderSyncFixture {
         sync,
         inbound_headers_tx,
@@ -324,7 +312,7 @@ fn orphan_headers_keep_source_peer_connected() -> Result<(), Box<dyn std::error:
                 BlockHash(Hash256::from_le_bytes(&[0x11; 32])),
                 1,
             )
-            .unwrap_or_else(|error| panic!("regtest fixture header: {error}")),
+            .or_fail("regtest fixture header"),
         ],
         source: Some(current_source(&peers, peer_addr)),
 
@@ -346,8 +334,7 @@ fn orphan_headers_keep_source_peer_connected() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(8)?;
     install_budget(
         &sync,
@@ -390,15 +377,12 @@ fn tick_bounded_request_peer_selection_skips_inflight_saturated_prefix()
             .into());
         }
     }
-    // The in-flight getheaders gate suppresses a duplicate header request to
-    // the original sync peer, so it receives no further messages.
     assert!(first_rx.try_recv().is_err());
     Ok(())
 }
 
 #[test]
-fn tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_demotes_peer_after_expired_pending_and_retries_on_alternate_peer() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
     install_budget(
         &sync,

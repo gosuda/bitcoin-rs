@@ -7,10 +7,6 @@ use nohash_hasher::NoHashHasher;
 pub(crate) type UtxoBuildHasher = BuildHasherDefault<NoHashHasher<u64>>;
 
 /// Eight-byte transaction-id prefix used as the UTXO map key.
-///
-/// The prefix is already uniformly distributed by SHA-256d, so shard tables use
-/// `NoHashHasher<u64>` through [`UtxoBuildHasher`] rather than spending cycles on
-/// an additional hash.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct UtxoKey([u8; 8]);
 

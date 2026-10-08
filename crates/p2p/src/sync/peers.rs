@@ -48,16 +48,7 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
         // peer-invalid data.
         | ChainError::KnownInvalidHeader { .. } => true,
         // Future drift is judged against OUR clock, so a wrong local clock
-        // would otherwise let us ban every honest peer and partition
-        // ourselves. The header is rejected without blaming the sender.
-        //
-        // The invalid-parent refusal joins them: the parent is marked invalid
-        // both by a block this node rejected on peer-relayed data and by a
-        // local `invalidateblock`, and the refusal carries no origin, so
-        // blaming the sender would disconnect honest peers relaying
-        // descendants of an operator-invalidated block. Until the tree
-        // records the invalidation origin, the sender punishment for
-        // relaying a peer-invalidated subtree is given up.
+        // would otherwise let us ban every honest peer and partition ourselves.
         ChainError::TimestampTooFarAhead { .. }
         | ChainError::DuplicateHeader { .. }
         | ChainError::MissingParent { .. }
@@ -68,10 +59,9 @@ pub(super) fn is_peer_fault(error: &ChainError) -> bool {
     }
 }
 
-/// The one eligibility and ordering rule for demonstrated-best-known
-/// height peer selection (P2P-03): a peer is request-eligible when its
-/// demonstrated height exceeds `floor`, and among eligible peers the
-/// greatest height wins. First-wins on equal heights.
+/// The one eligibility and ordering rule for demonstrated-best-known height
+/// peer selection (P2P-03): a peer is request-eligible when its demonstrated
+/// height exceeds `floor`, and among eligible peers the greatest height wins.
 pub(super) fn sync_peer_candidate(
     source: PeerSource,
     peer: &PeerInfo,
@@ -186,9 +176,8 @@ pub(super) struct ChainSyncState {
     /// When this connection became worth timing out, `None` while it is
     /// keeping up, protected, or never yet observed behind the tip.
     timeout_start: Option<Instant>,
-    /// The tip height recorded when the running window was armed: a
-    /// connection that reaches it gets a fresh window even while our tip has
-    /// moved on. Core's `m_work_header` (`net_processing.cpp:5519-5527`).
+    /// The tip height recorded when the running window was armed: a connection
+    /// that reaches it gets a fresh window even while our tip has moved on.
     benchmark: Option<u32>,
     /// Whether a probe was sent since `timeout_start` was set.
     probe_sent: bool,
@@ -211,9 +200,8 @@ impl ChainSyncState {
         self.probe_sent
     }
 
-    /// Starts a fresh window against the current tip, as Core's
-    /// `m_work_header = tip` arm does
-    /// (`net_processing.cpp:5519-5527`).
+    /// Starts a fresh window against the current tip, as Core's `m_work_header
+    /// = tip` arm does (`net_processing.cpp:5519-5527`).
     fn arm(&mut self, tip_height: u32, now: Instant) {
         self.timeout_start = Some(now);
         self.benchmark = Some(tip_height);
@@ -370,9 +358,6 @@ impl BlockSync {
             return;
         }
         let frontier_hash = chain.next_required.map(|body| body.hash);
-        // The stall family keys on the same `next_required` body the
-        // scheduler requests; at the tip the front sits one past the applied
-        // height, exactly as the pre-frontier derivation computed it.
         let next_apply_height = chain.next_required.map(|body| body.height).or_else(|| {
             chain
                 .applied_tip
@@ -380,9 +365,6 @@ impl BlockSync {
                 .and_then(|tip| tip.height.checked_add(1))
         });
         let decision = {
-            // Lock order tree -> scheduler (as in request publication): the
-            // stall predicate resolves staged hashes against block-tree
-            // heights, so the tree guard is held across the window read.
             let tree = self.chain.block_tree();
             let mut scheduler = self.scheduler.lock();
             let SchedulerState { window, stager, .. } = &mut *scheduler;
@@ -408,10 +390,6 @@ impl BlockSync {
             suppressed_for,
         } = decision
         {
-            // The no-blame suppression outlived its bound (issue #1091):
-            // evict the stuck staged body for refetch. No peer is convicted
-            // here; while the body is absent the unsuppressed stall path
-            // applies as usual.
             self.escalate_stuck_staged_body(height, Some(hash), suppressed_for, now);
             return;
         }
@@ -533,9 +511,7 @@ impl BlockSync {
     }
 
     /// Picks the peers eligible for body requests and prefix probes from the
-    /// frontier's usable-peer snapshot. The selection no longer re-walks the
-    /// session table or the block tree: `observe_frontier` already resolved
-    /// each peer's demonstrated capability once this tick.
+    /// frontier's usable-peer snapshot.
     pub(super) fn sync_peer_selection(
         &self,
         frontier: &SyncFrontier,
@@ -577,11 +553,6 @@ impl BlockSync {
     }
 
     /// Collects the fan-out candidates from the frontier's usable peers.
-    ///
-    /// PRE: `frontier.usable_peers` is this tick's capability-resolved
-    ///   snapshot and no scheduler lock is held.
-    /// POST: every candidate carries its demonstrated height, its
-    ///   body-serving and fan-out eligibility, and no soft-block mark.
     fn fanout_candidates(&self, frontier: &SyncFrontier) -> Vec<FanoutCandidate> {
         // Height clause of the fan-out eligibility predicate (KTD6) and
         // the pre-existing candidate filter: the peer's demonstrated chain
@@ -650,8 +621,6 @@ impl BlockSync {
         candidates: &mut [FanoutCandidate],
         now: Instant,
     ) -> (usize, bool, Option<SyncPeer>) {
-        // The tree guard comes before the scheduler lock, matching the
-        // tree -> scheduler order the request path follows.
         let tree = (!frontier.chain.apply_halted
             && frontier.chain.chain_tip.is_some()
             && frontier.chain.next_required.is_some())
@@ -817,20 +786,14 @@ mod tests {
     fn clock_and_bookkeeping_refusals_spare_the_sender() {
         let hash = Hash256::default();
         for error in [
-            // Future drift is judged against OUR clock, so a slow local clock
-            // must not ban every honest peer and partition the node.
             ChainError::TimestampTooFarAhead {
                 hash,
                 timestamp: 9,
                 max_allowed: 1,
             },
-            // The invalid parent may be the operator's `invalidateblock`
-            // choice: the refusal names no origin, so the sender is spared.
             ChainError::InvalidParent {
                 parent: NodeId::new(3),
             },
-            // A missing parent is a sync-ordering fact, not misconduct: the
-            // same headers may arrive from a peer that already has them.
             ChainError::MissingParent { prev_hash: hash },
             ChainError::UnknownNode { id: NodeId::new(1) },
         ] {
@@ -858,9 +821,6 @@ mod tests {
         header
     }
 
-    // An operator invalidation must not disconnect the honest peers that keep
-    // relaying the retired branch: the invalid-parent refusal they hit
-    // carries no origin, so the sender is spared.
     #[test]
     fn descendant_of_an_invalidated_block_spares_the_sender()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -870,8 +830,6 @@ mod tests {
         let child = mined_header(BlockHash::from(tree.node(genesis_id)?.hash), 900_600);
         let child_id = tree.insert_header(child, NodeStatus::HeaderValid)?;
 
-        // The operator retires the block; the `invalidateblock` RPC drives
-        // exactly this entry point (chainstate `reorg::invalidate_block`).
         tree.invalidate_subtree(child_id)?;
 
         let grandchild = mined_header(BlockHash::from(tree.node(child_id)?.hash), 901_200);

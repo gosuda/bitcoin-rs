@@ -29,9 +29,8 @@ const DEFAULT_OUTBOUND_BLOCK_RELAY_SLOTS: usize = 2;
 
 const DEFAULT_OUTBOUND_QUEUE_LIMIT: usize = DEFAULT_OUTBOUND_FULL_RELAY_SLOTS;
 
-/// How often the connection manager looks for a full-relay connection that
-/// the stale-tip allowance made extra. Core's `EXTRA_PEER_CHECK_INTERVAL`
-/// (`net_processing.cpp:113`).
+/// How often the connection manager looks for a full-relay connection that the
+/// stale-tip allowance made extra.
 const EXTRA_PEER_CHECK_INTERVAL: Duration = Duration::from_secs(45);
 
 const DEFAULT_INBOUND_BLOCK_QUEUE_LIMIT: usize = 256;
@@ -74,19 +73,13 @@ pub struct P2pServiceConfig {
     ///
     /// Core: `m_max_automatic_connections` (`net.h:1091`).
     pub max_peer_connections: usize,
-    /// Outbound full-relay connection slots (transaction, address, block
-    /// relay, and announcements).
-    ///
-    /// Core: `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
+    /// Outbound full-relay connection slots (transaction, address, block relay,
+    /// and announcements).
     pub outbound_full_relay_slots: usize,
-    /// The services this node advertises in every `version`. A pruned node
-    /// supplies `WITNESS | NETWORK_LIMITED`; the default is the full-history
-    /// advertisement (Core `init.cpp:2022-2026`).
+    /// The services this node advertises in every `version`.
     pub local_services: ServiceFlags,
     /// Outbound block-relay-only connection slots (blocks only, no `tx` or
     /// `addr`).
-    ///
-    /// Core: `MAX_BLOCK_RELAY_ONLY_CONNECTIONS` (`net.h:73`).
     pub outbound_block_relay_slots: usize,
     /// Outbound request queue capacity.
     pub outbound_queue_limit: usize,
@@ -1470,8 +1463,6 @@ mod tests {
 
     #[test]
     fn live_outbound_count_skips_manual_and_cancelled_leases_so_dns_deficit_refills() {
-        // Replacement address differs from the registered one below so the
-        // drain cannot skip it as already connected.
         const REPLACEMENT_PORT: u16 = 9;
 
         let table = crate::PeerTable::new();
@@ -1490,14 +1481,10 @@ mod tests {
             "the manual peer does not satisfy the automatic DNS target"
         );
 
-        // A disable cancels the lease and keeps its table entry; the
-        // cancelled connection must stop counting as live.
         lease.cancel();
         assert_eq!(table.sessions().len(), 2, "cancellation keeps both entries");
         assert_eq!(live_outbound_count(&table), 0);
 
-        // With no live outbound peer the DNS drain queues a replacement, so
-        // maintenance sees the full deficit instead of a satisfied target.
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
         let active = AtomicBool::new(true);
         let dns_queue = Mutex::new(DnsQueueState::default());
@@ -1666,8 +1653,6 @@ mod tests {
         );
     }
 
-    /// The dialer fills full-relay slots before block-relay slots, and serves
-    /// an explicit request as full relay once both classes are full.
     #[test]
     fn next_outbound_role_fills_full_relay_slots_first() {
         use crate::connection::PeerLease;
@@ -1714,9 +1699,6 @@ mod tests {
         );
     }
 
-    /// Automatic dials that have not registered still count against their
-    /// class, so a burst of queued addresses fills block-relay slots instead of
-    /// stacking every connection in the first class.
     #[test]
     fn in_flight_dials_hold_their_class() {
         use crate::peer_info::PeerRole;
@@ -1757,9 +1739,6 @@ mod tests {
         );
     }
 
-    /// A live connection that is still on the caller's dial list counts once:
-    /// five connected full-relay peers hold five of eight slots, not ten, so
-    /// the next dial is still full relay rather than an early block-relay.
     #[test]
     fn a_registered_dial_counts_once() {
         use crate::connection::PeerLease;
@@ -1788,9 +1767,6 @@ mod tests {
         );
     }
 
-    /// The connection retired for a moving tip is the newest full-relay
-    /// outbound one beyond the slots, and a connection too young to have had a
-    /// chance is passed over.
     #[test]
     fn newest_excess_full_relay_picks_the_newest_aged_connection() {
         use crate::connection::PeerLease;
@@ -1826,10 +1802,6 @@ mod tests {
             "two full-relay connections fill two slots, and neither a              block-relay nor an inbound connection counts as one"
         );
 
-        // The newest connection overall is too young to judge; the one retired
-        // is the newest that is old enough. A hand-pinned connection is newer
-        // still and aged, and Core's `EvictExtraOutboundPeers` never looks at
-        // it (`net_processing.cpp:5558-5604`).
         let (young_tx, _young_rx) = crossbeam_channel::unbounded();
         let young_lease = PeerLease::new(young_tx);
         table.register(addr(5), young_lease);
@@ -1860,9 +1832,6 @@ mod tests {
         );
     }
 
-    /// A pinned dial is answered with full relay even when the automatic
-    /// chooser would hand out a block-relay slot, so an operator's peer
-    /// always relays transactions.
     #[test]
     fn a_pinned_dial_takes_full_relay_whatever_the_slots_hold() {
         use crate::connection::PeerLease;
@@ -1871,7 +1840,6 @@ mod tests {
         let table = crate::PeerTable::new();
         let addr = SocketAddr::from(([127, 0, 0, 1], 1));
         let (tx, _rx) = crossbeam_channel::unbounded();
-        // A connected full-relay peer fills the one full-relay slot.
         table.register(addr, PeerLease::new(tx));
 
         assert!(
@@ -1897,10 +1865,6 @@ mod tests {
         );
     }
 
-    /// The retirement victim comes only from the excess slice: a young extra
-    /// connection beyond the slots cannot divert retirement onto an in-slot
-    /// peer, and a candidate with a body download in flight is passed over
-    /// for the next eligible excess peer.
     #[test]
     fn the_excess_victim_comes_from_the_excess_slice_only() {
         use crate::connection::PeerLease;
@@ -1916,16 +1880,12 @@ mod tests {
             .expect("test clock is past the minimum connect time");
         let table = crate::PeerTable::new();
 
-        // Two aged full-relay connections fill the two slots.
         for port in 1..=2_u16 {
             let (tx, _rx) = crossbeam_channel::unbounded();
             let mut lease = PeerLease::new(tx);
             lease.backdate_for_test(aged);
             table.register(addr(port), lease);
         }
-        // A young extra connection sits beyond the slots. Under the old
-        // whole-list scan it is skipped for youth and the newest in-slot
-        // connection is retired in its place.
         let (young_tx, _young_rx) = crossbeam_channel::unbounded();
         table.register(addr(3), PeerLease::new(young_tx));
 
@@ -1934,8 +1894,6 @@ mod tests {
             "the only excess candidate is too young, so nobody in the slots is retired"
         );
 
-        // The young excess connection ages, but holds a body download in
-        // flight: it is passed over rather than stalling retirement.
         let (aged_tx, _aged_rx) = crossbeam_channel::unbounded();
         let mut downloading = PeerLease::new(aged_tx);
         downloading.backdate_for_test(aged);
@@ -1958,11 +1916,6 @@ mod tests {
         );
     }
 
-    /// A pinned peer that connects on top of a full automatic set sits
-    /// outside the extra-peer census: it creates no excess, so a full
-    /// automatic set keeps every peer, matching `p2p-compatibility.md`
-    /// item 10. Only a further automatic connection beyond the slots is
-    /// retired, never an automatic displaced by the operator's pin.
     #[test]
     fn a_pinned_peer_beyond_a_full_set_creates_no_excess() {
         use crate::connection::PeerLease;
@@ -1979,7 +1932,6 @@ mod tests {
             .expect("test clock is past the minimum connect time");
         let table = crate::PeerTable::new();
 
-        // The automatic set fills both slots before the operator's dial.
         for port in 1..=2_u16 {
             let (tx, _rx) = crossbeam_channel::unbounded();
             let mut lease = PeerLease::new(tx);
@@ -1996,9 +1948,6 @@ mod tests {
             "a full automatic set plus a pinned peer is still no connection over"
         );
 
-        // The census still fires on automatic excess: one more aged
-        // automatic beyond the slots is the victim, while the pinned peer
-        // stays out of the count and the candidate set both.
         let (extra_tx, _extra_rx) = crossbeam_channel::unbounded();
         let mut extra_lease = PeerLease::new(extra_tx);
         extra_lease.backdate_for_test(aged);

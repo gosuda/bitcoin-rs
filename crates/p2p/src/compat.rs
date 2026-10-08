@@ -56,9 +56,6 @@ pub const COMMANDS: &[&str] = &[
 ];
 
 /// Bitcoin Core 31.1 commands this node does not type.
-///
-/// Decoded as [`crate::Message::Unknown`]. `sendtxrcncl` (BIP330) is the one
-/// Core 31 command missing from [`COMMANDS`]; see the deviation ledger.
 pub const CORE_UNTYPED_COMMANDS: &[&str] = &["sendtxrcncl"];
 
 /// Reports whether `name` is a typed command.

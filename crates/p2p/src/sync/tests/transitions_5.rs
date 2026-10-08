@@ -1,8 +1,7 @@
 use super::*;
 
 #[test]
-fn slow_trickle_front_peer_observable_but_never_disconnected()
--> Result<(), Box<dyn std::error::Error>> {
+fn slow_trickle_front_peer_observable_but_never_disconnected() -> TestResult {
     // R10 slow-trickle: a peer delivering each front block just under
     // the adaptive threshold is never disconnected (Core has the same
     // exposure), but the stall state must be visible — via the window
@@ -17,8 +16,6 @@ fn slow_trickle_front_peer_observable_but_never_disconnected()
                 max_received_blocks: 3,
                 max_peer_inflight: 3,
                 getdata_batch_limit: 3,
-                // Default 2s initial threshold: the 100ms trickle below
-                // stays far under it on any machine.
                 ..super::super::default_sync_budget(Network::Regtest)
             },
         );
@@ -30,7 +27,6 @@ fn slow_trickle_front_peer_observable_but_never_disconnected()
             sync.tick();
             let inventory = next_getdata(&rx)?;
             assert_eq!(inventory.len(), 3);
-            // Successors arrive, the front trickles: window-blocked.
             blocks_tx.send(crate::InboundBlock::from_decoded(
                 blocks[offset + 1].clone(),
             ))?;
@@ -49,7 +45,6 @@ fn slow_trickle_front_peer_observable_but_never_disconnected()
             );
             std::thread::sleep(Duration::from_millis(100));
             sync.tick();
-            // Still under the threshold: observed, not punished.
             assert!(peers.is_connected(trickler));
             match recorder.snapshot().get("node.sync.stall_seconds") {
                 Some(TestMetric::Gauge(seconds)) => {
@@ -60,9 +55,6 @@ fn slow_trickle_front_peer_observable_but_never_disconnected()
                 }
                 value => panic!("stall_seconds gauge missing or wrong type: {value:?}"),
             }
-            // The front arrives just under the threshold: progress —
-            // episode ends, adaptive threshold stays at its initial
-            // value, and the next round starts clean.
             blocks_tx.send(crate::InboundBlock::from_decoded(blocks[offset].clone()))?;
             sync.tick();
             assert!(sync.scheduler.lock().window.stalling_peer().is_none());
@@ -93,8 +85,7 @@ fn slow_trickle_front_peer_observable_but_never_disconnected()
 }
 
 #[test]
-fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
--> Result<(), Box<dyn std::error::Error>> {
+fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes() -> TestResult {
     // Sync-level smoke for the self-eclipse blocker and the ADV-DRIP-1
     // drip: 8 eligible peers in saturated fan-out (window 24 = 8 peers x
     // cap 3 over a 32-block chain, so refills keep R+P pinned at the
@@ -140,7 +131,6 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
             sources.push(current_source(&peers, addr));
         }
 
-        // Tick 1: fan-out stripes the 24-block window, 3 blocks per peer.
         sync.tick();
         let mut stripes = Vec::new();
         for rx in &rxs {
@@ -153,27 +143,8 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
             .map(|block| (block.block_hash(), block.clone()))
             .collect();
 
-        // Three rounds, each past the stall threshold. The front
-        // (heights 1, 2, 3 — peer 0's stripe) advances once per round,
-        // so the interval EWMA takes its first sample at round 1 and the
-        // adaptive floor (2x the ~150ms demonstrated cadence) covers the
-        // mid-gap wakes from the round 1 -> 2 gap on. The round 0 -> 1
-        // gap has no sample yet and no wake lands there: the predicate
-        // only arms at round 1's observe (the staged set crosses the
-        // half-window term then), so the unseeded 100ms floor never
-        // judges a front in that gap.
         for round in 0..3_usize {
             if round == 2 {
-                // The wake path observes at ~g/8 cadence, so episodes
-                // form on the first wake after a round's deliveries
-                // (the round tick itself observes before its refill
-                // re-closes request capacity) and age across the
-                // following wakes. Two mid-gap wakes reproduce that:
-                // one just inside the gap to form the episode, one
-                // ~120ms later — past the 100ms static threshold (the
-                // pre-fix drip disconnected peer 0 exactly there) but
-                // under the adaptive floor (2x the ~150ms demonstrated
-                // front cadence).
                 std::thread::sleep(Duration::from_millis(5));
                 sync.tick();
                 std::thread::sleep(Duration::from_millis(120));
@@ -192,8 +163,6 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
                     .get(&stripe[round])
                     .ok_or_else(|| std::io::Error::other("unknown getdata hash"))?;
                 let mut inbound = crate::InboundBlock::from_decoded(block.clone());
-                // Source-attributed, like the wire path: the front arrival
-                // credits the cadence EWMA and clears the owner's episode.
                 inbound.source = Some(sources[idx]);
                 blocks_tx.send(inbound)?;
             }
@@ -204,11 +173,6 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
                 "no streaming peer may be disconnected (round {round})"
             );
         }
-        // Drain: feed the refill tail (heights 25..=32) one block per
-        // tick — the staged set is still near the 24-block budget while
-        // the expected-apply cache narrows, and a burst would push the
-        // stager into evicting frontier blocks that are never
-        // re-delivered here.
         let mut tail = blocks[24..].iter();
         for _ in 0..40_usize {
             let applied = applied_tip.load_full().map_or(0, |tip| tip.height);
@@ -238,7 +202,7 @@ fn uniform_slow_saturated_fanout_disconnects_no_peer_and_completes()
 }
 
 #[test]
-fn single_peer_can_fill_default_pending_window() -> Result<(), Box<dyn std::error::Error>> {
+fn single_peer_can_fill_default_pending_window() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain(u32::try_from(super::super::PENDING_BUDGET)?)?;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
@@ -271,8 +235,7 @@ fn single_peer_can_fill_default_pending_window() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn tick_preserves_partial_window_order_across_pending_gap() -> Result<(), Box<dyn std::error::Error>>
-{
+fn tick_preserves_partial_window_order_across_pending_gap() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(5)?;
     install_budget(
         &sync,

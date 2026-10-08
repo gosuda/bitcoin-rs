@@ -23,19 +23,11 @@ impl ScriptHistoryEntry {
 impl<S: KvStore> Indexer<S> {
     /// Resolves confirmed script-history entries for `scripthash` via `source`.
     ///
-    /// Walks `iter_funding_rows(scripthash)` to get every (prefix, height) pair,
-    /// fetches each block via `source.block_at_height(height)`, and yields a
-    /// `ScriptHistoryEntry::confirmed` for every transaction in that block that has
-    /// at least one output matching `scripthash` exactly.
-    ///
-    /// Entries are returned sorted by numeric height (ascending), matching the
-    /// underlying store iteration order: the 4-byte height suffix is
-    /// big-endian (format 5), so lexicographic key-byte order already is
-    /// chronological within one prefix. The sort stays as a contract guarantee.
-    /// Heights not resolvable by `source` are skipped.
-    ///
-    /// The lossy 8-byte prefix is exact-resolved here: only transactions whose
-    /// output scripthash matches the full 32-byte `scripthash` are emitted.
+    /// Walks every funding row for the scripthash, fetches each block, and
+    /// yields a `ScriptHistoryEntry::confirmed` per transaction with an output
+    /// matching the full 32-byte scripthash, so the lossy 8-byte prefix is
+    /// exact-resolved here. Heights the source cannot resolve are skipped.
+    /// Entries are sorted by ascending height as a contract guarantee.
     pub fn resolve_script_history<B: BlockSource>(
         &self,
         scripthash: crate::ScriptHash,
@@ -54,22 +46,13 @@ impl<S: KvStore> Indexer<S> {
         Ok(entries)
     }
 
-    /// Resolves confirmed unspent-output candidates for `scripthash` via `source`.
+    /// Resolves confirmed unspent-output candidates for `scripthash` via
+    /// `source`, each carrying its funding height.
     ///
-    /// For every funding-row (prefix, height), fetches the block and emits a
-    /// triple `(txid, vout, value_sats)` for every output whose scriptPubKey
-    /// hashes to `scripthash`. Spending checks are NOT performed here — callers
-    /// compose with `iter_spending_rows` to filter out spent outputs.
-    ///
-    /// The lossy 8-byte prefix is exact-resolved here: only outputs whose script
-    /// hashes match the full 32-byte `scripthash` are emitted.
-    /// Each emitted tuple also carries the funding height.
-    ///
-    /// Returns `(txid, vout, value_sats, funding_height)` quadruples sorted by
-    /// funding height (ascending). Use this when callers need the confirmation
-    /// height (e.g. `ScriptIndex` `listunspent` emits the height for each
-    /// unspent output). The sort mirrors [`Self::resolve_script_history`]:
-    /// store iteration order is BE byte order, hence numeric height order.
+    /// Emits `(txid, vout, value_sats, funding_height)` for every output whose
+    /// script hashes to the full 32-byte `scripthash`, sorted by ascending
+    /// funding height. Spending checks are not performed here: callers compose
+    /// with `iter_spending_rows` to filter out spent outputs.
     pub fn resolve_unspent_outputs_with_height<B: BlockSource>(
         &self,
         scripthash: crate::ScriptHash,

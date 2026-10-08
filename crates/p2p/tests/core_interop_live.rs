@@ -50,11 +50,6 @@ fn evidence_bool(value: &Value, key: &str) -> Result<bool, LiveError> {
 }
 
 /// Parses Core's user agent into its dotted version.
-///
-/// Core reports `getnetworkinfo.subversion` in BIP 14 form
-/// (`/Satoshi:<version>(<comment>)/`), e.g. `/Satoshi:31.1.0/` or
-/// `/Satoshi:31.1.0(testsuite)/`. Returns `None` for anything that is not a
-/// Satoshi-format agent.
 fn parse_core_subversion(subversion: &str) -> Option<&str> {
     let rest = subversion.strip_prefix("/Satoshi:")?;
     let rest = rest.strip_suffix('/')?;

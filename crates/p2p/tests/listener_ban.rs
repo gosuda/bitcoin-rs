@@ -230,16 +230,11 @@ fn live_handshake_traffic_reaches_the_aggregate_ledger() -> Result<(), Box<dyn E
         Arc::clone(&session_cancel),
     );
 
-    // One wiring value cloned to every worker, as the service start does.
     let listener_shutdown = Arc::clone(&shutdown);
     let serve_shared = shared.clone();
     let serve_handle = thread::spawn(move || serve(listener, listener_shutdown, serve_shared));
     let outbound_handle = spawn_outbound_connection(addr, shared, PeerRole::FullRelay);
 
-    // Metadata publication attaches the connection counters, so nonzero
-    // totals prove both handshakes completed over the loopback wire.
-    // Deadline-bounded wait; no fixed sleep. Every exit path takes the same
-    // teardown, so a failed assertion cannot leak the accept loop.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let (received, sent) = peer_table.traffic_totals();

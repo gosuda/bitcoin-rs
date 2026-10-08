@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, ChainWork, NodeStatus};
+use bitcoin_rs_chain::{ChainWork, NodeStatus};
 use bitcoin_rs_primitives::{AssumeUtxoData, Block, Hash256, Network};
 use bitcoin_rs_storage::{CommitRecords, DurableHead, DurableHeadStore, StorageError};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
@@ -12,6 +12,7 @@ use parking_lot::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{AssumeUtxoDiskStatus, AssumeUtxoError, AssumeUtxoManager, ChainstateRole};
+use crate::test_fixtures::handles;
 use crate::{ApplyError, Chainstate};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -20,15 +21,9 @@ fn chainstate() -> Arc<Chainstate> {
     let stats = Arc::new(CoinStatsListener::new(CoinStats::default()));
     let mut utxo = UtxoSet::new();
     utxo.track_coin_stats((*stats).clone());
-    Arc::new(Chainstate::new(
-        Network::Regtest,
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(RwLock::new(BlockTree::new())),
-        Arc::new(utxo),
-        stats,
-        Arc::new(crate::events::ChainEventPublisher::detached(0)),
-    ))
+    let mut chainstate = handles(Network::Regtest, Arc::new(utxo));
+    chainstate.coin_stats = stats;
+    Arc::new(chainstate)
 }
 
 #[derive(Default)]

@@ -33,12 +33,10 @@ fn run_reopen_and_fence_laws() -> Result<(), StorageError> {
         bitcoin_rs_storage::FjallStore::open(temp.path())?,
     )));
 
-    // An empty store must be named with a None fence.
     let first = head(1, 1);
     store.commit(None, &first, &CommitRecords::default())?;
     assert_eq!(store.load()?.map(|h| h.commit_id), Some(1));
 
-    // A stale fence applies nothing and reports the move.
     let second = head(2, 2);
     let stale = head(9, 9);
     assert!(
@@ -49,7 +47,6 @@ fn run_reopen_and_fence_laws() -> Result<(), StorageError> {
     assert_eq!(store.load()?.map(|h| h.commit_id), Some(1));
     store.commit(Some(&first), &second, &CommitRecords::default())?;
 
-    // Ok(()) is the durability receipt: a reopened store sees the head.
     drop(store);
     let reopened =
         KvDurableHeadStore::new(Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?));

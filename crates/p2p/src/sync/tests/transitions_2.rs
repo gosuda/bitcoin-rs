@@ -1,9 +1,7 @@
 use super::*;
 
-/// A two-branch retarget fixture: the header tip starts on a two-block
-/// losing branch, and one peer has been sent getdata for both of its
-/// blocks. Storing `winning_tip` into `chain_tip` retargets the request
-/// branch to a three-block winning branch at the next request.
+/// A two-branch retarget fixture: the header tip starts on a two-block losing
+/// branch, and one peer has been sent getdata for both of its blocks.
 struct TwoBranches {
     sync: BlockSync,
     rx: crossbeam_channel::Receiver<Message>,
@@ -36,13 +34,13 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let losing_body2 = regtest_fixture::mined_block_with_prev_hash(
         losing_body1.block_hash(),
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let losing1_id = tree.insert_node(
         Some(genesis_id),
         losing_body1.header,
@@ -58,13 +56,13 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
     let losing_bodies = vec![losing_body1, losing_body2];
 
     let winning1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let winning1_id = tree.insert_node(Some(genesis_id), winning1, NodeStatus::HeaderValid)?;
     let winning2 = regtest_fixture::mined_regtest_header(winning1.compute_hash(), 102)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let winning2_id = tree.insert_node(Some(winning1_id), winning2, NodeStatus::HeaderValid)?;
     let winning3 = regtest_fixture::mined_regtest_header(winning2.compute_hash(), 103)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let winning3_id = tree.insert_node(Some(winning2_id), winning3, NodeStatus::HeaderValid)?;
     let winning_tip = snapshot(&tree, winning3_id)?;
     let winning_hashes = vec![
@@ -114,8 +112,7 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn retargeting_pending_requests_drops_losing_branch_hashes()
--> Result<(), Box<dyn std::error::Error>> {
+fn retargeting_pending_requests_drops_losing_branch_hashes() -> TestResult {
     let TwoBranches {
         sync,
         rx,
@@ -146,11 +143,8 @@ fn retargeting_pending_requests_drops_losing_branch_hashes()
     Ok(())
 }
 
-/// BLK-08: a retarget releases losing-branch bodies from the stager as well
-/// as the window, so the freed capacity is real, and a late losing-branch
-/// delivery cannot re-acquire purged state.
 #[test]
-fn retarget_purges_staged_off_branch_bodies() -> Result<(), Box<dyn std::error::Error>> {
+fn retarget_purges_staged_off_branch_bodies() -> TestResult {
     let TwoBranches {
         sync,
         rx,
@@ -202,17 +196,16 @@ fn retarget_purges_staged_off_branch_bodies() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
-fn outweighed_branch_target_accepts_shorter_higher_work_branch()
--> Result<(), Box<dyn std::error::Error>> {
+fn outweighed_branch_target_accepts_shorter_higher_work_branch() -> TestResult {
     use bitcoin_rs_primitives::CompactTarget;
     let genesis = genesis_header();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
     let main1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let main1_id = tree.insert_node(Some(genesis_id), main1, NodeStatus::HeaderValid)?;
     let main2 = regtest_fixture::mined_regtest_header(main1.compute_hash(), 2)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let main2_id = tree.insert_node(Some(main1_id), main2, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(main2_id)?;
@@ -226,11 +219,11 @@ fn outweighed_branch_target_accepts_shorter_higher_work_branch()
     };
 
     let mut high_work = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     high_work.bits = CompactTarget::from_consensus(0x2000_ffff);
     high_work.nonce = 0;
     regtest_fixture::mine_header_to_declared_target(&mut high_work)
-        .unwrap_or_else(|error| panic!("regtest fixture grind: {error}"));
+        .or_fail("regtest fixture grind");
     let high_work_id = tree.insert_node(Some(genesis_id), high_work, NodeStatus::HeaderValid)?;
     let winning = tree
         .tip()
@@ -252,13 +245,8 @@ fn outweighed_branch_target_accepts_shorter_higher_work_branch()
     Ok(())
 }
 
-/// BLK-08: a retarget must run before the request-peer scan limit truncates
-/// the peer list. A losing-branch pending set that fills the window otherwise
-/// yields zero request peers, so `next_peer_request` — the only other place
-/// the purge runs — is never reached and the winning branch waits out the
-/// pending timeout.
 #[test]
-fn retarget_runs_before_the_peer_budget_truncates() -> Result<(), Box<dyn std::error::Error>> {
+fn retarget_runs_before_the_peer_budget_truncates() -> TestResult {
     const LOSING_LEN: usize = 4;
     let genesis = genesis_header();
     let mut tree = BlockTree::new();
@@ -307,8 +295,6 @@ fn retarget_runs_before_the_peer_budget_truncates() -> Result<(), Box<dyn std::e
         inbound_blocks_rx,
         crate::sync::syncing_ibd_latch(),
     );
-    // Fill the window with losing-branch pending: a pending cap of the losing
-    // branch's length makes the scan limit exactly zero once it is full.
     sync.install_budget(crate::sync::SyncBudget {
         max_pending_blocks: LOSING_LEN,
         ..crate::sync::default_sync_budget(Network::Regtest)

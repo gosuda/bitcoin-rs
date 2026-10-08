@@ -1,8 +1,7 @@
-//! #1128 model/property coverage: the canonical frontier reconciler's
-//! invariant over `SyncFrontier::plan`, exercised directly against
-//! synthesized frontier states, plus the connection-identity pins that
-//! close the same-address-replacement race the issue's prior attempt
-//! left open.
+//! #1128 model/property coverage: the canonical frontier reconciler's invariant
+//! over `SyncFrontier::plan`, exercised directly against synthesized frontier
+//! states, plus the connection-identity pins that close the same-address-
+//! replacement race the issue's prior attempt left open.
 
 use super::*;
 
@@ -14,13 +13,8 @@ use crate::BlockStager;
 use crate::download_window::{BlameReason, BlockedContext, BlockedDecision, DownloadWindow};
 use bitcoin_rs_chain::{ChainWork, NodeId};
 
-/// Advances the unified blockage observation one tick and returns the
-/// stall blame's owner, if this tick convicted one.
-///
-/// A conviction for any other reason never coalesces into `None`: the
-/// helper panics naming the whole decision, so a failing assertion tells
-/// no-conviction apart from conviction-for-another-reason. Decisions that
-/// carry no conviction at all return `None`.
+/// Advances the unified blockage observation one tick and returns the stall
+/// blame's owner, if this tick convicted one.
 fn stall_blame(
     window: &mut DownloadWindow,
     stager: &BlockStager,
@@ -153,7 +147,6 @@ fn unowned_frontier_with_only_incapable_peers_reports_no_capable_peer() {
     let plan = assert_invariant(&frontier(
         chain_frontier(5, false),
         Some(BodyState::Unowned),
-        // Handshake height 2 cannot reach required height 5.
         vec![usable(9001, 2, None)],
     ));
     assert!(plan.schedule_bodies);
@@ -173,8 +166,6 @@ fn unowned_frontier_while_apply_halted_reports_apply_halted() {
 
 #[test]
 fn in_flight_frontier_on_a_dead_connection_recovers_as_unowned() {
-    // `InFlight(owner)` where `owner` fell out of the usable set is unowned
-    // work: the plan must schedule its re-request this tick.
     let dead = PeerSource::for_test(addr_of(9010));
     let plan = assert_invariant(&frontier(
         chain_frontier(5, false),
@@ -287,9 +278,6 @@ fn live_pending_header_request_awaits_its_connection() {
 
 #[test]
 fn probe_rotates_past_the_dead_pending_owner() {
-    // The pending request's connection is gone (usable_peers no longer
-    // contains it), so it is not live and the probe rotates to the next
-    // address past its owner.
     let dead_owner = PeerSource::for_test(addr_of(9005));
     let mut frontier = frontier(
         chain_frontier(5, false),
@@ -333,9 +321,6 @@ fn non_serving_peers_are_never_probe_picks() {
 }
 
 proptest::proptest! {
-    /// #1128's invariant as a property: across arbitrary frontier states, a
-    /// next-required body is always either scheduled for recovery this tick
-    /// or carries an explicit `NoProgressReason` — never both absent.
     #[test]
     fn plan_never_leaves_a_required_body_unaccounted(
         applied_ahead in proptest::bool::ANY,
@@ -355,9 +340,6 @@ proptest::proptest! {
         } else {
             snap(2, 12, 0x02)
         };
-        // `evidenced` peers carry demonstrated tips that resolve off the
-        // active chain, so `capability()` yields `None` — crossing the
-        // no-capable-peer branch, not just empty-vs-nonempty peers.
         let usable_peers = peers
             .iter()
             .enumerate()
@@ -373,9 +355,6 @@ proptest::proptest! {
                 peer
             })
             .collect::<Vec<_>>();
-        // InFlight crosses both directions of the identity-exact owner
-        // check: a live owner counts as progress; an owner absent from the
-        // usable set is unowned work and must be re-requested.
         let body_state = next_required.map(|_height| match body_case {
             0 => BodyState::Unowned,
             1 => BodyState::Staged,
@@ -423,8 +402,6 @@ proptest::proptest! {
                  {plan:?}"
             );
         }
-        // A live in-flight owner counts as progress: no incapability
-        // verdict and recovery keeps scheduling while its work is pending.
         if let Some(BodyState::InFlight(owner)) = frontier.body_state
             && !frontier.chain.apply_halted
             && frontier
@@ -435,9 +412,6 @@ proptest::proptest! {
             proptest::prop_assert!(plan.schedule_bodies, "live owner is progress: {plan:?}");
             proptest::prop_assert_eq!(plan.no_progress, None);
         }
-        // An owner absent from the usable set is unowned work: when no
-        // capable peer exists the plan must carry NoCapablePeer rather than
-        // silently relying on the dead connection.
         if let Some(BodyState::InFlight(owner)) = frontier.body_state
             && !frontier.usable_peers.is_empty()
             && !frontier.usable_peers.iter().any(|peer| peer.source == owner)
@@ -452,10 +426,6 @@ proptest::proptest! {
                 Some(NoProgressReason::NoCapablePeer)
             );
         }
-        // NoUsablePeers is reserved for an actually-empty usable set: the
-        // verdict must never fire while peers exist, and every empty-peer
-        // frontier with a required body must carry it (rather than a
-        // misattributed capability verdict).
         if plan.no_progress == Some(NoProgressReason::NoUsablePeers) {
             proptest::prop_assert!(frontier.usable_peers.is_empty());
         }
@@ -471,14 +441,9 @@ proptest::proptest! {
     }
 }
 
-/// #1129's residual hole, closed: a replacement connection that registers
-/// between the predecessor's conviction and the release sweep must neither
-/// be blamed for the predecessor's stall nor lose the released work.
 #[test]
-fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn convicted_connection_cannot_pass_its_stall_to_a_replacement() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
-    // One received block must arm the stall predicate.
     install_budget(
         &sync,
         super::super::SyncBudget {
@@ -499,8 +464,6 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     };
     assert!(witness_block_inventory(inventory)?.contains(&expected[0]));
 
-    // Stage a successor so the stall predicate arms: the front pending
-    // owner plus received backlog is the wedge the stall machine watches.
     let tail = Hash256::from_le_bytes(expected[3].as_bytes());
     let now = Instant::now();
     {
@@ -510,7 +473,7 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
             4,
             vec![super::transaction(0xEE)],
         )
-        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+        .or_fail("regtest fixture block");
         let serialized = bytes::Bytes::from(consensus_bytes(&block));
         scheduler.window.seed_front_cadence_for_test(50, now);
         scheduler.stager.insert(
@@ -526,8 +489,6 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
             .mark_received_from(tail, 80, Some(conn1.source(staller)), now);
     }
 
-    // The stall matures on conn1; its replacement registers before the
-    // disconnect lands — the ordering that defeated addr-keyed blame.
     let next_apply = sync
         .observe_chain_frontier()
         .next_required
@@ -556,8 +517,6 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     peers.register(staller, conn2.clone());
     peers.publish_info(staller, &conn2, synthetic_peer(staller, 200));
 
-    // Conviction is exact: the convicted source is conn1, already replaced,
-    // so the disconnect lands on nobody — and specifically not on conn2.
     let owner = owner.ok_or_else(|| std::io::Error::other("missing stall owner"))?;
     assert!(
         !peers.disconnect_source(owner),
@@ -568,8 +527,6 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     assert!(!conn2.is_cancelled());
     sync.reconcile_peer_sessions();
 
-    // The released front goes to the only live peer: conn2. A cooldown or
-    // inherited conviction would hold it out of the window front.
     sync.tick();
     let Message::GetData(reissued) = rx2.try_recv()? else {
         return Err(std::io::Error::other(
@@ -584,12 +541,8 @@ fn convicted_connection_cannot_pass_its_stall_to_a_replacement()
     Ok(())
 }
 
-/// The window-level half of the same pin: once the replacement owns the
-/// re-issued frontier, a release sweep for the dead predecessor's identity
-/// leaves it untouched, while a sweep naming the replacement releases it.
 #[test]
-fn release_sweep_is_connection_exact_at_the_same_address() -> Result<(), Box<dyn std::error::Error>>
-{
+fn release_sweep_is_connection_exact_at_the_same_address() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
     let addr = test_addr(9820, 0)?;
     let rx = connect_peer(&peers, synthetic_peer(addr, 200));
@@ -606,8 +559,6 @@ fn release_sweep_is_connection_exact_at_the_same_address() -> Result<(), Box<dyn
         Some(owner)
     );
 
-    // A sweep whose live set lists only this connection keeps its work;
-    // one that does not releases it, even though the addr is unchanged.
     sync.scheduler
         .lock()
         .window
