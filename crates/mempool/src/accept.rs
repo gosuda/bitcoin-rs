@@ -6,15 +6,6 @@ use bitcoin_rs_consensus::UtxoView;
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 
 /// Chain UTXO set with the mempool's unconfirmed outputs layered on top.
-///
-/// Bitcoin Core's `CCoinsViewMemPool`. Mempool first: a txid present in the
-/// pool is by definition unconfirmed, so the chain cannot hold the same
-/// outpoint, and consulting the pool first is what lets a child spend its
-/// unconfirmed parent.
-///
-/// Deliberately does **not** hide outputs another mempool transaction spends.
-/// Detecting that is the replacement path's job, and hiding them here would
-/// turn every RBF attempt into a missing-inputs rejection.
 pub(crate) struct MempoolUtxoView<'a, V> {
     pool: &'a Mempool,
     chain: &'a V,

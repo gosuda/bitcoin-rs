@@ -11,12 +11,6 @@ use crate::mutation::{AdmissionOrigin, RemovalReason};
 use crate::{EntryId, Mempool, MempoolEntry, MempoolError};
 
 /// Whether a committed entry registers with the fee estimator.
-///
-/// PRE: chosen by the admission owner from the request's origin.
-/// POST: `Skip` suppresses `record_entry_arrival` at commit; `Estimate`
-/// records it.
-/// INVARIANT: exactly reorg re-admissions skip; the value never travels as
-/// a bool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FeeEstimation {
     Estimate,
@@ -35,12 +29,6 @@ impl FeeEstimation {
 }
 
 /// Policy limit enforcement strategy for admission.
-///
-/// [`LimitEnforcement::Full`] applies every policy gate; [`LimitEnforcement::Deferred`]
-/// skips the min-fee floor and the per-acceptance size trim during individual
-/// admit attempts, deferring the total-size trim to one post-settlement pass
-/// (reorg re-admission, Core's `bypassLimits`). Topology checks — ancestor
-/// topology, TRUC, ephemeral spend — still run under `Deferred`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LimitEnforcement {
     /// Apply all policy limits immediately.
@@ -66,10 +54,6 @@ pub struct ReplacementCandidate {
     /// Incremental relay fee rate in sat/kvB.
     pub min_relay_fee_rate: u64,
     /// BIP141 sigop cost against the resolved prevouts.
-    ///
-    /// Carried through so a replacement lands with the same accounting a plain
-    /// acceptance would give it. Zero when the candidate was built without
-    /// resolved prevouts, which means unknown rather than none.
     pub sigop_cost: u32,
 }
 
@@ -214,8 +198,6 @@ pub(crate) struct ReplacementInputs {
 
 pub(crate) struct PreparedPoolChange {
     pub(crate) stamp: crate::pool::fee_policy::PolicyStamp,
-    // Retained in production plans so the test-seam policy oracle observes
-    // the exact plan shape without a second replacement implementation.
     #[allow(dead_code)]
     pub(crate) evicted: Vec<EntryId>,
     pub(crate) removals: Vec<(EntryId, RemovalReason)>,
@@ -224,15 +206,8 @@ pub(crate) struct PreparedPoolChange {
 }
 
 impl ReplacementInputs {
-    /// The potentially expensive graph solver runs over owned facts, with
-    /// no pool guard held. The returned plan can only commit at its stamp.
-    ///
-    /// INVARIANT: under [`LimitEnforcement::Deferred`] the per-acceptance
-    /// size trim is not applied — a trim during the walk would shed a parent
-    /// before the child that spends it is re-admitted, and one trim runs
-    /// over the settled pool instead (Core bounds the pool once the new
-    /// branch is active). The projected cluster limits still apply: Core's
-    /// `bypassLimits` path never skips `CalculateMemPoolAncestors`.
+    /// The potentially expensive graph solver runs over owned facts, with no
+    /// pool guard held. The returned plan can only commit at its stamp.
     pub(crate) fn verify(self) -> Result<PreparedPoolChange, RbfError> {
         let Some((before_graph, after_graph)) = self.graphs else {
             return Ok(PreparedPoolChange {
@@ -269,8 +244,6 @@ impl ReplacementInputs {
                 if size <= self.max_vsize {
                     break;
                 }
-                // A replacement that would be shed is rejected as a whole,
-                // before removing conflicts or updating estimator history.
                 if chunk
                     .members
                     .iter()
@@ -330,14 +303,6 @@ impl Mempool {
     }
 
     /// Captures one replacement, resolving its conflict set.
-    ///
-    /// PRE: `candidate` describes a transaction whose fee and vsize are
-    /// already resolved against the current chain and pool.
-    /// POST: the returned inputs describe the removals and the prepared entry
-    /// the commit would apply, with no pool state changed.
-    /// INVARIANT: this door enforces in full. The admission owner that derives
-    /// enforcement from the origin owns the deferred path: it collects the
-    /// conflict set itself and calls `capture_admission` with it.
     #[cfg(any(test, feature = "test-seam"))]
     pub(crate) fn capture_replacement(
         &self,
@@ -367,14 +332,6 @@ impl Mempool {
     }
 
     /// Captures one admission's graph work outside the writer.
-    ///
-    /// PRE: `conflicts` and `sibling_eviction` are one conflict-set pair the
-    /// admission owner chose; `entry` is complete.
-    /// POST: the inputs verify into a plan that commits only at the captured
-    /// stamp; no pool state changes here.
-    /// INVARIANT: a non-empty `conflicts` vec is the only route that applies
-    /// the BIP125 fee rules and the fee-diagram compare; the plain door passes
-    /// an empty vec.
     pub(crate) fn capture_admission(
         &self,
         entry: MempoolEntry,
@@ -436,9 +393,6 @@ impl Mempool {
             .checked_sub(removed_vsize)
             .and_then(|size| size.checked_add(u64::from(entry.vsize)))
             .ok_or(RbfError::ArithmeticOverflow)?;
-        // The whole-pool projection exists to feed the size trim; a deferred
-        // admission defers that trim to settlement, so it only ever needs the
-        // affected-cluster graph that `check_limits` reads.
         let include_all = enforcement == LimitEnforcement::Full
             && self.limits.max_total_bytes > 0
             && projected_vsize > self.limits.max_total_bytes;
@@ -464,10 +418,6 @@ impl Mempool {
     }
 
     /// Checks the complete replacement policy without changing pool state.
-    ///
-    /// Test seam: the RPC BIP125 contract oracle
-    /// (`crates/rpc/tests/policy_contract.rs`) quotes this verdict against the
-    /// RPC's.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn check_replacement(
         &self,
@@ -514,9 +464,6 @@ impl Mempool {
 
     /// Trusted direct-pool replacement. The gateway captures and verifies
     /// separately so graph work never runs while holding its write lock.
-    ///
-    /// Test seam: fixtures and the RPC BIP125 contract oracle
-    /// (`crates/rpc/tests/policy_contract.rs`) drive this door directly.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn replace_transaction(
         &mut self,

@@ -31,11 +31,6 @@ pub(crate) fn policy_vsize(tx: &Tx, sigop_cost: u32) -> u32 {
 }
 
 /// Derives admission accounting from the resolved input outputs.
-///
-/// `prevouts` contains one entry per resolved transaction input, in any order.
-/// Missing inputs remain an explicit fact: a saturating provisional fee must
-/// never make an incomplete transaction admissible. Range validation remains
-/// the existing consensus verifier's responsibility.
 #[must_use]
 pub(crate) fn prepared_context(
     tx: &Tx,
@@ -137,8 +132,6 @@ mod tests {
 
     /// Independent vectors follow BIP141's Sigops section and Core v31.1
     /// `GetTransactionSigOpCost`; rust-bitcoin is the executable oracle.
-    /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
-    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_verify.cpp>
     #[test]
     fn bip141_accounting_matches_independent_transaction_oracle() {
         assert_oracle(

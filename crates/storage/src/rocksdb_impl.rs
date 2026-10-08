@@ -17,7 +17,6 @@ const WRITE_BUFFER_SIZE: usize = 128 << 20;
 /// `RocksDB`-backed key-value store.
 pub struct RocksDbStore {
     db: rust_rocksdb::DB,
-    // Non-reentrant: public mutators hold this lock while calling the lock-free batch helper.
     write_lock: parking_lot::Mutex<()>,
     #[cfg(any(test, feature = "test-seam"))]
     faults: crate::trait_::PersistFaultSlot,

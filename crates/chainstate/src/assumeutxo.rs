@@ -326,7 +326,7 @@ pub struct AssumeUtxoManager {
     lifecycle: Mutex<()>,
     network: Network,
     active_chainstate: Arc<Chainstate>,
-    historical_chainstate: Arc<RwLock<Option<Arc<Chainstate>>>>,
+    historical_chainstate: RwLock<Option<Arc<Chainstate>>>,
     historical_undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
     data_dir: Option<PathBuf>,
     historical_checkpoint_interval: u32,
@@ -422,7 +422,7 @@ impl AssumeUtxoManager {
             lifecycle: Mutex::new(()),
             network,
             active_chainstate,
-            historical_chainstate: Arc::new(RwLock::new(historical)),
+            historical_chainstate: RwLock::new(historical),
             historical_undo,
             data_dir,
             historical_checkpoint_interval: historical_checkpoint_interval.max(1),
@@ -457,7 +457,7 @@ impl AssumeUtxoManager {
         undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
     ) -> Result<Arc<Chainstate>, AssumeUtxoError> {
         let Some(checkpoint) = checkpoint else {
-            return active.create_historical_counterpart(base_height, base_hash, undo);
+            return active.create_historical_counterpart(base_height, base_hash, undo, None);
         };
         let data_dir = data_dir.ok_or_else(|| {
             anyhow::anyhow!(
@@ -548,7 +548,7 @@ impl AssumeUtxoManager {
             chain_tx_count: restored.applied_tip.chain_tx_count,
         };
         drop(tree);
-        active.create_historical_counterpart_with_state(
+        active.create_historical_counterpart(
             base_height,
             base_hash,
             undo,
@@ -673,6 +673,7 @@ impl AssumeUtxoManager {
             pinned.height,
             pinned.block_hash,
             Arc::clone(&self.historical_undo),
+            None,
         )?;
 
         *self.historical_chainstate.write() = Some(historical);

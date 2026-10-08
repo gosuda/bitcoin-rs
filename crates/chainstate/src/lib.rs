@@ -703,52 +703,26 @@ impl Chainstate {
         Ok(())
     }
 
-    /// Constructs an isolated historical chainstate from this chainstate.
-    /// The historical chainstate has an independent UTXO set, detached events,
-    /// separate transient undo/head stores, no body writer or active journal,
-    /// and no external follower side-effects. Reopening restores a published
-    /// historical checkpoint when the durable head names one.
+    /// Constructs an isolated historical chainstate, optionally from a validated
+    /// checkpoint. The active header tree remains the single header authority.
+    /// Historical coins, statistics, tip, undo/head stores and detached events
+    /// are independent, with no body writer, active journal or follower effects.
     fn create_historical_counterpart(
-        &self,
-        base_height: u32,
-        base_hash: Hash256,
-        undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
-    ) -> Result<Arc<Self>, crate::AssumeUtxoError> {
-        self.create_historical_counterpart_with_state(base_height, base_hash, undo, None)
-    }
-
-    /// Constructs an isolated historical chainstate from a validated
-    /// checkpoint state.  The active header tree remains the single header
-    /// authority; only the historical UTXO, statistics, and applied tip are
-    /// restored from the checkpoint artifacts.
-    fn create_historical_counterpart_with_state(
         &self,
         base_height: u32,
         base_hash: Hash256,
         undo: Arc<bitcoin_rs_storage::InMemoryUndoStore>,
         restored: Option<(UtxoSet, CoinStats, TipSnapshot)>,
     ) -> Result<Arc<Self>, crate::AssumeUtxoError> {
-        let restored_tip = restored.as_ref().map(|(_, _, tip)| tip.clone());
-        let (mut historical_utxo, historical_stats) = restored.map_or_else(
-            || {
-                (
-                    bitcoin_rs_utxo::UtxoSet::new(),
-                    bitcoin_rs_utxo::stats::CoinStats::new(),
-                )
-            },
-            |(utxo, stats, _)| (utxo, stats),
-        );
+        let (mut historical_utxo, historical_stats, restored_tip) = match restored {
+            Some((utxo, stats, tip)) => (utxo, stats, Some(tip)),
+            None => (UtxoSet::new(), CoinStats::new(), None),
+        };
         let historical_coin_stats = Arc::new(CoinStatsListener::new(historical_stats));
         historical_utxo.track_coin_stats((*historical_coin_stats).clone());
 
-        let transition = bitcoin_rs_chain::TransitionDomain::new();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
-        if let Some(restored_tip) = restored_tip.clone() {
-            applied_tip.store(Some(Arc::new(restored_tip)));
-        }
         let historical_head = Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new());
-        if let Some(restored_tip) = restored_tip {
+        if let Some(restored_tip) = &restored_tip {
             let head = bitcoin_rs_storage::DurableHead {
                 assumeutxo: crate::AssumeUtxoDiskStatus::Uninitialized,
                 commit_id: 0,
@@ -765,6 +739,7 @@ impl Chainstate {
                 &bitcoin_rs_storage::CommitRecords::default(),
             )?;
         }
+        let applied_tip = Arc::new(ArcSwapOption::new(restored_tip.map(Arc::new)));
         let chain_tip = Arc::new(arc_swap::ArcSwapOption::empty());
         let assume_valid_gate = Arc::new(AssumeValidGate::new(self.network, 0));
         let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
@@ -788,8 +763,8 @@ impl Chainstate {
             undo_store: undo,
             durable_head: historical_head,
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown,
-            chain_transition: transition.authority(),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            chain_transition: bitcoin_rs_chain::TransitionDomain::new().authority(),
             assume_valid_height: 0,
             assume_valid_gate,
             validation_mode: ValidationMode::Full,
