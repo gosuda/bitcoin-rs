@@ -1,17 +1,4 @@
 //! Block parse backends and runtime-selected script preparation.
-//!
-//! The `kernel` Cargo feature is capability only ("bitcoinkernel support is
-//! compiled in"); it never selects an engine. Selection is
-//! [`crate::ValidationEngine`] alone: [`ValidationEngine::Kernel`] is refused
-//! with the unsupported-build error on a build without this feature, and
-//! [`ValidationEngine::Native`] reaches the Rust interpreter in every build —
-//! including ones where the kernel backend below is compiled.
-//!
-//! The parse engine follows the selected validation engine ([`BlockParse::parse`])
-//! so one run cannot mix a kernel parse with native script checks or the
-//! reverse. Everything script-verification-specific dispatches through
-//! [`BlockParse::prepare_tx`] and [`verify_prepared_input`]; the block/tx
-//! validation pipeline around them is shared.
 
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
@@ -19,9 +6,8 @@ use bitcoin_rs_script::VerifyFlags;
 use crate::ConsensusError;
 use crate::ValidationEngine;
 
-/// Returns the unsupported-build error for a kernel request on a build
-/// without `kernel` support. Selection fails closed here; it never falls back
-/// to another engine. Only builds without the capability produce it.
+/// Returns the unsupported-build error for a kernel request on a build without
+/// `kernel` support.
 #[cfg(not(feature = "kernel"))]
 pub(crate) fn kernel_not_compiled() -> ConsensusError {
     ConsensusError::UnsupportedEngine {
@@ -30,17 +16,6 @@ pub(crate) fn kernel_not_compiled() -> ConsensusError {
 }
 
 /// Rejects a prevout set that does not cover exactly `input_count` inputs.
-///
-/// Shared by every seam that hands resolved prevouts to a script backend, so
-/// no engine can disagree about it. The dispatch loops are driven by the
-/// prevout slice: a short slice would leave trailing inputs silently
-/// unverified (fail-open) and a long one would index past the transaction's
-/// inputs in the native interpreter.
-///
-/// # Errors
-/// Returns [`ConsensusError::PrevoutCount`] when the counts disagree: the
-/// mismatch is a caller wiring bug and is reported backend-neutrally, never
-/// as a script failure.
 pub(crate) fn ensure_prevout_count(
     spent_outputs: &[(OutPoint, TxOut)],
     input_count: usize,
@@ -55,14 +30,6 @@ pub(crate) fn ensure_prevout_count(
 }
 
 /// The native one-shot block parse, compiled in every build.
-///
-/// The native path parses the serialized block once through the checked
-/// borrowed layout and keeps every fact derived from that single pass:
-/// transaction IDs, witness IDs, weight, byte positions, and the Merkle root
-/// with its mutation flag. Later stages consume those facts through
-/// [`NativeBlock::derive_facts`] instead of re-walking or re-hashing the
-/// decoded block, so the production native path decodes the transaction tree
-/// exactly once.
 mod native {
     use core::marker::PhantomData;
 
@@ -78,13 +45,7 @@ mod native {
     }
 
     impl NativeBlock {
-        /// Parses `raw_block` once and derives every fact the later stages
-        /// share.
-        ///
-        /// # Errors
-        /// Returns [`ConsensusError::Encoding`] if `raw_block` is not a valid
-        /// block — a backend-neutral parse failure, so kernel-less builds do
-        /// not report it as a kernel error.
+        /// Parses `raw_block` once and derives every fact the later stages share.
         pub fn parse(raw_block: &[u8]) -> Result<Self, ConsensusError> {
             // `parse_exact` keeps the old owned decoder's contract: trailing
             // bytes are a typed error, and the whole pass validates shape
@@ -97,9 +58,6 @@ mod native {
         }
 
         /// Transaction IDs derived in the single parse pass.
-        ///
-        /// Infallible here; the `Result` keeps one call shape with the
-        /// kernel backend, whose parse can fail per transaction.
         #[expect(
             clippy::unnecessary_wraps,
             reason = "shape parity with the fallible kernel backend"
@@ -121,19 +79,12 @@ mod native {
         }
 
         /// The shared block facts for a view that owns them.
-        ///
-        /// The parse already derived everything in one pass, so this clones
-        /// the derived facts; the arguments exist for the kernel backend's
-        /// call shape and are unused here.
         #[must_use]
         pub fn derive_facts(&self, _txs: &[Tx], _txids: &[Txid]) -> crate::block_view::BlockFacts {
             self.facts.clone()
         }
 
         /// The native backend has nothing to prepare per transaction.
-        ///
-        /// Infallible and self-less here; the shape is the kernel backend's
-        /// fallible per-transaction prepare so callers do not fork.
         #[expect(
             clippy::unused_self,
             reason = "shape parity with the kernel backend's per-transaction prepare"
@@ -156,8 +107,8 @@ mod native {
     #[derive(Debug, Clone, Copy)]
     pub(crate) struct NativePreparedTx;
 
-    /// The native per-input script verdict: the interpreter in
-    /// `bitcoin-rs-script` covers every consensus spend class.
+    /// The native per-input script verdict: the interpreter in `bitcoin-rs-script`
+    /// covers every consensus spend class.
     #[expect(
         clippy::trivially_copy_pass_by_ref,
         reason = "shape parity with the kernel backend's prepared-state handle"
@@ -174,10 +125,6 @@ mod native {
 }
 
 /// The prefix every `bitcoinkernel` script rejection carries.
-///
-/// It reaches clients inside the BIP22 reject reason, so the bytes are a
-/// boundary contract. Classification never reads it: a kernel rejection is
-/// identified by [`crate::ScriptEngine::Kernel`].
 #[cfg(feature = "kernel")]
 pub(crate) const KERNEL_SCRIPT_REJECT_PREFIX: &str = "kernel script verification failed: ";
 
@@ -190,18 +137,6 @@ mod kernel_backend {
     use crate::{ConsensusError, ScriptEngine};
 
     /// Verifies every input script of `tx` through bitcoinkernel.
-    ///
-    /// `spent_outputs` pairs each input's outpoint with the output it spends, in
-    /// input order — the shape the verify path already holds after prevout
-    /// resolution. One transaction serialization/parse and one
-    /// [`bitcoinkernel::PrecomputedTransactionData`] are shared across all inputs.
-    ///
-    /// Per-input verdict failures map to [`ConsensusError::Script`] (preserving
-    /// the verify entry's error contract); parse and precompute failures map to
-    /// [`ConsensusError::Kernel`]. A `spent_outputs` length that disagrees with
-    /// the input count is rejected outright: the loop below is driven by
-    /// `spent_outputs`, so a short slice would otherwise leave trailing inputs
-    /// silently unverified.
     pub(super) fn verify_tx_scripts(
         tx: &Tx,
         spent_outputs: &[(OutPoint, TxOut)],
@@ -218,13 +153,6 @@ mod kernel_backend {
     }
 
     /// A block parsed by `libbitcoinkernel`.
-    ///
-    /// Parsing here is worth far more than the parse itself. Core's
-    /// `CTransaction` hashes itself while deserializing, using the SHA-256
-    /// implementation Core selects at runtime (`avx2(8way)` on this host), so
-    /// every txid comes out of this parse for free and the per-transaction
-    /// serialization + `bitcoinkernel::Transaction::new` round-trip disappears
-    /// with it.
     pub struct KernelBlock {
         block: bitcoinkernel::Block,
     }
@@ -243,9 +171,7 @@ mod kernel_backend {
                 .map_err(|error| ConsensusError::Kernel(error.to_string()))
         }
 
-        /// Txids in block order, taken from the hashes the parse already
-        /// computed. Verified byte-identical to native `Tx::txid` over mainnet
-        /// `0..150_000` (1.7M transactions, zero mismatches).
+        /// Txids in block order, taken from the hashes the parse already computed.
         pub fn txids(&self) -> Result<Vec<Txid>, ConsensusError> {
             use bitcoinkernel::prelude::*;
 
@@ -265,8 +191,8 @@ mod kernel_backend {
             self.block.transaction_count()
         }
 
-        /// Prepares this block's transaction `index` for parallel per-input
-        /// kernel verification over its resolved prevouts.
+        /// Prepares this block's transaction `index` for parallel per-input kernel
+        /// verification over its resolved prevouts.
         pub(crate) fn prepare_tx(
             &self,
             index: usize,
@@ -281,11 +207,7 @@ mod kernel_backend {
             )?))
         }
 
-        /// Derives the shared block facts (weight, Merkle root, and mutation
-        /// flag) by reducing the caller's already-surfaced transaction IDs
-        /// in one pass over the decoded transactions — the same IDs the
-        /// parse produced, without a second kernel FFI crossing. Byte
-        /// positions are a native-layout fact and stay empty on this path.
+        /// Derives block facts from parsed IDs without another FFI crossing.
         #[expect(
             clippy::unused_self,
             reason = "shape parity with the native backend's derive_facts"
@@ -300,19 +222,12 @@ mod kernel_backend {
         ConsensusError::Kernel(error.to_string())
     }
 
-    /// Kernel transaction plus sighash precompute retained for parallel
-    /// per-input verification.
-    ///
-    /// Generic over the transaction handle so the block path can hold a
-    /// borrowed [`bitcoinkernel::TransactionRef`] while the standalone
-    /// `verify_tx_scripts` entry keeps an owned one.
+    /// Kernel transaction and shared sighash precompute.
     pub(crate) struct PreparedKernelTx<T: bitcoinkernel::prelude::TransactionExt> {
         kernel_tx: T,
         precomputed: bitcoinkernel::PrecomputedTransactionData,
     }
 
-    /// Builds the shared [`bitcoinkernel::PrecomputedTransactionData`] over an
-    /// already-parsed kernel transaction.
     fn prepare_kernel_tx<T: bitcoinkernel::prelude::TransactionExt>(
         kernel_tx: T,
         input_count: usize,
@@ -332,7 +247,6 @@ mod kernel_backend {
         })
     }
 
-    /// Verifies a single input against a previously prepared kernel transaction.
     pub(crate) fn verify_prepared_input<T: bitcoinkernel::prelude::TransactionExt>(
         prepared: &PreparedKernelTx<T>,
         prevout: &TxOut,
@@ -372,15 +286,9 @@ mod kernel_backend {
 
 /// A one-shot block parse for the selected engine, carrying whichever backend
 /// parsed `raw_block`.
-///
-/// The parse engine follows the selected validation engine so a run cannot mix
-/// a kernel parse with native script checks or the reverse. Both arms share
-/// one shape — parse once, count check, txids — so callers stay uniform
-/// whichever engine produced the view, and every engine-specific decision
-/// downstream is answered from this value.
 #[derive(Debug)]
 pub enum BlockParse {
-    /// The checked borrowed layout parse. Compiled and supported in every build.
+    /// The checked borrowed layout parse.
     Native(native::NativeBlock),
     /// The `libbitcoinkernel` parse.
     #[cfg(feature = "kernel")]
@@ -389,13 +297,6 @@ pub enum BlockParse {
 
 impl BlockParse {
     /// Parses `raw_block` once under `engine`.
-    ///
-    /// # Errors
-    /// The error variant follows the selected backend: [`ConsensusError::Encoding`]
-    /// when the native layout parse rejects the bytes, [`ConsensusError::Kernel`]
-    /// when the kernel backend cannot parse them, and
-    /// [`ConsensusError::UnsupportedEngine`] when `engine` is
-    /// [`ValidationEngine::Kernel`] on a build without kernel support.
     pub fn parse(raw_block: &[u8], engine: ValidationEngine) -> Result<Self, ConsensusError> {
         match engine {
             ValidationEngine::Native => native::NativeBlock::parse(raw_block).map(Self::Native),
@@ -422,8 +323,8 @@ impl BlockParse {
         }
     }
 
-    /// The native one-pass facts, or `None` for a kernel parse (whose facts
-    /// are derived on demand from the caller's transaction IDs).
+    /// The native one-pass facts, or `None` for a kernel parse (whose facts are
+    /// derived on demand from the caller's transaction IDs).
     #[must_use]
     pub const fn native_facts(&self) -> Option<&crate::block_view::BlockFacts> {
         match self {
@@ -433,13 +334,6 @@ impl BlockParse {
         }
     }
 
-    /// Prepares one parsed transaction for this parse's engine's parallel
-    /// per-input script checks over its resolved prevouts.
-    ///
-    /// # Errors
-    /// Returns [`ConsensusError::Kernel`] when the backend cannot prepare the
-    /// transaction (a `spent_outputs` length that disagrees with the input
-    /// count is rejected outright, before any backend runs).
     pub(crate) fn prepare_tx<'b>(
         &'b self,
         index: usize,
@@ -455,11 +349,6 @@ impl BlockParse {
     }
 
     /// The shared block facts (weight, Merkle root, mutation flag) for `txs`.
-    ///
-    /// The native parse already derived everything in one pass and clones its
-    /// facts; the kernel backend reduces the caller's already-surfaced
-    /// transaction IDs through the production walker instead of re-crossing
-    /// the kernel FFI per transaction.
     #[must_use]
     pub fn derive_facts(&self, txs: &[Tx], txids: &[Txid]) -> crate::block_view::BlockFacts {
         match self {
@@ -470,33 +359,22 @@ impl BlockParse {
     }
 }
 
-/// Parses one block with `libbitcoinkernel`.
 #[cfg(feature = "kernel")]
 fn kernel_block_parse(raw_block: &[u8]) -> Result<BlockParse, ConsensusError> {
     kernel_backend::KernelBlock::parse(raw_block).map(BlockParse::Kernel)
 }
 
-/// Fails closed: the kernel parse is unavailable in this build.
 #[cfg(not(feature = "kernel"))]
 fn kernel_block_parse(_raw_block: &[u8]) -> Result<BlockParse, ConsensusError> {
     Err(kernel_not_compiled())
 }
 
-/// One prepared transaction's backend state for the parse's engine.
 pub(crate) enum PreparedTx<'b> {
-    /// The native backend retains nothing; the marker ties the state to its
-    /// parse in builds where the kernel variant is compiled out.
     Native(native::NativePreparedTx, core::marker::PhantomData<&'b ()>),
-    /// The kernel transaction and its shared sighash precompute.
     #[cfg(feature = "kernel")]
     Kernel(kernel_backend::PreparedKernelTx<bitcoinkernel::TransactionRef<'b>>),
 }
 
-/// Verifies one input against its prepared transaction state under the
-/// engine that prepared it.
-///
-/// `spent_outputs` is the full ordered set of outputs this transaction spends,
-/// shared by every input check (BIP341 sighashes commit to it).
 pub(crate) fn verify_prepared_input(
     prepared: &PreparedTx<'_>,
     spent_outputs: &[TxOut],
@@ -519,21 +397,6 @@ pub(crate) fn verify_prepared_input(
 }
 
 /// Verifies every input script of `tx` under `engine`.
-///
-/// `spent_outputs` pairs each input's outpoint with the output it spends, in
-/// input order. [`ValidationEngine::Native`] runs the portable interpreter in
-/// every build; [`ValidationEngine::Kernel`] runs bitcoinkernel where compiled
-/// and otherwise fails closed with the unsupported-build error.
-///
-/// # Errors
-/// Per-input verdict failures map to [`ConsensusError::Script`]; backend parse
-/// and precompute failures map to [`ConsensusError::Kernel`]. A
-/// `spent_outputs` length that disagrees with the input count is rejected
-/// before any backend runs: the dispatch below is driven by `spent_outputs`,
-/// so a short slice would otherwise leave trailing inputs silently unverified
-/// (fail-open) and a long one would index past `tx.inputs` in the native
-/// interpreter. The check is shared, not per-branch, so no engine can
-/// disagree about it.
 pub fn verify_tx_scripts(
     tx: &Tx,
     spent_outputs: &[(OutPoint, TxOut)],

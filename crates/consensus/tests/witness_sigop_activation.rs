@@ -74,8 +74,6 @@ impl WitnessFixture {
         }
     }
 
-    /// Parses the fixture block under `engine`, the same selection the
-    /// verification entries below receive.
     fn block(&self, engine: ValidationEngine) -> Result<BlockParse, ConsensusError> {
         let block = Block {
             header: Header {
@@ -116,11 +114,6 @@ impl UtxoView for WitnessFixture {
     }
 }
 
-/// Every validation engine this build can execute. Activation semantics are a
-/// consensus rule, not an engine property, so each contract runs under every
-/// compiled engine: `native` in every build, `kernel` where compiled. Derived
-/// from `ValidationEngine::ALL` so this and other engine-parameterized tests
-/// cannot drift apart.
 fn engines() -> Vec<ValidationEngine> {
     ValidationEngine::ALL
         .iter()

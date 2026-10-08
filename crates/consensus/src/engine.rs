@@ -1,32 +1,15 @@
 //! The one runtime validation-engine selector.
-//!
-//! Capability is not selection: the `kernel` Cargo feature means "bitcoinkernel
-//! support is compiled into this build" and never selects an engine by itself.
-//! Selection is [`ValidationEngine`] alone — configured once as
-//! `validation.engine` (TOML `validation_engine`, `BITCOIN_RS_VALIDATION_ENGINE`,
-//! `--validation-engine`) and passed explicitly to every seam that dispatches
-//! between the script backends. [`ValidationEngine::Native`] is the default in
-//! every build.
 
 use core::fmt;
 
 /// Which script-verification engine the validation pipeline runs.
-///
-/// Both variants name a selection in every build, including builds without the
-/// `kernel` feature, so a configuration asking for an engine this build lacks
-/// is rejected with the unsupported-build error at configuration validation —
-/// before any chain state or worker exists — instead of dying at a parse layer
-/// with an unrelated message. [`Self::is_supported`] is the capability check.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ValidationEngine {
-    /// The native Rust interpreter in `bitcoin-rs-script`: legacy, P2SH,
-    /// `SegWit` v0, and Taproot key-path and script-path spends. Compiled in
-    /// every build and always supported.
+    /// The native Rust interpreter in `bitcoin-rs-script`: legacy, P2SH, `SegWit`
+    /// v0, and Taproot key-path and script-path spends.
     #[default]
     Native,
-    /// Bitcoin Core's C++ consensus engine (`libbitcoinkernel`). Selecting it
-    /// on a build without the `kernel` feature fails closed with
-    /// [`crate::ConsensusError::UnsupportedEngine`].
+    /// Bitcoin Core's C++ consensus engine (`libbitcoinkernel`).
     Kernel,
 }
 
@@ -43,8 +26,7 @@ impl ValidationEngine {
         }
     }
 
-    /// Whether this engine's implementation is compiled into the current
-    /// build. This is capability only; it says nothing about selection.
+    /// Whether this engine's implementation is compiled into the current build.
     #[must_use]
     pub const fn is_supported(self) -> bool {
         match self {
@@ -54,10 +36,6 @@ impl ValidationEngine {
     }
 
     /// Parses a configuration spelling, case-insensitively.
-    ///
-    /// `kernel` parses in every build so an unsupported selection produces the
-    /// unsupported-build error at configuration validation rather than a parse
-    /// error at one input layer.
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {

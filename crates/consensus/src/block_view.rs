@@ -1,7 +1,4 @@
 //! Shared parse-once block facts for native validation.
-//!
-//! `BlockFacts` owns identifiers, weight, layout spans, witness presence, and
-//! the Merkle result so later validation stages do not derive them again.
 
 use bitcoin_rs_primitives::{
     Tx, TxOut, Txid, Wtxid,
@@ -132,7 +129,8 @@ impl BlockFacts {
         self.weight
     }
 
-    /// Returns transaction spans in block order, or an empty slice without a layout.
+    /// Returns transaction spans in block order, or an empty slice without a
+    /// layout.
     #[must_use]
     pub fn transaction_spans(&self) -> &[ByteSpan] {
         &self.tx_spans
@@ -152,11 +150,7 @@ impl BlockFacts {
 
     pub(crate) fn or_insert_wtxids_from(&mut self, txs: &[Tx]) {
         if self.wtxids.is_none() {
-            // BIP141: a witness-free transaction's wtxid is its txid. Reuse
-            // the identity already owned by these facts instead of encoding
-            // and hashing the same transaction again. Iterate over txs, not
-            // a zip: even malformed caller-supplied identity counts must not
-            // silently truncate the witness-ID matrix.
+            // Reuse legacy txids; iterate over txs so malformed ID counts cannot truncate.
             self.wtxids = Some(
                 txs.iter()
                     .enumerate()
@@ -260,12 +254,6 @@ fn merkle_root_and_mutation(txids: &[Txid]) -> (Option<Txid>, bool) {
 }
 
 /// Hash the canonical base serialization without reconstructing its fields.
-///
-/// The layout parser has already checked `CompactSize` canonicality and wire
-/// order. Legacy bytes are contiguous; `SegWit` removes exactly the marker/flag
-/// and witness section, leaving version, the input/output range, and lock time.
-/// The same borrowed ranges own the stripped-size calculation, so there is no
-/// second traversal of input/output metadata and no transaction-sized scratch.
 fn txid_and_base_size(tx: &ParsedTransaction<'_>) -> (Txid, u64) {
     let parts = tx.stripped_parts();
     if !tx.is_segwit() {

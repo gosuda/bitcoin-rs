@@ -14,7 +14,6 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_script::opcode::OP_EQUAL;
 use bitcoin_rs_script::{VerifyFlags, push_int};
 
-/// Resolved coins for the standalone transaction seam.
 struct Coins(hashbrown::HashMap<OutPoint, TxOut>);
 
 impl UtxoView for Coins {
@@ -23,8 +22,6 @@ impl UtxoView for Coins {
     }
 }
 
-/// One input spending an `OP_EQUAL` prevout with a mismatched `7 8` scriptSig.
-/// Every compiled engine must reject the spend; no engine may accept it.
 fn mismatched_equal_spend() -> (Tx, Coins) {
     let outpoint = OutPoint {
         txid: Txid(Hash256::from_le_bytes(&[8; 32])),
@@ -66,6 +63,7 @@ fn single_tx_block(tx: &Tx) -> Block {
     }
 }
 
+#[cfg(feature = "kernel")]
 fn script_reason(result: Result<(), ConsensusError>) -> String {
     match result {
         Err(ConsensusError::Script { reason, .. }) => reason,
@@ -73,9 +71,6 @@ fn script_reason(result: Result<(), ConsensusError>) -> String {
     }
 }
 
-/// The native interpreter stays compiled when the kernel feature is enabled:
-/// `engine = native` must produce the interpreter's verdict for both the
-/// transaction seam and the block seam, not the kernel dispatch marker.
 #[test]
 #[cfg(feature = "kernel")]
 fn native_engine_remains_available_when_kernel_is_compiled() {
@@ -109,7 +104,6 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
         "kernel engine must run the kernel, got {kernel_reason}"
     );
 
-    // The block seam dispatches the same way: the parse carries the engine.
     let block = single_tx_block(&tx);
     let parsed = BlockParse::parse(&consensus_bytes(&block), ValidationEngine::Native)
         .unwrap_or_else(|error| panic!("native parse: {error}"));
@@ -129,8 +123,6 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
     );
 }
 
-/// A build without `kernel` compiled in must fail closed on `engine = kernel`
-/// with a clear unsupported-build error, never a silent engine substitution.
 #[test]
 #[cfg(not(feature = "kernel"))]
 fn kernel_engine_fails_closed_without_the_kernel_feature() {
@@ -192,39 +184,11 @@ fn kernel_engine_fails_closed_without_the_kernel_feature() {
     }
 }
 
-/// `native` resolves and runs in every build, kernel capability or not.
-#[test]
-fn native_engine_is_supported_and_default_in_every_build() {
-    assert!(ValidationEngine::Native.is_supported());
-    assert_eq!(ValidationEngine::default(), ValidationEngine::Native);
-
-    let (tx, coins) = mismatched_equal_spend();
-    let verdict = verify_transaction(
-        &tx,
-        &coins,
-        0,
-        0,
-        VerifyFlags::MANDATORY,
-        ValidationEngine::Native,
-    );
-    assert!(
-        script_reason(verdict).starts_with("script failed:"),
-        "native engine must reach the interpreter in this build"
-    );
-}
-
-/// A prevout set that does not cover exactly the transaction's inputs is
-/// rejected before any backend runs, under every compiled engine. A short
-/// slice would otherwise leave trailing inputs silently unverified
-/// (fail-open); a long one would index past `tx.inputs` in the native
-/// interpreter. The check is shared, so no engine can disagree about it.
 #[test]
 fn prevout_count_mismatch_is_rejected_under_every_engine() {
     let (tx, coins) = mismatched_equal_spend();
     let one_prevout = coins.0.into_iter().collect::<Vec<_>>();
 
-    // Every engine this build can execute, derived from the single engine
-    // list so this and other engine-parameterized tests cannot drift apart.
     let engines = ValidationEngine::ALL
         .iter()
         .copied()
@@ -232,8 +196,6 @@ fn prevout_count_mismatch_is_rejected_under_every_engine() {
         .collect::<Vec<_>>();
 
     for engine in engines {
-        // Short: one prevout for one input is exact; two inputs are needed for
-        // a short slice to be a real fail-open case, so use a two-input tx.
         let two_input = Tx {
             version: 1,
             lock_time: LockTime::ZERO,

@@ -20,8 +20,6 @@ fn facts(block: &Block) -> BlockFacts {
 
 #[test]
 fn sha256_and_compact_size_script_boundaries_match_oracle() {
-    // Include SHA256 padding/block boundaries and both representable
-    // script-length CompactSize transitions without allocating huge scripts.
     for len in [0, 1, 55, 56, 63, 64, 65, 252, 253, 254, 65_535, 65_536] {
         for witness_modulus in [0, 1, 2] {
             let block = fixtures::fixture(3, 1, 1, len, witness_modulus);
@@ -34,7 +32,6 @@ fn sha256_and_compact_size_script_boundaries_match_oracle() {
 fn count_prefixes_and_nonzero_transaction_origins_match_oracle() {
     for count in [1, 252, 253, 254] {
         for witness_modulus in [0, 1, 2] {
-            // Vary input, output and block transaction counts independently.
             facts(&fixtures::fixture(3, count, 1, 0, witness_modulus));
             facts(&fixtures::fixture(3, 1, count, 0, witness_modulus));
             facts(&fixtures::fixture(count, 1, 1, 0, witness_modulus));
@@ -112,9 +109,7 @@ fn legacy_and_mixed_lazy_witness_ids_match_oracle_and_reuse_cache() {
         for (actual, expected) in ids.iter().zip(&oracle.txdata) {
             assert_eq!(actual.to_string(), expected.compute_wtxid().to_string());
         }
-        // A repeated call must return the same stored matrix, not a fresh
-        // rederivation: the deterministic wtxids make contents identical
-        // either way, so only pointer identity proves cache reuse.
+        // Contents alone cannot prove cache reuse.
         let first = view.witness_ids();
         let cached = first.as_ptr();
         assert_eq!(cached, view.witness_ids().as_ptr());
@@ -137,8 +132,6 @@ fn empty_blocks_preserve_lazy_and_parsed_fact_shapes() {
 
 #[test]
 fn mutation_flag_distinguishes_real_duplicate_tail_from_odd_padding() {
-    // Core's [1..6] / [1..6,5,6] ambiguity: same root, only the latter
-    // contains equal real siblings. Apply it to actual wire transactions.
     for witness_modulus in [0, 1, 2] {
         let mut block = fixtures::fixture(6, 1, 1, 0, witness_modulus);
         let original = facts(&block);

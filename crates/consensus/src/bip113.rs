@@ -1,12 +1,7 @@
 /// Number of blocks spanned by median-time-past.
-///
-/// BIP113 locktime evaluation and BIP9 versionbits both use this window.
 pub const MEDIAN_TIME_PAST_WINDOW: usize = 11;
 
 /// BIP113 locktime-cutoff selection: the one rule every caller shares.
-///
-/// While CSV is active the cutoff is the previous tip's median-time-past;
-/// before activation it is the candidate block's own header time.
 #[must_use]
 pub const fn locktime_cutoff(
     csv_active: bool,

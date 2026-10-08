@@ -20,9 +20,9 @@ pub enum DeploymentState {
     Started,
     /// Threshold reached; activation pending.
     LockedIn,
-    /// Deployment active. Terminal.
+    /// Deployment active.
     Active,
-    /// Deployment failed (timeout reached without lock-in). Terminal.
+    /// Deployment failed (timeout reached without lock-in).
     Failed,
 }
 
@@ -54,9 +54,6 @@ impl DeploymentState {
 }
 
 /// Extended deployment parameters for the BIP9 state machine.
-///
-/// `DeploymentParams` carries `period` and `threshold` alongside the
-/// `bit`/`start_time`/`timeout` signalling window for the state machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeploymentParams {
     /// Bit number signalled in the block version.
@@ -81,9 +78,6 @@ pub struct SoftforkState {
 }
 
 /// Versionbits parameters for a named deployment on `network`.
-///
-/// Returns `None` when `network` has no BIP9 window for `deployment_id`
-/// (height-gated networks, or an unknown id).
 #[must_use]
 pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<DeploymentParams> {
     let threshold = match network {
@@ -123,27 +117,16 @@ pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<D
 }
 
 /// Read-only chain context the state machine queries.
-///
-/// Chain implements this over `BlockTree`; consensus stays agnostic of
-/// storage layout.
 pub trait DeploymentContext {
     /// Returns the block version field at `height`, or `None` if unknown.
     fn block_version(&self, height: u32) -> Option<i32>;
 
-    /// Returns the median-time-past at `height` over `window` blocks, or `None` if unknown.
+    /// Returns the median-time-past at `height` over `window` blocks, or `None` if
+    /// unknown.
     fn median_time_past(&self, height: u32, window: usize) -> Option<u32>;
 }
 
 /// Computes the BIP9 deployment state at `height`.
-///
-/// Walks back to the most recent period boundary <= `height`, then
-/// recursively computes the state at the parent boundary, applying
-/// transition rules.
-///
-/// `mtp_window` is the BIP113 MTP window, typically 11.
-///
-/// Returns `Defined` when `height` is below the first period boundary
-/// or when context can't supply the needed data.
 #[must_use]
 pub fn compute_state(
     ctx: &impl DeploymentContext,
@@ -222,11 +205,8 @@ fn compute_state_at_boundary(
         DeploymentState::Failed => DeploymentState::Failed,
     }
 }
-/// Builds the version field for a candidate block from already-resolved BIP9 states.
-///
-/// Bitcoin Core signals a deployment while it is `STARTED` or `LOCKED_IN`.
-/// Active, failed, and not-yet-started deployments leave their bits clear. Invalid
-/// deployment bit numbers are ignored rather than shifting past the version field.
+/// Builds the version field for a candidate block from already-resolved BIP9
+/// states.
 #[must_use]
 pub fn versionbits_block_version(
     deployments: impl IntoIterator<Item = (u8, DeploymentState)>,
@@ -258,15 +238,6 @@ mod tests {
         mtps: BTreeMap<u32, u32>,
     }
 
-    impl SyntheticCtx {
-        fn new() -> Self {
-            Self {
-                versions: BTreeMap::new(),
-                mtps: BTreeMap::new(),
-            }
-        }
-    }
-
     impl DeploymentContext for SyntheticCtx {
         fn block_version(&self, height: u32) -> Option<i32> {
             self.versions.get(&height).copied()
@@ -277,96 +248,95 @@ mod tests {
         }
     }
 
+    type StateCase<'a> = (
+        DeploymentParams,
+        &'a [(u32, u32)],
+        &'a [(u32, i32)],
+        u32,
+        DeploymentState,
+    );
+
     #[test]
-    fn deployment_starts_when_mtp_crosses_start_time() {
-        let params = DeploymentParams {
+    fn deployment_state_machine_follows_mtp_and_signal_windows() {
+        let params = |start_time, timeout| DeploymentParams {
             bit: 0,
-            start_time: 100,
-            timeout: 1000,
+            start_time,
+            timeout,
             period: 10,
             threshold: 8,
         };
-        let mut ctx = SyntheticCtx::new();
+        let signalling: Vec<(u32, i32)> = (10..20)
+            .map(|height| (height, if height < 18 { 0x2000_0001 } else { 0 }))
+            .collect();
+        let no_top_bits: Vec<(u32, i32)> = (10..20).map(|height| (height, 1)).collect();
+        let silent: Vec<(u32, i32)> = (10..20).map(|height| (height, 0)).collect();
 
-        ctx.mtps.insert(9, 50);
-        assert_eq!(
-            compute_state(&ctx, 10, params, 11),
-            DeploymentState::Defined
-        );
+        let cases: [StateCase<'_>; 6] = [
+            (
+                params(100, 1000),
+                &[(9, 50)],
+                &[],
+                10,
+                DeploymentState::Defined,
+            ),
+            (
+                params(100, 1000),
+                &[(9, 150)],
+                &[],
+                10,
+                DeploymentState::Started,
+            ),
+            (
+                params(0, 1_000_000),
+                &[(9, 100), (19, 200)],
+                &signalling,
+                20,
+                DeploymentState::LockedIn,
+            ),
+            (
+                params(0, 1_000_000),
+                &[(9, 100), (19, 200), (29, 300)],
+                &signalling,
+                30,
+                DeploymentState::Active,
+            ),
+            (
+                params(0, 1_000_000),
+                &[(9, 100), (19, 200)],
+                &no_top_bits,
+                20,
+                DeploymentState::Started,
+            ),
+            (
+                params(100, 500),
+                &[(9, 200), (19, 600)],
+                &silent,
+                20,
+                DeploymentState::Failed,
+            ),
+        ];
 
-        ctx.mtps.insert(9, 150);
-        assert_eq!(
-            compute_state(&ctx, 10, params, 11),
-            DeploymentState::Started
-        );
-    }
-
-    #[test]
-    fn deployment_locks_in_when_threshold_reached() {
-        let params = DeploymentParams {
-            bit: 0,
-            start_time: 0,
-            timeout: 1_000_000,
-            period: 10,
-            threshold: 8,
-        };
-        let mut ctx = SyntheticCtx::new();
-
-        ctx.mtps.insert(9, 100);
-        ctx.mtps.insert(19, 200);
-        for height in 10..20 {
-            let version = if height < 18 { 0x2000_0001 } else { 0 };
-            ctx.versions.insert(height, version);
+        for (params, mtps, versions, height, expected) in cases {
+            let ctx = SyntheticCtx {
+                versions: versions.iter().copied().collect(),
+                mtps: mtps.iter().copied().collect(),
+            };
+            assert_eq!(
+                compute_state(&ctx, height, params, 11),
+                expected,
+                "{params:?} at {height}"
+            );
         }
-
-        assert_eq!(
-            compute_state(&ctx, 20, params, 11),
-            DeploymentState::LockedIn
-        );
-
-        ctx.mtps.insert(29, 300);
-        assert_eq!(compute_state(&ctx, 30, params, 11), DeploymentState::Active);
-    }
-
-    #[test]
-    fn deployment_does_not_count_signal_without_bip9_top_bits() {
-        let params = DeploymentParams {
-            bit: 0,
-            start_time: 0,
-            timeout: 1_000_000,
-            period: 10,
-            threshold: 8,
-        };
-        let mut ctx = SyntheticCtx::new();
-
-        ctx.mtps.insert(9, 100);
-        ctx.mtps.insert(19, 200);
-        for height in 10..20 {
-            ctx.versions.insert(height, 1);
-        }
-
-        assert_eq!(
-            compute_state(&ctx, 20, params, 11),
-            DeploymentState::Started
-        );
     }
 
     #[test]
     fn deployment_state_cache_tags_are_stable() {
-        let states = [
-            DeploymentState::Defined,
-            DeploymentState::Started,
-            DeploymentState::LockedIn,
-            DeploymentState::Active,
-            DeploymentState::Failed,
-        ];
-
         for (tag, state) in [
-            (0_u8, states[0]),
-            (1_u8, states[1]),
-            (2_u8, states[2]),
-            (3_u8, states[3]),
-            (4_u8, states[4]),
+            (0_u8, DeploymentState::Defined),
+            (1, DeploymentState::Started),
+            (2, DeploymentState::LockedIn),
+            (3, DeploymentState::Active),
+            (4, DeploymentState::Failed),
         ] {
             assert_eq!(state.cache_tag(), tag);
             assert_eq!(DeploymentState::from_cache_tag(tag), Some(state));
@@ -386,25 +356,5 @@ mod tests {
         ]);
 
         assert_eq!(u32::from_ne_bytes(version.to_ne_bytes()), 0x2000_0006);
-    }
-
-    #[test]
-    fn deployment_fails_on_timeout() {
-        let params = DeploymentParams {
-            bit: 0,
-            start_time: 100,
-            timeout: 500,
-            period: 10,
-            threshold: 8,
-        };
-        let mut ctx = SyntheticCtx::new();
-
-        ctx.mtps.insert(9, 200);
-        ctx.mtps.insert(19, 600);
-        for height in 10..20 {
-            ctx.versions.insert(height, 0);
-        }
-
-        assert_eq!(compute_state(&ctx, 20, params, 11), DeploymentState::Failed);
     }
 }
