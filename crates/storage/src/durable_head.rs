@@ -458,22 +458,18 @@ mod tests {
     #[test]
     fn frame_fails_closed_on_corruption() {
         let mut frame = sample(7).encode();
-        // Wrong version byte.
         frame[DURABLE_HEAD_MAGIC.len()] = DURABLE_HEAD_FORMAT_VERSION + 1;
         assert_eq!(DurableHead::decode(&frame), None);
 
         let mut frame = sample(7).encode();
-        // Bit flip inside the payload.
         let last = frame.len() - 1;
         frame[last] ^= 0x80;
         assert_eq!(DurableHead::decode(&frame), None);
 
         let mut frame = sample(7).encode();
-        // Bad magic.
         frame[0] = b'X';
         assert_eq!(DurableHead::decode(&frame), None);
 
-        // Truncated frame.
         let frame = sample(7).encode();
         assert_eq!(DurableHead::decode(&frame[..frame.len() - 1]), None);
     }
@@ -487,7 +483,6 @@ mod tests {
             commit_id: 2,
             ..sample(2)
         };
-        // A stale expectation applies nothing and reports the fence.
         let stale = DurableHead {
             commit_id: 9,
             ..first

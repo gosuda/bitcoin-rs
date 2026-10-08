@@ -77,8 +77,6 @@ impl<S: KvStore> JournalWriter<S> {
             chain_tx_count,
             record_count: cursor.record_count,
         };
-        // The atomic head rewrite is the logical invalidation point. Physical
-        // truncation follows; a crash between them leaves only an ignored tail.
         self.write_head_atomic(&marker)?;
         if let Err(error) = self.truncate_after(cursor) {
             self.mark_append_gap(fork_height.saturating_add(1));

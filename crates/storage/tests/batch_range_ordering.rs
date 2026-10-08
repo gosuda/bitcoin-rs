@@ -46,8 +46,6 @@ fn ordered_batch<S: KvStore>(store: &S) -> BufferedWriteBatch {
     batch.delete(CF, b"put-delete-range:m");
     batch.delete_range(CF, b"put-delete-range:a", b"put-delete-range:z");
 
-    // Both staged and committed keys obey the half-open bounds. A staged
-    // overwrite of a committed key must not outlive the following range.
     batch.put(CF, b"bounds:0", b"before-start");
     batch.put(CF, b"bounds:a", b"overwrite-removed");
     batch.put(CF, b"bounds:b", b"staged-removed");
@@ -55,8 +53,6 @@ fn ordered_batch<S: KvStore>(store: &S) -> BufferedWriteBatch {
     batch.put(OTHER_CF, b"bounds:b", b"other-staged");
     batch.delete_range(CF, b"bounds:a", b"bounds:z");
 
-    // A range only consumes earlier puts. Later overlapping ranges must see
-    // the keys inserted between them, including a previously deleted key.
     for key in [b"overlap:b", b"overlap:l", b"overlap:s", b"overlap:x"] {
         batch.put(CF, key, b"first");
     }
@@ -90,8 +86,6 @@ fn apply_ordered_batch<S: KvStore>(mode: WriteMode, store: &S) -> Result<(), Sto
 }
 
 fn assert_rows(store: &impl KvStore) -> Result<(), StorageError> {
-    // Explicit expected rows follow the WriteBatch contract, independently
-    // of any backend's range-expansion implementation.
     let expected = [
         (b"bounds:0".as_slice(), b"before-start".as_slice()),
         (b"bounds:z", b"at-end"),
@@ -135,8 +129,6 @@ fn range_ordering_laws<S: KvStore>(open: impl Fn(&Path) -> Result<S, StorageErro
             apply_ordered_batch(mode, &store)?;
             assert_rows(&store)?;
 
-            // A mismatched precondition must not apply even a range spanning
-            // committed rows or any other operation in that batch.
             let mut rejected = store.new_batch();
             rejected.put(CF, b"rejected", b"must-not-land");
             rejected.delete_range(CF, b"a", b"z");
