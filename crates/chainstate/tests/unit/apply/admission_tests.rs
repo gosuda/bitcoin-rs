@@ -1,8 +1,7 @@
-use arc_swap::ArcSwapOption;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use super::{ApplyAdmission, Chainstate};
+use super::ApplyAdmission;
 use crate::ApplyError;
 
 #[test]
@@ -31,16 +30,9 @@ fn shutdown_closes_admission_and_waits_for_in_flight_apply() {
 /// download answer, and independent of any chain height.
 #[test]
 fn is_closed_for_recovery_tracks_the_fatal_close() {
-    let chainstate = Chainstate::new(
+    let chainstate = crate::test_fixtures::handles(
         bitcoin_rs_primitives::Network::Regtest,
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(parking_lot::RwLock::new(bitcoin_rs_chain::BlockTree::new())),
         Arc::new(bitcoin_rs_utxo::UtxoSet::new()),
-        Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
-            bitcoin_rs_utxo::stats::CoinStats::default(),
-        )),
-        Arc::new(crate::events::ChainEventPublisher::detached(0)),
     );
     assert!(
         !chainstate.is_closed_for_recovery(),
