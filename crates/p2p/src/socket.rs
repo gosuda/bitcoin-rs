@@ -16,11 +16,6 @@ pub(crate) const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Applies the peer-socket policy: `TCP_NODELAY`, blocking I/O, and the
 /// handshake/poll timeouts.
-///
-/// `TCP_NODELAY` is required so the vectored header+payload write in
-/// [`crate::wire::write_message`] is not delayed by Nagle after a short
-/// first segment. Timeouts are the same on inbound and outbound so a stalled
-/// peer cannot park a connection thread past the handshake ceiling.
 pub(crate) fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_nonblocking(false)?;
@@ -44,7 +39,6 @@ mod tests {
         (client, server)
     }
 
-    /// Contract `P2P-04` requires the peer socket policy on both directions.
     #[test]
     fn configure_peer_stream_disables_nagle_on_both_halves() {
         let (client, server) = loopback_pair();

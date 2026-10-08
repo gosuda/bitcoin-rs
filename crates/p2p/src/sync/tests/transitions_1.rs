@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std::error::Error>> {
+fn tick_sends_getdata_for_headers_above_applied_tip() -> TestResult {
     let mut tree = BlockTree::new();
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -11,7 +11,7 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std:
     for height in 1_u32..=3 {
         let parent_hash = BlockHash::from(tree.node(tip_id)?.hash);
         let header = regtest_fixture::mined_regtest_header(parent_hash, height)
-            .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+            .or_fail("regtest fixture header");
         tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
         expected.push(BlockHash::from(tree.node(tip_id)?.hash));
     }
@@ -38,7 +38,6 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std:
     let requested = inventory
         .into_iter()
         .map(|item| match item {
-            // Wire seam: Inventory payloads stay bitcoin::; convert to native.
             Inventory::WitnessBlock(hash) => {
                 Ok(BlockHash(Hash256::from_le_bytes(hash.as_byte_array())))
             }
@@ -55,7 +54,7 @@ fn tick_sends_getdata_for_headers_above_applied_tip() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::error::Error>> {
+fn tick_fetches_new_tip_headers_from_at_tip_peers() -> TestResult {
     // Contract proof: P2P-03 (docs/contracts/p2p-wire.md).
     // Regression test for the #617 shape: once a node has caught up, no
     // connected peer has a handshake-time start_height above its applied
@@ -72,10 +71,9 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::e
     for height in 1_u32..=2 {
         let parent_hash = BlockHash::from(tree.node(tip_id)?.hash);
         let header = regtest_fixture::mined_regtest_header(parent_hash, height)
-            .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+            .or_fail("regtest fixture header");
         tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
     }
-    // Applied frontier at height 2; header 3 arrives later, below.
     let applied = {
         let node = tree.node(tip_id)?;
         TipSnapshot {
@@ -88,7 +86,7 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::e
     };
     let announced_header =
         regtest_fixture::mined_regtest_header(BlockHash::from(tree.node(tip_id)?.hash), 3)
-            .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+            .or_fail("regtest fixture header");
     let expected = announced_header.compute_hash();
 
     let SyncHarness {
@@ -141,7 +139,7 @@ fn tick_fetches_new_tip_headers_from_at_tip_peers() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std::error::Error>> {
+fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> TestResult {
     // Contract proof: P2P-03 (docs/contracts/p2p-wire.md) — the reorg
     // edge of the branch-aware credit. A winning fork announced at tip
     // re-selects the tree's best chain during acceptance, and the
@@ -152,10 +150,10 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std:
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
     let losing1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
     let losing2 = regtest_fixture::mined_regtest_header(losing1.compute_hash(), 2)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let losing2_id = tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(losing2_id)?;
@@ -169,11 +167,11 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std:
     };
 
     let winning1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let winning2 = regtest_fixture::mined_regtest_header(winning1.compute_hash(), 102)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let winning3 = regtest_fixture::mined_regtest_header(winning2.compute_hash(), 103)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let expected: Vec<Hash256> = [&winning1, &winning2, &winning3]
         .iter()
         .map(|header| header.compute_hash().into())
@@ -204,8 +202,6 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std:
 
     sync.tick();
 
-    // The winning fork's actual tip height is 3 (the fixture's 101..103
-    // only seed merkle/time bytes; tree heights derive from parents).
     assert_eq!(
         peers.infos()[0].best_known_height,
         3,
@@ -232,7 +228,7 @@ fn tick_fetches_reorg_fork_announced_by_at_tip_peer() -> Result<(), Box<dyn std:
 }
 
 #[test]
-fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+fn losing_fork_credit_survives_winner_disconnect() -> TestResult {
     // Contract proof: P2P-03 (docs/contracts/p2p-wire.md). Peer A's
     // accepted fork is initially losing, peer B later extends it so the
     // fork wins, and B then disconnects. A must retain the accepted tip
@@ -241,10 +237,10 @@ fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::er
     let genesis = genesis_header();
     let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
     let losing1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 1)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let losing1_id = tree.insert_node(Some(genesis_id), losing1, NodeStatus::HeaderValid)?;
     let losing2 = regtest_fixture::mined_regtest_header(losing1.compute_hash(), 2)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     tree.insert_node(Some(losing1_id), losing2, NodeStatus::HeaderValid)?;
     let genesis_node = tree.node(genesis_id)?;
     let applied = TipSnapshot {
@@ -256,11 +252,11 @@ fn losing_fork_credit_survives_winner_disconnect() -> Result<(), Box<dyn std::er
     };
 
     let fork1 = regtest_fixture::mined_regtest_header(genesis.compute_hash(), 101)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let fork2 = regtest_fixture::mined_regtest_header(fork1.compute_hash(), 102)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let fork3 = regtest_fixture::mined_regtest_header(fork2.compute_hash(), 103)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let expected = [fork1, fork2, fork3];
     let expected_hashes: Vec<Hash256> = expected
         .iter()

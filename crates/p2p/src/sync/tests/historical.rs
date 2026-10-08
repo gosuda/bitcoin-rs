@@ -32,7 +32,7 @@ fn deliver(sync: &BlockSync, block: &Block, source: PeerSource) {
 }
 
 #[test]
-fn local_replay_budget_does_not_send_getdata() -> Result<(), Box<dyn std::error::Error>> {
+fn local_replay_budget_does_not_send_getdata() -> TestResult {
     let (harness, chain, _blocks) = fixture(3)?;
     let addr = test_addr(28211, 0)?;
     let rx = connect_peer(&harness.peers, synthetic_peer(addr, 3));
@@ -51,8 +51,7 @@ fn local_replay_budget_does_not_send_getdata() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn historical_pipeline_bounds_pending_and_staged_and_applies_in_order()
--> Result<(), Box<dyn std::error::Error>> {
+fn historical_pipeline_bounds_pending_and_staged_and_applies_in_order() -> TestResult {
     let (harness, chain, blocks) = fixture(40)?;
     let first = test_addr(28200, 0)?;
     let second = test_addr(28200, 1)?;
@@ -142,8 +141,7 @@ fn historical_pipeline_bounds_pending_and_staged_and_applies_in_order()
 }
 
 #[test]
-fn historical_archive_replay_retires_overtaken_downloads() -> Result<(), Box<dyn std::error::Error>>
-{
+fn historical_archive_replay_retires_overtaken_downloads() -> TestResult {
     let (harness, chain, blocks) = fixture(6)?;
     let addr = test_addr(28204, 0)?;
     let _rx = connect_peer(&harness.peers, synthetic_peer(addr, 6));
@@ -170,8 +168,7 @@ fn historical_archive_replay_retires_overtaken_downloads() -> Result<(), Box<dyn
 }
 
 #[test]
-fn late_retired_history_cannot_enter_foreground_staging() -> Result<(), Box<dyn std::error::Error>>
-{
+fn late_retired_history_cannot_enter_foreground_staging() -> TestResult {
     let (harness, chain, blocks) = fixture(6)?;
     chain.bootstrap_genesis();
     chain
@@ -242,8 +239,7 @@ fn late_retired_history_cannot_enter_foreground_staging() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn historical_pipeline_retries_expired_owner_on_another_connection()
--> Result<(), Box<dyn std::error::Error>> {
+fn historical_pipeline_retries_expired_owner_on_another_connection() -> TestResult {
     let (harness, _, blocks) = fixture(4)?;
     harness.sync.install_budget(
         default_sync_budget(Network::Regtest).with_pending_timeout_override(Duration::from_secs(1)),
@@ -271,8 +267,7 @@ fn historical_pipeline_retries_expired_owner_on_another_connection()
 }
 
 #[test]
-fn historical_pipeline_bounds_bytes_and_keeps_front_admissible()
--> Result<(), Box<dyn std::error::Error>> {
+fn historical_pipeline_bounds_bytes_and_keeps_front_admissible() -> TestResult {
     let (harness, chain, blocks) = fixture(6)?;
     let body_bytes = consensus_bytes(&blocks[0]).len();
     let mut budget = default_sync_budget(Network::Regtest);
@@ -300,8 +295,7 @@ fn historical_pipeline_bounds_bytes_and_keeps_front_admissible()
 }
 
 #[test]
-fn historical_pipeline_follows_snapshot_branch_instead_of_best_header()
--> Result<(), Box<dyn std::error::Error>> {
+fn historical_pipeline_follows_snapshot_branch_instead_of_best_header() -> TestResult {
     let (harness, chain, _) = fixture(5)?;
     let mut tree = harness.block_tree.write();
     let mut parent = tree

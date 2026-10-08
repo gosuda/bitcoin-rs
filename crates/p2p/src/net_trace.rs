@@ -73,11 +73,6 @@ pub(crate) fn inbound_message(trace: Option<&NetTrace>, command: &str, payload: 
 }
 
 /// Fires `net:outbound_message` for one write attempt.
-///
-/// Fires before the write so a write that fails afterwards still observes
-/// the attempt, the way Core fires from its `SendMessages` queue. `payload`
-/// is the encoded frame's payload — the same bytes the vectored write
-/// emits, so each message encodes into a frame exactly once.
 pub(crate) fn outbound_message(trace: Option<&NetTrace>, message: &Message, payload: &[u8]) {
     if let Some(trace) = trace {
         bitcoin_rs_consensus::trace::outbound_message(|| {
@@ -100,8 +95,7 @@ fn message_args(
         command.to_owned(),
         payload_len_u64(payload.len()),
         // A zero-length payload has no addressable bytes; hand the tracer a
-        // null pointer rather than a dangling non-null one. Argument 6 pairs
-        // with argument 5, which is 0 here.
+        // null pointer rather than a dangling non-null one.
         if payload.is_empty() {
             std::ptr::null()
         } else {

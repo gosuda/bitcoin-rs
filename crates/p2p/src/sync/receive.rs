@@ -518,19 +518,15 @@ impl BlockSync {
             {
                 let hash = Hash256::from(inbound.block.block_hash());
                 let source = inbound.source;
-                // The body has left the ingress channel: release the
-                // delivering connection's unsolicited forwarding slot. What
-                // follows - staging, discarding, or rejecting - is sync's.
+                // The body has left the ingress channel: release the delivering
+                // connection's unsolicited forwarding slot.
                 drop(inbound.forward_credit);
                 if matches!(admission, BodyAdmission::Staged) {
                     staged_blocks.push((hash, source, StagedBlock::AlreadyStaged));
                     continue;
                 }
                 // Issue #1070: the header-derived block hash does not bind the
-                // delivered transaction or witness bytes by itself. The
-                // stager keeps the first body per hash, so reject any body
-                // whose txid Merkle tree or witness commitment does not bind
-                // to the header before it can occupy that slot.
+                // delivered transaction or witness bytes by itself.
                 if let Err(error) = binding_result {
                     metrics::counter!("node.sync.body_binding_drops").increment(1);
                     let witness = inbound
@@ -622,8 +618,7 @@ impl BlockSync {
 
         // The block tree owns heights: bodies this insert count-evicts are
         // requeued at their tree-resolved heights, never at a stored sentinel
-        // (there is no stored height). A hash the tree cannot resolve
-        // requeues with no cursor move.
+        // (there is no stored height).
         let staged_blocks: Vec<_> = {
             let tree = self.chain.block_tree();
             staged_blocks

@@ -4,15 +4,6 @@ use super::BlockSync;
 
 impl BlockSync {
     /// Emits a one-line sync-progress summary at INFO level.
-    ///
-    /// Reports applied height, header (chain) height, the gap, live peer
-    /// count, and whether the node is still in initial block download. This
-    /// is the operator-facing progress signal that #223 identified as
-    /// missing during IBD — without it, `docker logs` shows no indication
-    /// that the node is alive and applying blocks.
-    ///
-    /// When the canonical frontier cannot make progress at all, the line
-    /// names the explicit reason instead of staying silent (#1128).
     pub fn emit_sync_progress(&self) {
         let now = std::time::Instant::now();
         let chain = self.observe_chain_frontier();

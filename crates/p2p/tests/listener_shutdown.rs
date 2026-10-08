@@ -64,9 +64,6 @@ fn serve_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
     });
     let guard = ServeGuard::new(&shutdown, handle);
 
-    // The listener is already bound, so the connect completes at once. The
-    // accept loop proves it is running when it registers the connection;
-    // the deadline is a hang failsafe.
     let client = TcpStream::connect(addr)?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while peer_table.is_empty() {
@@ -86,20 +83,13 @@ fn serve_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
         thread::sleep(Duration::from_millis(5));
     }
 
-    // Drop the accepted stream so the orphan handshake thread exits on a
-    // read error instead of holding the connection open.
     drop(client);
 
-    // Raise the flag, then drain before joining: a serve loop that never
-    // observes the flag fails after 5 s instead of hanging the test on an
-    // unbounded join.
     shutdown.store(true, Ordering::Relaxed);
     let result = rx.recv_timeout(Duration::from_secs(5))?;
     guard.join()?;
 
     result?;
-    // Connection threads outlive the listener. The orphan handshake thread
-    // removes its own registration once it reads EOF.
     let deadline = Instant::now() + Duration::from_secs(5);
     while !peer_table.is_empty() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
@@ -112,8 +102,6 @@ fn serve_exits_when_flag_set() -> Result<(), Box<dyn Error>> {
 fn serve_returns_without_accepting_when_flag_preset() -> Result<(), Box<dyn Error>> {
     let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
 
-    // The flag is set before the listener thread spawns; the serve call must
-    // observe it before accepting and return without registering peers.
     let shutdown = Arc::new(AtomicBool::new(true));
     let listener_shutdown = Arc::clone(&shutdown);
     let (tx, rx) = mpsc::channel();

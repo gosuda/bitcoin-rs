@@ -1,16 +1,5 @@
 //! Block-download service eligibility: the initial-block-download rule and the
 //! retained-window rule for pruned peers.
-//!
-//! Bitcoin Core never asks a pruned peer for blocks it may have deleted.
-//! During initial block download only a `NODE_NETWORK` peer serves bodies
-//! (`net_processing.cpp:6521`); afterwards a peer without `NODE_NETWORK`
-//! serves only the last `NODE_NETWORK_LIMITED_MIN_BLOCKS` — 288
-//! (`net_processing.cpp:159`, window applied at `:1637`) — of its own chain.
-//! The demonstrated-height clause used by the selection and hedge paths
-//! applies Core's two-block race buffer, so that window is 286 there.
-//! Both the selection path and the shared predicate are pinned here, because a
-//! fix that lands on one path alone leaves the other requesting undeliverable
-//! blocks.
 
 use std::sync::Arc;
 
@@ -48,12 +37,8 @@ fn sent_messages(rx: &crossbeam_channel::Receiver<Message>) -> Vec<Message> {
     rx.try_iter().collect()
 }
 
-/// During initial block download a pruned peer may not serve bodies at any
-/// height: the blocks the node is asking for are exactly the ones a pruned peer
-/// has discarded.
 #[test]
-fn predicate_excludes_limited_peer_during_initial_block_download()
--> Result<(), Box<dyn std::error::Error>> {
+fn predicate_excludes_limited_peer_during_initial_block_download() -> TestResult {
     let addr = test_addr(9600, 0)?;
     let syncing = crate::sync::syncing_ibd_latch();
     assert!(
@@ -67,12 +52,8 @@ fn predicate_excludes_limited_peer_during_initial_block_download()
     Ok(())
 }
 
-/// After the latch is off, a peer without `NODE_NETWORK` serves the last 288
-/// blocks of its own chain and nothing older: 287 blocks behind its tip is
-/// inside the window, 288 behind is not, and a peer that has not demonstrated
-/// the requested height is ineligible.
 #[test]
-fn predicate_limits_pruned_peer_to_the_retained_window() -> Result<(), Box<dyn std::error::Error>> {
+fn predicate_limits_pruned_peer_to_the_retained_window() -> TestResult {
     let addr = test_addr(9601, 0)?;
     for (height, requested, accepted) in [
         (288_i32, 1_u32, true),
@@ -94,13 +75,8 @@ fn predicate_limits_pruned_peer_to_the_retained_window() -> Result<(), Box<dyn s
     Ok(())
 }
 
-/// A peer advertising only `WITNESS` — neither `NODE_NETWORK` nor
-/// `NODE_NETWORK_LIMITED` — serves no blocks at all: Core applies the retained
-/// window only to peers that set `NODE_NETWORK_LIMITED`, so this peer is
-/// refused even inside the 288-block window.
 #[test]
-fn predicate_refuses_witness_only_peer_inside_the_window() -> Result<(), Box<dyn std::error::Error>>
-{
+fn predicate_refuses_witness_only_peer_inside_the_window() -> TestResult {
     let addr = test_addr(9603, 0)?;
     let witness_only = PeerInfo {
         services: ServiceFlags::WITNESS.to_u64(),
@@ -115,10 +91,8 @@ fn predicate_refuses_witness_only_peer_inside_the_window() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// A `NODE_NETWORK` peer is unaffected by the phase or the window: the retained
-/// rule is about pruned storage, not about chain length.
 #[test]
-fn predicate_keeps_full_service_peer_at_any_height() -> Result<(), Box<dyn std::error::Error>> {
+fn predicate_keeps_full_service_peer_at_any_height() -> TestResult {
     let addr = test_addr(9602, 0)?;
     for ibd in [crate::sync::syncing_ibd_latch(), synced_ibd_latch()] {
         assert!(statically_fanout_eligible(
@@ -133,12 +107,8 @@ fn predicate_keeps_full_service_peer_at_any_height() -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// The selection path agrees with the predicate: while the node is still in
-/// initial block download, a connected pruned peer receives header requests
-/// only — never a `getdata`.
 #[test]
-fn tick_asks_no_bodies_from_limited_peer_during_initial_block_download()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_asks_no_bodies_from_limited_peer_during_initial_block_download() -> TestResult {
     let (sync, peers, _tree, _applied, _expected) =
         sync_with_header_chain_and_ibd(4, crate::sync::syncing_ibd_latch())?;
     let rx = connect_peer(&peers, limited_peer(test_addr(9603, 0)?, 300));
@@ -146,7 +116,6 @@ fn tick_asks_no_bodies_from_limited_peer_during_initial_block_download()
     sync.tick();
     sync.tick();
 
-    // One drain, then both clauses: no body request, headers still open.
     let messages = sent_messages(&rx);
     assert!(
         !messages
@@ -163,14 +132,8 @@ fn tick_asks_no_bodies_from_limited_peer_during_initial_block_download()
     Ok(())
 }
 
-/// After initial block download the same peer serves the near-tip range, and
-/// the selection is the deep single-peer batch, so the body request proves the
-/// predicate ran inside the tick and not only in isolation. The peer's
-/// handshake height 286 keeps the required bodies inside the race-buffered
-/// window this node applies.
 #[test]
-fn tick_asks_bodies_from_limited_peer_inside_retained_window()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_asks_bodies_from_limited_peer_inside_retained_window() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain_and_ibd(4, synced_ibd_latch())?;
     let rx = connect_peer(&peers, limited_peer(test_addr(9604, 0)?, 286));
@@ -187,11 +150,8 @@ fn tick_asks_bodies_from_limited_peer_inside_retained_window()
     Ok(())
 }
 
-/// One block older and the peer is outside its retained window: the node leaves
-/// the bodies unrequested rather than asking a peer that cannot deliver them.
 #[test]
-fn tick_asks_no_bodies_from_limited_peer_beyond_retained_window()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_asks_no_bodies_from_limited_peer_beyond_retained_window() -> TestResult {
     let (sync, peers, block_tree, applied_tip, _expected) =
         sync_with_header_chain_and_ibd(4, synced_ibd_latch())?;
     let rx = connect_peer(&peers, limited_peer(test_addr(9605, 0)?, 287));
@@ -203,18 +163,12 @@ fn tick_asks_no_bodies_from_limited_peer_beyond_retained_window()
     Ok(())
 }
 
-/// The fan-out set must not include a pruned peer while the node is still
-/// syncing: were it counted, the window would stripe the old range across a
-/// peer that can only serve its last 288 blocks.
 #[test]
-fn limited_peer_is_not_counted_toward_fanout_during_initial_block_download()
--> Result<(), Box<dyn std::error::Error>> {
+fn limited_peer_is_not_counted_toward_fanout_during_initial_block_download() -> TestResult {
     let (sync, peers, _tree, _applied, _expected) = sync_with_header_chain_and_ibd(
         u32::try_from(PENDING_BUDGET)?,
         crate::sync::syncing_ibd_latch(),
     )?;
-    // The highest chain in the set: the old witness-only rule would have made
-    // this the first pick for the deep batch.
     let limited_rx = connect_peer(&peers, limited_peer(test_addr(9606, 0)?, 400));
     let mut rxs = Vec::new();
     for idx in 0..MIN_PEERS_FOR_FANOUT {

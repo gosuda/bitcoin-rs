@@ -1,8 +1,7 @@
 use super::*;
 
 #[test]
-fn tick_retries_when_all_selected_peers_have_expired_pending()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_retries_when_all_selected_peers_have_expired_pending() -> TestResult {
     let (sync, peers, _tree, _applied, expected) = sync_with_header_chain(3)?;
     install_budget(
         &sync,
@@ -25,7 +24,7 @@ fn tick_retries_when_all_selected_peers_have_expired_pending()
 }
 
 #[test]
-fn tick_fans_out_getdata_across_eligible_peers() -> Result<(), Box<dyn std::error::Error>> {
+fn tick_fans_out_getdata_across_eligible_peers() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain(u32::try_from(super::super::PENDING_BUDGET)?)?;
     let mut receivers = Vec::new();
@@ -37,7 +36,6 @@ fn tick_fans_out_getdata_across_eligible_peers() -> Result<(), Box<dyn std::erro
     }
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
-    // Effective fan-out stripe (mirrors `effective_peer_inflight`).
     let cap = super::super::PENDING_BUDGET
         .div_ceil(super::super::MIN_PEERS_FOR_FANOUT)
         .clamp(
@@ -65,8 +63,7 @@ fn tick_fans_out_getdata_across_eligible_peers() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn stale_invalid_headers_cannot_evict_or_clear_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn stale_invalid_headers_cannot_evict_or_clear_replacement() -> TestResult {
     let table = Arc::new(PeerTable::new());
     let addr = test_addr(9507, 0)?;
     let (old_tx, _old_rx) = unbounded::<Message>();
@@ -82,7 +79,7 @@ fn stale_invalid_headers_cannot_evict_or_clear_replacement()
 }
 
 #[test]
-fn mutated_forward_body_preserves_descendant_for_retry() -> Result<(), Box<dyn std::error::Error>> {
+fn mutated_forward_body_preserves_descendant_for_retry() -> TestResult {
     use bitcoin_rs_primitives::Amount;
     let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
     sync.chain.bootstrap_genesis();
@@ -95,7 +92,7 @@ fn mutated_forward_body_preserves_descendant_for_retry() -> Result<(), Box<dyn s
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     // The value change alters the txid, so the staged body contradicts the
     // header's merkle root: a mutated body, not an invalid header.
     let mut bad_body = bad.clone();
@@ -105,7 +102,7 @@ fn mutated_forward_body_preserves_descendant_for_retry() -> Result<(), Box<dyn s
         3,
         vec![regtest_fixture::coinbase(3)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     assert!(matches!(
         sync.chain.admit_headers(&[bad.header, descendant.header]),
         HeaderAdmission::Accepted { .. }

@@ -35,10 +35,6 @@ pub struct PeerCapabilities {
 }
 
 /// BIP152 compact-block protocol version this node speaks and advertises.
-///
-/// v2 identifies transactions by wtxid and carries witness data; we send it
-/// in the handshake so peers serving us compact blocks use the witness
-/// profile. See `docs/policies/p2p-compatibility.md` §4/§5.
 pub const COMPACT_BLOCK_VERSION: u64 = 2;
 
 /// Remote BIP152 compact-block negotiation preference.
@@ -114,8 +110,7 @@ pub struct Peer<S> {
     /// BIP339 state for the peer.
     pub wtxid_relay: WtxidRelayState,
     /// `net:*` probe context attached by live connection roots; `None` on
-    /// probe-free constructions, which keeps the probes out of their
-    /// binaries.
+    /// probe-free constructions, which keeps the probes out of their binaries.
     pub(crate) net_trace: Option<crate::net_trace::NetTrace>,
 }
 
@@ -137,10 +132,6 @@ impl<S> Peer<S> {
     }
 
     /// Attaches the `net:*` probe context captured at the connection root.
-    ///
-    /// The inbound accept path and the outbound dial call this once, before
-    /// the handshake, so every read and write of the connection emits the
-    /// Core-compatible probes.
     pub(crate) fn attach_net_trace(&mut self, net_trace: crate::net_trace::NetTrace) {
         self.net_trace = Some(net_trace);
     }
@@ -175,10 +166,6 @@ impl<S: Read + Write> Peer<S> {
 
 impl<S: Read> Peer<S> {
     /// Read one framed message.
-    ///
-    /// With a `net:*` probe context attached, `net:inbound_message` observes
-    /// the checksum-validated wire payload before typed decoding, including
-    /// messages whose payload later fails to decode.
     pub fn read_message(&mut self) -> Result<(Message, bytes::Bytes), PeerError> {
         let net_trace = self.net_trace.as_ref();
         crate::wire::read_message_with(&mut self.stream, self.magic, |command, payload| {

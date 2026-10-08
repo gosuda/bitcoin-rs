@@ -21,14 +21,11 @@ use crate::dispatch::{ChainQuery, InventoryServing};
 use crate::wire::{Message, PeerError};
 
 /// Depth from the active tip for which a `getdata` of a block is still worth
-/// answering with a `cmpctblock`. Deeper, a peer's mempool has almost
-/// certainly moved on, so the full witness-bearing body is served instead
-/// (Core 31.1 `net_processing.cpp:141-145,2705-2721,4590-4624`).
+/// answering with a `cmpctblock`.
 const MAX_CMPCTBLOCK_DEPTH: u32 = 5;
 
-/// Depth from the active tip for which a `getblocktxn` is still answered
-/// with a `blocktxn`. Deeper, Core sends the whole block rather than let a
-/// peer reconstruct one it cannot have hinted.
+/// Depth from the active tip for which a `getblocktxn` is still answered with a
+/// `blocktxn`.
 const MAX_BLOCKTXN_DEPTH: u32 = 10;
 
 /// Read-only active-chain view for P2P `getheaders` / `getdata`.
@@ -69,8 +66,7 @@ impl ActiveChainQuery {
 
     /// The active height of one block with the tip height it was observed
     /// under, both read in one guard so a depth is a snapshot of one tree
-    /// state. `None` when no tip exists or the hash is not on the active
-    /// chain.
+    /// state.
     fn active_position(&self, hash: BlockHash) -> Option<(u32, u32)> {
         let tree = self.block_tree.read();
         let tip = tree.tip()?;
@@ -102,8 +98,6 @@ impl ActiveChainQuery {
         if header.compute_hash() != hash {
             return None;
         }
-        // Use the complete consensus layout parser without materializing
-        // scripts or witnesses. Both serving forms reject malformed bodies.
         let block = ParsedBlock::parse_exact(&bytes).ok()?;
         let stripped = if !include_witness
             && block
@@ -160,11 +154,6 @@ impl ChainQuery for ActiveChainQuery {
         let Some(tip) = tree.tip() else {
             return Vec::new();
         };
-        // A node whose active chain has not reached the network's minimum
-        // work is still syncing: it answers `getheaders` with the empty
-        // response rather than feeding a peer its low-work branch, exactly
-        // as Core refuses to serve headers below the assumed-valid floor
-        // (`net_processing.cpp:3010-3018,4648-4657`).
         if tip.chainwork < ChainWork::from_be_bytes(self.network.minimum_chain_work()) {
             return Vec::new();
         }
@@ -278,9 +267,6 @@ impl ChainQuery for ActiveChainQuery {
         let Some((payload, tip_height)) = self.load_active_block(height, hash, true) else {
             return Ok(None);
         };
-        // The tip may have moved while the body was read; the re-observed
-        // depth decides the reply, so a moving tip cannot keep an old block
-        // eligible for a compact answer.
         if deep || beyond_depth(tip_height, height, MAX_BLOCKTXN_DEPTH) {
             return Ok(Some(Message::BlockPayload(payload)));
         }
@@ -300,8 +286,6 @@ impl ChainQuery for ActiveChainQuery {
 }
 
 /// Clear every witness in a `blocktxn` response for the v1 serving profile.
-/// PRE: `transactions` came from the requested block. POST: all inputs carry
-/// empty witnesses; transaction IDs are unchanged.
 fn strip_witnesses(transactions: &mut BlockTransactions) {
     for tx in &mut transactions.transactions {
         for input in &mut tx.input {
@@ -312,8 +296,7 @@ fn strip_witnesses(transactions: &mut BlockTransactions) {
 
 impl ActiveChainQuery {
     /// Builds one `cmpctblock` for an active-chain body at the requesting
-    /// peer's negotiated BIP152 version. `None` (no negotiation, unknown
-    /// version, undecodable or stale body) leaves the item in `not_found`.
+    /// peer's negotiated BIP152 version.
     fn compact_block_for(
         &self,
         height: u32,
@@ -350,9 +333,6 @@ impl ActiveChainQuery {
                 hash,
                 include_witness,
             } => self.full_block_response(height, hash, include_witness),
-            // A peer asking for an old block almost certainly cannot match it
-            // against a useful mempool, so the compact request is served as
-            // the whole body, whatever it negotiated.
             BlockRequest::Compact(hash)
                 if beyond_depth(tip_height, height, MAX_CMPCTBLOCK_DEPTH) =>
             {
@@ -572,10 +552,6 @@ mod tests {
         Ok(())
     }
 
-    /// A node whose active chain sits below its network's assumed-work
-    /// floor is still syncing: it must answer `getheaders` with the empty
-    /// response rather than serve its low-work branch to the rest of the
-    /// network (`net_processing.cpp:3010-3018,4648-4657`).
     #[test]
     fn low_work_chain_serves_no_headers() -> Result<(), Box<dyn std::error::Error>> {
         let genesis = test_header(BlockHash::default(), 0);
@@ -588,8 +564,6 @@ mod tests {
             tree.insert_node(Some(first_id), second, NodeStatus::Active)?;
             Ok(tree)
         };
-        // Mainnet's floor is far above three regtest-easy headers: the
-        // serving path must go quiet below it.
         let mainnet = query_over(low_work_tree()?, Network::Mainnet);
         assert!(
             mainnet
@@ -653,9 +627,6 @@ mod tests {
         Ok(())
     }
 
-    // BIP144 and Core 31.1 ProcessGetBlockData use TX_NO_WITNESS for
-    // MSG_BLOCK and TX_WITH_WITNESS for MSG_WITNESS_BLOCK. The independent
-    // rust-bitcoin envelope/serializer below checks the actual emitted bytes.
     #[test]
     fn getdata_block_encoding_matches_requested_inventory_on_wire()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -672,8 +643,6 @@ mod tests {
                 if witness_modulus != 0 && index % witness_modulus == 0 {
                     tx.inputs[0].witness = vec![vec![0x51; 32]].into();
                 }
-                // Exercise the base-body boundary with and without a final
-                // output, including its empty script CompactSize prefix.
                 if index % 2 == 0 {
                     tx.outputs.clear();
                 } else {
@@ -768,9 +737,6 @@ mod tests {
             wrong_header[0] ^= 1;
             let mut trailing = body.clone();
             trailing.push(0);
-            // One transaction follows the 80-byte header and one-byte count.
-            // Insert marker/flag after its four-byte version, and an empty
-            // witness stack for its single input before the lock time.
             let mut superfluous_witness = body.clone();
             superfluous_witness.splice(Header::LEN + 5..Header::LEN + 5, [0, 1]);
             superfluous_witness.insert(superfluous_witness.len() - 4, 0);
@@ -1017,10 +983,6 @@ mod tests {
         Ok(())
     }
 
-    /// A `getblocktxn` for a deep block — the branch that would otherwise
-    /// materialize the whole body — loads nothing and stays unanswered while
-    /// the production gate is saturated, mirroring the `getdata` gate
-    /// behaviour (`serve_inventory_blocks`).
     #[test]
     fn getblocktxn_halts_at_gate_without_loading() -> Result<(), Box<dyn std::error::Error>> {
         let headers = seed_headers(12);
@@ -1162,9 +1124,6 @@ mod tests {
         )?)
     }
 
-    /// A shallow `getblocktxn` is answered with the requested bodies, an
-    /// index past the end of the block disconnects the peer, and a block
-    /// this node cannot serve leaves the request unanswered.
     #[test]
     fn getblocktxn_answers_active_body_and_disconnects_on_out_of_range_index()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1212,10 +1171,6 @@ mod tests {
         Ok(())
     }
 
-    /// A block within [`MAX_BLOCKTXN_DEPTH`] of the active tip is answered
-    /// with a `blocktxn`; a deeper one gets the whole witness-bearing
-    /// `block`, never a small `blocktxn`, an inventory announcement, or
-    /// silence (Core 31.1 `net_processing.cpp:4590-4624`).
     #[test]
     fn getblocktxn_depth_boundary_uses_full_block_beyond_ten()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1235,9 +1190,6 @@ mod tests {
         Ok(())
     }
 
-    /// A compact `getdata` within [`MAX_CMPCTBLOCK_DEPTH`] of the tip is
-    /// answered with a `cmpctblock`; a deeper one with the whole
-    /// witness-bearing `block` (Core 31.1 `net_processing.cpp:2705-2721`).
     #[test]
     fn compact_depth_boundary_uses_full_block_beyond_five() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -1257,9 +1209,6 @@ mod tests {
         Ok(())
     }
 
-    /// A served compact block always prefills transaction zero — the coinbase
-    /// — and short-ID-encodes the rest, under both identity versions
-    /// (Core 31.1 `blockencodings.cpp:20-31`).
     #[test]
     fn compact_prefills_coinbase_under_both_v1_v2() -> Result<(), Box<dyn std::error::Error>> {
         let headers = seed_headers(3);
@@ -1290,9 +1239,6 @@ mod tests {
         Ok(())
     }
 
-    // BIP152's blocktransactions format uses legacy MSG_TX encoding for v1
-    // and witness encoding for v2. Exercise negotiation and both response
-    // types through the production dispatcher and an independent wire decoder.
     #[test]
     fn compact_exchange_uses_peer_version_for_prefills_and_blocktxn()
     -> Result<(), Box<dyn std::error::Error>> {
