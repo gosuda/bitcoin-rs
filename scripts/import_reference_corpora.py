@@ -139,8 +139,9 @@ def blockfilter_blocks(path: Path) -> Iterator[bytes]:
 class Emitted:
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
-        # Basenames written into the target corpus dir, for the refresh
-        # inventory that removes stale reference seeds on later runs.
+        # sha1 of each emitted seed: the name libFuzzer's merge gives the
+        # file if cmin retains it, so the refresh inventory names match the
+        # post-minimization basenames on disk.
         self.names: set[str] = set()
 
     def bump(self, reason: str, by: int = 1) -> None:
@@ -153,7 +154,7 @@ class Emitted:
 
 def _emit(out: Path, seed: bytes, emitted: Emitted) -> None:
     """Publish the seed and record its content-addressed name."""
-    emitted.names.add(hashlib.sha256(seed).hexdigest()[:32])
+    emitted.names.add(hashlib.sha1(seed).hexdigest())
     qa._emit(out, seed)
 
 
