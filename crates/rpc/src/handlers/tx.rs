@@ -1042,7 +1042,7 @@ mod tests {
         higher.header.prev_blockhash = sibling.block_hash();
         let mut ctx = Context::new();
         let blocks = [(&genesis, 0), (&sibling, 1), (&active, 1), (&higher, 2)];
-        ctx.chain.block_body_source = Some(Arc::new(SeededBodySource {
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
             bodies: blocks
                 .iter()
                 .map(|(block, height)| (*height, block.block_hash(), consensus_bytes(*block)))
@@ -1502,18 +1502,7 @@ mod tests {
         }
     }
 
-    struct SeededBodySource {
-        bodies: Vec<(u32, BlockHash, Vec<u8>)>,
-    }
-
-    impl bitcoin_rs_chain::BlockBodySource for SeededBodySource {
-        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-            self.bodies
-                .iter()
-                .find(|(h, k, _)| *h == height && *k == hash)
-                .map(|(_, _, body)| body.clone())
-        }
-    }
+    use crate::test_support::BlockBodies;
 
     #[derive(Default)]
     struct ScriptedBodySource {
@@ -1537,7 +1526,7 @@ mod tests {
             bodies.push((record.height, record.hash, consensus_bytes(block)));
             records.push(record);
         }
-        ctx.chain.block_body_source = Some(Arc::new(SeededBodySource { bodies }));
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies { bodies }));
         for record in records {
             ctx.chain.add_block(record);
         }
@@ -1551,7 +1540,7 @@ mod tests {
 
     fn attach_body_for_block(ctx: &mut Context, block: &Block, height: u32) {
         let record = BlockRecord::from_block(height, block);
-        ctx.chain.block_body_source = Some(Arc::new(SeededBodySource {
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
             bodies: vec![(record.height, record.hash, consensus_bytes(block))],
         }));
     }
