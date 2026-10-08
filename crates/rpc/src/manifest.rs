@@ -150,21 +150,6 @@ impl Status {
 ///   [`crate::registry`] is the only owner of surface claims.
 pub const MANIFEST_TOML: &str = include_str!("../core-compat.toml");
 
-/// The `[reference.release]` field naming the binary digest a spawned
-/// reference process must match on this platform.
-///
-/// The win64 build on Windows (the linux-gnu binary cannot execute there),
-/// the capture platform's binary elsewhere. `bitcoind_sha256` always names
-/// the capture platform's binary — it does not vary per host — so the
-/// host-specific pick must come from here rather than a per-caller cfg.
-#[cfg(windows)]
-pub const REFERENCE_BITCOIND_SHA256_FIELD: &str = "bitcoind_win64_sha256";
-
-/// The `[reference.release]` field naming the binary digest a spawned
-/// reference process must match on this platform.
-#[cfg(not(windows))]
-pub const REFERENCE_BITCOIND_SHA256_FIELD: &str = "bitcoind_sha256";
-
 /// One declared surface.
 #[derive(Clone, Copy, Debug)]
 pub struct Entry {

@@ -36,24 +36,33 @@ function Log([string]$Message) {
 
 $root = Split-Path -Parent $PSScriptRoot
 $compat = Get-Content -Raw (Join-Path $root 'crates/rpc/core-compat.toml')
-function Pin([string]$Key) {
-    $match = [regex]::Match($compat, "(?m)^$Key = `"([^`"]+)`"")
+function Field([string]$Body, [string]$Key) {
+    $match = [regex]::Match($Body, "(?m)^$Key = `"([^`"]+)`"")
     if (-not $match.Success) {
         throw "core-compat.toml is missing a valid $Key pin"
     }
     $match.Groups[1].Value
 }
 
-$TARBALL       = Pin 'archive_win64'
-$TARBALL_SHA256 = Pin 'archive_win64_sha256'
-# The released version label is recovered from the win64 archive name: the
-# TOML carries a separate development `core_version` (31.99.x) that must not
-# leak into this script's paths.
-$versionMatch = [regex]::Match($TARBALL, '^bitcoin-(.+)-win64\.zip$')
-if (-not $versionMatch.Success) {
-    throw "win64 archive pin '$TARBALL' does not carry a version label"
+# `[reference]` also carries a development `core_version` (31.99.x); the
+# released label lives in the `[reference.release]` section.
+$releaseMatch = [regex]::Match($compat, '(?ms)^\[reference\.release\](.+?)(?=^\[|\z)')
+if (-not $releaseMatch.Success) {
+    throw 'core-compat.toml is missing the [reference.release] section'
 }
-$CORE_VERSION = $versionMatch.Groups[1].Value
+$releaseBody = $releaseMatch.Groups[1].Value
+$CORE_VERSION = Field $releaseBody 'core_version'
+
+# The win64 runnable artifact is a [[reference.release.platforms]] row.
+$row = [regex]::Matches($compat, '(?ms)^\[\[reference\.release\.platforms\]\](.+?)(?=^\[|\z)') |
+    Where-Object { $_.Groups[1].Value -match '(?m)^target = "win64"' } |
+    Select-Object -First 1
+if (-not $row) {
+    throw 'core-compat.toml pins no win64 platform artifact'
+}
+$rowBody = $row.Groups[1].Value
+$TARBALL        = Field $rowBody 'archive'
+$TARBALL_SHA256 = Field $rowBody 'archive_sha256'
 $TARBALL_URL   = "https://bitcoincore.org/bin/bitcoin-core-$CORE_VERSION/$TARBALL"
 $PREFIX        = if ($env:BITCOIND_PREFIX) { $env:BITCOIND_PREFIX } else { Join-Path $HOME "bitcoin-core-$CORE_VERSION" }
 $BITCOIND      = Join-Path $PREFIX 'bin\bitcoind.exe'
@@ -64,9 +73,18 @@ $STAMP         = Join-Path $PREFIX '.bitcoin-rs-core-tarball-sha256'
 # installer and crates/p2p/tests/core_interop_live.rs version_is_pinned_line:
 # "31.1" accepts 31.1(.N) but not 31.10(.N), 31.2(.N), or 30.1(.N).
 function VersionMatchesPin {
-    $out = & $BITCOIND -version 2>$null
+    # A binary that cannot launch at all (corrupt, wrong arch) rejects the
+    # cache like a version mismatch — it must not abort the install.
+    try {
+        $out = & $BITCOIND -version 2>$null
+    } catch {
+        return $false
+    }
     if ($LASTEXITCODE -ne 0 -or -not $out) { return $false }
-    if ($out[0] -notmatch '(\d+(\.\d+)*)') { return $false }
+    # `&` yields a scalar string on a single output line; @() normalizes so
+    # [0] is always the first LINE, never the first character.
+    $first = @($out)[0]
+    if ($first -notmatch '(\d+(\.\d+)*)') { return $false }
     $parsed = $Matches[1] -split '\.'
     $pinned = $CORE_VERSION -split '\.'
     if ($parsed.Count -lt $pinned.Count) { return $false }
@@ -91,7 +109,11 @@ if ($cached) {
     New-Item -ItemType Directory -Path $workdir | Out-Null
     try {
         $archive = Join-Path $workdir $TARBALL
-        Invoke-WebRequest -Uri $TARBALL_URL -OutFile $archive -UseBasicParsing
+        # `curl.exe` (not the `curl` alias, which is Invoke-WebRequest on
+        # Windows PowerShell 5.1) — the same fetch tool the bash twin uses,
+        # so an offline PATH shim can intercept it identically in tests.
+        & curl.exe -fsSL --retry 4 --retry-delay 4 -o $archive $TARBALL_URL
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         $got = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($got -ne $TARBALL_SHA256) {
             Log "ABORT: tarball sha256 $got != $TARBALL_SHA256"

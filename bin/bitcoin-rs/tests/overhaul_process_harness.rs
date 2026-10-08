@@ -508,7 +508,9 @@ fn missing_reference_binary_names_the_pinned_digest() {
     let pinned = reference_set()
         .expect("reference set")
         .release
-        .spawned_bitcoind_sha256();
+        .current_artifact()
+        .expect("a pinned artifact for this platform")
+        .bitcoind_sha256;
     let pinned = sha256::Hash::from_byte_array(pinned).to_string();
 
     let error = verify_reference_binary(path).expect_err("absent binary must fail");
@@ -643,7 +645,22 @@ fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle
         loop {
             assert!(request.len() < 4096, "unexpected oversized fixture request");
             let mut chunk = [0_u8; 512];
-            let count = stream.read(&mut chunk).expect("request bytes");
+            let count = match stream.read(&mut chunk) {
+                Ok(count) => count,
+                // RCVTIMEO expiry arrives as WouldBlock; a loaded scheduler
+                // can stall the client past one read bound, so retry against
+                // the responder's total deadline.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(Instant::now() < deadline, "client stalled on its request");
+                    continue;
+                }
+                Err(error) => panic!("request bytes: {error}"),
+            };
             assert!(count > 0, "request ended before its body");
             request.extend_from_slice(chunk.get(..count).expect("read chunk"));
             if let Some(split) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
@@ -712,7 +729,21 @@ fn dribbled_http_response_cannot_renew_the_request_deadline() {
             .set_write_timeout(Some(Duration::from_secs(1)))
             .expect("bounded write");
         let mut request = [0_u8; 4096];
-        assert!(stream.read(&mut request).expect("request") > 0);
+        loop {
+            match stream.read(&mut request) {
+                Ok(count) if count > 0 => break,
+                Ok(_) => panic!("request ended before its body"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(Instant::now() < deadline, "client never sent");
+                }
+                Err(error) => panic!("request: {error}"),
+            }
+        }
         for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}" {
             if stream.write_all(&[*byte]).is_err() {
                 break;
@@ -923,13 +954,7 @@ fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), 
 fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Error> {
     let deadline = readiness_deadline();
     let mined = loop {
-        // A whole batch is one request; the shared readiness deadline, not the
-        // per-request transport budget, bounds how long it may take to answer.
-        match node.rpc_until(
-            "generatetoaddress",
-            &json!([blocks, MINING_ADDRESS]),
-            deadline,
-        ) {
+        match node.rpc("generatetoaddress", &json!([blocks, MINING_ADDRESS])) {
             Ok(mined) => break mined,
             Err(Error::Rpc { message, .. }) if message.contains("applied tip is not available") => {
                 assert!(

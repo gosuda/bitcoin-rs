@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Install the pinned Bitcoin Core 31.1 bitcoind used by the live differential.
 #
-# Downloads the official release artifact for the host platform — the
-# x86_64 Linux tarball or, under MSYS/MINGW/CYGWIN on Windows, the win64
-# zip — checks it against the hardcoded SHA-256, and extracts bitcoind.
-# Prints the bitcoind path on stdout (log lines go to stderr).
+# Downloads the official tarball for this platform from bitcoincore.org,
+# checks it against the SHA-256 pinned in crates/rpc/core-compat.toml, and
+# extracts bitcoind. Prints the bitcoind path on stdout (log lines go to
+# stderr).
 #
 #   scripts/install-bitcoind.sh --print-path
 #   eval "$(scripts/install-bitcoind.sh --export)"   # exports BITCOIND_COMMAND
@@ -12,32 +12,6 @@
 # Owner: docs/contracts/core-differential.md (CORE-01).
 
 set -euo pipefail
-
-readonly CORE_VERSION="31.1"
-# Both artifact pins are named declarations so offline checks can read them
-# regardless of which platform the script runs on.
-readonly TARBALL_LINUX="bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz"
-readonly TARBALL_SHA256_LINUX="b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
-readonly TARBALL_WIN64="bitcoin-${CORE_VERSION}-win64.zip"
-readonly TARBALL_SHA256_WIN64="c99ef173471c58e6766d9eebd12e6c35349082eeed3939bc99eed58ef57db587"
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*)
-    TARBALL="${TARBALL_WIN64}"
-    TARBALL_SHA256="${TARBALL_SHA256_WIN64}"
-    BITCOIND_NAME="bitcoind.exe"
-    BITCOIN_CLI_NAME="bitcoin-cli.exe"
-    ;;
-  *)
-    TARBALL="${TARBALL_LINUX}"
-    TARBALL_SHA256="${TARBALL_SHA256_LINUX}"
-    BITCOIND_NAME="bitcoind"
-    BITCOIN_CLI_NAME="bitcoin-cli"
-    ;;
-esac
-readonly TARBALL TARBALL_SHA256 BITCOIND_NAME BITCOIN_CLI_NAME
-readonly TARBALL_URL="https://bitcoincore.org/bin/bitcoin-core-${CORE_VERSION}/${TARBALL}"
-readonly PREFIX="${BITCOIND_PREFIX:-${HOME}/bitcoin-core-${CORE_VERSION}}"
-readonly BITCOIND="${PREFIX}/bin/${BITCOIND_NAME}"
 
 usage() {
   printf '%s\n' 'usage: scripts/install-bitcoind.sh [--print-path|--export]'
@@ -51,6 +25,55 @@ case "${1:-}" in
   "") ;;
   *) usage >&2; exit 2 ;;
 esac
+
+# Resolve the manifest without changing the process directory: a relative
+# BITCOIND_PREFIX keeps meaning the caller's directory.
+REPO="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+
+# resolve_reference_identity.py carries its own manifest reader for
+# interpreters without tomllib; probe any Python >=3.6 (versioned first,
+# since the system python3 on macOS predates tomllib).
+PYTHON=""
+# `python` (unversioned) is the name Windows installs; the Microsoft Store
+# shim of the same name fails the version probe and is skipped like the rest.
+for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2>/dev/null; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+[[ -n "$PYTHON" ]] || { echo "a Python >=3.6 interpreter is required" >&2; exit 1; }
+
+# Stock macOS has no sha256sum; shasum ships with it.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | awk '{print $1}'
+  else
+    shasum -a 256 < "$1" | awk '{print $1}'
+  fi
+}
+
+# The manifest owns the pinned digests; resolve_reference_identity.py is the
+# single owner of the host-platform artifact selection. Capturing stdout
+# propagates the interpreter's exit status; the while-read keeps this
+# working under the bash 3.2 that still ships with macOS (no mapfile, no
+# heredoc inside a substitution — bash 3.2 cannot parse that).
+# A Windows interpreter emits CRLF; tr drops the carriage returns.
+pin_text="$("$PYTHON" "$REPO/scripts/resolve_reference_identity.py" core "$REPO" | tr -d '\r')" || exit 1
+pin=()
+while IFS= read -r line; do pin+=("$line"); done <<< "$pin_text"
+[[ "${#pin[@]}" -ge 3 ]] || { echo "incomplete Core artifact pin" >&2; exit 1; }
+readonly CORE_VERSION="${pin[0]}"
+readonly TARBALL="${pin[1]}"
+readonly TARBALL_SHA256="${pin[2]}"
+readonly TARBALL_URL="https://bitcoincore.org/bin/bitcoin-core-${CORE_VERSION}/${TARBALL}"
+readonly PREFIX="${BITCOIND_PREFIX:-${HOME}/bitcoin-core-${CORE_VERSION}}"
+# The win64 archive is a zip of .exe binaries; every other pin is a .tar.gz.
+case "${TARBALL}" in
+  *.zip) BITCOIND="${PREFIX}/bin/bitcoind.exe" ;;
+  *) BITCOIND="${PREFIX}/bin/bitcoind" ;;
+esac
+readonly BITCOIND
 
 log() { printf '[install-bitcoind] %s\n' "$*" >&2; }
 
@@ -86,29 +109,27 @@ else
   WORKDIR="$(mktemp -d /tmp/bitcoind-install.XXXXXX)"
   trap 'rm -rf -- "${WORKDIR:?}"' EXIT
   curl -fsSL --retry 4 --retry-delay 4 -o "${WORKDIR}/${TARBALL}" "${TARBALL_URL}"
-  got="$(sha256sum -- "${WORKDIR}/${TARBALL}" | awk '{ print $1 }')"
+  got="$(sha256_of "${WORKDIR}/${TARBALL}")"
   if [[ "${got}" != "${TARBALL_SHA256}" ]]; then
     log "ABORT: tarball sha256 ${got} != ${TARBALL_SHA256}"
     exit 1
   fi
   mkdir -p "${PREFIX}/bin"
-  # The win64 artifact is a zip: prefer unzip where it is installed and
-  # otherwise fall back to tar — bsdtar (the tar.exe shipping with
-  # Windows 10+) reads zip archives, which covers stock Git for Windows
-  # and MSYS2 installs that carry neither GNU-unzip nor a zip-capable tar.
   case "${TARBALL}" in
     *.zip)
+      # MSYS ships bsdtar, which reads zips; unzip exists only sometimes.
       if command -v unzip >/dev/null 2>&1; then
-        unzip -o -q "${WORKDIR}/${TARBALL}" -d "${WORKDIR}"
+        unzip -q "${WORKDIR}/${TARBALL}" -d "${WORKDIR}"
       else
         tar -xf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}"
       fi
       ;;
     *) tar -xzf "${WORKDIR}/${TARBALL}" -C "${WORKDIR}" ;;
   esac
-  install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/${BITCOIND_NAME}" "${BITCOIND}"
-  if [[ -f "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/${BITCOIN_CLI_NAME}" ]]; then
-    install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/${BITCOIN_CLI_NAME}" "${PREFIX}/bin/${BITCOIN_CLI_NAME}"
+  SUFFIX=""; [[ "${TARBALL}" == *.zip ]] && SUFFIX=".exe"
+  install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoind${SUFFIX}" "${BITCOIND}"
+  if [[ -f "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli${SUFFIX}" ]]; then
+    install -m 0755 "${WORKDIR}/bitcoin-${CORE_VERSION}/bin/bitcoin-cli${SUFFIX}" "${PREFIX}/bin/bitcoin-cli${SUFFIX}"
   fi
   printf '%s\n' "${TARBALL_SHA256}" > "${STAMP}"
   log "installed ${BITCOIND}"

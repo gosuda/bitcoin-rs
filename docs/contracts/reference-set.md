@@ -36,20 +36,20 @@ recorded under `[reference.release]` in the manifest:
 - `core_version = "31.1"` — a released `MAJOR.MINOR` product version
 - `git_tag = "v31.1"`
 - `source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"`
+- `target = "x86_64-linux-gnu"` — the canonical artifact, the one whose
+  `bitcoind` captured the checked-in fixtures
 - `archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"` with `archive_sha256`
   `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`
 - `bitcoind_sha256`
   `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`
-- `archive_win64 = "bitcoin-31.1-win64.zip"` with `archive_win64_sha256`
-  `c99ef173471c58e6766d9eebd12e6c35349082eeed3939bc99eed58ef57db587`
-- `bitcoind_win64_sha256`
-  `f79eeb94e1379986df9f7be4c78c8fc8e18dc9be64a31cbaa8acad249d3db77a`
 - `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`
 
-`bitcoind_sha256` names the capture platform's binary — every checked-in
-corpus records that linux-gnu digest. The win64 fields pin the same release
-for a Windows host, whose spawned reference process the harness verifies
-against `bitcoind_win64_sha256` instead.
+Additional platform artifacts live under `[[reference.release.platforms]]`
+rows of the same shape, each pinned by target (currently `arm64-apple-darwin`
+and `win64`) so the live lanes can run the same pinned Core release on other
+hosts. The canonical row is the fixture-capture platform and is never
+inferred from the host: fixture provenance always compares against the
+canonical `bitcoind_sha256`.
 
 This is the behavioral reference. No compatibility claim may be made against a
 version string or a source snapshot alone.
@@ -61,9 +61,10 @@ release through the shared parser. Changing the reference leaves an old
 capture stale and fails its gate; it does not relabel the recorded response.
 The process harness separately hashes the actual executable before launch.
 The parser also fingerprints the complete release tuple using NUL-separated
-UTF-8 fields under the `bitcoin-rs/reference-release/v2` domain. Consequently,
-a different but well-formed source commit or artifact digest is a custody
-mismatch, not a valid new reference.
+UTF-8 fields under the `bitcoin-rs/reference-release/v2` domain (product
+fields, then every artifact row in order). Consequently, a different but
+well-formed source commit or artifact digest is a custody mismatch, not a
+valid new reference.
 
 ### `REF-03`: Core 31.99.0 kernel tree evidence
 
