@@ -616,142 +616,6 @@ fn assert_nbits_mismatch(result: Result<(), ChainError>, actual: u32, expected: 
 }
 
 #[test]
-fn daa_non_retarget_height_requires_parent_bits() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let (parent_id, _) = seed_period(
-        &mut tree,
-        MAINNET_POW_LIMIT_BITS,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + 600,
-        1,
-    )?;
-    let parent_hash = tree.node(parent_id)?.hash.into();
-    let header = raw_header_with(
-        parent_hash,
-        2,
-        DAA_ANCHOR_TIME + 1_200,
-        MAINNET_POW_LIMIT_DIV_4_BITS,
-    );
-    assert_nbits_mismatch(
-        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
-        MAINNET_POW_LIMIT_DIV_4_BITS,
-        MAINNET_POW_LIMIT_BITS,
-        2,
-    );
-    Ok(())
-}
-
-#[test]
-fn daa_retarget_accepts_expected_bits_at_boundary() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let interval = Network::Mainnet.retarget_interval();
-    let expected_timespan = interval * 600;
-    let (parent_id, _) = seed_period(
-        &mut tree,
-        MAINNET_POW_LIMIT_BITS,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + expected_timespan,
-        interval - 1,
-    )?;
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        interval,
-        DAA_ANCHOR_TIME + expected_timespan + 600,
-        MAINNET_POW_LIMIT_BITS,
-    );
-    assert_eq!(
-        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
-        Ok(())
-    );
-    Ok(())
-}
-
-#[test]
-fn daa_retarget_rejects_wrong_bits_at_boundary() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let interval = Network::Mainnet.retarget_interval();
-    let expected_timespan = interval * 600;
-    let (parent_id, _) = seed_period(
-        &mut tree,
-        MAINNET_POW_LIMIT_BITS,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + expected_timespan,
-        interval - 1,
-    )?;
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        interval,
-        DAA_ANCHOR_TIME + expected_timespan + 600,
-        MAINNET_POW_LIMIT_DIV_4_BITS,
-    );
-    assert_nbits_mismatch(
-        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
-        MAINNET_POW_LIMIT_DIV_4_BITS,
-        MAINNET_POW_LIMIT_BITS,
-        interval,
-    );
-    Ok(())
-}
-
-#[test]
-fn daa_retarget_clamps_fast_timespan_to_quarter_target() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let interval = Network::Mainnet.retarget_interval();
-    let expected_timespan = interval * 600;
-    let (parent_id, _) = seed_period(
-        &mut tree,
-        MAINNET_POW_LIMIT_BITS,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + expected_timespan / 4 - 1,
-        interval - 1,
-    )?;
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        interval,
-        DAA_ANCHOR_TIME + expected_timespan,
-        MAINNET_POW_LIMIT_DIV_4_BITS,
-    );
-    assert_eq!(
-        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
-        Ok(())
-    );
-    Ok(())
-}
-
-#[test]
-fn daa_retarget_clamps_slow_timespan_to_quadruple_target() -> Result<(), Box<dyn std::error::Error>>
-{
-    let mut tree = BlockTree::new();
-    let interval = Network::Mainnet.retarget_interval();
-    let expected_timespan = interval * 600;
-    let start_bits = scaled_pow_limit_bits(Network::Mainnet, 16);
-    let expected_bits = retarget_bits_for_test(
-        Network::Mainnet,
-        start_bits,
-        expected_timespan * 4 + 1,
-        expected_timespan,
-    );
-    let (parent_id, _) = seed_period(
-        &mut tree,
-        start_bits,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + expected_timespan * 4 + 1,
-        interval - 1,
-    )?;
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        interval,
-        DAA_ANCHOR_TIME + expected_timespan * 4 + 600,
-        expected_bits,
-    );
-    assert_eq!(
-        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
-        Ok(())
-    );
-    Ok(())
-}
-
-#[test]
 fn testnet_allows_min_difficulty_after_time_gap() -> Result<(), Box<dyn std::error::Error>> {
     let mut tree = BlockTree::new();
     let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
@@ -839,36 +703,6 @@ fn mainnet_rejects_min_difficulty_after_time_gap() -> Result<(), Box<dyn std::er
 }
 
 #[test]
-fn testnet_min_difficulty_does_not_override_retarget_boundary()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let interval = Network::Testnet3.retarget_interval();
-    let expected_timespan = interval * 600;
-    let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
-    let min_bits = pow_limit_bits(Network::Testnet3);
-    let (parent_id, _) = seed_period(
-        &mut tree,
-        regular_bits,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + expected_timespan,
-        interval - 1,
-    )?;
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        interval,
-        DAA_ANCHOR_TIME + expected_timespan + 1_201,
-        min_bits,
-    );
-    assert_nbits_mismatch(
-        validate_header_nbits(&tree, parent_id, &header, Network::Testnet3),
-        min_bits,
-        regular_bits,
-        interval,
-    );
-    Ok(())
-}
-
-#[test]
 fn testnet4_retarget_uses_first_period_bits_after_min_difficulty_tip()
 -> Result<(), Box<dyn std::error::Error>> {
     let mut tree = BlockTree::new();
@@ -914,28 +748,110 @@ fn testnet4_retarget_uses_first_period_bits_after_min_difficulty_tip()
     Ok(())
 }
 
+// Times are offsets from DAA_ANCHOR_TIME; mismatch is the required bits.
+struct DaaCase {
+    name: &'static str,
+    network: Network,
+    start_bits: u32,
+    span: u32,
+    tip_height: u32,
+    time: u32,
+    bits: u32,
+    mismatch: Option<u32>,
+}
+
 #[test]
-fn daa_retarget_caps_slow_timespan_at_pow_limit() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let network = Network::Mainnet;
-    let interval = network.retarget_interval();
-    let expected_timespan = interval * 600;
-    let (parent_id, _) = seed_period(
-        &mut tree,
-        MAINNET_POW_LIMIT_BITS,
-        DAA_ANCHOR_TIME,
-        DAA_ANCHOR_TIME + expected_timespan * 4,
-        interval - 1,
-    )?;
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        interval,
-        DAA_ANCHOR_TIME + expected_timespan * 4 + 600,
-        MAINNET_POW_LIMIT_BITS,
-    );
-    assert_eq!(
-        validate_header_nbits(&tree, parent_id, &header, network),
-        Ok(())
-    );
+fn period_difficulty_rules_match_core() -> Result<(), Box<dyn std::error::Error>> {
+    let interval = Network::Mainnet.retarget_interval();
+    let span = interval * 600;
+    let slow_start = scaled_pow_limit_bits(Network::Mainnet, 16);
+    let slow_bits = retarget_bits_for_test(Network::Mainnet, slow_start, span * 4 + 1, span);
+    let on_schedule = DaaCase {
+        name: "on-schedule period keeps bits",
+        network: Network::Mainnet,
+        start_bits: MAINNET_POW_LIMIT_BITS,
+        span,
+        tip_height: interval - 1,
+        time: span + 600,
+        bits: MAINNET_POW_LIMIT_BITS,
+        mismatch: None,
+    };
+    let cases = [
+        DaaCase {
+            name: "non-retarget height inherits pow-limit parent bits",
+            span: 600,
+            tip_height: 1,
+            time: 1_200,
+            bits: MAINNET_POW_LIMIT_DIV_4_BITS,
+            mismatch: Some(MAINNET_POW_LIMIT_BITS),
+            ..on_schedule
+        },
+        DaaCase {
+            name: "on-schedule period rejects changed bits",
+            bits: MAINNET_POW_LIMIT_DIV_4_BITS,
+            mismatch: Some(MAINNET_POW_LIMIT_BITS),
+            ..on_schedule
+        },
+        DaaCase {
+            name: "fast period clamps to a quarter target",
+            span: span / 4 - 1,
+            time: span,
+            bits: MAINNET_POW_LIMIT_DIV_4_BITS,
+            ..on_schedule
+        },
+        DaaCase {
+            name: "slow period clamps to a quadruple target",
+            start_bits: slow_start,
+            span: span * 4 + 1,
+            time: span * 4 + 600,
+            bits: slow_bits,
+            ..on_schedule
+        },
+        DaaCase {
+            name: "slow clamp remains observable after compact-target rounding",
+            start_bits: slow_start,
+            span: span * 8,
+            time: span * 8 + 600,
+            bits: slow_bits,
+            ..on_schedule
+        },
+        DaaCase {
+            name: "slow period caps at the pow limit",
+            span: span * 4,
+            time: span * 4 + 600,
+            ..on_schedule
+        },
+        DaaCase {
+            name: "testnet min-difficulty does not override a retarget boundary",
+            network: Network::Testnet3,
+            start_bits: MAINNET_POW_LIMIT_DIV_4_BITS,
+            time: span + 1_201,
+            bits: pow_limit_bits(Network::Testnet3),
+            mismatch: Some(MAINNET_POW_LIMIT_DIV_4_BITS),
+            ..on_schedule
+        },
+        on_schedule,
+    ];
+    for case in cases {
+        let mut tree = BlockTree::new();
+        let (parent_id, parent_hash) = seed_period(
+            &mut tree,
+            case.start_bits,
+            DAA_ANCHOR_TIME,
+            DAA_ANCHOR_TIME + case.span,
+            case.tip_height,
+        )?;
+        let height = case.tip_height + 1;
+        let header = raw_header_with(parent_hash, height, DAA_ANCHOR_TIME + case.time, case.bits);
+        let result = validate_header_nbits(&tree, parent_id, &header, case.network);
+        let expected = case.mismatch.map_or(Ok(()), |expected| {
+            Err(ChainError::NbitsMismatch {
+                actual: case.bits,
+                expected,
+                height,
+            })
+        });
+        assert_eq!(result, expected, "{}", case.name);
+    }
     Ok(())
 }
