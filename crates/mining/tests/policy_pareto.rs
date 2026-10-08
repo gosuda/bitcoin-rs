@@ -1,6 +1,9 @@
 #![allow(clippy::expect_used)]
 //! Package selection, limits, and adversarial candidate tests.
 
+#[path = "common/fixtures.rs"]
+mod common;
+
 use std::error::Error;
 use std::sync::Arc;
 
@@ -10,8 +13,7 @@ use bitcoin_rs_mempool::{
 };
 use bitcoin_rs_mining::{Candidate, CandidateContext, MiningError, assemble_candidate};
 use bitcoin_rs_primitives::{
-    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness,
+    Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
 };
 use bitcoin_rs_script::VerifyFlags;
 use proptest::prelude::*;
@@ -527,18 +529,9 @@ proptest! {
 fn context(max_weight: u64, max_size: u64, max_sigops: u64) -> CandidateContext {
     CandidateContext {
         previous_block_hash: Hash256::from_le_bytes(&[0xcd; 32]),
-        height: 100,
-        version: 0x2000_0000,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        min_time: 1,
-        current_time: 2,
-        locktime_cutoff: 1,
-        network: Network::Regtest,
-        csv_active: true,
-        segwit_active: true,
         max_weight,
         max_size,
-        max_sigops,
+        ..common::context(true, max_sigops)
     }
 }
 
