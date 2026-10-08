@@ -213,9 +213,9 @@ policy governs how such breaks are released, not whether), object ownership,
 abstraction layers, execution pipelines, database schema and on-disk layout,
 and parity with Bitcoin Core's code organization. A schema-breaking change may require an explicit fresh resync —
 an acceptable tradeoff, not a bug — but it must never silently reinterpret
-incompatible persisted data or corrupt operator state: a format break fails
-closed, and replay — or an optional offline migration tool — is the migration
-route.
+incompatible persisted data or corrupt operator state: an incompatible
+authoritative chainstate format fails closed, and replay — or an optional
+offline migration tool, when offered — is the migration route.
 
 Internal breaking changes are acceptable with clear rationale and the evidence
 the boundary demands; breaking a supported external contract is a regression.

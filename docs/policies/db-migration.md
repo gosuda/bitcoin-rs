@@ -62,7 +62,7 @@ A schema break never puts a converter inside the node, but a full resync is not 
 Any such tool follows these rules:
 
 - The production node understands and writes only the current authoritative schema. Legacy decoders live in the tool, outside the node's runtime and build-dependency path.
-- Never in place: the tool reads the source datadir without mutating it, produces a new datadir, and verifies network/chain identity and the applicable durability invariants. Cutover is an explicit operator action — confirm the tool's verification report, then start the node against the produced datadir. The source survives any failure and remains the replay path.
+- Never in place: the tool reads the source datadir without mutating it, produces a new datadir, and verifies network/chain identity and the applicable durability invariants. Cutover is an explicit operator action — confirm the tool's verification report, which covers the provenance of every reused byte, then start the node against the produced datadir. On any failure the source remains untouched and fresh replay is the fallback.
 - Migrating bytes is not proof of consensus validity. The tool reuses only state whose provenance and integrity can be verified; anything else means revalidation or resync. Derived, rebuildable indexes are not migrated.
 - Optional, not guaranteed: no converter is owed for any schema revision, perpetual old-format support is never promised, and better internal designs are never blocked on migration tooling.
 
