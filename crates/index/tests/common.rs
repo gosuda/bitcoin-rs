@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bitcoin_rs_index::types::{TxPosition, TxPositionValue};
 use bitcoin_rs_index::{ScriptHash, ScriptHashRow, SpendingPrefixRow};
@@ -19,6 +20,20 @@ use parking_lot::RwLock;
 #[derive(Default)]
 pub(crate) struct MemoryStore {
     cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
+    pub(crate) fail_next_durable: AtomicBool,
+}
+
+impl MemoryStore {
+    pub(crate) fn count(&self, cf: ColumnFamily) -> usize {
+        self.cfs.read()[cf.index()].len()
+    }
+
+    pub(crate) fn rows(&self, cf: ColumnFamily) -> Vec<(Vec<u8>, Vec<u8>)> {
+        self.cfs.read()[cf.index()]
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
 }
 
 /// Folds one batch's recorded operations into the column families, in order.
@@ -80,6 +95,11 @@ impl KvStore for MemoryStore {
         conditions: &[WriteCondition<'_>],
         batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
+        if self.fail_next_durable.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::Backend(
+                "injected durable write failure".into(),
+            ));
+        }
         // Every condition observes pre-batch state; the batch is allowed to
         // put or delete a condition key itself. The check and the apply run
         // under one write lock, matching the backend's atomic conditional
