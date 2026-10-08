@@ -10,9 +10,10 @@ a running pinned binary, not a replay of captured JSON.
 ### `CORE-01`: Pinned Core 31.1 bitcoind
 
 - **Owner**: `scripts/install-bitcoind.sh`.
-- The live lane downloads Bitcoin Core 31.1
-  `bitcoin-31.1-x86_64-linux-gnu.tar.gz` from bitcoincore.org and checks
-  the tarball SHA-256 before extracting `bitcoind`.
+- The live lane downloads the Bitcoin Core 31.1 tarball for the host
+  platform (`x86_64-linux-gnu` or `arm64-apple-darwin`) from bitcoincore.org
+  and checks the tarball SHA-256 pinned for that platform in
+  `core-compat.toml` before extracting `bitcoind`.
 - A cached prefix is reused only when its stamp matches that SHA-256 and
   `bitcoind -version` completes successfully and reports `v31.1`.
 
