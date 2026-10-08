@@ -43,9 +43,6 @@ pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
                 ));
             }
             if stale_temp {
-                // This is a reserved temporary marker left by an interrupted
-                // initialization, not user data. Removing it lets the next
-                // attempt start a fresh atomic publication.
                 data.remove_file(CURRENT_SCHEMA_TEMP_FILE)?;
             }
 

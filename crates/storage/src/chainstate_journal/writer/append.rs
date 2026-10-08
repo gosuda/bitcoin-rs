@@ -171,8 +171,6 @@ impl<S: KvStore> JournalWriter<S> {
         if self.segment_offset < self.rotate_bytes {
             return Ok(());
         }
-        // Close the current segment durably: the boundary covers buffered
-        // records, then the next append starts a new generation.
         self.advance_durability()?;
         let previous_gen = self.segment_gen;
         let previous_offset = self.segment_offset;
@@ -180,9 +178,6 @@ impl<S: KvStore> JournalWriter<S> {
         let next_gen = previous_gen
             .checked_add(1)
             .ok_or_else(|| JournalWriterError::CursorMismatch("generation overflow".to_owned()))?;
-        // A head may name a zero-offset generation only after the directory
-        // entry itself is durable. Reuse after a pre-head crash truncates the
-        // uncommitted generation before publishing it again.
         let name = segment_name(next_gen);
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);

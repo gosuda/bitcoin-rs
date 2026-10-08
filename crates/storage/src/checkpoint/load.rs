@@ -58,9 +58,7 @@ fn is_checkpoint_corruption(error: &std::io::Error) -> bool {
 pub(crate) fn read_current(root: &CheckpointRoot) -> Result<Option<CurrentV1>, CheckpointError> {
     let bytes = match read_file(root.dir(), CURRENT_FILE, MAX_CHECKPOINT_METADATA_BYTES) {
         Ok(bytes) => bytes,
-        // A missing CURRENT means no checkpoint has committed yet.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        // Any other read failure must retain its corruption/I/O classification.
         Err(e) => return Err(checkpoint_file_error(CURRENT_FILE, e)),
     };
     let current: CurrentV1 = serde_json::from_slice(&bytes)?;
@@ -280,16 +278,11 @@ pub fn open_current_checkpoint_at(
     let root = match CheckpointRoot::open_existing(data_dir, root_name) {
         Ok(Some(root)) => root,
         Ok(None) => return Ok(CheckpointOpen::Cold),
-        // Opening the checkpoint root failed before CURRENT could be read.
         Err(e) => return Err(classify_open_error("open checkpoint root", e)),
     };
     let current = match read_current(&root) {
         Ok(Some(c)) => c,
-        // CURRENT is the publication commit point. A root without it can be
-        // leftover from a first publication that crashed before the pointer
-        // became visible; none of that generation is committed state.
         Ok(None) => return Ok(CheckpointOpen::Cold),
-        // CURRENT exists but failed authenticated parsing.
         Err(e) => return Err(classify_checkpoint_error(e)),
     };
     let generation_dir = root.open_dir(&current.directory).map_err(|e| {

@@ -136,9 +136,6 @@ pub(crate) fn stage_flat_block_file_prune<S: KvStore>(
             )
         })?;
         let selected_file = file_numbers.binary_search(&position.file_no).is_ok();
-        // A row whose height does not parse still rides out with its file
-        // when the file is pruned; it cannot sit at or above the line, so
-        // the line-1 bound is the tallest it could be.
         let height = row_height(&key, BLOCK_BODY_PREFIX_BYTES)
             .unwrap_or_else(|| prune_below_height.saturating_sub(1));
         let below_horizon = height < prune_below_height;

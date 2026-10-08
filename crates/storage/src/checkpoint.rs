@@ -115,9 +115,6 @@ pub struct CheckpointTipV1 {
     /// Chainwork encoded as lowercase hex.
     pub chainwork: String,
     /// Cumulative transaction count of the chain through this tip.
-    ///
-    /// Only meaningful for the applied tip; the best-header tip records `0`,
-    /// since headers carry no transactions.
     pub chain_tx_count: u64,
 }
 /// Header artifact metadata authenticated by the checkpoint manifest.
