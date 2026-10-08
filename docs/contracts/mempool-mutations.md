@@ -16,8 +16,7 @@ state (`crates/mempool/src/orphan.rs`).
 - Every production mempool mutation routes through `MempoolGateway`. No
   production code outside the gateway takes the mempool write lock; lookups
   go through `MempoolGateway::read`.
-- Every mutating method flows through one path, `commit` (and
-  `admit_transaction`, which enqueues the same way), in this exact order:
+- Every publishing mutation flows through `commit`, in this exact order:
   1. take the pool write lock,
   2. mutate and assign per-change `mempool_sequence` values, then update
      the gateway's orphan state and mark waiting children ready for parents

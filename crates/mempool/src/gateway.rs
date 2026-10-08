@@ -684,10 +684,14 @@ impl MempoolGateway {
                 )
                 .map_err(RbfError::into_pool_error)?;
             let plan = inputs.verify().map_err(RbfError::into_pool_error)?;
-            let result = self.commit(origin, move |pool| {
-                pool.commit_pool_change(plan)
-                    .map_err(RbfError::into_pool_error)
-            });
+            let result = self.commit(
+                origin,
+                move |pool| {
+                    pool.commit_pool_change(plan)
+                        .map_err(RbfError::into_pool_error)
+                },
+                |result| Some(result),
+            );
             if !matches!(result, Err(MempoolError::StalePolicy)) {
                 return result;
             }
@@ -713,7 +717,11 @@ impl MempoolGateway {
                 crate::rbf::FeeEstimation::Estimate,
             )?;
             let plan = inputs.verify()?;
-            let result = self.commit(origin, move |pool| pool.commit_pool_change(plan));
+            let result = self.commit(
+                origin,
+                move |pool| pool.commit_pool_change(plan),
+                |result| Some(result),
+            );
             if !matches!(result, Err(RbfError::StalePlan)) {
                 return result;
             }
@@ -766,65 +774,53 @@ impl MempoolGateway {
         #[cfg(any(test, feature = "test-seam"))]
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
-        let mut pool = self.pool.write();
-        self.check_admission_state(
-            &pool,
-            request.expected_generation,
-            request.expected_sequence,
-            fence,
-            Some(prepared.stamp),
-        )?;
-        if claim.is_some_and(|(claim, announcer)| {
-            !self.lifecycle.lock().orphans.is_current(claim, announcer)
-        }) {
-            return Ok(AdmitOutcome::AlreadyKnown);
-        }
-        let txid = request.tx.txid();
-        if pool.contains_txid(&txid) {
-            self.lifecycle
-                .lock()
-                .orphans
-                .remove_transaction_variants(txid);
-            return Ok(AdmitOutcome::AlreadyKnown);
-        }
-        if let Some((error, scope)) = prepared.rejection {
-            self.record_peer_failure(&pool, request, error, scope);
-            return Err(error);
-        }
-        let default_reject_scope = rejection_scope(&request.tx);
+        self.commit(
+            request.origin,
+            |pool| {
+                self.check_admission_state(
+                    pool,
+                    request.expected_generation,
+                    request.expected_sequence,
+                    fence,
+                    Some(prepared.stamp),
+                )?;
+                if claim.is_some_and(|(claim, announcer)| {
+                    !self.lifecycle.lock().orphans.is_current(claim, announcer)
+                }) {
+                    return Ok(AdmitOutcome::AlreadyKnown);
+                }
+                let txid = request.tx.txid();
+                if pool.contains_txid(&txid) {
+                    self.lifecycle
+                        .lock()
+                        .orphans
+                        .remove_transaction_variants(txid);
+                    return Ok(AdmitOutcome::AlreadyKnown);
+                }
+                if let Some((error, scope)) = prepared.rejection {
+                    self.record_peer_failure(pool, request, error, scope);
+                    return Err(error);
+                }
+                let default_reject_scope = rejection_scope(&request.tx);
 
-        // The writer consumes the already verified graph plan. It checks
-        // the stamp again but never reruns the solver or script verifier.
-        let ReplacementStage::Verified(plan) = prepared.replacement else {
-            return Err(AdmitError::MempoolChanged);
-        };
-        let outcome = pool.commit_pool_change(plan).map_err(replacement_rejection);
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.record_peer_failure(&pool, request, error, default_reject_scope);
-                return Err(error);
-            }
-        };
-
-        // 6. Enqueue the committed mutation and elect a drainer if needed.
-        let result = outcome;
-        self.update_admission_lifecycle(&pool, &result);
-        let mut elected = false;
-        if !result.changes.is_empty() && self.observer.is_some() {
-            let mut publish = self.publish.lock();
-            publish.queue.push_back(MutationEnvelope {
-                origin: request.origin,
-                result: result.clone(),
-            });
-            elected = !publish.draining;
-            publish.draining = true;
-        }
-        drop(pool);
-        if elected {
-            self.drain();
-        }
-        Ok(AdmitOutcome::Committed(result))
+                // The writer consumes the already verified graph plan. It checks
+                // the stamp again but never reruns the solver or script verifier.
+                let ReplacementStage::Verified(plan) = prepared.replacement else {
+                    return Err(AdmitError::MempoolChanged);
+                };
+                pool.commit_pool_change(plan)
+                    .map(AdmitOutcome::Committed)
+                    .map_err(|error| {
+                        let error = replacement_rejection(error);
+                        self.record_peer_failure(pool, request, error, default_reject_scope);
+                        error
+                    })
+            },
+            |outcome| match outcome {
+                AdmitOutcome::AlreadyKnown => None,
+                AdmitOutcome::Committed(result) => Some(result),
+            },
+        )
     }
 
     /// Rejects an attempt whose captured admittance facts no longer hold.
@@ -1145,13 +1141,17 @@ impl MempoolGateway {
                 failing.push(tx.txid());
             }
         }
-        self.commit(AdmissionOrigin::Reorg, |pool| {
-            let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
-            if fence.current(self) != Some(change.odd_generation()) {
-                return Err(ChainChangeError::GenerationMoved);
-            }
-            Ok(pool.remove_for_reorg(&failing))
-        })
+        self.commit(
+            AdmissionOrigin::Reorg,
+            |pool| {
+                let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
+                if fence.current(self) != Some(change.odd_generation()) {
+                    return Err(ChainChangeError::GenerationMoved);
+                }
+                Ok(pool.remove_for_reorg(&failing))
+            },
+            |result| Some(result),
+        )
     }
 
     /// Commits `pool.remove_for_block` and publishes its result.
@@ -1202,10 +1202,14 @@ impl MempoolGateway {
     ) -> Result<MutationResult, MempoolError> {
         let inputs = self.pool.read().capture_eviction(max_bytes)?;
         let plan = inputs.verify()?;
-        self.commit(origin, move |pool| {
-            pool.commit_pool_change(plan)
-                .map_err(RbfError::into_pool_error)
-        })
+        self.commit(
+            origin,
+            move |pool| {
+                pool.commit_pool_change(plan)
+                    .map_err(RbfError::into_pool_error)
+            },
+            |result| Some(result),
+        )
     }
 
     /// Commits `pool.clear` and publishes its result.
@@ -1268,25 +1272,27 @@ impl MempoolGateway {
     /// every accepted/removed change from its prevalidated plan.
     /// Successful mutations acquire the publish mutex before releasing the
     /// pool guard, then call observers only after releasing the pool guard.
-    fn commit<E>(
+    fn commit<T, E>(
         &self,
         origin: AdmissionOrigin,
-        mutate: impl FnOnce(&mut Mempool) -> Result<MutationResult, E>,
-    ) -> Result<MutationResult, E> {
+        mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,
+        mutation: impl FnOnce(&T) -> Option<&MutationResult>,
+    ) -> Result<T, E> {
         let mut elected = false;
         let outcome = {
             let mut pool = self.pool.write();
             let outcome = mutate(&mut pool)?;
-            let result = &outcome;
-            self.update_admission_lifecycle(&pool, result);
-            if !result.changes.is_empty() && self.observer.is_some() {
-                let mut publish = self.publish.lock();
-                publish.queue.push_back(MutationEnvelope {
-                    origin,
-                    result: result.clone(),
-                });
-                elected = !publish.draining;
-                publish.draining = true;
+            if let Some(result) = mutation(&outcome) {
+                self.update_admission_lifecycle(&pool, result);
+                if !result.changes.is_empty() && self.observer.is_some() {
+                    let mut publish = self.publish.lock();
+                    publish.queue.push_back(MutationEnvelope {
+                        origin,
+                        result: result.clone(),
+                    });
+                    elected = !publish.draining;
+                    publish.draining = true;
+                }
             }
             outcome
         };
@@ -1350,9 +1356,11 @@ impl MempoolGateway {
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> MutationResult,
     ) -> MutationResult {
-        let Ok(result) = self.commit(origin, |pool| {
-            Ok::<_, core::convert::Infallible>(mutate(pool))
-        });
+        let Ok(result) = self.commit(
+            origin,
+            |pool| Ok::<_, core::convert::Infallible>(mutate(pool)),
+            |result| Some(result),
+        );
         result
     }
 
