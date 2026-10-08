@@ -200,8 +200,9 @@ External evidence and remaining work:
 - [Live Core P2P](docs/validation-tooling.md#1-live-bitcoin-core-p2p-and-chain-identity-differential):
   externally verified handshake, sync, compact blocks, and chain identity.
 - [Live Core acceptance](docs/validation-tooling.md#2-live-core-block-and-transaction-acceptance-differential):
-  curated block/transaction cases tested; broader differential fuzzing is not
-  currently implemented.
+  curated block/transaction cases tested.
+- [bitcoinfuzz integration](https://github.com/bitcoinfuzz/bitcoinfuzz/issues/662):
+  integration effort in progress to add bitcoin-rs as a differential fuzzing module.
 - [Offline full-validation comparator](docs/validation-tooling.md#9-offline-full-validation-comparator):
   harness tested; full-mainnet campaigns not yet executed.
 - [Ecosystem compatibility](docs/validation-tooling.md#10-external-ecosystem-compatibility-matrix):

@@ -201,6 +201,11 @@ Owners, prerequisites, commands, and scope limitations are listed in each sectio
 - **Tier**: In-tree fuzzing and corpus regression.
 - **Contract & clauses**: [`docs/contracts/qa-corpus.md`](contracts/qa-corpus.md) (`QAC-01`..`QAC-05`).
 - **Provenance record**: [`fuzz/CORPUS_PROVENANCE.md`](../fuzz/CORPUS_PROVENANCE.md).
+- **External integration in progress**: Adding bitcoin-rs as a differential
+  fuzzing module in bitcoinfuzz, tracked in
+  [bitcoinfuzz/bitcoinfuzz#662](https://github.com/bitcoinfuzz/bitcoinfuzz/issues/662).
+  This integration effort is separate from the existing in-tree fuzz campaigns
+  and is not yet reported as completed external verification.
 - **Campaign prerequisites**: Linux shell tools (`jq`, `sha1sum`), `cargo-fuzz`,
   and nightly Rust with `llvm-tools-preview`. Keep the writable companion corpus
   checkout on the same filesystem as this repository; the campaign minimizes it.
