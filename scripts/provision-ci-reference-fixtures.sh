@@ -12,15 +12,23 @@ esac
 # resolve_reference_identity.py carries its own manifest reader for
 # interpreters without tomllib; probe any Python >=3.6 (versioned first,
 # since the system python3 on macOS predates tomllib). The formal lane's
-# check_models.py still requires tomllib on the resolved interpreter.
+# check_models.py imports tomllib unconditionally, so its probe requires
+# that instead.
+if [[ "$mode" == formal ]]; then
+  probe='import tomllib'
+  hint='a Python interpreter with tomllib is required'
+else
+  probe='import sys; sys.exit(sys.version_info < (3, 6))'
+  hint='a Python >=3.6 interpreter is required'
+fi
 PYTHON=""
 for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3; do
-  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2>/dev/null; then
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "$probe" 2>/dev/null; then
     PYTHON="$candidate"
     break
   fi
 done
-[[ -n "$PYTHON" ]] || { echo "a Python >=3.6 interpreter is required" >&2; exit 1; }
+[[ -n "$PYTHON" ]] || { echo "$hint" >&2; exit 1; }
 
 # Exact-match digest gate; stock macOS ships shasum, not sha256sum.
 sha256_check() {

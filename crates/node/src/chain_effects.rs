@@ -376,25 +376,29 @@ impl ChainFollowers {
 /// RPC listener binds, the sync tick itself) funnels through this one
 /// owner. Idempotent — a populated applied tip returns immediately.
 ///
-/// A refused connect is returned so startup can abort instead of binding
-/// RPC onto a chainstate that cannot serve an applied tip; the sync tick
-/// logs it and retries.
+/// Any connect failure is returned so startup can abort instead of binding
+/// RPC onto a chainstate that cannot serve an applied tip — a refused
+/// connect leaves the slot empty, and a failed settlement has already
+/// closed chain admission and requested shutdown. The sync tick logs the
+/// failure and stays retryable.
 pub(crate) fn bootstrap_genesis(
     handles: &bitcoin_rs_chainstate::Chainstate,
     followers: &ChainFollowers,
-) -> Result<(), bitcoin_rs_chainstate::ApplyError> {
+) -> Result<(), ConnectMutationError> {
     if handles.applied_tip_snapshot().is_some() {
         return Ok(());
     }
     let genesis = handles.network().genesis_block();
     match followers.apply_connect(handles, &genesis) {
-        // The header-tip cell is the chainstate's to publish.
+        // The header-tip cell is the chainstate's to publish — including on
+        // a committed-but-unsettled connect, which owns its outcome.
         Ok(outcome) => handles.publish_genesis_tip(outcome.tip),
-        Err(ConnectMutationError::CommittedButSettlementFailed { outcome, source }) => {
-            handles.publish_genesis_tip(outcome.tip);
-            tracing::error!(%source, "genesis committed but settlement failed");
+        Err(error) => {
+            if let ConnectMutationError::CommittedButSettlementFailed { outcome, .. } = &error {
+                handles.publish_genesis_tip(outcome.tip.clone());
+            }
+            return Err(error);
         }
-        Err(ConnectMutationError::NotCommitted(error)) => return Err(error),
     }
     Ok(())
 }
