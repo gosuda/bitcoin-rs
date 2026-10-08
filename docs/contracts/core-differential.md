@@ -9,11 +9,12 @@ a running pinned binary, not a replay of captured JSON.
 
 ### `CORE-01`: Pinned Core 31.1 bitcoind
 
-- **Owner**: `scripts/install-bitcoind.sh`.
+- **Owner**: `scripts/install-bitcoind.sh` (`install-bitcoind.ps1` on Windows).
 - The live lane downloads the host platform's Bitcoin Core 31.1 release
   from bitcoincore.org — `bitcoin-31.1-x86_64-linux-gnu.tar.gz` on Linux,
-  `bitcoin-31.1-win64.zip` under MSYS/MINGW/CYGWIN on Windows — and checks
-  the archive SHA-256 before extracting `bitcoind` (`bitcoind.exe`).
+  `bitcoin-31.1-win64.zip` on Windows — and checks the archive SHA-256
+  before extracting `bitcoind` (`bitcoind.exe`). The bash script serves
+  POSIX shells; `install-bitcoind.ps1` serves native PowerShell.
 - A cached prefix is reused only when its stamp matches that SHA-256 and
   `bitcoind -version` completes successfully and reports `v31.1`.
 

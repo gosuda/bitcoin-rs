@@ -215,7 +215,7 @@ fn verified_core_binary() -> Result<PathBuf> {
     let expected = manifest_reference_sha256()?;
     let actual = file_sha256(&path).map_err(|e| {
         Error::Assertion(format!(
-            "pinned bitcoind {} not readable (install via scripts/install-bitcoind.sh): {e}",
+            "pinned bitcoind {} not readable (install via scripts/install-bitcoind.sh, or install-bitcoind.ps1 on Windows): {e}",
             path.display()
         ))
     })?;

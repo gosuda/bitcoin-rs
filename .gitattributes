@@ -9,6 +9,10 @@
 # than a missing attribute -- and the message points nowhere near the cause.
 *.sh text eol=lf
 
+# PowerShell reads LF natively on both 5.1 and 7+; pinning keeps the blob
+# canonical instead of letting autocrlf churn it on Windows checkouts.
+*.ps1 text eol=lf
+
 # Generated file compared byte-identically by manifest_coverage; same CRLF
 # checkout hazard as the scripts above.
 docs/rpc-reference.md text eol=lf
