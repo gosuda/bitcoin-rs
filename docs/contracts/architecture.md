@@ -211,8 +211,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 ### `ARCH-07`: Chainstate owns authoritative applied-chain mutation
 
 - `bitcoin_rs_chainstate::Chainstate` is the in-process owner of applied-tip
-  mutation, recovery, branch switching, checkpoint publication, and mandatory
-  retention consumption. `NodeState`, `BlockSync`, mining, and RPC
+  mutation, recovery, branch switching, checkpoint payload assembly/publication,
+  and mandatory retention consumption. `NodeState`, `BlockSync`, mining, and RPC
   chain-control hold or clone that service; they do not assemble a transition
   from independent locks.
   Retained-history *authority* is not chainstate's:
@@ -389,7 +389,8 @@ backend construction), [ARCH-05](#arch-05-node-composition-and-orchestration-bou
 
 - `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`:
   - `workspace_dependency_direction_is_one_way`: validates `cargo metadata --no-deps`
-    against `ARCH-01`–`ARCH-04` and the production feature isolation rule above.
+    against the manifest-level portions of `ARCH-01`–`ARCH-04` and the production
+    feature isolation rule above.
   - `fixture_owners_expose_no_production_injection_or_synthetic_constructors`:
     compiles an isolated consumer; ordinary read/composition APIs must compile,
     while persistence/checkpoint injection, the old footprint module, and
