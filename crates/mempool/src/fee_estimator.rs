@@ -46,12 +46,6 @@ impl FeeRate {
     pub const fn as_sat_per_kvb(self) -> u64 {
         self.0
     }
-
-    /// Returns the fee rate in sat/vB (truncated toward zero).
-    #[must_use]
-    pub const fn as_sat_per_vb(self) -> u64 {
-        self.0 / 1_000
-    }
 }
 
 /// Why a persisted estimator-history payload was not adopted.
@@ -59,7 +53,7 @@ impl FeeRate {
 /// CONTRACT: docs/policies/db-migration.md — every rejection degrades to
 /// insufficient-data status; none of them fails startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HistoryReject {
+pub(crate) enum HistoryReject {
     /// Leading magic bytes are not the estimator's.
     BadMagic,
     /// The format version is not one this build reads.
@@ -330,6 +324,7 @@ impl FeeEstimator {
     /// when it confirms nothing the pool tracked, so this is the observable
     /// proof that `block_connected` fired.
     #[must_use]
+    #[cfg(any(test, feature = "test-seam"))]
     pub(crate) fn last_decayed_height(&self) -> Option<u32> {
         self.last_decayed_height
     }
@@ -680,7 +675,7 @@ fn build_buckets() -> Vec<Bucket> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::{history_codec::HISTORY_MAGIC, *};
     use bitcoin_rs_primitives::Hash256;
@@ -1061,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    #[allow(
         clippy::float_cmp,
         reason = "confirmation counts are small integers, exact in f64; exact accounting is the assertion"
     )]
@@ -1089,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    #[allow(
         clippy::float_cmp,
         reason = "confirmation counts are small integers, exact in f64; exact accounting is the assertion"
     )]

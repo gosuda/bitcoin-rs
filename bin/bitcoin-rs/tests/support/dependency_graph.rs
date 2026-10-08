@@ -47,12 +47,10 @@ pub(crate) const CHAINSTATE_CRATE: &str = "bitcoin-rs-chainstate";
 pub(crate) const MEMPOOL_CONSUMER_CRATES: [&str; 4] =
     ["bitcoin-rs-p2p", RPC_CRATE, NODE_CRATE, BIN_CRATE];
 /// Crates permitted to define and forward storage backend feature selection.
-pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 8] = [
+pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 6] = [
     STORAGE_CRATE,
-    "bitcoin-rs-chain",
     CHAINSTATE_CRATE,
     "bitcoin-rs-utxo",
-    "bitcoin-rs-p2p",
     "bitcoin-rs-index",
     NODE_CRATE,
     BIN_CRATE,
@@ -64,21 +62,17 @@ pub(crate) const BACKEND_FORWARDING_CRATES: [&str; 8] = [
 /// table cannot drift silently.
 pub(crate) fn approved_layer(crate_name: &str) -> u8 {
     match crate_name {
-        "bitcoin-rs-primitives"
-        | "bitcoin-rs-script"
-        | "bitcoin-rs-consensus"
-        | "bitcoin-rs-trace" => 0,
+        "bitcoin-rs-primitives" | "bitcoin-rs-script" | "bitcoin-rs-consensus" => 0,
         STORAGE_CRATE => 1,
         "bitcoin-rs-chain" | CHAINSTATE_CRATE | "bitcoin-rs-utxo" | "bitcoin-rs-p2p"
         | "bitcoin-rs-mempool" | "bitcoin-rs-index" | "bitcoin-rs-mining" => 2,
         RPC_CRATE => 3,
-        NODE_CRATE | BIN_CRATE | "bitcoin-rs-e2e" => 4,
+        NODE_CRATE | BIN_CRATE | "bitcoin-rs-e2e" | "bitcoin-rs-storage-footprint" => 4,
         other => panic!("unclassified workspace crate `{other}`: add it to the layer table"),
     }
 }
 
 /// A normal or build workspace dependency, before dev-feature unification.
-#[derive(Clone, Debug)]
 struct FeatureDependency {
     name: String,
     alias: String,
@@ -87,16 +81,15 @@ struct FeatureDependency {
 }
 
 /// Parsed workspace dependency graph used by the gates.
-#[derive(Clone, Debug)]
 pub(crate) struct WorkspaceGraph {
     /// Normal `bitcoin-rs-*` dependencies per crate.
-    pub normal_deps: BTreeMap<String, Vec<String>>,
+    normal_deps: BTreeMap<String, Vec<String>>,
     /// Storage engine dependencies per crate.
-    pub engine_deps: BTreeMap<String, Vec<String>>,
+    engine_deps: BTreeMap<String, Vec<String>>,
     /// External ZMQ implementation dependencies per crate.
-    pub zmq_deps: BTreeMap<String, Vec<String>>,
+    zmq_deps: BTreeMap<String, Vec<String>>,
     /// Cargo feature implies per crate.
-    pub features: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    features: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     /// Feature selections on normal/build workspace edges, excluding dev fixtures.
     production_deps: BTreeMap<String, Vec<FeatureDependency>>,
     /// Number of workspace packages seen in the metadata.
@@ -529,7 +522,7 @@ impl WorkspaceGraph {
         let mut color: BTreeMap<&str, u8> = BTreeMap::new();
         let mut stack: Vec<String> = Vec::new();
 
-        #[allow(clippy::items_after_statements)]
+        #[expect(clippy::items_after_statements)]
         fn visit<'a>(
             graph: &'a WorkspaceGraph,
             color: &mut BTreeMap<&'a str, u8>,

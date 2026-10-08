@@ -52,7 +52,7 @@ impl FeeWeight {
         Ok(Self { fee, weight })
     }
 
-    pub(crate) fn rate_cmp(self, other: Self) -> Ordering {
+    fn rate_cmp(self, other: Self) -> Ordering {
         // validate/checked_add establish the product bound before sorting.
         (self.fee * i128::from(other.weight)).cmp(&(other.fee * i128::from(self.weight)))
     }

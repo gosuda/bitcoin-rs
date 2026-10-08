@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 
 use anyhow::Result;
@@ -23,14 +21,16 @@ pub(crate) struct ShutdownHandler {
 
 impl ShutdownHandler {
     /// Installs SIGINT/SIGTERM handling on a dedicated forwarding thread.
-    pub(crate) fn install(shutdown: Arc<AtomicBool>, shutdown_tx: Sender<()>) -> Result<Self> {
+    pub(crate) fn install(
+        request_shutdown: impl Fn() + Send + 'static,
+        shutdown_tx: Sender<()>,
+    ) -> Result<Self> {
         let mut signals = Signals::new([SIGTERM, SIGINT])?;
         let handle = signals.handle();
         let thread = thread::spawn(move || {
             for _signal in signals.forever() {
                 // First signal flips the flag; later ones only re-wake.
-                let _ =
-                    shutdown.compare_exchange(false, true, Ordering::Release, Ordering::Acquire);
+                request_shutdown();
                 if shutdown_tx.try_send(()).is_err() {
                     break;
                 }
@@ -71,36 +71,9 @@ impl Drop for ShutdownHandler {
     }
 }
 
-/// Per-thread install/close counters for the lifecycle regressions.
-///
-/// Installs and closes both happen on the lifecycle owner's thread, so the
-/// counters measure exactly the handler a test installed — even while other
-/// tests run their own lifecycles concurrently.
 #[cfg(test)]
-pub(crate) mod testing {
-    use core::cell::Cell;
-
-    thread_local! {
-        static INSTALLED: Cell<usize> = const { Cell::new(0) };
-        static CLOSED: Cell<usize> = const { Cell::new(0) };
-    }
-
-    pub(crate) fn note_installed() {
-        INSTALLED.with(|count| count.set(count.get() + 1));
-    }
-
-    pub(crate) fn note_closed() {
-        CLOSED.with(|count| count.set(count.get() + 1));
-    }
-
-    pub(crate) fn installed_total() -> usize {
-        INSTALLED.with(Cell::get)
-    }
-
-    pub(crate) fn closed_total() -> usize {
-        CLOSED.with(Cell::get)
-    }
-}
+#[path = "../tests/unit/signal_counters.rs"]
+pub(crate) mod testing;
 
 #[cfg(test)]
 mod tests {
@@ -112,7 +85,7 @@ mod tests {
     #[test]
     fn close_and_join_releases_the_forwarding_thread() -> Result<()> {
         let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded::<()>(1);
-        let mut handler = ShutdownHandler::install(Arc::new(AtomicBool::new(false)), shutdown_tx)?;
+        let mut handler = ShutdownHandler::install(|| {}, shutdown_tx)?;
         assert!(handler.thread.is_some(), "the forwarding thread is running");
 
         handler.close_and_join()?;
@@ -135,8 +108,7 @@ mod tests {
 
         for _ in 0..2 {
             let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded::<()>(1);
-            let mut handler =
-                ShutdownHandler::install(Arc::new(AtomicBool::new(false)), shutdown_tx)?;
+            let mut handler = ShutdownHandler::install(|| {}, shutdown_tx)?;
             handler.close_and_join()?;
         }
 

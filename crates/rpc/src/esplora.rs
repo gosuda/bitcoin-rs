@@ -1,12 +1,10 @@
 //! Esplora HTTP projections over confirmed indexes and the live mempool.
-#![allow(
+#![expect(
     clippy::as_conversions,
     clippy::cast_precision_loss,
-    clippy::map_unwrap_or,
     clippy::needless_borrow,
     clippy::needless_pass_by_value,
     clippy::redundant_closure_for_method_calls,
-    clippy::semicolon_if_nothing_returned,
     clippy::significant_drop_in_scrutinee,
     clippy::unnecessary_semicolon
 )]
@@ -103,7 +101,7 @@ fn strip_dir<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -114,7 +112,7 @@ mod tests {
     use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_chain::NodeStatus;
     use bitcoin_rs_index::ScriptHash;
-    use bitcoin_rs_mempool::MempoolEntry;
+    use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry, MempoolObserver, MutationEnvelope};
     use bitcoin_rs_primitives::encode::double_sha256;
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
@@ -175,17 +173,7 @@ mod tests {
         }
     }
 
-    struct SingleBlockSource {
-        height: u32,
-        hash: BlockHash,
-        body: Vec<u8>,
-    }
-
-    impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
-        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-            (height == self.height && hash == self.hash).then(|| self.body.clone())
-        }
-    }
+    use crate::test_support::BlockBodies;
 
     fn transaction(input: Option<OutPoint>, output: TxOut) -> Tx {
         Tx {
@@ -206,7 +194,7 @@ mod tests {
 
     /// Core's null outpoint: zero txid, `u32::MAX` vout.
     fn null_outpoint() -> OutPoint {
-        OutPoint::new(Txid::default(), u32::MAX)
+        OutPoint::null()
     }
 
     /// Folds txids into the block merkle root the consensus encoder builds,
@@ -252,7 +240,7 @@ mod tests {
         block
     }
 
-    fn transaction_with_funded_input(ctx: &Context) -> (Tx, Tx) {
+    fn transaction_with_funded_input(ctx: &Context, input_value: u64) -> (Tx, Tx) {
         // OP_TRUE: an anyone-can-spend funding script, so the broadcast
         // fixture's empty scriptSig satisfies script verification. The output
         // stays P2WPKH: standardness only allows known output templates.
@@ -261,7 +249,7 @@ mod tests {
         let funding = transaction(
             None,
             TxOut {
-                value: Amount::from_sat(10_000),
+                value: Amount::from_sat(input_value),
                 script_pubkey: spendable.clone().into(),
             },
         );
@@ -270,7 +258,7 @@ mod tests {
         changes.add(UtxoAdd::new(
             OutPoint::new(txid, 0),
             TxOut {
-                value: Amount::from_sat(10_000),
+                value: Amount::from_sat(input_value),
                 script_pubkey: spendable.into(),
             },
             false,
@@ -286,7 +274,7 @@ mod tests {
             transaction(
                 Some(OutPoint::new(txid, 0)),
                 TxOut {
-                    value: Amount::from_sat(9_000),
+                    value: Amount::from_sat(input_value - 1_000),
                     script_pubkey: script.into(),
                 },
             ),
@@ -545,10 +533,8 @@ mod tests {
         let txid = transaction.txid();
         let mut context = Context::new();
         context.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
-        context.chain.block_body_source = Some(Arc::new(SingleBlockSource {
-            height: 0,
-            hash: record.hash,
-            body: consensus_bytes(&block),
+        context.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, record.hash, consensus_bytes(&block))],
         }));
         context.chain.add_block(record);
         let tip = {
@@ -600,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn bitcoin_esplora_surface_matches_documented_routes_and_content_types()
     -> Result<(), Box<dyn std::error::Error>> {
         let (handler, transaction, block, address) = contract_fixture()?;
@@ -710,7 +696,8 @@ mod tests {
             );
         }
 
-        let (broadcast_transaction, _) = transaction_with_funded_input(handler.context().as_ref());
+        let (broadcast_transaction, _) =
+            transaction_with_funded_input(handler.context().as_ref(), 10_000);
         let raw = consensus_bytes(&broadcast_transaction).to_lower_hex_string();
         let broadcast = route_post(&handler, "/tx", raw.as_bytes());
         assert_eq!(
@@ -730,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn bitcoin_esplora_representations_match_the_documented_schemas()
     -> Result<(), Box<dyn std::error::Error>> {
         fn keys(value: &Value) -> std::collections::BTreeSet<&str> {
@@ -1044,25 +1031,11 @@ mod tests {
     /// `[b2, b1, genesis]` and `a1` is off it. Any other combination straddles
     /// two publications.
     #[test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn block_status_and_block_list_never_straddle_two_applied_branches()
     -> Result<(), Box<dyn std::error::Error>> {
         use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
         use bitcoin_rs_primitives::Header;
-
-        /// Serves every fixture block's body by identity, so the block list
-        /// can project each record.
-        struct BranchBodies {
-            bodies: Vec<(u32, BlockHash, Vec<u8>)>,
-        }
-        impl bitcoin_rs_chain::BlockBodySource for BranchBodies {
-            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-                self.bodies
-                    .iter()
-                    .find(|(h, k, _)| *h == height && *k == hash)
-                    .map(|(_, _, body)| body.clone())
-            }
-        }
 
         let header = |prev: BlockHash, nonce: u32, time: u32| Header {
             version: 1,
@@ -1126,7 +1099,7 @@ mod tests {
             bodies.push((record.height, record.hash, consensus_bytes(&block)));
             context.chain.add_block(record);
         }
-        context.chain.block_body_source = Some(Arc::new(BranchBodies { bodies }));
+        context.chain.block_body_source = Some(Arc::new(BlockBodies { bodies }));
         context.chain.applied_tip.store(Some(Arc::clone(&a_tip)));
 
         let ctx = Arc::new(context);
@@ -1309,10 +1282,159 @@ mod tests {
         assert_eq!(route_post(&handler, "/txs/package", b"[]").status, 404);
     }
 
+    #[derive(Default)]
+    struct BroadcastObserver(parking_lot::Mutex<Vec<MutationEnvelope>>);
+
+    impl MempoolObserver for BroadcastObserver {
+        fn on_mutation(&self, envelope: &MutationEnvelope) {
+            self.0.lock().push(envelope.clone());
+        }
+    }
+
+    /// API-10: both directories identify Esplora at the existing publication
+    /// boundary; successful retries publish no second acceptance.
+    #[test]
+    fn broadcast_preserves_esplora_origin_and_idempotence() {
+        for path in ["/api/tx", "/esplora/tx"] {
+            let observer = Arc::new(BroadcastObserver::default());
+            let ctx = Arc::new(Context::new_with_mempool_observer(observer.clone()));
+            let (transaction, _) = transaction_with_funded_input(&ctx, 10_000);
+            let handler = Handler::new(Arc::clone(&ctx));
+            let raw = consensus_bytes(&transaction).to_lower_hex_string();
+            let sequence = ctx.mempool.gateway.read().sequence_number();
+            for _ in 0..2 {
+                let response = dispatch_post(&handler, path, format!("  {raw}\n").as_bytes());
+                assert_eq!(response.status, 200, "{path}");
+                assert_eq!(response.content_type, "text/plain");
+                assert_eq!(response.body, transaction.txid().to_string().as_bytes());
+            }
+            let events = observer.0.lock();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].origin, AdmissionOrigin::Esplora);
+            assert_eq!(ctx.mempool.gateway.read().sequence_number(), sequence + 1);
+            assert!(
+                ctx.mempool
+                    .gateway
+                    .read()
+                    .contains_txid(&transaction.txid())
+            );
+        }
+    }
+
+    /// The HTTP rejection dialect and lack of publication are observable
+    /// contracts, including malformed input and a missing UTXO.
+    #[test]
+    fn broadcast_rejections_are_400_without_mutation() {
+        for path in ["/api/tx", "/esplora/tx"] {
+            let observer = Arc::new(BroadcastObserver::default());
+            let ctx = Arc::new(Context::new_with_mempool_observer(observer.clone()));
+            let handler = Handler::new(Arc::clone(&ctx));
+            let (mut transaction, _) = transaction_with_funded_input(&ctx, 10_000);
+            transaction.inputs[0].previous_output.vout = 1;
+            let missing = consensus_bytes(&transaction).to_lower_hex_string();
+            transaction.inputs[0].previous_output.vout = 0;
+            transaction.inputs.push(transaction.inputs[0].clone());
+            let duplicate = consensus_bytes(&transaction).to_lower_hex_string();
+            let sequence = ctx.mempool.gateway.read().sequence_number();
+            for (body, reason) in [
+                (b"\xff".as_slice(), "transaction body must be UTF-8 hex"),
+                (
+                    b"zz".as_slice(),
+                    "TX decode failed. Make sure the tx has at least one input.",
+                ),
+                (
+                    b"00".as_slice(),
+                    "TX decode failed. Make sure the tx has at least one input.",
+                ),
+                (missing.as_bytes(), "bad-txns-inputs-missingorspent"),
+                (duplicate.as_bytes(), "consensus-verification-failed"),
+            ] {
+                let response = dispatch_post(&handler, path, body);
+                assert_eq!(response.status, 400, "{path}");
+                assert_eq!(response.content_type, "text/plain");
+                assert_eq!(response.body, reason.as_bytes());
+            }
+            assert!(ctx.mempool.gateway.read().is_empty());
+            assert_eq!(ctx.mempool.gateway.read().sequence_number(), sequence);
+            assert!(observer.0.lock().is_empty());
+        }
+    }
+
+    /// The 0.1 BTC/kvB HTTP cap is fixed. RPC's zero override still opts
+    /// out only for that RPC call, and the observer receives its RPC origin.
+    #[test]
+    fn broadcast_fee_ceiling_is_independent_of_rpc_overrides() {
+        use sonic_rs::JsonValueTrait as _;
+        for path in ["/api/tx", "/esplora/tx"] {
+            let observer = Arc::new(BroadcastObserver::default());
+            let ctx = Arc::new(Context::new_with_mempool_observer(observer.clone()));
+            let (mut transaction, _) = transaction_with_funded_input(&ctx, 100_000_000);
+            transaction.outputs[0].value = Amount::from_sat(1_000_000);
+            let handler = Handler::new(Arc::clone(&ctx));
+            let raw = consensus_bytes(&transaction).to_lower_hex_string();
+            let response = dispatch_post(&handler, path, raw.as_bytes());
+            assert_eq!(response.status, 400);
+            assert_eq!(response.body, b"invalid params: max-fee-exceeded");
+            assert!(ctx.mempool.gateway.read().is_empty());
+            assert!(observer.0.lock().is_empty());
+            let default_error = handler
+                .dispatch("sendrawtransaction", &sonic_rs::json!([raw]))
+                .expect_err("RPC still enforces its default maximum");
+            assert_eq!(default_error.code(), crate::RpcError::INVALID_PARAMS);
+            let accepted = handler
+                .dispatch("sendrawtransaction", &sonic_rs::json!([raw, 0]))
+                .expect("RPC zero fee cap opts out");
+            assert_eq!(
+                accepted.as_str(),
+                Some(transaction.txid().to_string().as_str())
+            );
+            let events = observer.0.lock();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].origin, AdmissionOrigin::Rpc);
+            drop(events);
+
+            let (mut next, _) = transaction_with_funded_input(&ctx, 200_000_000);
+            next.outputs[0].value = Amount::from_sat(1_000_000);
+            let next_raw = consensus_bytes(&next).to_lower_hex_string();
+            let refused = dispatch_post(&handler, path, next_raw.as_bytes());
+            assert_eq!(
+                refused.status, 400,
+                "RPC override cannot change the HTTP cap"
+            );
+            assert_eq!(observer.0.lock().len(), 1);
+        }
+    }
+
+    /// Independent rust-bitcoin decoding supplies the wire vsize; this
+    /// fixture has no sigops, so that is also its policy vsize.
+    #[test]
+    fn broadcast_fee_ceiling_accepts_equality_and_refuses_one_sat_above() {
+        for above in [0, 1] {
+            let ctx = Arc::new(Context::new());
+            let (mut transaction, _) = transaction_with_funded_input(&ctx, 100_000_000);
+            let reference: bitcoin::Transaction =
+                bitcoin::consensus::deserialize(&consensus_bytes(&transaction))
+                    .expect("independently decode fixture");
+            let maximum_fee = u64::try_from(reference.vsize()).expect("vsize fits u64") * 10_000;
+            transaction.outputs[0].value = Amount::from_sat(100_000_000 - maximum_fee - above);
+            let handler = Handler::new(Arc::clone(&ctx));
+            let raw = consensus_bytes(&transaction).to_lower_hex_string();
+            let response = route_post(&handler, "/tx", raw.as_bytes());
+            assert_eq!(response.status, if above == 0 { 200 } else { 400 });
+            assert_eq!(
+                ctx.mempool
+                    .gateway
+                    .read()
+                    .contains_txid(&transaction.txid()),
+                above == 0
+            );
+        }
+    }
+
     #[test]
     fn broadcast_transaction_is_immediately_visible_as_unconfirmed() {
         let mut ctx = Context::new();
-        let (transaction, funding) = transaction_with_funded_input(&ctx);
+        let (transaction, funding) = transaction_with_funded_input(&ctx, 10_000);
         ctx.indexes.esplora_tx_index = Some(Arc::new(StaticTxIndex::new(funding)));
         let ctx = Arc::new(ctx);
         let txid = transaction.txid();
@@ -1803,10 +1925,8 @@ mod tests {
         };
         let stale_record = bitcoin_rs_index::block_log::BlockRecord::from_block(1, &stale_block);
         let mut ctx = Context::new();
-        ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
-            height: 1,
-            hash: stale_record.hash,
-            body: consensus_bytes(&stale_block),
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(1, stale_record.hash, consensus_bytes(&stale_block))],
         }));
         ctx.chain.add_block(stale_record.clone());
         {

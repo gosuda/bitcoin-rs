@@ -49,7 +49,7 @@ fn answer_requests(
 /// afterwards. The replacements must be driven into header sync past the
 /// stuck tip and serve the requeued bodies, so the apply frontier advances.
 #[test]
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn replacements_carry_frontier_after_serving_peer_timeouts()
 -> Result<(), Box<dyn std::error::Error>> {
     // Header tip at 6, bodies for 1..=6; the public tip sits at 8, two

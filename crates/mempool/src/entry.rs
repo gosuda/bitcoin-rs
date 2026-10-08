@@ -126,12 +126,6 @@ impl MempoolEntry {
         signed_fee_rate(self.modified_fee(), u64::from(self.vsize))
     }
 
-    /// Actual ancestor package fee rate in sat/kvB.
-    #[must_use]
-    pub const fn ancestor_fee_rate(&self) -> u64 {
-        fee_rate(self.ancestor_fee, self.ancestor_size)
-    }
-
     /// Modified ancestor package fee rate in sat/kvB.
     #[must_use]
     pub(crate) fn modified_ancestor_fee_rate(&self) -> i128 {
@@ -139,12 +133,6 @@ impl MempoolEntry {
             i128::from(self.ancestor_fee) + self.ancestor_fee_delta,
             self.ancestor_size,
         )
-    }
-
-    /// Actual descendant package fee rate in sat/kvB.
-    #[must_use]
-    pub const fn descendant_fee_rate(&self) -> u64 {
-        fee_rate(self.descendant_fee, self.descendant_size)
     }
 
     /// Returns whether this transaction signals BIP-125 replaceability.
@@ -280,7 +268,7 @@ mod wire_metadata_tests {
                 TxIn {
                     previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x22; 32])), 7),
                     script_sig: Script::new(),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::new(),
                 },
             ],

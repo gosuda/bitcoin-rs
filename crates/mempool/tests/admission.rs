@@ -88,7 +88,7 @@ fn tx_one_input(
 ) -> Tx {
     Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: prevout,
             script_sig: Script::from_bytes(script_sig),
@@ -331,18 +331,18 @@ fn overlay_resolved_parent_sigops_trigger_standard_limit() -> Result<(), Box<dyn
     // is non-empty and passes the empty-prevouts refusal.
     let child = Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![
             TxIn {
                 previous_output: OutPoint::new(parent_txid, 0),
                 script_sig: Script::from_bytes(bitcoin_rs_script::push_data(&redeem)),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             },
             TxIn {
                 previous_output: outpoint(6, 0),
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             },
         ],
@@ -460,7 +460,7 @@ fn v3_sibling_eviction_with_empty_direct_conflicts_admits_through_the_replacemen
     // empty witness.
     let parent = Tx {
         version: 3,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: outpoint(20, 0),
             script_sig: Script::new(),

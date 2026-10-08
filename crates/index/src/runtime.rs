@@ -32,7 +32,7 @@ use crate::{
 
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, OutPoint, Tx, Txid, deserialize};
 
-use crate::block_log::{BlockLog, record_at_height};
+use crate::block_log::{BlockLogReader, record_at_height};
 use crate::capabilities::{
     CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource, derived_index_status,
 };
@@ -91,7 +91,8 @@ pub use startup::open_derived_index_store_on_worker;
 
 pub use capability::DerivedIndexCapability;
 use query::IndexProgress;
-pub use query::{DerivedIndexQueryEngine, IndexBlockSource, QueryEngineLive};
+pub(crate) use query::QueryEngineLive;
+pub use query::{DerivedIndexQueryEngine, IndexBlockSource};
 
 /// Shared wake/revision/health state owned by `NodeState` and referenced by
 /// `Chainstate`, the worker thread, and the query engine.
@@ -120,20 +121,20 @@ impl DerivedIndexRuntime {
     }
 
     /// Publishes the reconciliation phase. Only the worker thread writes it.
-    pub fn publish_phase(&self, phase: ReconcilePhase) {
+    pub(crate) fn publish_phase(&self, phase: ReconcilePhase) {
         if **self.phase.load() != phase {
             self.phase.store(Arc::new(phase));
         }
     }
 
     /// Publishes `leg` for `capabilities`, leaving the other legs as they are.
-    pub fn publish_leg(&self, capabilities: IndexCapabilities, leg: ReconcileLeg) {
+    pub(crate) fn publish_leg(&self, capabilities: IndexCapabilities, leg: ReconcileLeg) {
         self.publish_phase(self.phase().with_leg(capabilities, leg));
     }
 
     /// Reads the published reconciliation phase.
     #[must_use]
-    pub fn phase(&self) -> ReconcilePhase {
+    pub(crate) fn phase(&self) -> ReconcilePhase {
         **self.phase.load()
     }
 
@@ -148,20 +149,20 @@ impl DerivedIndexRuntime {
     }
 
     /// Marks the worker as failed with an explanatory message.
-    pub fn publish_failed(&self, message: impl Into<CompactString>) {
+    pub(crate) fn publish_failed(&self, message: impl Into<CompactString>) {
         *self.failure_message.write() = Some(message.into());
         self.failed.store(true, Ordering::Release);
     }
 
     /// Reads the wake revision.
     #[must_use]
-    pub fn revision(&self) -> u64 {
+    pub(crate) fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
 
     /// Reports whether shutdown or failure was published.
     #[must_use]
-    pub fn should_stop(&self) -> bool {
+    pub(crate) fn should_stop(&self) -> bool {
         self.shutdown.load(Ordering::Acquire) || self.failed.load(Ordering::Acquire)
     }
 
@@ -173,7 +174,7 @@ impl DerivedIndexRuntime {
 
     /// Reads the published failure message.
     #[must_use]
-    pub fn failure_message(&self) -> Option<CompactString> {
+    pub(crate) fn failure_message(&self) -> Option<CompactString> {
         self.failure_message.read().clone()
     }
 }
@@ -309,7 +310,7 @@ impl Generation {
 
     /// Reads the generation identifier.
     #[must_use]
-    pub fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> u64 {
         self.id
     }
 
@@ -405,7 +406,7 @@ pub struct DerivedIndexOpenSpec {
     /// Opens the durable store inside `dir`. Concrete backend construction
     /// stays with the node's storage composition; the runtime only calls the
     /// closure on its worker thread.
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     pub open_store:
         Arc<dyn Fn(&Path) -> Result<OpenDerivedIndex, DerivedIndexWorkerError> + Send + Sync>,
     /// Authoritative UTXO set used to seed and resolve the compact live view.
@@ -425,7 +426,7 @@ pub struct DerivedIndexWorker {
     runtime: Arc<DerivedIndexRuntime>,
     join_handle: Option<JoinHandle<()>>,
     /// Publication token; revoked on abandonment.
-    pub generation: Option<Generation>,
+    pub generation: Generation,
     /// Canonical namespace key for poisoning on abandonment.
     namespace_key: Option<PathBuf>,
     /// Set by `finish_worker` when this worker abandoned its backend open;
@@ -437,11 +438,11 @@ pub struct DerivedIndexWorker {
 /// Result of opening the txindex store: writer, reader, and batch limits.
 pub struct OpenDerivedIndex {
     /// Fenced durable writer.
-    pub writer: Arc<dyn TxIndexWriter>,
+    pub(crate) writer: Arc<dyn TxIndexWriter>,
     /// Snapshot-capable reader for the query engine.
-    pub reader: Arc<dyn crate::IndexReader>,
+    pub(crate) reader: Arc<dyn crate::IndexReader>,
     /// Batch limits selected by the composing backend.
-    pub batch_limits: PreparedBatchLimits,
+    pub(crate) batch_limits: PreparedBatchLimits,
 }
 
 /// Sink for index-ahead rollback evidence.
@@ -517,7 +518,7 @@ impl crate::reconcile::ChainCursorSource for TestChainCursor {
 pub(crate) struct RecordedIndexAhead {
     /// One entry per call: `(capability, index_height, tip_height,
     /// tip_hash_be, index_hash_be, depth, unix_secs)`.
-    #[allow(clippy::type_complexity)]
+    #[expect(clippy::type_complexity)]
     pub(crate) calls: Mutex<Vec<(String, u32, u32, String, String, u32, u64)>>,
 }
 
@@ -737,5 +738,5 @@ mod query_tests;
 mod integration_tests;
 
 #[cfg(all(test, feature = "fjall"))]
-#[allow(clippy::expect_used, clippy::panic)]
+#[expect(clippy::expect_used, clippy::panic)]
 mod recovery_tests;

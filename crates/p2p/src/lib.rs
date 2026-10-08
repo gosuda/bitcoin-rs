@@ -2,27 +2,27 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
 /// Out-of-order inbound block staging bounded by the download window budget.
-pub mod block_stager;
+pub(crate) mod block_stager;
 /// Active-chain `getheaders` / `getdata` serving.
-pub mod chain_query;
+pub(crate) mod chain_query;
 /// BIP152 compact-block reconstruction: bounded per-peer pending state.
 pub mod compact_blocks;
 /// Bitcoin Core P2P compatibility inventory: pinned reference and command set.
 pub mod compat;
 /// Per-connection identity and cancellation.
-pub mod connection;
+pub(crate) mod connection;
 /// Per-connection traffic counters.
-pub mod counters;
+pub(crate) mod counters;
 /// Inbound message dispatcher.
 pub mod dispatch;
 /// Block download window, peer-assignment, stall, and scheduling policy.
 pub mod download_window;
 /// Peer finite-state machine.
-pub mod fsm;
+pub(crate) mod fsm;
 /// Version/verack negotiation helpers.
 pub mod handshake;
 /// Inbound block payloads with preserved wire bytes.
-pub mod inbound;
+pub(crate) mod inbound;
 /// Inventory relay helpers.
 pub mod inv;
 /// Inbound accept loop, outbound dial, and their shared start-epoch wiring.
@@ -31,56 +31,50 @@ pub mod listener;
 /// Bitcoin Core `net:*` tracepoint payload mapping.
 mod net_trace;
 
-/// Peer state and peer manager types.
-pub mod peer;
+/// Peer state and DNS resolution types.
+pub(crate) mod peer;
 /// Peer metadata published after a successful handshake.
-pub mod peer_info;
+pub(crate) mod peer_info;
 /// Single owner of live peer sessions: leases and their handshake metadata.
-pub mod peer_table;
+pub(crate) mod peer_table;
 /// Runtime owner for P2P control state and workers.
-pub mod service;
+pub(crate) mod service;
 /// Peer TCP socket options: `TCP_NODELAY`, blocking I/O, poll timeouts.
-pub mod socket;
+pub(crate) mod socket;
 /// Manual IP subnet banning primitives.
 pub mod subnet;
 /// Block-download executor driving the applied-chain [`sync::SyncChain`] seam.
 pub mod sync;
 /// Bounded transaction announcements and their peer relay worker.
-pub mod tx_relay;
+pub(crate) mod tx_relay;
 /// Bitcoin P2P wire codec.
 pub mod wire;
 /// BIP339 wtxid-relay state.
-pub mod wtxid;
+pub(crate) mod wtxid;
 
+pub(crate) use block_stager::BlockStager;
 pub use chain_query::ActiveChainQuery;
 pub use compact_blocks::{CompactBlockHints, Reconstruction};
-pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, Command, CommandStatus, PINNED_CORE_VERSION};
-pub use connection::{ConnectionId, PeerLease, PeerSource, ReadyPeer};
+pub use compat::{COMMANDS, CORE_UNTYPED_COMMANDS, PINNED_CORE_VERSION};
+pub use connection::{ConnectionId, PeerLease, PeerSource};
 pub use counters::{CountingStream, PeerCounters};
 pub use dispatch::{ChainQuery, InventoryServing, TxInventory};
 pub use inbound::{InboundBlock, InboundHeaders, InboundTx};
 pub use inv::request_missing_parents;
 pub use listener::ListenerExtras;
-pub use peer::{
-    DnsResolver, MAX_BLOCK_SERIALIZED_SIZE_USIZE, NetworkActivity, Peer, PeerManager, PeerState,
-    SystemDnsResolver,
-};
+pub use peer::{CompactBlockNegotiation, NetworkActivity, Peer, PeerCapabilities, PeerState};
 pub use peer_info::{PeerInfo, PeerRole, service_flag_names};
 pub use peer_table::{PeerSession, PeerTable};
 pub use service::{
-    OutboundDial, P2pControlError, P2pJoinError, P2pService, P2pServiceConfig, P2pServiceError,
-    apply_network_active,
+    BannedReader, OutboundDial, P2pControlError, P2pJoinError, P2pService, P2pServiceConfig,
+    P2pServiceError,
 };
 pub use subnet::{BannedSubnet, IpSubnet, SubnetParseError};
 pub use tx_relay::{
     DEFAULT_TX_RELAY_QUEUE_CAPACITY, LocalTxRelayObserver, PeerRelaySink, RelayOutcome,
-    RelayRequest, RelaySink, TxRelayQueue, drain_relay_queue, spawn_tx_relay_worker,
+    RelayRequest, RelaySink, TxRelayQueue, spawn_tx_relay_worker,
 };
 pub use wire::{Message, PeerError};
+pub use wtxid::WtxidRelayState;
 
-pub use block_stager::{BlockStager, DrainedBlock, DroppedBlock, StagedBlock};
-pub use download_window::{
-    BlameReason, BlockDownloadPolicy, BlockedContext, BlockedDecision, DownloadWindow,
-    FanoutCandidate, RejectDelivery, SyncBudget, SyncPeer, SyncPeerSelection,
-    configure_request_mode, default_sync_budget, statically_fanout_eligible,
-};
+pub use download_window::default_sync_budget;

@@ -8,32 +8,32 @@
 use bitcoin_rs_chain::{
     BlockTree, ChainError, candidate_version, header_sync, node::NodeId, softfork_state,
 };
-use bitcoin_rs_consensus::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
+use bitcoin_rs_consensus::locktime_cutoff;
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
 /// Contextual facts for the block that would extend `previous_tip_id`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MiningChainContext {
     /// Parent header hash in consensus little-endian storage order.
-    pub previous_block_hash: Hash256,
+    pub(crate) previous_block_hash: Hash256,
     /// Height the candidate would have.
-    pub height: u32,
+    pub(crate) height: u32,
     /// Versionbits candidate version: top bits set plus every `Started` or
     /// `LockedIn` deployment bit.
-    pub version: i32,
+    pub(crate) version: i32,
     /// Compact target the candidate's nBits must equal.
-    pub bits: CompactTarget,
+    pub(crate) bits: CompactTarget,
     /// Earliest timestamp the candidate may carry: previous-tip MTP + 1, or,
     /// at a BIP94 adjustment boundary, the higher of that and the parent's
     /// timestamp minus the timewarp allowance
     /// ([`header_sync::minimum_candidate_time`]).
-    pub min_time: u32,
+    pub(crate) min_time: u32,
     /// Median time past of the previous tip over the BIP113 window.
-    pub prev_median_time_past: u32,
+    pub(crate) prev_median_time_past: u32,
     /// Whether CSV (BIP68/112/113) is active at the candidate's height.
-    pub csv_active: bool,
+    pub(crate) csv_active: bool,
     /// Whether Segwit (BIP141/143) is active at the candidate's height.
-    pub segwit_active: bool,
+    pub(crate) segwit_active: bool,
 }
 
 impl MiningChainContext {
@@ -61,11 +61,11 @@ impl MiningChainContext {
                 parent: previous_tip_id,
             })?;
         let softfork = softfork_state(tree, network, Some(previous_tip_id), height);
-        let prev_median_time_past = tree
-            .median_time_past_at(previous_tip_id, MEDIAN_TIME_PAST_WINDOW)
-            .ok_or(ChainError::UnknownNode {
-                id: previous_tip_id,
-            })?;
+        let prev_median_time_past =
+            tree.median_time_past_at(previous_tip_id)
+                .ok_or(ChainError::UnknownNode {
+                    id: previous_tip_id,
+                })?;
         let mut min_time = prev_median_time_past.saturating_add(1);
         // The chain owns the boundary predicate and its floor: the template
         // reads the same [`header_sync::minimum_candidate_time`] that
@@ -91,7 +91,7 @@ impl MiningChainContext {
 
     /// BIP113 locktime cutoff for a candidate carrying `candidate_time`.
     #[must_use]
-    pub const fn locktime_cutoff(&self, candidate_time: u32) -> u32 {
+    pub(crate) const fn locktime_cutoff(&self, candidate_time: u32) -> u32 {
         locktime_cutoff(self.csv_active, self.prev_median_time_past, candidate_time)
     }
 }

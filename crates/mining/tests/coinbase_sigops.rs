@@ -54,7 +54,7 @@ fn coinbase_sigops_match_consensus_cost_in_both_assembly_paths() -> TestResult {
                     )),
                     *expected,
                 );
-                assert_eq!(candidate.sigop_cost, *expected);
+                assert!(candidate.transactions.is_empty());
                 assert_eq!(
                     candidate.coinbase.outputs[0].script_pubkey.as_slice(),
                     payout
@@ -95,7 +95,6 @@ fn coinbase_and_admitted_package_costs_share_one_inclusive_limit() -> TestResult
         for assemble in ASSEMBLERS {
             let candidate = assemble(&sigop_limited(segwit_active, 12), &snapshot, &payout)?;
             assert_eq!(candidate.transactions.len(), 2);
-            assert_eq!(candidate.sigop_cost, 12);
             let actual_cost = candidate
                 .into_unsolved_block()?
                 .txs
@@ -104,15 +103,14 @@ fn coinbase_and_admitted_package_costs_share_one_inclusive_limit() -> TestResult
                 .collect::<Result<Vec<_>, _>>()?
                 .into_iter()
                 .sum::<u64>();
-            assert_eq!(actual_cost, candidate.sigop_cost);
+            assert_eq!(actual_cost, 12);
         }
         // The fee owner joins this high-fee child with its low-fee parent.
         // One less unit must exclude both, while ordered assembly must refuse.
         let limited = sigop_limited(segwit_active, 11);
         let selected = assemble_candidate(&limited, &snapshot, &payout)?;
         assert!(selected.transactions.is_empty());
-        assert_eq!(selected.fees, 0);
-        assert_eq!(selected.sigop_cost, 4);
+        assert_eq!(oracle_sigop_cost(&selected.coinbase)?, 4);
         assert!(matches!(
             assemble_ordered_candidate(&limited, &snapshot, &payout),
             Err(MiningError::CapacityExhausted { field: "sigops" })

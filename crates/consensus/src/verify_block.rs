@@ -57,20 +57,10 @@ pub fn verify_flags(
 }
 
 /// Context needed for block rules whose activation is height-dependent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct BlockRuleContext {
     /// Whether BIP141 segwit block rules are active for the candidate block.
     pub segwit_active: bool,
-}
-
-impl BlockRuleContext {
-    /// Conservative non-contextual mode: enforce checks from active softforks.
-    #[must_use]
-    pub const fn non_contextual() -> Self {
-        Self {
-            segwit_active: true,
-        }
-    }
 }
 
 /// Verifies non-contextual block rules that do not require a UTXO set.
@@ -80,7 +70,11 @@ pub fn verify_block_rules(block: &Block) -> Result<(), ConsensusError> {
     if facts.has_witness() {
         facts.or_insert_wtxids_from(&block.txs);
     }
-    verify_block_rules_precomputed(block, BlockRuleContext::non_contextual(), &facts)
+    // Conservative non-contextual mode: enforce checks from active softforks.
+    let context = BlockRuleContext {
+        segwit_active: true,
+    };
+    verify_block_rules_precomputed(block, context, &facts)
 }
 
 /// Verifies block rules from facts derived once for the supplied block.
@@ -181,15 +175,6 @@ pub fn block_merkle_root_matches_txids(block: &Block, txids: &[Txid]) -> bool {
         Some((root, _)) => block.header.merkle_root == root.into(),
         None => false,
     }
-}
-
-/// Returns `true` when any transaction input carries witness data (Core's
-/// `CBlock::HasWitness`).
-fn block_has_witness(block: &Block) -> bool {
-    block
-        .txs
-        .iter()
-        .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()))
 }
 
 /// Double-SHA256 over `left || right`, the Merkle parent of two nodes.
@@ -357,7 +342,7 @@ fn hash_avx2_parent_batches<T: Copy>(
 /// `wtxids` must contain one witness ID per block transaction in block order;
 /// computing them here would re-serialize and re-hash every transaction on a
 /// path the node can already serve from its parse-once view.
-pub(crate) fn witness_commitment(block: &Block) -> Option<&[u8]> {
+fn witness_commitment(block: &Block) -> Option<&[u8]> {
     block
         .txs
         .first()?
@@ -399,7 +384,7 @@ fn check_witness_malleation(
             return Ok(());
         }
     }
-    if block_has_witness(block) {
+    if block.txs.iter().any(Tx::has_witness) {
         return Err(ConsensusError::UnexpectedWitness);
     }
     Ok(())
@@ -424,8 +409,8 @@ pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool
 /// `segwit_active` must match the apply path's contextual derivation
 /// (`BlockRuleContext.segwit_active`) so the gate reproduces exact consensus
 /// semantics: pre-activation blocks with a commitment-like output are not
-/// required to carry a witness nonce, and witness data without a commitment
-/// is `unexpected-witness` only when segwit is active.
+/// required to carry a witness nonce, but witness data without an active
+/// commitment is `unexpected-witness` at either activation state.
 ///
 /// Merkle verification runs before witness verification in this binding gate;
 /// this is not the full block-rule error precedence. The witness verdict is
@@ -446,7 +431,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     verify_merkle_root_with_txids(block, &txids)?;
 
     let commitment = witness_commitment(block);
-    if commitment.is_none() && !block_has_witness(block) {
+    if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
         return Ok(());
     }
     // Early shape check: hoisted first branch of check_witness_malleation.
@@ -634,14 +619,14 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[1; 32])), 0),
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(1),
                 script_pubkey: Script::new(),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         };
         let block = Block {
             header: Header {
@@ -1194,16 +1179,16 @@ mod tests {
         Tx {
             version: 1,
             inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                previous_output: OutPoint::null(),
                 script_sig: Script::from_bytes(vec![1, 1]),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(50),
                 script_pubkey: Script::new(),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1213,14 +1198,14 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[2; 32])), 0),
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::from_stack(vec![vec![1; 32]]),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(1),
                 script_pubkey: Script::new(),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -1230,14 +1215,14 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), 0),
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(1),
                 script_pubkey: Script::new(),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         }
     }
 

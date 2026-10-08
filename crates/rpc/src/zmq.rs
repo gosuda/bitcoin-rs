@@ -40,7 +40,7 @@ pub enum ZmqTopic {
 }
 
 /// Default outbound queue limit for one ZMQ PUB endpoint.
-pub const DEFAULT_ZMQ_HWM: u32 = 1_000;
+const DEFAULT_ZMQ_HWM: u32 = 1_000;
 
 /// Configuration for one ZMQ PUB socket.
 ///
@@ -138,7 +138,7 @@ impl ZmqTopic {
 }
 
 /// Event published on Core's unified `sequence` topic.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum SequenceEvent {
     /// A block was connected.
     Connected(Hash256),
@@ -244,7 +244,7 @@ pub trait ZmqPublisher: Send + Sync + core::fmt::Debug {
 /// Default no-op implementation. All methods discard their input silently.
 ///
 /// Use this when ZMQ notifications are not configured.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Debug)]
 pub struct NoOpZmqPublisher;
 
 impl ZmqPublisher for NoOpZmqPublisher {
@@ -267,8 +267,6 @@ impl ZmqPublisher for NoOpZmqPublisher {
     fn publish_rawblock(&self, _bytes: &[u8]) {}
 
     fn publish_rawtx(&self, _bytes: &[u8]) {}
-
-    fn publish_sequence(&self, _event: SequenceEvent) {}
 }
 
 #[cfg(feature = "zmq")]
@@ -447,12 +445,12 @@ impl ZmqPublisher for SocketZmqPublisher {
     }
 
     fn publish_hashblock(&self, hash: Hash256) {
-        let body = hash_body_from_hash(hash);
+        let body = reversed_hash_body(hash.to_le_bytes());
         self.publish(ZmqTopic::HashBlock, &body);
     }
 
     fn publish_hashtx(&self, txid: Txid) {
-        let body = hash_body_from_txid(txid);
+        let body = reversed_hash_body(*txid.as_bytes());
         self.publish(ZmqTopic::HashTx, &body);
     }
 
@@ -469,11 +467,12 @@ impl ZmqPublisher for SocketZmqPublisher {
     }
 }
 
+/// Body frame for a `hashblock`/`hashtx`/`sequence` event: the hash or txid's
+/// natural byte order reversed for the wire.
 #[cfg(any(feature = "zmq", test))]
-pub(crate) fn hash_body_from_hash(hash: Hash256) -> [u8; 32] {
-    let mut body = hash.to_le_bytes();
-    body.reverse();
-    body
+fn reversed_hash_body(mut bytes: [u8; 32]) -> [u8; 32] {
+    bytes.reverse();
+    bytes
 }
 
 /// Body frame for a `sequence` topic event: the reversed hash/txid bytes and
@@ -481,30 +480,23 @@ pub(crate) fn hash_body_from_hash(hash: Hash256) -> [u8; 32] {
 /// as a little-endian u64. The transport's own 4-byte counter stays in its
 /// separate trailing frame.
 #[cfg(any(feature = "zmq", test))]
-pub(crate) fn sequence_payload(event: SequenceEvent) -> Vec<u8> {
+fn sequence_payload(event: SequenceEvent) -> Vec<u8> {
     match event {
         SequenceEvent::Added(txid, mempool_sequence)
         | SequenceEvent::Removed(txid, mempool_sequence) => {
             let mut body = Vec::with_capacity(41);
-            body.extend_from_slice(&hash_body_from_txid(txid));
+            body.extend_from_slice(&reversed_hash_body(*txid.as_bytes()));
             body.push(event.label());
             body.extend_from_slice(&mempool_sequence.to_le_bytes());
             body
         }
         SequenceEvent::Connected(hash) | SequenceEvent::Disconnected(hash) => {
             let mut body = Vec::with_capacity(33);
-            body.extend_from_slice(&hash_body_from_hash(hash));
+            body.extend_from_slice(&reversed_hash_body(hash.to_le_bytes()));
             body.push(event.label());
             body
         }
     }
-}
-
-#[cfg(any(feature = "zmq", test))]
-pub(crate) fn hash_body_from_txid(txid: Txid) -> [u8; 32] {
-    let mut body = *txid.as_bytes();
-    body.reverse();
-    body
 }
 
 #[cfg(any(feature = "zmq", test))]
@@ -599,7 +591,7 @@ mod tests {
         let mut expected = le;
         expected.reverse();
 
-        assert_eq!(hash_body_from_hash(hash), expected);
+        assert_eq!(reversed_hash_body(hash.to_le_bytes()), expected);
         assert_eq!(sequence_body(0x0102_0304), [0x04, 0x03, 0x02, 0x01]);
     }
 
@@ -724,7 +716,10 @@ mod tests {
                 Ok(frames) => {
                     assert_eq!(frames.len(), 3);
                     assert_eq!(frames[0].as_slice(), b"hashblock");
-                    assert_eq!(frames[1].as_slice(), hash_body_from_hash(hash).as_slice());
+                    assert_eq!(
+                        frames[1].as_slice(),
+                        reversed_hash_body(hash.to_le_bytes()).as_slice()
+                    );
                     assert_eq!(frames[2].len(), 4);
                     return Ok(());
                 }
@@ -774,9 +769,12 @@ mod tests {
         let disconnected = &received[1];
         assert_eq!(connected[0], b"sequence");
         assert_eq!(connected[1].len(), 33);
-        assert_eq!(connected[1][..32], hash_body_from_hash(hash));
+        assert_eq!(connected[1][..32], reversed_hash_body(hash.to_le_bytes()));
         assert_eq!(connected[1][32], b'C');
-        assert_eq!(disconnected[1][..32], hash_body_from_hash(hash));
+        assert_eq!(
+            disconnected[1][..32],
+            reversed_hash_body(hash.to_le_bytes())
+        );
         assert_eq!(disconnected[1][32], b'D');
         let connected_sequence = u32::from_le_bytes(connected[2].as_slice().try_into()?);
         let disconnected_sequence = u32::from_le_bytes(disconnected[2].as_slice().try_into()?);
@@ -881,7 +879,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::as_conversions)]
+#[expect(clippy::expect_used, clippy::as_conversions)]
 mod manifest_tests {
     use super::*;
 
@@ -1116,9 +1114,8 @@ mod manifest_tests {
     }
 
     #[test]
-    // Allow: end-to-end fan-out coverage in one readable sequence; splitting
+    // End-to-end fan-out coverage in one readable sequence; splitting
     // would scatter the arrange-act-assert across helpers with no reuse.
-    #[allow(clippy::too_many_lines)]
     fn composite_observer_fans_out_to_sequence_then_mining_wake() {
         use bitcoin_rs_mempool::{
             AdmissionOrigin, CompositeObserver, Mempool, MempoolGateway, MempoolLimits,

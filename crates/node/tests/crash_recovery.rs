@@ -6,10 +6,8 @@ use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Tx, TxIn, TxOut, Witness,
 };
-
-use sha2::{Digest, Sha256};
 
 use parking_lot::Mutex;
 
@@ -586,11 +584,11 @@ fn assert_tip(state: &NodeState, expected: &bitcoin_rs_chain::TipSnapshot) -> Re
 fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
     let coinbase = Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: Script::from_bytes(coinbase_height_push(height)?),
-            sequence: Sequence::from_consensus(u32::MAX),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
@@ -652,16 +650,11 @@ fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
             let mut pair = [0_u8; 64];
             pair[..32].copy_from_slice(&left);
             pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair));
+            next.push(bitcoin_rs_primitives::encode::double_sha256(&pair).to_le_bytes());
         }
         leaves = next;
     }
     Some(Hash256::from_le_bytes(&leaves[0]))
-}
-
-fn double_sha256(bytes: &[u8]) -> [u8; 32] {
-    let first = Sha256::digest(bytes);
-    Sha256::digest(first).into()
 }
 
 fn pow_met(bits: u32, hash: Hash256) -> bool {

@@ -12,7 +12,11 @@
 //! for a silently lost completion (armed by this harness alone); an observed
 //! persistence fault surfaces as `Err`, never as a durability completion.
 
-#![expect(clippy::expect_used, reason = "test assertions")]
+#![cfg_attr(
+    any(feature = "fjall", feature = "redb", feature = "rocksdb"),
+    expect(clippy::expect_used, reason = "test assertions")
+)]
+#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 
 use bitcoin_rs_storage::{
     BatchOp, BufferedWriteBatch, ColumnFamily, KvIter, KvSnapshot, KvStore, PersistFault,

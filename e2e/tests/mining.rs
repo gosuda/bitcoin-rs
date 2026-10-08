@@ -28,17 +28,14 @@ fn block_template_shape() -> Result<()> {
         template.str_field("target")?,
         "7fffff0000000000000000000000000000000000000000000000000000000000"
     );
-    for field in [
-        "curtime",
-        "mintime",
-        "noncerange",
-        "sigoplimit",
-        "sizelimit",
-        "weightlimit",
-        "version",
-    ] {
-        assert!(template.get(field).is_some(), "template lacks {field}");
-    }
+    assert_eq!(template.str_field("noncerange")?, "00000000ffffffff");
+    assert_eq!(template.u64_field("sigoplimit")?, 80_000);
+    assert_eq!(template.u64_field("sizelimit")?, 4_000_000);
+    assert_eq!(template.u64_field("weightlimit")?, 4_000_000);
+    assert!(
+        template.u64_field("mintime")? <= template.u64_field("curtime")?,
+        "mintime must not exceed curtime: {template}"
+    );
     let capabilities = template
         .get("capabilities")
         .and_then(Value::as_array)
@@ -52,76 +49,66 @@ fn block_template_shape() -> Result<()> {
     node.stop()
 }
 
-/// A template assembled offline grinds to valid proof-of-work and is
-/// accepted by `submitblock`, advancing the applied tip.
+/// A template assembled offline grinds to valid proof-of-work: its header is
+/// admitted by `submitheader`, the matching body then connects via
+/// `submitblock`, and the applied tip advances to it.
 #[test]
-fn template_assembly_and_submit() -> Result<()> {
+fn template_assembly_header_then_block() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     submit_genesis(&mut node)?;
     let _ = mine_bare_blocks(&mut node, 2)?;
 
     let template = node.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
     let block = assemble_block_from_template(&template, &op_true_script())?;
-    let result = node.rpc("submitblock", &json!([serialize_hex(&block)]))?;
-    assert!(result.is_null(), "submitblock: {result}");
+
+    let header = node.rpc("submitheader", &json!([serialize_hex(&block.header)]))?;
+    assert!(header.is_null(), "submitheader: {header}");
+    let body = node.rpc("submitblock", &json!([serialize_hex(&block)]))?;
+    assert!(body.is_null(), "body connects after header: {body}");
 
     assert_eq!(node.rpc("getblockcount", &json!([]))?, json!(3));
     assert_eq!(
         node.rpc("getbestblockhash", &json!([]))?,
         json!(block.block_hash().to_string())
     );
+
+    // Re-submitting an applied block is a duplicate, not an error, and
+    // genesis is always already known.
+    let tip_hex = node.rpc("getblock", &json!([block.block_hash().to_string(), 0]))?;
+    assert_eq!(
+        node.rpc("submitblock", &json!([tip_hex]))?,
+        json!("duplicate")
+    );
+    assert_eq!(
+        node.rpc("submitblock", &json!([serialize_hex(&genesis_block())]))?,
+        json!("duplicate")
+    );
     node.stop()
 }
 
-/// `submitblock` distinguishes decode failures, duplicates, and unknown
-/// parents.
+/// Malformed block/header hex and unmineable `generateblock` requests each
+/// carry Core's distinct error code.
 #[test]
-fn submitblock_failure_vocabulary() -> Result<()> {
+fn mining_rejections_carry_core_error_codes() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     submit_genesis(&mut node)?;
-    let _ = mine_bare_blocks(&mut node, 2)?;
 
-    let bad = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "submitblock", "params": ["deadbeef"]
-    }))?;
-    assert_eq!(bad["error"]["code"], json!(-22));
-
-    // Re-submitting the tip is a duplicate, not an error.
-    let tip = node.rpc("getbestblockhash", &json!([]))?;
-    let tip_hex = node.rpc("getblock", &json!([tip, 0]))?;
-    let dup = node.rpc("submitblock", &json!([tip_hex]))?;
-    assert_eq!(dup, json!("duplicate"), "resubmit tip: {dup}");
-
-    // Genesis resubmission is also a duplicate.
-    let genesis_hex = serialize_hex(&genesis_block());
-    let dup = node.rpc("submitblock", &json!([genesis_hex]))?;
-    assert_eq!(dup, json!("duplicate"));
-    node.stop()
-}
-
-/// `submitheader` admits a valid header ahead of the tip; the matching
-/// body then connects via `submitblock`.
-#[test]
-fn submitheader_then_block() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    submit_genesis(&mut node)?;
-    let _ = mine_bare_blocks(&mut node, 2)?;
-
-    let template = node.rpc("getblocktemplate", &json!([{"rules": ["segwit"]}]))?;
-    let block = assemble_block_from_template(&template, &op_true_script())?;
-    let header_hex = serialize_hex(&block.header);
-
-    let result = node.rpc("submitheader", &json!([header_hex]))?;
-    assert!(result.is_null(), "submitheader: {result}");
-
-    let body = node.rpc("submitblock", &json!([serialize_hex(&block)]))?;
-    assert!(body.is_null(), "body connects after header: {body}");
-    assert_eq!(node.rpc("getblockcount", &json!([]))?, json!(3));
-
-    let bad = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "submitheader", "params": ["00ff00"]
-    }))?;
-    assert_eq!(bad["error"]["code"], json!(-22));
+    let cases = [
+        ("submitblock", json!(["deadbeef"]), -22),
+        ("submitheader", json!(["00ff00"]), -22),
+        ("generateblock", json!(["not-a-descriptor", []]), -5),
+        (
+            "generateblock",
+            json!(["raw(51)", [format!("{:064x}", 0)]]),
+            -5,
+        ),
+    ];
+    for (method, params, code) in cases {
+        let reply = node.rpc_raw(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params
+        }))?;
+        assert_eq!(reply["error"]["code"], json!(code), "{method}: {reply}");
+    }
     node.stop()
 }
 
@@ -148,33 +135,6 @@ fn generatetoaddress_pays_address() -> Result<()> {
     node.stop()
 }
 
-/// `generateblock` fails for a malformed descriptor and for a listed
-/// txid that is not pooled.
-#[test]
-fn generateblock_rejections() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    submit_genesis(&mut node)?;
-
-    let bad_desc = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "generateblock",
-        "params": ["not-a-descriptor", []]
-    }))?;
-    assert!(
-        bad_desc.get("error").is_some(),
-        "bad descriptor: {bad_desc}"
-    );
-
-    let missing_tx = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 2, "method": "generateblock",
-        "params": ["raw(51)", ["0000000000000000000000000000000000000000000000000000000000000000"]]
-    }))?;
-    assert!(
-        missing_tx.get("error").is_some(),
-        "unknown txid: {missing_tx}"
-    );
-    node.stop()
-}
-
 /// Mining introspection reports tip height, difficulty, and a non-negative
 /// network hashrate estimate.
 #[test]
@@ -187,15 +147,14 @@ fn mining_info_and_hashps() -> Result<()> {
     assert_eq!(info.u64_field("blocks")?, 5);
     assert_eq!(info.str_field("chain")?, "regtest");
     assert_eq!(info.str_field("bits")?, "207fffff");
-    assert!(info.get("networkhashps").is_some());
-    assert!(info.get("difficulty").is_some());
     assert_eq!(info["next"]["height"], json!(6));
 
-    let hashps = node.rpc("getnetworkhashps", &json!([]))?;
-    let value = hashps
-        .as_f64()
-        .ok_or_else(|| Error::Assertion("getnetworkhashps not numeric".into()))?;
-    assert!(value >= 0.0);
+    // The two mining surfaces must report one estimate, not two.
+    assert_eq!(
+        info.field("networkhashps")?,
+        &node.rpc("getnetworkhashps", &json!([]))?,
+        "getmininginfo and getnetworkhashps disagree"
+    );
     node.stop()
 }
 

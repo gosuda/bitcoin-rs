@@ -142,8 +142,8 @@ fn bip341_binds_all_prevouts_and_the_transaction() {
     assert!(verify(&altered_tx, &prevouts, 0).is_err());
 }
 
-/// The replacement-byte contract is documented by [`Interpreter::execute`] in
-/// `crates/script/src/interpreter.rs`: supplied witness bytes are verified without
+/// The replacement-byte contract is documented by [`Interpreter::execute_with_prevouts`]
+/// in `crates/script/src/interpreter.rs`: supplied witness bytes are verified without
 /// changing the caller's transaction.
 #[test]
 fn supplied_witness_is_verified_without_mutating_the_transaction() {

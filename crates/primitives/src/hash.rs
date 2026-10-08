@@ -80,12 +80,7 @@ impl Hash256 {
     /// Formats this hash as conventional big-endian lowercase hexadecimal.
     #[must_use]
     pub fn to_string_be(self) -> String {
-        let mut s = String::with_capacity(64);
-        for byte in self.0.iter().rev() {
-            s.push(char::from(HEX[usize::from(byte >> 4)]));
-            s.push(char::from(HEX[usize::from(byte & 0x0f)]));
-        }
-        s
+        self.to_string()
     }
 
     /// Returns the backing little-endian byte array.

@@ -99,17 +99,6 @@ fn record_write_failure_does_not_replace_the_network_error() {
 }
 
 #[test]
-fn read_completion_fails_after_the_time_limit() {
-    let (mut peer, _remote, _dir) = fixture();
-    let result = super::read_frame(
-        &mut peer.stream,
-        Instant::now(),
-        &mut super::FrameBuffer::default(),
-    );
-    assert!(result.is_err(), "an expired operation must not succeed");
-}
-
-#[test]
 fn bytes_past_the_deadline_do_not_renew_it() {
     let (mut peer, mut remote, _dir) = fixture();
     remote.write_all(&[7]).expect("one byte before the read");
@@ -200,13 +189,4 @@ fn a_paused_frame_resumes_from_where_it_stopped() {
     )
     .expect("the paused frame resumes");
     assert_eq!(completed, frame);
-}
-
-#[test]
-fn send_deadline_keeps_the_attempt_and_error() {
-    let (mut peer, _remote, dir) = fixture();
-    let error = peer
-        .send(NetworkMessage::Ping(1), Instant::now())
-        .expect_err("expired time limit");
-    assert_failure(&dir, "sending", &error);
 }

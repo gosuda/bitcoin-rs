@@ -4,7 +4,7 @@
 //! loop and during the handshake; [`outbound_message`] fires per write
 //! attempt by the connection writer and during the handshake. Argument
 //! positions and types follow Bitcoin Core's published ABI — see
-//! `docs/tracing.md` and `bitcoin_rs_trace`'s `probe_abi` table. Every
+//! `docs/tracing.md` and `bitcoin_rs_consensus`'s `probes.d` table. Every
 //! emitter no-ops unless the connection carries a [`NetTrace`], which only
 //! the live inbound-accept and outbound-dial roots attach, and payload
 //! preparation runs only while a consumer (bpftrace, BCC, DTrace) holds
@@ -68,7 +68,7 @@ impl NetTrace {
 /// typed payload is still observable before decoding fails.
 pub(crate) fn inbound_message(trace: Option<&NetTrace>, command: &str, payload: &[u8]) {
     if let Some(trace) = trace {
-        bitcoin_rs_trace::inbound_message(|| message_args(trace, command, payload));
+        bitcoin_rs_consensus::trace::inbound_message(|| message_args(trace, command, payload));
     }
 }
 
@@ -80,7 +80,7 @@ pub(crate) fn inbound_message(trace: Option<&NetTrace>, command: &str, payload: 
 /// emits, so each message encodes into a frame exactly once.
 pub(crate) fn outbound_message(trace: Option<&NetTrace>, message: &Message, payload: &[u8]) {
     if let Some(trace) = trace {
-        bitcoin_rs_trace::outbound_message(|| {
+        bitcoin_rs_consensus::trace::outbound_message(|| {
             let command = message.command();
             message_args(trace, command.as_ref(), payload)
         });
@@ -88,7 +88,11 @@ pub(crate) fn outbound_message(trace: Option<&NetTrace>, message: &Message, payl
 }
 
 /// Assembles Core's six-argument payload tuple for one message.
-fn message_args(trace: &NetTrace, command: &str, payload: &[u8]) -> bitcoin_rs_trace::MessageArgs {
+fn message_args(
+    trace: &NetTrace,
+    command: &str,
+    payload: &[u8],
+) -> bitcoin_rs_consensus::trace::MessageArgs {
     (
         node_id_i64(trace.node_id),
         trace.peer.to_string(),

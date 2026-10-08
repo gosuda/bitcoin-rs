@@ -7,11 +7,9 @@
 use anyhow::{Result, bail};
 
 use bitcoin_rs_mempool::{
-    AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
-    SubmitOutcome,
+    AdmissionOrigin, MempoolObserver, MutationEnvelope, MutationOutcome, SubmitOutcome,
 };
 
-use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mining::MiningControl;
 
@@ -19,8 +17,9 @@ use bitcoin_rs_node::{MiningCoordinator, Network, NodeConfig, state::NodeState};
 
 use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, deserialize as native_deserialize, encode::double_sha256,
+    Witness, consensus_bytes, deserialize as native_deserialize, encode::double_sha256,
 };
+use bitcoin_rs_script::push_int;
 
 use bitcoin_rs_rpc::{
     Handler,
@@ -36,6 +35,7 @@ use parking_lot::Mutex;
 
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
+use bitcoin::hex::{DisplayHex, FromHex};
 use std::sync::Arc;
 
 const SEED_BLOCKS: u32 = 100;
@@ -47,7 +47,7 @@ const MEMPOOL_TX_FEE_SATS: u64 = 10_000;
 const WITNESS_RESERVED: [u8; 32] = [0_u8; 32];
 
 #[test]
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
@@ -125,7 +125,7 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
         "rendered hash is the wtxid"
     );
     assert_eq!(
-        native_deserialize::<Tx>(&hex_decode(&required_str(entry, "data")?)?)?,
+        native_deserialize::<Tx>(&Vec::<u8>::from_hex(&required_str(entry, "data")?)?)?,
         mempool_tx,
         "rendered data round-trips to the mempool tx"
     );
@@ -210,7 +210,7 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     let expected_commitment = double_sha256(&commitment_input).to_le_bytes();
     assert_eq!(
         &commitment[12..],
-        hex_encode(&expected_commitment),
+        expected_commitment.to_lower_hex_string(),
         "rendered commitment must be SHA256D(witness merkle root || witness reserved value)"
     );
 
@@ -218,7 +218,7 @@ fn template_mines_to_tip_and_drains_mempool() -> Result<()> {
     let block = assemble_from_template(&template, template_txs)?;
 
     // --- submitblock over the real RPC handler -------------------------------
-    let hex = hex_encode(&consensus_bytes(&block));
+    let hex = consensus_bytes(&block).to_lower_hex_string();
     let verdict = handler.dispatch("submitblock", &json!([hex]))?;
     assert!(
         verdict.is_null(),
@@ -273,14 +273,14 @@ fn template_orders_parent_then_child_with_dependency() -> Result<()> {
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
             script_sig: p2sh_true_spend_script_sig(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
             script_pubkey: p2sh_true_output(),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     let child_txid = child.txid();
 
@@ -365,20 +365,18 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
         let coinbase = Tx {
             version: 2,
             inputs: vec![TxIn {
-                previous_output: null_prevout(),
+                previous_output: OutPoint::null(),
                 // BIP34 height push plus one pad byte: consensus requires a
                 // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-                script_sig: Script::from_bytes(
-                    [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-                ),
-                sequence: Sequence::from_consensus(0xffff_ffff),
+                script_sig: Script::from_bytes([push_int(i64::from(height)), push_int(0)].concat()),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
                 script_pubkey: Script::from_bytes(vec![0x51]),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         };
         let mut block = Block {
             header: bitcoin_rs_primitives::Header {
@@ -393,7 +391,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<Hash256> {
         };
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| anyhow::anyhow!("seed block must have a merkle root"))?;
-        grind_pow(&mut block)?;
+        regtest_fixture::mine_block_to_declared_target(&mut block)?;
         state.apply_block(&block)?;
         tip = current_tip(state)?;
         assert_eq!(tip.height, height, "seed block must become the tip");
@@ -408,18 +406,6 @@ fn current_tip(state: &NodeState) -> Result<bitcoin_rs_chain::TipSnapshot> {
     Ok((*tip).clone())
 }
 
-fn grind_pow(block: &mut Block) -> Result<()> {
-    loop {
-        if compact_is_met_by(block.header.bits, block.header.compute_hash().into()) {
-            return Ok(());
-        }
-        let Some(next) = block.header.nonce.checked_add(1) else {
-            bail!("nonce exhausted while grinding block");
-        };
-        block.header.nonce = next;
-    }
-}
-
 /// Assembles the submit-ready block from rendered template JSON fields
 /// alone, the way an external miner would.
 fn assemble_from_template(
@@ -432,7 +418,8 @@ fn assemble_from_template(
     let bits = u32::from_str_radix(&required_str(template, "bits")?, 16)?;
     let curtime = u32::try_from(required_u64(template, "curtime")?).unwrap_or(u32::MAX);
     let version = i32::try_from(required_u64(template, "version")?).unwrap_or(0);
-    let commitment_script = hex_decode(&required_str(template, "default_witness_commitment")?)?;
+    let commitment_script =
+        Vec::<u8>::from_hex(&required_str(template, "default_witness_commitment")?)?;
     assert!(
         commitment_script.starts_with(&[0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed]),
         "default_witness_commitment must be the BIP141 commitment script"
@@ -444,7 +431,7 @@ fn assemble_from_template(
             .get("data")
             .and_then(|value| value.as_str())
             .ok_or_else(|| anyhow::anyhow!("template transaction missing data hex"))?;
-        txs.push(native_deserialize::<Tx>(&hex_decode(data)?)?);
+        txs.push(native_deserialize::<Tx>(&Vec::<u8>::from_hex(data)?)?);
     }
 
     assemble_block(
@@ -473,32 +460,32 @@ fn seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
     let seed_coinbase = Tx {
         version: 2,
         inputs: vec![TxIn {
-            previous_output: null_prevout(),
+            previous_output: OutPoint::null(),
             // Must mirror the height-1 seed coinbase exactly (txid anchors
             // the mempool spend).
-            script_sig: Script::from_bytes([script_push_int(1), script_push_int(0)].concat()),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            script_sig: Script::from_bytes([push_int(1), push_int(0)].concat()),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
             script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     Tx {
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(seed_coinbase.txid(), 0),
             script_sig: Script::new(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - fee_sats),
             script_pubkey: p2sh_true_output(),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -523,18 +510,16 @@ fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Bl
     let coinbase = Tx {
         version: 2,
         inputs: vec![TxIn {
-            previous_output: null_prevout(),
-            script_sig: Script::from_bytes(
-                [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-            ),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            previous_output: OutPoint::null(),
+            script_sig: Script::from_bytes([push_int(i64::from(height)), push_int(0)].concat()),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
             script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     let mut block = Block {
         header: bitcoin_rs_primitives::Header {
@@ -549,12 +534,12 @@ fn assemble_regtest_block(prev: Hash256, height: u32, txs: Vec<Tx>) -> Result<Bl
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| anyhow::anyhow!("regtest block must have a merkle root"))?;
-    grind_pow(&mut block)?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
 }
 /// Admits `tx` through the run-composed shared gateway exactly like
 /// `sendrawtransaction` does: full policy admission over the provisional
-#[allow(clippy::unnecessary_wraps)]
+#[expect(clippy::unnecessary_wraps)]
 fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
     let utxo = state.chainstate().utxo_reader();
     let applied_tip = state.chainstate().applied_tip_reader();
@@ -564,7 +549,7 @@ fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
         Arc::new(tx.clone()),
         AdmissionOrigin::Rpc,
         None,
-        unix_time_secs(),
+        bitcoin_rs_primitives::unix_time_secs(),
         &view,
     );
     assert!(
@@ -572,12 +557,6 @@ fn admit_to_mempool(state: &NodeState, tx: &Tx) -> Result<()> {
         "gateway admission must commit the spend, got: {outcome:?}"
     );
     Ok(())
-}
-
-fn unix_time_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
 }
 
 /// Mines and applies the regtest block at `height` over `prev`: the seed
@@ -591,20 +570,18 @@ fn mine_regtest_block(
     let coinbase = Tx {
         version: 2,
         inputs: vec![TxIn {
-            previous_output: null_prevout(),
+            previous_output: OutPoint::null(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: Script::from_bytes(
-                [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-            ),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            script_sig: Script::from_bytes([push_int(i64::from(height)), push_int(0)].concat()),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
             script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     let mut block = Block {
         header: bitcoin_rs_primitives::Header {
@@ -619,7 +596,7 @@ fn mine_regtest_block(
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| anyhow::anyhow!("mined block must have a merkle root"))?;
-    grind_pow(&mut block)?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     state.apply_block(&block)?;
     Ok(block)
 }
@@ -628,20 +605,19 @@ fn mine_regtest_block(
 /// mining coordinator installed as the `MiningControl`.
 fn mining_handler(state: &NodeState) -> Handler {
     let coordinator = MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),
         state.config().mining.payout_script.clone(),
     );
     let mining_control: Arc<dyn MiningControl> = Arc::new(coordinator);
-    let ibd = state.chainstate().ibd_latch();
     let ctx = Context::from_handles(ContextHandles {
         chain: ChainHandles {
             chain_tip: state.chainstate().header_tip_reader(),
             applied_tip: state.chainstate().applied_tip_reader(),
-            ibd,
-            blocks: state.blocks(),
+            progress: state.chainstate().chain_progress_reader(),
+            blocks: state.block_log_reader(),
             utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(UtxoSet::new())),
             coin_stats: state.chainstate().coin_stats_handle(),
             block_tree: state.chainstate().block_tree_reader(),
@@ -657,11 +633,8 @@ fn mining_handler(state: &NodeState) -> Handler {
         },
         indexes: IndexHandles::default(),
         network: NetworkHandles {
-            network_active: state.network_active(),
             peer_table: state.peer_table(),
-            p2p_outbound_sender: Some(state.p2p_outbound_sender()),
-            banned: state.banned_subnets(),
-            added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            p2p: state.p2p(),
             local_services: state.p2p().local_services().to_u64(),
         },
         mining: MiningHandles {
@@ -686,10 +659,10 @@ fn assemble_block(
     let coinbase = Tx {
         version: 2,
         inputs: vec![TxIn {
-            previous_output: null_prevout(),
+            previous_output: OutPoint::null(),
             // BIP34: the coinbase scriptSig begins with the serialized height.
-            script_sig: Script::from_bytes(script_push_int(i64::from(height))),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            script_sig: Script::from_bytes(push_int(i64::from(height))),
+            sequence: Sequence::MAX,
             witness: Witness::from_stack(vec![WITNESS_RESERVED.to_vec()]),
         }],
         outputs: vec![
@@ -702,7 +675,7 @@ fn assemble_block(
                 script_pubkey: Script::from_bytes(commitment_script),
             },
         ],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
 
     let mut block_txs = Vec::with_capacity(txs.len() + 1);
@@ -724,38 +697,8 @@ fn assemble_block(
     };
     block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| anyhow::anyhow!("block must have a merkle root"))?;
-    grind_pow(&mut block)?;
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
     Ok(block)
-}
-
-/// The one-input null-prevout coinbase outpoint (Core `COINBASE_OUTPOINT`).
-fn null_prevout() -> OutPoint {
-    OutPoint::new(Txid::default(), u32::MAX)
-}
-
-/// Minimal script push of a small integer, mirroring rust-bitcoin
-/// `Builder::push_int`: `OP_0` for zero, `OP_N` for 1..=16, otherwise a
-/// length-prefixed little-endian payload (BIP34 heights).
-fn script_push_int(value: i64) -> Vec<u8> {
-    match value {
-        0 => vec![0x00],
-        // `value` is pinned to 1..=16 by the match arm.
-        1..=16 => vec![0x50 + u8::try_from(value).unwrap_or_default()],
-        _ => {
-            let mut payload = Vec::new();
-            let mut magnitude = value.unsigned_abs();
-            while magnitude > 0 {
-                // Low byte only; the shift below consumes it fully.
-                payload.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
-                magnitude >>= 8;
-            }
-            let mut out = Vec::with_capacity(payload.len() + 1);
-            // A small-int push never exceeds 8 payload bytes.
-            out.push(u8::try_from(payload.len()).unwrap_or_default());
-            out.extend(payload);
-            out
-        }
-    }
 }
 
 /// Native BIP141 witness merkle fold with the odd-leaf duplication rule.
@@ -782,42 +725,6 @@ fn compute_witness_merkle_root(txs: &[Tx]) -> Option<Hash256> {
         level = next;
     }
     Some(Hash256::from_le_bytes(&level[0]))
-}
-
-/// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
-/// Decodes a hexadecimal string into bytes.
-fn hex_decode(hex: &str) -> Result<Vec<u8>> {
-    let bytes = hex.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        bail!("hex string must have even length");
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.as_chunks::<2>().0 {
-        let hi = hex_nibble(pair[0]).ok_or_else(|| anyhow::anyhow!("invalid hex"))?;
-        let lo = hex_nibble(pair[1]).ok_or_else(|| anyhow::anyhow!("invalid hex"))?;
-        out.push((hi << 4) | lo);
-    }
-    Ok(out)
-}
-
-/// Decodes one ASCII hex nibble.
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn required_str(value: &sonic_rs::Value, key: &str) -> Result<String> {
@@ -851,14 +758,14 @@ fn invalidateblock_readmits_parent_before_child_in_dependency_order() -> Result<
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
             script_sig: p2sh_true_spend_script_sig(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
             script_pubkey: p2sh_true_output(),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     let child_txid = child.txid();
 
@@ -918,29 +825,22 @@ impl MempoolObserver for RecordingMempoolObserver {
     }
 }
 
-/// Reorg re-admission publishes through the run-composed shared gateway:
+/// Reorg re-admission publishes through the run-composed gateway:
 /// two Accepted changes, parent before child, origin `Reorg`, contiguous
 /// sequences. The apply path's raw sweep bypasses observers by design, so
 /// these two changes are the only publications the gateway emits here.
 #[test]
-fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Result<()> {
+fn invalidateblock_readmission_publishes_events_through_composed_gateway() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // Interning returns the one gateway every production route reaches
-    // The gateway is constructed with the observer so publication runs
+    // The node carries the gateway built for this pool, so publication runs
     // through the same path production uses.
     let observer = Arc::new(RecordingMempoolObserver::default());
     let gateway = state.mempool_gateway();
-    assert!(
-        Arc::ptr_eq(
-            &gateway,
-            &MempoolGateway::shared(state.mempool(), state.config().validation.engine)
-                .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"))
-        ),
-        "the node's gateway must be the one interned for its pool"
-    );
+    assert!(Arc::ptr_eq(gateway.pool(), &state.mempool()));
+    assert_eq!(gateway.engine(), state.config().validation.engine);
     gateway
         .attach_observer_leg("test-recorder", observer.clone())
         .unwrap_or_else(|error| panic!("the node installs an observer slot to extend: {error}"));
@@ -951,14 +851,14 @@ fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Re
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
             script_sig: p2sh_true_spend_script_sig(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
             script_pubkey: p2sh_true_output(),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     let child_txid = child.txid();
 
@@ -1002,14 +902,14 @@ fn invalidateblock_readmits_a_below_floor_family_through_the_deferred_fence() ->
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
             script_sig: p2sh_true_spend_script_sig(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 1 - 5_000),
             script_pubkey: p2sh_true_output(),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     let child_txid = child.txid();
 
@@ -1048,7 +948,7 @@ fn submitblock_accepts_block_without_prior_mempool_admission() -> Result<()> {
     assert!(!state.mempool().read().contains_txid(&tx.txid()));
 
     let block = assemble_regtest_block(seed_tip_hash, SEED_BLOCKS + 1, vec![tx])?;
-    let block_hex = hex_encode(&consensus_bytes(&block));
+    let block_hex = consensus_bytes(&block).to_lower_hex_string();
 
     let handler = mining_handler(&state);
     let verdict = handler.dispatch("submitblock", &json!([block_hex]))?;
@@ -1083,7 +983,7 @@ fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> 
         .and_then(|value| value.as_array())
         .map_or(&[][..], |entries| entries.as_slice());
     let accepted = assemble_from_template(&template, template_txs)?;
-    let accepted_hex = hex_encode(&consensus_bytes(&accepted));
+    let accepted_hex = consensus_bytes(&accepted).to_lower_hex_string();
     let verdict = handler.dispatch("submitblock", &json!([accepted_hex]))?;
     assert!(
         verdict.is_null(),
@@ -1092,7 +992,7 @@ fn submitblock_rejects_stale_template_with_inconclusive_prevblk() -> Result<()> 
 
     // A competing block built on the superseded template still points at old_tip.
     let stale_block = assemble_regtest_block(old_tip, SEED_BLOCKS + 1, Vec::new())?;
-    let stale_hex = hex_encode(&consensus_bytes(&stale_block));
+    let stale_hex = consensus_bytes(&stale_block).to_lower_hex_string();
     let reject = handler.dispatch("submitblock", &json!([stale_hex]))?;
     let reason = reject
         .as_str()
@@ -1137,14 +1037,14 @@ fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent_txid, 0),
             script_sig: p2sh_true_spend_script_sig(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REGTEST_SUBSIDY_SATS - 2 * MEMPOOL_TX_FEE_SATS),
             script_pubkey: p2sh_true_output(),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     admit_to_mempool(&state, &parent)?;
     admit_to_mempool(&state, &child)?;
@@ -1155,7 +1055,7 @@ fn post_connect_template_pool_and_estimator_observables() -> Result<()> {
         .and_then(|value| value.as_array())
         .map_or(&[][..], |entries| entries.as_slice());
     let block = assemble_from_template(&template, template_txs)?;
-    let block_hex = hex_encode(&consensus_bytes(&block));
+    let block_hex = consensus_bytes(&block).to_lower_hex_string();
     let verdict = handler.dispatch("submitblock", &json!([block_hex]))?;
     assert!(
         verdict.is_null(),

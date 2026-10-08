@@ -13,7 +13,7 @@ use bitcoin::p2p::message_blockdata::Inventory;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_chain::{BlockBodySource, BlockTree, BlockTreeReader, ChainWork, TipReader};
 use bitcoin_rs_primitives::layout::{ParsedBlock, ParsedTransaction};
-use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network};
+use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network, deserialize};
 #[cfg(test)]
 use parking_lot::RwLock;
 
@@ -98,7 +98,7 @@ impl ActiveChainQuery {
         let bytes = self.block_body_source.as_ref()?.block_body(height, hash)?;
         let header = bytes
             .get(..80)
-            .and_then(|header| Header::consensus_decode(header).ok())?;
+            .and_then(|header| deserialize::<Header>(header).ok())?;
         if header.compute_hash() != hash {
             return None;
         }
@@ -482,7 +482,7 @@ mod tests {
             let Message::BlockPayload(payload) = message else {
                 return Ok(());
             };
-            blocks.borrow_mut().push(Block::consensus_decode(&payload)?);
+            blocks.borrow_mut().push(deserialize::<Block>(&payload)?);
             Ok(())
         })?;
         Ok((outcome, blocks.into_inner()))
@@ -511,11 +511,10 @@ mod tests {
         let headers = seed_headers(3);
         let query = query_with(headers)?;
 
-        assert!(query.headers_after(&[], BlockHash::default(), 2).is_empty());
-        assert!(
-            query
-                .headers_after(&[], BlockHash::from(Hash256::from_le_bytes(&[9; 32])), 2)
-                .is_empty()
+        assert_eq!(query.headers_after(&[], BlockHash::default(), 2), []);
+        assert_eq!(
+            query.headers_after(&[], BlockHash::from(Hash256::from_le_bytes(&[9; 32])), 2),
+            []
         );
         Ok(())
     }
@@ -569,11 +568,7 @@ mod tests {
             header_hashes(&response),
             vec![active1.compute_hash(), active2.compute_hash()]
         );
-        assert!(
-            query
-                .headers_after(&[], fork1.compute_hash(), 10)
-                .is_empty()
-        );
+        assert_eq!(query.headers_after(&[], fork1.compute_hash(), 10), []);
         Ok(())
     }
 
@@ -764,7 +759,7 @@ mod tests {
                 panic!("denied headroom cannot serve")
             })?;
             assert!(outcome.halted);
-            assert!(outcome.not_found.is_empty());
+            assert_eq!(outcome.not_found, []);
             assert_eq!(source.loads.load(Ordering::Relaxed), 0);
 
             let mut corrupt = body.clone();
@@ -782,7 +777,7 @@ mod tests {
             let mut unknown_flag = superfluous_witness.clone();
             unknown_flag[Header::LEN + 6] = 2;
             for malformed in [&trailing, &superfluous_witness, &unknown_flag] {
-                assert!(Block::consensus_decode(malformed).is_err());
+                assert!(deserialize::<Block>(malformed).is_err());
                 assert!(bitcoin::consensus::deserialize::<RegistryBlock>(malformed).is_err());
             }
             for unavailable in [
@@ -865,7 +860,7 @@ mod tests {
 
         let (outcome, blocks) = serve_collect(&query, &[Inventory::Block(wire_hash(hash))])?;
 
-        assert!(blocks.is_empty());
+        assert_eq!(blocks, []);
         assert_eq!(outcome.not_found, vec![Inventory::Block(wire_hash(hash))]);
         Ok(())
     }
@@ -889,7 +884,7 @@ mod tests {
 
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_hash(), block.block_hash());
-        assert!(outcome.not_found.is_empty());
+        assert_eq!(outcome.not_found, []);
         Ok(())
     }
 
@@ -1082,7 +1077,7 @@ mod tests {
             Ok(())
         })?;
         assert_eq!(outcome.not_found, vec![item]);
-        assert!(served.is_empty());
+        assert_eq!(served, []);
 
         let mut served = Vec::new();
         let outcome = query.serve_inventory_blocks(&[item], Some(2), &|| true, &mut |message| {
@@ -1301,7 +1296,7 @@ mod tests {
     #[test]
     fn compact_exchange_uses_peer_version_for_prefills_and_blocktxn()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::dispatch::dispatch_inbound_with_chain;
+        use crate::dispatch::dispatch_inbound_full;
         use crate::peer::{Peer, PeerState};
         use bitcoin::p2p::Magic;
         use bitcoin::p2p::message::NetworkMessage;
@@ -1330,15 +1325,18 @@ mod tests {
             peer.state = PeerState::Ready;
             for version in versions {
                 if let Some(version) = version {
-                    dispatch_inbound_with_chain(
+                    dispatch_inbound_full(
                         &mut peer,
                         &Message::SendCmpct(SendCmpct {
                             send_compact: false,
                             version,
                         }),
                         Some(&query),
+                        None,
+                        &|| true,
                         &|| true,
                         &mut |_| panic!("sendcmpct does not emit a response"),
+                        &mut |_| {},
                     )?;
                 }
                 let strip_witness = matches!(version, Some(1 | 99));
@@ -1396,7 +1394,7 @@ mod tests {
     #[test]
     fn getblocktxn_versions_preserve_missing_body_and_invalid_index_outcomes()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::dispatch::dispatch_inbound_with_chain;
+        use crate::dispatch::dispatch_inbound_full;
         use crate::peer::{Peer, PeerState};
         use bitcoin::p2p::Magic;
         use bitcoin::p2p::message_compact_blocks::{GetBlockTxn, SendCmpct};
@@ -1416,15 +1414,18 @@ mod tests {
             let mut peer = Peer::new(std::io::Cursor::new(Vec::<u8>::new()), Magic::REGTEST);
             peer.state = PeerState::Ready;
             if let Some(version) = version {
-                dispatch_inbound_with_chain(
+                dispatch_inbound_full(
                     &mut peer,
                     &Message::SendCmpct(SendCmpct {
                         send_compact: false,
                         version,
                     }),
                     Some(&query),
+                    None,
+                    &|| true,
                     &|| true,
                     &mut |_| panic!("sendcmpct does not emit a response"),
+                    &mut |_| {},
                 )?;
             }
             for (requested_hash, indexes, invalid) in [
@@ -1441,7 +1442,7 @@ mod tests {
                 } else {
                     None
                 };
-                let result = dispatch_inbound_with_chain(
+                let result = dispatch_inbound_full(
                     &mut peer,
                     &Message::GetBlockTxn(GetBlockTxn {
                         txs_request: BlockTransactionsRequest {
@@ -1450,8 +1451,11 @@ mod tests {
                         },
                     }),
                     Some(&query),
+                    None,
+                    &|| true,
                     &|| true,
                     &mut |_| panic!("missing or invalid request cannot emit transactions"),
+                    &mut |_| {},
                 );
                 if let Some(expected) = expected {
                     assert!(
@@ -1499,15 +1503,18 @@ mod tests {
         request: &Message,
     ) -> Result<bitcoin::p2p::message::RawNetworkMessage, Box<dyn std::error::Error>> {
         let mut wire = Vec::new();
-        crate::dispatch::dispatch_inbound_with_chain(
+        crate::dispatch::dispatch_inbound_full(
             peer,
             request,
             Some(query),
+            None,
+            &|| true,
             &|| true,
             &mut |response| {
                 crate::wire::write_message(&mut wire, bitcoin::p2p::Magic::REGTEST, &response)?;
                 Ok(())
             },
+            &mut |_| {},
         )?;
         Ok(bitcoin::consensus::deserialize(&wire)?)
     }

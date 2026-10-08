@@ -5,16 +5,12 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_primitives::{Hash256, Network};
 use bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT;
 use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
-use parking_lot::RwLock;
 
+use crate::CheckpointError;
 use crate::test_fixtures::MemoryBodies;
-use crate::{Chainstate, CheckpointError};
 
 fn checkpoint_dirs(root: &std::path::Path) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
     let mut dirs = BTreeSet::new();
@@ -34,15 +30,7 @@ fn checkpoint_refuses_inflight_disconnect_and_preserves_state()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let network = Network::Regtest;
-    let mut handles = Chainstate::new(
-        network,
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(RwLock::new(BlockTree::new())),
-        Arc::new(UtxoSet::new()),
-        Arc::new(CoinStatsListener::new(CoinStats::default())),
-        Arc::new(crate::events::ChainEventPublisher::detached(0)),
-    );
+    let mut handles = crate::test_fixtures::handles(network, Arc::new(UtxoSet::new()));
     handles.block_body_store = Some(Arc::new(MemoryBodies::default()));
     handles.apply_block(&network.genesis_block(), None)?;
     handles.configure_checkpointing(dir.path(), Arc::new(AtomicU32::new(0)))?;

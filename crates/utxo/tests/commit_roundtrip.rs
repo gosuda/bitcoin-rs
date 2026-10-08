@@ -2,7 +2,7 @@
 
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, varint};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
-use bitcoin_rs_utxo::{UtxoError, UtxoSet, hash_serialized_3};
+use bitcoin_rs_utxo::{UtxoError, UtxoSet};
 use sha2::{Digest, Sha256};
 
 fn txid(seed: u64) -> Hash256 {
@@ -131,8 +131,8 @@ fn owned_and_borrowed_commits_match_independent_state_hashes()
                     &txid(round),
                 )?;
                 let expected = expected_hash_serialized_3(&entries)?;
-                assert_eq!(hash_serialized_3(&owned)?, expected);
-                assert_eq!(hash_serialized_3(&borrowed)?, expected);
+                assert_eq!(owned.lock_stable_view().hash_serialized_3()?, expected);
+                assert_eq!(borrowed.lock_stable_view().hash_serialized_3()?, expected);
                 removes = entries.drain(..16).map(|entry| entry.0).collect();
                 for (_, txout, coinbase, height) in &mut entries {
                     txout.value = Amount::from_sat(77);
@@ -398,7 +398,7 @@ fn hash_serialized_3_matches_independent_core_serialization_for_unsorted_utxos()
     bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(99))?;
 
     assert_eq!(
-        hash_serialized_3(&set)?,
+        set.lock_stable_view().hash_serialized_3()?,
         expected_hash_serialized_3(&entries)?
     );
     Ok(())
@@ -608,7 +608,7 @@ fn zero_and_unequal_script_lengths_roundtrip_and_scan() -> Result<(), Box<dyn st
         (op4, txout_10kb, false, 14),
     ];
     let expected_hash = expected_hash_serialized_3(&entries)?;
-    assert_eq!(hash_serialized_3(&set)?, expected_hash);
+    assert_eq!(set.lock_stable_view().hash_serialized_3()?, expected_hash);
     Ok(())
 }
 
@@ -699,6 +699,6 @@ fn hash_serialized_3_matches_independent_core_serialization_for_edge_cases()
         (op3, txout3, true, 0),
     ];
     let expected = expected_hash_serialized_3(&entries)?;
-    assert_eq!(hash_serialized_3(&set)?, expected);
+    assert_eq!(set.lock_stable_view().hash_serialized_3()?, expected);
     Ok(())
 }

@@ -46,21 +46,21 @@ use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use core::mem::size_of;
 
 /// Block-body pruning over persisted block rows.
-pub mod block_pruner;
+mod block_pruner;
 /// Retention leases that keep required history against pruning.
-pub mod lease;
+mod lease;
 /// Pruning policy shapes matching Bitcoin Core semantics.
-pub mod policy;
+mod policy;
 /// Undo-data pruning over persisted undo rows.
-pub mod undo_pruner;
+mod undo_pruner;
 
-pub use block_pruner::{BLOCK_DATA_CF, BlockPruner, block_body_key};
+pub use block_pruner::{BLOCK_DATA_CF, block_body_key};
 pub use lease::{
     HistoryAccess, HistoryLease, HistoryUnavailable, MandatoryRetention, PruneReservation,
     RetentionBudget, RetentionError, RetentionLease, RetentionRegistry,
 };
 pub use policy::PrunePolicy;
-pub use undo_pruner::{UndoPruner, block_undo_key};
+pub use undo_pruner::block_undo_key;
 
 use crate::{BufferedWriteBatch, StorageError};
 use thiserror::Error;
@@ -143,7 +143,7 @@ pub fn load_executed_frontier<S: crate::KvStore>(
 /// INVARIANT: the frontier never moves backwards, every height below it is
 /// gone, and no lease is granted below it, so no reader can pin rows the
 /// frontier names as deleted.
-#[derive(Debug, Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ExecutedFrontier(u32);
 
 impl ExecutedFrontier {
@@ -158,19 +158,13 @@ impl ExecutedFrontier {
 
     /// The raw height: one past the highest deleted row.
     #[must_use]
-    pub const fn get(self) -> u32 {
+    pub(crate) const fn get(self) -> u32 {
         self.0
-    }
-
-    /// Returns true when `height` lies below the frontier: gone.
-    #[must_use]
-    pub const fn contains(self, height: u32) -> bool {
-        height < self.0
     }
 
     /// The monotonic join of two frontiers.
     #[must_use]
-    pub const fn advance(self, other: Self) -> Self {
+    pub(crate) const fn advance(self, other: Self) -> Self {
         if self.0 >= other.0 { self } else { other }
     }
 
@@ -232,7 +226,7 @@ impl ExecutedFrontier {
 /// reclaims the flat files, and then promotes [`StagedPrune::pruned_below`]
 /// through [`PruneReservation::commit`] so later lease requests learn what
 /// is actually gone.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct StagedPrune {
     /// Block-body rows the batch deletes.
     pub blocks: PruneOutcome,
@@ -456,7 +450,7 @@ pub fn reclaim_staged_flat_block_files<S: crate::KvStore>(
 }
 
 /// Result of one pruning pass.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct PruneOutcome {
     /// Number of payload bytes deleted from storage.
     pub bytes_freed: u64,

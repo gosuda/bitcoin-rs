@@ -4,12 +4,11 @@
 //! by consensus verification and mempool preparation. Script-level counters
 //! remain owned by `bitcoin-rs-script`.
 
+use crate::verify_tx::is_coinbase;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_script::script::{
-    Instruction, instructions, is_p2sh, is_push_only, is_witness_program,
-};
 use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
+use bitcoin_rs_script::{Instruction, instructions, is_p2sh, is_push_only, is_witness_program};
 use hashbrown::HashMap;
 
 /// Counts transaction sigop cost against resolved previous outputs.
@@ -30,7 +29,7 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: Ve
     let flags = flags.filled();
     let mut cost = count_tx_legacy(tx).saturating_mul(4);
     // Core's coinbase cost never includes previous-output or witness sigops.
-    if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
+    if is_coinbase(tx) {
         return cost;
     }
     let mut cursor = 0;
@@ -90,7 +89,7 @@ fn last_push(script: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Script, Sequence, TxIn, Txid, Witness};
-    use bitcoin_rs_script::script::{opcode, push_data};
+    use bitcoin_rs_script::{opcode, push_data};
 
     use super::*;
 
@@ -100,11 +99,11 @@ mod tests {
         let script_sig = [vec![opcode::OP_DUP], push_data(&[opcode::OP_CHECKSIG])].concat();
         let tx = Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: outpoint,
                 script_sig: Script::from_bytes(script_sig),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
@@ -148,7 +147,7 @@ mod tests {
         let p2wpkh = [vec![0x00, 0x14], vec![2; 20]].concat();
         let cases = [
             (
-                vec![bitcoin_rs_script::eval::OP_DROP, opcode::OP_PUSHNUM_1],
+                vec![bitcoin_rs_script::opcode::OP_DROP, opcode::OP_PUSHNUM_1],
                 push_data(&p2wpkh),
                 0,
             ),
@@ -160,14 +159,14 @@ mod tests {
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(Txid::default(), 0),
                     script_sig: Script::from_bytes(script_sig),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::new(),
                 }],
                 outputs: vec![TxOut {
                     value: Amount::from_sat(1),
                     script_pubkey: Script::new(),
                 }],
-                lock_time: LockTime::from_consensus(0),
+                lock_time: LockTime::ZERO,
             };
             let prevouts = [(
                 tx.inputs[0].previous_output,
@@ -191,7 +190,7 @@ mod tests {
                 .map(|vout| TxIn {
                     previous_output: OutPoint::new(Txid::default(), vout),
                     script_sig: Script::new(),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::from_stack(vec![vec![
                         opcode::OP_PUSHNUM_1 + 1,
                         opcode::OP_CHECKMULTISIG,
@@ -199,7 +198,7 @@ mod tests {
                 })
                 .collect(),
             outputs: Vec::new(),
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         };
         let prevouts = [
             (
@@ -238,12 +237,12 @@ mod tests {
                 .map(|vout| TxIn {
                     previous_output: OutPoint::new(Txid::default(), vout),
                     script_sig: Script::new(),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::new(),
                 })
                 .collect(),
             outputs: Vec::new(),
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         };
         let mut prevouts: Vec<_> = tx
             .inputs
@@ -297,14 +296,14 @@ mod tests {
                 inputs: vec![TxIn {
                     previous_output: outpoint,
                     script_sig: Script::from_bytes(script_sig),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::from_stack(witness),
                 }],
                 outputs: vec![TxOut {
                     value: Amount::from_sat(9_000),
                     script_pubkey: Script::from_bytes(vec![opcode::OP_CHECKSIG]),
                 }],
-                lock_time: LockTime::from_consensus(0),
+                lock_time: LockTime::ZERO,
             };
             let prevouts = [(
                 outpoint,

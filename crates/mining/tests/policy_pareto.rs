@@ -10,7 +10,10 @@ use std::sync::Arc;
 use bitcoin_rs_mempool::SnapshotEntry;
 use bitcoin_rs_mining::{Candidate, CandidateContext, MiningError, assemble_candidate};
 use bitcoin_rs_primitives::{Hash256, LockTime, Network, Sequence, Txid};
-use common::{PAYOUT, forged_entry, insert, snapshot, tx, zero_fee_pool};
+use common::{
+    PAYOUT, forged_entry, insert, selected_fees, serialized_size, snapshot, total_sigop_cost, tx,
+    zero_fee_pool,
+};
 use proptest::prelude::*;
 
 fn context() -> CandidateContext {
@@ -85,7 +88,7 @@ fn package_selection_is_dependency_closed_and_topological() -> Result<(), Box<dy
     assert_eq!(candidate.transactions.len(), 2);
     assert_eq!(candidate.transactions[0].txid, parent_txid);
     assert_eq!(candidate.transactions[1].depends, vec![1]);
-    assert_eq!(candidate.fees, 11_000);
+    assert_eq!(selected_fees(&candidate), 11_000);
     Ok(())
 }
 
@@ -104,9 +107,7 @@ fn modified_fees_rank_but_actual_fees_fund_coinbase() -> Result<(), Box<dyn Erro
     let candidate = assemble_candidate(&context(), &snapshot, PAYOUT)?;
     assert_eq!(candidate.transactions[0].txid, low_txid);
     assert_eq!(candidate.transactions[0].fee, 1_000);
-    assert_eq!(candidate.transactions[0].fee_delta, 10_000);
-    assert_eq!(candidate.transactions[0].modified_fee, 11_000);
-    assert_eq!(candidate.fees, 3_000);
+    assert_eq!(selected_fees(&candidate), 3_000);
     assert_eq!(
         candidate.coinbase_value,
         bitcoin_rs_consensus::block_subsidy(100, Network::Regtest.subsidy_halving_interval())
@@ -217,8 +218,8 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
     );
     let exact_limits = limits(
         reservation.weight + 100,
-        reservation.size + 100,
-        reservation.sigop_cost + 10,
+        serialized_size(&reservation) + 100,
+        total_sigop_cost(&reservation) + 10,
     );
 
     let exact = assemble_candidate(
@@ -228,8 +229,6 @@ fn exact_resource_limits_accept_dependency_closed_package() -> Result<(), Box<dy
     )?;
     assert_eq!(selected(&exact), vec![parent.txid, child.txid]);
     assert_eq!(exact.weight, exact_limits.max_weight);
-    assert_eq!(exact.size, exact_limits.max_size);
-    assert_eq!(exact.sigop_cost, exact_limits.max_sigops);
 
     let excesses: [fn(&mut SnapshotEntry); 3] = [
         |entry| entry.weight += 1,
@@ -261,38 +260,40 @@ fn coinbase_reservation_accepts_exact_limits_and_rejects_one_over() -> Result<()
     let empty = snapshot(9, vec![]);
     let reservation = assemble_candidate(&context(), &empty, &payout)?;
     assert!(reservation.weight > 0);
-    assert!(reservation.size > 0);
-    assert!(reservation.sigop_cost > 0);
+    assert!(serialized_size(&reservation) > 0);
+    assert!(total_sigop_cost(&reservation) > 0);
 
-    let exact_limits = limits(reservation.weight, reservation.size, reservation.sigop_cost);
+    let exact_limits = limits(
+        reservation.weight,
+        serialized_size(&reservation),
+        total_sigop_cost(&reservation),
+    );
     let exact = assemble_candidate(&exact_limits, &empty, &payout)?;
     assert_eq!(exact.weight, exact_limits.max_weight);
-    assert_eq!(exact.size, exact_limits.max_size);
-    assert_eq!(exact.sigop_cost, exact_limits.max_sigops);
 
     let one_over = [
         (
             "weight",
             limits(
                 reservation.weight - 1,
-                reservation.size,
-                reservation.sigop_cost,
+                serialized_size(&reservation),
+                total_sigop_cost(&reservation),
             ),
         ),
         (
             "size",
             limits(
                 reservation.weight,
-                reservation.size - 1,
-                reservation.sigop_cost,
+                serialized_size(&reservation) - 1,
+                total_sigop_cost(&reservation),
             ),
         ),
         (
             "sigops",
             limits(
                 reservation.weight,
-                reservation.size,
-                reservation.sigop_cost - 1,
+                serialized_size(&reservation),
+                total_sigop_cost(&reservation) - 1,
             ),
         ),
     ];
@@ -329,7 +330,7 @@ fn non_final_packages_are_skipped() -> Result<(), Box<dyn Error>> {
         PAYOUT,
     )?;
     assert_eq!(candidate.transactions.len(), 1);
-    assert_eq!(candidate.fees, 1_000);
+    assert_eq!(selected_fees(&candidate), 1_000);
     Ok(())
 }
 
@@ -414,10 +415,18 @@ proptest! {
         let left = assemble_candidate(&context(), &snapshot, PAYOUT).expect("left assembly");
         let right = assemble_candidate(&context(), &snapshot, PAYOUT).expect("right assembly");
         assert_eq!(selected(&left), selected(&right));
-        assert_eq!(left.fees, right.fees);
+        assert_eq!(selected_fees(&left), selected_fees(&right));
         assert_eq!(left.weight, right.weight);
-        assert_eq!(left.size, right.size);
-        assert_eq!(left.sigop_cost, right.sigop_cost);
+        assert_eq!(
+            left.into_unsolved_block()
+                .expect("assembly serializes")
+                .txs,
+            right
+                .into_unsolved_block()
+                .expect("assembly serializes")
+                .txs
+        );
+        assert_eq!(total_sigop_cost(&left), total_sigop_cost(&right));
         assert_eq!(left.coinbase_value, right.coinbase_value);
     }
 }

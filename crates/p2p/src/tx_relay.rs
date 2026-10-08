@@ -19,7 +19,7 @@
 //! a running node.
 //!
 //! [`spawn_tx_relay_worker`] drains the queue on a dedicated thread; tests
-//! call [`drain_relay_queue`] synchronously for deterministic fixtures. Both
+//! call `drain_relay_queue` synchronously for deterministic fixtures. Both
 //! paths re-check the shared mempool at send time and announce only
 //! transactions still resident there with the queued wtxid. The gate
 //! narrows the stale-announcement window without closing it: a request is
@@ -44,7 +44,7 @@
 //! entry's real wtxid only while that acceptance remains resident. The
 //! gateway reference is weak so its observer cannot retain the gateway.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -155,11 +155,11 @@ impl TxRelayQueue {
 }
 
 /// Announces locally-injected accepted transactions (`sendrawtransaction`,
-/// reorg re-admission) to every connected peer.
+/// Esplora `POST /tx`, reorg re-admission) to every connected peer.
 ///
 /// Peer-origin accepts are announced by their ingress caller after admission
-/// returns a committed outcome. This observer preserves the existing RPC and
-/// reorg publication trigger, including their lack of a source peer to exclude.
+/// returns a committed outcome. This observer publishes RPC, Esplora and reorg
+/// acceptances, which have no source peer to exclude.
 pub struct LocalTxRelayObserver {
     relay: TxRelayQueue,
     gateway: Weak<MempoolGateway>,
@@ -177,7 +177,7 @@ impl MempoolObserver for LocalTxRelayObserver {
     fn on_mutation(&self, envelope: &MutationEnvelope) {
         if !matches!(
             envelope.origin,
-            AdmissionOrigin::Rpc | AdmissionOrigin::Reorg
+            AdmissionOrigin::Rpc | AdmissionOrigin::Esplora | AdmissionOrigin::Reorg
         ) {
             return;
         }
@@ -318,7 +318,8 @@ fn transaction_is_live(gateway: &MempoolGateway, request: &RelayRequest) -> bool
 /// whose transaction left the mempool — or was re-admitted under a
 /// different wtxid — produces no announcement.
 /// INVARIANT: no mempool guard is held while `sink` sends to peers.
-pub fn drain_relay_queue(
+#[cfg(test)]
+pub(crate) fn drain_relay_queue(
     rx: &Receiver<RelayRequest>,
     sink: &dyn RelaySink,
     gateway: &MempoolGateway,
@@ -347,18 +348,19 @@ pub fn drain_relay_queue(
 /// witness-mutated transaction is consumed with no announcement. The
 /// thread ends on `shutdown` or queue close.
 /// INVARIANT: no mempool guard is held while `sink` sends to peers. The
-/// worker applies the same send-time rule as [`drain_relay_queue`] and never
+/// worker applies the same send-time rule as `drain_relay_queue` and never
 /// retains a strong gateway reference while it waits for queue input.
 pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
     sink: S,
     rx: Receiver<RelayRequest>,
     gateway: Weak<MempoolGateway>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let shutdown = shutdown.into();
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-relay".to_owned())
         .spawn(move || {
-            while !shutdown.load(Ordering::Relaxed) {
+            while !shutdown.load() {
                 match rx.recv_timeout(RELAY_POLL) {
                     Ok(request) => {
                         let Some(gateway) = gateway.upgrade() else {
@@ -376,7 +378,7 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::PeerLease;
@@ -385,6 +387,7 @@ mod tests {
     use crossbeam_channel::bounded;
     use parking_lot::Mutex;
     use std::net::SocketAddr;
+    use std::sync::atomic::AtomicBool;
 
     /// A peer in the fake sink: a node id and a remaining send budget.
     #[derive(Clone)]
@@ -1022,27 +1025,29 @@ mod tests {
         use parking_lot::RwLock;
 
         let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let gateway = MempoolGateway::shared_with(
+        let gateway = Arc::new(MempoolGateway::new(
             pool,
-            Arc::new(CompositeObserver::new()),
+            Some(Arc::new(CompositeObserver::new())),
             ValidationEngine::Native,
-        )
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        ));
         let (queue, rx) = TxRelayQueue::new(8);
         let observer = Arc::new(LocalTxRelayObserver::new(queue, Arc::downgrade(&gateway)));
         gateway
             .attach_observer_leg("relay", observer.clone())
             .expect("observer slot");
         let mut last_txid = Txid::default();
-        for (marker, origin) in [
-            (1, AdmissionOrigin::Rpc),
-            (2, AdmissionOrigin::Reorg),
+        for (marker, origin, should_announce) in [
+            (1, AdmissionOrigin::Rpc, true),
+            (2, AdmissionOrigin::Reorg, true),
+            (4, AdmissionOrigin::Esplora, true),
+            (5, AdmissionOrigin::Block, false),
             (
                 3,
                 AdmissionOrigin::Peer(PeerToken {
                     addr: SocketAddr::from(([127, 0, 0, 1], 8333)),
                     connection_id: 7,
                 }),
+                false,
             ),
         ] {
             let tx = Arc::new(Tx {
@@ -1050,14 +1055,14 @@ mod tests {
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(dummy_txid(marker), 0),
                     script_sig: Script::new(),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::from_stack(vec![vec![0x51]]),
                 }],
                 outputs: vec![TxOut {
                     value: Amount::from_sat(1_000),
                     script_pubkey: Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]),
                 }],
-                lock_time: LockTime::from_consensus(0),
+                lock_time: LockTime::ZERO,
             });
             let txid = tx.txid();
             let wtxid = tx.wtxid();
@@ -1065,7 +1070,7 @@ mod tests {
             gateway
                 .insert_entry(origin, MempoolEntry::new(tx, 100, 10_000, 1, 0, 0))
                 .expect("insert fixture");
-            if matches!(origin, AdmissionOrigin::Rpc | AdmissionOrigin::Reorg) {
+            if should_announce {
                 let announced = rx.try_recv().expect("local commit announces once");
                 assert_eq!(
                     (announced.txid, announced.wtxid, announced.source),
@@ -1118,7 +1123,7 @@ mod tests {
                 value: Amount::from_sat(1_000),
                 script_pubkey: Script::from_bytes(vec![0x6a, 4, 1, 2, 3, 4]),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         })
     }
 
@@ -1240,7 +1245,11 @@ mod tests {
     // An old local event must not borrow a new peer admission's identity.
     #[test]
     fn delayed_local_relay_does_not_adopt_a_reinserted_body() {
-        for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Reorg] {
+        for origin in [
+            AdmissionOrigin::Rpc,
+            AdmissionOrigin::Esplora,
+            AdmissionOrigin::Reorg,
+        ] {
             for alternate_witness in [false, true] {
                 let original = relay_identity_tx();
                 let next = if alternate_witness {

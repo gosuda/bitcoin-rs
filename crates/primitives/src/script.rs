@@ -3,7 +3,7 @@
 use core::ops::{Deref, DerefMut};
 
 /// A Bitcoin script (`scriptSig` or `scriptPubKey`) as owned consensus bytes.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Script(Vec<u8>);
 
 impl Script {
@@ -23,18 +23,6 @@ impl Script {
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
-    }
-
-    /// Returns true when the script is empty.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Returns the script length in bytes.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.0.len()
     }
 }
 
@@ -58,71 +46,14 @@ impl From<Vec<u8>> for Script {
     }
 }
 
-impl From<Script> for Vec<u8> {
-    fn from(script: Script) -> Self {
-        script.0
-    }
-}
-
-impl AsRef<[u8]> for Script {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl PartialEq<[u8]> for Script {
-    fn eq(&self, other: &[u8]) -> bool {
-        self.0 == other
-    }
-}
-
 impl PartialEq<Vec<u8>> for Script {
     fn eq(&self, other: &Vec<u8>) -> bool {
         &self.0 == other
     }
 }
 
-impl PartialEq<Script> for [u8] {
-    fn eq(&self, other: &Script) -> bool {
-        self == other.0.as_slice()
-    }
-}
-
-impl PartialEq<Script> for Vec<u8> {
-    fn eq(&self, other: &Script) -> bool {
-        self == &other.0
-    }
-}
-
-impl IntoIterator for Script {
-    type Item = u8;
-    type IntoIter = std::vec::IntoIter<u8>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a Script {
-    type Item = &'a u8;
-    type IntoIter = std::slice::Iter<'a, u8>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a mut Script {
-    type Item = &'a mut u8;
-    type IntoIter = std::slice::IterMut<'a, u8>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter_mut()
-    }
-}
-
 /// A BIP144 witness stack.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Witness(Vec<Vec<u8>>);
 
 impl Witness {
@@ -171,42 +102,9 @@ impl From<Vec<Vec<u8>>> for Witness {
     }
 }
 
-impl From<Witness> for Vec<Vec<u8>> {
-    fn from(witness: Witness) -> Self {
-        witness.0
-    }
-}
-
-impl PartialEq<[Vec<u8>]> for Witness {
-    fn eq(&self, other: &[Vec<u8>]) -> bool {
-        self.0 == other
-    }
-}
-
 impl PartialEq<Vec<Vec<u8>>> for Witness {
     fn eq(&self, other: &Vec<Vec<u8>>) -> bool {
         &self.0 == other
-    }
-}
-
-impl PartialEq<Witness> for [Vec<u8>] {
-    fn eq(&self, other: &Witness) -> bool {
-        self == other.0.as_slice()
-    }
-}
-
-impl PartialEq<Witness> for Vec<Vec<u8>> {
-    fn eq(&self, other: &Witness) -> bool {
-        self == &other.0
-    }
-}
-
-impl IntoIterator for Witness {
-    type Item = Vec<u8>;
-    type IntoIter = std::vec::IntoIter<Vec<u8>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
     }
 }
 
@@ -216,14 +114,5 @@ impl<'a> IntoIterator for &'a Witness {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
-    }
-}
-
-impl<'a> IntoIterator for &'a mut Witness {
-    type Item = &'a mut Vec<u8>;
-    type IntoIter = std::slice::IterMut<'a, Vec<u8>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter_mut()
     }
 }

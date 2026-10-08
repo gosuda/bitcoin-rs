@@ -52,7 +52,7 @@ fn fixture(outputs: usize) -> (Tx, bitcoin::Transaction) {
 }
 
 fn double_sha256(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(Sha256::digest(bytes)).into()
+    bitcoin_rs_primitives::encode::double_sha256(bytes).to_le_bytes()
 }
 
 /// BIP143 reference serialization. Raw hash-type bits select fields using the
@@ -159,7 +159,7 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
                 prevout.clone()
             } else {
                 TxOut {
-                    value: VALUE.into(),
+                    value: Amount::from_sat(VALUE),
                     script_pubkey: vec![0x51].into(),
                 }
             };
@@ -175,7 +175,7 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
     .expect("kernel accepts independently signed BIP143 input");
     // Every BIP143 mode commits to this amount. Ensure the oracle is not
     // vacuously accepting, and require a script rejection, not an engine error.
-    spent[INPUT].1.value = spent[INPUT].1.value.saturating_add(1_u64.into());
+    spent[INPUT].1.value = spent[INPUT].1.value.saturating_add(Amount::from_sat(1));
     assert!(matches!(
         verify_tx_scripts(
             &signed,
@@ -199,7 +199,7 @@ fn published_bip143_digest_and_signature_anchor_reference() {
         reference_bip143(&oracle, INPUT, &script, VALUE, 1).as_slice(),
         expected,
     );
-    let mut cache = SighashCache::new(&tx);
+    let cache = SighashCache::new(&tx);
     assert_eq!(
         cache
             .segwit_v0_signature_hash_raw(INPUT, &script, Amount::from_sat(VALUE), 1)
@@ -233,7 +233,7 @@ fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
         // input 1 has no matching output in the one-output fixture. SINGLE
         // must still hash a complete BIP143 preimage and allow a valid signature.
         let (tx, oracle) = fixture(output_count);
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
         for byte in 0_u8..=u8::MAX {
             let raw = u32::from(byte);
             let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
@@ -289,7 +289,7 @@ fn raw_segwit_hash_commits_all_32_bits_and_checks_input_bounds() {
     let script = hex(SCRIPT_CODE);
     for output_count in [1, 2] {
         let (tx, oracle) = fixture(output_count);
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
         for raw in [0x100, 0x101, 0x1234_5682, 0x8000_0083, u32::MAX] {
             let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
             let actual = cache
@@ -329,7 +329,7 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
     ];
     for output_count in [1, 2] {
         let (tx, oracle) = fixture(output_count);
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
         for (mode, raw) in modes {
             assert_eq!(
                 cache
@@ -445,7 +445,7 @@ fn raw_segwit_script_code_is_verbatim_across_compactsize_boundaries() {
     // or amount-dependent state. Both CompactSize encodings around 253 matter.
     for output_count in [1, 2] {
         let (tx, oracle) = fixture(output_count);
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
         for size in [0, 1, 252, 253, 520, 10_000] {
             let script = vec![0xab; size];
             for value in [VALUE, VALUE + 1] {

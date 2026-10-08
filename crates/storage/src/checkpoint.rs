@@ -14,6 +14,13 @@ pub use fs::{
     CURRENT_SCHEMA_FILE, create_file, current_schema_bytes, ensure_current_schema, open_data_dir,
     read_file, sync_dir,
 };
+pub use load::open_checkpoint_generation_at;
+pub use load::open_current_checkpoint_at;
+pub use publish::begin_publication_at;
+#[cfg(any(test, feature = "test-seam"))]
+pub use publish::begin_publication_at_with_failpoint;
+pub use publish::clear_checkpoint_generations_at;
+pub use publish::retire_checkpoint_generations_at;
 
 use cap_std::fs::File;
 use serde::{Deserialize, Serialize};
@@ -23,6 +30,25 @@ use thiserror::Error;
 
 /// Root directory containing checkpoint generations.
 pub const CHECKPOINT_ROOT: &str = "chainstate-checkpoints";
+/// Root containing checkpoints for the background `AssumeUTXO` chainstate.
+pub const HISTORICAL_CHECKPOINT_ROOT: &str = "assumeutxo-historical-checkpoints";
+/// Immutable checkpoint identity and publication-time manifest digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CheckpointReference {
+    /// Published generation.
+    pub generation: u64,
+    /// SHA-256 of the manifest bytes synchronized by publication.
+    pub manifest_sha256: [u8; 32],
+}
+
+/// When publication may retire older generations.
+#[derive(Clone, Copy)]
+pub enum CheckpointRetention {
+    /// CURRENT is the owner; retire older generations after publishing it.
+    Replace,
+    /// A separate durable reference owns recovery; retirement follows its commit.
+    UntilReferenced,
+}
 /// Published pointer file for the active checkpoint generation.
 pub const CURRENT_FILE: &str = "CURRENT";
 /// Manifest filename inside each checkpoint generation.
@@ -34,7 +60,7 @@ pub const UTXO_FILE: &str = "utxo-v4.dat";
 /// Coin statistics artifact filename.
 pub const COINSTATS_FILE: &str = "coinstats-v1.dat";
 /// Expected format identifier for the CURRENT pointer.
-pub const CURRENT_FORMAT: &str = "bitcoin-rs-chainstate-current";
+pub(crate) const CURRENT_FORMAT: &str = "bitcoin-rs-chainstate-current";
 /// Expected format identifier for checkpoint manifests.
 pub const MANIFEST_FORMAT: &str = "bitcoin-rs-chainstate-checkpoint";
 /// Codec identifier for canonical header artifacts.
@@ -44,7 +70,7 @@ pub const UTXO_CODEC: &str = "bitcoin-rs-utxo-spendable-v1";
 /// Codec identifier for `CoinStats` artifacts.
 pub const COINSTATS_CODEC: &str = "bitcoin-rs-coinstats-v1";
 /// CURRENT pointer schema version.
-pub const CURRENT_VERSION: u32 = 1;
+pub(crate) const CURRENT_VERSION: u32 = 1;
 /// Checkpoint manifest schema version.
 pub const MANIFEST_VERSION: u32 = 1;
 /// UTXO artifact schema version.
@@ -58,9 +84,9 @@ pub const COINSTATS_PAYLOAD_LEN: u32 = 804;
 /// Complete `CoinStats` artifact length in bytes.
 pub const COINSTATS_ARTIFACT_LEN: u64 = 820;
 /// Maximum accepted checkpoint artifact payload size in bytes.
-pub const MAX_CHECKPOINT_PAYLOAD_BYTES: u64 = 64_u64 * 1024 * 1024 * 1024;
+pub(crate) const MAX_CHECKPOINT_PAYLOAD_BYTES: u64 = 64_u64 * 1024 * 1024 * 1024;
 /// Maximum accepted checkpoint metadata size in bytes.
-pub const MAX_CHECKPOINT_METADATA_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_CHECKPOINT_METADATA_BYTES: u64 = 1024 * 1024;
 const CHECKPOINT_WRITE_BUFFER_SIZE: usize = 64 * 1024;
 
 /// Authenticated pointer to the currently published checkpoint generation.
@@ -204,29 +230,21 @@ pub enum CheckpointError {
     #[error("checkpoint invariant failed: {0}")]
     Invalid(String),
 }
-/// A checkpoint cannot be trusted and requires a full resync.
-#[derive(Debug, Error)]
-pub enum CheckpointCorruption {
-    /// The checkpoint failed a current-schema integrity or format check.
-    #[error(
-        "corrupt current-schema checkpoint: {reason}; remove or replace the datadir and restart to perform a full resync"
-    )]
-    Invalid {
-        /// Human-readable corruption reason.
-        reason: String,
-    },
-}
 /// Errors returned while opening the current checkpoint.
 #[derive(Debug, Error)]
 pub enum CheckpointLoadError {
-    /// The checkpoint is corrupt or fails authentication.
-    #[error(transparent)]
-    Corrupt(#[from] CheckpointCorruption),
+    /// The checkpoint failed a current-schema integrity or format check and
+    /// cannot be trusted; a full resync is required.
+    #[error(
+        "corrupt current-schema checkpoint: {0}; remove or replace the datadir and restart to perform a full resync"
+    )]
+    Corrupt(String),
     /// Opening or reading the checkpoint failed with I/O.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 /// Failpoint boundaries used to test checkpoint publication recovery.
+#[cfg(any(test, feature = "test-seam"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CheckpointFailpoint {
     /// Before headers bytes are written.
@@ -276,21 +294,26 @@ pub(crate) struct HashingWriter<'a> {
     file: BufWriter<&'a mut File>,
     hasher: Sha256,
     bytes: u64,
+    #[cfg(any(test, feature = "test-seam"))]
     fail: bool,
 }
 impl<'a> HashingWriter<'a> {
+    /// The `configured`/`boundary` parameters exist only under
+    /// `test`/`test-seam` and arm the write-failure injection.
     pub(crate) fn new(
         file: &'a mut File,
-        configured: Option<CheckpointFailpoint>,
-        boundary: CheckpointFailpoint,
+        #[cfg(any(test, feature = "test-seam"))] configured: Option<CheckpointFailpoint>,
+        #[cfg(any(test, feature = "test-seam"))] boundary: Option<CheckpointFailpoint>,
     ) -> Self {
         Self {
             file: BufWriter::with_capacity(CHECKPOINT_WRITE_BUFFER_SIZE, file),
             hasher: Sha256::new(),
             bytes: 0,
-            fail: configured == Some(boundary),
+            #[cfg(any(test, feature = "test-seam"))]
+            fail: configured.is_some() && configured == boundary,
         }
     }
+
     pub(crate) fn finish(mut self) -> std::io::Result<(u64, [u8; 32])> {
         self.file.flush()?;
         Ok((self.bytes, self.hasher.finalize().into()))
@@ -298,6 +321,7 @@ impl<'a> HashingWriter<'a> {
 }
 impl Write for HashingWriter<'_> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        #[cfg(any(test, feature = "test-seam"))]
         if self.fail {
             return Err(std::io::Error::from_raw_os_error(28));
         }
@@ -327,4 +351,6 @@ pub use load::{
     CheckpointOpen, classify_checkpoint_error, classify_checkpoint_io, coinstats_artifact_payload,
     corrupt_checkpoint, open_current_checkpoint, read_manifest, require_filename, verify_artifact,
 };
+#[cfg(any(test, feature = "test-seam"))]
+pub use publish::begin_publication_with_failpoint;
 pub use publish::{ArtifactDigest, CheckpointStage, begin_publication, commit_publication};

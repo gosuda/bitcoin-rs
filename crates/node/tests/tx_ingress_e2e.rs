@@ -52,7 +52,6 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use crossbeam_channel::Sender;
-use parking_lot::Mutex;
 
 /// Node-side socket read poll while waiting for peer frames.
 const READ_POLL: Duration = Duration::from_millis(200);
@@ -131,14 +130,14 @@ fn spending_tx(parent: Txid, output_value: u64) -> Tx {
         inputs: vec![TxIn {
             previous_output: OutPoint::new(parent, 0),
             script_sig: Script::new(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(output_value),
             script_pubkey: Script::from_bytes(vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD]),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -583,7 +582,9 @@ impl Harness {
         let gateway = state.mempool_gateway();
 
         let ingress_tx = state.inbound_tx_sender();
-        let ingress_rx = state.inbound_tx_rx_handle();
+        let ingress_rx = state
+            .take_inbound_tx_receiver()
+            .ok_or_else(|| anyhow::anyhow!("inbound tx receiver already taken"))?;
         let (relay, relay_rx) = TxRelayQueue::new(DEFAULT_TX_RELAY_QUEUE_CAPACITY);
         let mining = FakeMiningControl::unavailable("not implemented");
         let mining_control: Arc<dyn MiningControl> = mining.clone();
@@ -708,7 +709,7 @@ fn full_relay_queue_does_not_block_peer_admission_or_mining_wake() -> anyhow::Re
         Arc::clone(&gateway),
         mining_control,
         Arc::clone(&shutdown),
-        Arc::new(Mutex::new(ingress_rx)),
+        ingress_rx,
         relay.clone(),
     )?;
 
@@ -790,7 +791,7 @@ fn witness_transaction_relays_txid_and_wtxid_to_mixed_peers() -> anyhow::Result<
         harness.magic,
         Instant::now() + ABSENCE_WINDOW,
     )?;
-    assert!(inventories(&source_frames).is_empty());
+    assert_eq!(inventories(&source_frames), []);
     Ok(())
 }
 

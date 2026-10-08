@@ -40,7 +40,7 @@ surface = "P2P v1 wire protocol"
 core_reference = "Bitcoin Core 31.1 net protocol (docs/policies/p2p-compatibility.md pin)"
 status = "externally verified"
 representative_consumer = "unmodified Bitcoin Core 31.1 bitcoind (scripts/run-p2p-core-interop.sh)"
-evidence = "black-box interop: handshake, IBD sync, relay, disconnect behavior, externally visible chain identity (docs/contracts/core-differential.md CORE-02/CORE-03; evidence schema bitcoin-rs-core-differential-v2 verified by crates/p2p/tests/core_interop_live.rs). Bounded to those outcomes. Per CORE-03, compact-block relay counters are still derived from internal bitcoin-rs log markers (scripts/run-p2p-core-interop.sh count_marker); per ECO-09 that derivation is diagnostic only and must trend to observable protocol outcomes before it is relied on as a compatibility contract. The evidence JSON is ephemeral (deleted after the run unless --keep is passed); a CI artifact upload is follow-up work per ECO-08."
+evidence = "black-box interop: handshake, IBD sync, relay, disconnect behavior, externally visible chain identity (docs/contracts/core-differential.md CORE-02/CORE-03; evidence schema bitcoin-rs-core-differential-v2 verified by crates/p2p/tests/core_interop_live.rs). Bounded to those outcomes. Per CORE-03, compact-block relay counters are still derived from internal bitcoin-rs log markers (scripts/run-p2p-core-interop.sh count_marker); per ECO-09 that derivation is diagnostic only and must trend to observable protocol outcomes before it is relied on as a compatibility contract. The main workflow retains any generated evidence JSON and diagnostic logs for seven days in its core-differential-<run_attempt> artifact, including available partial logs on failure (docs/contracts/core-differential.md)."
 
 [[row]]
 surface = "BIP324 / P2P v2 transport"
@@ -124,7 +124,7 @@ surface = "USDT tracepoints (validation/mempool/net providers)"
 core_reference = "Bitcoin Core doc/tracing.md probe ABI"
 status = "implemented"
 representative_consumer = "planned: bpftrace/BCC or bitcoin-dev-tools/usdt-dash workflow (issue #1122, #1121)"
-evidence = "in-tree only: crates/trace/src/probe_abi.rs table asserted against built SDT notes by crates/trace/tests/sdt_notes.rs; docs/tracing/smoke.bt is adapted from Core's contrib/tracing script but no external-tool run is recorded. ABI table alone is not external verification (ECO-08)."
+evidence = "in-tree only: crates/consensus/probes.d table asserted against built SDT notes by crates/consensus/tests/sdt_notes.rs; docs/tracing/smoke.bt is adapted from Core's contrib/tracing script but no external-tool run is recorded. ABI table alone is not external verification (ECO-08)."
 
 [[row]]
 surface = "Observability via bpftrace/BCC and bitcoin-dev-tools"

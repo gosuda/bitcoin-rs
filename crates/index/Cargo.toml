@@ -13,21 +13,17 @@ workspace = true
 
 [features]
 default = []
-# Exposes cross-crate test seams without widening the production API.
 test-seam = []
 rocksdb = [
     "bitcoin-rs-storage/rocksdb",
-    "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-utxo/rocksdb",
 ]
 fjall = [
     "bitcoin-rs-storage/fjall",
-    "bitcoin-rs-chain/fjall",
     "bitcoin-rs-utxo/fjall",
 ]
 redb = [
     "bitcoin-rs-storage/redb",
-    "bitcoin-rs-chain/redb",
     "bitcoin-rs-utxo/redb",
 ]
 
@@ -49,11 +45,12 @@ tracing.workspace = true
 parking_lot.workspace = true
 
 [dev-dependencies]
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 proptest.workspace = true
 serde_json.workspace = true
 criterion.workspace = true
-tempfile = ">=3.20.0, <4"
+tempfile.workspace = true
 bitcoin.workspace = true
 
 [[bench]]

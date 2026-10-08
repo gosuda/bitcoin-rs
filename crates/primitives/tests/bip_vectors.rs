@@ -85,7 +85,7 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
         let value_sats = example["value_sats"].as_u64().expect("value sats");
         let input_index = usize::try_from(example["input_index"].as_u64().expect("input index"))
             .expect("input index fits usize");
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
 
         for vector in example["vectors"].as_array().expect("vectors array") {
             let hash_type = u32::try_from(vector["hash_type"].as_u64().expect("hash type"))
@@ -125,22 +125,6 @@ fn bip143_examples_match_spec_digests() -> Result<()> {
                 expected,
                 "bip143 {example} raw hash type {hash_type:#x}"
             );
-
-            // One-shot helpers must agree with the spec too (they are the
-            // forms consensus/src/bip143.rs and the script checker call).
-            let one_shot = Sighash::compute_bip143(
-                &tx,
-                input_index,
-                &script_code,
-                Amount::from_sat(value_sats),
-                ty,
-            )
-            .unwrap_or_else(|error| panic!("bip143 {example}: one-shot failed: {error}"));
-            assert_eq!(
-                digest_hex(&one_shot),
-                expected,
-                "bip143 {example} one-shot {hash_type:#x}"
-            );
         }
     }
     Ok(())
@@ -173,7 +157,7 @@ fn bip341_keypath_vectors_match_spec_digests() -> Result<()> {
             })
             .collect();
 
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
         for input in case["inputSpending"]
             .as_array()
             .expect("inputSpending array")

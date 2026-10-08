@@ -668,7 +668,7 @@ impl HeadersSyncState {
     /// INVARIANT: locator progress is monotonic within a phase: the cursor is
     ///   the deepest header this sync has accepted.
     #[must_use]
-    pub fn next_locator(&self) -> Vec<Hash256> {
+    pub(crate) fn next_locator(&self) -> Vec<Hash256> {
         if self.phase == HeadersSyncPhase::Final {
             return Vec::new();
         }
@@ -727,7 +727,7 @@ impl HeadersSyncState {
 
     /// The salted one-bit commitment for one header hash
     /// (`headerssync.h:211-216`: a salted hasher reduced to its low bit).
-    pub(crate) fn commitment_bit(&self, hash: Hash256) -> bool {
+    pub(super) fn commitment_bit(&self, hash: Hash256) -> bool {
         let mut digest = Sha256::new();
         digest.update(self.salt);
         digest.update(hash.as_byte_array());

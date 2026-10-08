@@ -40,7 +40,7 @@ fn sample_candidate(
         mempool_sequence: sequence,
         coinbase: Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
                 value: Amount::from_sat(50),
@@ -48,13 +48,8 @@ fn sample_candidate(
             }],
         },
         coinbase_value: 50,
-        fees: 0,
         weight: 800,
-        size: 200,
-        sigop_cost: 0,
         transactions: Vec::new(),
-        witness_merkle_root: None,
-        witness_reserved_value: None,
         witness_commitment: None,
     }
 }
@@ -145,7 +140,7 @@ fn template_projects_candidate_generation_and_deployment_flags() {
         let candidate = sample_candidate(prev, 1, csv_active, segwit_active);
         let expected_id = candidate.template_id.clone();
         let template =
-            template_from_candidate(network, Arc::new(candidate), submit_old, Vec::new(), 0);
+            template_from_candidate(network, Arc::new(candidate), submit_old, Vec::new());
         assert_eq!(template.candidate.previous_block_hash, prev);
         assert_eq!(template.candidate.csv_active, csv_active);
         assert_eq!(template.candidate.segwit_active, segwit_active);

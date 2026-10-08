@@ -65,6 +65,97 @@ fn invalidate_block_settles_disconnect_debt() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A fork below the journal's checkpoint base invalidates the whole
+/// generation: the writer stays frozen and cannot disarm the marker itself.
+/// The disconnect-debt settlement must still publish the replacement
+/// checkpoint, compact a fresh base onto it, and reopen appends — the wedge
+/// where `freeze`/`compact` refused the invalidated writer left the marker
+/// armed and every later apply inconclusive until restart.
+#[test]
+fn below_base_invalidate_settles_debt_and_reopens_journal() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let data_dir = dir.path().join("node");
+    let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
+    config.data_dir = data_dir.clone();
+    config.p2p.listen.clear();
+    let state = NodeState::open(config, None)?;
+    let genesis = bitcoin_rs_primitives::Network::Regtest.genesis_block();
+    state.apply_block(&genesis)?;
+    let block_one = regtest_fixture::mined_regtest_child_at_time(
+        genesis.block_hash(),
+        genesis.header.time + 1,
+        1,
+    )?;
+    state.apply_block(&block_one)?;
+    state.publish_checkpoint()?;
+    let block_two = regtest_fixture::mined_regtest_child_at_time(
+        block_one.block_hash(),
+        genesis.header.time + 2,
+        2,
+    )?;
+    state.apply_block(&block_two)?;
+
+    let current_before = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+        data_dir.join("chainstate-checkpoints/CURRENT"),
+    )?)?
+    .get("generation")
+    .and_then(serde_json::Value::as_u64)
+    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+
+    // Forking at genesis crosses below the checkpoint base at height 1.
+    crate::reorg::invalidate_block(
+        &state.chainstate(),
+        &state.chain_followers(),
+        Hash256::from(block_one.block_hash()),
+    )?;
+
+    let current_after = serde_json::from_slice::<serde_json::Value>(&std::fs::read(
+        data_dir.join("chainstate-checkpoints/CURRENT"),
+    )?)?
+    .get("generation")
+    .and_then(serde_json::Value::as_u64)
+    .ok_or_else(|| anyhow::anyhow!("CURRENT has no generation"))?;
+    assert!(
+        current_after > current_before,
+        "settlement must publish the rolled-back checkpoint"
+    );
+    assert!(
+        !data_dir
+            .join(CHAINSTATE_JOURNAL_DIR)
+            .join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER)
+            .exists(),
+        "the settlement checkpoint retires the full-revalidation marker"
+    );
+    let tip = state
+        .chainstate()
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| anyhow::anyhow!("applied tip missing after invalidation"))?;
+    assert_eq!(
+        (tip.height, tip.hash),
+        (0, Hash256::from(genesis.block_hash()))
+    );
+
+    // The reopened journal tracks new applies on the rebuilt branch.
+    let mut previous = genesis.block_hash();
+    for height in 1..=2 {
+        let replacement = regtest_fixture::mined_regtest_child_at_time(
+            previous,
+            genesis.header.time + 10 + height,
+            height,
+        )?;
+        previous = replacement.block_hash();
+        state.apply_block(&replacement)?;
+    }
+    let tip = state
+        .chainstate()
+        .applied_tip()
+        .load_full()
+        .ok_or_else(|| anyhow::anyhow!("rebuilt tip missing"))?;
+    assert_eq!(tip.height, 2);
+    Ok(())
+}
+
 #[test]
 fn invalidate_preflights_first_replacement_body_before_disconnect() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -565,6 +656,97 @@ fn full_revalidation_marker_resumes_on_durable_head() -> anyhow::Result<()> {
         (tip.hash, tip.height),
         (remembered_tip.hash, remembered_tip.height),
         "forced full revalidation must rebuild on the durable head chain"
+    );
+    Ok(())
+}
+
+/// `RCV-02`: cold replay runs before the maintenance worker exists, so the
+/// recovery owner must compact a full journal and retry the refused block.
+/// The progress checkpoint is not completion: the sticky marker remains until
+/// a checkpoint at the fully recovered state retires it.
+#[test]
+fn cold_revalidation_relieves_journal_pressure_and_retries() -> anyhow::Result<()> {
+    let (_dir, state, mut config) = applied_regtest_chain(2, 1)?;
+    let remembered_tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("applied tip missing"))?;
+    drop(state);
+
+    config.chainstate_journal.max_journal_mib = 1;
+    config.chainstate_journal.rotate_mib = 1;
+    let journal_dir = config.data_dir.join(CHAINSTATE_JOURNAL_DIR);
+    std::fs::remove_dir_all(&journal_dir)?;
+    std::fs::create_dir_all(&journal_dir)?;
+    let marker = journal_dir.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER);
+    std::fs::write(&marker, b"force full validation\n")?;
+
+    // Start one byte below the retention limit. Genesis emits no journal
+    // record, block one crosses the limit, and block two is deterministically
+    // refused before mutation until recovery publishes a compaction base.
+    let pressure = journal_dir.join("segment-9999999999.log");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pressure)?
+        .set_len(1024 * 1024 - 1)?;
+
+    let reopened = NodeState::open(config.clone(), None)?;
+    assert_eq!(reopened.resume_source(), ResumeSource::Cold);
+    let tip = reopened
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("cold replay did not publish an applied tip"))?;
+    assert_eq!(
+        (tip.hash, tip.height),
+        (remembered_tip.hash, remembered_tip.height),
+        "cold replay must retry the block refused by journal retention pressure"
+    );
+    assert_eq!(
+        tip.chain_tx_count.get(),
+        Some(
+            reopened
+                .chainstate()
+                .coin_stats_handle()
+                .snapshot()
+                .tx_count
+        ),
+        "the recovered tip count must remain coherent with CoinStats"
+    );
+    assert!(
+        marker.exists(),
+        "a progress checkpoint must not retire the full-revalidation marker"
+    );
+    assert!(
+        !pressure.exists(),
+        "recovery relief must compact the retained journal segments"
+    );
+
+    // Crash/restart after progress compaction can leave a later segment at
+    // the exact retention limit. The sticky marker restarts from genesis,
+    // before any applied tip exists for checkpoint publication.
+    drop(reopened);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&pressure)?
+        .set_len(1024 * 1024)?;
+    let restarted = NodeState::open(config, None)?;
+    let landed = restarted
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("restart at the retention limit did not land"))?;
+    assert_eq!(
+        (landed.hash, landed.height),
+        (remembered_tip.hash, remembered_tip.height)
+    );
+    assert!(
+        marker.exists(),
+        "replay progress must preserve the sticky marker"
+    );
+    assert!(
+        !pressure.exists(),
+        "post-genesis relief must compact stale segments"
     );
     Ok(())
 }

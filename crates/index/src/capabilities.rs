@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Stable identifier used by the RPC capability report.
-pub const TXINDEX_CAPABILITY: &str = "txindex";
+pub(crate) const TXINDEX_CAPABILITY: &str = "txindex";
 
 /// Lifecycle state reported for a compiled RPC capability.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -129,7 +129,7 @@ pub fn derived_index_status(enabled: bool, state: CapabilityState) -> Capability
 
 /// Disabled txindex row used when no worker is attached.
 #[must_use]
-pub fn disabled_txindex() -> CapabilityStatus {
+pub(crate) fn disabled_txindex() -> CapabilityStatus {
     derived_index_status(false, CapabilityState::Disabled)
 }
 

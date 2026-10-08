@@ -132,17 +132,18 @@ remove another script's output.
   namespace per `docs/policies/db-migration.md` (never an in-place migration).
   `IndexWriter::open` (`crates/index/src/index.rs`) accepts the current
   durability marker only (row-format 5: big-endian heights, 43-byte live rows,
-  6-byte positions); every older marker is `IndexError::UnsupportedTxIndexFormatVersion`
+  6-byte positions — format owned by
+  `docs/benchmarks/scriptindex-format.md`); every older marker is `IndexError::UnsupportedTxIndexFormatVersion`
   and recovery full-resets the store for rebuild. No in-place upgrade path
   exists. (`IDX-04` selective reset still covers corrupt watermarks, not versions.)
 - On node startup, index workers read their persisted watermarks and reconcile
-  against `NodeState::active_chain_snapshot()`:
+  against `Chainstate::chain_snapshot()` (via `NodeState::chainstate()`):
   - If the watermark is an ancestor of the restored tip, the worker connects
     forward.
   - If the watermark is on an abandoned branch, the worker rolls back to the
     common ancestor and connects forward to the active tip.
 
-### `IDX-08`: Atomic commit durability and recovery
+### `IDX-10`: Atomic commit durability and recovery
 
 - `IndexWriter` is the sole owner of index mutations. `commit_block` prepares
   all rows and commits them together with the capability watermark in one
@@ -228,11 +229,9 @@ remove another script's output.
   `commit_golden_blocks_writes_expected_electrs_rows`: electrs family
   occupancy after one atomic `IndexWriter::commit_block` (`IDX-06`).
 - `crates/index/src/runtime/recovery_tests.rs`:
-  - `shallow_reorg_rewinds_to_common_ancestor_then_replays`
-  - `absent_tip_rewinds_index_to_empty`
-  - `missing_disconnected_body_routes_rewind_to_rebuild`
+  - `index_ahead_of_restored_tip_is_reported_once_and_rewound`
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
-  - `live_only_index_ahead_is_reported_and_reseeded`
+  - `pruned_history_rebuilds_from_the_frontier_and_absent_history_waits`
 - `crates/index/src/runtime/startup.rs` and
   `crates/index/src/runtime/integration_tests.rs`: lifecycle
   publication, open failure/timeout, and shutdown abandonment.

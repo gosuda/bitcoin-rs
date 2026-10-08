@@ -65,12 +65,33 @@ def _emit(output: Path, seed: bytes) -> None:
 def _mask_rust_raw_strings(text: str) -> str:
     """Hide raw-string bodies from regexes that locate Rust declarations."""
     raw_start = re.compile(r'(?:b|c)?r(#{0,255})"')
+    # 'x', '\'', '\n', '\u{41}', b'x' — a bare " inside must not toggle in_string.
+    char_literal = re.compile(r"'(?:\\u\{[0-9a-fA-F_]{1,6}\}|\\.|[^'\\])'")
     out: list[str] = []
     index = 0
+    in_string = False
     while index < len(text):
+        if in_string:
+            char = text[index]
+            out.append(char)
+            index += 1
+            if char == "\\" and index < len(text):
+                out.append(text[index])
+                index += 1
+            elif char == '"':
+                in_string = False
+            continue
         raw = raw_start.match(text, index)
         if raw is None:
-            out.append(text[index])
+            if text[index] == "'":
+                literal = char_literal.match(text, index)
+                if literal is not None:
+                    out.append(literal.group(0))
+                    index = literal.end()
+                    continue
+            char = text[index]
+            out.append(char)
+            in_string = char == '"'
             index += 1
             continue
         hashes = raw.group(1)
@@ -85,16 +106,39 @@ def _mask_rust_raw_strings(text: str) -> str:
 
 
 def _commands(source: Path) -> dict[str, bytes]:
-    text = _mask_rust_raw_strings(_strip_rust_comments(source.read_text()))
+    stripped = _strip_rust_comments(source.read_text())
+    # The mask preserves offsets (raw-string bodies -> spaces, newlines kept), so
+    # a span found in the masked text indexes the same range in `stripped`.
+    masked = _mask_rust_raw_strings(stripped)
     table = re.search(
-        r"pub\s+const\s+COMMANDS\s*:\s*&\[Command\]\s*=\s*&\[(.*?)\];",
-        text, re.S,
+        r"pub\s+const\s+COMMANDS\s*:\s*&\[&str\]\s*=\s*&\[(.*?)\];",
+        masked, re.S,
     )
     if table is None:
         raise ValueError("Cannot find the P2P COMMANDS inventory")
-    commands = re.findall(r'\bname\s*:\s*"([a-z0-9]{1,12})"', table.group(1))
-    if (not commands or len(commands) > 256 or len(set(commands)) != len(commands)
-            or len(commands) != len(re.findall(r"\bCommand\s*\{", table.group(1)))):
+    table_source = stripped[table.start(1):table.end(1)]
+    # Sequential parse: every comma-separated entry must be one complete
+    # literal — r#"x"junk"# is not the entry "x" and must not parse as it.
+    literal = re.compile(
+        r'(?:(b|c)?r(#{0,255})"([^"]*)"\2|(?:b|c)?"([^"]*)")'
+    )
+    whitespace = re.compile(r"\s*")
+    name = re.compile(r"[a-z0-9]{1,12}")
+    commands: list[str] = []
+    pos = whitespace.match(table_source).end()
+    while pos < len(table_source):
+        entry = literal.match(table_source, pos)
+        value = entry and (entry.group(3) or entry.group(4))
+        if value is None or name.fullmatch(value) is None:
+            raise ValueError("Invalid P2P COMMANDS inventory")
+        commands.append(value)
+        pos = whitespace.match(table_source, entry.end()).end()
+        if pos >= len(table_source):
+            break
+        if table_source[pos] != ",":
+            raise ValueError("Invalid P2P COMMANDS inventory")
+        pos = whitespace.match(table_source, pos + 1).end()
+    if not commands or len(commands) > 256 or len(set(commands)) != len(commands):
         raise ValueError("Invalid P2P COMMANDS inventory")
     return {name: bytes([index]) for index, name in enumerate(commands)}
 

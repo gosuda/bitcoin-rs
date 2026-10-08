@@ -106,14 +106,13 @@ impl ServerHarness {
     pub(crate) fn start(node: &NodeHarness) -> GateResult<Self> {
         let state = &node.state;
         let chainstate = state.chainstate();
-        let ibd = chainstate.ibd_latch();
         let transition = state.stable_read();
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
                 chain_tip: chainstate.header_tip_reader(),
                 applied_tip: chainstate.applied_tip_reader(),
-                ibd,
-                blocks: state.blocks(),
+                progress: chainstate.chain_progress_reader(),
+                blocks: state.block_log_reader(),
                 utxo: chainstate.utxo_reader(),
                 coin_stats: chainstate.coin_stats_handle(),
                 block_tree: chainstate.block_tree_reader(),
@@ -124,8 +123,8 @@ impl ServerHarness {
             },
             mempool: MempoolHandles {
                 // The daemon wires this handle as `state.mempool_gateway()`
-                // (lifecycle.rs): the gateway interned under the resolved
-                // `config.validation.engine`, not a re-interned Native one.
+                // (lifecycle.rs): the gateway constructed with the resolved
+                // `config.validation.engine`, not a separate Native one.
                 gateway: state.mempool_gateway(),
             },
             indexes: IndexHandles {
@@ -135,11 +134,8 @@ impl ServerHarness {
                 derived_index_status: Some(state.derived_index_status()),
             },
             network: NetworkHandles {
-                network_active: state.network_active(),
                 peer_table: state.peer_table(),
-                p2p_outbound_sender: Some(state.p2p_outbound_sender()),
-                banned: state.banned_subnets(),
-                added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
+                p2p: state.p2p(),
                 local_services: state.p2p().local_services().to_u64(),
             },
             mining: bitcoin_rs_rpc::context::MiningHandles {

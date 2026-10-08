@@ -8,13 +8,14 @@
 //! Embedders control placement of that work on their own runtime.
 
 use bitcoin_rs_index::CapabilitySnapshot;
-use bitcoin_rs_mempool::{FeeRate, MempoolStats, MutationResult};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Tx, Txid, deserialize};
-pub use bitcoin_rs_rpc::context::SyncProgress;
+use bitcoin_rs_mempool::{FeeRate, LocalOrigin, MempoolStats, MutationResult};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Tx, Txid, deserialize, unix_time_secs};
+pub(crate) use bitcoin_rs_rpc::context::SyncProgress;
+use bitcoin_rs_rpc::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB};
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::lifecycle::{DRAIN_DEADLINE, NodeServices, TeardownMode, start_node};
+use crate::lifecycle::{NodeServices, TeardownMode, start_node};
 use crate::state::NodeState;
 use bitcoin_rs_chainstate::events::ChainSnapshot;
 
@@ -36,6 +37,9 @@ pub enum NodeError {
     /// Mempool admission rejected the broadcast transaction.
     #[error("transaction broadcast failed: {0}")]
     Broadcast(String),
+    /// Snapshot import, trust verification, or activation failed.
+    #[error("snapshot activation failed: {0}")]
+    Snapshot(String),
 }
 
 /// A running node owning its state, service graph, and RPC context.
@@ -73,6 +77,28 @@ impl Node {
     #[must_use]
     pub fn snapshot(&self) -> ChainSnapshot {
         self.state.chainstate().chain_snapshot()
+    }
+
+    /// Returns active and historical validation progress from the chainstate owner.
+    pub fn chainstates_summary(
+        &self,
+    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, NodeError> {
+        self.state
+            .chainstates_summary()
+            .map_err(|error| NodeError::Unavailable(error.to_string()))
+    }
+
+    /// Imports a pinned snapshot through the node's fenced activation boundary.
+    /// Like startup, file reading and validation run synchronously when polled;
+    /// the caller chooses their runtime placement. Headers through the pinned
+    /// base must already have been admitted by ordinary header synchronization.
+    pub async fn activate_assumeutxo_snapshot_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), NodeError> {
+        self.state
+            .activate_assumeutxo_snapshot_file(path)
+            .map_err(|error| NodeError::Snapshot(error.to_string()))
     }
 
     /// Returns the live txindex capability report.
@@ -115,7 +141,11 @@ impl Node {
     /// that the transaction does not exist. A complete negative lookup is
     /// `NodeError::NotFound`.
     pub async fn tx_by_id(&self, txid: Txid) -> Result<Tx, NodeError> {
-        let pooled = self.state.mempool().read().transaction_by_txid(&txid);
+        let pooled = self
+            .state
+            .mempool_reader()
+            .read()
+            .transaction_by_txid(&txid);
         if let Some(tx) = pooled {
             return Ok((*tx).clone());
         }
@@ -134,27 +164,42 @@ impl Node {
     /// Returns aggregate mempool information from one read snapshot.
     #[must_use]
     pub fn mempool_info(&self) -> MempoolStats {
-        self.state.mempool().read().stats()
+        self.state.mempool_reader().read().stats()
     }
 
     /// Returns a history-based fee estimate, or `None` with insufficient history.
     #[must_use]
     pub fn fee_estimate(&self, confirmation_target_blocks: u32) -> Option<FeeRate> {
         self.state
-            .mempool()
+            .mempool_reader()
             .read()
             .estimate_fee_rate(confirmation_target_blocks)
     }
 
-    /// Admits a transaction through the same typed operation as RPC submission.
+    /// Admits a transaction through the mempool gateway's local submission,
+    /// the operation RPC `sendrawtransaction` and Esplora broadcasts also call.
     ///
-    /// Policy checks and ordered publication belong to the shared gateway;
-    /// embedding does not insert directly into the pool or own another gateway.
+    /// The submission carries `sendrawtransaction`'s default fee-rate cap.
+    /// Policy checks and ordered publication belong to the gateway; embedding
+    /// does not insert directly into the pool or own another gateway.
     pub async fn broadcast(&self, tx: Tx) -> Result<MutationResult, NodeError> {
-        let max_feerate = Some(bitcoin_rs_rpc::context::DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB);
-        self.context
-            .admit_transaction(tx, max_feerate)
-            .map_err(NodeError::Broadcast)
+        let chainstate = self.state.chainstate();
+        let chain = ChainAdmissionView::new(
+            chainstate.utxo_reader(),
+            chainstate.applied_tip_reader(),
+            chainstate.block_tree_reader(),
+            chainstate.network(),
+        );
+        self.state
+            .mempool_gateway()
+            .submit_local_transaction(
+                Arc::new(tx),
+                LocalOrigin::Rpc,
+                Some(DEFAULT_MAX_RAW_TX_FEE_RATE_SAT_PER_KVB),
+                unix_time_secs(),
+                &chain,
+            )
+            .map_err(|error| NodeError::Broadcast(error.to_string()))
     }
 
     /// Stops owned services, then publishes the clean-shutdown checkpoint.
@@ -163,17 +208,11 @@ impl Node {
     }
 
     pub(crate) fn shutdown_blocking(mut self) -> Result<(), NodeError> {
-        // Explicit shutdown must release index stores, not abandon their
-        // workers at the bounded Drop deadline: stop and join the
-        // derived-index worker before teardown, so the clean checkpoint
-        // publishes and chainstate closes only after the worker is gone —
-        // the same order `Drop for Node` uses.
         let Some(services) = self.services.as_mut() else {
             return Err(NodeError::Shutdown("node was already shut down".to_owned()));
         };
-        let index_error = self.state.bounded_index_shutdown(DRAIN_DEADLINE).err();
         let result = services
-            .teardown(Some(&self.state), TeardownMode::CleanShutdown, index_error)
+            .teardown(Some(&mut self.state), TeardownMode::CleanShutdown)
             .map_err(|error| NodeError::Shutdown(error.to_string()));
         self.services = None;
         // Dropping self releases state and the RPC context's storage clones
@@ -185,9 +224,7 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         if let Some(services) = self.services.as_mut() {
-            let index_error = self.state.bounded_index_shutdown(DRAIN_DEADLINE).err();
-            if let Err(error) =
-                services.teardown(Some(&self.state), TeardownMode::StartupAbort, index_error)
+            if let Err(error) = services.teardown(Some(&mut self.state), TeardownMode::StartupAbort)
             {
                 tracing::warn!(%error, "dropped embedded node; teardown reported an error");
             }
@@ -204,6 +241,7 @@ mod tests {
 
     use super::*;
     use crate::NodeConfig;
+    use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
     use bitcoin_rs_mempool::{MempoolEntry, MempoolObserver};
     use bitcoin_rs_primitives::{
         Amount, LockTime, Network, OutPoint, Script, Sequence, TxIn, TxOut, Witness,
@@ -300,11 +338,11 @@ mod tests {
         ]);
         let spending = |previous_output: OutPoint| Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output,
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0xffff_ffff),
+                sequence: Sequence::MAX,
                 witness: Witness::from_stack(vec![vec![0x51]]),
             }],
             outputs: vec![TxOut {
@@ -367,6 +405,26 @@ mod tests {
         assert!(
             publisher.sequence_events.lock().is_empty(),
             "a direct pool insertion must not satisfy the gateway publication assertion"
+        );
+
+        // Refusal: an unknown prevout is refused with the gateway's policy
+        // reason verbatim, and nothing is inserted or published.
+        let orphan = spending(OutPoint::new(Txid(Hash256::from_le_bytes(&[0x5C; 32])), 0));
+        let orphan_txid = orphan.txid();
+        let refusal = block_on(node.broadcast(orphan)).expect_err("an unknown prevout is refused");
+        assert!(
+            matches!(
+                &refusal,
+                NodeError::Broadcast(reason)
+                    if *reason == AcceptanceRejectReason::MissingInputs.to_string()
+            ),
+            "the embedded envelope carries the gateway's policy reason verbatim: {refusal}"
+        );
+        let mempool = node.state.mempool_reader();
+        assert!(!mempool.read().contains_txid(&orphan_txid));
+        assert!(
+            publisher.sequence_events.lock().is_empty(),
+            "a refused broadcast publishes nothing"
         );
 
         block_on(node.shutdown()).expect("clean shutdown");

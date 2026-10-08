@@ -31,14 +31,12 @@ impl ActiveHeightIndex {
         self.entries.last().copied()
     }
 
-    pub(super) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
+    #[cfg(any(test, feature = "test-seam"))]
     pub(super) fn contains_at_height(&self, height: u32, id: NodeId) -> bool {
         self.get(height) == Some(id)
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
     pub(super) fn taint(&mut self) {
         self.state = TrustState::Tainted;
     }
@@ -59,7 +57,7 @@ impl ActiveHeightIndex {
     ) -> bool {
         if self.is_trusted()
             && self.last() == Some(parent)
-            && u32::try_from(self.len()).ok() == Some(tip_height)
+            && u32::try_from(self.entries.len()).ok() == Some(tip_height)
         {
             self.entries.push(tip);
             true

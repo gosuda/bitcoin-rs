@@ -6,10 +6,16 @@ the single durable authority. `crates/chainstate` owns the ordered commit
 protocol over the storage durable head. That head certifies ordering and
 high-water bounds, not coin contents. If startup restores no chainstate while
 a durable head still exists, `reconcile_at_boot` replays the head chain
-from genesis out of the durable bodies it certifies — coins are durable
-only through the checkpoint export, so the head is the only surviving
-authority — and a missing or mismatched body fails closed. Every
+from the newest accepted checkpoint out of the durable bodies it certifies
+(or from genesis when no checkpoint is accepted). Coins are recovery artifacts
+and the durable head remains the only surviving authority; a missing or
+mismatched body fails closed. Every
 other persisted component is derived and reconciles to it.
+
+For an AssumeUTXO historical role, the durable head may name a complete
+historical checkpoint in the isolated `assumeutxo-historical-checkpoints`
+namespace. Startup restores that checkpoint before replaying any remaining
+certified historical suffix; an unreferenced generation is ignored.
 
 Owners:
 - Authoritative durable root and ordered commit protocol:
@@ -34,7 +40,8 @@ Owners:
 The authoritative durable root is:
 
 ```text
-R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs)
+R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs,
+     historical_checkpoint)
 ```
 
 - `tip` is the 32-byte block hash of the applied tip.
@@ -50,6 +57,8 @@ R = (tip, height, CommitId, coins_version, coins, body_extent, undo_extent, refs
 - `refs` is the authoritative map from `(height, block_hash, Body|Undo)` to
   the durable byte range in the corresponding segment file. Undo and body
   references include the block hash, not only the height.
+- `historical_checkpoint` is an optional durable-head reference to a complete
+  historical checkpoint generation, including its generation, height, and hash.
 
 `DurableHead` is the persisted form, landed in
 `crates/storage/src/durable_head.rs` as one versioned, CRC32C-framed row in
@@ -63,6 +72,7 @@ struct DurableHead {
     chain_tx_count: u64,
     body_extent: Option<BodyExtent { file_no: u32, offset: u64 }>,
     undo_extent: Option<(u32, Hash256)>,
+    assumeutxo: AssumeUtxoDiskStatus,
 }
 ```
 
@@ -80,6 +90,68 @@ the batch are what make a committed tip recoverable. The chainstate journal
 is derived from this batch and may lag it, never lead it. `commit_id` is
 strictly monotonic on disconnect as well as on connect: a reorg lowers
 `height`, never `commit_id`.
+
+AssumeUTXO activation and historical archive updates use the same transition
+reservation but separate recovery namespaces. Activation first syncs immutable
+`coins.dat` and `headers.dat` under `assumeutxo/<base_hash>/`, then commits the pinned base,
+count, and lifecycle in the head. An unreferenced import is an orphan, not a
+checkpoint or activation authority. Historical updates advance `commit_id`
+without changing the active tip. Each new candidate body is synced and referenced
+as pending before validation; its locator becomes visible to derived readers
+only with the validated undo/progress batch. An unresolved pending check is
+reconstructed and completed during startup, before service admission, even if
+the preceding process could not persist its terminal failure. This applies below
+the base as well: discarding an intermediate intent could forget a consensus
+failure whose `Failed` receipt was lost. When the durable head names a historical
+checkpoint, startup restores its UTXO, CoinStats, and applied tip, then replays
+only the validated archive suffix. Checkpoint publication and its durable-head
+reference are ordered so an unreferenced generation is ignored after a crash.
+Publication retains older historical generations until the durable-head batch
+accepts the replacement. Startup opens the generation named by that head
+directly, even when `CURRENT` leads it; cleanup runs only after head commit.
+A missing or corrupt named checkpoint fails closed rather than attaching an
+unverified height to empty coins. Without an accepted checkpoint, reconstruction
+can still delay startup by the full historical prefix. Already archived blocks
+replay without another pending/archive write.
+
+Snapshot activation refuses while the full-revalidation marker is present,
+including a recheck under transition exclusion before committing its anchor.
+The marker and pre-activation head remain intact on refusal.
+
+Snapshot recovery validates the root's network pin, restores a compatible
+ checkpoint or verifies the immutable snapshot archive, and replays the
+ root-certified foreground suffix. A full-revalidation marker still overrides
+ incremental recovery. The pre-activation journal cannot extend a snapshot jump
+ and is detached. Historical coins are restored from the head-accepted
+ checkpoint and retained bodies supply only the remaining suffix; durable archive
+ progress never pretends to be a recovered coin set.
+Finalized history supplies ordinary undo/reorg behavior. A disconnect below
+the base clears the snapshot anchor in its head batch. These bytes use datadir
+schema epoch 2; older datadirs are refused without conversion.
+
+A checkpoint exactly at the pinned snapshot base must match its commitment and
+transaction count and must contain no coin created above that base height.
+Recovery uses the same height-bounded commitment traversal as snapshot activation
+and immutable archive restoration; valid file checksums do not waive this rule.
+
+Ordinary and historical checkpoints share the same generation and manifest-digest
+reference and manifest/artifact verification. The ordinary owner selects that
+reference through `CURRENT`; historical recovery uses the durable head's reference
+directly, even when `CURRENT` is ahead. Historical publication explicitly retains
+generations until the new reference commits. Retirement runs after that commit and
+again at startup after the accepted generation has been validated, using the same
+cleanup routine without a second durable cleanup record.
+After `Finalized` commits, the historical namespace's recognized generations,
+staging files and `CURRENT` are removed. Startup retries this cleanup for a
+committed `Finalized` head. Cleanup failures are warnings, not recovery failures;
+ordinary checkpoints and unknown files are preserved.
+
+Snapshot recovery is exercised by
+`crates/chainstate/tests/unit/assumeutxo_tests.rs` (commitment verification,
+isolated replay, terminal-write failures and role guards) and
+`crates/chainstate/tests/unit/assumeutxo_recovery_tests.rs` (real-storage
+restart, process-kill boundaries, lost failure receipts, root-preserving
+archive replay, checkpoint pin binding, pruning and below-base reorg restart).
 
 ## Clauses
 
@@ -129,6 +201,25 @@ caps are stated constants, not emergent cadence:
 seconds at IBD rates, and a crash-redo bound of at most 64 body re-applies.
 This is the ordered commit protocol. It is also called the durable root
 recovery contract.
+
+Boot-time durable-head replay runs before the journal maintenance worker is
+started. If journal retention pressure refuses a replay block, recovery releases its
+transition, publishes a marker-preserving progress checkpoint to compact the
+journal, reacquires the transition, verifies that the applied tip is unchanged,
+and retries that same block once. The progress checkpoint does not retire the
+disconnect or full-revalidation marker. Intermediate replay tips retain the
+cumulative transaction count reconstructed from their parent; only the landing
+tip adopts the durable head's certified count, so every progress checkpoint
+agrees with CoinStats. Failure to publish the checkpoint, reacquire the
+transition, preserve the captured tip, or apply the retry fails closed.
+Before genesis, no progress checkpoint is possible. If an empty cold writer
+hits retention pressure while the full-revalidation marker is present, it
+removes only invalidated, non-active journal segment generations and syncs
+the journal directory. It preserves the marker, head, and active cursor;
+append-gap admission and filesystem errors still fail closed.
+Other journal refusals (append gaps, unreadable state, corruption, or storage
+and filesystem failures) do not enter this checkpoint-and-retry path.
+
 
 ### `RCV-03`: Prior-or-whole-proposed and orphan tails
 
@@ -383,6 +474,9 @@ durable.
   - `committed_gap_replay_failure_fails_closed` proves an apply failure inside
     the replay transition closes admission and leaves `begin_transition`
     refusing with `ApplyError::Shutdown`.
+  - `committed_gap_append_gap_does_not_enter_retention_relief` proves a poisoned
+    writer returns its original append-gap refusal without progress publication,
+    preserving its recovery marker and journal head while closing admission.
 - `crates/chainstate/src/connect.rs` and
   `crates/chainstate/src/disconnect.rs`: run the `RCV-02` tail —
   sync, one atomic batch, derived journal emission, then publication — and
@@ -413,6 +507,21 @@ durable.
   `restart_without_periodic_publication_restores_tip_and_commit_id` proves
   the durable head replays past the last checkpoint with `commit_id`
   preserved across restarts (`RCV-10`).
+  `cold_revalidation_relieves_journal_pressure_and_retries` proves boot replay
+  compacts retention pressure and retries the refused block with a coherent
+  cumulative transaction count, preserves the full-revalidation marker, and
+  restarts at the retention limit before genesis without an applied tip
+  (`RCV-02`).
+- `crates/storage/src/chainstate_journal/writer/tests/behavior_1.rs`:
+  - `recovery_progress_compaction_preserves_full_revalidation_marker` proves
+    progress compaction leaves the sticky marker armed (`RCV-02`, `JW-MARK-2`);
+  - `recovery_compaction_cannot_clear_an_append_gap` proves compaction cannot
+    bypass append-gap admission or clear a gap on a frozen writer
+    (`RCV-02`, `JW-ORDER-1`);
+  - `cold_retention_removes_all_invalidated_generations_and_preserves_recovery`
+    proves pre-genesis retention relief removes all invalidated generations
+    across a large, sparse directory while preserving the marker, head,
+    active segment, unrelated files, and append/reopen continuity (`RCV-02`).
 - `crates/chainstate/src/reorg.rs` and `crates/chainstate/src/disconnect.rs`
   cover `RCV-05` and bounded disconnect/reorg memory; `RCV-08`'s bounded
   stream windows and retention leases are exercised by the node sync/recovery
@@ -452,11 +561,11 @@ durable.
 - `crates/storage/tests/overhaul_atomic_durability.rs` (existing): tests the
   storage-level prior-or-whole-proposed rule and durable batch completion.
 - `crates/index/src/runtime/recovery_tests.rs` (existing):
+  - `index_ahead_of_restored_tip_is_reported_once_and_rewound` (`RCV-04`);
   - `deep_rollback_rebuilds_and_publishes_rebuild_phase_until_caught_up`
     (`RCV-05`);
-  - `tip_change_during_rebuild_converges_on_new_tip` (`RCV-06`);
-  - `missing_disconnected_body_routes_rewind_to_rebuild` (`RCV-07`);
-  - `selective_rebuild_leg_survives_sibling_rollback` (`RCV-05`).
+  - `pruned_history_rebuilds_from_the_frontier_and_absent_history_waits`
+    (`RCV-07`).
 
 - `crates/node/tests/overhaul_fee_history.rs` (existing):
   - `restart_adopts_persisted_estimator_history`,

@@ -6,6 +6,8 @@
 //! vectors and published hash values; this crate does not take a `rust-bitcoin`
 //! oracle dependency.
 
+use std::sync::OnceLock;
+
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -32,10 +34,11 @@ use crate::{
 pub const CODESEPARATOR_POSITION: u32 = 0xFFFF_FFFF;
 
 /// BIP342 leaf version byte for tapscript leaves.
-pub const TAPSCRIPT_LEAF_VERSION: u8 = 0xc0;
+#[cfg(test)]
+const TAPSCRIPT_LEAF_VERSION: u8 = 0xc0;
 
 /// Standard Bitcoin signature hash modes used by legacy, segwit, and taproot signing.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Sighash {
     /// `SIGHASH_ALL`.
     All,
@@ -111,7 +114,7 @@ pub enum AnnexError {
 }
 
 /// The masked base type of a legacy sighash flag (Core's `nHashType & 0x1f | 0x80` mask).
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone)]
 enum EcdsaType {
     All,
     None,
@@ -169,18 +172,20 @@ impl EcdsaType {
 /// Lazily cached signature hashes for one transaction.
 ///
 /// The taproot amount/scriptPubKey midstates assume the same prevout set is supplied to
-/// every call on this cache (the same assumption the `bitcoin` crate's cache makes);
-/// construct a fresh cache when the prevout set changes.
+/// every call on this cache, including concurrent calls (the same assumption the `bitcoin` crate's cache makes);
+/// construct a fresh cache when the prevout set changes. Aggregate hashes initialize
+/// once and can be shared across parallel input checks. Script code, input index,
+/// hash type, annex and code-separator position remain arguments of each digest.
 pub struct SighashCache<'t> {
     tx: &'t Tx,
-    segwit_prevouts: Option<Hash256>,
-    segwit_sequences: Option<Hash256>,
-    segwit_outputs: Option<Hash256>,
-    taproot_prevouts: Option<Hash256>,
-    taproot_amounts: Option<Hash256>,
-    taproot_scriptpubkeys: Option<Hash256>,
-    taproot_sequences: Option<Hash256>,
-    taproot_outputs: Option<Hash256>,
+    segwit_prevouts: OnceLock<Hash256>,
+    segwit_sequences: OnceLock<Hash256>,
+    segwit_outputs: OnceLock<Hash256>,
+    prevouts: OnceLock<Hash256>,
+    taproot_amounts: OnceLock<Hash256>,
+    taproot_scriptpubkeys: OnceLock<Hash256>,
+    sequences: OnceLock<Hash256>,
+    outputs: OnceLock<Hash256>,
 }
 
 impl<'t> SighashCache<'t> {
@@ -189,14 +194,14 @@ impl<'t> SighashCache<'t> {
     pub fn new(tx: &'t Tx) -> Self {
         Self {
             tx,
-            segwit_prevouts: None,
-            segwit_sequences: None,
-            segwit_outputs: None,
-            taproot_prevouts: None,
-            taproot_amounts: None,
-            taproot_scriptpubkeys: None,
-            taproot_sequences: None,
-            taproot_outputs: None,
+            segwit_prevouts: OnceLock::new(),
+            segwit_sequences: OnceLock::new(),
+            segwit_outputs: OnceLock::new(),
+            prevouts: OnceLock::new(),
+            taproot_amounts: OnceLock::new(),
+            taproot_scriptpubkeys: OnceLock::new(),
+            sequences: OnceLock::new(),
+            outputs: OnceLock::new(),
         }
     }
 
@@ -214,7 +219,7 @@ impl<'t> SighashCache<'t> {
     /// nowhere else. [`Self::segwit_v0_signature_hash`] hashes its script code
     /// verbatim and zeroes whole fields instead, and
     /// [`Self::taproot_signature_hash`] commits to field-level aggregates with
-    /// no script-code concept at all — none of the three share a code path.
+    /// no script-code concept at all.
     pub fn legacy_signature_hash(
         &self,
         input_index: usize,
@@ -287,7 +292,7 @@ impl<'t> SighashCache<'t> {
     /// SINGLE blanking of individual outputs, and no uint256-one bug — those are
     /// legacy-only (see [`Self::legacy_signature_hash`]).
     pub fn segwit_v0_signature_hash(
-        &mut self,
+        &self,
         input_index: usize,
         script_code: &[u8],
         value: crate::Amount,
@@ -306,7 +311,7 @@ impl<'t> SighashCache<'t> {
     /// API's taproot-only [`Sighash::Default`]. The caller supplies the selected
     /// script-code suffix verbatim.
     pub fn segwit_v0_signature_hash_raw(
-        &mut self,
+        &self,
         input_index: usize,
         script_code: &[u8],
         value: crate::Amount,
@@ -327,16 +332,22 @@ impl<'t> SighashCache<'t> {
         let prevouts_hash = if ty.is_anyone_can_pay() {
             zero
         } else {
-            self.segwit_prevouts()
+            *self.segwit_prevouts.get_or_init(|| {
+                sha256_over(|writer| writer.write_all(self.prevouts().as_byte_array()))
+            })
         };
         let sequences_hash = if ty.is_anyone_can_pay() || ty.is_single() || ty.is_none() {
             zero
         } else {
-            self.segwit_sequences()
+            *self.segwit_sequences.get_or_init(|| {
+                sha256_over(|writer| writer.write_all(self.sequences().as_byte_array()))
+            })
         };
 
         let outputs_hash = if !ty.is_single() && !ty.is_none() {
-            self.segwit_outputs()
+            *self.segwit_outputs.get_or_init(|| {
+                sha256_over(|writer| writer.write_all(self.outputs().as_byte_array()))
+            })
         } else if ty.is_single() {
             match self.tx.outputs.get(input_index) {
                 Some(output) => {
@@ -374,7 +385,7 @@ impl<'t> SighashCache<'t> {
     /// for key-path spends and `Some((leaf_hash, code_separator_position))` for script
     /// path spends (BIP342). The tagged hash includes Core's zero epoch byte.
     pub fn taproot_signature_hash(
-        &mut self,
+        &self,
         input_index: usize,
         prevouts: &[TxOut],
         annex: Option<&[u8]>,
@@ -414,13 +425,13 @@ impl<'t> SighashCache<'t> {
         msg.extend_from_slice(&self.tx.version.to_le_bytes());
         msg.extend_from_slice(&self.tx.lock_time.to_le_bytes());
         if !is_anyone_can_pay {
-            msg.extend_from_slice(&self.taproot_prevouts().to_le_bytes());
+            msg.extend_from_slice(&self.prevouts().to_le_bytes());
             msg.extend_from_slice(&self.taproot_amounts(prevouts).to_le_bytes());
             msg.extend_from_slice(&self.taproot_scriptpubkeys(prevouts).to_le_bytes());
-            msg.extend_from_slice(&self.taproot_sequences().to_le_bytes());
+            msg.extend_from_slice(&self.sequences().to_le_bytes());
         }
         if base != 0x02 && base != 0x03 {
-            msg.extend_from_slice(&self.taproot_outputs().to_le_bytes());
+            msg.extend_from_slice(&self.outputs().to_le_bytes());
         }
         let mut spend_type = 0_u8;
         if annex.is_some() {
@@ -460,42 +471,9 @@ impl<'t> SighashCache<'t> {
         Ok(tagged_hash(b"TapSighash", &msg))
     }
 
-    fn segwit_prevouts(&mut self) -> Hash256 {
+    fn prevouts(&self) -> Hash256 {
         let tx = self.tx;
-        *self.segwit_prevouts.get_or_insert_with(|| {
-            double_sha256_over(|writer| {
-                for input in &tx.inputs {
-                    input.previous_output.consensus_encode(writer);
-                }
-            })
-        })
-    }
-
-    fn segwit_sequences(&mut self) -> Hash256 {
-        let tx = self.tx;
-        *self.segwit_sequences.get_or_insert_with(|| {
-            double_sha256_over(|writer| {
-                for input in &tx.inputs {
-                    writer.write_all(&input.sequence.to_le_bytes());
-                }
-            })
-        })
-    }
-
-    fn segwit_outputs(&mut self) -> Hash256 {
-        let tx = self.tx;
-        *self.segwit_outputs.get_or_insert_with(|| {
-            double_sha256_over(|writer| {
-                for output in &tx.outputs {
-                    output.consensus_encode(writer);
-                }
-            })
-        })
-    }
-
-    fn taproot_prevouts(&mut self) -> Hash256 {
-        let tx = self.tx;
-        *self.taproot_prevouts.get_or_insert_with(|| {
+        *self.prevouts.get_or_init(|| {
             sha256_over(|writer| {
                 for input in &tx.inputs {
                     input.previous_output.consensus_encode(writer);
@@ -504,8 +482,8 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_amounts(&mut self, prevouts: &[TxOut]) -> Hash256 {
-        *self.taproot_amounts.get_or_insert_with(|| {
+    fn taproot_amounts(&self, prevouts: &[TxOut]) -> Hash256 {
+        *self.taproot_amounts.get_or_init(|| {
             sha256_over(|writer| {
                 for prevout in prevouts {
                     writer.write_all(&prevout.value.to_le_bytes());
@@ -514,8 +492,8 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_scriptpubkeys(&mut self, prevouts: &[TxOut]) -> Hash256 {
-        *self.taproot_scriptpubkeys.get_or_insert_with(|| {
+    fn taproot_scriptpubkeys(&self, prevouts: &[TxOut]) -> Hash256 {
+        *self.taproot_scriptpubkeys.get_or_init(|| {
             sha256_over(|writer| {
                 for prevout in prevouts {
                     write_script(writer, &prevout.script_pubkey);
@@ -524,9 +502,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_sequences(&mut self) -> Hash256 {
+    fn sequences(&self) -> Hash256 {
         let tx = self.tx;
-        *self.taproot_sequences.get_or_insert_with(|| {
+        *self.sequences.get_or_init(|| {
             sha256_over(|writer| {
                 for input in &tx.inputs {
                     writer.write_all(&input.sequence.to_le_bytes());
@@ -535,9 +513,9 @@ impl<'t> SighashCache<'t> {
         })
     }
 
-    fn taproot_outputs(&mut self) -> Hash256 {
+    fn outputs(&self) -> Hash256 {
         let tx = self.tx;
-        *self.taproot_outputs.get_or_insert_with(|| {
+        *self.outputs.get_or_init(|| {
             sha256_over(|writer| {
                 for output in &tx.outputs {
                     output.consensus_encode(writer);
@@ -548,49 +526,6 @@ impl<'t> SighashCache<'t> {
 }
 
 impl Sighash {
-    /// Computes the pre-segwit legacy signature hash.
-    pub fn compute_legacy(
-        tx: &Tx,
-        input_idx: usize,
-        script_code: &[u8],
-        sighash_type: Self,
-    ) -> Result<Hash256, SighashError> {
-        SighashCache::new(tx).legacy_signature_hash(
-            input_idx,
-            script_code,
-            u32::from(sighash_type.to_u8()),
-        )
-    }
-
-    /// Computes the BIP143 segwit-v0 signature hash.
-    pub fn compute_bip143(
-        tx: &Tx,
-        input_idx: usize,
-        script_code: &[u8],
-        value: crate::Amount,
-        sighash_type: Self,
-    ) -> Result<Hash256, SighashError> {
-        SighashCache::new(tx).segwit_v0_signature_hash(input_idx, script_code, value, sighash_type)
-    }
-
-    /// Computes the BIP341 taproot signature hash for key-path or script-path spends.
-    pub fn compute_bip341(
-        tx: &Tx,
-        input_idx: usize,
-        prevouts: &[TxOut],
-        sighash_type: Self,
-        leaf_hash: Option<Hash256>,
-        annex: Option<&[u8]>,
-    ) -> Result<Hash256, SighashError> {
-        SighashCache::new(tx).taproot_signature_hash(
-            input_idx,
-            prevouts,
-            annex,
-            leaf_hash.map(|leaf_hash| (leaf_hash, CODESEPARATOR_POSITION)),
-            sighash_type,
-        )
-    }
-
     /// Returns the consensus byte for the sighash mode.
     #[must_use]
     pub const fn to_u8(self) -> u8 {
@@ -633,7 +568,7 @@ impl Sighash {
 }
 
 /// Computes the BIP341 tapleaf hash for a leaf script at `leaf_version`
-/// (use [`TAPSCRIPT_LEAF_VERSION`] for BIP342 tapscript).
+/// (`0xc0` for BIP342 tapscript).
 #[must_use]
 pub fn tapleaf_hash(leaf_version: u8, script: &[u8]) -> Hash256 {
     let len = varint::encode(compact_len(script.len()))
@@ -680,13 +615,6 @@ fn sha256_over(encode: impl FnOnce(&mut Sha256Sink<'_>)) -> Hash256 {
     Hash256::from_le_bytes(&out)
 }
 
-fn double_sha256_over(encode: impl FnOnce(&mut Sha256Sink<'_>)) -> Hash256 {
-    let mut engine = Sha256::new();
-    let writer = &mut Sha256Sink(&mut engine);
-    encode(writer);
-    finalize_double_sha256(engine)
-}
-
 fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
     let mut engine = Sha256::new();
     for part in parts {
@@ -697,20 +625,17 @@ fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
 
 fn tagged_hash(tag: &[u8], msg: &[u8]) -> Hash256 {
     let tag_hash = Sha256::digest(tag);
-    let mut engine = Sha256::new();
-    Digest::update(&mut engine, tag_hash);
-    Digest::update(&mut engine, tag_hash);
-    Digest::update(&mut engine, msg);
-    let mut out = [0_u8; 32];
-    out.copy_from_slice(&engine.finalize());
-    Hash256::from_le_bytes(&out)
+    Hash256::from_le_bytes(&sha256_parts(&[&tag_hash, &tag_hash, msg]))
 }
 
 #[cfg(test)]
 mod tests {
     #![expect(clippy::expect_used, reason = "test assertions")]
 
-    use super::{Sighash, SighashCache, SighashError, TAPSCRIPT_LEAF_VERSION, tapleaf_hash};
+    use super::{
+        CODESEPARATOR_POSITION, Sighash, SighashCache, SighashError, TAPSCRIPT_LEAF_VERSION,
+        tapleaf_hash,
+    };
     use crate::{Hash256, OutPoint, Tx, Txid};
 
     fn pin(hex: &str) -> Hash256 {
@@ -774,7 +699,7 @@ mod tests {
         ];
         for (mode, expected) in pins {
             assert_eq!(
-                Sighash::compute_legacy(&tx, 0, &script, mode),
+                SighashCache::new(&tx).legacy_signature_hash(0, &script, u32::from(mode.to_u8())),
                 Ok(pin(expected))
             );
         }
@@ -789,8 +714,7 @@ mod tests {
         let tx = synthetic_tx(2);
         let script = vec![0x51_u8, 0x51];
         assert_eq!(
-            Sighash::compute_bip143(
-                &tx,
+            SighashCache::new(&tx).segwit_v0_signature_hash(
                 0,
                 &script,
                 crate::Amount::from_sat(50_000),
@@ -813,7 +737,13 @@ mod tests {
             script_pubkey: crate::Script::new(),
         }];
         assert_eq!(
-            Sighash::compute_bip341(&tx, 0, &prevouts, Sighash::AllAnyoneCanPay, None, None),
+            SighashCache::new(&tx).taproot_signature_hash(
+                0,
+                &prevouts,
+                None,
+                None,
+                Sighash::AllAnyoneCanPay
+            ),
             Ok(pin(
                 "8910eff2c9430e82893c47e1ba29da7ff76285dcb7a386bb9cbdd04fc97b8c8f"
             ))
@@ -824,7 +754,13 @@ mod tests {
             pin("75d68237360f5032d84419d0d32e2061cbc7ce286c58e7846ab291f707215ba8")
         );
         assert_eq!(
-            Sighash::compute_bip341(&tx, 0, &prevouts, Sighash::Default, Some(leaf), None),
+            SighashCache::new(&tx).taproot_signature_hash(
+                0,
+                &prevouts,
+                None,
+                Some((leaf, CODESEPARATOR_POSITION)),
+                Sighash::Default
+            ),
             Ok(pin(
                 "4cc7918733b1c9abd997206fac92d03183ec712d059dd5da5bd099e39b66a1d6"
             ))
@@ -836,7 +772,7 @@ mod tests {
         let tx = synthetic_tx(1);
 
         assert!(matches!(
-            Sighash::compute_legacy(&tx, 999, &[], Sighash::All),
+            SighashCache::new(&tx).legacy_signature_hash(999, &[], u32::from(Sighash::All.to_u8())),
             Err(SighashError::InputOutOfRange {
                 index: 999,
                 total: 1
@@ -849,8 +785,7 @@ mod tests {
         let tx = synthetic_tx(1);
 
         assert_eq!(
-            Sighash::compute_bip143(
-                &tx,
+            SighashCache::new(&tx).segwit_v0_signature_hash(
                 0,
                 &[],
                 crate::Amount::from_sat(50_000),
@@ -869,7 +804,13 @@ mod tests {
         }];
 
         assert!(matches!(
-            Sighash::compute_bip341(&tx, 0, &prevouts, Sighash::All, None, Some(&[0x51])),
+            SighashCache::new(&tx).taproot_signature_hash(
+                0,
+                &prevouts,
+                Some(&[0x51]),
+                None,
+                Sighash::All
+            ),
             Err(SighashError::InvalidAnnex(_))
         ));
     }

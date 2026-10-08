@@ -18,11 +18,12 @@
 use std::sync::Arc;
 
 use bitcoin_rs_chain::ChainTxCount;
+use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_primitives::{Hash256, Network, consensus_bytes};
 use bitcoin_rs_storage::{CommitRecords, DurableHead};
 use bitcoin_rs_utxo::UtxoSet;
 
-use super::persistence_tests::{handles, mined_child, seed_genesis};
+use crate::test_fixtures::{handles, seed_genesis};
 
 #[test]
 fn a_grouped_window_publishes_each_blocks_own_prefix_count()
@@ -35,6 +36,7 @@ fn a_grouped_window_publishes_each_blocks_own_prefix_count()
     handles.durable_head.commit(
         None,
         &DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 0,
             tip: Hash256::from(genesis.block_hash()),

@@ -1,9 +1,4 @@
 //! Canonical header-checkpoint representation and validation.
-//!
-//! Owns the headers-v1 prefix, ancestry serialization, independent best/applied
-//! commitments, and consensus-validated reconstruction. The parent owns the
-//! immutable generation and CURRENT publication; this codec does not publish,
-//! remove, or sync files. Existing wire bytes and typed failures are unchanged.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -58,7 +53,6 @@ pub(crate) struct RestoredHeaders {
     pub(crate) applied_tip_id: NodeId,
 }
 
-#[allow(missing_docs)]
 #[derive(Debug, Error)]
 pub enum HeaderCheckpointError {
     #[error("configured genesis {configured} does not match {network:?} genesis {expected}")]

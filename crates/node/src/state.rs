@@ -1,24 +1,30 @@
-//! Shared node runtime state and capability handles.
+//! Internal node runtime composition root and capability handles.
 //!
 //! Shared handles, checkpoint publication, and index lifecycle live with
 //! `NodeState`. Construction, recovery, storage, events, and pruning retain
-//! separate private implementations.
+//! separate private implementations. Production embedders enter through
+//! [`crate::Node`]; the module is public only under the explicit `test-seam`
+//! feature used by integration tests and benchmarks.
 
 use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
 use bitcoin_rs_chain::BlockBodySource;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chainstate::events::ChainEventPublisher;
 #[cfg(test)]
 pub(crate) use bitcoin_rs_chainstate::recovery::ResumeSource;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_index::block_log::BlockLog;
 use bitcoin_rs_index::runtime::DEFAULT_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::OpenDerivedIndex;
 use bitcoin_rs_index::runtime::REDB_BATCH_LIMITS;
 use bitcoin_rs_index::runtime::open_derived_index_store_on_worker;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_mempool::Mempool;
+#[cfg(any(test, feature = "test-seam"))]
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_rpc::context::PruneService;
 use bitcoin_rs_storage::KvStore;
@@ -26,9 +32,11 @@ use bitcoin_rs_storage::StorageBackend;
 use crossbeam_channel::Receiver;
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
+#[cfg(any(test, feature = "test-seam"))]
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use storage::NodeStorage;
@@ -83,7 +91,7 @@ pub(crate) const INBOUND_BLOCK_CHANNEL_LIMIT: usize = 512;
 // the same connection under normal load.
 pub(crate) const INBOUND_TX_CHANNEL_LIMIT: usize = 1_024;
 
-/// Aggregate handle to a running node.
+/// Internal aggregate handle to a running node.
 pub struct NodeState {
     config: NodeConfig,
     #[cfg(test)]
@@ -100,7 +108,7 @@ pub struct NodeState {
     /// Node-owned P2P-to-mempool ingress bridge. Unlike the service-owned
     /// header/block channels, this receiver is drained by node orchestration.
     inbound_tx_tx: Sender<bitcoin_rs_p2p::InboundTx>,
-    inbound_tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
+    inbound_tx_rx: Mutex<Option<Receiver<bitcoin_rs_p2p::InboundTx>>>,
     /// The transition domain minted for this node.
     ///
     /// Composition splits it: chainstate holds the mutation role, and every
@@ -114,6 +122,8 @@ pub struct NodeState {
     sync: Arc<crate::BlockSync>,
     /// Process-wide rollback-evidence reporter (warning snapshot + marker).
     recovery_reporter: Arc<storage::RecoveryReporter>,
+    /// `AssumeUTXO` coordinator managing chainstate roles.
+    assumeutxo: Arc<bitcoin_rs_chainstate::AssumeUtxoManager>,
 }
 
 impl Drop for NodeState {
@@ -151,6 +161,7 @@ impl NodeState {
     }
 
     /// Returns the configured storage backend that was opened.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub const fn storage_kind(&self) -> &'static str {
         self.storage.kind()
@@ -162,6 +173,7 @@ impl NodeState {
     /// Crash-recovery test seam: exposes the undo/marker store so harnesses
     /// can arm and inspect disconnect markers. Not a supported mutation
     /// surface for node owners.
+    #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
     pub fn undo_store(&self) -> Arc<dyn bitcoin_rs_chainstate::UndoStore> {
@@ -173,6 +185,7 @@ impl NodeState {
     /// Crash-recovery test seam: exposes the durable head store so
     /// harnesses can read the commit point. Not a supported mutation
     /// surface for node owners.
+    #[cfg(any(test, feature = "test-seam"))]
     #[doc(hidden)]
     #[must_use]
     pub fn durable_head(&self) -> Arc<dyn bitcoin_rs_storage::DurableHeadStore> {
@@ -187,11 +200,18 @@ impl NodeState {
 
     /// Returns the configured ZMQ publisher handle (default: `NoOpZmqPublisher`).
     #[must_use]
-    pub fn zmq_publisher(&self) -> Arc<dyn crate::ZmqPublisher> {
+    pub(crate) fn zmq_publisher(&self) -> Arc<dyn crate::ZmqPublisher> {
         self.followers.zmq_publisher()
     }
 
-    /// Returns the shared mempool handle.
+    /// Returns the cloneable read-only mempool capability.
+    #[must_use]
+    pub fn mempool_reader(&self) -> bitcoin_rs_mempool::MempoolReader {
+        self.mempool_gateway.reader()
+    }
+
+    /// Raw pool access for test fixture staging only.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn mempool(&self) -> Arc<RwLock<Mempool>> {
         Arc::clone(self.mempool_gateway.pool())
@@ -211,11 +231,18 @@ impl NodeState {
     /// Returns the mining generation wake shared with the apply path and the
     /// gateway observer. The template coordinator attaches itself here.
     #[must_use]
-    pub fn mining_generation_signal(&self) -> Arc<crate::mining::MiningGenerationSignal> {
+    pub(crate) fn mining_generation_signal(&self) -> Arc<crate::mining::MiningGenerationSignal> {
         Arc::clone(self.followers.mining())
     }
 
+    /// Returns a read-only capability to observe the applied-block log.
+    #[must_use]
+    pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
+        self.followers.block_log_reader()
+    }
+
     /// Returns the shared block-records handle exposed to RPC handlers.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn blocks(&self) -> Arc<RwLock<BlockLog>> {
         Arc::clone(self.followers.block_log())
@@ -230,18 +257,6 @@ impl NodeState {
         Ok(Arc::new(StoredBlockBodySource::new(store)))
     }
 
-    /// Returns the shared P2P admission switch exposed to RPC and P2P workers.
-    #[must_use]
-    pub fn network_active(&self) -> Arc<AtomicBool> {
-        self.p2p.network_active_handle()
-    }
-
-    /// Returns the shared manual IP/subnet ban list exposed to RPC and P2P.
-    #[must_use]
-    pub fn banned_subnets(&self) -> Arc<RwLock<Vec<bitcoin_rs_p2p::BannedSubnet>>> {
-        self.p2p.banned_handle()
-    }
-
     /// Returns the P2P runtime that owns workers and the session table.
     #[must_use]
     pub fn p2p(&self) -> Arc<bitcoin_rs_p2p::P2pService> {
@@ -254,19 +269,9 @@ impl NodeState {
         self.p2p.table()
     }
 
-    /// Returns the service-owned persistent addnode view.
-    #[must_use]
-    pub fn added_nodes(&self) -> Arc<RwLock<Vec<std::net::SocketAddr>>> {
-        self.p2p.added_nodes_handle()
-    }
-    /// Returns a cloned sender that RPC `addnode` uses to request outbound P2P connections.
-    #[must_use]
-    pub fn p2p_outbound_sender(&self) -> crossbeam_channel::Sender<bitcoin_rs_p2p::OutboundDial> {
-        self.p2p.outbound_sender()
-    }
-
     /// Returns a cloned `Sender` that the P2P listener pushes inbound
     /// blocks into for verification and relay.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn inbound_blocks_sender(&self) -> Sender<bitcoin_rs_p2p::InboundBlock> {
         self.p2p.inbound_blocks_sender()
     }
@@ -283,10 +288,11 @@ impl NodeState {
         self.inbound_tx_tx.clone()
     }
 
-    /// Returns the shared receiver handle drained by the tx-ingress consumer.
+    /// Takes the inbound transaction receiver for the single ingress consumer.
+    /// Returns `None` if the receiver has already been claimed.
     #[must_use]
-    pub fn inbound_tx_rx_handle(&self) -> Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>> {
-        Arc::clone(&self.inbound_tx_rx)
+    pub fn take_inbound_tx_receiver(&self) -> Option<Receiver<bitcoin_rs_p2p::InboundTx>> {
+        self.inbound_tx_rx.lock().take()
     }
 
     /// Returns the shared block-download orchestrator.
@@ -297,14 +303,26 @@ impl NodeState {
 
     /// Returns the node's one initial-block-download latch.
     #[must_use]
-    pub fn ibd(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
+    pub(crate) fn ibd(&self) -> Arc<bitcoin_rs_chain::InitialBlockDownload> {
         self.chainstate.ibd_latch()
     }
 
     /// Returns the process-wide shutdown signal shared by all runtime workers.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn shutdown(&self) -> Arc<AtomicBool> {
         self.chainstate.shutdown_handle()
+    }
+
+    /// Returns a read-only capability to observe the process-wide shutdown signal.
+    #[must_use]
+    pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
+        self.chainstate.shutdown_reader()
+    }
+
+    /// Requests process shutdown across all runtime workers.
+    pub fn request_shutdown(&self) {
+        self.chainstate.request_shutdown();
     }
 
     /// Clone of the chainstate facade used by apply, reorg, and sync.
@@ -334,6 +352,7 @@ impl NodeState {
     /// Holds the chain transition through follower dispatch (`ARCH-07`).
     /// A post-commit settlement failure remains distinguishable in
     /// [`crate::ConnectMutationError`] and retains the authoritative outcome.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn apply_block(
         &self,
         block: &Block,
@@ -358,6 +377,67 @@ impl NodeState {
         self.chainstate.start_maintenance()
     }
 
+    /// Produces a summary of active and background chainstates for operator reporting.
+    pub fn chainstates_summary(
+        &self,
+    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, bitcoin_rs_chainstate::AssumeUtxoError>
+    {
+        self.assumeutxo.chainstates_summary()
+    }
+
+    /// Activates a verified `AssumeUTXO` snapshot from a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if reading or parsing the snapshot fails, if the snapshot is untrusted,
+    /// or if commitment verification fails.
+    pub fn activate_assumeutxo_snapshot_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> anyhow::Result<()> {
+        let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
+        let snapshot_load = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
+        self.activate_assumeutxo_snapshot(snapshot_load)
+    }
+
+    /// Activates a verified `AssumeUTXO` snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the snapshot is untrusted or if commitment verification fails.
+    pub fn activate_assumeutxo_snapshot(
+        &self,
+        snapshot_load: bitcoin_rs_utxo::SnapshotLoad,
+    ) -> anyhow::Result<()> {
+        let change = self.followers.begin_mempool_change()?;
+        let result = self.assumeutxo.activate_snapshot(snapshot_load);
+        if result.is_ok()
+            && let Err(error) = self.followers.on_snapshot(change.as_ref())
+        {
+            self.chainstate.fail_closed_for_recovery();
+            return Err(anyhow::anyhow!(
+                "snapshot consumer reconciliation failed: {error}"
+            ));
+        }
+        if !self.chainstate.is_closed_for_recovery() {
+            if let Some(change) = change {
+                if let Err(error) = change.finish() {
+                    self.chainstate.fail_closed_for_recovery();
+                    if let Err(activation) = result {
+                        return Err(anyhow::anyhow!(
+                            "snapshot activation failed: {activation}; consumer settlement also failed: {error}"
+                        ));
+                    }
+                    return Err(anyhow::anyhow!(
+                        "snapshot consumer settlement failed: {error}"
+                    ));
+                }
+            }
+        }
+        result.map_err(|e| anyhow::anyhow!("failed to activate assumeutxo snapshot: {e}"))?;
+        Ok(())
+    }
+
     /// Returns the node-owned complete transaction-index query adapter.
     #[must_use]
     pub fn derived_index_query(
@@ -366,10 +446,7 @@ impl NodeState {
         if !self.config.indexes.txindex {
             return None;
         }
-        self.derived_index.adapter().map(|adapter| {
-            let q: Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery> = adapter.clone();
-            q
-        })
+        self.esplora_derived_index_query()
     }
 
     /// Returns transaction lookup for internal Esplora projections.
@@ -377,7 +454,7 @@ impl NodeState {
     /// `--scriptindex` builds this dependency as well, but that does not
     /// enable or advertise the Core `--txindex` contract.
     #[must_use]
-    pub fn esplora_derived_index_query(
+    pub(crate) fn esplora_derived_index_query(
         &self,
     ) -> Option<Arc<dyn bitcoin_rs_rpc::context::DerivedIndexQuery>> {
         self.derived_index.adapter().map(|adapter| {
@@ -498,7 +575,7 @@ impl crate::storage_backend::StoreConsumer for DerivedIndexComposer {
     }
 }
 
-pub(crate) struct TxIndexSpawn {
+struct TxIndexSpawn {
     spec: bitcoin_rs_index::runtime::DerivedIndexOpenSpec,
     generation: bitcoin_rs_index::runtime::Generation,
     block_source: bitcoin_rs_index::runtime::IndexBlockSource,

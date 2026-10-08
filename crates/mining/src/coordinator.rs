@@ -8,8 +8,6 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::TipSnapshot;
@@ -58,21 +56,23 @@ const GENERATION_RACE: &str = "generation key changed during candidate assembly"
 const LONG_POLL_SLICE: Duration = Duration::from_secs(1);
 
 /// Applied-tip hash plus mempool sequence that identify one candidate generation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub(crate) struct GenerationKey {
-    pub tip_hash: Hash256,
-    pub mempool_sequence: u64,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GenerationKey {
+    /// Applied tip hash in consensus little-endian storage order.
+    tip_hash: Hash256,
+    /// Mempool sequence captured with the tip.
+    mempool_sequence: u64,
 }
 
 impl GenerationKey {
     /// Opaque BIP22/BIP23 long-poll identity for this generation.
     #[must_use]
-    pub(crate) fn template_id(self) -> TemplateId {
+    fn template_id(self) -> TemplateId {
         TemplateId::new(&self.tip_hash, self.mempool_sequence)
     }
 }
 
-#[derive(Debug)]
+/// Single in-flight assembly record.
 struct InFlight {
     key: GenerationKey,
     /// Monotonic identity assigned when the flight was installed.
@@ -82,7 +82,7 @@ struct InFlight {
 }
 
 /// Bounded template cache, single-flight guard, and published generation.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct CoordinatorState {
     published: Option<GenerationKey>,
     cache: HashMap<TemplateId, Arc<Candidate>>,
@@ -216,8 +216,9 @@ pub struct MiningService {
     /// Network whose genesis anchors an empty applied chain.
     network: Network,
     coinbase_script: Vec<u8>,
-    /// Checked by every unbounded wait.
-    shutdown: Arc<AtomicBool>,
+    /// Shared shutdown flag checked by every unbounded wait.
+    shutdown: bitcoin_rs_chain::LatchReader,
+    /// Applied-chain tip publisher.
     applied_tip: Arc<dyn AppliedTipSource>,
     mempool: Arc<dyn MempoolSnapshotSource>,
     chain: Arc<dyn ChainContextSource>,
@@ -239,7 +240,7 @@ impl MiningService {
         mempool: Arc<dyn MempoolSnapshotSource>,
         chain: Arc<dyn ChainContextSource>,
         coinbase_script: Vec<u8>,
-        shutdown: Arc<AtomicBool>,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> Self {
         Self {
             network,
@@ -247,8 +248,8 @@ impl MiningService {
             mempool,
             chain,
             coinbase_script,
-            shutdown,
-            state: Mutex::new(CoordinatorState::default()),
+            shutdown: shutdown.into(),
+            state: Mutex::default(),
             wake: Condvar::new(),
         }
     }
@@ -259,7 +260,8 @@ impl MiningService {
     /// mutation and before any dependent notification. The published key is
     /// captured from live applied-tip / mempool state under the coordinator lock.
     pub fn publish_generation(&self) {
-        self.publish(self.live_generation_key());
+        let key = self.live_generation_key();
+        self.publish_key(key);
     }
 
     /// Publishes a generation key built from `applied_tip` and `sequence`
@@ -271,13 +273,28 @@ impl MiningService {
     /// [`Self::publish_generation`] instead, which captures the live sequence
     /// safely (no write lock is held on that path).
     pub fn publish_generation_from(&self, sequence: u64) {
-        self.publish(GenerationKey {
-            tip_hash: self.tip_hash(),
+        let key = GenerationKey {
+            tip_hash: self.live_tip_hash(),
             mempool_sequence: sequence,
-        });
+        };
+        self.publish_key(key);
     }
 
-    fn publish(&self, key: GenerationKey) {
+    fn live_tip_hash(&self) -> Hash256 {
+        self.applied_tip
+            .applied_tip()
+            .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash)
+    }
+
+    fn live_generation_key(&self) -> GenerationKey {
+        GenerationKey {
+            tip_hash: self.live_tip_hash(),
+            mempool_sequence: self.mempool.current_sequence(),
+        }
+    }
+
+    /// Installs `key` as the published generation and wakes every waiter.
+    fn publish_key(&self, key: GenerationKey) {
         let mut state = self.state.lock();
         if let Some(previous) = state.published
             && previous != key
@@ -286,19 +303,6 @@ impl MiningService {
         }
         state.published = Some(key);
         self.wake.notify_all();
-    }
-
-    fn tip_hash(&self) -> Hash256 {
-        self.applied_tip
-            .applied_tip()
-            .map_or_else(|| self.network.genesis_block_hash(), |tip| tip.hash)
-    }
-
-    fn live_generation_key(&self) -> GenerationKey {
-        GenerationKey {
-            tip_hash: self.tip_hash(),
-            mempool_sequence: self.mempool.current_sequence(),
-        }
     }
 
     fn ensure_published(&self, state: &mut CoordinatorState) -> GenerationKey {
@@ -320,7 +324,7 @@ impl MiningService {
     ) -> Result<GenerationKey, MiningControlError> {
         let mut state = self.state.lock();
         loop {
-            if self.shutdown.load(Ordering::Acquire) {
+            if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));
@@ -376,14 +380,12 @@ impl MiningService {
                 continue;
             }
             let submit_old = waited.map(|waited| candidate.previous_block_hash == waited.tip_hash);
-            let (version_bits_available, version_bits_required) =
-                self.version_bits_for(&candidate, &tip);
+            let version_bits_available = self.chain.signalling_rules(&tip, candidate.height);
             return Ok(template_from_candidate(
                 self.network,
                 candidate,
                 submit_old,
                 version_bits_available,
-                version_bits_required,
             ));
         }
         Err(generation_race())
@@ -455,7 +457,7 @@ impl MiningService {
     fn live_candidate(&self) -> Result<Arc<Candidate>, MiningControlError> {
         let mut last_race = None;
         for _attempt in 0..CANDIDATE_GENERATION_RETRIES {
-            if self.shutdown.load(Ordering::Acquire) {
+            if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));
@@ -490,7 +492,7 @@ impl MiningService {
         }
 
         loop {
-            if self.shutdown.load(Ordering::Acquire) {
+            if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));
@@ -555,9 +557,11 @@ impl MiningService {
             flight.result = Some(returned.clone());
         }
         self.wake.notify_all();
-        if state.in_flight.as_ref().is_some_and(|flight| {
-            flight.key == key && flight.id == flight_id && flight.result.is_some()
-        }) {
+        if state
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| flight.id == flight_id)
+        {
             state.in_flight = None;
         }
         flight_guard.armed = false;
@@ -644,24 +648,6 @@ impl MiningService {
             }
         })
     }
-
-    fn version_bits_for(
-        &self,
-        candidate: &Candidate,
-        tip: &TipSnapshot,
-    ) -> (Vec<AvailableMiningRule>, u32) {
-        if tip.hash != candidate.previous_block_hash {
-            return (Vec::new(), 0);
-        }
-        // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
-        (self.chain.signalling_rules(tip, candidate.height), 0)
-    }
-}
-
-impl MempoolSequenceWake for MiningService {
-    fn publish_generation_from(&self, sequence: u64) {
-        Self::publish_generation_from(self, sequence);
-    }
 }
 
 /// Clears an abandoned single-flight slot when assembly unwinds, so
@@ -700,7 +686,6 @@ fn template_from_candidate(
     candidate: Arc<Candidate>,
     submit_old: Option<bool>,
     version_bits_available: Vec<AvailableMiningRule>,
-    version_bits_required: u32,
 ) -> BlockTemplate {
     let mut rules = Vec::new();
     if candidate.segwit_active {
@@ -717,11 +702,12 @@ fn template_from_candidate(
         rules.push(MiningRule::new("signet"));
     }
     // API-11 advertises producer capabilities, never client-requested names.
+    // Core v31 `getblocktemplate` hardcodes `vbrequired` to 0.
     BlockTemplate {
         rules,
         candidate,
         version_bits_available,
-        version_bits_required,
+        version_bits_required: 0,
         capabilities: vec![
             MiningCapability::new("proposal"),
             MiningCapability::new("longpoll"),
@@ -733,7 +719,6 @@ fn template_from_candidate(
         ],
         submit_old,
         signet,
-        work_id: None,
     }
 }
 

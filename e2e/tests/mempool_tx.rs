@@ -14,20 +14,27 @@ use bitcoin_rs_e2e::helpers::{
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
 use serde_json::{Value, json};
 
-/// A broadcast enters the mempool with a complete entry view.
+/// One mempool lifecycle on one node: a broadcast enters the pool with a
+/// complete entry view, re-submitting is idempotent (Core's `-27
+/// txn-already-in-mempool` divergence is intentional), a fee delta overlays
+/// and is reported, and `generateblock` confirms the transaction and drains
+/// the pool.
 #[test]
-fn broadcast_enters_mempool_with_entry() -> Result<()> {
+fn mempool_lifecycle_from_broadcast_to_confirmation() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let (outpoint, prevout) = mature_funding(&mut node)?;
-    assert!(mempool_txids(&mut node)?.is_empty());
+    assert_eq!(mempool_txids(&mut node)?, Vec::<String>::new());
 
     let spend = spend_anyone(outpoint, &prevout, 1_000);
     let txid = spend.compute_txid().to_string();
-    let returned = node.rpc("sendrawtransaction", &json!([tx_hex(&spend)]))?;
-    assert_eq!(returned, json!(txid));
-
-    let ids = mempool_txids(&mut node)?;
-    assert_eq!(ids, vec![txid.clone()]);
+    let hex = tx_hex(&spend);
+    assert_eq!(node.rpc("sendrawtransaction", &json!([hex]))?, json!(txid));
+    assert_eq!(
+        node.rpc("sendrawtransaction", &json!([hex]))?,
+        json!(txid),
+        "second submit must be idempotent"
+    );
+    assert_eq!(mempool_txids(&mut node)?, vec![txid.clone()]);
 
     let info = node.rpc("getmempoolinfo", &json!([]))?;
     assert_eq!(info.u64_field("size")?, 1);
@@ -47,30 +54,29 @@ fn broadcast_enters_mempool_with_entry() -> Result<()> {
         "fee 1000 sats: {base_fee}"
     );
 
-    let missing = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "getmempoolentry",
-        "params": ["0000000000000000000000000000000000000000000000000000000000000000"]
-    }))?;
-    assert_eq!(missing["error"]["code"], json!(-5));
-    node.stop()
-}
-
-/// Re-submitting an already-pooled transaction is idempotent here
-/// (Core's `-27 txn-already-in-mempool` divergence is intentional).
-#[test]
-fn resubmit_is_idempotent() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    let (outpoint, prevout) = mature_funding(&mut node)?;
-    let spend = spend_anyone(outpoint, &prevout, 1_000);
-    let txid = spend.compute_txid().to_string();
-    let hex = tx_hex(&spend);
-
-    assert_eq!(node.rpc("sendrawtransaction", &json!([hex]))?, json!(txid));
     assert_eq!(
-        node.rpc("sendrawtransaction", &json!([hex]))?,
-        json!(txid),
-        "second submit must be idempotent"
+        node.rpc("prioritisetransaction", &json!([txid, 0, 5000]))?,
+        json!(true)
     );
+    let listed = node.rpc("getprioritisedtransactions", &json!([]))?;
+    assert_eq!(listed[&txid]["fee_delta"], json!(5000));
+    assert_eq!(listed[&txid]["in_mempool"], json!(true));
+
+    let mined = node.rpc("generateblock", &json!(["raw(51)", [txid]]))?;
+    let hash = mined.str_field("hash")?.to_owned();
+    assert!(mempool_txids(&mut node)?.is_empty(), "mined tx leaves pool");
+    let block = node.rpc("getblock", &json!([hash, 2]))?;
+    let txids: Vec<&str> = block["tx"]
+        .as_array()
+        .map(|txs| txs.iter().filter_map(|t| t["txid"].as_str()).collect())
+        .unwrap_or_default();
+    assert_eq!(txids.len(), 2);
+    assert_eq!(txids[1], txid, "listed tx is tx[1] after the coinbase");
+
+    // Without txindex a confirmed tx needs its block hash to be served.
+    let confirmed = node.rpc("getrawtransaction", &json!([txid, true, hash]))?;
+    assert_eq!(confirmed.u64_field("confirmations")?, 1);
+    assert_eq!(confirmed.str_field("blockhash")?, hash);
     node.stop()
 }
 
@@ -105,13 +111,6 @@ fn mempool_accept_preview() -> Result<()> {
     let rows = node.rpc("testmempoolaccept", &json!([[tx_hex(&bad)]]))?;
     assert_eq!(rows[0]["allowed"], json!(false));
     assert_eq!(rows[0]["reject-reason"], json!("missing-inputs"));
-
-    // Malformed hex is a request-level deserialization error, not a reject row.
-    let reply = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "testmempoolaccept",
-        "params": [["deadbeef"]]
-    }))?;
-    assert_eq!(reply["error"]["code"], json!(-22));
     node.stop()
 }
 
@@ -169,11 +168,6 @@ fn raw_transaction_lookup_rules() -> Result<()> {
 
     // A confirmed coinbase is only reachable via its block hash.
     let coinbase_txid = outpoint.txid.to_string();
-    let not_found = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "getrawtransaction",
-        "params": [coinbase_txid]
-    }))?;
-    assert_eq!(not_found["error"]["code"], json!(-5));
 
     let block_hash = node
         .rpc("getblockhash", &json!([1]))?
@@ -184,10 +178,13 @@ fn raw_transaction_lookup_rules() -> Result<()> {
         "getrawtransaction",
         &json!([coinbase_txid, false, block_hash]),
     )?;
-    assert!(
-        via_block.as_str().is_some(),
-        "raw hex via block: {via_block}"
-    );
+    let decoded: bitcoin::Transaction = deserialize_hex(
+        via_block
+            .as_str()
+            .ok_or_else(|| Error::Assertion("raw hex via block".into()))?,
+    )
+    .map_err(|e| Error::Assertion(format!("block-served tx decode: {e}")))?;
+    assert_eq!(decoded.compute_txid().to_string(), coinbase_txid);
 
     // A mempool transaction resolves without a block hash.
     let spend = spend_anyone(outpoint, &prevout, 1_000);
@@ -233,11 +230,6 @@ fn create_and_decode_raw_transaction() -> Result<()> {
         raw.compute_txid().to_string(),
         decoded["txid"].as_str().unwrap()
     );
-
-    let bad = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "decoderawtransaction", "params": ["00ff"]
-    }))?;
-    assert_eq!(bad["error"]["code"], json!(-22));
     let _ = prevout;
     node.stop()
 }
@@ -272,34 +264,6 @@ fn signed_p2pkh_spend_accepted() -> Result<()> {
     node.stop()
 }
 
-/// `prioritisetransaction` overlays a fee delta that
-/// `getprioritisedtransactions` reports.
-#[test]
-fn prioritise_and_list() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    let (outpoint, prevout) = mature_funding(&mut node)?;
-    let spend = spend_anyone(outpoint, &prevout, 1_000);
-    let txid = spend.compute_txid().to_string();
-    node.rpc("sendrawtransaction", &json!([tx_hex(&spend)]))?;
-
-    assert_eq!(
-        node.rpc("prioritisetransaction", &json!([txid, 0, 5000]))?,
-        json!(true)
-    );
-    let listed = node.rpc("getprioritisedtransactions", &json!([]))?;
-    let entry = &listed[&txid];
-    assert_eq!(entry["fee_delta"], json!(5000));
-    assert_eq!(entry["in_mempool"], json!(true));
-
-    // A non-zero dummy argument is Core's -8.
-    let reply = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "prioritisetransaction",
-        "params": [txid, 1, 5000]
-    }))?;
-    assert_eq!(reply["error"]["code"], json!(-8));
-    node.stop()
-}
-
 /// With no confirmation history `estimatesmartfee` reports an `errors`
 /// array and `estimaterawfee` an empty object; invalid targets are -8/-32602.
 #[test]
@@ -316,76 +280,46 @@ fn fee_estimates_on_empty_history() -> Result<()> {
     );
     let raw = node.rpc("estimaterawfee", &json!([3]))?;
     assert_eq!(raw, json!({}));
-
-    let bad = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "estimatesmartfee", "params": [0]
-    }))?;
-    assert!(
-        bad.get("error").is_some(),
-        "conf_target 0 must be rejected: {bad}"
-    );
     node.stop()
 }
 
-/// `generateblock` mines the listed mempool transactions and the pool
-/// drains; the confirmed transaction gains a blockhash/confirmations.
+/// Malformed, unknown-input, unknown-txid, and out-of-range requests each
+/// carry Core's distinct error code rather than a generic failure.
 #[test]
-fn generateblock_confirms_mempool_tx() -> Result<()> {
+fn rejects_carry_core_error_codes() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let (outpoint, prevout) = mature_funding(&mut node)?;
-
-    let spend = spend_anyone(outpoint, &prevout, 1_000);
-    let txid = spend.compute_txid().to_string();
-    node.rpc("sendrawtransaction", &json!([tx_hex(&spend)]))?;
-
-    let mined = node.rpc("generateblock", &json!(["raw(51)", [txid]]))?;
-    let hash = mined
-        .get("hash")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::Assertion("generateblock reply".into()))?
-        .to_owned();
-    assert!(mempool_txids(&mut node)?.is_empty(), "mined tx leaves pool");
-
-    let block = node.rpc("getblock", &json!([hash, 2]))?;
-    let txids: Vec<&str> = block["tx"]
-        .as_array()
-        .map(|txs| txs.iter().filter_map(|t| t["txid"].as_str()).collect())
-        .unwrap_or_default();
-    assert_eq!(txids.len(), 2);
-    assert_eq!(txids[1], txid, "listed tx is tx[1] after the coinbase");
-
-    // Without txindex a confirmed tx needs its block hash to be served.
-    let confirmed = node.rpc("getrawtransaction", &json!([txid, true, hash]))?;
-    assert_eq!(confirmed.u64_field("confirmations")?, 1);
-    assert_eq!(confirmed.str_field("blockhash")?, hash);
-    node.stop()
-}
-
-/// Undecodable and missing-input broadcasts carry Core's distinct
-/// verification codes: -22 decode failure and -25 missing inputs.
-#[test]
-fn broadcast_failure_codes() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    let (_outpoint, _prevout) = mature_funding(&mut node)?;
-
-    let bad_hex = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "sendrawtransaction", "params": ["deadbeef"]
-    }))?;
-    assert_eq!(bad_hex["error"]["code"], json!(-22));
+    let confirmed_txid = outpoint.txid.to_string();
+    let pooled = spend_anyone(outpoint, &prevout, 1_000);
+    let pooled_txid = pooled.compute_txid().to_string();
+    node.rpc("sendrawtransaction", &json!([tx_hex(&pooled)]))?;
 
     let phantom = bitcoin::TxOut {
         value: bitcoin::Amount::from_sat(1_000),
         script_pubkey: op_true_script(),
     };
-    let missing = spend_anyone(
+    let unknown_input = spend_anyone(
         OutPoint::new(bitcoin::Txid::from_byte_array([0xaa; 32]), 0),
         &phantom,
         100,
     );
-    let reply = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 2, "method": "sendrawtransaction",
-        "params": [tx_hex(&missing)]
-    }))?;
-    assert_eq!(reply["error"]["code"], json!(-25));
+    let cases = [
+        ("sendrawtransaction", json!(["deadbeef"]), -22),
+        ("sendrawtransaction", json!([tx_hex(&unknown_input)]), -25),
+        ("testmempoolaccept", json!([["deadbeef"]]), -22),
+        ("decoderawtransaction", json!(["00ff"]), -22),
+        ("getmempoolentry", json!([format!("{:064x}", 0)]), -5),
+        // No txindex: a confirmed transaction is unreachable without its block.
+        ("getrawtransaction", json!([confirmed_txid]), -5),
+        // A non-zero dummy argument is Core's -8.
+        ("prioritisetransaction", json!([pooled_txid, 1, 5000]), -8),
+        ("estimatesmartfee", json!([0]), -8),
+    ];
+    for (method, params, code) in cases {
+        let reply = node.rpc_raw(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params
+        }))?;
+        assert_eq!(reply["error"]["code"], json!(code), "{method}: {reply}");
+    }
     node.stop()
 }

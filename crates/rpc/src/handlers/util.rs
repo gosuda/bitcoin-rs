@@ -10,9 +10,9 @@ use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value, json};
 
 use corepc_types::v31;
 
-use crate::compat::convert::{
-    self, hex_encode, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
-};
+use bitcoin::hex::DisplayHex as _;
+
+use crate::compat::convert::{self, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls};
 use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{
@@ -213,11 +213,11 @@ pub(crate) fn validateaddress(ctx: &Arc<Context>, params: &Value) -> Result<Valu
     };
 
     let script = address.script_pubkey();
-    let script_hex = hex_encode(script.as_bytes());
+    let script_hex = script.as_bytes().to_lower_hex_string();
     let witness_version = script.witness_version();
     let witness_program = witness_version
         .filter(|_| script.as_bytes().len() >= 2)
-        .map(|_| hex_encode(&script.as_bytes()[2..]));
+        .map(|_| script.as_bytes()[2..].to_lower_hex_string());
     typed_to_sonic(&v31::ValidateAddress {
         is_valid: true,
         address: address.to_string(),
@@ -334,7 +334,7 @@ fn with_checksum(canonical: &str) -> String {
 /// descriptor derives perfectly good addresses that nobody holds the keys for,
 /// and the checksum is the only thing standing between a typo and that.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChecksumRequirement {
+enum ChecksumRequirement {
     /// Accept a descriptor with no checksum; verify one that is present.
     Optional,
     /// Refuse a descriptor with no checksum.
@@ -488,7 +488,7 @@ pub(crate) fn strip_addr_wrapper(payload: &str) -> Option<&str> {
 // ---------------------------------------------------------------------------
 
 /// What `getdescriptorinfo` reports about a descriptor.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct DescriptorInfo {
     /// Canonical form, with private keys replaced by their public counterparts.
     ///
@@ -1304,18 +1304,33 @@ mod tests {
     }
 
     #[test]
-    fn getmemoryinfo_returns_locked_stats_shape() {
+    fn getmemoryinfo_reports_resident_bytes_as_the_whole_locked_pool() {
         use alloc::sync::Arc;
 
         let ctx = Arc::new(Context::new());
         let result = getmemoryinfo(&ctx, &json!([]))
             .unwrap_or_else(|err| panic!("getmemoryinfo failed: {err}"));
-        assert!(result.get("locked").is_some(), "locked missing: {result:?}");
         let Some(locked) = result.get("locked") else {
-            panic!("locked missing");
+            panic!("locked missing: {result:?}");
         };
-        assert!(locked.get("used").is_some());
-        assert!(locked.get("total").is_some());
+        let field = |name: &str| {
+            locked
+                .get(name)
+                .and_then(JsonValueTrait::as_u64)
+                .unwrap_or_else(|| panic!("{name} is not an unsigned number: {locked:?}"))
+        };
+        let used = field("used");
+        if read_linux_rss_bytes().is_some() {
+            assert!(used > 0, "resident set size read as zero: {locked:?}");
+        }
+        assert_eq!(used, field("total"), "the proxy pool is fully used");
+        for name in ["free", "locked", "chunks_used", "chunks_free"] {
+            assert_eq!(
+                field(name),
+                0,
+                "{name} has no meaning for the resident-set proxy"
+            );
+        }
     }
 
     #[test]

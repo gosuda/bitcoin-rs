@@ -14,9 +14,9 @@ does not hold a second copy. The node supplies chain queries and coordinates
 chain application. A connection
 negotiates version/verack in `handshake`, then runs the peer finite-state machine
 in `fsm`; `wire` is the protocol codec. The per-connection writer coalesces a ready
-burst of control messages into one `write_messages` writev; blocks and transactions
+burst of control messages into `write_ready_burst`'s vectored write pass; blocks and transactions
 stay one frame. Inbound traffic reaches the host through
-`dispatch_inbound_with_chain`, which streams getdata responses behind the outbound
+`dispatch_inbound_full`, which streams getdata responses behind the outbound
 budget's pre-load production headroom gate and reads the active chain through the
 `ChainQuery` trait. Served block bodies are the stored consensus bytes
 (`Message::BlockPayload`); they are not decoded and re-encoded. `inbound` hands over
@@ -49,35 +49,20 @@ shared transaction lifecycle. The authoritative cross-crate ownership split is
 peer-visible inventory and relay behavior are defined in
 [P2P compatibility](../../docs/policies/p2p-compatibility.md).
 
-`PeerManager` owns DNS resolver and seed configuration and bootstraps outbound
-addresses. Live session registration, replacement, metadata publication, and
-identity-checked removal go through `PeerTable`, used by the inbound TCP
-`listener` and connection-session paths. A connection is identified by a
-`ConnectionId` and cleaned up through a `PeerLease`. The `listener` module has one
-entry point per role: `bind_listener` binds a local address, `serve` runs the accept
-loop on that bound listener until shutdown, and `spawn_outbound_connection` dials one
-peer. `serve` and `spawn_outbound_connection` read one cloneable `ConnectionShared`
-wiring value per start epoch, which also owns the header, block, and transaction sinks. A connection negotiates
-version/verack in `handshake`, then runs the peer finite-state machine in `fsm`;
-`wire` is the protocol codec, decoding `Message` values and reporting `PeerError`. Inbound traffic reaches
-the host through `dispatch_inbound_full`, which streams getdata responses
-block by block behind the outbound budget's pre-load production headroom gate,
-filters transaction inventory through the `TxInventory` trait, reads the
-active chain through the `ChainQuery` trait, and receives the chain-owned
-initial-block-download gate that the `listener` supplies to it through its
-`tx_relay_open` callback: while the gate is closed, transaction-typed `inv`
-vectors are never requested and `tx` bodies are dropped before ingress (Core
-31.1 `net_processing.cpp:4401-4404`, `:4713-4716`); `inbound` hands over
-`InboundBlock`,
-`InboundHeaders`, and `InboundTx` with their delivering peer stamped. Manual bans
-exclude whole subnets as a `BannedSubnet` built from an `IpSubnet`, held in memory.
-`wire` decodes BIP155 `addrv2` messages, and BIP339 wtxid-relay state lives in `wtxid`.
-
-## Features
-- `default` (enables `fjall`): build with the fjall storage backend selected.
-- `rocksdb`: forward the rocksdb storage backend to `bitcoin-rs-storage`.
-- `fjall`: forward the fjall storage backend to `bitcoin-rs-storage`.
-- `redb`: forward the redb storage backend to `bitcoin-rs-storage`.
+`P2pService` owns DNS seed configuration and bootstraps outbound addresses in
+its bootstrap worker. The `listener` module has one entry point per role: `bind_listener`
+binds a local address, `serve` runs the accept loop on that bound listener until
+shutdown, and `spawn_outbound_connection` dials one peer. `serve` and
+`spawn_outbound_connection` read one cloneable `ConnectionShared` wiring value
+per start epoch, which also owns the header, block, and transaction sinks.
+`wire` decodes `Message` values and reports `PeerError`. `dispatch_inbound_full`
+also filters transaction inventory through the `TxInventory` trait and receives
+the chain-owned initial-block-download gate that the `listener` supplies to it
+through its `tx_relay_open` callback: while the gate is closed, transaction-typed
+`inv` vectors are never requested and `tx` bodies are dropped before ingress
+(Core 31.1 `net_processing.cpp:4401-4404`, `:4713-4716`); `inbound` hands over
+`InboundBlock`, `InboundHeaders`, and `InboundTx` with their delivering peer
+stamped.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

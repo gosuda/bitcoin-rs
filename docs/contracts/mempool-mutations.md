@@ -16,8 +16,7 @@ state (`crates/mempool/src/orphan.rs`).
 - Every production mempool mutation routes through `MempoolGateway`. No
   production code outside the gateway takes the mempool write lock; lookups
   go through `MempoolGateway::read`.
-- Every mutating method flows through one path, `commit` (and
-  `admit_transaction`, which enqueues the same way), in this exact order:
+- Every publishing mutation flows through `commit`, in this exact order:
   1. take the pool write lock,
   2. mutate and assign per-change `mempool_sequence` values, then update
      the gateway's orphan state and mark waiting children ready for parents
@@ -41,7 +40,7 @@ state (`crates/mempool/src/orphan.rs`).
   still sees a gap-free, ordered stream.
 - The observer receives a `&MutationEnvelope` — the committed
   `MutationResult` paired with the `AdmissionOrigin` that identifies how
-  the transaction entered the node (`Rpc`, `Peer`, `Reorg`, or `Block`).
+  the transaction entered the node (`Rpc`, `Esplora`, `Peer`, `Reorg`, or `Block`).
   The gateway clones one `MutationResult` into the envelope for each
   committed non-empty batch that has an observer attached, so it can both
   enqueue publication and return the original result to the caller.
@@ -67,7 +66,7 @@ state (`crates/mempool/src/orphan.rs`).
   order. Each change carries the txid and a `MutationOutcome`:
   `Accepted`, or `Removed(RemovalReason)`.
 - `RemovalReason` is one of `BlockInclusion`, `Conflict`, `Replaced`,
-  `Descendant`, `PolicyEviction`, `Expiry`, `Clear`, `Reorg`.
+  `Descendant`, `PolicyEviction`, `Clear`, `Reorg`.
 - `Mempool::sequence_number` advances exactly once per emitted change while
   the write lock is held. A failed insert, a no-op removal, and a clear of
   an empty pool assign nothing.
@@ -93,7 +92,7 @@ state (`crates/mempool/src/orphan.rs`).
 
 - `MempoolGateway` carries a `chain_generation` atomic counter. Even values
   mean the chain is stable and admission is open; odd values mean a chain
-  change (connect, disconnect, or reorg) is in progress and admission is
+  change (connect, disconnect, reorg, or snapshot activation) is in progress and admission is
   closed. `stable_generation()` returns `Some(even)` when stable, `None`
   when a chain change is active.
 - `begin_chain_change` takes the pool write lock, stores the next odd value,
@@ -102,6 +101,11 @@ state (`crates/mempool/src/orphan.rs`).
   explicit `finish` leaves the generation odd — admission stays closed.
   Only `finish` may compare-exchange the odd value to the reserved even value,
   reopening admission. One guard covers one externally coherent chain operation.
+- Snapshot replacement retires the old pool and fee history through
+  `clear_for_snapshot`, which also clears orphan/reject residency, verifies the gateway identity and exact odd
+  generation under the pool write lock. It publishes ordinary `Clear` removals
+  and keeps admission fenced until the node settles the new chain's consumers.
+  Ordinary reconnect/reorg recovery does not use this wholesale reset.
 - The reorg owner settles both sync branch switches and RPC invalidation.
   A clean refusal finishes at the fully committed disconnect/connect prefix,
   after reconsidering its disconnected transactions under the odd generation.
@@ -112,7 +116,10 @@ state (`crates/mempool/src/orphan.rs`).
   fatal invariant failure: retain the execution cause, close apply admission
   and request shutdown rather than report success or retry the chain walk.
 - `submit_transaction` owns common preparation and four bounded attempts for
-  RPC and peer submissions. `preview_transactions` uses the same policy and
+  RPC and peer submissions. `submit_local_transaction` runs it for RPC,
+  Esplora and embedded broadcasts, answering current membership as success
+  with no changes; it takes a `LocalOrigin`, so peer, reorg and block
+  origins cannot reach it. `preview_transactions` uses the same policy and
   script evaluator, with the same retry bound. Each attempt captures an even
   chain generation and pool sequence before reading chain facts. Preparation
   copies the input outputs under a pool read, then executes scripts without
@@ -324,12 +331,12 @@ state (`crates/mempool/src/orphan.rs`).
   `admission_state_accepts_only_the_current_generation`.
 - `crates/rpc/src/context.rs` (`admission_chain_tests`):
   `stable_chainstate_reader_does_not_block_transaction_admission`,
-  `cached_unconfirmed_transaction_is_still_admitted_from_a_peer`,
-  `confirmed_hint_requires_live_chain_outputs_and_survives_no_cache`,
+  `unconfirmed_transaction_is_admitted_from_a_peer`,
+  `confirmed_hint_requires_live_chain_outputs`,
   `admission_chain_uses_current_handles_and_one_applied_tip`.
 - `crates/mempool/src/orphan.rs` (inline tests):
   `zero_quota_retains_no_body_or_index`,
-  `witness_refresh_keeps_fifo_position_and_announcer_set`,
+  `witness_refresh_keeps_announce_order_and_announcer_set`,
   `readiness_is_deduplicated_and_removed_with_eviction`,
   `maintenance_expires_old_bodies_and_cleans_every_index`,
   `maintenance_uses_exact_connection_identity`,

@@ -49,9 +49,6 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
     let commitment = candidate
         .witness_commitment
         .ok_or("segwit-active candidate must carry a commitment")?;
-    let root = candidate
-        .witness_merkle_root
-        .ok_or("segwit-active candidate must carry a witness root")?;
 
     // 1. Pinned out-of-band vector.
     assert_eq!(
@@ -81,11 +78,6 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
     let oracle_root = oracle_block
         .witness_root()
         .ok_or("oracle block must yield a witness root")?;
-    assert_eq!(
-        bitcoin_serialize(&oracle_root),
-        root.as_byte_array().to_vec(),
-        "witness merkle root diverges from the rust-bitcoin oracle"
-    );
 
     // 3. Commitment recomputed from the oracle root over the reserved value.
     let mut engine = sha256d::Hash::engine();
@@ -130,8 +122,6 @@ fn witness_commitment_matches_pinned_vector_and_rust_bitcoin_root() -> Result<()
         PAYOUT,
     )?;
     assert!(legacy.witness_commitment.is_none());
-    assert!(legacy.witness_merkle_root.is_none());
-    assert!(legacy.witness_reserved_value.is_none());
     assert!(
         !legacy
             .coinbase

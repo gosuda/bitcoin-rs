@@ -27,6 +27,7 @@
 
 mod append;
 mod durability;
+#[cfg(any(test, feature = "test-seam"))]
 mod failpoints;
 mod open;
 mod retention;
@@ -158,6 +159,7 @@ pub(crate) fn parse_segment_name(name: &str) -> Option<u64> {
 }
 
 /// §2.6 crash-injection boundaries (reuse of the `CheckpointFailpoint` style).
+#[cfg(any(test, feature = "test-seam"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JournalWriterFailpoint {
     /// Injected just before the buffered record bytes hit the segment file.
@@ -400,7 +402,14 @@ pub struct JournalWriter<S: KvStore> {
     /// next pre-apply check must retry that boundary regardless of configured
     /// lag thresholds before permitting another chainstate mutation.
     durability_retry_required: bool,
+    /// A fork below the checkpoint base destroyed this generation
+    /// (`invalidate_generation`): segments and the head are gone, and the
+    /// writer stays Frozen until a checkpoint publication installs a new
+    /// base. `freeze` is then a no-op, `compact_to_checkpoint` skips the
+    /// durable-identity check, and `resume` refuses until compaction lands.
+    generation_invalidated: bool,
     state: WriterState,
+    #[cfg(any(test, feature = "test-seam"))]
     failpoint: Option<JournalWriterFailpoint>,
 }
 
@@ -427,7 +436,7 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     /// Records that a failed append leaves a live-chain gap.
-    pub fn mark_append_gap(&mut self, height: u32) {
+    pub(crate) fn mark_append_gap(&mut self, height: u32) {
         self.append_gap_height.get_or_insert(height);
         metrics::gauge!("node.chainstate_journal.append_gap").set(1.0);
         self.record_lag_metrics();

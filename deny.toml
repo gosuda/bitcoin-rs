@@ -8,7 +8,6 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
 
 [licenses]
 version = 2
@@ -105,15 +104,11 @@ skip = [
     { crate = "rand_chacha@0.3.1", reason = "rand 0.8 chain" },
     { crate = "rand_core@0.6.4", reason = "rand 0.8 chain" },
     { crate = "r-efi@5.3.0", reason = "getrandom 0.3 UEFI backend" },
-    { crate = "wit-bindgen@0.57.1", reason = "getrandom 0.3 wasm bindings" },
     # dashmap 6.2 pins 0.14; metrics-util/quick_cache pin 0.16; the workspace uses 0.17.
     { crate = "hashbrown@0.14.5", reason = "dashmap 6.2 pin" },
     { crate = "hashbrown@0.16.1", reason = "metrics-util 0.20 and quick_cache 0.6" },
     # bitcoin 0.32 pins hex-conservative 0.2; miniscript uses 1.x.
     { crate = "hex-conservative@0.2.3", reason = "bitcoin 0.32 pin" },
-    # ahash 0.8 (sonic-rs JSON lane) pins zerocopy 0.7; the workspace uses 0.8.
-    { crate = "zerocopy@0.7.35", reason = "ahash 0.8.11 via sonic-rs" },
-    { crate = "zerocopy-derive@0.7.35", reason = "zerocopy 0.7 via ahash 0.8.11" },
     # cap-std 4 stack: fs-set-times 0.20 pins io-lifetimes 2, cap-std uses 3.
     { crate = "io-lifetimes@2.0.4", reason = "fs-set-times 0.20" },
     # system-deps 6 (zmq/rocksdb build chain) pins the toml 0.8 stack.

@@ -62,7 +62,7 @@ pub const fn feature_messages() -> [Message; 3] {
 /// version 2 (wtxid identity, witness-bearing prefills) but never take a
 /// high-bandwidth announcement slot, so peers relay compact blocks only when
 /// we request them. See `docs/policies/p2p-compatibility.md` §5.
-pub const fn post_verack_messages() -> [Message; 1] {
+const fn post_verack_messages() -> [Message; 1] {
     [Message::SendCmpct(SendCmpct {
         send_compact: false,
         version: COMPACT_BLOCK_VERSION,

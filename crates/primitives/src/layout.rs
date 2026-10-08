@@ -17,9 +17,7 @@
 //! rejected up front, so a malformed length can never drive an oversized
 //! allocation or an out-of-bounds access.
 //!
-//! Span offsets are `u32` relative to the parsed image. File consumers widen
-//! them to `u64` through [`ByteSpan::file_range`], which adds the image base
-//! in checked `u64` arithmetic (the `u32`-to-`u64` file-offset discipline).
+//! Span offsets are `u32` relative to the parsed image.
 //! Lengths outside the representable span domain surface as an impossible
 //! [`DecodeError::EndOfData`] requirement, following `read_script`'s
 //! convention for lengths beyond `usize`.
@@ -56,8 +54,7 @@ const OUTPOINT_LEN: u64 = 36;
 /// Construction validates `start + len` in `u64` arithmetic against the image
 /// limit before the range is ever used for slicing, so every [`ByteSpan`] is
 /// in-bounds by construction. Offsets are `u32` relative to the image; widen
-/// with [`ByteSpan::end`] or [`ByteSpan::file_range`] instead of storing
-/// absolute file positions in `u32`.
+/// with [`ByteSpan::end`] instead of storing absolute positions in `u32`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ByteSpan {
     start: u32,
@@ -109,18 +106,6 @@ impl ByteSpan {
     pub fn end(self) -> u64 {
         u64::from(self.start) + u64::from(self.len)
     }
-
-    /// Locates the span inside a segment file that starts at `base`,
-    /// widening the `u32` image offset in checked `u64` arithmetic.
-    ///
-    /// Returns `None` when the addition would overflow `u64`; callers never
-    /// silently wrap a file position.
-    #[must_use]
-    pub fn file_range(self, base: u64) -> Option<Range<u64>> {
-        let start = u64::from(self.start).checked_add(base)?;
-        let end = start.checked_add(u64::from(self.len))?;
-        Some(start..end)
-    }
 }
 
 /// A checked index range over one parsed metadata vector.
@@ -149,24 +134,6 @@ impl MetadataRange {
         let start = u32::try_from(start).map_err(|_| impossible(available))?;
         let end = u32::try_from(end).map_err(|_| impossible(available))?;
         Ok(Self { start, end })
-    }
-
-    /// Index of the first selected record.
-    #[must_use]
-    pub const fn start(self) -> u32 {
-        self.start
-    }
-
-    /// Index one past the last selected record.
-    #[must_use]
-    pub const fn end(self) -> u32 {
-        self.end
-    }
-
-    /// Number of selected records.
-    #[must_use]
-    pub const fn len(self) -> u32 {
-        self.end.saturating_sub(self.start)
     }
 
     /// Whether no records are selected.
@@ -302,12 +269,6 @@ impl InputLayout {
         self.script_sig
     }
 
-    /// Span of the 4-byte sequence number.
-    #[must_use]
-    pub const fn sequence(&self) -> ByteSpan {
-        self.sequence
-    }
-
     /// Index range of this input's witness stack items within
     /// [`ParsedTransaction::witness_spans`]; empty for legacy inputs.
     #[must_use]
@@ -324,12 +285,6 @@ pub struct OutputLayout {
 }
 
 impl OutputLayout {
-    /// Span of the 8-byte little-endian value.
-    #[must_use]
-    pub const fn value(&self) -> ByteSpan {
-        self.value
-    }
-
     /// Span of the scriptPubKey contents (without the length prefix).
     #[must_use]
     pub const fn script_pubkey(&self) -> ByteSpan {
@@ -366,7 +321,7 @@ pub struct ParsedTransaction<'a> {
 impl<'a> ParsedTransaction<'a> {
     /// Parses one transaction from the front of `reader`, advancing `reader`
     /// past exactly the consumed bytes.
-    pub fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
+    pub(crate) fn parse(reader: &mut &'a [u8]) -> Result<Self, DecodeError> {
         let image = *reader;
         let mut cursor = 0_u64;
         let parsed = Self::parse_at(image, &mut cursor)?;
@@ -499,12 +454,6 @@ impl<'a> ParsedTransaction<'a> {
         self.span
     }
 
-    /// The immutable byte image every span indexes into.
-    #[must_use]
-    pub fn bytes(&self) -> &'a [u8] {
-        self.bytes
-    }
-
     /// Whether the BIP144 marker/flag was present in the wire encoding. For
     /// every parseable encoding this coincides with witness data being
     /// present, because an all-empty witness section is rejected as
@@ -524,18 +473,6 @@ impl<'a> ParsedTransaction<'a> {
     #[must_use]
     pub fn outputs(&self) -> &[OutputLayout] {
         &self.outputs
-    }
-
-    /// Number of inputs.
-    #[must_use]
-    pub fn input_count(&self) -> usize {
-        self.inputs.len()
-    }
-
-    /// Number of outputs.
-    #[must_use]
-    pub fn output_count(&self) -> usize {
-        self.outputs.len()
     }
 
     /// Witness stack item spans concatenated across inputs; each input's
@@ -805,18 +742,6 @@ impl<'a> ParsedBlock<'a> {
     #[must_use]
     pub fn transactions(&self) -> &[ParsedTransaction<'a>] {
         &self.txs
-    }
-
-    /// The transaction at `index`, if present.
-    #[must_use]
-    pub fn transaction(&self, index: usize) -> Option<&ParsedTransaction<'a>> {
-        self.txs.get(index)
-    }
-
-    /// The immutable byte image every span indexes into.
-    #[must_use]
-    pub fn bytes(&self) -> &'a [u8] {
-        self.bytes
     }
 
     /// Bytes this block occupies inside the owning image.

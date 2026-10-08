@@ -14,9 +14,7 @@ use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
 
-use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::BlockBodySource;
-use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_chainstate::ChainstateParts;
 use bitcoin_rs_chainstate::events::{ChainEventPublisher, ChainSnapshot, initialize_data_dir};
 use bitcoin_rs_chainstate::recovery::{
@@ -31,7 +29,6 @@ use bitcoin_rs_p2p::download_window::fast_sync_budget;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU32;
 
 impl NodeState {
@@ -40,8 +37,7 @@ impl NodeState {
     /// Derived-index workers are constructed dormant (`Opening`) and started
     /// by [`Self::start_index_workers`] once crash recovery has made the
     /// applied tip authoritative; `start_node` performs both steps.
-    #[allow(clippy::arc_with_non_send_sync)]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     pub fn open(
         config: NodeConfig,
         mempool_observer: Option<&Arc<dyn bitcoin_rs_mempool::MempoolObserver>>,
@@ -69,7 +65,7 @@ impl NodeState {
 
         let block_body_store = storage.block_body_store();
 
-        let zmq_endpoints = config.zmq_endpoints();
+        let zmq_endpoints = &config.notifications.zmq;
         #[cfg(feature = "zmq")]
         let zmq_publisher: Arc<dyn crate::ZmqPublisher> = if zmq_endpoints.is_empty() {
             Arc::new(crate::NoOpZmqPublisher)
@@ -84,7 +80,7 @@ impl NodeState {
         let InitialChainstate {
             utxo: mut utxo_set,
             coin_stats: initial_coin_stats,
-            tree: mut block_tree_value,
+            tree: block_tree_value,
             applied_tip: restored_applied_tip,
             resume_source,
             journal_bootstrap,
@@ -92,6 +88,7 @@ impl NodeState {
             &config.data_dir,
             config.network,
             config.chainstate_journal,
+            durable_head.load()?.as_ref(),
         )?;
         if resume_source == ResumeSource::Checkpoint {
             tracing::info!(
@@ -129,6 +126,7 @@ impl NodeState {
             ) {
                 let witness_height = witness.height;
                 let source = match resume_source {
+                    ResumeSource::Snapshot => "snapshot",
                     ResumeSource::Cold => "cold",
                     ResumeSource::Checkpoint => "checkpoint",
                     ResumeSource::Journal => "journal",
@@ -190,35 +188,24 @@ impl NodeState {
         // confirmation history before any admission can run. A corrupt or
         // unknown-version file degrades to insufficient data (docs/policies/db-migration.md).
         bitcoin_rs_mempool::fee_history::load(&config.data_dir, &mempool);
-        // Extract the tip publication cell while the tree is still owned
-        // here; sharing it is part of the tree's mutation authority.
-        let chain_tip = block_tree_value.tip_handle();
-        let block_tree = Arc::new(RwLock::new(block_tree_value));
-        let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
-        if let Some(restored_applied_tip) = restored_applied_tip {
-            applied_tip.store(Some(Arc::new(restored_applied_tip)));
-        }
         let blocks = Arc::new(RwLock::new(BlockLog::new()));
         // Created before the txindex worker spawn: the worker mirrors this
         // publisher's snapshot into its persisted consumer cursor.
         let chain_events_raw = ChainEventPublisher::new(initial_snapshot);
-        let shutdown = Arc::new(AtomicBool::new(false));
         // One domain for this node: chainstate takes the mutation role, and
         // the readers below take the matching stable-read role from it.
         let transition = bitcoin_rs_chain::TransitionDomain::new();
         let chain_events = Arc::new(chain_events_raw);
         let mut chainstate = bitcoin_rs_chainstate::Chainstate::from_parts(ChainstateParts {
             network: config.network,
-            chain_tip: Arc::clone(&chain_tip),
-            applied_tip: Arc::clone(&applied_tip),
-            block_tree: Arc::clone(&block_tree),
+            block_tree: block_tree_value,
+            restored_applied_tip,
             utxo: Arc::clone(&utxo),
             coin_stats: Arc::clone(&coin_stats),
             chain_events: Arc::clone(&chain_events),
             block_body_store: Some(Arc::clone(&block_body_store)),
             undo_store,
             durable_head,
-            shutdown: Arc::clone(&shutdown),
             chain_transition: transition.authority(),
             assume_valid_height: config.validation.assume_valid_height,
             validation_mode: config.validation.mode,
@@ -227,6 +214,7 @@ impl NodeState {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
+            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
@@ -239,10 +227,11 @@ impl NodeState {
                     Arc::new(bitcoin_rs_index::runtime::DerivedIndexRuntime::new(wake_tx));
                 let body_source: Arc<dyn BlockBodySource> =
                     Arc::new(StoredBlockBodySource::new(Arc::clone(&block_body_store)));
-                let block_source =
-                    bitcoin_rs_index::runtime::IndexBlockSource::new(Arc::clone(&blocks))
-                        .with_block_body_source(Arc::clone(&body_source))
-                        .with_block_tree(chainstate.block_tree_reader());
+                let block_source = bitcoin_rs_index::runtime::IndexBlockSource::new(
+                    bitcoin_rs_index::BlockLogReader::from(Arc::clone(&blocks)),
+                )
+                .with_block_body_source(Arc::clone(&body_source))
+                .with_block_tree(chainstate.block_tree_reader());
                 let lifecycle: Arc<
                     arc_swap::ArcSwap<bitcoin_rs_index::runtime::DerivedIndexLifecycle>,
                 > = Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -316,30 +305,35 @@ impl NodeState {
                 },
                 ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
-            Arc::clone(&shutdown),
+            chainstate.shutdown_reader(),
         ));
         let peer_table = p2p.table();
-        let inbound_headers_rx = p2p.inbound_headers_receiver();
-        let inbound_blocks_rx = p2p.inbound_blocks_receiver();
+        let inbound_headers_rx = p2p
+            .take_inbound_headers_receiver()
+            .ok_or_else(|| anyhow::anyhow!("inbound headers receiver already taken"))?;
+        let inbound_blocks_rx = p2p
+            .take_inbound_blocks_receiver()
+            .ok_or_else(|| anyhow::anyhow!("inbound blocks receiver already taken"))?;
         let (inbound_tx_tx, inbound_tx_rx_raw) =
             crossbeam_channel::bounded::<bitcoin_rs_p2p::InboundTx>(INBOUND_TX_CHANNEL_LIMIT);
-        let inbound_tx_rx = Arc::new(Mutex::new(inbound_tx_rx_raw));
+        let inbound_tx_rx = Mutex::new(Some(inbound_tx_rx_raw));
         // The template-coordinator wake exists from node birth so the apply
         // path and the gateway can fire it before `run` builds the
         // coordinator; the coordinator attaches itself once constructed.
         let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
-        // One gateway per pool. Mempool owns fan-out: mining occupies the
-        // observer slot, and ZMQ sequence (or a test observer) attaches as an
-        // extra named leg. Admission/relay legs attach after construction.
+        // Construct the pool's one gateway here. Mempool owns fan-out: mining
+        // occupies the observer slot, and ZMQ sequence (or a test observer)
+        // attaches as an extra named leg. Admission/relay legs attach after
+        // construction.
         let mempool_gateway = {
             let publisher = Arc::clone(&zmq_publisher);
             let cloned_mining = Arc::clone(&mining_generation);
             let mining_leg: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = cloned_mining;
-            let gateway = bitcoin_rs_mempool::MempoolGateway::shared_with(
+            let gateway = Arc::new(bitcoin_rs_mempool::MempoolGateway::new(
                 Arc::clone(&mempool),
-                mining_leg,
+                Some(mining_leg),
                 config.validation.engine,
-            )?;
+            ));
             if publisher.wants_notifications() {
                 gateway
                     .attach_observer_leg(
@@ -369,7 +363,11 @@ impl NodeState {
         // start there rather than at zero, which would refuse all undo
         // pruning. Recovery publication advances it to the reconstructed tip.
         let durable_tip_height = Arc::new(AtomicU32::new(
-            applied_tip.load().as_ref().map_or(0, |tip| tip.height),
+            chainstate
+                .applied_tip_reader()
+                .load_full()
+                .as_ref()
+                .map_or(0, |tip| tip.height),
         ));
         chainstate.configure_checkpointing(&config.data_dir, Arc::clone(&durable_tip_height))?;
         // Before anything reads the chainstate, let alone serves or syncs it.
@@ -400,13 +398,22 @@ impl NodeState {
         // the transaction-relay gate, and block-peer eligibility can never
         // disagree.
         let ibd = chainstate.ibd_latch();
+        let assumeutxo = Arc::new(
+            bitcoin_rs_chainstate::AssumeUtxoManager::open(
+                config.network,
+                Arc::clone(&chainstate),
+                Some(config.data_dir.clone()),
+            )
+            .map_err(|err| anyhow::anyhow!("assumeutxo open failed: {err}"))?,
+        );
         let sync = Arc::new(crate::sync::block_sync(
             Arc::clone(&chainstate),
             followers.clone(),
             Arc::clone(&peer_table),
-            Arc::clone(&inbound_headers_rx),
-            Arc::clone(&inbound_blocks_rx),
+            inbound_headers_rx,
+            inbound_blocks_rx,
             Arc::clone(&ibd),
+            Some(Arc::clone(&assumeutxo)),
         ));
         if config.p2p.fast_sync {
             sync.install_budget(fast_sync_budget(config.network));
@@ -448,6 +455,7 @@ impl NodeState {
             followers,
             sync,
             recovery_reporter,
+            assumeutxo,
         })
     }
 }

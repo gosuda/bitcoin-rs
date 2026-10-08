@@ -12,9 +12,17 @@ on:
 permissions:
   contents: read
 
-# Preserve an evidence run for every scheduled or manual invocation.
+# Preserve an evidence run for every scheduled or manual invocation, but run
+# generations serially: a campaign that overruns its daily slot used to start
+# the next day's run beside it (per-run group), stacking long throughput
+# jobs against PR feedback (issue #1349). Fixed group + `queue: max` +
+# `cancel-in-progress: false`: the running campaign is never cancelled and
+# newer runs wait in queue (up to 100 pending) instead of cancelling the
+# previous pending one, so an invocation's evidence is dropped only when 100
+# runs are already pending.
 concurrency:
-  group: ci-compatibility-${{ github.workflow }}-${{ github.run_id }}
+  group: ci-compatibility
+  queue: max
   cancel-in-progress: false
 
 env:
@@ -71,14 +79,14 @@ jobs:
       - uses: ./.github/actions/native-deps
         if: matrix.lane == 'native'
       - run: scripts/check-feature-matrix.sh ${{ matrix.lane }}
-      # The matrix rows only compile; the trace lane's acceptance gate is that
+      # The matrix rows only compile; the usdt lane's acceptance gate is that
       # a `usdt` build with `default-features = false` still embeds
       # `.note.stapsdt` notes, which only this test asserts (it parses the
-      # built artifact's notes against `probe_abi::PROBES`), and that a
-      # feature-off build embeds none.
+      # built artifact's notes against `crates/consensus/probes.d`), and that
+      # a feature-off build embeds none.
       - run: |
-          cargo test --locked -p bitcoin-rs-trace --no-default-features --test sdt_notes
-          cargo test --locked -p bitcoin-rs-trace --features usdt --test sdt_notes
+          cargo test --locked -p bitcoin-rs-consensus --no-default-features --test sdt_notes
+          cargo test --locked -p bitcoin-rs-consensus --features usdt --test sdt_notes
         if: matrix.lane == 'pure'
 
   # Compile-only MSRV gate: the policy promise is that workspace crates build

@@ -40,6 +40,9 @@ mod tx_render;
 /// Bitcoin Core-compatible ZMQ notification protocol and transport.
 pub mod zmq;
 
+#[cfg(test)]
+mod test_support;
+
 pub use auth::Auth;
 pub use manifest::MANIFEST_TOML;
 

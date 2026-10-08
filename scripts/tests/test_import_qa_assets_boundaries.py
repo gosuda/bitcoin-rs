@@ -42,11 +42,11 @@ class SeedBoundaryTests(unittest.TestCase):
         (self.source / name).write_bytes(message)
 
     def test_commented_commands_do_not_shift_decoder_selection(self):
-        self.inventory.write_text('''pub const COMMANDS: &[Command] = &[
-    // Command { name: "ghost" },
-    Command { name: "verack" },
-    /* nested /* Command { name: "phantom" }, */ ]; still a comment */
-    Command { name: "ping" },
+        self.inventory.write_text('''pub const COMMANDS: &[&str] = &[
+    // "ghost",
+    "verack",
+    /* nested /* "phantom", */ ]; still a comment */
+    "ping",
 ];
 ''')
         self.write_message("ping", b"payload")
@@ -57,7 +57,7 @@ class SeedBoundaryTests(unittest.TestCase):
 
     def test_raw_strings_before_commands_do_not_stop_inventory_scan(self):
         self.inventory.write_text('''const NOTE: &str = r#""/*"#;
-    pub const COMMANDS: &[Command] = &[Command { name: "ping" }];
+    pub const COMMANDS: &[&str] = &["ping"];
 ''')
         self.write_message("ping", b"payload")
         self.map_p2p()
@@ -67,8 +67,7 @@ class SeedBoundaryTests(unittest.TestCase):
         # Rust Reference raw-string grammar (matching hash-delimited terminators):
         # https://doc.rust-lang.org/reference/tokens.html#raw-string-literals
         # Strings before COMMANDS are fixture data, not inventory or comments.
-        table = ('pub const COMMANDS: &[Command] = &['
-                 'Command { name: "ping" }, Command { name: "verack" }];')
+        table = 'pub const COMMANDS: &[&str] = &["ping", "verack"];'
         self.write_message("verack")
         for prefix in ("r", "br", "cr"):
             for count in (0, 1, 2, 3, 255):
@@ -90,26 +89,25 @@ class SeedBoundaryTests(unittest.TestCase):
 
     def test_unterminated_raw_literal_is_rejected(self):
         self.inventory.write_text('const BAD: &str = r##"not terminated;\n'
-                                  'pub const COMMANDS: &[Command] = &['
-                                  'Command { name: "verack" }];')
+                                  'pub const COMMANDS: &[&str] = &["verack"];')
         with self.assertRaisesRegex(ValueError, "raw string"):
             self.map_p2p()
         self.assertFalse(self.output.exists())
 
     def test_header_only_command_becomes_a_selector_only_seed(self):
-        self.inventory.write_text('pub const COMMANDS: &[Command] = &[Command { name: "verack" }];')
+        self.inventory.write_text('pub const COMMANDS: &[&str] = &["verack"];')
         self.write_message("verack")
         self.map_p2p()
         self.assertEqual([path.read_bytes() for path in self.output.iterdir()], [b"\0"])
 
     def test_one_byte_budget_supports_a_selector_only_seed(self):
-        self.inventory.write_text('pub const COMMANDS: &[Command] = &[Command { name: "verack" }];')
+        self.inventory.write_text('pub const COMMANDS: &[&str] = &["verack"];')
         self.write_message("verack")
         self.map_p2p(budget=1)
         self.assertEqual([path.read_bytes() for path in self.output.iterdir()], [b"\0"])
 
     def test_truncated_envelopes_never_become_selector_only_seeds(self):
-        self.inventory.write_text('pub const COMMANDS: &[Command] = &[Command { name: "verack" }];')
+        self.inventory.write_text('pub const COMMANDS: &[&str] = &["verack"];')
         message = b"\0" * 4 + b"verack".ljust(12, b"\0") + b"\0" * 8
         for length in range(len(message)):
             (self.source / str(length)).write_bytes(message[:length])

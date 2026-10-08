@@ -82,29 +82,24 @@ pub const fn encoded_len(value: u64) -> usize {
 pub fn encode(value: u64) -> ArrayVec<[u8; 9]> {
     let mut out = ArrayVec::new();
     if value <= 0xfc {
-        push_u8(
-            &mut out,
-            u8::try_from(value).unwrap_or_else(|_| unreachable_small_value()),
-        );
+        out.push(u8::try_from(value).unwrap_or_else(|_| unreachable_small_value()));
     } else if value <= 0xffff {
-        push_u8(&mut out, 0xfd);
-        push_slice(
-            &mut out,
+        out.push(0xfd);
+        out.extend_from_slice(
             &u16::try_from(value)
                 .unwrap_or_else(|_| unreachable_small_value())
                 .to_le_bytes(),
         );
     } else if value <= 0xffff_ffff {
-        push_u8(&mut out, 0xfe);
-        push_slice(
-            &mut out,
+        out.push(0xfe);
+        out.extend_from_slice(
             &u32::try_from(value)
                 .unwrap_or_else(|_| unreachable_small_value())
                 .to_le_bytes(),
         );
     } else {
-        push_u8(&mut out, 0xff);
-        push_slice(&mut out, &value.to_le_bytes());
+        out.push(0xff);
+        out.extend_from_slice(&value.to_le_bytes());
     }
     out
 }
@@ -126,24 +121,8 @@ fn read_array<const N: usize>(
     Ok(out)
 }
 
-fn push_u8(out: &mut ArrayVec<[u8; 9]>, value: u8) {
-    if out.try_push(value).is_some() {
-        unreachable_capacity();
-    }
-}
-
-fn push_slice(out: &mut ArrayVec<[u8; 9]>, bytes: &[u8]) {
-    for byte in bytes {
-        push_u8(out, *byte);
-    }
-}
-
 fn unreachable_small_value() -> ! {
     unreachable!("compact-size branch bounds guarantee integer width")
-}
-
-fn unreachable_capacity() -> ! {
-    unreachable!("compact-size encoding is at most nine bytes")
 }
 
 #[cfg(test)]

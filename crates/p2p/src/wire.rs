@@ -25,10 +25,10 @@ pub const PROTOCOL_VERSION: u32 = 70_016;
 /// Maximum accepted payload length for one v1 network message.
 pub const MAX_MESSAGE_PAYLOAD: usize = 32 * 1024 * 1024;
 /// Maximum control messages coalesced into one vectored write.
-pub const MAX_WRITE_BURST: usize = 8;
+pub(crate) const MAX_WRITE_BURST: usize = 8;
 
 /// Maximum number of headers accepted in one `headers` message.
-pub const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
+const MAX_HEADERS_MESSAGE_COUNT: usize = 2_000;
 
 /// Maximum block locator hashes accepted in one locator-based request.
 pub const MAX_LOCATOR_HASHES: usize = 101;
@@ -173,7 +173,7 @@ impl Message {
             Self::SendAddrV2 => "sendaddrv2",
             Self::Unknown { command, .. } => return command.clone(),
         };
-        #[allow(clippy::expect_used)]
+        #[expect(clippy::expect_used)]
         CommandString::try_from_static(name).expect("static P2P command")
     }
 
@@ -184,7 +184,7 @@ impl Message {
     /// them. Blocks, transactions, and headers stay one frame per syscall so
     /// a 1 MiB body cannot pin a 16-message encode behind it.
     #[must_use]
-    pub const fn is_bulk_payload(&self) -> bool {
+    pub(crate) const fn is_bulk_payload(&self) -> bool {
         matches!(
             self,
             Self::Tx(_)
@@ -408,19 +408,6 @@ pub fn write_message<W: Write + ?Sized>(
     write_frame(writer, &frame)
 }
 
-/// Write a burst of Bitcoin v1 network messages in one vectored pass.
-///
-/// Returns the framed wire length of each message, in order, so the writer
-/// can release the outbound budget that admitted them.
-pub fn write_messages<W: Write + ?Sized>(
-    writer: &mut W,
-    magic: Magic,
-    messages: &[Message],
-) -> Result<Vec<usize>, PeerError> {
-    let frames = encode_frames(magic, messages)?;
-    write_frames(writer, &frames)
-}
-
 /// Read and validate a Bitcoin v1 network message.
 ///
 /// Returns the decoded message and the raw payload bytes (checksum-validated).
@@ -477,7 +464,7 @@ pub(crate) fn read_message_with<R: Read>(
 ///
 /// Admission accounts this exact count and `write_message` returns it for
 /// release, so budget accounting and wire emission charge identical bytes.
-pub fn wire_len(message: &Message) -> Result<usize, PeerError> {
+pub(crate) fn wire_len(message: &Message) -> Result<usize, PeerError> {
     let payload_len = match message {
         Message::BlockPayload(payload) => payload.len(),
         Message::Tx(tx) => tx.total_size(),
@@ -534,7 +521,7 @@ fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
     // COMMANDS is the allow-list for typed decoding. Keep this gate before the
     // dispatch table so a decoder arm cannot silently create an unlisted
     // typed command.
-    if crate::compat::command(command).is_none() {
+    if !crate::compat::is_typed_command(command) {
         return Ok(Message::Unknown {
             command: command_string(command)?,
             payload: payload.to_vec(),
@@ -582,7 +569,7 @@ fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
         "sendaddrv2" => empty_payload(payload, Message::SendAddrV2)?,
         _ => {
             debug_assert!(
-                crate::compat::command(command).is_none(),
+                !crate::compat::is_typed_command(command),
                 "typed command {command} is missing from decode_payload"
             );
             Message::Unknown {
@@ -776,7 +763,7 @@ mod tests {
 
     use super::{
         HEADER_LEN, MAX_MESSAGE_PAYLOAD, PeerError, encode_payload, read_message, wire_len,
-        write_message, write_messages,
+        write_message,
     };
 
     /// Serves exactly one v1 wire header and fails on any read beyond it.
@@ -844,8 +831,9 @@ mod tests {
     fn block_message_roundtrip_preserves_wire_payload() -> Result<(), super::PeerError> {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let block_bytes = serialize(&block);
-        let native_block = bitcoin_rs_primitives::Block::consensus_decode(&block_bytes)
-            .map_err(super::PeerError::NativeDecode)?;
+        let native_block =
+            bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&block_bytes)
+                .map_err(super::PeerError::NativeDecode)?;
         let message = super::Message::Block(native_block);
         let payload = encode_payload(&message)?;
         let expected_hash = block.block_hash();
@@ -922,8 +910,9 @@ mod tests {
     fn block_payload_writes_the_same_frame_as_decoded_block() -> Result<(), PeerError> {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let block_bytes = serialize(&block);
-        let native_block = bitcoin_rs_primitives::Block::consensus_decode(&block_bytes)
-            .map_err(super::PeerError::NativeDecode)?;
+        let native_block =
+            bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&block_bytes)
+                .map_err(super::PeerError::NativeDecode)?;
         let decoded = super::Message::Block(native_block);
         let payload = super::Message::BlockPayload(bytes::Bytes::from(block_bytes));
 
@@ -978,26 +967,6 @@ mod tests {
             assert_eq!(wire_len(message)?, written);
             assert_eq!(written, buffer.len());
         }
-        Ok(())
-    }
-
-    #[test]
-    fn write_messages_matches_sequential_write_message() -> Result<(), PeerError> {
-        let messages = [
-            super::Message::Ping(1),
-            super::Message::Pong(1),
-            super::Message::Verack,
-        ];
-        let mut sequential = Vec::new();
-        let mut expected = Vec::new();
-        for message in &messages {
-            expected.push(write_message(&mut sequential, Magic::REGTEST, message)?);
-        }
-
-        let mut coalesced = Vec::new();
-        let sizes = write_messages(&mut coalesced, Magic::REGTEST, &messages)?;
-        assert_eq!(sizes, expected);
-        assert_eq!(coalesced, sequential);
         Ok(())
     }
 }

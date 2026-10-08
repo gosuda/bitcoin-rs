@@ -10,11 +10,11 @@ pub mod opcode {
     /// `OP_0`: pushes an empty byte string.
     pub const OP_0: u8 = 0x00;
     /// `OP_PUSHDATA1`: the next byte is the push length.
-    pub const OP_PUSHDATA1: u8 = 0x4c;
+    pub(crate) const OP_PUSHDATA1: u8 = 0x4c;
     /// `OP_PUSHDATA2`: the next two little-endian bytes are the push length.
-    pub const OP_PUSHDATA2: u8 = 0x4d;
+    pub(crate) const OP_PUSHDATA2: u8 = 0x4d;
     /// `OP_PUSHDATA4`: the next four little-endian bytes are the push length.
-    pub const OP_PUSHDATA4: u8 = 0x4e;
+    pub(crate) const OP_PUSHDATA4: u8 = 0x4e;
     /// `OP_1NEGATE`: pushes the number -1.
     pub const OP_1NEGATE: u8 = 0x4f;
     /// `OP_1`: pushes the number 1 (`OP_PUSHNUM_1`).
@@ -27,6 +27,8 @@ pub mod opcode {
     pub const OP_ENDIF: u8 = 0x68;
     /// `OP_RETURN`: marks an unspendable provably-prunable output.
     pub const OP_RETURN: u8 = 0x6a;
+    /// `OP_DROP`: drops the top stack item.
+    pub const OP_DROP: u8 = 0x75;
     /// `OP_DUP`: duplicates the top stack item.
     pub const OP_DUP: u8 = 0x76;
     /// `OP_EQUAL`: pushes whether the top two stack items are equal.
@@ -38,16 +40,16 @@ pub mod opcode {
     /// `OP_CHECKSIG`: verifies a signature against the top public key.
     pub const OP_CHECKSIG: u8 = 0xac;
     /// `OP_CHECKSIGVERIFY`: `OP_CHECKSIG` followed by `OP_VERIFY`.
-    pub const OP_CHECKSIGVERIFY: u8 = 0xad;
+    pub(crate) const OP_CHECKSIGVERIFY: u8 = 0xad;
     /// `OP_CHECKMULTISIG`: verifies an m-of-n multisignature set.
     pub const OP_CHECKMULTISIG: u8 = 0xae;
     /// `OP_CHECKMULTISIGVERIFY`: `OP_CHECKMULTISIG` followed by `OP_VERIFY`.
-    pub const OP_CHECKMULTISIGVERIFY: u8 = 0xaf;
+    pub(crate) const OP_CHECKMULTISIGVERIFY: u8 = 0xaf;
 
     /// Returns the small-integer value an `OP_PUSHNUM_*` opcode encodes,
     /// or `None` for every other opcode.
     #[must_use]
-    pub const fn decode_pushnum(opcode: u8) -> Option<u8> {
+    pub(crate) const fn decode_pushnum(opcode: u8) -> Option<u8> {
         if opcode >= OP_PUSHNUM_1 && opcode <= OP_PUSHNUM_16 {
             Some(opcode - OP_PUSHNUM_1 + 1)
         } else {
@@ -78,7 +80,9 @@ pub struct EarlyEndOfScript;
 /// is an [`Instruction::Op`].
 #[derive(Clone, Debug)]
 pub struct Instructions<'a> {
-    remaining: &'a [u8],
+    /// Unconsumed tail; its length maps the current position back to an
+    /// offset in the source script.
+    pub(crate) remaining: &'a [u8],
     failed: bool,
 }
 
@@ -230,7 +234,7 @@ pub fn is_p2sh(script: &[u8]) -> bool {
 /// `0x02`/`0x03`, 65-byte keys `0x04`/`0x06`/`0x07`), the strictness Core's
 /// `Solver` applies before classifying `pubkey`.
 #[must_use]
-pub fn p2pk_pubkey_bytes(script: &[u8]) -> Option<&[u8]> {
+fn p2pk_pubkey_bytes(script: &[u8]) -> Option<&[u8]> {
     let key = match script.len() {
         67 if script[0] == 0x41 && script[66] == opcode::OP_CHECKSIG => &script[1..66],
         35 if script[0] == 0x21 && script[34] == opcode::OP_CHECKSIG => &script[1..34],
@@ -270,7 +274,7 @@ pub fn is_p2tr(script: &[u8]) -> bool {
 /// Returns `true` for `OP_1 OP_PUSHBYTES_2 0x4e73` (pay-to-anchor).
 #[must_use]
 pub fn is_p2a(script: &[u8]) -> bool {
-    script == [0x51, 0x02, 0x4e, 0x73]
+    script == [opcode::OP_PUSHNUM_1, 0x02, 0x4e, 0x73]
 }
 
 /// Returns the witness version and program of a segwit output script, or
@@ -353,37 +357,26 @@ pub fn is_multisig(script: &[u8]) -> bool {
 const MAX_BARE_MULTISIG_PUBKEYS: i64 = 20;
 
 /// Yields the next element as Core's `CScript::GetOp` does: the opcode
-/// byte and its pushed data (empty for non-push opcodes).
-fn next_op<'a>(script: &'a [u8], pos: &mut usize) -> Option<(u8, &'a [u8])> {
-    let &opcode = script.get(*pos)?;
-    *pos += 1;
-    let len = match opcode {
-        0x01..=0x4b => usize::from(opcode),
-        opcode::OP_PUSHDATA1 | opcode::OP_PUSHDATA2 | opcode::OP_PUSHDATA4 => {
-            let width = if opcode == opcode::OP_PUSHDATA4 {
-                4
-            } else {
-                usize::from(opcode - opcode::OP_PUSHDATA1 + 1)
-            };
-            let bytes = script.get(*pos..pos.checked_add(width)?)?;
-            *pos += width;
-            let mut len = 0usize;
-            for (shift, byte) in bytes.iter().enumerate() {
-                len |= usize::from(*byte) << (8 * shift);
-            }
-            len
-        }
-        _ => 0,
+/// byte and its pushed data (empty for non-push opcodes). `pos` tracks the
+/// start of the instruction the iterator just consumed.
+fn next_op<'a>(
+    iter: &mut Instructions<'a>,
+    script: &'a [u8],
+    pos: &mut usize,
+) -> Option<(u8, &'a [u8])> {
+    let (op, data) = match iter.next()? {
+        Ok(Instruction::PushBytes(data)) => (script[*pos], data),
+        Ok(Instruction::Op(op)) => (op, &script[..0]),
+        Err(_) => return None,
     };
-    let data = script.get(*pos..pos.checked_add(len)?)?;
-    *pos += len;
-    Some((opcode, data))
+    *pos = script.len() - iter.remaining.len();
+    Some((op, data))
 }
 
 /// Core `CheckMinimalPush`: the opcode must be the smallest push form
 /// that can carry `data`, and one-byte small integers must use their
 /// dedicated opcodes (`OP_0`, `OP_1NEGATE`, `OP_1..=OP_16`).
-fn minimal_push(opcode: u8, data: &[u8]) -> bool {
+pub(crate) fn minimal_push(data: &[u8], opcode: u8) -> bool {
     match data.len() {
         0 => opcode == opcode::OP_0,
         1 if (1..=16).contains(&data[0]) || data[0] == 0x81 => false,
@@ -425,7 +418,7 @@ fn script_count(opcode: u8, data: &[u8], min: i64, max: i64) -> Option<u8> {
     let count = if let Some(pushnum) = opcode::decode_pushnum(opcode) {
         i64::from(pushnum)
     } else if opcode <= opcode::OP_PUSHDATA4 {
-        if !minimal_push(opcode, data) {
+        if !minimal_push(data, opcode) {
             return None;
         }
         minimal_script_num(data)?
@@ -460,12 +453,13 @@ pub fn multisig_key_count(script: &[u8]) -> Option<u8> {
     if *script.last()? != opcode::OP_CHECKMULTISIG {
         return None;
     }
+    let mut iter = instructions(script);
     let mut pos = 0usize;
-    let (op, data) = next_op(script, &mut pos)?;
+    let (op, data) = next_op(&mut iter, script, &mut pos)?;
     let required = i64::from(script_count(op, data, 1, MAX_BARE_MULTISIG_PUBKEYS)?);
     let mut keys = 0usize;
     let (op, data) = loop {
-        let (op, data) = next_op(script, &mut pos)?;
+        let (op, data) = next_op(&mut iter, script, &mut pos)?;
         if !pubkey_valid_size(data) {
             break (op, data);
         }
@@ -475,8 +469,10 @@ pub fn multisig_key_count(script: &[u8]) -> Option<u8> {
     if usize::from(declared) != keys {
         return None;
     }
-    if script.get(pos) != Some(&opcode::OP_CHECKMULTISIG) || pos + 1 != script.len() {
-        return None;
+    match iter.next() {
+        Some(Ok(Instruction::Op(op)))
+            if op == opcode::OP_CHECKMULTISIG && iter.remaining.is_empty() => {}
+        _ => return None,
     }
     Some(declared)
 }

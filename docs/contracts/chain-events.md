@@ -27,7 +27,7 @@ Owners:
   disconnect. It starts at `1` on the first record of a run; `0` means no
   committed event yet this run.
 - The snapshot is a live value. It is never persisted per event.
-- Readers use `NodeState::active_chain_snapshot()`.
+- Readers use `Chainstate::chain_snapshot()` (via `NodeState::chainstate()`).
 
 ### `EVT-02`: Ordered commit and best-effort observer delivery
 
@@ -125,8 +125,10 @@ checkpoint or replay a journal as an authority.
   canonical estimator accounting stays inside the lifecycle, that slow
   observers never hold the pool writer, and that queue overflow produces gap
   counters and a reconcile signal with bounded memory.
-- `crates/node/tests/overhaul_durable_head.rs` (planned): tests that a new
-  durable head is published only after mempool alignment.
+- `crates/node/tests/overhaul_durable_head.rs`: fault-injection matrix for the
+  durable-head commit protocol — batch atomicity across the storage family,
+  durability before publication, monotonic commit ids across restarts, and
+  committed body and undo reachability.
 - `scripts/check_models.py` (manual evidence lane): checks the
   `ChainAdmission` TLA+ model, which covers the durable commit, mempool
   reconciliation, and stable publication ordering.
@@ -140,4 +142,4 @@ checkpoint or replay a journal as an authority.
 ## Vocabulary
 
 Terms used above are defined in [`../../CONCEPTS.md`](../../CONCEPTS.md):
-ordered commit protocol, coherent view, `ReadStamp`.
+ordered commit protocol, coherent view, `ChainSnapshot`, chain generation.

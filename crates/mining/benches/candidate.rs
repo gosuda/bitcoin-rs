@@ -43,7 +43,7 @@ fn distinct_tx(seed: u64, parent: Option<Txid>) -> Tx {
     previous[..8].copy_from_slice(&seed.to_le_bytes());
     Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(
                 parent.unwrap_or_else(|| Txid(Hash256::from_le_bytes(&previous))),

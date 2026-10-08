@@ -69,7 +69,7 @@ pub enum PolicyError {
 
 /// Fee-rate increment the eviction-floor projection and BIP125 rule 4 quote,
 /// in sat/kvB. The selected rate is 1,000 sat/kvB; Core 31.1's default is 100.
-pub(crate) const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
+const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
 
 /// Typed snapshot of the mempool relay-policy surface the RPC
 /// `getmempoolinfo` response projects, built from the policy the pool

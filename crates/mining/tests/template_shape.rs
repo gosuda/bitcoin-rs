@@ -13,7 +13,7 @@ use bitcoin_rs_mining::{
     assemble_ordered_candidate, solve_block,
 };
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network, Txid};
-use common::{PAYOUT, context, insert, tx, zero_fee_pool};
+use common::{PAYOUT, context, insert, selected_fees, tx, zero_fee_pool};
 
 fn txids(transactions: &[bitcoin_rs_mining::CandidateTransaction]) -> Vec<Txid> {
     transactions.iter().map(|tx| tx.txid).collect()
@@ -21,7 +21,7 @@ fn txids(transactions: &[bitcoin_rs_mining::CandidateTransaction]) -> Vec<Txid> 
 
 /// Checks whole-block scalars and selected dependency indexes against wire and hash oracles.
 #[test]
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {
     let mut mempool = zero_fee_pool();
     let parent = tx(1, 50_000, None);
@@ -79,20 +79,12 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
     assert_eq!(candidate.segwit_active, context.segwit_active);
 
     let mut fees = 0_u64;
-    let mut sigops = 0_u64;
     let mut positions = std::collections::BTreeMap::new();
     for (offset, tx) in candidate.transactions.iter().enumerate() {
         positions.insert(tx.txid, u32::try_from(offset + 1)?);
         fees = fees.checked_add(tx.fee).ok_or("fee")?;
-        sigops = sigops
-            .checked_add(u64::from(tx.sigop_cost))
-            .ok_or("sigops")?;
         assert_eq!(tx.txid, tx.tx.txid());
         assert_eq!(tx.wtxid, tx.tx.wtxid());
-        assert_eq!(
-            tx.modified_fee,
-            i128::from(tx.fee) + i128::from(tx.fee_delta)
-        );
     }
     for tx in &candidate.transactions {
         let mut expected = tx
@@ -109,13 +101,10 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
             assert!(usize::try_from(depend)? <= candidate.transactions.len());
         }
     }
-    assert_eq!(candidate.fees, fees);
     let block = candidate.into_unsolved_block()?;
     let oracle: bitcoin::Block =
         bitcoin::consensus::deserialize(&bitcoin_rs_primitives::encode::consensus_bytes(&block))?;
     assert_eq!(candidate.weight, oracle.weight().to_wu());
-    assert_eq!(candidate.size, u64::try_from(oracle.total_size())?);
-    assert_eq!(candidate.sigop_cost, sigops);
     assert_eq!(
         candidate.coinbase_value,
         bitcoin_rs_consensus::block_subsidy(250, Network::Regtest.subsidy_halving_interval())
@@ -132,7 +121,6 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
     );
     let root = bitcoin::merkle_tree::calculate_root(leaves.into_iter()).ok_or("root")?;
     let root = Hash256::from_le_bytes(root.as_byte_array());
-    assert_eq!(candidate.witness_merkle_root, Some(root));
     let mut engine = sha256d::Hash::engine();
     engine.input(root.as_byte_array());
     engine.input(&WITNESS_RESERVED_VALUE);
@@ -263,7 +251,7 @@ fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
         ..context()
     };
     let candidate = assemble_ordered_candidate(&context, &snapshot, PAYOUT)?;
-    assert_eq!(candidate.fees, 0);
+    assert_eq!(selected_fees(&candidate), 2_000);
     assert_eq!(candidate.coinbase_value, 5_000_000_000);
     assert_eq!(
         txids(&candidate.transactions),

@@ -9,13 +9,13 @@ use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::ExpectedRun;
-use super::chain::WindowCommitDisposition;
+use super::chain::WindowApplyDisposition;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use std::time::Instant;
 use std::vec::Vec;
 
-use crate::DrainedBlock;
+use crate::block_stager::DrainedBlock;
 
 /// Where restoration of un-applied drained blocks must start.
 ///
@@ -97,9 +97,11 @@ impl BlockSync {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    #[allow(clippy::too_many_lines)]
-    #[doc(hidden)]
-    pub fn apply_buffered_blocks(&self, next_expected_hash: Option<Hash256>) -> (usize, usize) {
+    #[expect(clippy::too_many_lines)]
+    pub(super) fn apply_buffered_blocks(
+        &self,
+        next_expected_hash: Option<Hash256>,
+    ) -> (usize, usize) {
         // A latched Fatal settlement left the implementation's admission
         // closed: starting another transition would bounce off the same
         // refusal and churn staged state every tick. Staged blocks stay
@@ -193,8 +195,8 @@ impl BlockSync {
                     if let Some(blocker) = blocker {
                         failed_hash = Some(blocker.hash);
                     }
-                    failed_permanent = error.disposition == WindowCommitDisposition::Permanent;
-                    if error.disposition == WindowCommitDisposition::Fatal {
+                    failed_permanent = error.disposition == WindowApplyDisposition::Permanent;
+                    if error.disposition == WindowApplyDisposition::Fatal {
                         self.note_fatal_settlement(stopped, error.source.as_ref());
                     } else if let Some(blocker) = blocker {
                         tracing::warn!(
@@ -219,7 +221,7 @@ impl BlockSync {
                         .lock()
                         .stager
                         .restore_many(drained[restore_from..].iter().cloned());
-                    if error.disposition == WindowCommitDisposition::Permanent {
+                    if error.disposition == WindowApplyDisposition::Permanent {
                         // The failed block's descendants can never become
                         // valid, so they must not occupy bounded download
                         // state or the frontier would cycle on them forever.
@@ -299,7 +301,7 @@ impl BlockSync {
     /// Returns `None` unless the run reaches `start_height` contiguously (the
     /// reorg / pruning guard); a partial run is never returned so the caller
     /// cannot apply or cache a non-contiguous prefix.
-    pub(super) fn expected_block_hashes(&self, max_count: usize) -> Option<ExpectedRun> {
+    fn expected_block_hashes(&self, max_count: usize) -> Option<ExpectedRun> {
         if max_count == 0 {
             return None;
         }
@@ -353,7 +355,7 @@ impl BlockSync {
     /// past the blocks applied this round, so the next round drains the
     /// remaining suffix on a cache hit. The run is empty only when there is
     /// nothing to apply, in which case caching would be a no-op.
-    pub(super) fn populate_expected_apply_cache(&self, run: ExpectedRun) {
+    fn populate_expected_apply_cache(&self, run: ExpectedRun) {
         if run.hashes.is_empty() {
             return;
         }
@@ -394,7 +396,7 @@ impl BlockSync {
         Some((drained, expected_len))
     }
 
-    pub(super) fn advance_expected_apply_cache(&self, applied_hashes: &[Hash256], failed: bool) {
+    fn advance_expected_apply_cache(&self, applied_hashes: &[Hash256], failed: bool) {
         if failed {
             *self.expected_apply_cache.lock() = None;
             return;

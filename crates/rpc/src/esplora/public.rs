@@ -11,17 +11,21 @@ use bitcoin::hashes::Hash as _;
 use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::merkle_tree::MerkleBlock;
 use bitcoin_rs_index::ScriptHash;
+use bitcoin_rs_mempool::LocalOrigin;
 use bitcoin_rs_primitives::encode::double_sha256;
-use bitcoin_rs_primitives::{Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize};
+use bitcoin_rs_primitives::{
+    Block, Hash256, OutPoint, Tx, Txid, consensus_bytes, deserialize, unix_time_secs,
+};
 use serde_json::json;
 use sonic_rs::{JsonValueTrait as _, json as sonic_json};
 
-use super::http::{dispatch_error, query_error};
+use super::http::{admission_error, query_error};
 use super::model::{
     AddressTransactionSummary, BlockStatus, MempoolSummary, MerkleProof, Outspend,
     RecentTransaction, ScriptSummary, TransactionValue,
 };
 use super::projection::{Confirmation, Projection};
+use crate::compat::convert;
 use crate::context::Context;
 use crate::handlers::Handler;
 use crate::rest::{
@@ -30,6 +34,10 @@ use crate::rest::{
 
 pub(super) const CHAIN_PAGE: usize = 25;
 const MEMPOOL_PAGE: usize = 50;
+
+/// API-10: the raw hex broadcast route has no per-request override. Preserve
+/// its 0.1 BTC/kvB ceiling independently of RPC defaults and parameters.
+const MAX_BROADCAST_FEE_RATE_SAT_PER_KVB: u64 = 10_000_000;
 
 pub(super) fn get(handler: &Handler, ctx: &Context, path: &str, _query: &str) -> Response {
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
@@ -139,12 +147,23 @@ pub(super) fn post(handler: &Handler, path: &str, body: &[u8]) -> Response {
             let Ok(hex) = core::str::from_utf8(body) else {
                 return bad_request("transaction body must be UTF-8 hex");
             };
-            match handler.dispatch("sendrawtransaction", &sonic_json!([hex.trim()])) {
-                Ok(value) => match value.as_str() {
-                    Some(id) => text_response("text/plain", id.as_bytes().to_vec()),
-                    None => json_ok(&value),
-                },
-                Err(error) => dispatch_error(error),
+            let transaction = Vec::<u8>::from_hex(hex.trim())
+                .ok()
+                .and_then(|bytes| deserialize::<Tx>(&bytes).ok());
+            let Some(transaction) = transaction else {
+                return bad_request("TX decode failed. Make sure the tx has at least one input.");
+            };
+            let ctx = handler.context();
+            let txid = transaction.txid();
+            match ctx.mempool.gateway.submit_local_transaction(
+                Arc::new(transaction),
+                LocalOrigin::Esplora,
+                Some(MAX_BROADCAST_FEE_RATE_SAT_PER_KVB),
+                unix_time_secs(),
+                &ctx.chain.admission_chain(),
+            ) {
+                Ok(_) => text_response("text/plain", txid.to_string().into_bytes()),
+                Err(error) => admission_error(error),
             }
         }
         // `/txs/package` is in this namespace so it cannot fall through to
@@ -706,7 +725,7 @@ pub(super) fn address_transaction_summary(ctx: &Context, h: ScriptHash) -> Respo
     )
 }
 fn address_hash(ctx: &Context, a: &str) -> Result<ScriptHash, Response> {
-    let n = Projection::new(ctx).bitcoin_network();
+    let n = convert::bitcoin_network(ctx.chain.chain_network);
     let a = bitcoin::Address::from_str(a)
         .map_err(|_| bad_request("invalid address"))?
         .require_network(n)

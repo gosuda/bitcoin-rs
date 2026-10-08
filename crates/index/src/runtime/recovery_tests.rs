@@ -88,7 +88,7 @@ fn coinbase_tx(height: u32, extra: i64) -> Transaction {
 }
 
 fn tree_header(block: &Block) -> bitcoin_rs_primitives::Header {
-    bitcoin_rs_primitives::Header::consensus_decode(&serialize(&block.header))
+    bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Header>(&serialize(&block.header))
         .expect("80-byte header")
 }
 

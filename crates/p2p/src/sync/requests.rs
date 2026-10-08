@@ -118,7 +118,7 @@ impl BlockSync {
     /// Compact flavor is worth its reconstruction round trip only when the
     /// peer announced BIP152 relay and the whole batch sits within the
     /// near-tip window of the header tip.
-    pub(super) fn compact_fetch_eligible(
+    fn compact_fetch_eligible(
         &self,
         request: &crate::download_window::PeerRequest,
         frontier: &ChainFrontier,

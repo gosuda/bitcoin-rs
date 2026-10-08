@@ -20,7 +20,7 @@ use crate::undo_codec;
 pub use crate::undo_codec::UndoCodecError;
 
 /// One UTXO output to add, owning a `TxOut` or borrowing it from a block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UtxoAdd<T = TxOut> {
     /// Outpoint being created.
     pub outpoint: OutPoint,
@@ -113,14 +113,6 @@ impl<T> BlockChanges<T> {
     pub fn spent_outpoints(&self) -> &[OutPoint] {
         &self.removes
     }
-
-    pub(crate) fn adds_slice(&self) -> &[UtxoAdd<T>] {
-        &self.adds
-    }
-
-    pub(crate) fn removes_slice(&self) -> &[OutPoint] {
-        &self.removes
-    }
 }
 
 /// Inverse mutations needed to disconnect one block.
@@ -128,7 +120,7 @@ impl<T> BlockChanges<T> {
 /// No public constructor: batches come from [`build_block_changes`] or the
 /// undo decoder ([`load_block_undo`]), so a rollback can never be asked to
 /// replay a batch the contract did not produce.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct UndoBatch {
     pub(crate) restores: Vec<UtxoAdd>,
     pub(crate) removes: Vec<OutPoint>,
@@ -172,12 +164,6 @@ impl UndoBatch {
         self.removes.push(outpoint);
     }
 
-    /// Returns true when the undo batch is empty.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.restores.is_empty() && self.removes.is_empty()
-    }
-
     /// Rebuilds a batch from its decoded parts.
     ///
     /// Crate-visible on purpose: the decoder rejects a record where one
@@ -216,7 +202,7 @@ impl UndoRecord {
 }
 
 /// The outcome of rolling one block back out of the UTXO set.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug)]
 pub struct DisconnectReceipt {
     /// Parent transactions of the outputs restored into the live set.
     pub restored_parents: Vec<Txid>,
@@ -225,9 +211,7 @@ pub struct DisconnectReceipt {
 /// Returns true when `tx` is a coinbase: one input with the null outpoint.
 #[must_use]
 pub fn is_coinbase_tx(tx: &Tx) -> bool {
-    tx.inputs.len() == 1
-        && tx.inputs[0].previous_output.txid == Txid::default()
-        && tx.inputs[0].previous_output.vout == u32::MAX
+    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Lookup for the full resolved coin of a spent output, including creation
@@ -317,7 +301,7 @@ pub enum BlockChangeError {
 
 /// Why a stored undo record could not be turned back into an [`UndoBatch`].
 #[derive(Debug, thiserror::Error)]
-#[allow(missing_docs)]
+#[expect(missing_docs)]
 pub enum UndoLoadError {
     #[error("undo record read: {0}")]
     Read(#[source] StorageError),
@@ -334,7 +318,7 @@ pub enum UndoLoadError {
 /// Only `Refused` leaves state untouched; the rest fire after the marker is
 /// armed and may leave state torn for recovery to reconcile.
 #[derive(Debug, thiserror::Error)]
-#[allow(missing_docs)]
+#[expect(missing_docs)]
 pub enum RollbackError {
     #[error("rollback refused: {0}")]
     Refused(#[source] StorageError),
@@ -391,7 +375,7 @@ pub fn commit_block_changes<T: Borrow<TxOut>>(
 /// [`BlockChangeError::BlockValueOverflow`] when value totals overflow; and
 /// [`BlockChangeError::UndoPrevoutMissing`] when a spend has no resolved
 /// prevout. Genesis returns empty mutations.
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn build_block_changes<'a>(
     block: &'a Block,
     height: u32,
@@ -580,7 +564,6 @@ pub fn decode_undo_record(bytes: &[u8], block_hash: Hash256) -> Result<UndoBatch
 ///
 /// [`RollbackError::Refused`] before the marker is armed; every other variant
 /// after.
-#[allow(clippy::too_many_arguments)]
 pub fn rollback_block(
     store: &dyn UndoStore,
     utxo: &UtxoSet,
@@ -603,7 +586,7 @@ pub fn rollback_block(
     store
         .arm_disconnect(height, hash)
         .map_err(RollbackError::Refused)?;
-    rewind_applied_coins(
+    rollback_block_recovery(
         utxo,
         coin_stats,
         height,
@@ -623,29 +606,8 @@ pub fn rollback_block(
     })
 }
 
-/// The coins side of one rollback step: UTXO undo plus the coinstats
-/// rewind, shared by an ordinary disconnect and by marker recovery.
-fn rewind_applied_coins(
-    utxo: &UtxoSet,
-    coin_stats: &CoinStatsListener,
-    height: u32,
-    parent_height: u32,
-    tx_count_delta: u64,
-    undo: &UndoBatch,
-) -> Result<(), RollbackError> {
-    // Refuse mismatched stats before the UTXO mutation: a recovery that
-    // fails closed after undoing the block would retry against a partially
-    // rewound set.
-    coin_stats
-        .check_rewind(height, tx_count_delta)
-        .map_err(RollbackError::CoinStats)?;
-    utxo.undo_block(undo).map_err(RollbackError::Utxo)?;
-    coin_stats
-        .rewind_block(height, parent_height, tx_count_delta)
-        .map_err(RollbackError::CoinStats)
-}
-
 /// Recovery's rollback step: the coin rewind without the marker lifecycle.
+/// Also used by an ordinary disconnect after its marker is armed.
 ///
 /// The marker recovery carries is the evidence being reconciled — re-arming
 /// would overwrite its identity and completing would fake a finished
@@ -665,14 +627,16 @@ pub fn rollback_block_recovery(
     tx_count_delta: u64,
     undo: &UndoBatch,
 ) -> Result<(), RollbackError> {
-    rewind_applied_coins(
-        utxo,
-        coin_stats,
-        height,
-        parent_height,
-        tx_count_delta,
-        undo,
-    )
+    // Refuse mismatched stats before the UTXO mutation: a recovery that
+    // fails closed after undoing the block would retry against a partially
+    // rewound set.
+    coin_stats
+        .check_rewind(height, tx_count_delta)
+        .map_err(RollbackError::CoinStats)?;
+    utxo.undo_block(undo).map_err(RollbackError::Utxo)?;
+    coin_stats
+        .rewind_block(height, parent_height, tx_count_delta)
+        .map_err(RollbackError::CoinStats)
 }
 
 #[cfg(test)]
@@ -686,7 +650,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::snapshot::aggregate_hash;
     use crate::stats::CoinStats;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -706,6 +669,13 @@ mod tests {
         TxOut {
             value: Amount::from_sat(value),
             script_pubkey: Script::from_bytes(vec![0x51]),
+        }
+    }
+
+    struct NoSpend;
+    impl SpentOutputLookup for NoSpend {
+        fn entry(&self, _outpoint: &OutPoint) -> Option<&UtxoCoin> {
+            None
         }
     }
 
@@ -740,7 +710,7 @@ mod tests {
     fn observe(utxo: &UtxoSet, coin_stats: &CoinStatsListener) -> Result<State, UtxoError> {
         let s = coin_stats.snapshot();
         Ok((
-            aggregate_hash(utxo)?,
+            utxo.lock_stable_view().hash_serialized_3()?,
             s.muhash.finalize_hash(),
             [
                 s.height.into(),
@@ -1055,7 +1025,10 @@ mod tests {
             commit_block_changes(&first_five, changes, &undo_txid(height))?;
         }
 
-        assert_eq!(aggregate_hash(&full)?, aggregate_hash(&first_five)?);
+        assert_eq!(
+            full.lock_stable_view().hash_serialized_3()?,
+            first_five.lock_stable_view().hash_serialized_3()?
+        );
         assert_eq!(full.len(), first_five.len());
 
         Ok(())
@@ -1172,13 +1145,6 @@ mod tests {
     /// reporting success. The build refuses the mismatch before iterating.
     #[test]
     fn short_txid_list_is_refused_before_iterating() {
-        struct NoSpend;
-        impl SpentOutputLookup for NoSpend {
-            fn entry(&self, _outpoint: &OutPoint) -> Option<&UtxoCoin> {
-                None
-            }
-        }
-
         let (block, txids) = block_with_short_txids();
         let outcome = build_block_changes(&block, HEIGHT, &txids, None, 4, 4, &NoSpend, None, 64);
         assert!(
@@ -1197,13 +1163,6 @@ mod tests {
     /// `txids` slice is refused at height 0 too, as the contract documents.
     #[test]
     fn short_txid_list_is_refused_at_genesis_height() {
-        struct NoSpend;
-        impl SpentOutputLookup for NoSpend {
-            fn entry(&self, _outpoint: &OutPoint) -> Option<&UtxoCoin> {
-                None
-            }
-        }
-
         let (block, txids) = block_with_short_txids();
         let outcome = build_block_changes(&block, 0, &txids, None, 4, 4, &NoSpend, None, 64);
         assert!(

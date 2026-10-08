@@ -44,8 +44,14 @@ if [[ "$(stat -c %d fuzz)" != "$(stat -c %d "${CORPUS_DIR}")" ]]; then
     echo "cargo fuzz cmin requires the corpus and fuzz project on one filesystem" >&2
     exit 2
 fi
-if [[ -d "fuzz/corpus/${TARGET}" ]]; then
-    cp -a "fuzz/corpus/${TARGET}/." "${CORPUS_DIR}/"
+# Seeds live in gosuda/bitcoin-rs-fuzz-corpus; FUZZ_CORPUS_DIR points at its
+# `corpus/` directory (default: sibling checkout, per fuzz/README.md). CI
+# passes the corpus dir directly as CORPUS_DIR, so this seeding only fills a
+# fresh local campaign dir.
+FUZZ_CORPUS_DIR="${FUZZ_CORPUS_DIR:-${REPO_ROOT}/../bitcoin-rs-fuzz-corpus/corpus}"
+if [[ -d "${FUZZ_CORPUS_DIR}/${TARGET}" ]] &&
+    [[ "$(cd "${FUZZ_CORPUS_DIR}/${TARGET}" && pwd -P)" != "$(cd "${CORPUS_DIR}" && pwd -P)" ]]; then
+    cp -a "${FUZZ_CORPUS_DIR}/${TARGET}/." "${CORPUS_DIR}/"
 fi
 
 if ! find "${CORPUS_DIR}" -maxdepth 1 -type f -print -quit | grep -q .; then

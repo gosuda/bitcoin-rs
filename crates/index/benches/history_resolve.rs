@@ -21,8 +21,8 @@
 use bitcoin_rs_index::{BlockSource, IndexWriter, Indexer, ScriptHash};
 
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, Header, OutPoint, Tx, TxIn, TxOut, Txid, consensus_bytes,
-    deserialize,
+    Amount, Block, BlockHash, Hash256, Header, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
+    consensus_bytes, deserialize,
 };
 
 use bitcoin_rs_storage::{BlockFilePosition, FlatFileBlockStore, RocksDbStore};
@@ -122,23 +122,23 @@ fn filler_tx(seed: u64) -> Tx {
     fill_bytes(seed, &mut txid_bytes);
     Tx {
         version: 2,
-        lock_time: 0.into(),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
                 vout: u32::try_from(seed & 0x3).unwrap_or(0),
             },
             script_sig: Vec::new().into(),
-            sequence: u32::MAX.into(),
+            sequence: Sequence::MAX,
             witness: Vec::new().into(),
         }],
         outputs: vec![
             TxOut {
-                value: 5_000.into(),
+                value: Amount::from_sat(5_000),
                 script_pubkey: witness_script(seed ^ 0xa5a5_a5a5).into(),
             },
             TxOut {
-                value: 7_000.into(),
+                value: Amount::from_sat(7_000),
                 script_pubkey: witness_script(seed ^ 0x5a5a_5a5a).into(),
             },
         ],
@@ -155,18 +155,18 @@ fn target_tx(height: u32, target_script: &[u8]) -> Tx {
     );
     Tx {
         version: 2,
-        lock_time: 0.into(),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: OutPoint {
                 txid: Txid(Hash256::from_le_bytes(&txid_bytes)),
                 vout: 0,
             },
             script_sig: Vec::new().into(),
-            sequence: u32::MAX.into(),
+            sequence: Sequence::MAX,
             witness: Vec::new().into(),
         }],
         outputs: vec![TxOut {
-            value: 11_000.into(),
+            value: Amount::from_sat(11_000),
             script_pubkey: target_script.to_vec().into(),
         }],
     }

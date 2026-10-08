@@ -81,6 +81,7 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
+use bitcoin::hex::FromHex;
 use bitcoin_rs_consensus::ConsensusError;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, consensus_bytes, deserialize};
 use bitcoin_rs_script::{Interpreter, VerifyFlags};
@@ -342,7 +343,7 @@ fn wrong_sighash_type_byte(tx: &mut Tx) -> bool {
     for input in &mut tx.inputs {
         let mut elements = input.witness.clone();
         let mut mutated = false;
-        for element in &mut elements {
+        for element in elements.iter_mut() {
             if looks_like_der_sig(element) || element.len() == 65 {
                 if let Some(byte) = element.last_mut() {
                     *byte ^= 0x02;
@@ -541,16 +542,7 @@ fn validate_fixture(file: FixtureFile, path: &Path) -> Result<Fixture, Box<dyn E
 }
 
 fn decode_hex(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    if !hex.len().is_multiple_of(2) {
-        return Err("hex string has odd length".into());
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let digits = hex.as_bytes();
-    for pair in digits.as_chunks::<2>().0 {
-        let value = u8::from_str_radix(str::from_utf8(pair)?, 16)?;
-        bytes.push(value);
-    }
-    Ok(bytes)
+    Ok(Vec::from_hex(hex)?)
 }
 
 /// Rejects an empty fixture set so the verdict loop cannot pass vacuously.

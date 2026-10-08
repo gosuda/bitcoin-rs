@@ -7,7 +7,7 @@
 /// (`HaveNumChainTxs()`). In memory the absence is explicit: an unknown count
 /// never takes part in arithmetic that would manufacture a plausible partial
 /// total. This type is the one implementation of that arithmetic.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChainTxCount(Option<u64>);
 
 impl ChainTxCount {

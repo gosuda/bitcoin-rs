@@ -19,24 +19,26 @@ workspace = true
 mimalloc.workspace = true
 anyhow.workspace = true
 clap.workspace = true
-serde.workspace = true
 toml.workspace = true
 bitcoin-rs-node.workspace = true
 bitcoin-rs-chainstate.workspace = true
 bitcoin-rs-storage.workspace = true
-bitcoin-rs-trace.workspace = true
+bitcoin-rs-consensus.workspace = true
 
 [dev-dependencies]
 thiserror.workspace = true
 parking_lot.workspace = true
 serde_json.workspace = true
-tempfile = ">=3.20.0, <4"
+tempfile.workspace = true
 bitcoin.workspace = true
 bitcoin-rs-rpc = { workspace = true }
 bitcoin-rs-e2e.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys.workspace = true
+
 [features]
-usdt = ["bitcoin-rs-node/usdt"]
+usdt = ["bitcoin-rs-consensus/usdt"]
 
 default = ["fjall", "redb", "zmq"]
 rocksdb = ["bitcoin-rs-node/rocksdb"]

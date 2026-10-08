@@ -311,12 +311,6 @@ impl NodeConfig {
         }
     }
 
-    /// Returns configured ZMQ endpoint groups.
-    #[must_use]
-    pub fn zmq_endpoints(&self) -> &[bitcoin_rs_rpc::zmq::ZmqEndpointConfig] {
-        &self.notifications.zmq
-    }
-
     /// Validates backend availability and cross-field constraints.
     ///
     /// This is the fail-early gate for engine selection: an engine this build
@@ -511,7 +505,7 @@ impl Auth {
     }
 
     /// Converts this configuration into the RPC crate's runtime auth policy.
-    pub fn to_rpc_auth(&self) -> Result<bitcoin_rs_rpc::Auth> {
+    pub(crate) fn to_rpc_auth(&self) -> Result<bitcoin_rs_rpc::Auth> {
         match self {
             Self::Basic { user, password } => {
                 Ok(bitcoin_rs_rpc::Auth::basic(user.clone(), password))
@@ -537,14 +531,8 @@ impl fmt::Debug for Auth {
     }
 }
 
-impl Default for Auth {
-    fn default() -> Self {
-        Self::basic(DEFAULT_RPC_USER, DEFAULT_RPC_PASSWORD)
-    }
-}
-
-pub(super) const DRYNET4_CONNECT: &str = "drynet4.drivechain.dev:8533";
-pub(super) const DRYNET4_P2P_MAGIC: [u8; 4] = [0xec, 0xa5, 0xd4, 0x04];
+const DRYNET4_CONNECT: &str = "drynet4.drivechain.dev:8533";
+const DRYNET4_P2P_MAGIC: [u8; 4] = [0xec, 0xa5, 0xd4, 0x04];
 
 /// A built-in node network and its associated P2P bootstrap profile.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -567,7 +555,7 @@ pub enum NetworkSelection {
 impl NetworkSelection {
     /// Parses the accepted network spellings.
     #[must_use]
-    pub fn parse(value: &str) -> Option<Self> {
+    fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "main" | "mainnet" | "bitcoin" => Some(Self::Mainnet),
             "test" | "testnet" | "testnet3" => Some(Self::Testnet3),
@@ -630,6 +618,7 @@ impl RuntimeInputs {
     }
 
     /// Returns a copy with the given mempool observer.
+    #[cfg(test)]
     #[must_use]
     pub fn with_mempool_observer(
         mut self,

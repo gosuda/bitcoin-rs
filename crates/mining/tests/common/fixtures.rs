@@ -4,14 +4,16 @@
 use std::error::Error;
 use std::sync::Arc;
 
+use bitcoin_rs_consensus::transaction_sigop_cost;
 use bitcoin_rs_mempool::{
     Mempool, MempoolEntry, MempoolLimits, MempoolMiningSnapshot, SnapshotEntry,
 };
-use bitcoin_rs_mining::CandidateContext;
+use bitcoin_rs_mining::{Candidate, CandidateContext};
 use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, encode::consensus_bytes,
 };
+use bitcoin_rs_script::VerifyFlags;
 
 /// Anyone-can-spend payout script used wherever the payout itself is not under test.
 pub(crate) const PAYOUT: &[u8] = &[0x51];
@@ -179,4 +181,31 @@ pub(crate) fn oracle_sigop_cost(tx: &Tx) -> Result<u64, Box<dyn Error>> {
     Ok(u64::try_from(
         oracle_transaction(tx)?.total_sigop_cost(|_| None),
     )?)
+}
+
+pub(crate) fn selected_fees(candidate: &Candidate) -> u64 {
+    candidate.transactions.iter().map(|tx| tx.fee).sum()
+}
+
+#[expect(clippy::expect_used)]
+pub(crate) fn serialized_size(candidate: &Candidate) -> u64 {
+    u64::try_from(
+        candidate
+            .into_unsolved_block()
+            .expect("assembly must serialize")
+            .total_size(),
+    )
+    .expect("size fits u64")
+}
+
+pub(crate) fn total_sigop_cost(candidate: &Candidate) -> u64 {
+    u64::from(transaction_sigop_cost(
+        &candidate.coinbase,
+        &[],
+        VerifyFlags::NONE,
+    )) + candidate
+        .transactions
+        .iter()
+        .map(|tx| u64::from(tx.sigop_cost))
+        .sum::<u64>()
 }

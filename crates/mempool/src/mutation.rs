@@ -50,8 +50,6 @@ pub enum RemovalReason {
     Descendant,
     /// Size or fee-rate policy evicted the entry.
     PolicyEviction,
-    /// The entry outlived its expiry.
-    Expiry,
     /// A wholesale clear emptied the pool.
     Clear,
     /// A reorg disconnected the entry's containing state.
@@ -165,8 +163,11 @@ pub struct PeerToken {
 /// by the apply-path sweep (`crates/node/src/apply.rs`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionOrigin {
-    /// Submitted through RPC (`sendrawtransaction`).
+    /// Submitted through RPC `sendrawtransaction` or the embedded
+    /// `Node::broadcast`.
     Rpc,
+    /// Submitted through an Esplora raw-transaction broadcast route.
+    Esplora,
     /// Relayed in from a network peer.
     Peer(PeerToken),
     /// Re-admitted by a reorg's disconnect walk.
@@ -175,10 +176,32 @@ pub enum AdmissionOrigin {
     Block,
 }
 
+/// The [`AdmissionOrigin`]s a local submission may carry.
+///
+/// [`MempoolGateway::submit_local_transaction`](crate::MempoolGateway::submit_local_transaction)
+/// takes this type, so a peer, reorg, or block origin cannot reach the local
+/// path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalOrigin {
+    /// Recorded as [`AdmissionOrigin::Rpc`].
+    Rpc,
+    /// Recorded as [`AdmissionOrigin::Esplora`].
+    Esplora,
+}
+
+impl From<LocalOrigin> for AdmissionOrigin {
+    fn from(origin: LocalOrigin) -> Self {
+        match origin {
+            LocalOrigin::Rpc => Self::Rpc,
+            LocalOrigin::Esplora => Self::Esplora,
+        }
+    }
+}
+
 /// What the gateway hands its observers: the committed result plus how the
 /// mutating transaction entered the node.
 ///
-/// [`MempoolGateway`] clones one [`MutationResult`] into the envelope for
+/// [`MempoolGateway`](crate::MempoolGateway) clones one [`MutationResult`] into the envelope for
 /// each committed non-empty batch that has an observer attached, enqueues
 /// that envelope, then returns the original result to the caller. Observers
 /// receive `&MutationEnvelope` after the publish mutex is released.

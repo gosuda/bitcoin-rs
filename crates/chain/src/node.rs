@@ -1,6 +1,5 @@
 use crate::ChainTxCount;
 use bitcoin_rs_primitives::{Hash256, Header};
-use bytemuck::{Pod, Zeroable};
 use ruint::Uint;
 
 /// 256-bit accumulated proof-of-work for a block-tree node.
@@ -10,7 +9,7 @@ pub type ChainWork = Uint<256, 4>;
 pub type BlockHeader = Header;
 
 /// Stable slab key for a block-tree node.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Zeroable, Pod)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct NodeId(u32);
 
@@ -19,12 +18,6 @@ impl NodeId {
     #[must_use]
     pub const fn new(id: u32) -> Self {
         Self(id)
-    }
-
-    /// Returns the compact integer representation.
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0
     }
 
     pub(crate) fn index(self) -> Option<usize> {
@@ -46,7 +39,7 @@ pub enum NodeStatus {
 }
 
 /// One block in the in-memory block tree.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct BlockTreeNode {
     /// Parent node id, or `None` for a root header.
     pub parent: Option<NodeId>,
