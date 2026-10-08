@@ -10,8 +10,8 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_utxo::UtxoSet;
 
-use super::persistence_tests::{handles, seed_genesis};
 use super::{ApplyError, AssumeValidGate, Chainstate, WindowApplyDisposition};
+use crate::test_fixtures::{handles, seed_genesis};
 
 /// A solved, empty block: the commit refuses its body with `EmptyBlock`, a
 /// permanent failure, while its header is already in the tree.

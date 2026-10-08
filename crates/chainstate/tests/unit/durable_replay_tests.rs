@@ -1,79 +1,24 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, current_unix_seconds};
-use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Witness, consensus_bytes,
-};
+use bitcoin_rs_chain::current_unix_seconds;
+use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network, consensus_bytes};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::{
     CommitRecords, DurableHead, DurableHeadStore, InMemoryDurableHeadStore, StorageError,
 };
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
-use parking_lot::RwLock;
 
-use crate::test_fixtures::MemoryBodies;
+use crate::test_fixtures::{MemoryBodies, handles, seed_genesis};
 use crate::{ApplyError, Chainstate};
 
 fn restored_chainstate() -> Result<(Chainstate, Block), Box<dyn std::error::Error>> {
-    let network = Network::Regtest;
-    let genesis = network.genesis_block();
-    let handles = Chainstate::new(
-        network,
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(RwLock::new(BlockTree::new())),
-        Arc::new(UtxoSet::new()),
-        Arc::new(CoinStatsListener::new(CoinStats::default())),
-        Arc::new(crate::events::ChainEventPublisher::detached(0)),
-    );
-    let genesis_tip = crate::connect::applied_header_tip(
-        &handles,
-        Hash256::from(genesis.block_hash()),
-        &genesis,
-        0,
-    )?;
-    let genesis_tip = bitcoin_rs_chain::TipSnapshot {
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(1),
-        ..genesis_tip
-    };
-    handles
-        .applied_tip
-        .store(Some(Arc::new(genesis_tip.clone())));
+    let handles = handles(Network::Regtest, Arc::new(UtxoSet::new()));
+    let genesis_tip = seed_genesis(&handles)?;
     handles.coin_stats.finish_block(0, 1);
-
-    let tx = Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: Script::from_bytes(vec![1, 1, 0]),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
-        }],
-        lock_time: LockTime::ZERO,
-    };
-    let mut leaves = vec![*tx.txid().as_bytes()];
-    let merkle = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
-        .ok_or("coinbase merkle root missing")?;
-    let mut child = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: BlockHash(genesis_tip.hash),
-            merkle_root: Hash256::from_le_bytes(&merkle),
-            time: genesis.header.time.saturating_add(1),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txs: vec![tx],
-    };
-    bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut child.header)?;
+    let child = mined_child(BlockHash(genesis_tip.hash), 1)?;
     Ok((handles, child))
 }
 
@@ -374,54 +319,6 @@ fn durable_head_at_or_below_restored_tip_is_not_a_replay_gap()
     Ok(())
 }
 
-/// Mines one regtest block at `height` whose coinbase names the height, on
-/// top of the block at `prev`.
-fn mined_child(
-    prev: Hash256,
-    prev_time: u32,
-    height: u32,
-) -> Result<Block, Box<dyn std::error::Error>> {
-    let tx = Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::null(),
-            // `push_int` is the encoding `check_bip34` requires as a prefix;
-            // the trailing byte keeps the script_sig at its minimum size at
-            // heights that encode as a single opcode.
-            script_sig: Script::from_bytes(
-                [
-                    bitcoin_rs_script::push_int(i64::from(height)).as_slice(),
-                    &[0],
-                ]
-                .concat(),
-            ),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
-        }],
-        lock_time: LockTime::ZERO,
-    };
-    let mut leaves = vec![*tx.txid().as_bytes()];
-    let merkle = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
-        .ok_or("coinbase merkle root missing")?;
-    let mut block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: BlockHash(prev),
-            merkle_root: Hash256::from_le_bytes(&merkle),
-            time: prev_time.saturating_add(1),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txs: vec![tx],
-    };
-    bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut block.header)?;
-    Ok(block)
-}
-
 /// A certified body chain wider than one commit group replays to the durable
 /// head: recoverability is the body-identity and ancestry walk, not the gap
 /// width. The replay lands on the stored head and preserves its `commit_id`
@@ -432,12 +329,10 @@ fn wide_authenticated_gap_replays_to_durable_head() -> Result<(), Box<dyn std::e
     let width = crate::window::DURABLE_HEAD_GROUP_BLOCKS + 1;
     let bodies = Arc::new(MemoryBodies::default());
     let mut tip_hash = Hash256::from(first.block_hash());
-    let mut prev_time = first.header.time;
     bodies.persist_block_body(1, tip_hash, &consensus_bytes(&first))?;
     for height in 2..=u32::try_from(width)? {
-        let block = mined_child(tip_hash, prev_time, height)?;
+        let block = mined_child(BlockHash(tip_hash), height)?;
         tip_hash = Hash256::from(block.block_hash());
-        prev_time = block.header.time;
         bodies.persist_block_body(height, tip_hash, &consensus_bytes(&block))?;
     }
     let head = DurableHead {

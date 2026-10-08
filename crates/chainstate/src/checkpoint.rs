@@ -34,7 +34,10 @@ pub(crate) use bitcoin_rs_storage::checkpoint::UTXO_CODEC;
 pub(crate) use bitcoin_rs_storage::checkpoint::UTXO_FILE;
 pub(crate) use bitcoin_rs_storage::checkpoint::UTXO_VERSION;
 pub(crate) use bitcoin_rs_storage::checkpoint::UtxoArtifactV1;
+#[cfg(not(any(test, feature = "test-seam")))]
 use bitcoin_rs_storage::checkpoint::begin_publication;
+#[cfg(any(test, feature = "test-seam"))]
+use bitcoin_rs_storage::checkpoint::begin_publication_with_failpoint;
 pub(crate) use bitcoin_rs_storage::checkpoint::classify_checkpoint_io;
 pub(crate) use bitcoin_rs_storage::checkpoint::corrupt_checkpoint;
 use bitcoin_rs_storage::checkpoint::decode_hex;
@@ -494,7 +497,7 @@ pub(crate) fn write_checkpoint_from_dir(
         ($stage:expr, $name:expr, $write_fp:ident, $sync_fp:ident, $write:expr) => {{
             #[cfg(any(test, feature = "test-seam"))]
             {
-                $stage.write_artifact(
+                $stage.write_artifact_with_failpoints(
                     $name,
                     CheckpointFailpoint::$write_fp,
                     CheckpointFailpoint::$sync_fp,
@@ -508,7 +511,7 @@ pub(crate) fn write_checkpoint_from_dir(
         }};
     }
     #[cfg(any(test, feature = "test-seam"))]
-    let stage = begin_publication(
+    let stage = begin_publication_with_failpoint(
         data_dir,
         NEXT_CHECKPOINT_FAILPOINT.with(std::cell::Cell::take),
     )

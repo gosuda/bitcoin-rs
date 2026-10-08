@@ -1,6 +1,6 @@
-# Stratum V2 example: bitcoin-rs as the mining owner behind the SRI stack
+# Stratum V2 tool: bitcoin-rs as the mining owner behind the SRI stack
 
-This example runs bitcoin-rs (regtest) together with the pinned Stratum
+This tool runs bitcoin-rs (regtest) together with the pinned Stratum
 Reference Implementation (SRI) pool, translator and CPU mining devices, with a
 thin template-distribution bridge in between. It exists to prove
 [gosuda/bitcoin-rs#1289](https://github.com/gosuda/bitcoin-rs/issues/1289):
@@ -8,7 +8,7 @@ thin template-distribution bridge in between. It exists to prove
 node / template source through a documented adapter**, while bitcoin-rs keeps
 mining ownership (transaction selection, fees, coinbase and
 witness-commitment rules, candidate validation, block submission) and no SRI
-dependency lands anywhere outside `examples/` (the bridge's `stratum-apps`
+dependency lands anywhere outside `tools/` (the bridge's `stratum-apps`
 dependency lives in `template-provider/`).
 
 > **Noise key pinning:** the pool config pins the bridge's Noise public key
@@ -64,7 +64,7 @@ SV1 miner connects — see [Optional SV1 leg](#optional-sv1-leg-unpinned).
 ## Run
 
 ```console
-$ cd examples/stratum-sv2
+$ cd tools/stratum-sv2
 $ docker compose build            # bitcoin-rs node, bridge, two devices
 $ docker compose up -d
 $ docker compose logs -f template-provider pool device-direct-1

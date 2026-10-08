@@ -219,18 +219,58 @@ fn verified_core_binary() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins.
+/// The host platform's release-archive suffix, mirroring the uname mapping in
+/// `scripts/install-bitcoind.sh`. `None` on platforms no pinned artifact can
+/// execute on.
+fn current_platform_target() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("x86_64-linux-gnu"),
+        ("linux", "aarch64") => Some("aarch64-linux-gnu"),
+        ("macos", "aarch64") => Some("arm64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        _ => None,
+    }
+}
+
+/// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins
+/// for the platform this suite runs on: the canonical artifact when its
+/// target matches, else the matching `[[reference.release.platforms]]` row —
+/// and a typed failure when the manifest carries no artifact for this platform.
 pub(crate) fn manifest_reference_sha256() -> Result<String> {
+    let target = current_platform_target().ok_or_else(|| {
+        Error::Assertion(format!(
+            "no pinned Core artifact for {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    })?;
     let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
         .parse()
         .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
-    table
+    let release = table
         .get("reference")
         .and_then(|r| r.get("release"))
-        .and_then(|r| r.get("bitcoind_sha256"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
-        .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| Error::Assertion("reference.release missing in core-compat.toml".into()))?;
+    let artifact = |row: &toml::Table| {
+        row.get("bitcoind_sha256")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))
+    };
+    if release.get("target").and_then(toml::Value::as_str) == Some(target) {
+        return artifact(release);
+    }
+    if let Some(rows) = release.get("platforms").and_then(toml::Value::as_array) {
+        for row in rows.iter().filter_map(toml::Value::as_table) {
+            if row.get("target").and_then(toml::Value::as_str) == Some(target) {
+                return artifact(row);
+            }
+        }
+    }
+    Err(Error::Assertion(format!(
+        "no pinned Core artifact for target {target} in core-compat.toml"
+    )))
 }
 
 /// Hash one file with SHA256; callers shape the error vocabulary.
