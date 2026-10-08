@@ -1,9 +1,14 @@
 //! Public commit/get coverage for the UTXO set.
 
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, Script, TxOut, varint};
+use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, varint};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::{UtxoError, UtxoSet};
 use sha2::{Digest, Sha256};
+
+/// One live output as the tests describe it: outpoint, payload, coinbase flag,
+/// creating height.
+type Entry = (OutPoint, TxOut, bool, u32);
+type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn txid(seed: u64) -> Hash256 {
     let mut bytes = [0_u8; 32];
@@ -21,6 +26,15 @@ fn txout(seed: u64) -> TxOut {
     TxOut {
         value: Amount::from_sat(1_000 + seed),
         script_pubkey: script.into(),
+    }
+}
+
+/// A script one byte past the record ceiling, the cheapest way to make a
+/// commit fail inside the shard pass.
+fn oversized_txout(value: u64) -> TxOut {
+    TxOut {
+        value: Amount::from_sat(value),
+        script_pubkey: vec![0; usize::from(u16::MAX) + 1].into(),
     }
 }
 
@@ -42,10 +56,8 @@ fn txid_in_shard(shard: u8, suffix: u64) -> Hash256 {
     Hash256::from_le_bytes(&bytes)
 }
 
-fn expected_hash_serialized_3(
-    entries: &[(OutPoint, TxOut, bool, u32)],
-) -> Result<Hash256, Box<dyn std::error::Error>> {
-    let mut sorted: Vec<&(OutPoint, TxOut, bool, u32)> = entries.iter().collect();
+fn expected_hash_serialized_3(entries: &[Entry]) -> Result<Hash256, Box<dyn std::error::Error>> {
+    let mut sorted: Vec<&Entry> = entries.iter().collect();
     sorted.sort_unstable_by(|left, right| {
         left.0
             .txid
@@ -79,10 +91,7 @@ fn expected_hash_serialized_3(
     Ok(Hash256::from_le_bytes(&bytes))
 }
 
-fn borrowed_changes<'a>(
-    adds: &'a [(OutPoint, TxOut, bool, u32)],
-    removes: &[OutPoint],
-) -> BlockChanges<&'a bitcoin_rs_primitives::TxOut> {
+fn borrowed_changes<'a>(adds: &'a [Entry], removes: &[OutPoint]) -> BlockChanges<&'a TxOut> {
     let mut changes = BlockChanges::with_capacity(adds.len(), removes.len());
     for remove in removes {
         changes.remove(*remove);
@@ -93,9 +102,39 @@ fn borrowed_changes<'a>(
     changes
 }
 
+fn owned_changes(adds: &[Entry], removes: &[OutPoint]) -> BlockChanges {
+    let mut changes = BlockChanges::with_capacity(adds.len(), removes.len());
+    for remove in removes {
+        changes.remove(*remove);
+    }
+    for (outpoint, txout, coinbase, height) in adds {
+        changes.add(UtxoAdd::new(*outpoint, txout.clone(), *coinbase, *height));
+    }
+    changes
+}
+
+/// Commits one block through the public contract, with the payloads owned or
+/// borrowed from the caller. Both shapes must behave identically.
+fn commit(
+    set: &UtxoSet,
+    adds: &[Entry],
+    removes: &[OutPoint],
+    block: &Hash256,
+    borrowed: bool,
+) -> Result<(), UtxoError> {
+    if borrowed {
+        bitcoin_rs_utxo::contract::commit_block_changes(
+            set,
+            &borrowed_changes(adds, removes),
+            block,
+        )
+    } else {
+        bitcoin_rs_utxo::contract::commit_block_changes(set, &owned_changes(adds, removes), block)
+    }
+}
+
 #[test]
-fn owned_and_borrowed_commits_match_independent_state_hashes()
--> Result<(), Box<dyn std::error::Error>> {
+fn owned_and_borrowed_commits_match_independent_state_hashes() -> TestResult {
     use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 
     for shard_count in [1_u8, 20] {
@@ -106,7 +145,7 @@ fn owned_and_borrowed_commits_match_independent_state_hashes()
                 owned.track_coin_stats(CoinStatsListener::new(CoinStats::new()));
                 borrowed.track_coin_stats(CoinStatsListener::new(CoinStats::new()));
             }
-            let mut entries: Vec<_> = (0_u8..64)
+            let mut entries: Vec<Entry> = (0_u8..64)
                 .map(|index| {
                     let outpoint = OutPoint::new(
                         txid_in_shard(index % shard_count, u64::from(index)).into(),
@@ -117,19 +156,8 @@ fn owned_and_borrowed_commits_match_independent_state_hashes()
                 .collect();
             let mut removes = Vec::new();
             for round in 0..2 {
-                let mut changes = BlockChanges::with_capacity(entries.len(), removes.len());
-                for &outpoint in &removes {
-                    changes.remove(outpoint);
-                }
-                for (outpoint, txout, coinbase, height) in &entries {
-                    changes.add(UtxoAdd::new(*outpoint, txout.clone(), *coinbase, *height));
-                }
-                bitcoin_rs_utxo::contract::commit_block_changes(&owned, &changes, &txid(round))?;
-                bitcoin_rs_utxo::contract::commit_block_changes(
-                    &borrowed,
-                    &borrowed_changes(&entries, &removes),
-                    &txid(round),
-                )?;
+                commit(&owned, &entries, &removes, &txid(round), false)?;
+                commit(&borrowed, &entries, &removes, &txid(round), true)?;
                 let expected = expected_hash_serialized_3(&entries)?;
                 assert_eq!(owned.lock_stable_view().hash_serialized_3()?, expected);
                 assert_eq!(borrowed.lock_stable_view().hash_serialized_3()?, expected);
@@ -145,560 +173,229 @@ fn owned_and_borrowed_commits_match_independent_state_hashes()
     Ok(())
 }
 
+/// A commit that fails inside the shard pass must leave the set exactly as it
+/// was: no remove applied, no earlier add of the same commit applied. Covers
+/// the owned and borrowed payload shapes and the single-shard and multi-shard
+/// commit paths, which reject in different places.
 #[test]
-fn invalid_add_does_not_apply_removes_in_same_commit() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let retained = OutPoint::new(txid(10).into(), 0);
-    let retained_txout = txout(10);
-    let mut initial = BlockChanges::default();
-    initial.add(UtxoAdd::new(retained, retained_txout.clone(), false, 1));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &initial, &txid(11))?;
+fn an_invalid_add_rejects_the_whole_commit_in_every_commit_path() -> TestResult {
+    for cross_shard in [false, true] {
+        for borrowed in [false, true] {
+            let far_shard = u8::from(cross_shard);
+            let set = UtxoSet::new();
+            let retained = OutPoint::new(txid_in_shard(0, 100).into(), 0);
+            let peer = OutPoint::new(txid_in_shard(far_shard, 101).into(), 0);
+            let retained_txout = txout(100);
+            let peer_txout = txout(101);
+            let preload = [
+                (retained, retained_txout.clone(), false, 10),
+                (peer, peer_txout.clone(), false, 10),
+            ];
+            commit(&set, &preload, &[], &txid(102), borrowed)?;
 
-    let mut invalid = BlockChanges::default();
-    invalid.remove(retained);
-    invalid.add(UtxoAdd::new(
-        OutPoint::new(txid(12).into(), 0),
-        TxOut {
-            value: Amount::from_sat(12),
-            script_pubkey: vec![0; usize::from(u16::MAX) + 1].into(),
-        },
-        false,
-        2,
-    ));
-
-    let error = match bitcoin_rs_utxo::contract::commit_block_changes(&set, &invalid, &txid(13)) {
-        Ok(()) => return Err("oversized script unexpectedly committed".into()),
-        Err(error) => error,
-    };
-    assert!(
-        matches!(
-            error,
-            UtxoError::ScriptTooLarge { len } if len == usize::from(u16::MAX) + 1
-        ),
-        "unexpected error: {error}"
-    );
-    assert_eq!(set.get(&retained), Some(retained_txout));
-    assert_eq!(set.get(&OutPoint::new(txid(12).into(), 0)), None);
+            let valid_add = OutPoint::new(txid_in_shard(0, 200).into(), 0);
+            let invalid_add = OutPoint::new(txid_in_shard(far_shard, 201).into(), 0);
+            let adds = [
+                (valid_add, txout(200), false, 11),
+                (invalid_add, oversized_txout(201), false, 11),
+            ];
+            let error = match commit(&set, &adds, &[retained], &txid(103), borrowed) {
+                Ok(()) => return Err("oversized script unexpectedly committed".into()),
+                Err(error) => error,
+            };
+            assert!(
+                matches!(
+                    error,
+                    UtxoError::ScriptTooLarge { len } if len == usize::from(u16::MAX) + 1
+                ),
+                "unexpected error: {error}"
+            );
+            assert_eq!(
+                set.get(&retained),
+                Some(retained_txout),
+                "a rejected commit applied its removes"
+            );
+            assert_eq!(set.get(&peer), Some(peer_txout));
+            assert_eq!(
+                set.get(&valid_add),
+                None,
+                "a rejected commit applied an earlier add"
+            );
+            assert_eq!(set.get(&invalid_add), None);
+            assert_eq!(set.len(), 2);
+        }
+    }
     Ok(())
 }
 
+/// Every output-level boundary the record encoding has a case for, carried
+/// through the public API: the metadata each read surface reports, the
+/// serialization hash, and the per-vout spend path.
 #[test]
-fn get_entry_surfaces_coinbase_and_height() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let mut changes = BlockChanges::default();
-    let outpoint = OutPoint::new(txid(42).into(), 0);
-    let txout = txout(42);
-
-    changes.add(UtxoAdd::new(outpoint, txout.clone(), true, 123));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(43))?;
-
-    let entry = set
-        .get_entry(&outpoint)
-        .ok_or("expected committed outpoint to be live")?;
-    assert_eq!(entry.txout, txout);
-    assert!(entry.coinbase);
-    assert_eq!(entry.height, 123);
-
-    Ok(())
-}
-
-#[test]
-fn scan_script_pubkeys_returns_matching_live_outputs() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let mut changes = BlockChanges::default();
-    let first = OutPoint::new(txid(52).into(), 0);
-    let second = OutPoint::new(txid(53).into(), 0);
-    let first_txout = txout(52);
-    let second_txout = txout(53);
-
-    changes.add(UtxoAdd::new(first, first_txout.clone(), false, 222));
-    changes.add(UtxoAdd::new(second, second_txout, true, 223));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(54))?;
-
-    let scan = set.scan_script_pubkeys(std::slice::from_ref(&first_txout.script_pubkey))?;
-
-    assert_eq!(scan.txouts, 2);
-    assert_eq!(scan.unspents.len(), 1);
-    assert_eq!(scan.unspents[0].outpoint, first);
-    assert_eq!(scan.unspents[0].txout, first_txout);
-    assert!(!scan.unspents[0].coinbase);
-    assert_eq!(scan.unspents[0].height, 222);
-    Ok(())
-}
-
-#[test]
-fn has_live_outputs_for_txid_tracks_any_remaining_vout() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let live_txid = txid(77);
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(
-        OutPoint::new(live_txid.into(), 1),
-        txout(77),
-        false,
-        200,
-    ));
-    changes.add(UtxoAdd::new(
-        OutPoint::new(live_txid.into(), 2),
-        txout(78),
-        false,
-        200,
-    ));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(78))?;
-
-    assert!(set.has_live_outputs_for_txid(&live_txid));
-    assert!(!set.has_live_outputs_for_txid(&txid(79)));
-
-    let mut first_spend: BlockChanges = BlockChanges::default();
-    first_spend.remove(OutPoint::new(live_txid.into(), 1));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &first_spend, &txid(80))?;
-
-    assert!(set.has_live_outputs_for_txid(&live_txid));
-
-    let mut final_spend: BlockChanges = BlockChanges::default();
-    final_spend.remove(OutPoint::new(live_txid.into(), 2));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &final_spend, &txid(81))?;
-
-    assert!(!set.has_live_outputs_for_txid(&live_txid));
-    Ok(())
-}
-
-#[test]
-fn borrowed_commit_preserves_invalid_add_atomicity() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let retained = OutPoint::new(txid(8_010).into(), 0);
-    let retained_txout = txout(8_010);
-    let mut initial = BlockChanges::default();
-    initial.add(UtxoAdd::new(retained, retained_txout.clone(), false, 1));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &initial, &txid(8_011))?;
-
-    let invalid_outpoint = OutPoint::new(txid(8_012).into(), 0);
-    let invalid_adds = vec![(
-        invalid_outpoint,
-        TxOut {
-            value: Amount::from_sat(8_012),
-            script_pubkey: vec![0; usize::from(u16::MAX) + 1].into(),
-        },
-        false,
-        2,
-    )];
-    let invalid = borrowed_changes(&invalid_adds, &[retained]);
-
-    let error = match bitcoin_rs_utxo::contract::commit_block_changes(&set, &invalid, &txid(8_013))
-    {
-        Ok(()) => return Err("oversized borrowed script unexpectedly committed".into()),
-        Err(error) => error,
-    };
-    assert!(
-        matches!(
-            error,
-            UtxoError::ScriptTooLarge { len } if len == usize::from(u16::MAX) + 1
-        ),
-        "unexpected error: {error}"
-    );
-    assert_eq!(set.get(&retained), Some(retained_txout));
-    assert_eq!(set.get(&invalid_outpoint), None);
-    Ok(())
-}
-
-#[test]
-fn vout_64_roundtrips_through_public_utxo_api() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let live_txid = txid(88);
-    let low = OutPoint::new(live_txid.into(), 63);
-    let high = OutPoint::new(live_txid.into(), 64);
-    let low_txout = txout(88);
-    let high_txout = txout(89);
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(low, low_txout.clone(), false, 300));
-    changes.add(UtxoAdd::new(high, high_txout.clone(), true, 301));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(90))?;
-
-    assert_eq!(set.get(&low), Some(low_txout.clone()));
-    assert_eq!(set.get(&high), Some(high_txout.clone()));
-    let high_entry = set
-        .get_entry(&high)
-        .ok_or("expected vout 64 to remain live")?;
-    assert_eq!(high_entry.txout, high_txout);
-    assert!(high_entry.coinbase);
-    assert_eq!(high_entry.height, 301);
-    assert!(set.has_live_outputs_for_txid(&live_txid));
-
-    let scan = set.scan_script_pubkeys(std::slice::from_ref(&high_txout.script_pubkey))?;
-    assert_eq!(scan.txouts, 2);
-    assert_eq!(scan.unspents.len(), 1);
-    assert_eq!(scan.unspents[0].outpoint, high);
-
-    let mut high_spend: BlockChanges = BlockChanges::default();
-    high_spend.remove(high);
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &high_spend, &txid(91))?;
-
-    assert_eq!(set.get(&high), None);
-    assert_eq!(set.get(&low), Some(low_txout));
-    assert!(set.has_live_outputs_for_txid(&live_txid));
-
-    let mut low_spend: BlockChanges = BlockChanges::default();
-    low_spend.remove(low);
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &low_spend, &txid(92))?;
-
-    assert!(!set.has_live_outputs_for_txid(&live_txid));
-    assert!(set.is_empty());
-    Ok(())
-}
-
-#[test]
-fn high_vout_full_record_delete_removes_all_outputs_in_one_commit()
--> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let live_txid = txid(93);
-    let mut preload = BlockChanges::default();
-    let mut spend: BlockChanges = BlockChanges::default();
-
-    for vout in 64_u32..128 {
-        let outpoint = OutPoint::new(live_txid.into(), vout);
-        preload.add(UtxoAdd::new(
-            outpoint,
-            txout(1_000 + u64::from(vout)),
+fn output_boundaries_roundtrip_through_get_scan_and_spend() -> TestResult {
+    // Scripts stay distinct so each one selects exactly its own output in a
+    // scan; vouts cross the inline-partition and directory-width boundaries.
+    let cases: [(u32, u64, bool, u32, Vec<u8>); 6] = [
+        (0, 100, false, 0, Vec::new()),
+        (63, 200, true, 123, vec![0x51]),
+        (64, 300, true, 301, vec![0x00; 34]),
+        (65, 0, false, 840_000, vec![0x6a]),
+        (1_000, 500, true, u32::MAX, vec![0x52; 10_000]),
+        (
+            u32::MAX,
+            2_099_999_999_999_999,
             false,
-            302,
-        ));
-        spend.remove(outpoint);
-    }
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &preload, &txid(94))?;
-    assert_eq!(set.record_count(), 1);
-    assert_eq!(set.len(), 64);
-    assert!(set.has_live_outputs_for_txid(&live_txid));
-
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &spend, &txid(95))?;
-
-    for vout in 64_u32..128 {
-        assert_eq!(set.get(&OutPoint::new(live_txid.into(), vout)), None);
-    }
-    assert!(!set.has_live_outputs_for_txid(&live_txid));
-    assert_eq!(set.record_count(), 0);
-    assert_eq!(set.len(), 0);
-    assert!(set.is_empty());
-    Ok(())
-}
-
-#[test]
-fn hash_serialized_3_matches_independent_core_serialization_for_unsorted_utxos()
--> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let mut changes = BlockChanges::default();
-    let entries = vec![
-        (OutPoint::new(txid(30).into(), 2), txout(30), false, 210),
-        (OutPoint::new(txid(10).into(), 1), txout(10), true, 208),
-        (OutPoint::new(txid(30).into(), 0), txout(31), false, 210),
-        (OutPoint::new(txid(20).into(), 3), txout(20), true, 209),
+            u32::MAX,
+            vec![0x51; 520],
+        ),
     ];
+    let live = txid(88);
+    let set = UtxoSet::new();
+    let entries: Vec<Entry> = cases
+        .iter()
+        .map(|(vout, value, coinbase, height, script)| {
+            (
+                OutPoint::new(live.into(), *vout),
+                TxOut {
+                    value: Amount::from_sat(*value),
+                    script_pubkey: script.clone().into(),
+                },
+                *coinbase,
+                *height,
+            )
+        })
+        .collect();
+    commit(&set, &entries, &[], &txid(90), false)?;
 
-    for (outpoint, txout, coinbase, height) in &entries {
-        changes.add(UtxoAdd::new(*outpoint, txout.clone(), *coinbase, *height));
-    }
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(99))?;
-
+    assert_eq!(set.record_count(), 1, "one txid must hold one record");
+    assert_eq!(set.len(), entries.len());
     assert_eq!(
         set.lock_stable_view().hash_serialized_3()?,
         expected_hash_serialized_3(&entries)?
     );
+    assert!(set.has_live_outputs_for_txid(&live));
+    assert!(!set.has_live_outputs_for_txid(&txid(89)));
+
+    for (outpoint, txout, coinbase, height) in &entries {
+        assert_eq!(set.get(outpoint).as_ref(), Some(txout));
+        let entry = set
+            .get_entry(outpoint)
+            .ok_or("expected a committed output to be live")?;
+        assert_eq!(&entry.txout, txout);
+        assert_eq!(entry.coinbase, *coinbase, "coinbase lost at {outpoint:?}");
+        assert_eq!(entry.height, *height, "height lost at {outpoint:?}");
+
+        let scan = set.scan_script_pubkeys(std::slice::from_ref(&txout.script_pubkey))?;
+        assert_eq!(scan.txouts, entries.len());
+        assert_eq!(scan.unspents.len(), 1, "scan matched the wrong outputs");
+        assert_eq!(scan.unspents[0].outpoint, *outpoint);
+        assert_eq!(scan.unspents[0].txout, *txout);
+        assert_eq!(scan.unspents[0].coinbase, *coinbase);
+        assert_eq!(scan.unspents[0].height, *height);
+    }
+
+    // One vout at a time: the record survives until its last output leaves.
+    for (index, (outpoint, _txout, _coinbase, _height)) in entries.iter().enumerate() {
+        assert!(set.has_live_outputs_for_txid(&live));
+        let block = txid(91 + u64::try_from(index)?);
+        commit(&set, &[], std::slice::from_ref(outpoint), &block, false)?;
+        assert_eq!(set.get(outpoint), None);
+    }
+    assert!(!set.has_live_outputs_for_txid(&live));
+    assert_eq!(set.record_count(), 0);
+    assert!(set.is_empty());
     Ok(())
 }
 
 #[test]
-fn same_prefix_txids_do_not_collide_in_get_or_remove_paths()
--> Result<(), Box<dyn std::error::Error>> {
+fn high_vout_full_record_delete_removes_all_outputs_in_one_commit() -> TestResult {
     let set = UtxoSet::new();
-    let prefix = 0xfeed_face_cafe_beef_u64;
-    let first = OutPoint::new(txid_with_prefix(prefix, 1).into(), 0);
-    let second = OutPoint::new(txid_with_prefix(prefix, 2).into(), 0);
-    let first_txout = txout(101);
-    let second_txout = txout(202);
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(first, first_txout.clone(), false, 1));
-    changes.add(UtxoAdd::new(second, second_txout.clone(), false, 1));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(300))?;
-
-    assert_eq!(set.get(&first), Some(first_txout));
-    assert_eq!(set.get(&second), Some(second_txout.clone()));
-
-    let mut spend: BlockChanges = BlockChanges::default();
-    spend.remove(first);
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &spend, &txid(301))?;
-
-    assert_eq!(set.get(&first), None);
-    assert_eq!(set.get(&second), Some(second_txout));
-    Ok(())
-}
-
-#[test]
-fn full_record_delete_uses_full_txid_and_preserves_collision_peer()
--> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let prefix = 0xfeed_face_cafe_beef_u64;
-    let first = OutPoint::new(txid_with_prefix(prefix, 10).into(), 0);
-    let second = OutPoint::new(txid_with_prefix(prefix, 11).into(), 0);
-    let second_txout = txout(202);
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(first, txout(101), false, 1));
-    changes.add(UtxoAdd::new(second, second_txout.clone(), false, 1));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(300))?;
-
-    let mut spend: BlockChanges = BlockChanges::default();
-    spend.remove(first);
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &spend, &txid(301))?;
-
-    assert_eq!(set.get(&first), None);
-    assert_eq!(set.get(&second), Some(second_txout));
-    assert!(set.has_live_outputs_for_txid(&second.txid.0));
+    let live = txid(93);
+    let adds: Vec<Entry> = (64_u32..128)
+        .map(|vout| {
+            (
+                OutPoint::new(live.into(), vout),
+                txout(1_000 + u64::from(vout)),
+                false,
+                302,
+            )
+        })
+        .collect();
+    let removes: Vec<OutPoint> = adds.iter().map(|entry| entry.0).collect();
+    commit(&set, &adds, &[], &txid(94), false)?;
     assert_eq!(set.record_count(), 1);
-    assert_eq!(set.len(), 1);
+    assert_eq!(set.len(), 64);
+
+    commit(&set, &[], &removes, &txid(95), false)?;
+
+    for remove in &removes {
+        assert_eq!(set.get(remove), None);
+    }
+    assert!(!set.has_live_outputs_for_txid(&live));
+    assert_eq!(set.record_count(), 0);
+    assert!(set.is_empty());
+    Ok(())
+}
+
+/// The set keys on the full txid, so two txids sharing a prefix must stay
+/// independent through partial spends and the full-record delete path.
+#[test]
+fn a_shared_txid_prefix_keeps_records_and_deletes_independent() -> TestResult {
+    for reverse in [false, true] {
+        let prefix = 0xfeed_face_cafe_beef_u64;
+        let set = UtxoSet::new();
+        let first = txid_with_prefix(prefix, if reverse { 2 } else { 1 });
+        let second = txid_with_prefix(prefix, if reverse { 1 } else { 2 });
+        let first_a = OutPoint::new(first.into(), 0);
+        let first_b = OutPoint::new(first.into(), 1);
+        let peer = OutPoint::new(second.into(), 0);
+        let first_b_txout = txout(102);
+        let peer_txout = txout(202);
+        let mut adds = [
+            (first_a, txout(101), false, 1),
+            (first_b, first_b_txout.clone(), false, 1),
+            (peer, peer_txout.clone(), false, 1),
+        ];
+        if reverse {
+            adds.reverse();
+        }
+        commit(&set, &adds, &[], &txid(300), false)?;
+
+        commit(&set, &[], &[first_a], &txid(301), false)?;
+        assert_eq!(set.get(&first_a), None);
+        assert_eq!(set.get(&first_b), Some(first_b_txout));
+        assert_eq!(set.get(&peer), Some(peer_txout.clone()));
+
+        // Emptying the first record must not take its prefix peer with it.
+        commit(&set, &[], &[first_b], &txid(302), false)?;
+        assert_eq!(set.get(&peer), Some(peer_txout));
+        assert!(!set.has_live_outputs_for_txid(&first));
+        assert!(set.has_live_outputs_for_txid(&second));
+        assert_eq!(set.record_count(), 1);
+        assert_eq!(set.len(), 1);
+    }
     Ok(())
 }
 
 #[test]
-fn duplicate_remove_does_not_fast_delete_unspent_vout() -> Result<(), Box<dyn std::error::Error>> {
+fn duplicate_remove_does_not_fast_delete_unspent_vout() -> TestResult {
     let set = UtxoSet::new();
-    let live_txid = txid(700);
-    let removed = OutPoint::new(live_txid.into(), 0);
-    let retained = OutPoint::new(live_txid.into(), 1);
+    let live = txid(700);
+    let removed = OutPoint::new(live.into(), 0);
+    let retained = OutPoint::new(live.into(), 1);
     let retained_txout = txout(701);
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(removed, txout(700), false, 1));
-    changes.add(UtxoAdd::new(retained, retained_txout.clone(), false, 1));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(702))?;
+    let adds = [
+        (removed, txout(700), false, 1),
+        (retained, retained_txout.clone(), false, 1),
+    ];
+    commit(&set, &adds, &[], &txid(702), false)?;
 
-    let mut duplicate_spend: BlockChanges = BlockChanges::default();
-    duplicate_spend.remove(removed);
-    duplicate_spend.remove(removed);
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &duplicate_spend, &txid(703))?;
+    commit(&set, &[], &[removed, removed], &txid(703), false)?;
 
     assert_eq!(set.get(&removed), None);
     assert_eq!(set.get(&retained), Some(retained_txout));
-    assert!(set.has_live_outputs_for_txid(&live_txid));
+    assert!(set.has_live_outputs_for_txid(&live));
     assert_eq!(set.record_count(), 1);
     assert_eq!(set.len(), 1);
-    Ok(())
-}
-#[test]
-fn height_u32_max_with_both_coinbase_states_roundtrips() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let live_txid = txid(800);
-    let first = OutPoint::new(live_txid.into(), 0);
-    let second = OutPoint::new(live_txid.into(), 1);
-    let first_txout = txout(800);
-    let second_txout = txout(801);
-
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(first, first_txout.clone(), true, u32::MAX));
-    changes.add(UtxoAdd::new(second, second_txout.clone(), false, u32::MAX));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(802))?;
-
-    let entry1 = set.get_entry(&first).ok_or("expected first entry")?;
-    assert_eq!(entry1.txout, first_txout);
-    assert!(entry1.coinbase);
-    assert_eq!(entry1.height, u32::MAX);
-
-    let entry2 = set.get_entry(&second).ok_or("expected second entry")?;
-    assert_eq!(entry2.txout, second_txout);
-    assert!(!entry2.coinbase);
-    assert_eq!(entry2.height, u32::MAX);
-
-    let scan = set.scan_script_pubkeys(std::slice::from_ref(&first_txout.script_pubkey))?;
-    assert_eq!(scan.unspents.len(), 1);
-    assert_eq!(scan.unspents[0].height, u32::MAX);
-    assert!(scan.unspents[0].coinbase);
-    Ok(())
-}
-
-#[test]
-fn vout_u32_max_roundtrips_and_spends() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let live_txid = txid(810);
-    let max_vout_op = OutPoint::new(live_txid.into(), u32::MAX);
-    let txout_val = txout(810);
-
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(max_vout_op, txout_val.clone(), false, 500));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(811))?;
-
-    assert_eq!(set.get(&max_vout_op), Some(txout_val.clone()));
-    let entry = set
-        .get_entry(&max_vout_op)
-        .ok_or("expected live max vout")?;
-    assert_eq!(entry.txout, txout_val);
-    assert_eq!(entry.height, 500);
-    assert!(set.has_live_outputs_for_txid(&live_txid));
-
-    let mut spend: BlockChanges = BlockChanges::default();
-    spend.remove(max_vout_op);
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &spend, &txid(812))?;
-
-    assert_eq!(set.get(&max_vout_op), None);
-    assert!(!set.has_live_outputs_for_txid(&live_txid));
-    assert_eq!(set.record_count(), 0);
-    assert_eq!(set.len(), 0);
-    Ok(())
-}
-
-#[test]
-fn zero_and_unequal_script_lengths_roundtrip_and_scan() -> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let live_txid = txid(820);
-
-    let script_empty = Vec::new();
-    let script_1b = vec![0x51];
-    let script_34b = vec![0x00; 34];
-    let script_520b = vec![0x51; 520];
-    let script_10kb = vec![0x52; 10_000];
-
-    let txout_empty = TxOut {
-        value: Amount::from_sat(100),
-        script_pubkey: script_empty.clone().into(),
-    };
-    let txout_1b = TxOut {
-        value: Amount::from_sat(200),
-        script_pubkey: script_1b.into(),
-    };
-    let txout_34b = TxOut {
-        value: Amount::from_sat(300),
-        script_pubkey: script_34b.into(),
-    };
-    let txout_520b = TxOut {
-        value: Amount::from_sat(400),
-        script_pubkey: script_520b.into(),
-    };
-    let txout_10kb = TxOut {
-        value: Amount::from_sat(500),
-        script_pubkey: script_10kb.clone().into(),
-    };
-
-    let op0 = OutPoint::new(live_txid.into(), 0);
-    let op1 = OutPoint::new(live_txid.into(), 1);
-    let op2 = OutPoint::new(live_txid.into(), 2);
-    let op3 = OutPoint::new(live_txid.into(), 3);
-    let op4 = OutPoint::new(live_txid.into(), 4);
-
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(op0, txout_empty.clone(), false, 10));
-    changes.add(UtxoAdd::new(op1, txout_1b.clone(), true, 11));
-    changes.add(UtxoAdd::new(op2, txout_34b.clone(), false, 12));
-    changes.add(UtxoAdd::new(op3, txout_520b.clone(), true, 13));
-    changes.add(UtxoAdd::new(op4, txout_10kb.clone(), false, 14));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(821))?;
-
-    assert_eq!(set.get(&op0), Some(txout_empty.clone()));
-    assert_eq!(set.get(&op1), Some(txout_1b.clone()));
-    assert_eq!(set.get(&op2), Some(txout_34b.clone()));
-    assert_eq!(set.get(&op3), Some(txout_520b.clone()));
-    assert_eq!(set.get(&op4), Some(txout_10kb.clone()));
-
-    let scan_empty = set.scan_script_pubkeys(&[script_empty])?;
-    assert_eq!(scan_empty.unspents.len(), 1);
-    assert_eq!(scan_empty.unspents[0].outpoint, op0);
-
-    let scan_10k = set.scan_script_pubkeys(&[script_10kb])?;
-    assert_eq!(scan_10k.unspents.len(), 1);
-    assert_eq!(scan_10k.unspents[0].outpoint, op4);
-
-    let entries = vec![
-        (op0, txout_empty, false, 10),
-        (op1, txout_1b, true, 11),
-        (op2, txout_34b, false, 12),
-        (op3, txout_520b, true, 13),
-        (op4, txout_10kb, false, 14),
-    ];
-    let expected_hash = expected_hash_serialized_3(&entries)?;
-    assert_eq!(set.lock_stable_view().hash_serialized_3()?, expected_hash);
-    Ok(())
-}
-
-#[test]
-fn multi_shard_invalid_add_preserves_commit_rejection_atomicity()
--> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let shard0_op = OutPoint::new(txid_in_shard(0, 100).into(), 0);
-    let shard1_op = OutPoint::new(txid_in_shard(1, 100).into(), 0);
-    let shard0_txout = txout(100);
-    let shard1_txout = txout(101);
-
-    let mut initial = BlockChanges::default();
-    initial.add(UtxoAdd::new(shard0_op, shard0_txout.clone(), false, 10));
-    initial.add(UtxoAdd::new(shard1_op, shard1_txout.clone(), false, 10));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &initial, &txid(102))?;
-
-    let mut invalid_changes = BlockChanges::default();
-    invalid_changes.remove(shard0_op);
-    invalid_changes.add(UtxoAdd::new(
-        OutPoint::new(txid_in_shard(0, 101).into(), 0),
-        txout(102),
-        false,
-        11,
-    ));
-    invalid_changes.add(UtxoAdd::new(
-        OutPoint::new(txid_in_shard(1, 101).into(), 0),
-        TxOut {
-            value: Amount::from_sat(103),
-            script_pubkey: vec![0; usize::from(u16::MAX) + 1].into(),
-        },
-        false,
-        11,
-    ));
-
-    let err =
-        match bitcoin_rs_utxo::contract::commit_block_changes(&set, &invalid_changes, &txid(103)) {
-            Ok(()) => return Err("expected ScriptTooLarge error".into()),
-            Err(e) => e,
-        };
-    assert!(matches!(err, UtxoError::ScriptTooLarge { len } if len == usize::from(u16::MAX) + 1));
-
-    // Verify rejection atomicity across shards
-    assert_eq!(set.get(&shard0_op), Some(shard0_txout));
-    assert_eq!(set.get(&shard1_op), Some(shard1_txout));
-    assert_eq!(
-        set.get(&OutPoint::new(txid_in_shard(0, 101).into(), 0)),
-        None
-    );
-    assert_eq!(
-        set.get(&OutPoint::new(txid_in_shard(1, 101).into(), 0)),
-        None
-    );
-    assert_eq!(set.len(), 2);
-    Ok(())
-}
-
-#[test]
-fn hash_serialized_3_matches_independent_core_serialization_for_edge_cases()
--> Result<(), Box<dyn std::error::Error>> {
-    let set = UtxoSet::new();
-    let op1 = OutPoint::new(txid(840).into(), 0);
-    let op2 = OutPoint::new(txid(841).into(), u32::MAX);
-    let op3 = OutPoint::new(txid(842).into(), 64);
-
-    let txout1 = TxOut {
-        value: Amount::from_sat(0),
-        script_pubkey: Script::new(),
-    };
-    let txout2 = TxOut {
-        value: Amount::from_sat(u64::MAX),
-        script_pubkey: vec![0x51; 520].into(),
-    };
-    let txout3 = TxOut {
-        value: Amount::from_sat(12_345),
-        script_pubkey: vec![0x6a].into(),
-    };
-
-    let mut changes = BlockChanges::default();
-    changes.add(UtxoAdd::new(op1, txout1.clone(), true, u32::MAX));
-    changes.add(UtxoAdd::new(op2, txout2.clone(), false, u32::MAX));
-    changes.add(UtxoAdd::new(op3, txout3.clone(), true, 0));
-    bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(843))?;
-
-    let entries = vec![
-        (op1, txout1, true, u32::MAX),
-        (op2, txout2, false, u32::MAX),
-        (op3, txout3, true, 0),
-    ];
-    let expected = expected_hash_serialized_3(&entries)?;
-    assert_eq!(set.lock_stable_view().hash_serialized_3()?, expected);
     Ok(())
 }

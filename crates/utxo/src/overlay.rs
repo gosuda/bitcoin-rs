@@ -32,11 +32,6 @@ impl<'u> WindowOverlay<'u> {
     /// outpoints are skipped on both sides, as in
     /// [`build_block_changes`](crate::contract::build_block_changes). Genesis is
     /// a no-op, as in the apply path.
-    ///
-    /// # Errors
-    ///
-    /// A `txids` slice that does not cover every transaction; zipping would
-    /// silently drop the trailing ones.
     pub fn advance(
         &mut self,
         block: &Block,
@@ -116,7 +111,6 @@ mod tests {
     use crate::UtxoSet;
     use crate::contract::{UndoBatch, UtxoAdd};
 
-    /// Opaque test bound; the apply path supplies the consensus value.
     const MAX_SCRIPT_SIZE: usize = 64;
     const HEIGHT: u32 = 7;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -138,7 +132,6 @@ mod tests {
         }
     }
 
-    /// A coinbase paying one output, so `advance` sees a creation.
     fn paying(script_pubkey: Vec<u8>, value: u64) -> Tx {
         tx(OutPoint::null(), script_pubkey, value)
     }
@@ -163,7 +156,6 @@ mod tests {
         }
     }
 
-    /// Folds `txs` in at `height` with no same-block netting.
     fn advance(overlay: &mut WindowOverlay<'_>, txs: Vec<Tx>, height: u32) -> TestResult {
         let txids: Vec<Txid> = txs.iter().map(Tx::txid).collect();
         overlay.advance(&block(txs), &txids, height, &HashSet::new())?;

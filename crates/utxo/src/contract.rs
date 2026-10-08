@@ -149,27 +149,16 @@ impl UndoBatch {
     }
 
     /// Restores an output the disconnected block spent into this `UndoBatch`.
-    ///
-    /// Crate-visible on purpose: only the apply path ([`build_block_changes`])
-    /// and the undo decoder build batches; everything outside this crate
-    /// receives them from the contract.
     pub(crate) fn restore(&mut self, add: UtxoAdd) {
         self.restores.push(add);
     }
 
     /// Removes an output the disconnected block created from this `UndoBatch`.
-    ///
-    /// Crate-visible on purpose: see [`Self::restore`].
     pub(crate) fn remove(&mut self, outpoint: OutPoint) {
         self.removes.push(outpoint);
     }
 
     /// Rebuilds a batch from its decoded parts.
-    ///
-    /// Crate-visible on purpose: the decoder rejects a record where one
-    /// outpoint appears in both halves, and this constructor performs no check
-    /// at all, so a public one is a way to build exactly the batch the codec
-    /// refuses. The decoder is the only caller and it has already done the work.
     #[must_use]
     pub(crate) const fn from_parts(restores: Vec<UtxoAdd>, removes: Vec<OutPoint>) -> Self {
         Self { restores, removes }
@@ -258,10 +247,6 @@ pub struct BlockValueTotals {
 
 impl BlockValueTotals {
     /// Fees the block earned, or `None` if the totals are inconsistent.
-    ///
-    /// Returns `None` rather than saturating: outputs exceeding inputs is a
-    /// consensus failure that per-transaction verification should already have
-    /// rejected, and silently reporting zero fees would let it through here.
     #[must_use]
     pub const fn fees(self) -> Option<u64> {
         self.spent_in.checked_sub(self.created_out)
@@ -331,15 +316,6 @@ pub enum RollbackError {
 }
 
 /// Applies one connected block's [`BlockChanges`] to the set.
-///
-/// The public commit entry point: chainstate and every test seam commit
-/// through this function, so `utxo::contract` owns the full
-/// build → commit → persist/disconnect mutation surface and the set itself
-/// keeps no public mutator.
-///
-/// # Errors
-///
-/// [`UtxoError`] when a shard mutation fails.
 pub fn commit_block_changes<T: Borrow<TxOut>>(
     set: &UtxoSet,
     changes: &BlockChanges<T>,
@@ -350,8 +326,6 @@ pub fn commit_block_changes<T: Borrow<TxOut>>(
 
 /// Builds the UTXO mutation, undo batch, and value totals for one connected
 /// block.
-///
-/// # Parameters
 ///
 /// - `block`: the block being connected.
 /// - `height`: the height at which it connects.
@@ -416,9 +390,6 @@ pub fn build_block_changes<'a>(
         let txid = *txid;
         let coinbase = is_coinbase_tx(tx);
         for (vout_idx, txout) in tx.outputs.iter().enumerate() {
-            // Before the unspendable-output skip below: an OP_RETURN output
-            // never enters the UTXO set, but the transaction that created it
-            // still paid for it, so it counts against the fee.
             let value = txout.value.to_sat();
             let vout =
                 u32::try_from(vout_idx).map_err(|_| BlockChangeError::VoutOverflow { txid })?;
@@ -442,18 +413,9 @@ pub fn build_block_changes<'a>(
             {
                 continue;
             }
-            // At a BIP30 exception height the coinbase reuses an earlier txid
-            // whose outputs are still live, so this add OVERWRITES a coin
-            // rather than creating one. `overwritten` is `Some` only at those
-            // two mainnet heights, so every other block pays no lookup.
             let replaced = overwritten.and_then(|set| set.get_entry(&outpoint));
             changes.add(UtxoAdd::new(outpoint, txout, coinbase, height));
             match replaced {
-                // The inverse of overwriting is writing the old coin back, not
-                // deleting the outpoint. Emitting a remove as well would depend
-                // on the undo applying restores after removes, and it does the
-                // opposite, so the older coin would be lost and the rewound
-                // UTXO set, MuHash, and coinstats would not match the parent.
                 Some(previous) => undo.restore(UtxoAdd::new(
                     outpoint,
                     previous.txout,
@@ -501,10 +463,6 @@ pub fn build_block_changes<'a>(
 
 /// Encodes and persists a block's undo record, returning the raw record so the
 /// caller can put the same row into its durable head batch.
-///
-/// # Errors
-///
-/// The store's write failure.
 pub fn persist_block_undo(
     store: &dyn UndoStore,
     height: u32,
@@ -703,8 +661,6 @@ mod tests {
         Ok((utxo, coin_stats, before, undo))
     }
 
-    /// UTXO digest, coinstats digest (`MuHash` limbs are representation, not
-    /// state) and the coinstats scalars.
     type State = (Hash256, Hash256, [u64; 5]);
 
     fn observe(utxo: &UtxoSet, coin_stats: &CoinStatsListener) -> Result<State, UtxoError> {
@@ -950,10 +906,6 @@ mod tests {
         Ok(())
     }
 
-    // Undo-determinism coverage, relocated from the crate's integration
-    // tests once the raw inverse (`undo_block`) and the `UndoBatch` builders
-    // became crate-visible only.
-
     fn undo_txid(seed: u64) -> Hash256 {
         let mut bytes = [0_u8; 32];
         bytes[..8].copy_from_slice(&seed.to_le_bytes());
@@ -973,8 +925,6 @@ mod tests {
         }
     }
 
-    /// Ten blocks of 100 creates and up to 50 spends each, with the matching
-    /// undo batches.
     fn build_undo_blocks() -> Result<Vec<(BlockChanges, UndoBatch)>, Box<dyn std::error::Error>> {
         let mut live: Vec<UtxoAdd> = Vec::new();
         let mut blocks = Vec::with_capacity(10);
@@ -1142,38 +1092,24 @@ mod tests {
 
     /// A `txids` slice shorter than the block would let `zip` silently drop
     /// trailing transactions from the changes, undo, and value totals while
-    /// reporting success. The build refuses the mismatch before iterating.
+    /// reporting success. The build refuses the mismatch before iterating, at
+    /// genesis too — the genesis early return must not skip validation.
     #[test]
-    fn short_txid_list_is_refused_before_iterating() {
+    fn a_short_txid_list_is_refused_at_every_height() {
         let (block, txids) = block_with_short_txids();
-        let outcome = build_block_changes(&block, HEIGHT, &txids, None, 4, 4, &NoSpend, None, 64);
-        assert!(
-            matches!(
-                outcome,
-                Err(BlockChangeError::TxidCountMismatch {
-                    transactions: 2,
-                    txids: 1
-                })
-            ),
-            "a short txid list must be refused before iterating"
-        );
-    }
-
-    /// The genesis early return must not skip validation: a mismatched
-    /// `txids` slice is refused at height 0 too, as the contract documents.
-    #[test]
-    fn short_txid_list_is_refused_at_genesis_height() {
-        let (block, txids) = block_with_short_txids();
-        let outcome = build_block_changes(&block, 0, &txids, None, 4, 4, &NoSpend, None, 64);
-        assert!(
-            matches!(
-                outcome,
-                Err(BlockChangeError::TxidCountMismatch {
-                    transactions: 2,
-                    txids: 1
-                })
-            ),
-            "a short txid list must be refused at genesis height too"
-        );
+        for height in [0, HEIGHT] {
+            let outcome =
+                build_block_changes(&block, height, &txids, None, 4, 4, &NoSpend, None, 64);
+            assert!(
+                matches!(
+                    outcome,
+                    Err(BlockChangeError::TxidCountMismatch {
+                        transactions: 2,
+                        txids: 1
+                    })
+                ),
+                "a short txid list was accepted at height {height}"
+            );
+        }
     }
 }

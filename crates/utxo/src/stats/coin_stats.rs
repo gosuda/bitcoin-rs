@@ -205,10 +205,6 @@ impl Default for CoinStats {
 }
 
 /// Computes `CoinStats` statistics by scanning a stable view.
-///
-/// Matches Bitcoin Core's on-demand model (no rolling listener required).
-/// `want_muhash` controls the expensive per-coin `MuHash` pass; callers needing
-/// only `total_amount`/`bogo_size`/`utxo_count` pass `false`.
 pub fn scan_coin_stats(
     view: &crate::UtxoSetView<'_>,
     height: u32,
@@ -224,10 +220,6 @@ pub fn scan_coin_stats(
 }
 
 /// Owned `CoinStats` fold for a snapshot coin traversal.
-///
-/// The accumulator borrows each script only for its callback and reuses one
-/// scratch buffer for optional `MuHash` preimages.
-/// Transaction count remains zero because live coins do not encode it.
 #[derive(Debug)]
 pub struct CoinStatsAccumulator {
     stats: CoinStats,
@@ -694,10 +686,6 @@ impl CoinStatsListener {
     }
 
     /// [`CoinStats::check_rewind`] against the current stats.
-    ///
-    /// # Errors
-    ///
-    /// Propagates [`CoinStats::check_rewind`].
     pub fn check_rewind(
         &self,
         disconnected_height: u32,

@@ -236,70 +236,60 @@ fn v4_record_body(txid_bytes: &[u8; 32], output_count: u32) -> Vec<u8> {
     bytes
 }
 
+/// Every way a v4 snapshot can be malformed, with the error each must name.
 #[test]
-fn snapshot_read_rejects_invalid_magic() {
-    let mut bytes = v4_header(txid(1), 100, 0);
-    bytes[0..4].copy_from_slice(&0xDE_AD_BE_EF_u32.to_le_bytes());
-    let Err(error) = read_snapshot_strict_v4(&mut Cursor::new(bytes)) else {
-        panic!("invalid magic was accepted");
+fn snapshot_read_refuses_malformed_v4_bytes() {
+    type Expected = fn(&UtxoError) -> bool;
+    let duplicate_vouts = {
+        let mut bytes = v4_header(txid(160_011), 1601, 1);
+        bytes.extend_from_slice(&v4_record_body(&txid(160_010).to_le_bytes(), 4));
+        for vout in [9, 1, 9, 1] {
+            append_snapshot_output(&mut bytes, vout, 1_000, 1601, false, &[0x51]);
+        }
+        bytes.extend_from_slice(&[0_u8; 384]);
+        bytes
     };
-    assert!(matches!(
-        error,
-        UtxoError::InvalidSnapshotMagic { actual } if actual == 0xDE_AD_BE_EF
-    ));
-}
+    let mut invalid_magic = v4_header(txid(1), 100, 0);
+    invalid_magic[0..4].copy_from_slice(&0xDE_AD_BE_EF_u32.to_le_bytes());
+    let mut count_mismatch = v4_header(txid(170_001), 1700, 1);
+    count_mismatch.extend_from_slice(&v4_record_body(&txid(170_000).to_le_bytes(), 0));
+    count_mismatch.extend_from_slice(&[0_u8; 384]);
 
-#[test]
-fn snapshot_read_rejects_unsupported_version() {
+    let cases: [(&str, Vec<u8>, Expected); 3] = [
+        (
+            "invalid magic",
+            invalid_magic,
+            |error| matches!(error, UtxoError::InvalidSnapshotMagic { actual } if *actual == 0xDE_AD_BE_EF),
+        ),
+        ("duplicate vout", duplicate_vouts, |error| {
+            matches!(error, UtxoError::SnapshotDuplicateVout { vout: 9 })
+        }),
+        ("record count mismatch", count_mismatch, |error| {
+            matches!(
+                error,
+                UtxoError::SnapshotRecordCountMismatch {
+                    declared: 1,
+                    actual: 0
+                }
+            )
+        }),
+    ];
     for version in [2_u32, 3, 99] {
         let mut bytes = v4_header(txid(1), 100, 0);
         bytes[4..8].copy_from_slice(&version.to_le_bytes());
         let Err(error) = read_snapshot_strict_v4(&mut Cursor::new(bytes)) else {
-            panic!("unsupported version was accepted");
+            panic!("unsupported version {version} was accepted");
         };
-        assert!(matches!(
-            error,
-            UtxoError::UnsupportedSnapshotVersion { version: actual } if actual == version
-        ));
+        assert!(
+            matches!(error, UtxoError::UnsupportedSnapshotVersion { version: actual } if actual == version)
+        );
     }
-}
-
-#[test]
-fn snapshot_read_rejects_duplicate_vouts_in_a_v4_record() {
-    let record_txid = txid(160_010);
-    let mut bytes = v4_header(txid(160_011), 1601, 1);
-    bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 4));
-    for vout in [9, 1, 9, 1] {
-        append_snapshot_output(&mut bytes, vout, 1_000, 1601, false, &[0x51]);
+    for (name, bytes, expected) in cases {
+        let Err(error) = read_snapshot_strict_v4(&mut Cursor::new(bytes)) else {
+            panic!("{name} was accepted");
+        };
+        assert!(expected(&error), "{name} gave {error:?}");
     }
-    bytes.extend_from_slice(&[0_u8; 384]);
-
-    let Err(error) = read_snapshot_strict_v4(&mut Cursor::new(bytes)) else {
-        panic!("duplicate vout was accepted");
-    };
-    assert!(matches!(
-        error,
-        UtxoError::SnapshotDuplicateVout { vout: 9 }
-    ));
-}
-
-#[test]
-fn snapshot_read_rejects_a_record_count_mismatch() {
-    let record_txid = txid(170_000);
-    let mut bytes = v4_header(txid(170_001), 1700, 1);
-    bytes.extend_from_slice(&v4_record_body(&record_txid.to_le_bytes(), 0));
-    bytes.extend_from_slice(&[0_u8; 384]);
-
-    let Err(error) = read_snapshot_strict_v4(&mut Cursor::new(bytes)) else {
-        panic!("record count mismatch was accepted");
-    };
-    assert!(matches!(
-        error,
-        UtxoError::SnapshotRecordCountMismatch {
-            declared: 1,
-            actual: 0
-        }
-    ));
 }
 
 #[test]

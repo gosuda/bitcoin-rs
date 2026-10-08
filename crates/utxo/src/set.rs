@@ -101,10 +101,6 @@ pub enum UtxoError {
     #[error("snapshot txid prefix does not match record key prefix")]
     SnapshotTxidPrefixMismatch,
     /// An output value exceeds the largest amount any UTXO can hold.
-    ///
-    /// Unreachable through consensus, which caps the money supply. It exists so
-    /// a corrupt or synthetic value fails loudly instead of overflowing the
-    /// amount compression.
     #[error("output value {value} exceeds the maximum money supply")]
     AmountOutOfRange {
         /// Offending value in satoshis.
@@ -113,9 +109,6 @@ pub enum UtxoError {
 }
 
 /// One live UTXO coin as contract consumers observe it.
-///
-/// The single coin shape for lookups, window overlays, and scans: it replaces
-/// the separate live-output, metadata-only, and scanned-coin records.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UtxoCoin {
     /// Outpoint that identifies the live coin.
@@ -335,10 +328,6 @@ impl UtxoSet {
     }
 
     /// Applies all UTXO changes for a connected block.
-    ///
-    /// Crate-visible on purpose: the public commit entry is the contract's
-    /// [`commit_block_changes`](crate::contract::commit_block_changes), so
-    /// every cross-crate mutation goes through `utxo::contract`.
     pub(crate) fn commit_block<T: Borrow<TxOut>>(
         &self,
         changes: &BlockChanges<T>,
@@ -612,11 +601,6 @@ impl Default for UtxoSet {
 }
 
 /// Read-only capability over the authoritative [`UtxoSet`].
-///
-/// The set itself is never handed out: [`crate::contract`] mutates through
-/// `&UtxoSet`, so a consumer that held the set would hold the mutation path
-/// too. This type exposes the reads an admission preview, a live index query,
-/// or a mining candidate needs, and nothing that can change a coin.
 #[derive(Clone)]
 pub struct UtxoReader {
     set: Arc<UtxoSet>,
@@ -647,29 +631,17 @@ impl UtxoReader {
     }
 
     /// Runs `read` against a stable whole-set view, blocking commits meanwhile.
-    ///
-    /// The view borrows the owner's set for the closure only: the set itself
-    /// never escapes, so the closure still carries no mutation path.
     pub fn with_stable_view<R>(&self, read: impl FnOnce(&UtxoSetView<'_>) -> R) -> R {
         self.set.with_stable_view(read)
     }
 
     /// Locks a stable whole-set view until the returned guard is dropped.
-    ///
-    /// Commits take the matching write lock, so a caller that must hold one
-    /// coherent set across a multi-step scan takes this instead of calling
-    /// [`Self::get`] repeatedly. Acquire any chain-transition authority first
-    /// when both are needed, matching block apply.
     #[must_use]
     pub fn lock_stable_view(&self) -> UtxoSetView<'_> {
         self.set.lock_stable_view()
     }
 
     /// Reveals the owner's set so a fixture can commit through `crate::contract`.
-    ///
-    /// Not present in production builds: a production reader must never reach
-    /// the set, because `contract::commit_block_changes` takes `&UtxoSet` as
-    /// its mutation surface.
     #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn fixture_set(&self) -> Arc<UtxoSet> {
@@ -955,11 +927,6 @@ fn initialized_slots<T>(slots: Vec<Option<T>>) -> Vec<T> {
         .into_iter()
         .map(|slot| match slot {
             Some(value) => value,
-            // `shard_ranges` sizes each shard's range from the per-shard
-            // counts, and every add/remove writes its payload into the slot
-            // at its shard's running cursor; a missing slot means the bucket
-            // counts disagreed with the input length, which is an
-            // unrecoverable internal corrupt state.
             None => panic!("shard bucket counts allocate every slot"),
         })
         .collect()
@@ -986,9 +953,6 @@ mod tests {
     use super::*;
     use bitcoin_rs_primitives::Amount;
 
-    /// The report accounts the exact boxed record payload plus the estimated
-    /// table backing: with records resident, `accounted_bytes()` must equal
-    /// that sum and every component must be positive.
     #[test]
     fn memory_report_accounts_payload_plus_table_bytes() -> Result<(), UtxoError> {
         let set = UtxoSet::new();
