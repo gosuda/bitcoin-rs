@@ -6,8 +6,7 @@
 
 use bitcoin::consensus::encode::deserialize_hex;
 use bitcoin_rs_e2e::helpers::{
-    COINBASE_MATURITY, coinbase_at, funding_address, funding_output, genesis_block,
-    mine_bare_blocks, submit_genesis,
+    coinbase_at, funding_address, funding_output, genesis_block, mine_bare_blocks, submit_genesis,
 };
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
 use serde_json::{Value, json};
@@ -75,19 +74,21 @@ fn block_views_agree() -> Result<()> {
         .and_then(Value::as_array)
         .ok_or_else(|| Error::Assertion("getblock(2) lacks tx".into()))?;
     assert_eq!(txs.len(), 1);
-    assert!(
-        txs[0].get("txid").and_then(Value::as_str).is_some(),
-        "verbose tx carries txid: {txs:?}"
+    assert_eq!(
+        txs[0].str_field("txid")?,
+        parsed.txdata[0].compute_txid().to_string(),
+        "verbose tx must be the block's coinbase"
     );
 
     let header = node.rpc("getblockheader", &json!([hash]))?;
+    // The header view must agree field-for-field with the verbose block.
     for field in ["hash", "height", "time", "mediantime", "bits", "nonce"] {
-        assert!(
-            header.get(field).is_some(),
-            "getblockheader lacks {field}: {header}"
+        assert_eq!(
+            header.field(field)?,
+            verbose.field(field)?,
+            "getblockheader disagrees on {field}"
         );
     }
-    assert_eq!(header.u64_field("height")?, 3);
 
     let stats = node.rpc("getblockstats", &json!([hash]))?;
     assert_eq!(stats.u64_field("height")?, 3);
@@ -142,19 +143,6 @@ fn txoutset_info_counts_utxos() -> Result<()> {
     node.stop()
 }
 
-/// `verifychain` validates the stored chain and `getindexinfo` reports
-/// the (empty) index inventory.
-#[test]
-fn verifychain_and_indexinfo() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    submit_genesis(&mut node)?;
-    let _ = mine_bare_blocks(&mut node, 3)?;
-
-    assert_eq!(node.rpc("verifychain", &json!([]))?, json!(true));
-    assert_eq!(node.rpc("getindexinfo", &json!([]))?, json!({}));
-    node.stop()
-}
-
 /// `gettxout` resolves a live outpoint and a spent/unknown one;
 /// `gettxoutproof`/`verifytxoutproof` round-trip a merkle proof.
 #[test]
@@ -201,17 +189,6 @@ fn txout_lookup_and_proof() -> Result<()> {
     node.stop()
 }
 
-/// `pruneblockchain` reports pruning as disabled on a non-pruned node.
-#[test]
-fn pruneblockchain_reports_disabled() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    let reply = node.rpc_raw(&json!({
-        "jsonrpc": "2.0", "id": 1, "method": "pruneblockchain", "params": [1000]
-    }))?;
-    assert_eq!(reply["error"]["code"], json!(-32603));
-    node.stop()
-}
-
 /// `scantxoutset` with an `addr()` descriptor finds the outputs paid to
 /// that address by `generatetoaddress`.
 #[test]
@@ -220,7 +197,11 @@ fn scantxoutset_addr_finds_paid_utxos() -> Result<()> {
     submit_genesis(&mut node)?;
     let address = funding_address()?.to_string();
     let result = node.rpc("generatetoaddress", &json!([5, address]))?;
-    assert!(result.as_array().is_some(), "generatetoaddress: {result}");
+    assert_eq!(
+        result.as_array().map(Vec::len),
+        Some(5),
+        "generatetoaddress must report 5 hashes: {result}"
+    );
 
     let scan = node.rpc(
         "scantxoutset",
@@ -241,12 +222,24 @@ fn scantxoutset_addr_finds_paid_utxos() -> Result<()> {
     node.stop()
 }
 
-/// `validateaddress`, `getdescriptorinfo`, and `uptime` answer on a
-/// running node — `uptime` must measure process time, not call time.
+/// Node-introspection and util queries on one node: chain verification, the
+/// empty index inventory, pruning refusal, address/descriptor validation,
+/// and `uptime` measuring process time rather than call time.
 #[test]
-fn util_queries_and_uptime() -> Result<()> {
+fn node_introspection_and_util_queries() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    submit_genesis(&mut node)?;
+    let _ = mine_bare_blocks(&mut node, 3)?;
+
+    assert_eq!(node.rpc("verifychain", &json!([]))?, json!(true));
+    // No indexes configured: the manifest reports an empty object.
+    assert_eq!(node.rpc("getindexinfo", &json!([]))?, json!({}));
+
+    // Pruning is disabled, so the request is refused rather than honoured.
+    let prune = node.rpc_raw(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "pruneblockchain", "params": [1000]
+    }))?;
+    assert_eq!(prune["error"]["code"], json!(-32603));
 
     let valid = node.rpc("validateaddress", &json!([funding_address()?.to_string()]))?;
     assert_eq!(valid.get("isvalid"), Some(&json!(true)));
@@ -261,6 +254,7 @@ fn util_queries_and_uptime() -> Result<()> {
     );
     assert_eq!(desc.str_field("checksum")?, "8lvh9jxk");
 
+    std::thread::sleep(std::time::Duration::from_secs(2));
     let uptime = node.rpc("uptime", &json!([]))?;
     let uptime = uptime
         .as_u64()
@@ -287,10 +281,16 @@ fn immature_coinbase_spend_rejected() -> Result<()> {
     let reply = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "sendrawtransaction", "params": [hex]
     }))?;
-    assert!(
-        reply.get("error").is_some(),
-        "immature coinbase spend must fail: {reply}"
+    // Core's mempool rejection code for a policy/consensus failure.
+    assert_eq!(
+        reply["error"]["code"],
+        json!(-26),
+        "immature coinbase spend must be rejected: {reply}"
     );
-    assert_eq!(COINBASE_MATURITY, 100);
+    assert_eq!(
+        reply["error"]["message"],
+        json!("consensus-verification-failed"),
+        "immature spend must fail script/consensus verification: {reply}"
+    );
     node.stop()
 }

@@ -2,7 +2,7 @@ use crate::peer::{Peer, PeerState};
 use crate::wire::{Message, PeerError};
 
 /// Advance a peer by one inbound message.
-pub fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
+pub(crate) fn step<S>(peer: &mut Peer<S>, message: &Message) -> Result<(), PeerError> {
     match message {
         Message::Version(version) => receive_version(peer, version.clone()),
         Message::Verack => receive_verack(peer),

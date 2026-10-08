@@ -13,7 +13,7 @@
 //! a breaking change. Per-event payloads, block/tx/peer identity, and any
 //! other high-cardinality label belong in `tracing::` events (diagnostics,
 //! explicitly not an API) or in the Core-compatible USDT probes of
-//! `bitcoin-rs-trace` (`crates/trace`, see `docs/tracing.md`), never here.
+//! `bitcoin_rs_consensus::trace` (see `docs/tracing.md`), never here.
 //! Metric labels are limited to closed enumerations owned by the code.
 //! The measured product-stage histograms consumed by the hot-path ledger
 //! (`docs/contracts/hot-path-attribution.md`) are exempt, and only via that
@@ -165,27 +165,6 @@ impl EvidenceIdentity {
             hardware: hardware_identity(),
         })
     }
-
-    /// The identity as label pairs for controlled benchmark evidence tooling.
-    ///
-    /// The operator Prometheus exporter deliberately does not install these
-    /// high-cardinality fields as global labels (OBS-01).
-    #[must_use]
-    pub fn labels(&self) -> Vec<(&'static str, String)> {
-        let mut labels = vec![
-            ("binary_sha256", self.binary_sha256.to_string()),
-            ("version", self.version.clone()),
-            ("config_sha256", self.config_sha256.to_string()),
-            ("backend", self.backend.clone()),
-            ("durability", self.durability.clone()),
-            ("hardware", self.hardware.clone()),
-        ];
-        if let Some(corpus) = &self.corpus {
-            labels.push(("corpus_id", corpus.id.clone()));
-            labels.push(("corpus_manifest_sha256", corpus.manifest_sha256.to_string()));
-        }
-        labels
-    }
 }
 
 fn describe_node_metrics() {
@@ -274,7 +253,8 @@ fn prometheus_handle(identity: &EvidenceIdentity) -> Result<PrometheusHandle> {
 }
 
 /// Process-global Prometheus scrape listener bound by [`start_metrics`].
-pub struct MetricsServer {
+pub(crate) struct MetricsServer {
+    #[cfg(test)]
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -286,13 +266,17 @@ impl MetricsServer {
     /// Listener-first ordering keeps an occupied-address failure from consuming
     /// the process-global recorder slot, so a later in-process retry cannot hit
     /// `SetRecorderError`.
-    pub fn bind(
+    pub(crate) fn bind(
         addr: SocketAddr,
-        shutdown: Arc<AtomicBool>,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
         identity: &EvidenceIdentity,
     ) -> Result<Self> {
+        let shutdown = shutdown.into();
         let listener = TcpListener::bind(addr)?;
+        #[cfg(test)]
         let local_addr = listener.local_addr()?;
+        #[cfg(not(test))]
+        listener.local_addr()?;
         let handle = prometheus_handle(identity)?;
         describe_node_metrics();
         listener.set_nonblocking(true)?;
@@ -302,6 +286,7 @@ impl MetricsServer {
             .name("bitcoin-rs-metrics".into())
             .spawn(move || serve_metrics(&listener, &handle, &thread_stop, &shutdown))?;
         Ok(Self {
+            #[cfg(test)]
             local_addr,
             stop,
             thread: Some(thread),
@@ -309,23 +294,29 @@ impl MetricsServer {
     }
 
     /// Address the scrape thread is listening on.
+    #[cfg(test)]
     #[must_use]
-    pub const fn local_addr(&self) -> SocketAddr {
+    pub(crate) const fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
     /// Signals the scrape thread and waits for it to exit.
-    pub(crate) fn stop_and_join(&mut self) {
+    pub(crate) fn stop_and_join(&mut self) -> Result<()> {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("metrics scrape thread panicked"))?;
         }
+        Ok(())
     }
 }
 
 impl Drop for MetricsServer {
     fn drop(&mut self) {
-        self.stop_and_join();
+        if let Err(error) = self.stop_and_join() {
+            tracing::warn!(%error, "metrics shutdown failed");
+        }
     }
 }
 
@@ -334,9 +325,10 @@ impl Drop for MetricsServer {
 /// This is the entry `run` uses after [`crate::state::NodeState::open`].
 pub(crate) fn start_metrics(
     bind: Option<SocketAddr>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     identity: &EvidenceIdentity,
 ) -> Result<Option<MetricsServer>> {
+    let shutdown = shutdown.into();
     bind.map(|addr| MetricsServer::bind(addr, shutdown, identity))
         .transpose()
 }
@@ -345,10 +337,10 @@ fn serve_metrics(
     listener: &TcpListener,
     handle: &PrometheusHandle,
     stop: &Arc<AtomicBool>,
-    shutdown: &Arc<AtomicBool>,
+    shutdown: &bitcoin_rs_chain::LatchReader,
 ) {
     loop {
-        if stop.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
+        if stop.load(Ordering::Acquire) || shutdown.is_triggered() {
             break;
         }
         match listener.accept() {
@@ -408,15 +400,16 @@ pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySourc
 /// never touches closed storage.
 pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
 ) -> anyhow::Result<JoinHandle<()>> {
+    let shutdown = shutdown.into();
     std::thread::Builder::new()
         .name("bitcoin-rs-metrics-readiness".into())
         .spawn(move || {
-            while !shutdown.load(Ordering::Acquire) {
+            while !shutdown.is_triggered() {
                 publish_txindex_readiness(source.as_ref());
                 let deadline = Instant::now() + READINESS_SAMPLE_INTERVAL;
-                while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
+                while !shutdown.is_triggered() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }

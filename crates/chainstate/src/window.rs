@@ -1,54 +1,28 @@
 //! Bounded script-proof windows, ordered prefix commits, and failure disposition.
 
-use super::BlockProvenance;
-use super::BlockValidationContext;
-use super::BlockValidationProof;
-use super::Chainstate;
-use super::ConnectOutcome;
-use super::PreparedApply;
-use super::ProvenApply;
-use super::ResolvedUtxoView;
-use super::WindowApplyDisposition;
-use super::WindowApplyError;
-use super::connect::apply_committed_block_admitted;
-use super::connect::emit_journal_record;
+use super::connect::{apply_committed_block_admitted, emit_journal_record};
 use super::durable::{
     ConnectCommitFacts, commit_connect_head, stored_body_row, sync_appended_blocks,
 };
-use super::prepare::parse_block_for_apply;
-use super::prepare::plan_block_transactions;
-use super::prepare::resolve_block_prevouts;
+use super::prepare::{parse_block_for_apply, plan_block_transactions, resolve_block_prevouts};
 use super::publication::publish_applied;
+use super::{
+    BlockProvenance, BlockValidationContext, BlockValidationProof, Chainstate, ConnectOutcome,
+    PreparedApply, ProvenApply, ResolvedUtxoView, WindowApplyDisposition, WindowApplyError,
+};
 use crate::error::ApplyError;
-use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::Hash256;
+use bitcoin_rs_primitives::{Block, Hash256};
 use bitcoin_rs_storage::CommitRecords;
 use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Blocks per durable group commit on the windowed IBD path.
-///
-/// Stated, not emergent (`RCV-02`): at the 30–75 blocks/s an IBD stream
-/// sustains, 64 blocks is one durable batch every one to two seconds, and
-/// the crash-redo bound is at most 64 body re-applies — the same order as
-/// the journal's own batch cadence. [`DURABLE_HEAD_GROUP_MAX_BYTES`] bounds
-/// the group from the memory side, because staged undo records and outcomes
-/// ride in the group until it commits.
-pub const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
+pub(super) const DURABLE_HEAD_GROUP_BLOCKS: usize = 64;
 
 /// Serialized block bytes one group may hold before it must commit.
-///
-/// Whichever cap hits first ends the group, so early-chain windows commit
-/// every 64 blocks and tip-size windows commit on bytes well before that.
-pub const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
+const DURABLE_HEAD_GROUP_MAX_BYTES: usize = 8 << 20;
 
 /// How a committed block reaches its durable head and the published tip.
-///
-/// [`PublishMode::Now`] commits and publishes inside the per-block path.
-/// [`PublishMode::Grouped`] buffers the commit facts in a [`WindowGroup`]:
-/// the window syncs once per group, lands one head batch per verified
-/// prefix, and publishes the prefix in order after the batch — one
 pub(super) enum PublishMode<'a> {
     Now,
     Grouped(&'a mut WindowGroup),
@@ -56,17 +30,16 @@ pub(super) enum PublishMode<'a> {
     /// committed. The stored head receipt covers it, so nothing syncs and
     /// nothing re-commits: replay rebuilds the derived state the crash
     /// lost — coins, bookkeeping, journal tail — and publishes under the
-    /// receipt the head already issued.
+    /// receipt the head already issued. Only the final replayed block takes
+    /// the head's certified chain-transaction count; intermediate tips keep
+    /// their reconstructed count so a progress checkpoint remains coherent.
     Replay {
         receipt: super::durable::DurableReceipt,
+        certify_head: bool,
     },
 }
 
 /// One staged block awaiting its group's durable commit.
-///
-/// The staged outcome's tip carries this block's own cumulative chain tx
-/// count, which its publication uses; the group's receipt certifies the last
-/// staged tip.
 pub(super) struct PendingBlockCommit {
     /// Commit id 0 until the group's batch assigns the prefix id.
     pub outcome: ConnectOutcome,
@@ -81,27 +54,15 @@ pub(super) struct PendingBlockCommit {
 }
 
 /// A bounded verified prefix staged for one durable group commit.
-///
-/// Staging is infallible and in-memory; [`WindowGroup::flush`] does the
-/// ordered durable work: sync the appended bytes once, land one head batch
-/// naming every undo and locator row of the prefix, then publish the
-/// prefix's tips in order. `Ok` from the batch is the receipt for the whole
-/// prefix, so publication — which follows the flush — never outruns
-/// durability (`INV-04`).
 #[derive(Default)]
 pub(super) struct WindowGroup {
     pending: Vec<PendingBlockCommit>,
     staged_bytes: usize,
-    first_prev: Option<Hash256>,
 }
 
 impl WindowGroup {
     /// The chain view the next staged block builds on: the group's last
     /// staged tip, or `None` when the caller must read the published tip.
-    ///
-    /// Grouped blocks cannot read `applied_tip` for their predecessor — the
-    /// prefix publishes only after its batch (`INV-04`) — so the staged
-    /// outcome is the in-memory chain state the next block extends.
     pub(super) fn predecessor(
         &self,
         prev_hash: Hash256,
@@ -125,9 +86,6 @@ impl WindowGroup {
 
     pub(super) fn stage(&mut self, pending: PendingBlockCommit) {
         self.staged_bytes += pending.outcome.block_bytes.len();
-        if self.pending.is_empty() {
-            self.first_prev = Some(pending.prev_hash);
-        }
         self.pending.push(pending);
     }
 
@@ -140,14 +98,15 @@ impl WindowGroup {
     /// Commits and publishes the staged prefix, returning its outcomes with
     /// the group's `commit_id`. On error nothing is drained: the prefix
     /// stays staged for the caller to retry or report.
-    pub(super) fn flush(
+    fn flush(
         &mut self,
         handles: &Chainstate,
     ) -> core::result::Result<Vec<ConnectOutcome>, ApplyError> {
-        let (last, first_prev) = match (self.pending.last(), self.first_prev) {
-            (Some(last), Some(first_prev)) => (last, first_prev),
+        let (first, last) = match (self.pending.first(), self.pending.last()) {
+            (Some(first), Some(last)) => (first, last),
             _ => return Ok(Vec::new()),
         };
+        let first_prev = first.prev_hash;
         let sync_started = quanta::Instant::now();
         sync_appended_blocks(handles)?;
         let group_sync_us = sync_started.elapsed().as_micros();
@@ -211,7 +170,6 @@ impl WindowGroup {
         // values are the ones the batch certified, so this tail is as
         // infallible as the single-block publication.
         self.staged_bytes = 0;
-        self.first_prev = None;
         let published = self
             .pending
             .drain(..)
@@ -231,14 +189,13 @@ impl WindowGroup {
     /// Drops the staged prefix without committing it. Only for fatal
     /// dispositions, where the state is torn and recovery owns the
     /// reconciliation; the prefix was never published.
-    pub(super) fn abandon(&mut self) {
+    fn abandon(&mut self) {
         self.pending.clear();
         self.staged_bytes = 0;
-        self.first_prev = None;
     }
 }
 
-#[allow(clippy::result_large_err)]
+#[expect(clippy::result_large_err)]
 pub(super) fn apply_window_admitted(
     handles: &Chainstate,
     blocks: &[&Block],
@@ -314,17 +271,7 @@ pub(super) fn apply_window_admitted(
                 // its durable group before reporting, so the durable head
                 // and the published tip keep moving together. A flush
                 // failure is the ambiguous-batch case: fatal, never retried.
-                let flushed = group.flush(handles).map_err(|flush_error| {
-                    group.abandon();
-                    WindowApplyError {
-                        applied: committed.len(),
-                        committed: std::mem::take(&mut committed),
-                        source: flush_error,
-                        disposition: WindowApplyDisposition::Fatal,
-                        invalidated: Box::default(),
-                    }
-                })?;
-                committed.extend(flushed);
+                flush_group(&mut group, handles, &mut committed)?;
                 return Err(WindowApplyError {
                     applied: committed.len(),
                     committed,
@@ -335,45 +282,43 @@ pub(super) fn apply_window_admitted(
             }
         }
         if group.should_flush() {
-            let flushed = group.flush(handles).map_err(|flush_error| {
-                group.abandon();
-                WindowApplyError {
-                    applied: committed.len(),
-                    committed: std::mem::take(&mut committed),
-                    source: flush_error,
-                    disposition: WindowApplyDisposition::Fatal,
-                    invalidated: Box::default(),
-                }
-            })?;
-            committed.extend(flushed);
+            flush_group(&mut group, handles, &mut committed)?;
         }
     }
-    let flushed = group
-        .flush(handles)
-        .map_err(|flush_error| WindowApplyError {
-            applied: committed.len(),
-            committed: std::mem::take(&mut committed),
-            source: flush_error,
-            disposition: WindowApplyDisposition::Fatal,
-            invalidated: Box::default(),
-        })?;
-    committed.extend(flushed);
+    flush_group(&mut group, handles, &mut committed)?;
     Ok(committed)
+}
+
+/// Flushes the group's staged prefix into `committed`. A flush failure is
+/// the ambiguous-batch case — the durable head may or may not name it — so
+/// the group is abandoned and the error is fatal, never retried.
+#[expect(clippy::result_large_err)]
+fn flush_group(
+    group: &mut WindowGroup,
+    handles: &Chainstate,
+    committed: &mut Vec<ConnectOutcome>,
+) -> core::result::Result<(), WindowApplyError> {
+    match group.flush(handles) {
+        Ok(flushed) => {
+            committed.extend(flushed);
+            Ok(())
+        }
+        Err(flush_error) => {
+            group.abandon();
+            Err(WindowApplyError {
+                applied: committed.len(),
+                committed: std::mem::take(committed),
+                source: flush_error,
+                disposition: WindowApplyDisposition::Fatal,
+                invalidated: Box::default(),
+            })
+        }
+    }
 }
 
 /// Invalidates a permanently invalid block's subtree through the shared
 /// chainstate operation, so the window caller can purge download state
 /// without the frontier ever re-offering a descendant of that block.
-///
-/// Returns the marked hashes and the disposition to report. A header missing
-/// from the tree (rejected before insertion, e.g. prev-hash mismatch or `PoW`
-/// failure) has no subtree to invalidate, which leaves the list empty and the
-/// classification untouched. A tree-plan failure can leave the tree partially
-/// marked, so the best remaining tip is republished, the assume-valid gate is
-/// re-evaluated, and the batch escalates to `Fatal`: a permanently invalid
-/// block whose subtree could not be marked must not be retried in-process.
-///
-/// PRE: the caller holds the chain transition and `disposition` is `Permanent`.
 fn invalidate_permanent_failure(
     handles: &Chainstate,
     hash: Hash256,
@@ -398,35 +343,6 @@ fn invalidate_permanent_failure(
 }
 
 /// Classifies an apply failure by what it proves about the header branch.
-///
-/// Only these failures poison the branch: the block and its descendants can
-/// never become valid, so invalidating the subtree is safe and the node
-/// republishes the best valid tip rather than retrying the same block.
-/// Body-binding failures do not prove the header invalid: a different body
-/// can have the same header hash. Operational failures also invalidate nothing.
-///
-/// Fatal failures mean mutation or durable-head state may already have changed
-/// without a reliable commit receipt. They require restart-time recovery;
-/// callers must not retry them in-process. The node-owned `ChainChangeGuard`
-/// must be dropped, not finished, so the mempool generation stays odd until
-/// recovery.
-///
-/// A kernel-backed script failure is Operational because `bitcoinkernel` can
-/// reject a valid block depending on process state (issue #618): the same
-/// block applies successfully after restart. Treating it as Permanent would
-/// freeze the node at the tip and invalidate a valid header subtree with no
-/// retry path. The native interpreter does not produce that spurious failure,
-/// so its `ConsensusError::Script` stays Permanent. The engine field decides
-/// this; the reason text is never inspected.
-///
-/// Backend-neutral shape and selection failures — `PrevoutMatrixSize`,
-/// `PrevoutCount`, `UnsupportedEngine` — are caller wiring errors, not
-/// verdicts about the block or its header. They never prove the header
-/// invalid, so they stay Operational like every other wiring failure.
-/// `UnsupportedEngine` is unreachable through the node (configuration
-/// validation rejects the selection before any block applies); the arm
-/// exists so direct consensus callers cannot turn it into a header
-/// invalidation.
 pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
     use WindowApplyDisposition::{BodyMutated, Fatal, Operational, Permanent};
     use bitcoin_rs_consensus::{ConsensusError, ScriptEngine};
@@ -458,6 +374,7 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
             ConsensusError::Encoding(_)
             | ConsensusError::PrevoutMatrixSize { .. }
             | ConsensusError::PrevoutCount { .. }
+            | ConsensusError::PrevoutMismatch { .. }
             | ConsensusError::UnsupportedEngine { .. }
             | ConsensusError::Kernel(_)
             | ConsensusError::Script {
@@ -472,18 +389,8 @@ pub fn classify_apply_error(error: &ApplyError) -> WindowApplyDisposition {
 
 /// Prepares consecutive blocks against one overlay and verifies all their input
 /// scripts in a single dispatch.
-///
-/// Returns one proof per block, or nothing at all. There is no partial result
-/// by design: a block must never be applied with its scripts skipped on the
-/// strength of a neighbour.
-///
-/// Every reason to give up is silent and cheap, because the per-block path
-/// behind this is complete and produces the real verdict in its documented
-/// order. A header not yet in the tree, a block that does not extend its
-/// predecessor, a prevout that does not resolve, or any failing check all
-/// return nothing.
-#[allow(clippy::too_many_lines)]
-pub(super) fn prove_window<'a>(
+#[expect(clippy::too_many_lines)]
+fn prove_window<'a>(
     handles: &Chainstate,
     blocks: &[&'a Block],
     serialized: &[bytes::Bytes],
@@ -521,8 +428,7 @@ pub(super) fn prove_window<'a>(
                 bitcoin_rs_chain::softfork_state(&tree, handles.network, Some(parent_id), height);
             let cutoff = bitcoin_rs_consensus::locktime_cutoff(
                 softfork.csv_active,
-                tree.median_time_past_at(parent_id, MEDIAN_TIME_PAST_WINDOW)
-                    .unwrap_or(0),
+                tree.median_time_past_at(parent_id).unwrap_or(0),
                 block.header.time,
             );
             // The next block's context needs this one in the tree. Header-first
@@ -595,17 +501,6 @@ pub(super) fn prove_window<'a>(
         .record(prepare_started.elapsed().as_secs_f64());
 
     // Cheap structural checks before any script runs.
-    //
-    // Batching changed the cost of a bad body. The per-block path rejects a
-    // broken merkle root or witness commitment before it verifies a single
-    // script, but the window used to dispatch the whole batch first — so a peer
-    // could send a body with the expected header and one altered witness
-    // reserved value, keeping every txid intact, and force a full window of
-    // script verification for a block that is rejected immediately either way.
-    // Both checks below depend on nothing but the block, so the window runs
-    // them before any script work. The Merkle verdict is already derived in
-    // the one-pass parse, so this is a comparison, not a hash; a
-    // witness-carrying block hashes its witness IDs exactly once below.
     for ((block, unit), context) in blocks.iter().zip(prepared.iter_mut()).zip(&contexts) {
         // The one-pass derivation already reduced these txids through the
         // production walker; comparing the stored root is the same verdict

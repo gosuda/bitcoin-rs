@@ -9,7 +9,8 @@
 //!
 //! Prerequisites:
 //! - `cargo build --bin bitcoin-rs` (default dev profile is fine)
-//! - `scripts/install-bitcoind.sh` for the P2P/reorg scenarios that need Core
+//! - `scripts/install-bitcoind.sh` (`install-bitcoind.ps1` on Windows) for
+//!   the P2P/reorg scenarios that need Core
 //!
 //! Evidence from every run (launch argv, captured stdout/stderr, the RPC
 //! and P2P transcripts) lands in `target/process-harness/e2e/run-*`, under

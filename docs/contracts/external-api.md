@@ -1,28 +1,8 @@
 # External API contract
 
-`API-01`–`API-04` place owners under the
-[contracts precedence rule](README.md). `API-05` is the solo-mining generate
-path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
-recorded Core reference used by the RPC fixture replay gate. `API-08` is
-bounded public exposure. `API-09` is the Esplora dialects. `API-10` is
-broadcast and preview through the admission gateway. `API-11` is the
-BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
-`API-12` is mainnet template operational gates. `API-13` is `submitheader`.
-`API-14` is GBT client-rule negotiation. `API-15` is `submitblock` decode.
-`API-16` is GBT proposal request parsing. `API-17` is `submitblock` uncommitted
-witness fill. `API-18` is Core v31 `submitblock` / GBT proposal duplicate
-vocabulary. `API-19` is BIP22 reject-reason mapping. `API-20` is GBT
-`vbrequired` always 0. `API-21` is Core `CheckWitnessMalleation`
-reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
-`prioritisetransaction` dummy/`fee_delta` arity. `API-24` is
-`prioritisetransaction` dust-output refusal. `API-25` is
-`getmininginfo` omitting unset optional fields. `API-26` is
-`estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-27` is
-`generateblock` txid and raw-tx parse errors. `API-28` is
-`getprioritisedtransactions` `modified_fee` in satoshis. `API-29` is Core
-`generatetoaddress` / `generateblock` invalid-output text. `API-30` is
-`generateblock` `TestBlockValidity` before solve. `API-31` is
-`generateblock` multipath, ranged, and Expand private-key errors.
+`API-01`–`API-32` govern RPC, REST, Esplora and ZMQ under the
+[contracts precedence rule](README.md). The clauses below own each behavior;
+[Proven by](#proven-by) separates existing tests from planned comparisons.
 
 ## Clauses
 
@@ -63,8 +43,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
   authentication, and error ordering follow the pinned Core 31.1
   contract.
 - Failures map through `RpcError` (`crates/rpc/src/error.rs`): standard
-  JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-3`
-  (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
+  JSON-RPC codes (`-32700`, `-32600`..=`-32603`) and Core codes `-1`
+  (miscellaneous runtime failure), `-3` (invalid type), `-5` (not found), `-8` (invalid parameter), `-9`
   (not connected), `-10` (initial download), `-22` (deserialization),
   and `-25` plus `-26` (submission).
 - Amounts are integer satoshis internally. Adapters render the exact
@@ -165,9 +145,10 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 
 
 - **Owner**: the corpus loader in `crates/rpc/tests/support/fixture.rs` owns
-  `PINNED_CORE_VERSION`, `PINNED_CORE_SHA256`, and their validation. Every
-  fixture records the version and exact binary digest used for its capture;
-  missing, empty, or mismatched values fail loading before replay starts.
+  the `core_version` and `core_binary_sha256` provenance pins and their
+  validation. Every fixture records the version and exact binary digest used
+  for its capture; missing, empty, or mismatched values fail loading before
+  replay starts.
 - These pins describe the released Core node used for the recorded RPC
   responses. They are separate from the `bitcoinkernel` oracle and from the
   broader API family declared by `MANIFEST` (`API-01`). Changing either of
@@ -225,12 +206,16 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 ### `API-10`: Broadcast and preview through the admission gateway
 
 
-- `sendrawtransaction`, `testmempoolaccept`, Esplora `POST /tx`, package
-  submissions, and P2P ingress all reach the single `MempoolGateway`
-  (`mempool-policy.md` `POL-02`). Each call carries an explicit
-  `AdmissionOrigin` and its own request fee limits.
-- Esplora is a distinct origin with its own request fee limits, not an
-  alias for the RPC origin. Peer ingress does not inherit RPC limits.
+- `sendrawtransaction`, `testmempoolaccept`, Esplora `POST /tx`, and P2P
+  ingress reach the single `MempoolGateway` (`mempool-policy.md` `POL-02`).
+  Each committing producer carries an explicit `AdmissionOrigin` and its
+  own request fee limits. Aggregate package submission remains unsupported
+  (`POL-05`); its future producer must use this same admission owner.
+- Esplora `POST /tx` is implemented on both `/api` and `/esplora` with
+  `AdmissionOrigin::Esplora` and an explicit, fixed 10,000,000 sat/kvB
+  request ceiling. Its hex body provides no fee override. RPC keeps its
+  own default and `maxfeerate` override; peer ingress has no request cap.
+  The shared gateway owns fee verification and authoritative mutation.
 - Preview runs the identical pipeline and mutates nothing: no membership,
   estimator, relay state, admission sequence, or victims (`POL-06`).
   `testmempoolaccept` returns preview rows in the frozen Core 31.1 shape
@@ -246,8 +231,8 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
   `crates/rpc/src/handlers/mining.rs` `render_block_template`.
 - Capabilities are the producer’s implemented set (`proposal`, `longpoll`).
   Client-advertised names are not echoed.
-- `submitold` is present after a long-poll wait and omitted otherwise. `workid`
-  is not emitted.
+- `submitold` and `workid` are BIP23 extras the pinned template contract
+  does not model; neither is emitted.
 - On signet, the template carries `signet` in `rules` (mandatory) and
   `signet_challenge`. Other networks omit `signet_challenge`.
   - Malformed `longpollid` values, including invalid UTF-8 split boundaries, are rejected without panicking.
@@ -378,8 +363,9 @@ reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
 ### `API-20`: GBT `vbrequired` is always 0
 
 
-- **Owner**: `MiningService::version_bits_for` in
-  `crates/mining/src/coordinator.rs`; signalling deployments are read from
+- **Owner**: `template_from_candidate` in
+  `crates/mining/src/coordinator.rs` (driven by
+  `MiningService::get_block_template`); signalling deployments are read from
   the applied tree through the node-implemented `ChainContextSource`.
 - Core v31 `getblocktemplate` hardcodes `vbrequired` to 0. Signalling
   deployments still appear in `vbavailable`; locked-in bits are not OR'd
@@ -536,6 +522,31 @@ owned by [wallet-facing.md](wallet-facing.md).
 - Multipath is checked first, matching Core `descs.size() > 1` before
   `IsRange()`. A descriptor that is both is the multipath error.
 
+### `API-32`: `gettxspendingprevout` mempool snapshot
+
+- **Owner**: `Mempool::outpoint_spender` owns the spending-index lookup and
+  its typed consistency failure. The RPC adapter validates every input before
+  taking one gateway read guard, captures spending transaction references for
+  all outpoints under that guard, and serializes after releasing it.
+- Results preserve query order, duplicates, and the caller's txid spelling.
+  A row without a mempool spender contains only `txid` and `vout`; no
+  confirmed-spend history is queried. Replacement and removal are visible
+  through the existing mempool index, with no additional state.
+- Positional and named `outputs` / `options`, flattened named options, and
+  the `args` positional prefix accept Core 31.1's `mempool_only` and
+  `return_spending_tx` options. The default is mempool-only; requested
+  `spendingtx` uses full consensus serialization, including witness.
+  With `mempool_only=false`, a missing mempool spender fails with Core's
+  `-1` unavailable-txospenderindex error. An inconsistent spending index
+  becomes an internal error, never an unspent result.
+- Empty output lists, strict object keys, txid syntax, and signed 32-bit
+  nonnegative vout validation follow the pinned reference. Missing or extra
+  argument counts retain local JSON-RPC `-32602` shape errors instead of
+  Core's `-1` help text; the registry declares this deviation.
+- The HTTP request-body limit bounds externally supplied queries; this
+  handler retains O(number of requested outputs) rows and transaction
+  references. It never scans or clones the full mempool.
+
 ## Live gaps
 
 - **Full Core differential suite**: Versioned Core response structs, golden fixtures, and differential test lanes across all RPC methods are tracked under #78 (open).
@@ -593,11 +604,27 @@ owned by [wallet-facing.md](wallet-facing.md).
   `candidate_solves_an_unsolved_regtest_header`,
   `ordered_assembly_keeps_snapshot_order`.
 
+- `API-10`:
+  - `crates/rpc/src/esplora.rs` tests
+    `broadcast_preserves_esplora_origin_and_idempotence`,
+    `broadcast_rejections_are_400_without_mutation`,
+    `broadcast_fee_ceiling_is_independent_of_rpc_overrides`, and
+    `broadcast_fee_ceiling_accepts_equality_and_refuses_one_sat_above`.
+  - `crates/rpc/src/esplora/http.rs` test
+    `admission_consensus_and_retry_failures_preserve_the_http_dialect`.
+  - `crates/p2p/src/tx_relay.rs` local relay and delayed-event tests include
+    Esplora origins; mempool admission tests cover orphan wakeups and absence
+    of peer lifecycle state for local missing-input refusals.
+  - `bin/bitcoin-rs/tests/wallet_facing.rs` test
+    `external_wallet_can_scan_estimate_and_broadcast` exercises both HTTP
+    broadcast directories' maximum-fee and malformed-input refusals, followed
+    by an accepted transaction whose returned id is checked with rust-bitcoin.
+
 - `API-11`:
   - `crates/rpc/src/handlers/mining.rs` tests `getblocktemplate_forwards_longpollid`,
-    `getblocktemplate_emits_submitold_and_omits_it_when_unset`,
     `getblocktemplate_requires_signet_rule_on_signet`
-  - `crates/mining/src/coordinator/candidate_template_tests.rs` test
+  - `crates/mining/src/coordinator/candidate_template_tests.rs` tests
+    `template_facts_follow_mutated_candidate_generation`,
     `signet_template_carries_challenge_and_mandatory_rule`
   - `crates/node/tests/mining.rs` tests `template_does_not_echo_client_capabilities`,
     `signet_template_includes_challenge_and_signet_rule`
@@ -607,9 +634,10 @@ owned by [wallet-facing.md](wallet-facing.md).
     `getblocktemplate_rejects_mainnet_during_ibd`,
     `getblocktemplate_proposal_skips_mainnet_connection_gates`
 - `API-13`:
-  - `crates/rpc/src/handlers/mining.rs` tests `submitheader_rejects_undecodable_headers`,
-    `submitheader_returns_null_and_forwards_decoded_header`,
-    `submitheader_maps_rejected_to_verify_error`
+  - `crates/rpc/src/handlers/mining.rs` test
+    `submitheader_maps_armed_control_failure`; `e2e/tests/mining.rs` tests
+    `mining_rejections_carry_core_error_codes` (decode `-22`) and
+    `template_assembly_header_then_block` (null success)
   - `crates/node/tests/mining.rs` tests `submit_header_admits_a_mined_child_and_is_idempotent`,
     `submit_header_accepts_genesis_before_and_after_bootstrap`,
     `submit_header_requires_the_previous_header`,
@@ -742,5 +770,14 @@ owned by [wallet-facing.md](wallet-facing.md).
   - `crates/rpc/src/handlers/mining.rs` tests
     `generateblock_rejects_multipath_before_ranged_like_core`,
     `generateblock_rejects_hardened_xpub_like_core`
+
+- `API-32`:
+  - `crates/rpc/src/handlers/mempool.rs` tests
+    `gettxspendingprevout_projects_queries_and_removal_from_the_existing_index`
+    and `gettxspendingprevout_rejects_argument_count_with_local_shape_errors`.
+  - `bin/bitcoin-rs/tests/overhaul_process_harness.rs` module
+    `spending_prevout_cases`: pinned Core 31.1 comparison of admitted,
+    replaced, and confirmed spenders, ordered and duplicate requests,
+    optional transaction bytes, named forms, and parameter errors.
 
 ## Vocabulary

@@ -15,7 +15,7 @@
 //!
 //! Leases are bounded by what still exists. A floor at or below the highest
 //! prune line already executed is refused with
-//! [`RetentionError::PrunedBelow`] — the defined required-history-is-gone
+//! [`RetentionError`] — the defined required-history-is-gone
 //! result (`RCV-08`: optional consumer lag cannot retain unlimited
 //! segments, and missing required history is an unavailable result, never a
 //! partial success). An optional consumer that falls that far behind must
@@ -38,7 +38,7 @@
 //! expires that pin once it lags the policy line by more than the granted
 //! [`RetentionBudget`]. An optional consumer therefore cannot retain history
 //! indefinitely, and the answer it receives — granted, pruned, reserved,
-//! missing, corrupt, or shutting down — is the owner's decision, not its
+//! missing, or shutting down — is the owner's decision, not its
 //! own guess.
 
 use crate::pruning::ExecutedFrontier;
@@ -200,7 +200,7 @@ impl RetentionBudget {
 /// [`RetentionRegistry::history_from`] answers permanence, and while a
 /// [`HistoryLease`] is live the owner guarantees no row at or above its
 /// floor is deleted, so a read that returns nothing under that grant is
-/// `Missing` and a read that returns damaged bytes is `Corrupt`. A consumer
+/// `Missing`. A consumer
 /// relays these meanings; it never compares a height against a copied prune
 /// frontier to decide them.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
@@ -226,30 +226,24 @@ pub enum HistoryUnavailable {
     /// appear through backfill or a reconnect. Retry; do not rebuild.
     #[error("retained history is temporarily unavailable")]
     Missing,
-    /// The row is present but damaged. Retrying cannot recover it. Owners
-    /// that verify what they serve answer this; the boundary names it so a
-    /// consumer never has to guess between damage and absence.
-    #[error("retained history is corrupt")]
-    Corrupt,
     /// The node is shutting down, so no new history is granted.
     #[error("history is unavailable while the node shuts down")]
     Shutdown,
 }
 
 /// Why a retention lease could not be granted.
+///
+/// The requested floor names data pruning has already deleted. The
+/// caller's retention budget was exceeded while it was not holding a
+/// lease; the defined recovery is to rebuild from what remains, not to
+/// retry.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Error)]
-pub enum RetentionError {
-    /// The requested floor names data pruning has already deleted. The
-    /// caller's retention budget was exceeded while it was not holding a
-    /// lease; the defined recovery is to rebuild from what remains, not to
-    /// retry.
-    #[error("required history at height {requested} is already pruned (prune line {pruned_below})")]
-    PrunedBelow {
-        /// Floor the caller asked to pin.
-        requested: u32,
-        /// Highest prune line already executed.
-        pruned_below: u32,
-    },
+#[error("required history at height {requested} is already pruned (prune line {pruned_below})")]
+pub struct RetentionError {
+    /// Floor the caller asked to pin.
+    pub requested: u32,
+    /// Highest prune line already executed.
+    pub pruned_below: u32,
 }
 
 impl fmt::Debug for RetentionRegistry {
@@ -303,7 +297,7 @@ impl RetentionRegistry {
         let mut inner = self.inner.lock();
         let line = inner.refusal_line();
         if floor < line {
-            return Err(RetentionError::PrunedBelow {
+            return Err(RetentionError {
                 requested: floor,
                 pruned_below: line,
             });
@@ -412,7 +406,7 @@ impl RetentionRegistry {
     /// claimed. That is the same linearization point [`Self::acquire`] uses
     /// for mandatory readers, in one registry.
     #[must_use = "a dropped lease releases the history pin"]
-    pub fn history_from(
+    pub(crate) fn history_from(
         self: &Arc<Self>,
         floor: u32,
         budget: RetentionBudget,
@@ -512,16 +506,6 @@ impl MandatoryRetention {
     pub fn acquire(&self, floor: u32) -> Result<RetentionLease, RetentionError> {
         self.registry.acquire(floor)
     }
-
-    /// The highest prune line a completed pass recorded.
-    ///
-    /// The read-only companion to [`Self::acquire`]: rows below it are gone,
-    /// so a mandatory consumer learns what it may no longer pin without
-    /// having to provoke the refusal.
-    #[must_use]
-    pub fn pruned_below(&self) -> u32 {
-        self.registry.pruned_below()
-    }
 }
 
 /// One prune pass's claim on the rows it is about to delete.
@@ -580,7 +564,7 @@ impl PruneReservation {
     /// pin rows that no longer exist. Holding it refuses every lease below
     /// the reserved line until restart-time recovery reconciles the durable
     /// record with its deletions — the closed failure mode.
-    pub fn fail_closed(self) {
+    pub(crate) fn fail_closed(self) {
         core::mem::forget(self);
     }
 }
@@ -636,8 +620,7 @@ impl Drop for RetentionLease {
 /// While this lease lives the authority deletes no row at or above its
 /// floor. That guarantee is what types a byte read: a read that returns
 /// nothing under a live grant is transient absence
-/// ([`HistoryUnavailable::Missing`]), never lost history, and a read that
-/// returns damaged bytes is [`HistoryUnavailable::Corrupt`]. The consumer
+/// ([`HistoryUnavailable::Missing`]), never lost history. The consumer
 /// relays those meanings instead of deciding permanence on its own.
 ///
 /// A pass expires the lease when its floor lags the policy line by more than
@@ -786,7 +769,7 @@ mod tests {
 
         assert!(matches!(
             registry.acquire(499),
-            Err(RetentionError::PrunedBelow {
+            Err(RetentionError {
                 requested: 499,
                 pruned_below: 500
             })
@@ -812,7 +795,7 @@ mod tests {
         let reservation = registry.reserve(500);
         assert!(matches!(
             registry.acquire(499),
-            Err(RetentionError::PrunedBelow {
+            Err(RetentionError {
                 requested: 499,
                 pruned_below: 500
             })

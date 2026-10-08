@@ -3,16 +3,18 @@ use hashbrown::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
+use bitcoin::hex::FromHex;
 use bitcoin_rs_chain::{BlockTree, TipSnapshot, regtest_fixture};
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_node::Network;
 use bitcoin_rs_primitives::{
-    Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    Amount, Block, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Witness, deserialize,
 };
 use bitcoin_rs_utxo::UtxoSet;
+use bitcoin_rs_utxo::contract::is_coinbase_tx;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
@@ -27,11 +29,8 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     let chain_tip = block_tree.write().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
     let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
-    let (inbound_headers_tx, inbound_headers_rx_raw) =
-        unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
-    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_p2p::InboundHeaders>();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
     let (handles, coin_stats) = apply_handles_with_coin_stats(
         Network::Regtest,
         Arc::clone(&chain_tip),
@@ -46,6 +45,7 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
         inbound_headers_rx,
         inbound_blocks_rx,
         Arc::clone(&ibd),
+        None,
     );
 
     inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
@@ -85,11 +85,8 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
     let chain_tip = block_tree.write().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
     let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
-    let (inbound_headers_tx, inbound_headers_rx_raw) =
-        unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
-    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_p2p::InboundHeaders>();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
     let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         Arc::clone(&chain_tip),
@@ -104,6 +101,7 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
         inbound_headers_rx,
         inbound_blocks_rx,
         Arc::clone(&ibd),
+        None,
     );
 
     inbound_headers_tx.send(bitcoin_rs_p2p::InboundHeaders {
@@ -132,18 +130,15 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
             .0
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.mature_coinbase_outpoint))
-            .is_none(),
+        utxo.get(&fixture.mature_coinbase_outpoint).is_none(),
         "mature coinbase prevout must be removed by the height-101 spend",
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.funding_outpoint))
-            .is_none(),
+        utxo.get(&fixture.funding_outpoint).is_none(),
         "funding prevout must be removed by the height-102 spend",
     );
     assert!(
-        utxo.get(&primitive_outpoint(fixture.spend_outpoint))
-            .is_some(),
+        utxo.get(&fixture.spend_outpoint).is_some(),
         "height-102 spend output must remain live",
     );
 
@@ -220,10 +215,10 @@ fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, Box<dyn std::erro
             let txid = tx.txid();
             for (vout, txout) in tx.outputs.iter().enumerate() {
                 let outpoint = OutPoint::new(txid, u32::try_from(vout)?);
-                stats.insert_utxo(&outpoint, txout, height, is_coinbase(tx));
-                live_outputs.insert(outpoint, (txout.clone(), height, is_coinbase(tx)));
+                stats.insert_utxo(&outpoint, txout, height, is_coinbase_tx(tx));
+                live_outputs.insert(outpoint, (txout.clone(), height, is_coinbase_tx(tx)));
             }
-            if is_coinbase(tx) {
+            if is_coinbase_tx(tx) {
                 continue;
             }
             for input in &tx.inputs {
@@ -242,7 +237,6 @@ fn expected_coin_stats(blocks: &[&Block]) -> Result<CoinStats, Box<dyn std::erro
     Ok(stats)
 }
 
-#[allow(clippy::arc_with_non_send_sync)]
 fn apply_handles_with_coin_stats(
     network: Network,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -254,7 +248,6 @@ fn apply_handles_with_coin_stats(
     (handles, coin_stats)
 }
 
-#[allow(clippy::arc_with_non_send_sync)]
 fn apply_handles_with_coin_stats_and_utxo(
     network: Network,
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -279,8 +272,8 @@ fn apply_handles_with_coin_stats_and_utxo(
 }
 
 fn regtest_genesis_block() -> Result<Block, Box<dyn std::error::Error>> {
-    let bytes = hex_decode(REGTEST_GENESIS_HEX)?;
-    Ok(Block::consensus_decode(&bytes)?)
+    let bytes = Vec::<u8>::from_hex(REGTEST_GENESIS_HEX)?;
+    Ok(deserialize::<Block>(&bytes)?)
 }
 
 fn child_coinbase_block(parent: &Block, height: u8) -> Result<Block, Box<dyn std::error::Error>> {
@@ -348,38 +341,4 @@ fn spend_to_op_true(
 
 fn op_true_script() -> Script {
     vec![0x51].into()
-}
-
-fn primitive_outpoint(outpoint: OutPoint) -> OutPoint {
-    outpoint
-}
-
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1
-        && tx.inputs[0].previous_output.txid == Txid::default()
-        && tx.inputs[0].previous_output.vout == u32::MAX
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let (chunks, remainder) = hex.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "odd hex length").into());
-    }
-
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in chunks {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        bytes.push((high << 4) | low);
-    }
-    Ok(bytes)
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, Box<dyn std::error::Error>> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid hex digit").into()),
-    }
 }

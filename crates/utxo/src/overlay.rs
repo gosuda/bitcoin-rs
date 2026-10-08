@@ -89,8 +89,8 @@ impl<'u> WindowOverlay<'u> {
 }
 
 /// Why the view refused to fold in a block.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[allow(missing_docs)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+#[expect(missing_docs)]
 pub enum WindowOverlayError {
     #[error("block has {transactions} transactions but {txids} txids were supplied")]
     TxidCountMismatch { transactions: usize, txids: usize },
@@ -140,11 +140,7 @@ mod tests {
 
     /// A coinbase paying one output, so `advance` sees a creation.
     fn paying(script_pubkey: Vec<u8>, value: u64) -> Tx {
-        tx(
-            OutPoint::new(Txid::default(), u32::MAX),
-            script_pubkey,
-            value,
-        )
+        tx(OutPoint::null(), script_pubkey, value)
     }
 
     fn spending(previous_output: OutPoint) -> Tx {

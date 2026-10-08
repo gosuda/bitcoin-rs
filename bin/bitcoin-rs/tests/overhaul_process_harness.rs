@@ -11,10 +11,17 @@
     reason = "process custody failures must name the offending identity"
 )]
 
-mod support;
+// The harness consumes only the release identity's binary digest; the rest
+// of the reference record stays dead in this binary.
+#[expect(dead_code, reason = "only the release bitcoind digest is read")]
+#[path = "support/reference_set.rs"]
+mod reference_set;
 
 #[path = "support/policy_cases.rs"]
 mod policy_cases;
+
+#[path = "support/spending_prevout_cases.rs"]
+mod spending_prevout_cases;
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -30,17 +37,47 @@ use bitcoin_rs_e2e::node::START_TIMEOUT;
 use bitcoin_rs_e2e::process_peer::connect_loopback;
 use bitcoin_rs_e2e::rpc::exchange;
 use bitcoin_rs_e2e::{ClockControl, Error, Kind, ProcessNode, SpawnOptions};
+use reference_set::reference_set;
 use serde_json::{Value, json};
-use support::reference_set::reference_set;
 
 // A height-1 coinbase is mature for admission after 101 common blocks.
 const COMMON_BLOCKS: u32 = 101;
 
-/// Waits for the kernel to drop `/proc/<pid>` after the child is reaped.
+/// Whether the OS still reports a live process under `pid`. On unix the
+/// kernel drops `/proc/<pid>` once the parent reaps the child; Windows
+/// answers via the process object's exit code.
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Whether the OS still reports a live process under `pid`. Windows marks
+/// a terminated object's exit code, so a present-but-dead pid is not alive.
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: the returned handle is checked for null and closed on every
+    // path; `code` is a plain out-param the call fully overwrites.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0_u32;
+        let alive = GetExitCodeProcess(handle, std::ptr::from_mut(&mut code)) != 0
+            && i32::try_from(code) == Ok(STILL_ACTIVE);
+        let _ = CloseHandle(handle);
+        alive
+    }
+}
+
+/// Waits for the kernel to drop the child after it is reaped.
 fn assert_reaped(pid: u32) {
-    let proc_entry = format!("/proc/{pid}");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Path::new(&proc_entry).exists() {
+    while pid_is_alive(pid) {
         assert!(Instant::now() < deadline, "child {pid} survived cleanup");
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -471,6 +508,8 @@ fn missing_reference_binary_names_the_pinned_digest() {
     let pinned = reference_set()
         .expect("reference set")
         .release
+        .current_artifact()
+        .expect("a pinned artifact for this platform")
         .bitcoind_sha256;
     let pinned = sha256::Hash::from_byte_array(pinned).to_string();
 
@@ -606,7 +645,22 @@ fn serve_reply(reply: &'static [u8], delay: Duration) -> (SocketAddr, JoinHandle
         loop {
             assert!(request.len() < 4096, "unexpected oversized fixture request");
             let mut chunk = [0_u8; 512];
-            let count = stream.read(&mut chunk).expect("request bytes");
+            let count = match stream.read(&mut chunk) {
+                Ok(count) => count,
+                // RCVTIMEO expiry arrives as WouldBlock; a loaded scheduler
+                // can stall the client past one read bound, so retry against
+                // the responder's total deadline.
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(Instant::now() < deadline, "client stalled on its request");
+                    continue;
+                }
+                Err(error) => panic!("request bytes: {error}"),
+            };
             assert!(count > 0, "request ended before its body");
             request.extend_from_slice(chunk.get(..count).expect("read chunk"));
             if let Some(split) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
@@ -675,7 +729,21 @@ fn dribbled_http_response_cannot_renew_the_request_deadline() {
             .set_write_timeout(Some(Duration::from_secs(1)))
             .expect("bounded write");
         let mut request = [0_u8; 4096];
-        assert!(stream.read(&mut request).expect("request") > 0);
+        loop {
+            match stream.read(&mut request) {
+                Ok(count) if count > 0 => break,
+                Ok(_) => panic!("request ended before its body"),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(Instant::now() < deadline, "client never sent");
+                }
+                Err(error) => panic!("request: {error}"),
+            }
+        }
         for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}" {
             if stream.write_all(&[*byte]).is_err() {
                 break;
@@ -886,7 +954,13 @@ fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), 
 fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Error> {
     let deadline = readiness_deadline();
     let mined = loop {
-        match node.rpc("generatetoaddress", &json!([blocks, MINING_ADDRESS])) {
+        // The transport shares the readiness deadline: a bulk mine
+        // legitimately exceeds the per-request budget on slow hosts.
+        match node.rpc_until(
+            "generatetoaddress",
+            &json!([blocks, MINING_ADDRESS]),
+            deadline,
+        ) {
             Ok(mined) => break mined,
             Err(Error::Rpc { message, .. }) if message.contains("applied tip is not available") => {
                 assert!(

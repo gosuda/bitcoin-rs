@@ -20,13 +20,13 @@ pub const U24_MAX: u32 = 0x00FF_FFFF;
 
 /// Encodes a block height so lexicographic byte order matches numeric order.
 #[must_use]
-pub const fn encode_height(height: u32) -> [u8; HEIGHT_SIZE] {
+pub(crate) const fn encode_height(height: u32) -> [u8; HEIGHT_SIZE] {
     height.to_be_bytes()
 }
 
 /// Decodes a block height stored by [`encode_height`].
 #[must_use]
-pub const fn decode_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
+pub(crate) const fn decode_height(bytes: [u8; HEIGHT_SIZE]) -> u32 {
     u32::from_be_bytes(bytes)
 }
 

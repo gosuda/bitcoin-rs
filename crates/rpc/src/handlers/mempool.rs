@@ -1,8 +1,10 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
+use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_mempool::MempoolEntry;
-use sonic_rs::Value;
+use bitcoin_rs_primitives::{OutPoint, consensus_bytes};
+use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::compat::convert::{i64_saturated, sat_to_btc, signed_sat_to_btc, typed_to_sonic};
 use crate::context::Context;
@@ -58,6 +60,209 @@ pub(crate) fn getmempoolentry(ctx: &Arc<Context>, params: &Value) -> Result<Valu
         .entry_by_txid(&txid)
         .ok_or(RpcError::NotFound("transaction not in mempool"))?;
     typed_to_sonic(&v31::GetMempoolEntry(mempool_entry_typed(entry, &pool)))
+}
+
+/// Resolve all requested outpoints against one mempool generation. Copy only
+/// transaction references while locked; hex encoding and JSON serialization
+/// happen after the guard is released.
+pub(crate) fn gettxspendingprevout(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
+    let (outputs, options) = spending_prevout_arguments(params)?;
+    if !outputs.is_array() && !options.is_null() && !options.is_object() {
+        return Err(RpcError::InvalidType(format!(
+            "Wrong type passed:\n{{\n    \"Position 1 (outputs)\": \"JSON value of type {} is not of expected type array\",\n    \"Position 2 (options)\": \"JSON value of type {} is not of expected type object\"\n}}",
+            super::json_type_name(outputs),
+            super::json_type_name(&options),
+        )));
+    }
+    let outputs = outputs
+        .as_array()
+        .ok_or_else(|| super::wrong_type(1, "outputs", outputs, "array"))?;
+    if !options.is_null() && !options.is_object() {
+        return Err(super::wrong_type(2, "options", &options, "object"));
+    }
+    if outputs.is_empty() {
+        return Err(RpcError::InvalidParameter(
+            "Invalid parameter, outputs are missing".to_owned(),
+        ));
+    }
+    check_prevout_fields(
+        &options,
+        &[("mempool_only", "bool"), ("return_spending_tx", "bool")],
+        true,
+    )?;
+    let option = |key, default| {
+        options.get(key).map_or(Ok(default), |value| {
+            value
+                .as_bool()
+                .ok_or_else(|| super::wrong_type_plain(value, "bool"))
+        })
+    };
+    let mempool_only = option("mempool_only", true)?;
+    let return_spending_tx = option("return_spending_tx", false)?;
+    let prevouts = outputs
+        .iter()
+        .map(|output| {
+            if !output.is_object() {
+                return Err(super::wrong_type_plain(output, "object"));
+            }
+            check_prevout_fields(output, &[("txid", "string"), ("vout", "number")], false)?;
+            let txid_text = output["txid"]
+                .as_str()
+                .ok_or_else(|| RpcError::InvalidType("Missing txid".to_owned()))?;
+            let txid = parse_txid(txid_text, "txid")?;
+            let index = output["vout"]
+                .as_i64()
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or_else(|| RpcError::Misc("JSON integer out of range".to_owned()))?;
+            let vout = u32::try_from(index).map_err(|_| {
+                RpcError::InvalidParameter("Invalid parameter, vout cannot be negative".to_owned())
+            })?;
+            Ok((OutPoint::new(txid, vout), txid_text))
+        })
+        .collect::<Result<Vec<_>, RpcError>>()?;
+    let spenders = {
+        let pool = ctx.mempool.gateway.read();
+        prevouts
+            .iter()
+            .map(|(outpoint, _)| {
+                pool.outpoint_spender(*outpoint)
+                    .map(|spender| {
+                        spender.map(|spender| (spender.entry.txid, Arc::clone(&spender.entry.tx)))
+                    })
+                    .map_err(|error| RpcError::Internal(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let rows = prevouts.into_iter().zip(spenders).map(|((outpoint, txid), spender)| {
+        let vout = outpoint.vout;
+        if !mempool_only && spender.is_none() {
+            return Err(RpcError::Misc(format!(
+                "No spending tx for the outpoint {}:{} in mempool, and txospenderindex is unavailable.",
+                outpoint.txid, vout,
+            )));
+        }
+        Ok(v31::GetTxSpendingPrevoutItem {
+            // Core echoes the caller's spelling, including uppercase hex.
+            txid: txid.to_owned(),
+            vout: outpoint.vout,
+            spending_txid: spender.as_ref().map(|(txid, _)| txid.to_string()),
+            spending_tx: spender.as_ref().filter(|_| return_spending_tx)
+                .map(|(_, tx)| consensus_bytes(tx.as_ref()).to_lower_hex_string()),
+            block_hash: None,
+        })
+    }).collect::<Result<Vec<_>, _>>()?;
+    typed_to_sonic(&v31::GetTxSpendingPrevout(rows))
+}
+
+/// Core's strict object check validates declared fields before unknown keys.
+fn check_prevout_fields(
+    value: &Value,
+    fields: &[(&str, &str)],
+    allow_null: bool,
+) -> Result<(), RpcError> {
+    for &(key, expected) in fields {
+        let field = value.get(key);
+        if field.is_none_or(JsonValueTrait::is_null) {
+            if allow_null {
+                continue;
+            }
+            return Err(RpcError::InvalidType(format!("Missing {key}")));
+        }
+        if let Some(field) = field {
+            let actual = super::json_type_name(field);
+            if actual != expected {
+                return Err(RpcError::InvalidType(format!(
+                    "JSON value of type {actual} for field {key} is not of expected type {expected}",
+                )));
+            }
+        }
+    }
+    if let Some(object) = value.as_object() {
+        for (key, _) in object {
+            if !fields.iter().any(|(name, _)| *name == key) {
+                return Err(RpcError::InvalidType(format!("Unexpected key {key}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bind the method's named forms, including Core's optional `args` prefix.
+fn spending_prevout_arguments(params: &Value) -> Result<(&Value, Value), RpcError> {
+    if let Some(array) = params.as_array() {
+        if array.len() > 2 {
+            return Err(RpcError::InvalidParams("too many parameters"));
+        }
+        return Ok((
+            array
+                .first()
+                .ok_or(RpcError::InvalidParams("outputs is required"))?,
+            array.get(1).cloned().unwrap_or_default(),
+        ));
+    }
+    let object = params
+        .as_object()
+        .ok_or(RpcError::InvalidParams("params must be an array or object"))?;
+    if let Some(key) = object
+        .iter()
+        .map(|(key, _)| key)
+        .filter(|key| {
+            ![
+                "outputs",
+                "options",
+                "mempool_only",
+                "return_spending_tx",
+                "args",
+            ]
+            .contains(key)
+        })
+        .min()
+    {
+        return Err(RpcError::InvalidParameter(format!(
+            "Unknown named parameter {key}"
+        )));
+    }
+    // Core consumes the named `args` key even when it is not an array.
+    let args = params.get("args").and_then(JsonContainerTrait::as_array);
+    if args.is_some_and(|args| args.len() > 2) {
+        return Err(RpcError::InvalidParams("too many parameters"));
+    }
+    let mut options = Value::default();
+    for key in ["mempool_only", "return_spending_tx"] {
+        if let Some(value) = params.get(key) {
+            if params.get("options").is_some() {
+                return Err(RpcError::InvalidParameter(format!(
+                    "Parameter options conflicts with parameter {key}"
+                )));
+            }
+            if options.is_null() {
+                options = sonic_rs::json!({});
+            }
+            let _ = options.insert(key, value.clone());
+        }
+    }
+    if let Some(value) = params.get("options") {
+        options = value.clone();
+    }
+    for (index, key) in [(0, "outputs"), (1, "options")] {
+        let named = params.get(key).is_some() || (index == 1 && !options.is_null());
+        if named && args.is_some_and(|args| args.len() > index) {
+            return Err(RpcError::InvalidParameter(format!(
+                "Parameter {key} specified twice both as positional and named argument"
+            )));
+        }
+    }
+    let outputs = params
+        .get("outputs")
+        .or_else(|| args.and_then(|args| args.first()))
+        .ok_or(RpcError::InvalidParams("outputs is required"))?;
+    if options.is_null() {
+        options = args
+            .and_then(|args| args.get(1))
+            .cloned()
+            .unwrap_or_default();
+    }
+    Ok((outputs, options))
 }
 
 pub(crate) fn getrawmempool(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -248,7 +453,7 @@ mod mempoolminfee_pressure_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
     use alloc::vec::Vec;
@@ -815,6 +1020,81 @@ mod spentby_tests {
                     script_pubkey: vec![0x51].into(),
                 })
                 .collect(),
+        }
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "fixture and RPC failures identify the broken boundary"
+    )]
+    fn gettxspendingprevout_projects_queries_and_removal_from_the_existing_index() {
+        let (ctx, root, _) = graph_ctx();
+        let handler = crate::Handler::new(Arc::clone(&ctx));
+        let outputs = json!([
+            {"txid": root.to_string().to_uppercase(), "vout": 2},
+            {"txid": root.to_string(), "vout": 0},
+            {"txid": root.to_string(), "vout": 3},
+            {"txid": root.to_string().to_uppercase(), "vout": 2},
+        ]);
+        let answer = handler
+            .dispatch("gettxspendingprevout", &json!([outputs]))
+            .expect("spending query");
+        assert_eq!(
+            answer[0], answer[3],
+            "duplicate input remains a duplicate row"
+        );
+        assert_eq!(
+            answer[0]["txid"], outputs[0]["txid"],
+            "preserve caller spelling"
+        );
+        assert_eq!(
+            answer[2], outputs[2],
+            "absent spender omits optional fields"
+        );
+        let pooled_spender = ctx
+            .mempool
+            .gateway
+            .read()
+            .outpoint_spender(OutPoint::new(root, 2))
+            .expect("consistent index")
+            .expect("child b")
+            .entry
+            .txid;
+        assert_eq!(answer[0]["spendingtxid"], json!(pooled_spender.to_string()));
+        ctx.mempool
+            .gateway
+            .pool()
+            .write()
+            .remove_for_reorg(&[pooled_spender]);
+        let after = handler
+            .dispatch("gettxspendingprevout", &json!([outputs]))
+            .expect("after removal");
+        assert_eq!(after[0], outputs[0]);
+        assert_eq!(after[1], answer[1], "other spender remains resident");
+        assert_eq!(after[3], outputs[3]);
+    }
+
+    #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a valid count here would violate the RPC contract"
+    )]
+    fn gettxspendingprevout_rejects_argument_count_with_local_shape_errors() {
+        let handler = crate::Handler::new(Arc::new(Context::new()));
+        for params in [
+            json!([]),
+            json!([[], {}, false]),
+            json!({}),
+            json!({"args": [[], {}, false]}),
+        ] {
+            assert_eq!(
+                handler
+                    .dispatch("gettxspendingprevout", &params)
+                    .expect_err("invalid argument count")
+                    .code(),
+                RpcError::INVALID_PARAMS
+            );
         }
     }
 

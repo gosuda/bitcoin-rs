@@ -8,8 +8,6 @@
 //! and materialized values are byte-identical to the consensus form.
 #![expect(clippy::expect_used, reason = "test assertions")]
 
-use std::ops::Range;
-
 use bitcoin_rs_primitives::layout::{ByteSpan, ParsedBlock, ParsedTransaction};
 use bitcoin_rs_primitives::{Block, DecodeError, Network, Tx, consensus_bytes, deserialize};
 
@@ -51,7 +49,8 @@ fn golden_blocks_validate_all_spans_and_consumed_counts() {
         let mut per_tx_total = 0_usize;
         for (index, span) in parsed.transaction_spans().iter().enumerate() {
             let transaction = parsed
-                .transaction(index)
+                .transactions()
+                .get(index)
                 .unwrap_or_else(|| panic!("height {height} tx {index} missing"));
             let slice = parsed
                 .span_bytes(*span)
@@ -178,29 +177,6 @@ fn segwit_flag_rules_hold() {
             | DecodeError::EndOfData { .. }
             | DecodeError::Varint(_))
     ));
-}
-
-/// Span widening: `file_range` adds the image base in checked `u64`
-/// arithmetic and reports overflow instead of wrapping.
-#[test]
-fn span_file_ranges_widen_in_checked_u64() {
-    let bytes = read_fixture(170);
-    let parsed = ParsedBlock::parse_exact(&bytes).expect("golden parse");
-    let base = u64::MAX - 1_000_000;
-    for span in parsed.transaction_spans() {
-        let file_range: Range<u64> = span
-            .file_range(base)
-            .expect("plenty of headroom under u64::MAX");
-        assert!(file_range.end > file_range.start);
-        assert!(file_range.end <= base + u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-    }
-    // A base at u64::MAX with a non-zero length overflows and reports None.
-    let span = parsed
-        .transaction_spans()
-        .first()
-        .copied()
-        .expect("at least one transaction");
-    assert!(span.file_range(u64::MAX).is_none());
 }
 
 /// Metadata ranges arrive only from parsing (construction is internal), and

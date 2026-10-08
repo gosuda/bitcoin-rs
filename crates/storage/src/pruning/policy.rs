@@ -12,24 +12,6 @@ pub struct PrunePolicy {
 }
 
 impl PrunePolicy {
-    /// Returns a policy that disables pruning.
-    #[must_use]
-    pub const fn full_node() -> Self {
-        Self {
-            target_size_mb: u64::MAX,
-            keep_below_tip: u32::MAX,
-        }
-    }
-
-    /// Returns Bitcoin Core's minimal pruning shape: 550 MiB and 288-block reorg margin.
-    #[must_use]
-    pub const fn minimal() -> Self {
-        Self {
-            target_size_mb: 550,
-            keep_below_tip: CORE_REORG_SAFETY_MARGIN,
-        }
-    }
-
     /// Returns true when this policy disables pruning.
     #[must_use]
     pub const fn is_full_node(self) -> bool {
@@ -47,11 +29,5 @@ impl PrunePolicy {
     pub fn retention_depth(self) -> u32 {
         // SPEC: Core's reorg-safety margin is 288 blocks.
         self.keep_below_tip.max(CORE_REORG_SAFETY_MARGIN)
-    }
-}
-
-impl Default for PrunePolicy {
-    fn default() -> Self {
-        Self::full_node()
     }
 }

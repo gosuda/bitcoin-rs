@@ -19,7 +19,6 @@ use hashbrown::HashMap;
 use parking_lot::{Mutex, RwLock};
 use thiserror::Error;
 
-use crate::connection::PeerSource;
 use crate::listener::ListenerError;
 
 /// Core's `MAX_OUTBOUND_FULL_RELAY_CONNECTIONS` (`net.h:69`).
@@ -124,7 +123,7 @@ impl P2pServiceConfig {
     /// INVARIANT: manual peers do not consume these slots; the two slot
     ///   counts are the only automatic outbound population knobs.
     #[must_use]
-    pub fn total_outbound_active_limit(&self) -> usize {
+    fn total_outbound_active_limit(&self) -> usize {
         self.outbound_full_relay_slots
             .saturating_add(self.outbound_block_relay_slots)
     }
@@ -138,7 +137,7 @@ impl P2pServiceConfig {
     /// INVARIANT: this is the only inbound capacity derivation; the listener
     ///   refuses admission at the result, it never evicts.
     #[must_use]
-    pub fn max_inbound(&self) -> usize {
+    pub(crate) fn max_inbound(&self) -> usize {
         self.max_peer_connections
             .saturating_sub(self.outbound_full_relay_slots)
             .saturating_sub(self.outbound_block_relay_slots)
@@ -190,6 +189,7 @@ pub enum P2pControlError {
     Closed,
 }
 
+#[derive(Default)]
 struct Workers {
     listeners: Vec<JoinHandle<Result<(), ListenerError>>>,
     outbound: Option<JoinHandle<()>>,
@@ -237,10 +237,51 @@ struct ActiveOutbound {
     manual: bool,
 }
 
+/// Cloneable, read-only capability for querying the active manual ban list.
+///
+/// Ban mutations remain with the P2P service; connection workers only test
+/// addresses against the active table.
+#[derive(Clone, Debug)]
+pub struct BannedReader {
+    inner: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+}
+
+impl BannedReader {
+    /// Wraps the shared ban table in a read-only reader capability.
+    #[must_use]
+    pub const fn new(inner: Arc<RwLock<Vec<crate::BannedSubnet>>>) -> Self {
+        Self { inner }
+    }
+
+    /// Acquires a shared read lock on the ban list.
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, Vec<crate::BannedSubnet>> {
+        self.inner.read()
+    }
+
+    /// Returns whether the given IP is banned at the given time.
+    #[must_use]
+    pub fn is_banned(&self, ip: std::net::IpAddr, now: SystemTime) -> bool {
+        crate::subnet::is_banned(&self.inner.read(), ip, now)
+    }
+
+    /// Returns an empty fixture reader for tests.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn fixture_empty() -> Self {
+        Self::new(Arc::new(RwLock::new(Vec::new())))
+    }
+}
+
+impl From<Arc<RwLock<Vec<crate::BannedSubnet>>>> for BannedReader {
+    fn from(inner: Arc<RwLock<Vec<crate::BannedSubnet>>>) -> Self {
+        Self::new(inner)
+    }
+}
+
 /// The sole runtime owner of P2P control state and workers.
 pub struct P2pService {
     config: P2pServiceConfig,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     worker_shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
@@ -249,9 +290,9 @@ pub struct P2pService {
     outbound_tx: Sender<OutboundDial>,
     outbound_rx: Arc<Mutex<Receiver<OutboundDial>>>,
     inbound_headers_tx: Sender<crate::InboundHeaders>,
-    inbound_headers_rx: Arc<Mutex<Receiver<crate::InboundHeaders>>>,
+    inbound_headers_rx: Mutex<Option<Receiver<crate::InboundHeaders>>>,
     inbound_blocks_tx: Sender<crate::InboundBlock>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+    inbound_blocks_rx: Mutex<Option<Receiver<crate::InboundBlock>>>,
     workers: Mutex<Option<Workers>>,
     /// Per-start cancellation observed by listener and connection threads.
     /// A failed start leaves this token asserted; the next start installs a
@@ -271,14 +312,17 @@ impl std::fmt::Debug for P2pService {
 impl P2pService {
     /// Creates an unstarted P2P service and allocates all P2P-owned state.
     #[must_use]
-    pub fn new(config: P2pServiceConfig, shutdown: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        config: P2pServiceConfig,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    ) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
         let (inbound_headers_tx, inbound_headers_rx) = crossbeam_channel::unbounded();
         let (inbound_blocks_tx, inbound_blocks_rx) =
             crossbeam_channel::bounded(config.inbound_block_queue_limit);
         Self {
             config,
-            shutdown,
+            shutdown: shutdown.into(),
             worker_shutdown: Arc::new(AtomicBool::new(false)),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
@@ -288,9 +332,9 @@ impl P2pService {
             outbound_tx,
             outbound_rx: Arc::new(Mutex::new(outbound_rx)),
             inbound_headers_tx,
-            inbound_headers_rx: Arc::new(Mutex::new(inbound_headers_rx)),
+            inbound_headers_rx: Mutex::new(Some(inbound_headers_rx)),
             inbound_blocks_tx,
-            inbound_blocks_rx: Arc::new(Mutex::new(inbound_blocks_rx)),
+            inbound_blocks_rx: Mutex::new(Some(inbound_blocks_rx)),
             workers: Mutex::new(None),
         }
     }
@@ -324,7 +368,7 @@ impl P2pService {
 
         let mut shared = crate::listener::ConnectionShared::new(
             Arc::clone(&self.peer_table),
-            Arc::clone(&self.banned),
+            self.banned_reader(),
             Arc::new(crate::NetworkActivity::from_shared(Arc::clone(
                 &self.network_active,
             ))),
@@ -407,6 +451,7 @@ impl P2pService {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let peer_table = Arc::clone(&self.peer_table);
         let shutdown = Arc::clone(&self.worker_shutdown);
+        let process_shutdown = self.shutdown.clone();
         let full_relay_slots = self.config.outbound_full_relay_slots;
         let block_relay_slots = self.config.outbound_block_relay_slots;
         let active_limit = self.config.total_outbound_active_limit();
@@ -420,7 +465,8 @@ impl P2pService {
                 let mut handles = Vec::new();
                 let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
                 while !shutdown.load(Ordering::Acquire)
-                    && !shared.session_cancel.load(Ordering::Acquire)
+                    && !shared.session_cancel.load()
+                    && !process_shutdown.is_triggered()
                 {
                     reap_finished_outbound_connections(&mut active, &mut handles);
                     let now = Instant::now();
@@ -560,9 +606,14 @@ impl P2pService {
     /// Stops P2P workers and asks all current connection owners to tear down.
     pub fn shutdown(&self) {
         self.session_cancel.lock().store(true, Ordering::Release);
-        self.shutdown.store(true, Ordering::Release);
         self.worker_shutdown.store(true, Ordering::Release);
         apply_network_active(&self.network_active, &self.peer_table, false);
+    }
+
+    /// Returns a reference to the process-wide shutdown reader.
+    #[must_use]
+    pub fn shutdown_reader(&self) -> &bitcoin_rs_chain::LatchReader {
+        &self.shutdown
     }
 
     /// Joins listener and outbound workers. Bootstrap is joined separately so
@@ -650,11 +701,7 @@ impl P2pService {
     pub fn test_install_outbound_worker(&self, handle: JoinHandle<()>) {
         self.workers
             .lock()
-            .get_or_insert_with(|| Workers {
-                listeners: Vec::new(),
-                outbound: None,
-                bootstrap: None,
-            })
+            .get_or_insert_with(Workers::default)
             .outbound = Some(handle);
     }
 
@@ -665,11 +712,7 @@ impl P2pService {
     pub fn test_install_bootstrap_worker(&self, handle: JoinHandle<()>) {
         self.workers
             .lock()
-            .get_or_insert_with(|| Workers {
-                listeners: Vec::new(),
-                outbound: None,
-                bootstrap: None,
-            })
+            .get_or_insert_with(Workers::default)
             .bootstrap = Some(handle);
     }
 
@@ -698,37 +741,6 @@ impl P2pService {
         apply_network_active(&self.network_active, &self.peer_table, active);
     }
 
-    /// Returns the shared admission switch for compatibility with node
-    /// orchestration code that passes the switch into worker constructors.
-    #[must_use]
-    pub fn network_active_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.network_active)
-    }
-
-    /// Returns a snapshot of manual bans.
-    #[must_use]
-    pub fn banned(&self) -> Vec<crate::BannedSubnet> {
-        self.banned.read().clone()
-    }
-
-    /// Returns the service-owned manual ban list handle.
-    #[must_use]
-    pub fn banned_handle(&self) -> Arc<RwLock<Vec<crate::BannedSubnet>>> {
-        Arc::clone(&self.banned)
-    }
-
-    /// Returns a sender for outbound dial requests, manual or not.
-    #[must_use]
-    pub fn outbound_sender(&self) -> Sender<OutboundDial> {
-        self.outbound_tx.clone()
-    }
-
-    /// Returns the service-owned outbound request receiver.
-    #[must_use]
-    pub fn outbound_receiver(&self) -> Arc<Mutex<Receiver<OutboundDial>>> {
-        Arc::clone(&self.outbound_rx)
-    }
-
     /// Adds or replaces one manual ban entry.
     pub fn set_ban(&self, entry: crate::BannedSubnet) {
         let mut banned = self.banned.write();
@@ -746,16 +758,22 @@ impl P2pService {
         self.banned.write().clear();
     }
 
+    /// Returns a read-only reader for the active manual bans.
+    #[must_use]
+    pub fn banned_reader(&self) -> BannedReader {
+        BannedReader::new(Arc::clone(&self.banned))
+    }
+
+    /// Returns a snapshot of current manual bans.
+    #[must_use]
+    pub fn banned(&self) -> Vec<crate::BannedSubnet> {
+        self.banned.read().clone()
+    }
+
     /// Returns configured addnode add addresses.
     #[must_use]
     pub fn added_nodes(&self) -> Vec<SocketAddr> {
         self.added_nodes.read().clone()
-    }
-
-    /// Returns the service-owned persistent addnode view.
-    #[must_use]
-    pub fn added_nodes_handle(&self) -> Arc<RwLock<Vec<SocketAddr>>> {
-        Arc::clone(&self.added_nodes)
     }
 
     /// Applies Core-like addnode state and requests a connection.
@@ -785,36 +803,29 @@ impl P2pService {
         self.added_nodes.write().retain(|current| *current != addr);
     }
 
-    /// Sends a message only to the connection identified by source.
-    ///
-    /// The message is returned when the source is stale or its writer has
-    /// gone away, allowing callers to keep ownership of retry decisions.
-    #[allow(clippy::result_large_err)]
-    pub fn send(&self, source: PeerSource, message: crate::Message) -> Result<(), crate::Message> {
-        self.peer_table.send(source, message)
+    /// Disconnects any active connection with the given address.
+    pub fn disconnect(&self, addr: SocketAddr) -> bool {
+        self.peer_table.disconnect(addr)
     }
 
-    /// Disconnects only the connection identified by source.
-    pub fn disconnect(&self, source: PeerSource) -> bool {
-        self.peer_table.disconnect_source(source)
+    /// Queues an automatic dial for the stale-tip slot-cap unit test.
+    /// Local addnode requests are manual and cannot exercise that allowance.
+    #[cfg(test)]
+    pub(crate) fn test_queue_automatic_dial(
+        &self,
+        addr: SocketAddr,
+    ) -> Result<(), crossbeam_channel::SendError<OutboundDial>> {
+        self.outbound_tx.send(OutboundDial::auto(addr))
     }
 
-    /// Returns a cloned inbound headers receiver for the node sync coordinator.
-    #[must_use]
-    pub fn inbound_headers_receiver(&self) -> Arc<Mutex<Receiver<crate::InboundHeaders>>> {
-        Arc::clone(&self.inbound_headers_rx)
+    /// Takes the inbound headers receiver for the single coordinator.
+    pub fn take_inbound_headers_receiver(&self) -> Option<Receiver<crate::InboundHeaders>> {
+        self.inbound_headers_rx.lock().take()
     }
 
-    /// Returns a sender for inbound header notifications.
-    #[must_use]
-    pub fn inbound_headers_sender(&self) -> Sender<crate::InboundHeaders> {
-        self.inbound_headers_tx.clone()
-    }
-
-    /// Returns a cloned inbound block receiver for the node sync coordinator.
-    #[must_use]
-    pub fn inbound_blocks_receiver(&self) -> Arc<Mutex<Receiver<crate::InboundBlock>>> {
-        Arc::clone(&self.inbound_blocks_rx)
+    /// Takes the inbound block receiver for the single coordinator.
+    pub fn take_inbound_blocks_receiver(&self) -> Option<Receiver<crate::InboundBlock>> {
+        self.inbound_blocks_rx.lock().take()
     }
 
     /// Returns a sender for inbound block notifications.
@@ -824,11 +835,11 @@ impl P2pService {
     }
 }
 
-/// Applies the network-activity transition used by [`P2pService`] and RPC.
+/// Applies the service-owned network-activity transition.
 ///
 /// Disabling cancels current leases; connection owners remove their own
 /// sessions during teardown.
-pub fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active: bool) {
+fn apply_network_active(flag: &AtomicBool, table: &crate::PeerTable, active: bool) {
     flag.store(active, Ordering::Release);
     if !active {
         table.cancel_all();
@@ -869,7 +880,7 @@ fn wait_for_shutdown(shutdown: &AtomicBool, delay: Duration) -> bool {
     true
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 fn run_fixed_peer_bootstrap(
     shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
@@ -1031,7 +1042,7 @@ fn next_outbound_role(
     // liveness checks from separate table passes could drop a dial that
     // registers in between into neither population and over-dial its class.
     let sessions = peer_table.sessions();
-    let census: Vec<&crate::PeerSession> = sessions
+    let census: Vec<&crate::peer_table::PeerSession> = sessions
         .iter()
         .filter(|session| {
             !session.lease.is_inbound()
@@ -1133,12 +1144,12 @@ fn newest_excess_full_relay(
     slots: usize,
     now: Instant,
     is_downloading: impl Fn(crate::PeerSource) -> bool,
-) -> Option<crate::PeerSession> {
+) -> Option<crate::peer_table::PeerSession> {
     // A hand-pinned full-relay connection is outside the census, as Core's
     // `IsFullOutboundConn()` excludes `ConnectionType::MANUAL`
     // (`net_processing.cpp:5558-5604`): it creates no excess and the victim
     // selection below only ever sees automatic connections.
-    let sessions: Vec<crate::PeerSession> = peer_table
+    let sessions: Vec<crate::peer_table::PeerSession> = peer_table
         .sessions()
         .into_iter()
         .filter(|session| {
@@ -1222,7 +1233,6 @@ fn clear_pending_auto_dial(dns_queue: &Mutex<DnsQueueState>, dial: OutboundDial)
     }
 }
 
-#[allow(clippy::needless_pass_by_value)]
 fn run_dns_peer_maintenance(
     DnsPeerMaintenance {
         shutdown,
@@ -1236,7 +1246,7 @@ fn run_dns_peer_maintenance(
         dns_queue,
     }: DnsPeerMaintenance,
 ) {
-    let resolver = crate::SystemDnsResolver::new(port);
+    let resolver = crate::peer::SystemDnsResolver::new(port);
     let seeds: Vec<&str> = seeds.iter().map(String::as_str).collect();
     let mut cursor = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1323,7 +1333,7 @@ fn drain_dns_peer_deficit<R>(
     needed: usize,
 ) -> usize
 where
-    R: crate::DnsResolver + ?Sized,
+    R: crate::peer::DnsResolver + ?Sized,
 {
     if !network_active.load(Ordering::Acquire) || needed == 0 || seeds.is_empty() {
         return 0;
@@ -1373,9 +1383,10 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::PeerSource;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 
     fn idle_ready() -> Arc<dyn Fn(PeerSource) + Send + Sync> {
@@ -1385,7 +1396,7 @@ mod tests {
     /// Every DNS lookup answers with this single address.
     struct OneAddrResolver(SocketAddr);
 
-    impl crate::DnsResolver for OneAddrResolver {
+    impl crate::peer::DnsResolver for OneAddrResolver {
         fn resolve(&self, _seed: &str) -> Result<Vec<SocketAddr>, crate::PeerError> {
             Ok(vec![self.0])
         }
@@ -2000,5 +2011,68 @@ mod tests {
             addr(4),
             "a real automatic excess still retires its newest aged peer"
         );
+    }
+
+    #[test]
+    fn add_node_enqueues_and_respects_queue_capacity() {
+        let service = P2pService::new(
+            P2pServiceConfig {
+                outbound_queue_limit: 1,
+                ..P2pServiceConfig::default()
+            },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let addr1: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
+        let addr2: SocketAddr = "127.0.0.2:8333".parse().expect("addr");
+
+        assert!(service.add_node(addr1, true).is_ok());
+        assert_eq!(service.added_nodes().as_slice(), &[addr1]);
+        let dial = service.outbound_rx.lock().try_recv().expect("recv");
+        assert_eq!(dial, OutboundDial::pinned(addr1));
+
+        service
+            .outbound_tx
+            .try_send(OutboundDial::pinned(addr1))
+            .expect("send");
+
+        assert_eq!(
+            service.add_node(addr2, false),
+            Err(P2pControlError::QueueFull)
+        );
+
+        assert!(service.add_node(addr2, true).is_ok());
+        assert_eq!(service.added_nodes().as_slice(), &[addr1, addr2]);
+    }
+
+    #[test]
+    fn add_node_inactive_skips_queueing() {
+        let service = P2pService::new(
+            P2pServiceConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        service.set_network_active(false);
+        let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
+        assert!(service.add_node(addr, true).is_ok());
+        assert_eq!(service.added_nodes().as_slice(), &[addr]);
+        assert!(service.outbound_rx.lock().try_recv().is_err());
+    }
+
+    #[test]
+    fn add_node_rejects_banned_address() {
+        let service = P2pService::new(
+            P2pServiceConfig::default(),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let subnet: crate::IpSubnet = "127.0.0.0/24".parse().expect("subnet");
+        service.set_ban(crate::BannedSubnet {
+            subnet,
+            ban_created: SystemTime::now(),
+            banned_until: None,
+            reason: String::new(),
+        });
+        let addr: SocketAddr = "127.0.0.1:8333".parse().expect("addr");
+        assert_eq!(service.add_node(addr, true), Err(P2pControlError::Banned));
+        assert_eq!(service.added_nodes().as_slice(), &[]);
+        assert!(service.outbound_rx.lock().try_recv().is_err());
     }
 }

@@ -133,11 +133,6 @@ fn validation_engine_defaults_to_native_and_layers_field_by_field() {
 }
 
 #[test]
-fn validation_engine_is_supported_in_this_build_for_native() {
-    assert!(ValidationEngine::Native.is_supported());
-}
-
-#[test]
 #[cfg(feature = "kernel")]
 fn validation_engine_kernel_is_supported_when_compiled() {
     let layer = UserConfig {

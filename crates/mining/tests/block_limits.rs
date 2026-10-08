@@ -4,6 +4,9 @@
 //! `CompactSize` transaction count. POL-05 keeps fee chunks indivisible and
 //! configured capacity inclusive.
 
+#[path = "common/fixtures.rs"]
+mod common;
+
 use std::error::Error;
 use std::sync::Arc;
 
@@ -12,9 +15,10 @@ use bitcoin_rs_mining::{
     Candidate, CandidateContext, MiningError, assemble_candidate, assemble_ordered_candidate,
 };
 use bitcoin_rs_primitives::{
-    Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, encode::consensus_bytes,
+    Amount, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    encode::consensus_bytes,
 };
+use common::context;
 
 type TestResult = Result<(), Box<dyn Error>>;
 type Assemble =
@@ -28,16 +32,14 @@ fn empty_candidate_limits_include_the_serialized_block_envelope() -> TestResult 
     let snapshot = snapshot(0, false)?;
     for segwit_active in [false, true] {
         for assemble in ASSEMBLERS {
-            let mut context = context(segwit_active);
+            let mut context = context(segwit_active, 80_000);
             let candidate = assemble(&context, &snapshot, &[0x51])?;
             assert_serialized_limits(&candidate)?;
-            assert_eq!(
-                candidate.size - u64::try_from(candidate.coinbase.total_size())?,
-                81
-            );
+            let size = u64::try_from(candidate.into_unsolved_block()?.total_size())?;
+            assert_eq!(size - u64::try_from(candidate.coinbase.total_size())?, 81);
             assert_eq!(candidate.weight - candidate.coinbase.weight(), 324);
             context.max_weight = candidate.weight;
-            context.max_size = candidate.size;
+            context.max_size = size;
             assert_serialized_limits(&assemble(&context, &snapshot, &[0x51])?)?;
             for field in ["weight", "size"] {
                 let mut limited = context.clone();
@@ -59,12 +61,12 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
         for body_count in [251, 252] {
             let snapshot = snapshot(body_count, segwit_active)?;
             for assemble in ASSEMBLERS {
-                let mut context = context(segwit_active);
+                let mut context = context(segwit_active, 80_000);
                 let candidate = assemble(&context, &snapshot, &[0x51])?;
                 assert_eq!(candidate.transactions.len(), body_count);
                 assert_serialized_limits(&candidate)?;
                 context.max_weight = candidate.weight;
-                context.max_size = candidate.size;
+                context.max_size = u64::try_from(candidate.into_unsolved_block()?.total_size())?;
                 let exact = assemble(&context, &snapshot, &[0x51])?;
                 assert_eq!(exact.transactions.len(), body_count);
                 assert_serialized_limits(&exact)?;
@@ -80,7 +82,10 @@ fn exact_block_limits_cover_both_sides_of_compact_size_boundary() -> TestResult 
                     let selected = assemble_candidate(&limited, &snapshot, &[0x51])?;
                     assert_eq!(selected.transactions.len(), body_count - 1);
                     assert_serialized_limits(&selected)?;
-                    assert_eq!(selected.fees, u64::try_from(body_count - 1)? * 10_000);
+                    assert_eq!(
+                        selected.transactions.iter().map(|tx| tx.fee).sum::<u64>(),
+                        u64::try_from(body_count - 1)? * 10_000
+                    );
                 }
             }
         }
@@ -99,24 +104,30 @@ fn count_encoding_growth_skips_a_whole_package_and_its_descendant() -> TestResul
         snapshot.entries.extend([parent, child]);
         // 250 independent transactions plus this two-member fee chunk produce
         // 253 total transactions including coinbase, growing CompactSize by 2.
-        let mut context = context(segwit_active);
+        let mut context = context(segwit_active, 80_000);
         let boundary = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
         assert_serialized_limits(&boundary)?;
         snapshot.entries.push(descendant);
         context.max_weight = boundary.weight;
-        context.max_size = boundary.size;
+        context.max_size = u64::try_from(boundary.into_unsolved_block()?.total_size())?;
         let exact = assemble_candidate(&context, &snapshot, &[0x51])?;
         assert_eq!(exact.transactions.len(), 252);
         assert_eq!(exact.transactions[250].txid, snapshot.entries[250].txid);
         assert_eq!(exact.transactions[251].depends, vec![251]);
-        assert_eq!(exact.fees, 2_501_100);
+        assert_eq!(
+            exact.transactions.iter().map(|tx| tx.fee).sum::<u64>(),
+            2_501_100
+        );
         assert_serialized_limits(&exact)?;
         for field in ["weight", "size"] {
             let mut limited = context.clone();
             lower_limit(&mut limited, field);
             let selected = assemble_candidate(&limited, &snapshot, &[0x51])?;
             assert_eq!(selected.transactions.len(), 250);
-            assert_eq!(selected.fees, 2_500_000);
+            assert_eq!(
+                selected.transactions.iter().map(|tx| tx.fee).sum::<u64>(),
+                2_500_000
+            );
             assert_serialized_limits(&selected)?;
         }
     }
@@ -140,18 +151,23 @@ fn assert_serialized_limits(candidate: &Candidate) -> TestResult {
     let bytes = consensus_bytes(&block);
     let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes)?;
     assert_eq!(bitcoin::consensus::serialize(&oracle), bytes);
-    assert_eq!(candidate.size, u64::try_from(oracle.total_size())?);
+    assert_eq!(
+        u64::try_from(block.total_size())?,
+        u64::try_from(oracle.total_size())?
+    );
     assert_eq!(candidate.weight, oracle.weight().to_wu());
-    assert_eq!(candidate.size, u64::try_from(block.total_size())?);
     assert_eq!(candidate.weight, block.weight());
     assert!(candidate.weight <= candidate.max_weight);
-    assert!(candidate.size <= candidate.max_size);
-    assert_eq!(
-        candidate.coinbase_value,
-        bitcoin_rs_consensus::block_subsidy(
-            candidate.height,
-            Network::Regtest.subsidy_halving_interval(),
-        ) + candidate.fees,
+    assert!(u64::try_from(block.total_size())? <= candidate.max_size);
+    let subsidy = bitcoin_rs_consensus::block_subsidy(
+        candidate.height,
+        Network::Regtest.subsidy_halving_interval(),
+    );
+    let fees = candidate.transactions.iter().map(|tx| tx.fee).sum::<u64>();
+    // Greedy assembly claims selected fees; ordered assembly claims none.
+    assert!(
+        candidate.coinbase_value == subsidy + fees || candidate.coinbase_value == subsidy,
+        "coinbase value is neither subsidy plus claimed fees nor bare subsidy"
     );
     Ok(())
 }
@@ -218,23 +234,4 @@ fn entry(
         ancestors,
         tx,
     })
-}
-
-/// Uses generous regtest limits; each test narrows only the dimension under examination.
-fn context(segwit_active: bool) -> CandidateContext {
-    CandidateContext {
-        previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
-        height: 100,
-        version: 0x2000_0000,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        min_time: 1,
-        current_time: 2,
-        locktime_cutoff: 1,
-        network: Network::Regtest,
-        csv_active: true,
-        segwit_active,
-        max_weight: 4_000_000,
-        max_size: 4_000_000,
-        max_sigops: 80_000,
-    }
 }

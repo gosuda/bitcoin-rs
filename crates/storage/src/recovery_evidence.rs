@@ -98,7 +98,7 @@ impl AppliedTipWitness {
 /// Exactly one rollback event kind.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(tag = "kind", deny_unknown_fields)]
-pub enum RollbackEventKind {
+pub(crate) enum RollbackEventKind {
     /// The durable applied-tip witness is ahead of the restored tip.
     CheckpointFallback {
         /// Restored applied-tip height.
@@ -134,7 +134,7 @@ pub enum RollbackEventKind {
 /// Last-event-wins. The prior valid event is preserved as `.prev`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(deny_unknown_fields)]
-pub struct ChainRollbackEvent {
+pub(crate) struct ChainRollbackEvent {
     /// Format identifier.
     pub format: String,
     /// Genesis block hash in hex.
@@ -149,7 +149,7 @@ pub struct ChainRollbackEvent {
 
 impl ChainRollbackEvent {
     /// Creates an event detected by `detecting_epoch` at `time`.
-    pub fn new(
+    pub(crate) fn new(
         genesis_hash: impl Into<String>,
         detecting_epoch: u64,
         time: u64,
@@ -232,14 +232,22 @@ fn write_sidecar(
                 let _ = std::fs::remove_file(&current);
             }
         }
+        // `std::fs::rename` substitutes atomically over an existing
+        // destination on both platforms — POSIX rename semantics; Windows
+        // applies MoveFileExW REPLACE_EXISTING under the hood — so a crash
+        // can never find the published evidence file gone.
         std::fs::rename(&tmp, &current)?;
-        std::fs::File::open(dir)?.sync_all()?;
+        // std cannot open a directory on Windows; the checkpoint fsync
+        // primitive carries the platform rules for flushing the entry.
+        let capability = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;
+        crate::checkpoint::fs::sync_dir(&capability)?;
         Ok(())
     })();
     if result.is_err() {
         // A returned failure must not leave the staged tmp behind (RCV-03).
         let _ = std::fs::remove_file(&tmp);
     }
+
     result
 }
 
@@ -261,7 +269,7 @@ pub fn write_witness(dir: &Path, witness: &AppliedTipWitness) -> Result<(), Evid
 }
 
 /// Publishes a rollback marker atomically. Last-event-wins.
-pub fn write_marker(dir: &Path, event: &ChainRollbackEvent) -> Result<(), EvidenceError> {
+pub(crate) fn write_marker(dir: &Path, event: &ChainRollbackEvent) -> Result<(), EvidenceError> {
     write_sidecar(dir, MARKER_FILE, &serde_json::to_string(event)?, |data| {
         ChainRollbackEvent::decode(data, &event.genesis_hash).is_some()
     })
@@ -275,22 +283,6 @@ pub fn checkpoint_fallback(
     restored_height: u32,
 ) -> bool {
     witness.writer_epoch < current_epoch && witness.height > restored_height
-}
-
-/// Reads the applied-tip witness through an opened data-dir anchor (current,
-/// then `.prev`); `(0, genesis)` when absent/invalid.
-pub fn read_witness_from_anchor(
-    anchor: &crate::footprint::DataDirAnchor,
-    genesis: &str,
-) -> Result<(u32, String), crate::footprint::FootprintError> {
-    for name in [WITNESS_FILE, &format!("{WITNESS_FILE}.prev")] {
-        if let Some(bytes) = anchor.read_child_file(name, MAX_FILE_BYTES)?
-            && let Some(witness) = AppliedTipWitness::decode(&bytes, genesis)
-        {
-            return Ok((witness.height, witness.block_hash));
-        }
-    }
-    Ok((0, genesis.to_owned()))
 }
 
 #[derive(Clone, Default)]
@@ -413,5 +405,5 @@ impl RecoveryEvidencePublisher {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[expect(clippy::expect_used, clippy::unwrap_used)]
 mod tests;

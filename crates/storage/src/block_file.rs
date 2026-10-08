@@ -13,12 +13,12 @@ use parking_lot::Mutex;
 use crate::{BodyExtent, StorageError};
 
 /// Fixed magic at the start of every flat-file block record.
-pub const BLOCK_FILE_MAGIC: [u8; 4] = *b"BRSB";
+pub(crate) const BLOCK_FILE_MAGIC: [u8; 4] = *b"BRSB";
 /// Maximum size of a normal block-body file: 128 MiB.
-pub const BLOCK_FILE_MAX_BYTES: u64 = 128 * 1024 * 1024;
+pub(crate) const BLOCK_FILE_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Directory name for append-only block-body files under a data directory.
-pub const BLOCK_FILE_DIRECTORY: &str = "blocks";
+pub(crate) const BLOCK_FILE_DIRECTORY: &str = "blocks";
 const BLOCK_FILE_PREFIX: &str = "blk";
 const BLOCK_FILE_SUFFIX: &str = ".dat";
 const FILE_MAX_HEIGHT_PREFIX: &[u8; 7] = b"blkfile";
@@ -27,7 +27,7 @@ const RECORD_HEADER_LEN_U64: u64 = 44;
 const BLOCK_READER_BUFFER_BYTES: usize = 256 << 10;
 
 /// A fixed-width pointer to a framed block body in a flat file.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockFilePosition {
     /// Number of the `blkNNNNN.dat` file.
     pub file_no: u32,
@@ -39,7 +39,7 @@ pub struct BlockFilePosition {
 
 impl BlockFilePosition {
     /// Exact byte width of an encoded block-file position.
-    pub const ENCODED_LEN: usize = 16;
+    pub(crate) const ENCODED_LEN: usize = 16;
 
     /// Encodes this position into the 16-byte little-endian index value.
     #[must_use]
@@ -53,7 +53,7 @@ impl BlockFilePosition {
 
     /// Decodes an exact 16-byte little-endian index value.
     #[must_use]
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
+    pub(crate) fn decode(bytes: &[u8]) -> Option<Self> {
         if bytes.len() != Self::ENCODED_LEN {
             return None;
         }
@@ -124,7 +124,7 @@ struct WriterState {
     rollback_offset: Option<u64>,
 }
 /// Reusable reader for framed block bodies.
-pub struct FlatFileBlockReader {
+pub(crate) struct FlatFileBlockReader {
     blocks_dir: PathBuf,
     state: Option<ReaderState>,
 }
@@ -279,7 +279,7 @@ impl FlatFileBlockStore {
     /// files here, so this store cannot see it; Bitcoin Core counts its undo
     /// files in the same number and this does not.
     #[must_use]
-    pub fn disk_usage(&self) -> u64 {
+    pub(crate) fn disk_usage(&self) -> u64 {
         if self.usage_dirty.load(Ordering::Acquire) {
             let _writer = self.writer.lock();
             if self.usage_dirty.load(Ordering::Relaxed) {
@@ -310,7 +310,7 @@ impl FlatFileBlockStore {
     }
 
     /// Flushes the current append file to stable storage.
-    pub fn sync(&self) -> Result<(), StorageError> {
+    pub(crate) fn sync(&self) -> Result<(), StorageError> {
         let mut writer = self.writer.lock();
         self.recover_failed_append(&mut writer)?;
         writer.file.flush()?;
@@ -324,7 +324,7 @@ impl FlatFileBlockStore {
 
     /// Creates a reusable block-body reader.
     #[must_use]
-    pub fn reader(&self) -> FlatFileBlockReader {
+    pub(crate) fn reader(&self) -> FlatFileBlockReader {
         FlatFileBlockReader {
             blocks_dir: self.blocks_dir.clone(),
             state: None,
@@ -349,7 +349,7 @@ impl FlatFileBlockStore {
     ///
     /// The returned prefix is bound to `height` and `hash`; malformed, missing,
     /// mismatched, or short records return `Ok(None)`.
-    pub fn load_prefix(
+    pub(crate) fn load_prefix(
         &self,
         position: BlockFilePosition,
         height: u32,
@@ -387,7 +387,7 @@ impl FlatFileBlockStore {
 
     /// Returns the file currently receiving appends.
     #[must_use]
-    pub fn current_file_number(&self) -> u32 {
+    pub(crate) fn current_file_number(&self) -> u32 {
         self.writer.lock().file_no
     }
 
@@ -398,7 +398,7 @@ impl FlatFileBlockStore {
     /// a durable head names: every frame at or below the cursor was written
     /// through this store, and [`Self::sync`] makes all of it durable.
     #[must_use]
-    pub fn append_offset(&self) -> u64 {
+    pub(crate) fn append_offset(&self) -> u64 {
         self.writer.lock().append_offset
     }
 
@@ -411,7 +411,7 @@ impl FlatFileBlockStore {
     /// Deletes a numbered file unless it is the current append target.
     ///
     /// Returns `true` only when a file was removed; a missing or current file returns `false`.
-    pub fn delete_file_if_not_current(&self, file_no: u32) -> Result<bool, StorageError> {
+    pub(crate) fn delete_file_if_not_current(&self, file_no: u32) -> Result<bool, StorageError> {
         let writer = self.writer.lock();
         if writer.file_no == file_no {
             return Ok(false);
@@ -528,7 +528,7 @@ impl FlatFileBlockStore {
 
 impl FlatFileBlockReader {
     /// Loads a body only when its frame completely matches the requested height and hash.
-    pub fn load(
+    pub(crate) fn load(
         &mut self,
         position: BlockFilePosition,
         height: u32,
@@ -538,7 +538,7 @@ impl FlatFileBlockReader {
     }
 
     /// Loads at most `limit` body bytes after validating the complete frame header.
-    pub fn load_prefix(
+    pub(crate) fn load_prefix(
         &mut self,
         position: BlockFilePosition,
         height: u32,
@@ -563,7 +563,7 @@ impl FlatFileBlockReader {
     ///
     /// Missing files, malformed frames, mismatched targets, out-of-bounds ranges
     /// and short reads all return `Ok(None)`.
-    pub fn load_range(
+    pub(crate) fn load_range(
         &mut self,
         position: BlockFilePosition,
         height: u32,
@@ -726,8 +726,23 @@ fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)]
+#[cfg(windows)]
+fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
+    // FlushFileBuffers needs GENERIC_WRITE on the directory handle, and
+    // FILE_FLAG_BACKUP_SEMANTICS is what lets a directory be opened at all.
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(blocks_dir)?
+        .sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+#[expect(clippy::unnecessary_wraps)]
 fn sync_blocks_dir(_blocks_dir: &Path) -> Result<(), StorageError> {
     // std has no portable primitive for opening and syncing a directory.
     // Keep the durability boundary explicit where the platform supports it.
@@ -772,14 +787,6 @@ fn write_record(writer: &mut impl io::Write, header: &[u8], body: &[u8]) -> io::
         }
     }
     Ok(())
-}
-
-/// Complete framed record count and byte length in an already-open block file.
-///
-/// Does not truncate an incomplete tail.
-pub fn complete_framed_stats(file: &mut File) -> Result<(u64, u64), StorageError> {
-    let file_len = file.metadata()?.len();
-    framed_stats_between(file, 0, file_len)
 }
 
 fn validate_committed_extent(blocks_dir: &Path, extent: BodyExtent) -> Result<(), StorageError> {
@@ -861,7 +868,9 @@ fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
         if parse_block_file_name(name).is_none() {
             continue;
         }
-        total = total.saturating_add(entry.metadata()?.len());
+        // `DirEntry::metadata` reuses the stale size cached by the directory
+        // enumeration on Windows; a fresh stat sees the kernel's live length.
+        total = total.saturating_add(fs::metadata(entry.path())?.len());
     }
     Ok(total)
 }
@@ -880,12 +889,6 @@ fn highest_block_file_number(blocks_dir: &Path) -> Result<Option<u32>, StorageEr
         highest = Some(highest.map_or(file_no, |current: u32| current.max(file_no)));
     }
     Ok(highest)
-}
-
-/// Returns whether `name` is a `blkNNNNN.dat` block-body file.
-#[must_use]
-pub fn is_block_file_name(name: &str) -> bool {
-    parse_block_file_name(name).is_some()
 }
 
 fn parse_block_file_name(name: &str) -> Option<u32> {

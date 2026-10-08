@@ -23,11 +23,12 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr as _;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, bail};
 use serde::Deserialize;
 use serde::de::{Error as _, MapAccess, Visitor};
 
 use crate::config::{NetworkSelection, NotificationConfig, ScriptIndexMode};
+use bitcoin::hex::FromHex;
 use bitcoin_rs_chainstate::ValidationMode;
 use bitcoin_rs_consensus::ValidationEngine;
 use bitcoin_rs_storage::StorageBackend;
@@ -66,7 +67,7 @@ pub fn parse_validation_engine(value: &str) -> std::result::Result<ValidationEng
 }
 
 /// Parses an environment or file boolean.
-pub fn parse_bool(value: &str) -> Result<bool> {
+fn parse_bool(value: &str) -> Result<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
@@ -77,15 +78,8 @@ pub fn parse_bool(value: &str) -> Result<bool> {
 /// Parses P2P message-start bytes as eight hexadecimal characters.
 pub fn parse_p2p_magic(value: &str) -> Result<[u8; 4]> {
     let value = value.trim();
-    ensure!(
-        value.len() == 8 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "p2p magic must be exactly eight hexadecimal characters"
-    );
-    let mut magic = [0; 4];
-    for (index, slot) in magic.iter_mut().enumerate() {
-        *slot = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
-    }
-    Ok(magic)
+    <[u8; 4]>::from_hex(value)
+        .map_err(|_| anyhow::anyhow!("p2p magic must be exactly eight hexadecimal characters"))
 }
 
 /// Parses one fixed outbound peer endpoint: a socket address or a
@@ -107,7 +101,7 @@ pub fn parse_connect_endpoint(value: &str) -> std::result::Result<String, String
 }
 
 /// Parses a comma-separated listener bind list.
-pub fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
+fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
     value
         .split(',')
         .filter(|part| !part.trim().is_empty())
@@ -121,7 +115,7 @@ pub fn parse_socket_list(value: &str) -> Result<Vec<SocketAddr>> {
 /// CLI applies after its delimiter split and TOML applies per array element,
 /// so no surface quietly accepts a trailing or doubled comma that another
 /// rejects. An all-empty value still means "unset".
-pub fn parse_connect_list(value: &str) -> Result<Vec<String>> {
+fn parse_connect_list(value: &str) -> Result<Vec<String>> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(Vec::new());
@@ -136,14 +130,14 @@ pub fn parse_connect_list(value: &str) -> Result<Vec<String>> {
 ///
 /// The wrap is deliberate: a row's grammar is one function shape, so an option
 /// that cannot fail still reports through `Result`.
-#[allow(clippy::unnecessary_wraps)]
+#[expect(clippy::unnecessary_wraps)]
 fn parse_text(value: &str) -> std::result::Result<String, Infallible> {
     Ok(value.to_owned())
 }
 
 /// Accepts any text as a filesystem path, for the same reason as
 /// [`parse_text`].
-#[allow(clippy::unnecessary_wraps)]
+#[expect(clippy::unnecessary_wraps)]
 fn parse_path(value: &str) -> std::result::Result<PathBuf, Infallible> {
     Ok(PathBuf::from(value))
 }

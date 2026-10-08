@@ -52,7 +52,7 @@ fn fixture(outputs: usize) -> (Tx, bitcoin::Transaction) {
 }
 
 fn double_sha256(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(Sha256::digest(bytes)).into()
+    bitcoin_rs_primitives::encode::double_sha256(bytes).to_le_bytes()
 }
 
 /// BIP143 reference serialization. Raw hash-type bits select fields using the
@@ -159,7 +159,7 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
                 prevout.clone()
             } else {
                 TxOut {
-                    value: VALUE.into(),
+                    value: Amount::from_sat(VALUE),
                     script_pubkey: vec![0x51].into(),
                 }
             };
@@ -175,7 +175,7 @@ fn kernel_witness_parity(tx: &Tx, prevout: &TxOut, witness: &[Vec<u8>]) {
     .expect("kernel accepts independently signed BIP143 input");
     // Every BIP143 mode commits to this amount. Ensure the oracle is not
     // vacuously accepting, and require a script rejection, not an engine error.
-    spent[INPUT].1.value = spent[INPUT].1.value.saturating_add(1_u64.into());
+    spent[INPUT].1.value = spent[INPUT].1.value.saturating_add(Amount::from_sat(1));
     assert!(matches!(
         verify_tx_scripts(
             &signed,
@@ -199,7 +199,7 @@ fn published_bip143_digest_and_signature_anchor_reference() {
         reference_bip143(&oracle, INPUT, &script, VALUE, 1).as_slice(),
         expected,
     );
-    let mut cache = SighashCache::new(&tx);
+    let cache = SighashCache::new(&tx);
     assert_eq!(
         cache
             .segwit_v0_signature_hash_raw(INPUT, &script, Amount::from_sat(VALUE), 1)
@@ -222,11 +222,74 @@ fn published_bip143_digest_and_signature_anchor_reference() {
 }
 
 #[test]
+fn every_segwit_hashtype_byte_matches_reference_and_verifies() {
+    let key = test_key();
+    let pubkey = PublicKey::from_secret_key(SECP256K1, &key)
+        .serialize()
+        .to_vec();
+    let script = hex(SCRIPT_CODE);
+    let prevout = p2wpkh_prevout();
+    for output_count in [1, 2] {
+        // input 1 has no matching output in the one-output fixture. SINGLE
+        // must still hash a complete BIP143 preimage and allow a valid signature.
+        let (tx, oracle) = fixture(output_count);
+        let cache = SighashCache::new(&tx);
+        for byte in 0_u8..=u8::MAX {
+            let raw = u32::from(byte);
+            let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
+            assert_eq!(
+                cache
+                    .segwit_v0_signature_hash_raw(INPUT, &script, Amount::from_sat(VALUE), raw)
+                    .expect("raw BIP143 digest")
+                    .as_byte_array(),
+                &expected,
+                "outputs={output_count}, raw={raw:#x}",
+            );
+            let message = Message::from_digest(expected);
+            let mut signature = SECP256K1
+                .sign_ecdsa(&message, &key)
+                .serialize_der()
+                .to_vec();
+            signature.push(byte);
+            let witness = vec![signature, pubkey.clone()];
+            assert_eq!(
+                verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY),
+                Ok(true),
+                "consensus: outputs={output_count}, raw={raw:#x}",
+            );
+            let mut wrong_amount = prevout.clone();
+            wrong_amount.value = Amount::from_sat(wrong_amount.value.to_sat() + 1);
+            assert_eq!(
+                verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
+                Err(ScriptError::Invalid {
+                    code: ScriptErrCode::EvalFalse,
+                }),
+                "amount commitment: outputs={output_count}, raw={raw:#x}",
+            );
+            #[cfg(feature = "kernel")]
+            kernel_witness_parity(&tx, &prevout, &witness);
+            let strict = VerifyFlags::MANDATORY.union(VerifyFlags::STRICTENC);
+            let result = verify_witness(&tx, &prevout, &witness, strict);
+            if matches!(byte, 1 | 2 | 3 | 0x81 | 0x82 | 0x83) {
+                assert_eq!(result, Ok(true));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(ScriptError::Invalid {
+                        code: ScriptErrCode::SigHashtype,
+                    }),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn raw_segwit_hash_commits_all_32_bits_and_checks_input_bounds() {
     let script = hex(SCRIPT_CODE);
     for output_count in [1, 2] {
         let (tx, oracle) = fixture(output_count);
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
         for raw in [0x100, 0x101, 0x1234_5682, 0x8000_0083, u32::MAX] {
             let expected = reference_bip143(&oracle, INPUT, &script, VALUE, raw);
             let actual = cache
@@ -266,7 +329,7 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
     ];
     for output_count in [1, 2] {
         let (tx, oracle) = fixture(output_count);
-        let mut cache = SighashCache::new(&tx);
+        let cache = SighashCache::new(&tx);
         for (mode, raw) in modes {
             assert_eq!(
                 cache
@@ -286,38 +349,6 @@ fn typed_segwit_api_preserves_named_modes_and_default_rejection() {
                 ),
                 Err(SighashError::DefaultOnlyTaproot),
             );
-        }
-    }
-}
-
-#[test]
-fn raw_segwit_script_code_is_verbatim_across_compactsize_boundaries() {
-    // These are digest-API inputs, not necessarily executable scripts. Mixing
-    // scripts, amounts, and modes on one cache must not reuse script-dependent
-    // or amount-dependent state. Both CompactSize encodings around 253 matter.
-    for output_count in [1, 2] {
-        let (tx, oracle) = fixture(output_count);
-        let mut cache = SighashCache::new(&tx);
-        for size in [0, 1, 252, 253, 520, 10_000] {
-            let script = vec![0xab; size];
-            for value in [VALUE, VALUE + 1] {
-                for raw in [0, 1, 3, 0x83, 0xc2, u32::MAX] {
-                    let expected = reference_bip143(&oracle, INPUT, &script, value, raw);
-                    assert_eq!(
-                        cache
-                            .segwit_v0_signature_hash_raw(
-                                INPUT,
-                                &script,
-                                Amount::from_sat(value),
-                                raw
-                            )
-                            .expect("raw script-code digest")
-                            .as_byte_array(),
-                        &expected,
-                        "outputs={output_count}, script_len={size}, value={value}, raw={raw:#x}",
-                    );
-                }
-            }
         }
     }
 }
@@ -348,48 +379,27 @@ fn separator_witness_script(pubkey: &[u8], multisig: bool, verify: bool) -> Vec<
     script
 }
 
-/// (signed script code, witness script, prevout, multisig, rejection code)
-type Shape = (Vec<u8>, Vec<u8>, TxOut, bool, ScriptErrCode);
-
 #[test]
-fn every_hashtype_verifies_all_witness_ecdsa_opcodes() {
+fn every_hashtype_verifies_all_witness_ecdsa_opcodes_with_separators() {
     let key = test_key();
     let pubkey = PublicKey::from_secret_key(SECP256K1, &key).serialize();
-    // The P2WPKH shape signs the interpreter's implicit script code; the P2WSH
-    // shapes sign the suffix after their executed CODESEPARATOR.
-    let mut shapes: Vec<Shape> = vec![(
-        hex(SCRIPT_CODE),
-        Vec::new(),
-        p2wpkh_prevout(),
-        false,
-        ScriptErrCode::EvalFalse,
-    )];
     for (multisig, verify) in [(false, false), (false, true), (true, false), (true, true)] {
         let script = separator_witness_script(&pubkey, multisig, verify);
         let mut program = vec![0x00, 0x20];
         program.extend_from_slice(&Sha256::digest(&script));
+        let prevout = TxOut {
+            value: Amount::from_sat(VALUE),
+            script_pubkey: Script::from_bytes(program),
+        };
         let failure = match (multisig, verify) {
             (false, true) => ScriptErrCode::CheckSigVerify,
             (true, true) => ScriptErrCode::CheckMultisigVerify,
             (_, false) => ScriptErrCode::EvalFalse,
         };
-        shapes.push((
-            script[1..].to_vec(),
-            script.clone(),
-            TxOut {
-                value: Amount::from_sat(VALUE),
-                script_pubkey: Script::from_bytes(program),
-            },
-            multisig,
-            failure,
-        ));
-    }
-
-    for (script_code, witness_script, prevout, multisig, failure) in shapes {
         for output_count in [1, 2] {
             let (tx, oracle) = fixture(output_count);
             for byte in 0_u8..=u8::MAX {
-                let digest = reference_bip143(&oracle, INPUT, &script_code, VALUE, u32::from(byte));
+                let digest = reference_bip143(&oracle, INPUT, &script[1..], VALUE, u32::from(byte));
                 let mut signature = SECP256K1
                     .sign_ecdsa(&Message::from_digest(digest), &key)
                     .serialize_der()
@@ -399,24 +409,18 @@ fn every_hashtype_verifies_all_witness_ecdsa_opcodes() {
                 if multisig {
                     witness.push(Vec::new()); // CHECKMULTISIG dummy, not a signature
                 }
-                witness.push(signature);
-                if witness_script.is_empty() {
-                    witness.push(pubkey.to_vec());
-                } else {
-                    witness.push(witness_script.clone());
-                }
+                witness.extend([signature, script.clone()]);
                 assert_eq!(
                     verify_witness(&tx, &prevout, &witness, VerifyFlags::MANDATORY),
                     Ok(true),
-                    "outputs={output_count}, raw={byte:#x}",
+                    "multisig={multisig}, verify={verify}, outputs={output_count}, raw={byte:#x}",
                 );
-                // Every BIP143 mode commits to the spent amount.
                 let mut wrong_amount = prevout.clone();
                 wrong_amount.value = Amount::from_sat(wrong_amount.value.to_sat() + 1);
                 assert_eq!(
                     verify_witness(&tx, &wrong_amount, &witness, VerifyFlags::MANDATORY),
                     Err(ScriptError::Invalid { code: failure }),
-                    "wrong amount: outputs={output_count}, raw={byte:#x}",
+                    "wrong amount: multisig={multisig}, verify={verify}, raw={byte:#x}",
                 );
                 let strict = VerifyFlags::MANDATORY.union(VerifyFlags::STRICTENC);
                 let expected = if matches!(byte, 1 | 2 | 3 | 0x81 | 0x82 | 0x83) {
@@ -429,6 +433,38 @@ fn every_hashtype_verifies_all_witness_ecdsa_opcodes() {
                 assert_eq!(verify_witness(&tx, &prevout, &witness, strict), expected);
                 #[cfg(feature = "kernel")]
                 kernel_witness_parity(&tx, &prevout, &witness);
+            }
+        }
+    }
+}
+
+#[test]
+fn raw_segwit_script_code_is_verbatim_across_compactsize_boundaries() {
+    // These are digest-API inputs, not necessarily executable scripts. Mixing
+    // scripts, amounts, and modes on one cache must not reuse script-dependent
+    // or amount-dependent state. Both CompactSize encodings around 253 matter.
+    for output_count in [1, 2] {
+        let (tx, oracle) = fixture(output_count);
+        let cache = SighashCache::new(&tx);
+        for size in [0, 1, 252, 253, 520, 10_000] {
+            let script = vec![0xab; size];
+            for value in [VALUE, VALUE + 1] {
+                for raw in [0, 1, 3, 0x83, 0xc2, u32::MAX] {
+                    let expected = reference_bip143(&oracle, INPUT, &script, value, raw);
+                    assert_eq!(
+                        cache
+                            .segwit_v0_signature_hash_raw(
+                                INPUT,
+                                &script,
+                                Amount::from_sat(value),
+                                raw
+                            )
+                            .expect("raw script-code digest")
+                            .as_byte_array(),
+                        &expected,
+                        "outputs={output_count}, script_len={size}, value={value}, raw={raw:#x}",
+                    );
+                }
             }
         }
     }

@@ -8,7 +8,6 @@
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::vec::Vec;
 
 use bitcoin_rs_mempool::SnapshotEntry;
 #[cfg(any(test, feature = "test-seam"))]
@@ -21,7 +20,7 @@ use parking_lot::Mutex;
 use crate::Candidate;
 
 /// One capability advertised by a `getblocktemplate` caller.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MiningCapability(CompactString);
 
 impl MiningCapability {
@@ -39,7 +38,7 @@ impl MiningCapability {
 }
 
 /// One versionbits rule named by a template request or response.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MiningRule(CompactString);
 
 impl MiningRule {
@@ -79,7 +78,7 @@ pub struct BlockTemplateRequest {
 }
 
 /// One versionbits deployment available for caller negotiation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct AvailableMiningRule {
     /// Deployment rule name.
     pub rule: MiningRule,
@@ -88,7 +87,7 @@ pub struct AvailableMiningRule {
 }
 
 /// Candidate fields a template consumer may change before solving.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub enum TemplateMutation {
     /// Header time may advance within the consensus bounds.
     Time,
@@ -122,8 +121,6 @@ pub struct BlockTemplate {
     pub submit_old: Option<bool>,
     /// Signet challenge, present only on signet.
     pub signet: Option<SignetMiningInfo>,
-    /// Opaque server work identity when the producer requires one on submission.
-    pub work_id: Option<CompactString>,
 }
 
 /// BIP22 validation vocabulary shared by proposal and solved-block submission.
@@ -150,7 +147,7 @@ pub enum BlockValidationResult {
 }
 
 /// Semantic result of template assembly or proposal validation.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum BlockTemplateResult {
     /// A candidate ready for projection into a BIP22 template.
     Template(BlockTemplate),
@@ -159,7 +156,7 @@ pub enum BlockTemplateResult {
 }
 
 /// Facts from the most recently assembled candidate, when one exists.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct LastCandidateInfo {
     /// Total candidate weight.
     pub weight: u64,
@@ -168,14 +165,14 @@ pub struct LastCandidateInfo {
 }
 
 /// Signet-specific mining configuration.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct SignetMiningInfo {
     /// Consensus signet challenge script.
     pub challenge: Vec<u8>,
 }
 
 /// Authoritative semantic state returned by [`MiningControl::mining_info`].
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct MiningInfo {
     /// Current applied-chain height.
     pub blocks: u32,
@@ -243,7 +240,7 @@ pub enum GenerateSelection {
 }
 
 /// Request to assemble, solve, and optionally submit one or more blocks.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct GenerateRequest {
     /// Coinbase `scriptPubKey`.
     pub payout: Vec<u8>,
@@ -258,7 +255,7 @@ pub struct GenerateRequest {
 }
 
 /// One solved block produced by [`MiningControl::generate`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct GeneratedBlock {
     /// Header hash of the solved block.
     pub hash: BlockHash,
@@ -348,7 +345,7 @@ pub trait MiningControl: Send + Sync {
 #[cfg(any(test, feature = "test-seam"))]
 pub struct FakeMiningControl {
     /// Template returned by template-mode `get_block_template` calls.
-    pub template: Mutex<Option<BlockTemplate>>,
+    template: Mutex<Option<BlockTemplate>>,
     /// Proposal-mode `get_block_template` result.
     pub proposal: Mutex<BlockValidationResult>,
     /// `submit_block` result.
@@ -370,7 +367,7 @@ pub struct FakeMiningControl {
     /// Armed failure returned by every result-returning operation.
     pub fail: Mutex<Option<MiningControlError>>,
     /// `publish_generation` wake count.
-    pub publishes: AtomicU64,
+    publishes: AtomicU64,
     /// Every `publish_generation_from` sequence, in call order.
     pub published_from: Mutex<Vec<u64>>,
 }
@@ -383,31 +380,27 @@ impl FakeMiningControl {
     /// The placeholder mining info is never returned through the control:
     /// an armed failure short-circuits before it can be read.
     pub fn unavailable(reason: &str) -> Arc<Self> {
-        Arc::new(Self {
-            template: Mutex::new(None),
-            proposal: Mutex::new(BlockValidationResult::Accepted),
-            submit: Mutex::new(BlockValidationResult::Accepted),
-            info: Mutex::new(placeholder_mining_info()),
-            last_request: Mutex::new(None),
-            last_hash_ps: Mutex::new(None),
-            last_generate: Mutex::new(None),
-            template_calls: AtomicUsize::new(0),
-            submit_calls: AtomicUsize::new(0),
-            info_calls: AtomicUsize::new(0),
-            fail: Mutex::new(Some(MiningControlError::Unavailable(CompactString::from(
-                reason,
-            )))),
-            publishes: AtomicU64::new(0),
-            published_from: Mutex::new(Vec::new()),
-        })
+        Self::from_parts(
+            None,
+            placeholder_mining_info(),
+            Some(MiningControlError::Unavailable(CompactString::from(reason))),
+        )
     }
 
     /// Builds a control that answers template requests with `template` and
     /// mining-info reads with `info`. Submissions and proposals are accepted
     /// by default; no failure is armed and every counter starts at zero.
     pub fn with_template(template: BlockTemplate, info: MiningInfo) -> Arc<Self> {
+        Self::from_parts(Some(template), info, None)
+    }
+
+    fn from_parts(
+        template: Option<BlockTemplate>,
+        info: MiningInfo,
+        fail: Option<MiningControlError>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            template: Mutex::new(Some(template)),
+            template: Mutex::new(template),
             proposal: Mutex::new(BlockValidationResult::Accepted),
             submit: Mutex::new(BlockValidationResult::Accepted),
             info: Mutex::new(info),
@@ -417,7 +410,7 @@ impl FakeMiningControl {
             template_calls: AtomicUsize::new(0),
             submit_calls: AtomicUsize::new(0),
             info_calls: AtomicUsize::new(0),
-            fail: Mutex::new(None),
+            fail: Mutex::new(fail),
             publishes: AtomicU64::new(0),
             published_from: Mutex::new(Vec::new()),
         })

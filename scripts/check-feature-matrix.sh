@@ -29,6 +29,7 @@ case "${FILTER}" in
 esac
 
 ROOT="$(git rev-parse --show-toplevel)"
+cd "${ROOT}"
 MATRIX="${ROOT}/scripts/feature-matrix.tsv"
 [[ -f "${MATRIX}" ]] || {
   printf 'error: missing %s\n' "${MATRIX}" >&2

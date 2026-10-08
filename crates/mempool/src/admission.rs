@@ -10,8 +10,8 @@ use hashbrown::{HashMap, HashSet};
 
 use crate::standardness::{AcceptanceRejectReason, StandardnessPolicy, is_standard_tx};
 use crate::{
-    AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, MempoolGateway, MutationResult,
-    PeerToken,
+    AdmissionOrigin, AdmissionRequest, AdmitError, AdmitOutcome, LocalOrigin, MempoolGateway,
+    MutationResult, PeerToken,
 };
 
 pub(crate) const MAX_ADMISSION_RETRIES: usize = 4;
@@ -68,7 +68,7 @@ pub struct ChainAdmissionSnapshot {
 /// Used to evaluate BIP68 relative locks and coinbase maturity at admission.
 /// The `MTP` value is the median-time-past of the block *before* the one that
 /// created the output, matching `bip68_prevout_mtp` in the block-connect path.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PrevoutMeta {
     /// Height the spent output was created at.
     pub height: u32,
@@ -447,6 +447,34 @@ impl MempoolGateway {
         )
     }
 
+    /// Submits one locally originated transaction: RPC `sendrawtransaction`,
+    /// an Esplora broadcast, or the embedded `Node::broadcast`.
+    ///
+    /// Runs [`Self::submit_transaction`]. Holding an orphan and reporting a
+    /// confirmed transaction are peer-only outcomes, so a local submission
+    /// answers current membership as success with no changes and keeps a
+    /// missing input a refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the gateway's refusal; nothing is inserted when this fails.
+    pub fn submit_local_transaction(
+        &self,
+        tx: Arc<Tx>,
+        origin: LocalOrigin,
+        max_feerate_sat_per_kvb: Option<u64>,
+        time: u64,
+        chain: &dyn AdmissionChain,
+    ) -> Result<MutationResult, SubmitError> {
+        match self.submit_transaction(tx, origin.into(), max_feerate_sat_per_kvb, time, chain)? {
+            SubmitOutcome::Committed(result) => Ok(result),
+            SubmitOutcome::AlreadyKnown => Ok(MutationResult::empty()),
+            SubmitOutcome::AlreadyConfirmed | SubmitOutcome::Held { .. } => {
+                Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+            }
+        }
+    }
+
     /// Re-admits transactions displaced by disconnected blocks through the
     /// shared admission evaluator while `change` holds the chain fence.
     /// `txs` must arrive parents before children. A refused candidate, and any
@@ -455,7 +483,7 @@ impl MempoolGateway {
     /// A guard issued by a different gateway admits nothing and returns an
     /// empty result: the odd value alone is not authority.
     ///
-    /// Every candidate is admitted with [`crate::LimitEnforcement::Deferred`],
+    /// Every candidate is admitted with `LimitEnforcement::Deferred`,
     /// the equivalent of Core passing `bypassLimits = true` to
     /// `AcceptToMemoryPool` from its disconnect walk — derived from the held
     /// `ChainChangeGuard`, not the caller-declared origin. The mempool fee
@@ -763,18 +791,30 @@ impl MempoolGateway {
     }
 
     /// Number of resident orphan transaction bodies.
+    ///
+    /// Test seam: peer-eviction assertions in this crate's and the node's
+    /// suites read it; production inventory suppression goes through
+    /// `have_tx`/`rejects_inventory`, never a count.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn orphan_count(&self) -> usize {
         self.lifecycle.lock().orphans.len()
     }
 
     /// Number of retained rejection hashes with transaction or witness scope.
+    ///
+    /// Test seam: reject-cache assertions only.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn recent_rejects_count(&self) -> usize {
         self.lifecycle.lock().rejects_len()
     }
 
     /// Whether a hash belongs to the bounded recent peer rejection cache.
+    ///
+    /// Test seam: reject-cache assertions only; production checks
+    /// `rejects_inventory`/`rejects_transaction` for scope.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn is_rejected(&self, hash: Hash256) -> bool {
         self.lifecycle.lock().is_rejected(hash)
@@ -833,11 +873,11 @@ mod tests {
         script.extend_from_slice(&[0x88, 0xac]);
         Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: outpoint,
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
@@ -873,6 +913,7 @@ mod tests {
     fn parent_commit_without_observers_retries_orphan_with_original_source() {
         for origin in [
             AdmissionOrigin::Rpc,
+            AdmissionOrigin::Esplora,
             AdmissionOrigin::Peer(source()),
             AdmissionOrigin::Reorg,
         ] {
@@ -909,19 +950,44 @@ mod tests {
         }
     }
 
-    // MPL-04: RPC failures do not populate peer lifecycle state.
+    // MPL-04: local failures do not populate peer lifecycle state.
     #[test]
     fn rpc_missing_inputs_does_not_create_peer_lifecycle_state() {
-        let gateway = gateway();
-        let (_, child) = parent_and_child();
-        let result =
-            gateway.submit_transaction(child, AdmissionOrigin::Rpc, None, 1, &Coins(vec![]));
-        assert_eq!(
-            result,
-            Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
-        );
-        assert_eq!(gateway.orphan_count(), 0);
-        assert_eq!(gateway.recent_rejects_count(), 0);
+        for origin in [AdmissionOrigin::Rpc, AdmissionOrigin::Esplora] {
+            let gateway = gateway();
+            let (_, child) = parent_and_child();
+            let result = gateway.submit_transaction(child, origin, None, 1, &Coins(vec![]));
+            assert_eq!(
+                result,
+                Err(SubmitError::Policy(AcceptanceRejectReason::MissingInputs))
+            );
+            assert_eq!(gateway.orphan_count(), 0);
+            assert_eq!(gateway.recent_rejects_count(), 0);
+        }
+    }
+
+    // POL-01: a local resubmission of a member succeeds without changes.
+    #[test]
+    fn local_submission_answers_membership_as_success_without_changes() {
+        for origin in [LocalOrigin::Rpc, LocalOrigin::Esplora] {
+            let gateway = gateway();
+            let (parent, child) = parent_and_child();
+            insert_parent(&gateway, parent, AdmissionOrigin::Rpc);
+            let committed = gateway.submit_local_transaction(
+                Arc::clone(&child),
+                origin,
+                None,
+                1,
+                &Coins(vec![]),
+            );
+            assert_eq!(committed.map(|result| result.len()), Ok(1));
+            let sequence = gateway.read().sequence_number();
+            assert_eq!(
+                gateway.submit_local_transaction(child, origin, None, 2, &Coins(vec![])),
+                Ok(MutationResult::empty())
+            );
+            assert_eq!(gateway.read().sequence_number(), sequence);
+        }
     }
 
     // MPL-04: nonexistent outputs of resident parents cannot become orphans.
@@ -1128,7 +1194,7 @@ mod tests {
         );
         assert_eq!(gateway.orphan_count(), 0);
         assert!(gateway.is_rejected(Hash256::from(invalid.wtxid())));
-        assert!(gateway.retry_orphans(&Coins(vec![]), 3).is_empty());
+        assert_eq!(gateway.retry_orphans(&Coins(vec![]), 3), []);
     }
 
     // MPL-04: only the resident body's claim may mutate its lifecycle state.
@@ -1352,7 +1418,7 @@ mod tests {
             child.inputs[0].previous_output,
             parent.outputs[0].clone(),
         )]);
-        assert!(gateway.retry_orphans(&chain, 2).is_empty());
+        assert_eq!(gateway.retry_orphans(&chain, 2), []);
         assert_eq!(gateway.orphan_count(), 1);
         assert!(reservation.finish().is_ok());
         let retried = gateway.retry_orphans(&chain, 2);
@@ -1389,7 +1455,7 @@ mod tests {
         let retried = gateway.retry_orphans(&chain, 3);
         assert_eq!(retried.len(), 1);
         assert!(matches!(retried[0].result, Ok(SubmitOutcome::Committed(_))));
-        assert!(gateway.retry_orphans(&chain, 4).is_empty());
+        assert_eq!(gateway.retry_orphans(&chain, 4), []);
     }
 
     struct ParentArrivesDuringPreparation {
@@ -1408,7 +1474,7 @@ mod tests {
             // gateway must reject those tokens and rebuild from the pool.
             Coins(vec![]).snapshot(&Tx {
                 version: 2,
-                lock_time: LockTime::from_consensus(0),
+                lock_time: LockTime::ZERO,
                 inputs: vec![],
                 outputs: vec![],
             })
@@ -1529,7 +1595,7 @@ mod tests {
         let mut nonstandard = (*child).clone();
         nonstandard.version = 4;
         let mut coinbase = (*child).clone();
-        coinbase.inputs[0].previous_output = OutPoint::new(Txid::default(), u32::MAX);
+        coinbase.inputs[0].previous_output = OutPoint::null();
         for tx in [nonstandard, coinbase] {
             let tx = Arc::new(tx);
             assert!(
@@ -1663,7 +1729,7 @@ mod tests {
                 );
                 assert!(!gateway.is_rejected(Hash256::from(child.txid())));
                 assert!(!gateway.is_rejected(Hash256::from(replacement.txid())));
-                assert!(gateway.retry_orphans(&Unavailable, 3).is_empty());
+                assert_eq!(gateway.retry_orphans(&Unavailable, 3), []);
             }
         }
     }
@@ -1790,11 +1856,11 @@ mod tests {
         for (script_pubkey, script_sig, witness, input_cost) in cases {
             let parent = Tx {
                 version: 2,
-                lock_time: LockTime::from_consensus(0),
+                lock_time: LockTime::ZERO,
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[9; 32])), 0),
                     script_sig: Script::new(),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::new(),
                 }],
                 outputs: vec![
@@ -1810,11 +1876,11 @@ mod tests {
             };
             let child = Tx {
                 version: 2,
-                lock_time: LockTime::from_consensus(0),
+                lock_time: LockTime::ZERO,
                 inputs: vec![TxIn {
                     previous_output: OutPoint::new(parent.txid(), 1),
                     script_sig: Script::from_bytes(script_sig),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::from_stack(witness),
                 }],
                 outputs: vec![TxOut {
@@ -1829,9 +1895,9 @@ mod tests {
             let expected_outpoint = oracle.input[0].previous_output;
             let oracle_output = bitcoin::TxOut {
                 value: bitcoin::Amount::from_sat(parent.outputs[1].value.to_sat()),
-                script_pubkey: bitcoin::ScriptBuf::from_bytes(Vec::from(
-                    parent.outputs[1].script_pubkey.clone(),
-                )),
+                script_pubkey: bitcoin::ScriptBuf::from_bytes(
+                    parent.outputs[1].script_pubkey.as_bytes().to_vec(),
+                ),
             };
             assert_eq!(
                 u32::try_from(oracle.total_sigop_cost(|outpoint| {
@@ -2328,9 +2394,9 @@ mod tests {
         let (parent, child) = parent_and_child();
         let mut tx = (*child).clone();
         tx.inputs.push(TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: Script::new(),
-            sequence: Sequence::from_consensus(u32::MAX),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         });
         let tx = Arc::new(tx);
@@ -2438,7 +2504,7 @@ mod tests {
         let outpoint = OutPoint::new(Txid(Hash256::from_le_bytes(&[92; 32])), 0);
         let mut tx = standard_spend(outpoint, 4);
         let mut null_input = tx.inputs[0].clone();
-        null_input.previous_output = OutPoint::new(Txid::default(), u32::MAX);
+        null_input.previous_output = OutPoint::null();
         tx.inputs.push(null_input);
         assert_input_structure_rejection(tx, Coins(vec![]));
     }
@@ -2521,7 +2587,7 @@ mod tests {
     /// MPL-04: the guard's odd fence re-admits a dependency-ordered batch
     /// through the shared evaluator, publishing `Reorg` in order.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn reconsider_disconnected_admits_parent_then_child_under_the_guard() {
         let observer = Arc::new(ReorgRecording::default());
         let gateway = observed_gateway(&observer);
@@ -2558,7 +2624,7 @@ mod tests {
     /// MPL-04: a parent that is not final at the lower tip is refused and its
     /// descendant withheld, so no partial family is left behind.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn reconsider_disconnected_withholds_descendants_of_a_refused_parent() {
         let observer = Arc::new(ReorgRecording::default());
         let gateway = observed_gateway(&observer);
@@ -2585,7 +2651,7 @@ mod tests {
     /// MPL-04: reorg re-admission runs script verification like any other
     /// admission — a bad-witness candidate is refused, not force-inserted.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn reconsider_disconnected_refuses_a_script_failure() {
         let gateway = gateway();
         let (parent, valid) = witness_parent_and_child();
@@ -2607,7 +2673,7 @@ mod tests {
     /// Reorg re-admission is not new fee evidence: the estimator must not see
     /// the re-entered transaction, matching Core's `validForFeeEstimation=false`.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn reconsider_disconnected_does_not_register_with_the_estimator() {
         let gateway = gateway();
         let (parent, child) = witness_parent_and_child();
@@ -2656,7 +2722,7 @@ mod tests {
     /// are deferred, which is the ordering that keeps a parent from being
     /// shed before the child that spends it is re-admitted.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn reconsider_disconnected_admits_below_floor_then_trims_once() {
         // The ceiling falls between the parent's and the family's virtual
         // size, so a per-acceptance trim would have to act on the child, and
@@ -2722,7 +2788,7 @@ mod tests {
     /// Pins the batch log for one reorg settlement: every reorg admission
     /// precedes the single policy-eviction batch, the trim publishes as Reorg
     /// shedding `trimmed_txid`, and nothing commits after it.
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn assert_reorg_publication_order(
         batches: &[ReorgBatch],
         admissions: &[Txid],
@@ -2787,7 +2853,7 @@ mod tests {
     /// relay is refused, so the gates are live and only the reorg origin
     /// defers them.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn reconsider_control_refuses_fresh_relay_below_floor() {
         const CEILING: u64 = 150;
         let limits = crate::MempoolLimits {
@@ -2826,7 +2892,7 @@ mod tests {
     /// missing-input parent together with its descendant, and a resident whose
     /// locktime is no longer final — while a supported entry stays.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn remove_for_reorg_sweeps_only_unsupported_residents() {
         let gateway = gateway();
         let (parent, child) = parent_and_child();
@@ -2892,7 +2958,7 @@ mod tests {
 
     /// A moved fence sweeps nothing: the commit re-checks the exact odd value.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn remove_for_reorg_refuses_a_moved_generation() {
         let gateway = gateway();
         let (parent, _child) = parent_and_child();
@@ -2918,7 +2984,7 @@ mod tests {
     /// stable fence is refused too — the integer alone is not authority —
     /// and the guard's chain-change fence admits only its own odd value.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn admission_state_accepts_only_the_current_generation() {
         let gateway = gateway();
         let change = gateway.begin_chain_change().expect("fence");
@@ -2988,7 +3054,7 @@ mod tests {
     /// `remove_for_reorg` fails fast with `ForeignGuard` before any pool
     /// read, and `reconsider_disconnected` inserts nothing.
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn reorg_methods_refuse_a_guard_from_another_gateway() {
         let gateway_a = gateway();
         let gateway_b = gateway();

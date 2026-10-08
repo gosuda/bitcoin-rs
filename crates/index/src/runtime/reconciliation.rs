@@ -6,8 +6,6 @@ use super::PendingForward;
 use super::ReconcileAction;
 use super::Worker;
 use super::catch_up::BatchWait;
-use super::catch_up::wait_for_batch_deadline;
-use super::catch_up::wait_for_revision_quiet;
 use crate::IndexCapabilities;
 use crate::IndexCapability;
 use crate::IndexError;
@@ -34,13 +32,9 @@ impl Worker {
             }
             if quiet_armed {
                 quiet_armed = false;
-                if wait_for_revision_quiet(
-                    &self.runtime,
-                    &self.wake_rx,
-                    self.quiet_period,
-                    self.runtime.revision(),
-                )
-                .is_none()
+                if self
+                    .wait_for_revision_quiet(self.runtime.revision())
+                    .is_none()
                 {
                     break;
                 }
@@ -86,7 +80,7 @@ impl Worker {
                     let Some(deadline) = pending.as_ref().map(|state| state.deadline) else {
                         unreachable!("buffered action has a pending batch");
                     };
-                    match wait_for_batch_deadline(&self.runtime, &self.wake_rx, deadline) {
+                    match self.wait_for_batch_deadline(deadline) {
                         BatchWait::Woken => continue,
                         BatchWait::Deadline => {
                             if !self.commit_pending(&mut pending)? {

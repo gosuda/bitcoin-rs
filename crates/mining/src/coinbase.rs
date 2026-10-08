@@ -4,9 +4,7 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_script::push_int;
 use thiserror::Error;
 
-const MAX_COINBASE_SCRIPT_SIG_LEN: usize = 100;
 const MIN_COINBASE_SCRIPT_SIG_LEN: usize = 2;
-const WITNESS_COMMITMENT_TAG: [u8; 4] = [0xaa, 0x21, 0xa9, 0xed];
 /// BIP141 `OP_RETURN` `PUSH36` `aa21a9ed` prefix. Core `MINIMUM_WITNESS_COMMITMENT` is 38 bytes.
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
@@ -14,7 +12,7 @@ const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 pub const WITNESS_RESERVED_VALUE: [u8; 32] = [0; 32];
 
 /// Candidate assembly failure.
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[derive(Debug, Error, Eq, PartialEq)]
 pub enum MiningError {
     /// The mempool owner's fee graph could not be evaluated.
     #[error(transparent)]
@@ -22,14 +20,6 @@ pub enum MiningError {
     /// Coinbase subsidy plus fees exceeded the satoshi range.
     #[error("coinbase value overflows satoshi range")]
     CoinbaseValueOverflow,
-    /// A generated coinbase scriptSig exceeded the consensus bound.
-    #[error("coinbase scriptSig length {len} exceeds {max}")]
-    CoinbaseScriptTooLarge {
-        /// Generated scriptSig byte length.
-        len: usize,
-        /// Maximum consensus scriptSig byte length.
-        max: usize,
-    },
     /// The immutable snapshot contains an invalid ancestor position.
     #[error("snapshot entry {entry} names missing ancestor {ancestor}")]
     MissingAncestor {
@@ -91,7 +81,7 @@ pub(crate) fn build_coinbase(
         version: 2,
         inputs: vec![TxIn {
             previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0; 32])), 0xffff_ffff),
-            script_sig: coinbase_script_sig(height)?.into(),
+            script_sig: coinbase_script_sig(height).into(),
             sequence: Sequence::MAX,
             witness,
         }],
@@ -103,9 +93,7 @@ pub(crate) fn build_coinbase(
 /// Builds the BIP141 `OP_RETURN` witness-commitment script (`6a24aa21a9ed || commitment`).
 pub fn witness_commitment_script(commitment: &Hash256) -> Vec<u8> {
     let mut script = Vec::with_capacity(38);
-    script.push(0x6a); // OP_RETURN
-    script.push(36); // PUSH36
-    script.extend_from_slice(&WITNESS_COMMITMENT_TAG);
+    script.extend_from_slice(&WITNESS_COMMITMENT_PREFIX);
     script.extend_from_slice(commitment.as_byte_array());
     script
 }
@@ -140,7 +128,7 @@ fn coinbase_has_witness_commitment(tx: &Tx) -> bool {
     })
 }
 
-fn coinbase_script_sig(height: u32) -> Result<Vec<u8>, MiningError> {
+fn coinbase_script_sig(height: u32) -> Vec<u8> {
     // BIP34 requires the minimal `CScriptNum` encoding. Heights 1..=16 therefore
     // use OP_1..OP_16 rather than a data push — `push_int` matches consensus
     // `check_bip34`.
@@ -151,13 +139,7 @@ fn coinbase_script_sig(height: u32) -> Result<Vec<u8>, MiningError> {
     if script.len() < MIN_COINBASE_SCRIPT_SIG_LEN {
         script.push(0x00);
     }
-    if script.len() > MAX_COINBASE_SCRIPT_SIG_LEN {
-        return Err(MiningError::CoinbaseScriptTooLarge {
-            len: script.len(),
-            max: MAX_COINBASE_SCRIPT_SIG_LEN,
-        });
-    }
-    Ok(script)
+    script
 }
 
 #[cfg(test)]
@@ -167,7 +149,7 @@ mod uncommitted_witness_tests {
     };
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
-        Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        Sequence, Tx, TxIn, TxOut, Witness,
     };
 
     fn commitment_block(witness: Vec<Vec<u8>>, with_commitment: bool) -> Block {
@@ -194,7 +176,7 @@ mod uncommitted_witness_tests {
             txs: vec![Tx {
                 version: 2,
                 inputs: vec![TxIn {
-                    previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                    previous_output: OutPoint::null(),
                     script_sig: Script::from_bytes(vec![0x51, 0x00]),
                     sequence: Sequence::MAX,
                     witness: witness.into(),

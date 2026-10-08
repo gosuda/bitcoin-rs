@@ -3,16 +3,16 @@
 use core::str::FromStr as _;
 use std::sync::Arc;
 
-use bitcoin::Network as BitcoinNetwork;
+use bitcoin::hex::DisplayHex;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_index::ScriptHash;
 use bitcoin_rs_mempool::ScriptHash as MempoolScriptHash;
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, OutPoint, Tx, TxOut, Txid, deserialize,
 };
-use bitcoin_rs_script::script::{instructions, is_p2sh, is_p2wsh};
+use bitcoin_rs_script::{instructions, is_p2sh, is_p2wsh};
 
-use crate::compat::convert::{self, hex_encode};
+use crate::compat::convert::{self};
 use crate::context::{Context, ScriptHistoryRecord, ScriptIndexRecord, TxQueryError};
 use crate::rest::{Response, bad_request, internal_error, not_found, service_unavailable};
 
@@ -40,7 +40,6 @@ impl From<Confirmation> for TransactionStatus {
     }
 }
 
-#[derive(Clone)]
 pub(super) struct ConfirmedActivity {
     pub record: ScriptHistoryRecord,
     pub confirmation: Confirmation,
@@ -217,8 +216,7 @@ impl<'a> Projection<'a> {
         let mut inputs = Vec::with_capacity(transaction.inputs.len());
         for input in &transaction.inputs {
             let previous_output = input.previous_output;
-            let coinbase =
-                previous_output.txid == Txid::default() && previous_output.vout == u32::MAX;
+            let coinbase = previous_output.is_null();
             let previous = if coinbase {
                 None
             } else {
@@ -235,14 +233,14 @@ impl<'a> Projection<'a> {
                 prevout: previous
                     .as_ref()
                     .map(|output| self.transaction_output(output)),
-                scriptsig: hex_encode(&input.script_sig),
+                scriptsig: input.script_sig.to_lower_hex_string(),
                 scriptsig_asm: convert::script_asm(&input.script_sig),
                 witness: (!input.witness.is_empty()).then(|| {
                     input
                         .witness
                         .iter()
                         .map(Vec::as_slice)
-                        .map(hex_encode)
+                        .map(DisplayHex::to_lower_hex_string)
                         .collect()
                 }),
                 is_coinbase: coinbase,
@@ -275,7 +273,7 @@ impl<'a> Projection<'a> {
     pub(super) fn transaction_output(&self, output: &TxOut) -> TransactionOutput {
         let script = &output.script_pubkey;
         TransactionOutput {
-            scriptpubkey: hex_encode(script),
+            scriptpubkey: script.to_lower_hex_string(),
             scriptpubkey_asm: convert::script_asm(script),
             scriptpubkey_type: esplora_type_name(convert::classify(script)),
             scriptpubkey_address: convert::script_address(script, self.ctx.chain.chain_network),
@@ -598,18 +596,6 @@ impl<'a> Projection<'a> {
                 (MempoolScriptHash::from_script(&output.script_pubkey) == script)
                     .then_some((position, vout, output))
             })
-    }
-
-    /// The rust-bitcoin network for the selected chain, for the address and
-    /// descriptor seams.
-    ///
-    /// PRE: `self.ctx.chain.chain_network` is the network to map.
-    /// POST: returns the same rust-bitcoin network as
-    ///   `convert::bitcoin_network`.
-    /// INVARIANT: the mapping lives in `convert::bitcoin_network`; this method
-    ///   adds no local match.
-    pub(super) const fn bitcoin_network(&self) -> BitcoinNetwork {
-        convert::bitcoin_network(self.ctx.chain.chain_network)
     }
 }
 

@@ -1,14 +1,12 @@
 use alloc::sync::Arc;
 
 use core::str::FromStr;
-use core::sync::atomic::Ordering;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin_rs_p2p::{BannedSubnet, IpSubnet};
 use bitcoin_rs_primitives::USER_AGENT;
-use crossbeam_channel::TrySendError;
 use sonic_rs::{JsonContainerTrait, JsonValueTrait, Value};
 
 use crate::compat::convert::{i64_saturated, typed_to_sonic, typed_to_sonic_omitting_nulls};
@@ -112,7 +110,7 @@ pub(crate) fn getnetworkinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value
     let total = peers.len();
     let inbound = peers.iter().filter(|p| p.inbound).count();
     let outbound = total.saturating_sub(inbound);
-    let network_active = ctx.network.network_active.load(Ordering::SeqCst);
+    let network_active = ctx.network.p2p.network_active();
     let networks = [
         ("ipv4", false, true),
         ("ipv6", false, true),
@@ -283,9 +281,9 @@ pub(crate) fn getpeerinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, R
 
 pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     let _ = params_array(params)?;
-    let added = ctx.network.added_nodes.read();
+    let added = ctx.network.p2p.added_nodes();
     let entries = added
-        .iter()
+        .into_iter()
         .map(|addr| v31::AddedNode {
             added_node: addr.to_string(),
             connected: false,
@@ -297,7 +295,7 @@ pub(crate) fn getaddednodeinfo(ctx: &Arc<Context>, params: &Value) -> Result<Val
 
 pub(crate) fn listbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    let banned = ctx.network.banned.read();
+    let banned = ctx.network.p2p.banned();
     let now = epoch_seconds(SystemTime::now());
     let entries = banned
         .iter()
@@ -327,9 +325,7 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
             let bantime = optional_u64(params, 2, 0)?;
             let absolute = optional_bool(params, 3, false)?;
             let banned_until = ban_until(now, bantime, absolute)?;
-            let mut banned = ctx.network.banned.write();
-            banned.retain(|entry| entry.subnet != subnet);
-            banned.push(BannedSubnet {
+            ctx.network.p2p.set_ban(BannedSubnet {
                 subnet,
                 banned_until: Some(banned_until),
                 ban_created: now,
@@ -337,10 +333,7 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
             });
         }
         "remove" => {
-            ctx.network
-                .banned
-                .write()
-                .retain(|entry| entry.subnet != subnet);
+            ctx.network.p2p.remove_ban(subnet);
         }
         _ => return Err(RpcError::InvalidParams("command must be 'add' or 'remove'")),
     }
@@ -349,7 +342,7 @@ pub(crate) fn setban(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcErr
 
 pub(crate) fn clearbanned(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
     ensure_no_params(params)?;
-    ctx.network.banned.write().clear();
+    ctx.network.p2p.clear_banned();
     Ok(Value::new_null())
 }
 
@@ -359,11 +352,7 @@ pub(crate) fn setnetworkactive(ctx: &Arc<Context>, params: &Value) -> Result<Val
         .first()
         .and_then(JsonValueTrait::as_bool)
         .ok_or(RpcError::InvalidParams("state must be a boolean"))?;
-    bitcoin_rs_p2p::apply_network_active(
-        &ctx.network.network_active,
-        &ctx.network.peer_table,
-        state,
-    );
+    ctx.network.p2p.set_network_active(state);
     typed_to_sonic(&v31::SetNetworkActive(state))
 }
 pub(crate) fn ping(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -380,40 +369,20 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
     let addr = SocketAddr::from_str(node)
         .map_err(|_| RpcError::InvalidParams("node must be a valid host:port address"))?;
     match command {
-        "add" | "onetry" => {
-            let now = SystemTime::now();
-            let banned = ctx.network.banned.read();
-            if bitcoin_rs_p2p::subnet::is_banned(banned.as_slice(), addr.ip(), now) {
-                return Err(RpcError::InvalidParams("node is banned"));
-            }
-            drop(banned);
-
-            let persist = command == "add";
-            if persist {
-                let mut list = ctx.network.added_nodes.write();
-                if !list.contains(&addr) {
-                    list.push(addr);
-                }
-            }
-
-            if ctx.network.network_active.load(Ordering::Acquire)
-                && let Some(sender) = &ctx.network.p2p_outbound_sender
-            {
-                match sender.try_send(bitcoin_rs_p2p::OutboundDial::pinned(addr)) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) if persist => {}
-                    Err(TrySendError::Full(_)) => {
-                        return Err(RpcError::Internal("p2p outbound queue full".to_owned()));
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        return Err(RpcError::Internal("p2p outbound channel closed".to_owned()));
-                    }
-                }
-            }
+        "add" => {
+            ctx.network
+                .p2p
+                .add_node(addr, true)
+                .map_err(control_error_to_rpc_error)?;
+        }
+        "onetry" => {
+            ctx.network
+                .p2p
+                .add_node(addr, false)
+                .map_err(control_error_to_rpc_error)?;
         }
         "remove" => {
-            let mut list = ctx.network.added_nodes.write();
-            list.retain(|a| *a != addr);
+            ctx.network.p2p.remove_node(addr);
         }
         _ => {
             return Err(RpcError::InvalidParams(
@@ -422,6 +391,18 @@ pub(crate) fn addnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcEr
         }
     }
     Ok(Value::new_null())
+}
+
+fn control_error_to_rpc_error(error: bitcoin_rs_p2p::P2pControlError) -> RpcError {
+    match error {
+        bitcoin_rs_p2p::P2pControlError::Banned => RpcError::InvalidParams("node is banned"),
+        bitcoin_rs_p2p::P2pControlError::QueueFull => {
+            RpcError::Internal("p2p outbound queue full".to_owned())
+        }
+        bitcoin_rs_p2p::P2pControlError::Closed => {
+            RpcError::Internal("p2p outbound channel closed".to_owned())
+        }
+    }
 }
 
 pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -450,7 +431,7 @@ pub(crate) fn disconnectnode(ctx: &Arc<Context>, params: &Value) -> Result<Value
         return Err(RpcError::NotFound("Node not found in connected nodes"));
     }
 
-    ctx.network.peer_table.disconnect(addr);
+    ctx.network.p2p.disconnect(addr);
 
     Ok(Value::new_null())
 }
@@ -513,7 +494,7 @@ pub(crate) fn getnodeaddresses(ctx: &Arc<Context>, params: &Value) -> Result<Val
     }
 
     // Persisted added nodes have no known services; advertise NODE_NETWORK.
-    for &addr in ctx.network.added_nodes.read().iter() {
+    for addr in ctx.network.p2p.added_nodes() {
         if !seen.insert(addr) {
             continue;
         }
@@ -617,7 +598,7 @@ mod ping_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod addnode_validation_tests {
     use super::*;
     use alloc::sync::Arc;
@@ -648,57 +629,45 @@ mod addnode_validation_tests {
 
     #[test]
     fn addnode_skips_queueing_while_network_is_inactive() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut ctx = Context::new();
-        ctx.network.p2p_outbound_sender = Some(tx);
-        ctx.network.network_active.store(false, Ordering::Release);
-        let ctx = Arc::new(ctx);
+        let ctx = Arc::new(Context::new());
+        ctx.network.p2p.set_network_active(false);
 
         let persisted = SocketAddr::from(([127, 0, 0, 1], 8333));
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]));
         assert!(result.is_ok());
-        assert_eq!(ctx.network.added_nodes.read().as_slice(), &[persisted]);
-        assert!(rx.try_recv().is_err());
+        assert_eq!(ctx.network.p2p.added_nodes().as_slice(), &[persisted]);
 
-        ctx.network.network_active.store(true, Ordering::Release);
-        assert!(rx.try_recv().is_err());
+        ctx.network.p2p.set_network_active(true);
         let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
         assert!(result.is_ok());
-        let queued = bitcoin_rs_p2p::OutboundDial::pinned(SocketAddr::from(([127, 0, 0, 2], 8333)));
-        assert_eq!(rx.try_recv().ok(), Some(queued));
     }
 
     #[test]
-    fn addnode_add_sends_outbound_request() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut ctx = Context::new();
-        ctx.network.p2p_outbound_sender = Some(tx);
-        let ctx = Arc::new(ctx);
+    fn addnode_add_persists_node() {
+        let ctx = Arc::new(Context::new());
         let result = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
 
         assert!(result.is_null());
-        let Ok(sent) = rx.try_recv() else {
-            panic!("addnode did not send outbound request");
-        };
-        let queued = bitcoin_rs_p2p::OutboundDial::pinned(std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            8333,
-        )));
-        assert_eq!(sent, queued);
+        assert_eq!(
+            ctx.network.p2p.added_nodes().as_slice(),
+            &[SocketAddr::from(([127, 0, 0, 1], 8333))]
+        );
     }
 
     #[test]
     fn addnode_returns_error_when_outbound_queue_is_full() {
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        let queued = bitcoin_rs_p2p::OutboundDial::pinned(std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            8333,
-        )));
-        tx.try_send(queued)
+        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
+            bitcoin_rs_p2p::P2pServiceConfig {
+                outbound_queue_limit: 1,
+                ..bitcoin_rs_p2p::P2pServiceConfig::default()
+            },
+            bitcoin_rs_chain::LatchReader::fixture_never(),
+        ));
+        p2p.add_node(SocketAddr::from(([127, 0, 0, 1], 8333)), false)
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
         let mut ctx = Context::new();
-        ctx.network.p2p_outbound_sender = Some(tx);
+        ctx.network.p2p = Arc::clone(&p2p);
         let ctx = Arc::new(ctx);
 
         let result = addnode(&ctx, &json!(["127.0.0.2:8333", "onetry"]));
@@ -707,27 +676,28 @@ mod addnode_validation_tests {
             result,
             Err(RpcError::Internal(message)) if message == "p2p outbound queue full"
         ));
-        assert_eq!(rx.try_iter().count(), 1);
     }
 
     #[test]
     fn addnode_add_persists_when_outbound_queue_is_full() {
-        let (tx, _rx) = crossbeam_channel::bounded(1);
-        let queued = bitcoin_rs_p2p::OutboundDial::pinned(std::net::SocketAddr::from((
-            [127, 0, 0, 1],
-            8333,
-        )));
-        tx.try_send(queued)
+        let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
+            bitcoin_rs_p2p::P2pServiceConfig {
+                outbound_queue_limit: 1,
+                ..bitcoin_rs_p2p::P2pServiceConfig::default()
+            },
+            bitcoin_rs_chain::LatchReader::fixture_never(),
+        ));
+        p2p.add_node(SocketAddr::from(([127, 0, 0, 1], 8333)), false)
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
         let mut ctx = Context::new();
-        ctx.network.p2p_outbound_sender = Some(tx);
+        ctx.network.p2p = Arc::clone(&p2p);
         let ctx = Arc::new(ctx);
 
         let result = addnode(&ctx, &json!(["127.0.0.2:8333", "add"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
 
         assert!(result.is_null());
-        let added = ctx.network.added_nodes.read();
+        let added = ctx.network.p2p.added_nodes();
         assert_eq!(
             added.as_slice(),
             [std::net::SocketAddr::from(([127, 0, 0, 2], 8333))]
@@ -736,10 +706,7 @@ mod addnode_validation_tests {
 
     #[test]
     fn addnode_rejects_manually_banned_subnet() {
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let mut ctx = Context::new();
-        ctx.network.p2p_outbound_sender = Some(tx);
-        let ctx = Arc::new(ctx);
+        let ctx = Arc::new(Context::new());
         if let Err(err) = setban(&ctx, &json!(["127.0.0.0/24", "add"])) {
             panic!("setban failed: {err}");
         }
@@ -750,8 +717,7 @@ mod addnode_validation_tests {
             result,
             Err(RpcError::InvalidParams("node is banned"))
         ));
-        assert!(ctx.network.added_nodes.read().is_empty());
-        assert!(rx.try_recv().is_err());
+        assert_eq!(ctx.network.p2p.added_nodes().as_slice(), &[]);
     }
 
     #[test]
@@ -801,12 +767,12 @@ mod addnode_validation_tests {
         assert!(result.is_null());
         assert!(lease.is_cancelled());
         assert!(ctx.network.peer_table.is_empty());
-        assert!(ctx.network.peer_table.infos().is_empty());
+        assert_eq!(ctx.network.peer_table.infos(), []);
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod admin_rpc_tests {
     use super::*;
     use alloc::sync::Arc;
@@ -840,11 +806,7 @@ mod admin_rpc_tests {
         let result = setnetworkactive(&ctx, &json!([false]))
             .unwrap_or_else(|err| panic!("setnetworkactive failed: {err}"));
         assert_eq!(result.as_bool(), Some(false));
-        assert!(
-            !ctx.network
-                .network_active
-                .load(std::sync::atomic::Ordering::SeqCst)
-        );
+        assert!(!ctx.network.p2p.network_active());
     }
 
     #[test]
@@ -873,9 +835,7 @@ mod admin_rpc_tests {
     #[test]
     fn getnetworkinfo_reports_network_active_state() {
         let ctx = Arc::new(Context::new());
-        ctx.network
-            .network_active
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        ctx.network.p2p.set_network_active(false);
         let result = getnetworkinfo(&ctx, &json!(null))
             .unwrap_or_else(|err| panic!("getnetworkinfo failed: {err}"));
         assert_eq!(
@@ -904,7 +864,7 @@ mod admin_rpc_tests {
             Some("10.0.0.1/32")
         );
         assert!(setban(&ctx, &json!(["10.0.0.1:8333", "remove"])).is_ok());
-        assert!(ctx.network.banned.read().is_empty());
+        assert_eq!(ctx.network.p2p.banned().as_slice(), &[]);
     }
 
     #[test]
@@ -971,8 +931,7 @@ mod ban_state_tests {
     fn setban_add_persists_in_context() {
         let ctx = Arc::new(Context::new());
         setban_ok(&ctx, "127.0.0.1:8333", "add");
-        let banned = ctx.network.banned.read();
-        assert_eq!(banned.len(), 1);
+        assert_eq!(ctx.network.p2p.banned().len(), 1);
     }
 
     #[test]
@@ -1067,7 +1026,7 @@ mod ban_state_tests {
         let ctx = Arc::new(Context::new());
         setban_ok(&ctx, "192.168.1.1", "add");
         clearbanned_ok(&ctx);
-        assert!(ctx.network.banned.read().is_empty());
+        assert_eq!(ctx.network.p2p.banned().as_slice(), &[]);
     }
 
     #[test]
@@ -1075,8 +1034,7 @@ mod ban_state_tests {
         let ctx = Arc::new(Context::new());
         let _ = addnode(&ctx, &json!(["127.0.0.1:8333", "add"]))
             .unwrap_or_else(|err| panic!("addnode failed: {err}"));
-        let added = ctx.network.added_nodes.read();
-        assert_eq!(added.len(), 1);
+        assert_eq!(ctx.network.p2p.added_nodes().len(), 1);
     }
 
     #[test]
@@ -1491,7 +1449,7 @@ mod peer_counter_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod getnodeaddresses_tests {
     use super::*;
     use alloc::sync::Arc;
@@ -1570,9 +1528,9 @@ mod getnodeaddresses_tests {
         let ctx = Context::new();
         add_peer(&ctx, peer("127.0.0.1:8333", 9));
         ctx.network
-            .added_nodes
-            .write()
-            .push("127.0.0.1:8333".parse().expect("addr"));
+            .p2p
+            .add_node("127.0.0.1:8333".parse().expect("addr"), true)
+            .expect("add_node");
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([0]))
             .unwrap_or_else(|err| panic!("getnodeaddresses failed: {err}"));
@@ -1615,9 +1573,9 @@ mod getnodeaddresses_tests {
     fn added_nodes_appear_when_no_live_peer() {
         let ctx = Context::new();
         ctx.network
-            .added_nodes
-            .write()
-            .push("10.0.0.1:8333".parse().expect("addr"));
+            .p2p
+            .add_node("10.0.0.1:8333".parse().expect("addr"), true)
+            .expect("add_node");
         let ctx = Arc::new(ctx);
         let result = getnodeaddresses(&ctx, &json!([0]))
             .unwrap_or_else(|err| panic!("getnodeaddresses failed: {err}"));

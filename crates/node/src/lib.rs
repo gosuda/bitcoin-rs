@@ -10,14 +10,14 @@
 extern crate alloc;
 
 /// Derived post-commit consumers of a committed chain transition.
-pub mod chain_effects;
+mod chain_effects;
 /// Layered node configuration.
 pub mod config;
 /// Typed in-process node lifecycle: the embedding surface over the same
 /// service graph the daemon wires.
-pub mod embed;
+mod embed;
 /// Central synchronous event loop.
-pub mod event_loop;
+mod event_loop;
 /// The node option table and the source-layer types generated from it.
 pub mod options;
 
@@ -31,32 +31,50 @@ pub mod mining;
 #[path = "reorg_effects.rs"]
 pub mod reorg;
 /// Top-level node runner.
-pub mod run;
+mod run;
 /// Signal handling.
+#[cfg(not(windows))]
 mod signal;
-/// Shared node state.
+#[cfg(windows)]
+#[path = "signal_windows.rs"]
+mod signal;
+/// Internal node composition root.
+#[cfg(not(feature = "test-seam"))]
+#[allow(
+    unreachable_pub,
+    reason = "the public shape is exposed only by the explicit test seam"
+)]
+mod state;
+/// Integration-test and benchmark access to the internal node composition root.
+#[cfg(feature = "test-seam")]
+#[doc(hidden)]
 pub mod state;
 mod storage_backend;
-/// Custody-grade data-directory storage-footprint evidence.
-pub mod storage_footprint;
 /// Adapter between the P2P block-download executor and Chainstate.
 #[path = "p2p_chain_adapter.rs"]
 pub mod sync;
-/// P2P transaction ingress consumer.
+/// Internal P2P transaction ingress wiring.
+#[cfg(not(feature = "test-seam"))]
+#[allow(
+    unreachable_pub,
+    reason = "the worker entry point is exposed only by the explicit test seam"
+)]
+mod tx_ingress;
+/// Integration-test access to P2P transaction ingress wiring.
+#[cfg(feature = "test-seam")]
+#[doc(hidden)]
 pub mod tx_ingress;
 pub use bitcoin_rs_primitives::Network;
 
-pub use bitcoin_rs_rpc::zmq::{
-    NoOpZmqPublisher, SequenceEvent, ZmqEndpointConfig, ZmqPublisher, ZmqTopic,
-};
+pub(crate) use bitcoin_rs_rpc::zmq::NoOpZmqPublisher;
+pub use bitcoin_rs_rpc::zmq::ZmqEndpointConfig;
+pub use bitcoin_rs_rpc::zmq::ZmqPublisher;
 
-pub use chain_effects::{ChainFollowers, ConnectMutationError, DisconnectMutationError};
+pub use chain_effects::{ChainFollowers, ConnectMutationError};
 
 pub use bitcoin_rs_consensus::ValidationEngine;
 pub use config::{
-    Auth, IndexConfig, MiningConfig, NetworkSelection, NodeConfig, NotificationConfig,
-    ObservabilityConfig, P2pConfig, RpcConfig, RuntimeInputs, ScriptIndexMode, StorageConfig,
-    ValidationConfig, resolve,
+    Auth, NetworkSelection, NodeConfig, NotificationConfig, RuntimeInputs, ScriptIndexMode, resolve,
 };
 
 pub use options::{
@@ -64,20 +82,15 @@ pub use options::{
     P2pOverrides, RpcOverrides, StorageOverrides, UserConfig, ValidationOverrides,
 };
 
-pub use embed::{Node, NodeError, SyncProgress};
+pub use embed::{Node, NodeError};
 
 pub use mining::MiningCoordinator;
 
 pub use run::run;
-
-pub use storage_footprint::{
-    MeasureStorageRequest, StorageFootprintEvidence, measure_storage_footprint,
-    storage_footprint_json,
-};
 
 pub use sync::BlockSync;
 
 pub use bitcoin_rs_index::runtime::DerivedIndexRuntime;
 
 #[cfg(feature = "zmq")]
-pub use bitcoin_rs_rpc::zmq::SocketZmqPublisher;
+pub(crate) use bitcoin_rs_rpc::zmq::SocketZmqPublisher;

@@ -1,7 +1,4 @@
-use core::{
-    fmt,
-    mem::{align_of, size_of},
-};
+use core::mem::{align_of, size_of};
 
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
@@ -44,18 +41,18 @@ impl OutPoint {
     /// Bitcoin's null / coinbase prevout: an all-zero txid with `vout == u32::MAX`.
     ///
     /// `OutPoint::default()` is the derived all-zero layout (`vout == 0`) and
-    /// is not null. Consensus coinbase detection uses this predicate.
+    /// is not null.
+    #[must_use]
+    pub fn null() -> Self {
+        Self::new(Txid::default(), u32::MAX)
+    }
+
+    /// Returns true for the null / coinbase prevout.
+    ///
+    /// Consensus coinbase detection uses this predicate.
     #[must_use]
     pub fn is_null(self) -> bool {
         self.vout == u32::MAX && self.txid.as_bytes().iter().all(|&byte| byte == 0)
-    }
-}
-
-impl fmt::Display for OutPoint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let txid = self.txid;
-        let vout = self.vout;
-        write!(f, "{txid}:{vout}")
     }
 }
 
@@ -79,15 +76,11 @@ mod tests {
         assert_eq!(bytes.len(), 36);
         assert_eq!(&bytes[..32], &txid);
         assert_eq!(&bytes[32..], &[0x0d, 0x0c, 0x0b, 0x0a]);
-        assert_eq!(
-            outpoint.to_string(),
-            Txid(Hash256::from_le_bytes(&txid)).to_string() + ":168496141"
-        );
     }
 
     #[test]
     fn null_outpoint_is_zero_txid_and_max_vout() {
-        let coinbase = OutPoint::new(Txid::default(), u32::MAX);
+        let coinbase = OutPoint::null();
         assert!(coinbase.is_null());
         assert!(!OutPoint::default().is_null());
         assert!(!OutPoint::new(Txid::default(), 0).is_null());

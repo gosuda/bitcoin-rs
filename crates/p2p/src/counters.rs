@@ -8,7 +8,6 @@
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bytes and activity times for one peer connection.
 ///
@@ -82,9 +81,7 @@ impl PartialEq for PeerCounters {
 impl Eq for PeerCounters {}
 
 pub(crate) fn now_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
+    bitcoin_rs_primitives::unix_time_secs()
 }
 
 /// A stream that counts everything passing through it.
@@ -144,7 +141,7 @@ impl CountingStream<std::net::TcpStream> {
     /// # Errors
     ///
     /// Returns the error `TcpStream::set_nodelay` returned.
-    pub fn from_connected(
+    pub(crate) fn from_connected(
         stream: std::net::TcpStream,
         counters: Arc<PeerCounters>,
     ) -> IoResult<Self> {

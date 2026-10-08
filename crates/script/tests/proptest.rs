@@ -96,7 +96,7 @@ proptest! {
 /// Valid multi-input taproot key-path spend must verify once all prevouts are supplied.
 ///
 /// Before the prevout-threading fix this fails with `TaprootPrevoutsUnavailable` because
-/// `Interpreter::execute` only receives the single input's prevout.
+/// the interpreter only receives the single input's prevout.
 #[test]
 fn valid_multi_input_taproot_keypath_spend_executes() {
     let Some((oracle_tx, oracle_prevouts)) = signed_multi_input_p2tr([1, 2]) else {

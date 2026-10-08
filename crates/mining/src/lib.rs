@@ -8,7 +8,7 @@ mod coinbase;
 /// Candidate chain context.
 mod context;
 /// Node-facing mining control contract.
-pub mod control;
+mod control;
 /// Node-backed candidate lifecycle service.
 mod coordinator;
 /// Authoritative-mutation wake seam for long-poll mining.
@@ -16,7 +16,7 @@ mod generation_signal;
 /// Network hash-rate estimation.
 mod network_hashps;
 /// Transaction selection policy.
-pub mod policy;
+mod policy;
 /// Transport-neutral candidate assembly.
 mod template;
 

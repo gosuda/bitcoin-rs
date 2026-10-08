@@ -130,7 +130,7 @@ The mainnet checkpoint (height 938343, block `00000000000000000000ccebd6d74d9194
 The default mainnet configuration: `fjall` backend, multi-peer download (outbound target 8, pending block budget 256, 16 in-flight per peer once fan-out engages), hash-pinned assume-valid, 450 MiB `dbcache`, `txindex` and pruning off. The checked-in Compose specialization compiles `fjall` + `bitcoinkernel`, runs unprivileged, and namespaces node and enforcer data by `BITCOIN_RS_NETWORK`.
 
 ### Node network selection
-`BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. Owner: `apply_network_selection` in `crates/node/src/config.rs`; layering is `ARCH-05` in `docs/contracts/architecture.md`.
+`BITCOIN_RS_NETWORK`/`--network` atomically selects consensus rules and P2P bootstrap identity while preserving later low-level overrides. The internal consensus `Network` remains the consensus selector: `drynet4` keeps mainnet consensus with message start `eca5d404`, no Bitcoin DNS seeds, and `drynet4.drivechain.dev:8533`. Owner: `NetworkProfile::for_selection` in `crates/node/src/config.rs`; layering is `ARCH-05` in `docs/contracts/architecture.md`.
 
 ### Sync regimes (download-bound vs processing-bound)
 The two cost regimes a sync measurement must name before its numbers mean anything. **Download-bound:** wall is decided by the network path — live IBD. **Processing-bound:** blocks are local and wall is decided by validation plus storage commit — reindex and replay. A node can rank differently in the two, so a faster-than-X claim needs the regime and validation posture stated.
@@ -236,7 +236,7 @@ downstream consumers (ZMQ publisher, metrics) can distinguish relay from
 reorg re-admission without inspecting call sites.
 
 ### Chainstate facade
-The in-process owner of applied-tip mutation (`bitcoin_rs_node::Chainstate`).
+The in-process owner of applied-tip mutation (`bitcoin_rs_chainstate::Chainstate`).
 Callers copy a `ChainstateSnapshot` or obtain a `ChainTransition`; they do
 not hold the raw UTXO, tip, and lock cells and reproduce a partial
 transition. `chain` still plans the branch. Node-level reorg still sequences
@@ -261,7 +261,7 @@ A window sized by whichever of a count cap and a byte cap binds first, because i
 Consensus-affecting RPCs never mutate the block tree directly; they delegate through the node-owned `ChainControl` so the same apply-admission and chain-transition locks protect RPC- and sync-triggered reorganizations. `invalidateblock` previews the replacement tip, loads every body the disconnect/connect plan needs, then holds the chain-transition witness through header invalidation and branch switching; its disconnects emit the same `pubsequence` `D` events as an organic reorg. `PruneAuthority` takes the same locks before reading the applied tip.
 
 ### Commit point (multi-store mutation)
-The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried, so `DisconnectError` (`crates/node/src/state.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, but the in-flight disconnect marker could not be cleared, so the next start recovers from it automatically). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down.
+The mutation that makes a multi-store operation visible; it does not make preceding mutations atomic. For an authoritative disconnect it is the `applied_tip` rollback, after the UTXO undo and coinstats rewind. The UTXO undo can fail after some shards changed and cannot be retried, so `DisconnectError` (`crates/chainstate/src/error.rs`) splits `Refused` (nothing touched) from `Fatal` (partly rolled back) and `MarkerStuck` (rolled back cleanly, but the in-flight disconnect marker could not be cleared, so the next start recovers from it automatically). `Fatal` and `MarkerStuck` both close apply admission; `Fatal` shuts the process down.
 
 ### Disconnect marker phase
 The durable record that an authoritative disconnect started and how far it got. Armed and flushed before the UTXO mutation, not on the error path, because a process that dies mid-rollback writes no error. `InFlight`: rollback started, completion unreported; an ordinary checkpoint must not clear it. `RolledBack`: UTXO set and applied tip moved together and need one clean checkpoint. Startup recovers automatically from either phase: it reconciles the certified durable-head chain with the restored state — rewinding a checkpoint the disconnect outran, replaying a gap that trails it — warns with the mode chosen, publishes a clean checkpoint, and retires the marker only after that publication is durable; durable evidence the head chain cannot authenticate still fails closed.
@@ -307,7 +307,7 @@ One logical record has exactly one byte string; `UtxoRecord` compares and hashes
 Asserting how much of an expensive operation a code path performs, instead of how long it takes. A wall-clock assertion in a test suite is a flake generator, and an assertion that a function merely returns something passes for a stub. Counting the calls a path makes (for example, how many amounts `find_output` decompresses for a hit, a miss, and `max_vout`) states an algorithmic claim deterministically at any input size. The counterpart is the case a count cannot make: where the claim really is about elapsed time, the assertion belongs in a paired-arm benchmark, not a test.
 
 ### Chain snapshot
-The coherent, non-torn view of the applied tip the chain-event publisher keeps in one `RwLock`ed cell: `{ epoch, sequence, tip_hash, tip_height }` (`crates/node/src/state.rs`). The single writer replaces the whole cell per commit, so a reader never mixes two commit points. `epoch` is a persisted, strictly monotonic per-data-dir counter that makes an old run's cursors stale; `sequence` advances once per committed connect or disconnect and starts at 1. The snapshot is live state, never persisted per-event; readers take `NodeState::active_chain_snapshot`.
+The coherent, non-torn view of the applied tip the chain-event publisher keeps in one `RwLock`ed cell: `{ epoch, sequence, tip_hash, tip_height }` (`crates/chainstate/src/events.rs`). The single writer replaces the whole cell per commit, so a reader never mixes two commit points. `epoch` is a persisted, strictly monotonic per-data-dir counter that makes an old run's cursors stale; `sequence` advances once per committed connect or disconnect and starts at 1. The snapshot is live state, never persisted per-event; readers take `Chainstate::chain_snapshot()`.
 
 ### Chain-event hint
 The bounded-channel wake-up `ChainEventPublisher::record` emits after replacing the snapshot cell: `{ kind, height, hash, epoch, sequence }`, one per committed connect or disconnect. Hints carry no payload to apply and a full channel drops them without blocking the commit path; recovery is always positional re-planning over the chain itself. Hints are not a recovery log.
@@ -331,11 +331,11 @@ subsystem. Explains data-model growth. It is not filesystem allocation and
 must not be added to the physical ledger.
 
 ### Physical namespace ledger
-Allocated filesystem blocks (`st_blocks * 512`) for each top-level
-data-directory namespace. The source of the data-directory budget. A snapshot
-is a lower bound on peak allocation; a passing sub-1-TB default-node result
-requires a conservative high-water from an isolated filesystem or project
-quota. See [docs/contracts/storage-footprint.md](docs/contracts/storage-footprint.md).
+Allocated filesystem blocks (`st_blocks * 512`) by top-level data-directory
+entry in an offline snapshot. A snapshot is a lower bound on peak allocation,
+not a budget verdict. The Linux measurement tool reports this alongside
+filesystem apparent bytes, not a logical KV ledger.
+See [docs/contracts/storage-footprint.md](docs/contracts/storage-footprint.md).
 
 ### Consumer cursor
 The durable 52-byte record `{ epoch, sequence, height, hash }` naming the exact chain state a consumer's rows already mirror (`crates/index/src/reconcile.rs`). Position (`height`, `hash`) anchors row truth; `epoch` and `sequence` are advisory identity that a restart or epoch bump invalidates without invalidating rows. It is written only when the publisher snapshot provably names the tip the rows reached, and always in the same atomic batch as the row mutations it describes.

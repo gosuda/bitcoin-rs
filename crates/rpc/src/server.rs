@@ -73,16 +73,14 @@ impl RpcServer {
     /// shutdown without parking on an open socket. Each accepted connection
     /// is restored to blocking mode and handed to a bounded worker thread,
     /// preserving the configured `idle_timeout` per connection.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn serve_with_shutdown(
         self,
-        shutdown: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> io::Result<()> {
-        use core::sync::atomic::Ordering;
-
+        let shutdown = shutdown.into();
         self.listener.set_nonblocking(true)?;
         let active = Arc::new(Mutex::new(0_usize));
-        while !shutdown.load(Ordering::Acquire) {
+        while !shutdown.is_triggered() {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
                     stream.set_nonblocking(false)?;
@@ -588,7 +586,7 @@ fn split_path_query(path: &str) -> (&str, &str) {
 }
 
 /// Listener directories; see `docs/contracts/wallet-facing.md` WF-02.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 enum HttpRoute<'a> {
     Rest {
         path: &'a str,
@@ -616,7 +614,7 @@ enum HttpSurface {
     EsploraBackend,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 enum CorsPolicy {
     Disabled,
     Public {
@@ -782,7 +780,7 @@ struct ResponseHead<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::*;
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -803,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn serve_with_shutdown_exits_on_signal() -> std::io::Result<()> {
         let auth = Arc::new(Auth::basic("alice", "secret"));
         let handler = Arc::new(Handler::new(Arc::new(Context::new())));

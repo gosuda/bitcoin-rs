@@ -3,11 +3,11 @@
 //! entrypoints retain health, revision, watermark, and chain-transition checks.
 
 use super::{
-    Arc, Block, BlockBodySource, BlockHash, BlockLog, BlockSource, BlockTree, DerivedIndexInfo,
-    DerivedIndexQuery, DerivedIndexRuntime, Hash256, IndexCapabilities, IndexCapability,
-    IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint, PrefixScanLimit,
-    QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT,
-    RwLock, ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
+    Arc, Block, BlockBodySource, BlockHash, BlockLogReader, BlockSource, BlockTree,
+    DerivedIndexInfo, DerivedIndexQuery, DerivedIndexRuntime, Hash256, IndexCapabilities,
+    IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint,
+    PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT,
+    QUERY_SCAN_ROW_LIMIT, ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
     ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexScan,
     TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize,
     record_at_height,
@@ -20,7 +20,7 @@ mod transactions;
 /// bodies from the chain body store. Not a node-owned concept.
 #[derive(Clone)]
 pub struct IndexBlockSource {
-    blocks: Arc<RwLock<BlockLog>>,
+    blocks: BlockLogReader,
     block_body_source: Option<Arc<dyn BlockBodySource>>,
     block_tree: Option<bitcoin_rs_chain::BlockTreeReader>,
 }
@@ -28,9 +28,9 @@ pub struct IndexBlockSource {
 impl IndexBlockSource {
     /// A source backed only by the log of connected block records.
     #[must_use]
-    pub const fn new(blocks: Arc<RwLock<BlockLog>>) -> Self {
+    pub fn new(blocks: impl Into<BlockLogReader>) -> Self {
         Self {
-            blocks,
+            blocks: blocks.into(),
             block_body_source: None,
             block_tree: None,
         }
@@ -183,13 +183,13 @@ impl QueryBudget {
 
 /// Authoritative Live query sources: capability selection, the UTXO set, and
 /// the chain-transition lock Live composition requires.
-pub struct QueryEngineLive {
+pub(crate) struct QueryEngineLive {
     /// Authoritative UTXO set for the compact live view.
-    pub utxo: Option<bitcoin_rs_utxo::UtxoReader>,
+    pub(crate) utxo: Option<bitcoin_rs_utxo::UtxoReader>,
     /// Serializes live-view work against a chain transition.
-    pub chain_transition: Option<bitcoin_rs_chain::StableRead>,
+    pub(crate) chain_transition: Option<bitcoin_rs_chain::StableRead>,
     /// Capability set this engine serves.
-    pub enabled: IndexCapabilities,
+    pub(crate) enabled: IndexCapabilities,
 }
 
 /// First covered height per history-derived capability, loaded from the
@@ -202,6 +202,18 @@ pub(crate) struct CapabilityFloors {
     pub(crate) tx_lookup: u32,
     /// `ScriptHistory` first covered height.
     pub(crate) script_history: u32,
+}
+
+impl CapabilityFloors {
+    /// Assigns `floor` to `capability`'s slot. `ScriptLive` has no coverage
+    /// floor — it reseeds from the UTXO view — so it stores nothing.
+    pub(crate) fn set(&mut self, capability: IndexCapability, floor: u32) {
+        match capability {
+            IndexCapability::TxLookup => self.tx_lookup = floor,
+            IndexCapability::ScriptHistory => self.script_history = floor,
+            IndexCapability::ScriptLive => {}
+        }
+    }
 }
 
 /// Node-owned, snapshot-gated transaction-index query engine.
@@ -234,7 +246,7 @@ impl core::fmt::Debug for DerivedIndexQueryEngine {
 impl DerivedIndexQueryEngine {
     /// Builds a query engine over the shared reader and authoritative block source.
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         runtime: Arc<DerivedIndexRuntime>,
         reader: Arc<dyn IndexReader>,
         block_source: IndexBlockSource,
@@ -331,11 +343,7 @@ impl DerivedIndexQueryEngine {
             let floor = snapshot
                 .capability_floor(capability)
                 .map_err(|e| TxQueryError::Storage(e.to_string().into()))?;
-            match capability {
-                IndexCapability::TxLookup => floors.tx_lookup = floor,
-                IndexCapability::ScriptHistory => floors.script_history = floor,
-                IndexCapability::ScriptLive => {}
-            }
+            floors.set(capability, floor);
         }
 
         for capability in IndexCapability::ALL {

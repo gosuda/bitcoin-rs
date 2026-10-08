@@ -47,6 +47,7 @@ use std::error::Error;
 use std::path::Path;
 use std::str::FromStr;
 
+use bitcoin::hex::FromHex;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, deserialize};
 use bitcoin_rs_script::VerifyFlags;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
@@ -137,9 +138,9 @@ fn resolve_opcode(name: &str) -> Option<u8> {
     Some(match bare {
         // Push opcodes
         "0" | "EMPTY" => OP_0,
-        "PUSHDATA1" => OP_PUSHDATA1,
-        "PUSHDATA2" => OP_PUSHDATA2,
-        "PUSHDATA4" => OP_PUSHDATA4,
+        "PUSHDATA1" => 0x4c,
+        "PUSHDATA2" => 0x4d,
+        "PUSHDATA4" => 0x4e,
         "1NEGATE" => OP_1NEGATE,
         "1" | "PUSHNUM_1" => OP_PUSHNUM_1,
         "2" | "PUSHNUM_2" => 0x52,
@@ -237,9 +238,9 @@ fn resolve_opcode(name: &str) -> Option<u8> {
         "HASH256" => 0xaa,
         "CODESEPARATOR" => 0xab,
         "CHECKSIG" => OP_CHECKSIG,
-        "CHECKSIGVERIFY" => OP_CHECKSIGVERIFY,
+        "CHECKSIGVERIFY" => 0xad,
         "CHECKMULTISIG" => OP_CHECKMULTISIG,
-        "CHECKMULTISIGVERIFY" => OP_CHECKMULTISIGVERIFY,
+        "CHECKMULTISIGVERIFY" => 0xaf,
         // Locktime/sequence
         "CHECKLOCKTIMEVERIFY" => 0xb1,
         "CHECKSEQUENCEVERIFY" => 0xb2,
@@ -250,17 +251,7 @@ fn resolve_opcode(name: &str) -> Option<u8> {
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err(format!("odd length: {}", hex.len()));
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            let byte = u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|e| format!("at offset {i}: {e}"))?;
-            Ok(byte)
-        })
-        .collect()
+    Vec::from_hex(hex).map_err(|error| error.to_string())
 }
 
 // ---------------------------------------------------------------------------

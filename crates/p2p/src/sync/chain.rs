@@ -9,37 +9,20 @@ use bitcoin_rs_chain::TipSnapshot;
 // Header admission is decided by the authoritative tree writer, so its
 // outcome vocabulary belongs to the chain crate; the seam shares it.
 pub use bitcoin_rs_chain::HeaderAdmission;
+pub use bitcoin_rs_chainstate::WindowApplyDisposition;
+pub use bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance;
+pub use bitcoin_rs_chainstate::reorg::ReorgError;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use bytes::Bytes;
 use parking_lot::RwLockReadGuard;
-#[cfg(test)]
-use parking_lot::RwLockWriteGuard;
 use std::sync::Arc;
 
 /// Boxed source for seam failures: the executor forwards them to logs and
 /// metrics without naming the implementation's error types.
 pub type SyncChainError = Box<dyn core::error::Error + Send + Sync>;
-
-/// How the executor must treat a failed window commit or branch connect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowCommitDisposition {
-    /// `Permanent` failures poisoned the failed block's header subtree while
-    /// the chain transition was still held.
-    Permanent,
-    /// The delivered body is mutated or not bound to its header. Discard
-    /// this body and retry the same header/hash from another source; do not
-    /// poison the header or its descendants.
-    BodyMutated,
-    /// `Operational` failures poisoned nothing; the failed block stays
-    /// retryable.
-    Operational,
-    /// `Fatal` means the transition itself could not be settled, so
-    /// admission stays closed until recovery.
-    Fatal,
-}
 
 /// A window commit that stopped partway: `applied` committed, the block at
 /// index `applied` failed, and `invalidated` carries the subtree the
@@ -48,9 +31,9 @@ pub struct WindowCommitError {
     /// Blocks that committed before the failure.
     pub applied: usize,
     /// How the executor must treat this failure.
-    pub disposition: WindowCommitDisposition,
+    pub disposition: WindowApplyDisposition,
     /// Hashes marked invalid while the transition was held; empty unless
-    /// `disposition` is [`WindowCommitDisposition::Permanent`].
+    /// `disposition` is [`WindowApplyDisposition::Permanent`].
     pub invalidated: Box<[Hash256]>,
     /// The implementation's underlying failure.
     pub source: SyncChainError,
@@ -77,139 +60,28 @@ impl core::fmt::Debug for WindowCommitError {
     }
 }
 
-/// Why a branch switch stopped, and what the applied chain looks like now.
-pub enum BranchSwitchError {
-    /// The first block the connect walk needed has no staged or stored body.
-    MissingBody {
-        /// Height the missing body sits at.
-        height: u32,
-    },
-    /// A connect failed while applying the new branch. When the first body
-    /// was permanently invalid, the previously applied branch is restored
-    /// before this outcome is returned. The implementation has evaluated the
-    /// assume-valid gate over the post-invalidation tree when `invalidated`
-    /// is non-empty.
-    ConnectFailed {
-        /// Hash of the block that failed to connect.
-        hash: Hash256,
-        /// How the executor must treat the failure — decided by the apply
-        /// classifier at the failure.
-        disposition: WindowCommitDisposition,
-        /// Every hash marked `Invalid` under the held transition; empty for
-        /// operational failures.
-        invalidated: Box<[Hash256]>,
-    },
-    /// A disconnect-side body became unreadable mid-rollback; the chain is
-    /// coherent at `stopped_at`.
-    DisconnectBodyLost {
-        /// Fully disconnected blocks before the loss, in plan order.
-        disconnected: usize,
-        /// Height the applied tip reached before stopping.
-        stopped_at: u32,
-    },
-    /// A connect-side body became unavailable after part of the branch
-    /// applied; the chain is coherent at `stopped_at`.
-    ConnectBodyLost {
-        /// Fully disconnected blocks before the loss, in plan order.
-        disconnected: usize,
-        /// Fully connected new-branch blocks before the loss, in plan order.
-        connected: usize,
-        /// Height the applied tip reached before stopping.
-        stopped_at: u32,
-    },
-    /// A disconnect or old-branch restoration failed; the implementation has
-    /// already closed admission and requested shutdown for recovery.
-    Fatal(SyncChainError),
-    /// The walk concluded but its stable generation could not be published.
-    TransitionSettlement(SyncChainError),
-    /// A nonfatal switch completed but rolled-back state could not be
-    /// checkpointed.
-    CheckpointSettlement(SyncChainError),
-    /// Any other typed outcome the executor only logs.
-    Other(SyncChainError),
-}
-
-impl core::fmt::Display for BranchSwitchError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::MissingBody { height } => write!(f, "missing body at height {height}"),
-            Self::ConnectFailed { hash, .. } => write!(f, "connect failed at {hash}"),
-            Self::DisconnectBodyLost {
-                disconnected,
-                stopped_at,
-            } => write!(
-                f,
-                "body lost mid-rollback after {disconnected} disconnects at height {stopped_at}"
-            ),
-            Self::ConnectBodyLost {
-                disconnected,
-                connected,
-                stopped_at,
-            } => write!(
-                f,
-                "body lost mid-connect after {disconnected} disconnects and {connected} connects at height {stopped_at}"
-            ),
-            Self::Fatal(source)
-            | Self::TransitionSettlement(source)
-            | Self::CheckpointSettlement(source)
-            | Self::Other(source) => write!(f, "{source}"),
-        }
-    }
-}
-
-impl core::fmt::Debug for BranchSwitchError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::MissingBody { height } => f
-                .debug_struct("MissingBody")
-                .field("height", height)
-                .finish(),
-            Self::ConnectFailed {
-                hash,
-                disposition,
-                invalidated,
-            } => f
-                .debug_struct("ConnectFailed")
-                .field("hash", hash)
-                .field("disposition", disposition)
-                .field("invalidated", invalidated)
-                .finish(),
-            Self::DisconnectBodyLost {
-                disconnected,
-                stopped_at,
-            } => f
-                .debug_struct("DisconnectBodyLost")
-                .field("disconnected", disconnected)
-                .field("stopped_at", stopped_at)
-                .finish(),
-            Self::ConnectBodyLost {
-                disconnected,
-                connected,
-                stopped_at,
-            } => f
-                .debug_struct("ConnectBodyLost")
-                .field("disconnected", disconnected)
-                .field("connected", connected)
-                .field("stopped_at", stopped_at)
-                .finish(),
-            Self::Fatal(source) => f.debug_tuple("Fatal").field(source).finish(),
-            Self::TransitionSettlement(source) => {
-                f.debug_tuple("TransitionSettlement").field(source).finish()
-            }
-            Self::CheckpointSettlement(source) => {
-                f.debug_tuple("CheckpointSettlement").field(source).finish()
-            }
-            Self::Other(source) => f.debug_tuple("Other").field(source).finish(),
-        }
-    }
-}
-
 /// Applied-chain seam driven by the block-download executor.
 ///
 /// The implementation owns applied-tip mutation (node, ARCH-07) — header
 /// admission under the chain-transition lock, window commit, branch switch,
 /// and genesis bootstrap. The executor owns everything else.
 pub trait SyncChain: Send + Sync {
+    /// Pinned snapshot ancestor whose bodies historical validation requires.
+    /// This is independent of the moving foreground header tip.
+    fn historical_base(&self) -> Option<Hash256> {
+        None
+    }
+
+    /// Replays bounded retained snapshot history, distinguishing local work
+    /// from genuinely missing pinned-ancestry bodies.
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
+        Ok(HistoricalAdvance::Complete)
+    }
+
+    /// Validates a requested historical body through the chainstate owner.
+    fn connect_historical(&self, _block: &Block, _body: Bytes) -> Result<(), SyncChainError> {
+        Err("historical validation is not configured".into())
+    }
     /// Network the applied chain validates against.
     fn network(&self) -> Network;
 
@@ -221,14 +93,6 @@ pub trait SyncChain: Send + Sync {
 
     /// Applied tip published by commits and branch switches.
     fn applied_tip(&self) -> Option<Arc<TipSnapshot>>;
-
-    /// Fixture-only mutation seam, absent from production trait objects.
-    #[cfg(test)]
-    fn block_tree_mut(&self) -> RwLockWriteGuard<'_, BlockTree>;
-
-    /// Fixture-only tip publication seam, absent from production trait objects.
-    #[cfg(test)]
-    fn set_tips(&self, applied: TipSnapshot, header: TipSnapshot);
 
     /// Applies genesis when nothing is applied yet.
     fn bootstrap_genesis(&self);
@@ -280,5 +144,5 @@ pub trait SyncChain: Send + Sync {
         target: NodeId,
         staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, Bytes)>,
         connected_body: &mut dyn FnMut(Hash256),
-    ) -> Result<(), BranchSwitchError>;
+    ) -> Result<(), ReorgError>;
 }

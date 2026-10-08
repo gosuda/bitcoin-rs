@@ -69,30 +69,6 @@ impl ColumnFamily {
         }
     }
 
-    /// Alias for [`Self::name`].
-    pub const fn as_str(self) -> &'static str {
-        self.name()
-    }
-
-    /// Converts the stable one-byte representation to a column family.
-    pub const fn from_u8(byte: u8) -> Option<Self> {
-        match byte {
-            0 => Some(Self::TxConfirmed),
-            1 => Some(Self::TxMempool),
-            2 => Some(Self::BlockHeaders),
-            3 => Some(Self::Funding),
-            4 => Some(Self::Spending),
-            5 => Some(Self::Coinstats),
-            6 => Some(Self::BlockTree),
-            7 => Some(Self::UtxoMeta),
-            8 => Some(Self::BlockBodies),
-            9 => Some(Self::UndoData),
-            10 => Some(Self::ScriptLive),
-            11 => Some(Self::CoinRecords),
-            _ => None,
-        }
-    }
-
     /// Stable zero-based index for arrays keyed by column family.
     pub const fn index(self) -> usize {
         match self {

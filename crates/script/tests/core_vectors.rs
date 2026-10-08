@@ -1,19 +1,20 @@
 //! Differential vector harness over Bitcoin Core's script consensus test data.
 //!
-//! Feeds Core's `script_tests.json`, `tx_valid.json`, `tx_invalid.json`, and
-//! `sighash.json` through the native [`Interpreter`] and (when `--features kernel`
-//! is enabled) the bitcoinkernel oracle, then compares verdicts.
+//! Feeds Core's `script_tests.json`, `tx_valid.json` and `tx_invalid.json`
+//! through the native [`Interpreter`] and (when `--features kernel` is enabled)
+//! the bitcoinkernel oracle, then compares verdicts. `sighash.json` is graded
+//! by `checker::tests::sighash_json_corpus_legacy_path`, which reaches the
+//! crate-private `remove_all` this harness cannot call.
 //!
 //! ## Anti-vacuity
 //!
 //! Every corpus prints four counts: rows parsed, rows executed, rows skipped
-//! (with a one-line reason per category), and rows failed. A deliberately
-//! broken expectation proves the harness reports failures rather than passing
-//! vacuously.
+//! (with a one-line reason per category), and rows failed. The native columns
+//! pin those counts, so a row that silently stops executing fails the lane.
 //!
 //! ## Two columns
 //!
-//! The native evaluator runs every non-taproot spend class. Each native column
+//! The native evaluator runs the legacy, witness-v0 and taproot rows. Each column
 //! pins its remaining mismatch count, so a shrink lowers the constant with
 //! evidence and a growth fails the lane. The kernel column stays available
 //! under `--features kernel` as an oracle for the same rows.
@@ -30,22 +31,18 @@
 use std::str::FromStr;
 
 use bitcoin::ScriptBuf;
+use bitcoin::hex::FromHex;
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::taproot::{LeafVersion, TaprootBuilder};
 use bitcoin_rs_primitives::tapleaf_hash;
 use bitcoin_rs_primitives::{
-    Amount, Hash256, LockTime, OutPoint, Script, Sequence, SighashCache, Tx, TxIn, TxOut, Txid,
-    Witness, deserialize,
+    Amount, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness, deserialize,
 };
-use bitcoin_rs_script::checker::remove_codeseparators;
 use bitcoin_rs_script::{
-    Interpreter, ScriptError, VerifyFlags, opcode, push_data, push_int, taproot,
+    Interpreter, PreparedTransaction, ScriptError, VerifyFlags, opcode, push_data, push_int,
 };
 
-/// Core's script error identifiers, exactly as `script_error.cpp` /
-/// `script_tests.cpp`'s `script_errors[]` table renders them. A row naming
-/// anything outside this table is skipped and counted, so a corpus update
-/// that introduces a new rule cannot slip through as a silent pass.
+// Core error names admitted by the corpus parser; verdicts compare acceptance only.
 static CORE_ERROR_NAMES: &[&str] = &[
     "OK",
     "EVAL_FALSE",
@@ -103,29 +100,9 @@ static CORE_ERROR_NAMES: &[&str] = &[
     "SIG_FINDANDDELETE",
 ];
 
-/// One row's expected outcome: Core's error name, or `OK` for acceptance.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Expectation(&'static str);
-
-impl Expectation {
-    fn from_name(name: &str) -> Option<Self> {
-        CORE_ERROR_NAMES
-            .iter()
-            .copied()
-            .find(|known| *known == name)
-            .map(Self)
-    }
-
-    fn is_ok(self) -> bool {
-        self.0 == "OK"
-    }
-}
-
-impl std::fmt::Display for Expectation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
+// ===========================================================================
+// Core ASM script assembler
+// ===========================================================================
 
 /// Parses a Core test-vector script string into raw bytes.
 ///
@@ -176,25 +153,9 @@ fn is_decimal_int(s: &str) -> bool {
     bytes[start..].iter().all(u8::is_ascii_digit)
 }
 
-/// Linear search through the opcode table. Test-only, so O(n) is fine.
 fn resolve_opcode(name: &str) -> Option<u8> {
     let bare = name.strip_prefix("OP_").unwrap_or(name);
-    OPCODE_BYTES
-        .iter()
-        .find(|(_, names)| names.contains(&bare))
-        .map(|&(byte, _)| byte)
-        .or_else(|| {
-            let suffix = bare.strip_prefix("SUCCESS_")?;
-            let index = suffix.parse::<u8>().ok()?;
-            if suffix != index.to_string() {
-                return None;
-            }
-            match index {
-                0 => Some(0x50),
-                80..=191 => Some(index + 46),
-                _ => None,
-            }
-        })
+    lookup_opcode(bare)
 }
 
 static OPCODE_BYTES: &[(u8, &[&str])] = &[
@@ -315,23 +276,150 @@ static OPCODE_BYTES: &[(u8, &[&str])] = &[
     (0xff, &["INVALIDOPCODE"]),
 ];
 
-fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err(format!("odd length: {}", hex.len()));
+static OP_SUCCESS_NAMES: &[(u8, &str)] = &[
+    (0x50, "SUCCESS_0"),
+    (0x7e, "SUCCESS_80"),
+    (0x7f, "SUCCESS_81"),
+    (0x80, "SUCCESS_82"),
+    (0x81, "SUCCESS_83"),
+    (0x82, "SUCCESS_84"),
+    (0x83, "SUCCESS_85"),
+    (0x84, "SUCCESS_86"),
+    (0x85, "SUCCESS_87"),
+    (0x86, "SUCCESS_88"),
+    (0x87, "SUCCESS_89"),
+    (0x88, "SUCCESS_90"),
+    (0x89, "SUCCESS_91"),
+    (0x8a, "SUCCESS_92"),
+    (0x8b, "SUCCESS_93"),
+    (0x8c, "SUCCESS_94"),
+    (0x8d, "SUCCESS_95"),
+    (0x8e, "SUCCESS_96"),
+    (0x8f, "SUCCESS_97"),
+    (0x90, "SUCCESS_98"),
+    (0x91, "SUCCESS_99"),
+    (0x92, "SUCCESS_100"),
+    (0x93, "SUCCESS_101"),
+    (0x94, "SUCCESS_102"),
+    (0x95, "SUCCESS_103"),
+    (0x96, "SUCCESS_104"),
+    (0x97, "SUCCESS_105"),
+    (0x98, "SUCCESS_106"),
+    (0x99, "SUCCESS_107"),
+    (0x9a, "SUCCESS_108"),
+    (0x9b, "SUCCESS_109"),
+    (0x9c, "SUCCESS_110"),
+    (0x9d, "SUCCESS_111"),
+    (0x9e, "SUCCESS_112"),
+    (0x9f, "SUCCESS_113"),
+    (0xa0, "SUCCESS_114"),
+    (0xa1, "SUCCESS_115"),
+    (0xa2, "SUCCESS_116"),
+    (0xa3, "SUCCESS_117"),
+    (0xa4, "SUCCESS_118"),
+    (0xa5, "SUCCESS_119"),
+    (0xa6, "SUCCESS_120"),
+    (0xa7, "SUCCESS_121"),
+    (0xa8, "SUCCESS_122"),
+    (0xa9, "SUCCESS_123"),
+    (0xaa, "SUCCESS_124"),
+    (0xab, "SUCCESS_125"),
+    (0xac, "SUCCESS_126"),
+    (0xad, "SUCCESS_127"),
+    (0xae, "SUCCESS_128"),
+    (0xaf, "SUCCESS_129"),
+    (0xb0, "SUCCESS_130"),
+    (0xb1, "SUCCESS_131"),
+    (0xb2, "SUCCESS_132"),
+    (0xb3, "SUCCESS_133"),
+    (0xb4, "SUCCESS_134"),
+    (0xb5, "SUCCESS_135"),
+    (0xb6, "SUCCESS_136"),
+    (0xb7, "SUCCESS_137"),
+    (0xb8, "SUCCESS_138"),
+    (0xb9, "SUCCESS_139"),
+    (0xba, "SUCCESS_140"),
+    (0xbb, "SUCCESS_141"),
+    (0xbc, "SUCCESS_142"),
+    (0xbd, "SUCCESS_143"),
+    (0xbe, "SUCCESS_144"),
+    (0xbf, "SUCCESS_145"),
+    (0xc0, "SUCCESS_146"),
+    (0xc1, "SUCCESS_147"),
+    (0xc2, "SUCCESS_148"),
+    (0xc3, "SUCCESS_149"),
+    (0xc4, "SUCCESS_150"),
+    (0xc5, "SUCCESS_151"),
+    (0xc6, "SUCCESS_152"),
+    (0xc7, "SUCCESS_153"),
+    (0xc8, "SUCCESS_154"),
+    (0xc9, "SUCCESS_155"),
+    (0xca, "SUCCESS_156"),
+    (0xcb, "SUCCESS_157"),
+    (0xcc, "SUCCESS_158"),
+    (0xcd, "SUCCESS_159"),
+    (0xce, "SUCCESS_160"),
+    (0xcf, "SUCCESS_161"),
+    (0xd0, "SUCCESS_162"),
+    (0xd1, "SUCCESS_163"),
+    (0xd2, "SUCCESS_164"),
+    (0xd3, "SUCCESS_165"),
+    (0xd4, "SUCCESS_166"),
+    (0xd5, "SUCCESS_167"),
+    (0xd6, "SUCCESS_168"),
+    (0xd7, "SUCCESS_169"),
+    (0xd8, "SUCCESS_170"),
+    (0xd9, "SUCCESS_171"),
+    (0xda, "SUCCESS_172"),
+    (0xdb, "SUCCESS_173"),
+    (0xdc, "SUCCESS_174"),
+    (0xdd, "SUCCESS_175"),
+    (0xde, "SUCCESS_176"),
+    (0xdf, "SUCCESS_177"),
+    (0xe0, "SUCCESS_178"),
+    (0xe1, "SUCCESS_179"),
+    (0xe2, "SUCCESS_180"),
+    (0xe3, "SUCCESS_181"),
+    (0xe4, "SUCCESS_182"),
+    (0xe5, "SUCCESS_183"),
+    (0xe6, "SUCCESS_184"),
+    (0xe7, "SUCCESS_185"),
+    (0xe8, "SUCCESS_186"),
+    (0xe9, "SUCCESS_187"),
+    (0xea, "SUCCESS_188"),
+    (0xeb, "SUCCESS_189"),
+    (0xec, "SUCCESS_190"),
+    (0xed, "SUCCESS_191"),
+];
+
+/// Linear search through the opcode tables. Test-only, so O(n) is fine.
+fn lookup_opcode(bare: &str) -> Option<u8> {
+    for &(byte, names) in OPCODE_BYTES {
+        if names.contains(&bare) {
+            return Some(byte);
+        }
     }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("at offset {i}: {e}")))
-        .collect()
+    for &(byte, name) in OP_SUCCESS_NAMES {
+        if name == bare {
+            return Some(byte);
+        }
+    }
+    None
 }
 
+fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
+    Vec::from_hex(hex).map_err(|error| error.to_string())
+}
+
+// ===========================================================================
 // Transaction construction — Core's BuildCrediting/BuildSpending
+// ===========================================================================
 
 fn build_crediting_tx(script_pubkey: &[u8], amount: u64) -> Tx {
     Tx {
         version: 1,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: vec![opcode::OP_0, opcode::OP_0].into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -362,7 +450,9 @@ fn build_spending_tx(script_sig: &[u8], witness: &[Vec<u8>], credit_tx: &Tx) -> 
     }
 }
 
+// ===========================================================================
 // Verdict model
+// ===========================================================================
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Verdict {
@@ -397,16 +487,11 @@ impl Verdict {
     const fn accepted(&self) -> bool {
         matches!(self, Self::Accept)
     }
-
-    fn matches_expected(&self, expected: Expectation) -> bool {
-        match self {
-            Self::Accept => expected.is_ok(),
-            Self::Reject(_) => !expected.is_ok(),
-        }
-    }
 }
 
+// ===========================================================================
 // Counters for anti-vacuity
+// ===========================================================================
 
 #[derive(Default, Debug)]
 struct Counts {
@@ -481,7 +566,9 @@ fn assert_pinned_native_column(
     );
 }
 
+// ===========================================================================
 // Corpus 1: script_tests.json
+// ===========================================================================
 
 // Core's `script_json_test` fills three markers the JSON corpus cannot express
 // as hex (`src/test/script_tests.cpp:925-945`, `:968-974`):
@@ -525,10 +612,10 @@ struct TaprootPlaceholder {
 /// `TaprootBuilder::Add(0, script, TAPROOT_LEAF_TAPSCRIPT).Finalize(key0)`.
 ///
 /// The tree is assembled with rust-bitcoin's builder - an independent
-/// implementation of BIP341 - and then checked against this crate's own
-/// `taproot::compute_taproot_merkle_root` and `taproot::verify_taproot_commitment`
-/// before it is handed to the interpreter, so a row can never be graded against
-/// a commitment the driver itself would reject.
+/// implementation of BIP341 - and its merkle root is checked against this
+/// workspace's own tapleaf hash before the tree is handed to the
+/// interpreter, so a row can never be graded against a commitment the
+/// driver itself would reject.
 fn build_taproot_placeholder(leaf_script: &[u8]) -> Result<TaprootPlaceholder, String> {
     let secp = Secp256k1::new();
     let secret = SecretKey::from_slice(&CORE_TAPROOT_INTERNAL_SECRET)
@@ -549,9 +636,9 @@ fn build_taproot_placeholder(leaf_script: &[u8]) -> Result<TaprootPlaceholder, S
         .serialize();
     let output_key = spend_info.output_key().serialize();
 
-    // The tree's own merkle root must be the tapleaf hash this crate computes,
-    // and this crate's commitment check must accept the pair it just generated.
-    let tapleaf = tapleaf_hash(taproot::TAPROOT_LEAF_TAPSCRIPT, leaf_script);
+    // The tree's own merkle root must equal the tapleaf hash this workspace
+    // computes for the same leaf.
+    let tapleaf = tapleaf_hash(LeafVersion::TapScript.to_consensus(), leaf_script);
     let core_root = spend_info
         .merkle_root()
         .ok_or("a one-leaf tree has a merkle root")?;
@@ -560,17 +647,6 @@ fn build_taproot_placeholder(leaf_script: &[u8]) -> Result<TaprootPlaceholder, S
         return Err(format!(
             "tapleaf hash disagreement: rust-bitcoin {core_root:?}, this crate {tapleaf:?}"
         ));
-    }
-    let our_root = taproot::compute_taproot_merkle_root(&control_bytes, &tapleaf);
-    if our_root.as_byte_array() != tapleaf.as_byte_array() {
-        return Err(format!(
-            "compute_taproot_merkle_root must return the tapleaf for an empty path, got {our_root:?}"
-        ));
-    }
-    if !taproot::verify_taproot_commitment(&control_bytes, &output_key, &tapleaf) {
-        return Err(
-            "the generated control block failed this crate's own commitment check".to_owned(),
-        );
     }
 
     Ok(TaprootPlaceholder {
@@ -585,7 +661,7 @@ struct ScriptTestRow {
     witness: Vec<Vec<u8>>,
     amount: u64,
     flags: VerifyFlags,
-    expected: Expectation,
+    expected: String,
     row_index: usize,
     comment: String,
 }
@@ -748,10 +824,11 @@ fn load_script_tests(counts: &mut Counts) -> Result<Vec<ScriptTestRow>, String> 
             }
         };
 
-        let Some(expected) = Expectation::from_name(expected_str) else {
+        if !CORE_ERROR_NAMES.contains(&expected_str) {
             counts.record_skip(&format!("unknown expected error name: {expected_str}"));
             continue;
-        };
+        }
+        let expected = expected_str.to_owned();
 
         let comment = arr
             .get(comment_idx)
@@ -783,30 +860,20 @@ fn btc_to_sats(btc: f64) -> u64 {
     (btc * 100_000_000.0).round() as u64
 }
 
-fn run_script_tests_native(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<String> {
-    let interp = Interpreter;
+fn run_script_tests(
+    rows: &[ScriptTestRow],
+    counts: &mut Counts,
+    verify: impl Fn(&ScriptTestRow, &Tx, &Tx) -> Verdict,
+) -> Vec<String> {
     let mut mismatches = Vec::new();
 
     for row in rows {
         counts.executed += 1;
         let credit = build_crediting_tx(&row.script_pubkey, row.amount);
         let spend = build_spending_tx(&row.script_sig, &row.witness, &credit);
-        let prevouts = [credit.outputs[0].clone()];
+        let verdict = verify(row, &credit, &spend);
 
-        let result = interp.execute_with_prevouts(
-            &row.script_pubkey,
-            &row.script_sig,
-            &row.witness,
-            row.flags,
-            &prevouts,
-            &spend,
-            0,
-        );
-        let verdict = Verdict::from_interpreter(&result);
-
-        if verdict.matches_expected(row.expected) {
-            // pass
-        } else {
+        if verdict.accepted() != (row.expected == "OK") {
             counts.failed += 1;
             mismatches.push(format!(
                 "row {}: expected {}, got {:?} (flags {:#x}, sig {}, pubkey {}, comment: {})",
@@ -823,44 +890,9 @@ fn run_script_tests_native(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<S
     mismatches
 }
 
-#[cfg(feature = "kernel")]
-fn run_script_tests_kernel(rows: &[ScriptTestRow], counts: &mut Counts) -> Vec<String> {
-    let mut mismatches = Vec::new();
-
-    for row in rows {
-        counts.executed += 1;
-        let credit = build_crediting_tx(&row.script_pubkey, row.amount);
-        let spend = build_spending_tx(&row.script_sig, &row.witness, &credit);
-        let prevouts = [(OutPoint::new(credit.txid(), 0), credit.outputs[0].clone())];
-
-        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
-            &spend,
-            &prevouts,
-            row.flags,
-            bitcoin_rs_consensus::ValidationEngine::Kernel,
-        );
-        let verdict = Verdict::from_kernel(&result);
-
-        if verdict.matches_expected(row.expected) {
-            // pass
-        } else {
-            counts.failed += 1;
-            mismatches.push(format!(
-                "row {}: expected {}, got {:?} (flags {:#x}, sig {}, pubkey {}, comment: {})",
-                row.row_index,
-                row.expected,
-                verdict,
-                row.flags.bits(),
-                hex_of(&row.script_sig),
-                hex_of(&row.script_pubkey),
-                row.comment
-            ));
-        }
-    }
-    mismatches
-}
-
+// ===========================================================================
 // Corpus 2 & 3: tx_valid.json / tx_invalid.json
+// ===========================================================================
 
 struct TxVectorRow {
     tx: Tx,
@@ -1014,208 +1046,70 @@ fn load_tx_vectors(
     Ok(rows)
 }
 
-fn run_tx_vectors_native(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<String> {
-    let interp = Interpreter;
-    let mut mismatches = Vec::new();
-
-    for row in rows {
-        counts.executed += 1;
-        let prevout_txouts: Vec<TxOut> = row.prevouts.iter().map(|(_, o)| o.clone()).collect();
-        // The first failing input decides the row, and its error name is what
-        // a triage reader needs; a bare Reject says nothing.
-        let mut first_failure = None;
-        for input_idx in 0..row.tx.inputs.len() {
-            let prevout = &row.prevouts[input_idx].1;
-            let input = &row.tx.inputs[input_idx];
-            let result = interp.execute_with_prevouts(
-                &prevout.script_pubkey,
-                &input.script_sig,
-                &input.witness,
-                row.flags,
-                &prevout_txouts,
-                &row.tx,
-                input_idx,
-            );
-            if !matches!(result, Ok(true)) {
-                first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
-                break;
-            }
-        }
-
-        let verdict = match &first_failure {
-            None => Verdict::Accept,
-            Some((input_idx, Verdict::Reject(code))) => Verdict::Reject(Some(format!(
-                "input {input_idx}: {}",
-                code.clone().unwrap_or_else(|| "no code".to_owned())
-            ))),
-            Some((input_idx, Verdict::Accept)) => {
-                Verdict::Reject(Some(format!("input {input_idx}: accepted-but-not-true")))
-            }
-        };
-
-        let matches = verdict.accepted() == row.expected.accepted();
-        if !matches {
-            counts.failed += 1;
-            mismatches.push(format!(
-                "row {}: expected {:?}, got {:?} (flags {:#x}, locktime {}, seq0 {:#x})",
-                row.row_index,
-                row.expected,
-                verdict,
-                row.flags.bits(),
-                row.tx.lock_time,
-                row.tx
-                    .inputs
-                    .first()
-                    .map_or(0, |input| input.sequence.to_consensus())
-            ));
-        }
-    }
-    mismatches
-}
-
-#[cfg(feature = "kernel")]
-fn run_tx_vectors_kernel(rows: &[TxVectorRow], counts: &mut Counts) -> Vec<String> {
-    let mut mismatches = Vec::new();
-
-    for row in rows {
-        counts.executed += 1;
-        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
-            &row.tx,
-            &row.prevouts,
-            row.flags,
-            bitcoin_rs_consensus::ValidationEngine::Kernel,
-        );
-        let verdict = Verdict::from_kernel(&result);
-
-        let matches = verdict.accepted() == row.expected.accepted();
-        if !matches {
-            counts.failed += 1;
-            mismatches.push(format!(
-                "row {}: expected {:?}, got {:?} (flags {:#x}, locktime {}, seq0 {:#x})",
-                row.row_index,
-                row.expected,
-                verdict,
-                row.flags.bits(),
-                row.tx.lock_time,
-                row.tx
-                    .inputs
-                    .first()
-                    .map_or(0, |input| input.sequence.to_consensus())
-            ));
-        }
-    }
-    mismatches
-}
-
-// Corpus 4: sighash.json
-
-struct SighashRow {
-    tx: Tx,
-    script_code: Vec<u8>,
-    input_index: usize,
-    hash_type: u32,
-    expected_hash: Hash256,
-    row_index: usize,
-}
-
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "test vector indices and hash types are small non-negative integers stored as i64"
-)]
-fn load_sighash_vectors(counts: &mut Counts) -> Result<Vec<SighashRow>, String> {
-    let path = reference_path("sighash.json");
-    let text =
-        std::fs::read_to_string(&path).map_err(|e| format!("sighash.json unreadable: {e}"))?;
-    let root: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| format!("sighash.json parse: {e}"))?;
-    let arr = root.as_array().ok_or("sighash.json root is not an array")?;
-
-    let mut rows = Vec::new();
-    for (index, row) in arr.iter().enumerate() {
-        let Some(arr) = row.as_array() else {
-            continue;
-        };
-        if arr.len() < 5 {
-            continue;
-        }
-        counts.parsed += 1;
-
-        let tx_hex = arr[0]
-            .as_str()
-            .ok_or_else(|| format!("sighash row {index}: tx hex is not a string"))?;
-        let script_hex = arr[1].as_str().unwrap_or("");
-        let input_index = arr[2]
-            .as_i64()
-            .ok_or_else(|| format!("sighash row {index}: input_index is not an integer"))?;
-        let input_index = input_index as usize;
-        let hash_type_i32 = arr[3]
-            .as_i64()
-            .ok_or_else(|| format!("sighash row {index}: hashType is not an integer"))?
-            as i32;
-        let hash_type = hash_type_i32 as u32;
-        let expected_hex = arr[4]
-            .as_str()
-            .ok_or_else(|| format!("sighash row {index}: expected hash is not a string"))?;
-
-        let tx_bytes =
-            hex_to_bytes(tx_hex).map_err(|e| format!("sighash row {index}: bad tx hex: {e}"))?;
-        let tx = deserialize::<Tx>(&tx_bytes)
-            .map_err(|e| format!("sighash row {index}: tx deserialize: {e}"))?;
-        let script_code = if script_hex.is_empty() {
-            Vec::new()
-        } else {
-            hex_to_bytes(script_hex)
-                .map_err(|e| format!("sighash row {index}: bad script hex: {e}"))?
-        };
-        let expected_hash = Hash256::from_str_be(expected_hex)
-            .map_err(|e| format!("sighash row {index}: bad expected hash: {e}"))?;
-
-        rows.push(SighashRow {
-            tx,
-            script_code,
-            input_index,
-            hash_type,
-            expected_hash,
-            row_index: index + 1,
-        });
-    }
-    Ok(rows)
-}
-
-fn run_sighash_vectors(rows: &[SighashRow], counts: &mut Counts) -> Vec<String> {
-    let mut mismatches = Vec::new();
-
-    for row in rows {
-        counts.executed += 1;
-        // Core's SignatureHash calls SerializeScriptCode which strips
-        // OP_CODESEPARATOR (0xab) opcode bytes before hashing. Strip them
-        // here to match, so the sighash rows containing CS can be tested.
-        let script_code = remove_codeseparators(&row.script_code);
-        let cache = SighashCache::new(&row.tx);
-        let result = cache.legacy_signature_hash(row.input_index, &script_code, row.hash_type);
-
-        match result {
-            Ok(actual) => {
-                if actual != row.expected_hash {
-                    counts.failed += 1;
-                    mismatches.push(format!(
-                        "sighash row {}: expected {}, got {}",
-                        row.row_index, row.expected_hash, actual
-                    ));
+fn verify_native_tx(row: &TxVectorRow) -> Verdict {
+    let prepared = PreparedTransaction::new(&row.tx, &row.prevouts);
+    // The first failing input decides the row, and its error name is what
+    // a triage reader needs; a bare Reject says nothing.
+    let mut first_failure = None;
+    match prepared {
+        Ok(prepared) => {
+            for input_idx in 0..row.tx.inputs.len() {
+                let result = prepared.verify_input(input_idx, row.flags);
+                if !matches!(result, Ok(true)) {
+                    first_failure = Some((input_idx, Verdict::from_interpreter(&result)));
+                    break;
                 }
             }
-            Err(e) => {
-                counts.failed += 1;
-                mismatches.push(format!("sighash row {}: engine error: {e}", row.row_index));
-            }
+        }
+        Err(error) => first_failure = Some((0, Verdict::Reject(Some(error.to_string())))),
+    }
+
+    match &first_failure {
+        None => Verdict::Accept,
+        Some((input_idx, Verdict::Reject(code))) => Verdict::Reject(Some(format!(
+            "input {input_idx}: {}",
+            code.clone().unwrap_or_else(|| "no code".to_owned())
+        ))),
+        Some((input_idx, Verdict::Accept)) => {
+            Verdict::Reject(Some(format!("input {input_idx}: accepted-but-not-true")))
+        }
+    }
+}
+
+fn run_tx_vectors(
+    rows: &[TxVectorRow],
+    counts: &mut Counts,
+    verify: impl Fn(&TxVectorRow) -> Verdict,
+) -> Vec<String> {
+    let mut mismatches = Vec::new();
+
+    for row in rows {
+        counts.executed += 1;
+        let verdict = verify(row);
+
+        let matches = verdict.accepted() == row.expected.accepted();
+        if !matches {
+            counts.failed += 1;
+            mismatches.push(format!(
+                "row {}: expected {:?}, got {:?} (flags {:#x}, locktime {}, seq0 {:#x})",
+                row.row_index,
+                row.expected,
+                verdict,
+                row.flags.bits(),
+                row.tx.lock_time,
+                row.tx
+                    .inputs
+                    .first()
+                    .map_or(0, |input| input.sequence.to_consensus())
+            ));
         }
     }
     mismatches
 }
 
+// ===========================================================================
 // Helpers
+// ===========================================================================
 
 /// How many mismatch lines to print per corpus.
 ///
@@ -1340,6 +1234,10 @@ fn reference_path(name: &str) -> std::path::PathBuf {
     candidates[0].clone()
 }
 
+// ===========================================================================
+// Tests
+// ===========================================================================
+
 #[test]
 #[expect(
     clippy::unwrap_used,
@@ -1387,7 +1285,20 @@ fn script_tests_native_column() {
     };
     assert!(!rows.is_empty(), "script_tests produced zero runnable rows");
 
-    let mismatches = run_script_tests_native(&rows, &mut counts);
+    let mismatches = run_script_tests(&rows, &mut counts, |row, credit, spend| {
+        let prevouts = [credit.outputs[0].clone()];
+
+        let result = Interpreter.execute_with_prevouts(
+            &row.script_pubkey,
+            &row.script_sig,
+            &row.witness,
+            row.flags,
+            &prevouts,
+            spend,
+            0,
+        );
+        Verdict::from_interpreter(&result)
+    });
     println!("script_tests [native]: {counts}");
     assert!(
         counts.executed > 0,
@@ -1417,7 +1328,17 @@ fn script_tests_kernel_column() {
     };
     assert!(!rows.is_empty(), "script_tests produced zero runnable rows");
 
-    let mismatches = run_script_tests_kernel(&rows, &mut counts);
+    let mismatches = run_script_tests(&rows, &mut counts, |row, credit, spend| {
+        let prevouts = [(OutPoint::new(credit.txid(), 0), credit.outputs[0].clone())];
+
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            spend,
+            &prevouts,
+            row.flags,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        );
+        Verdict::from_kernel(&result)
+    });
     println!("script_tests [kernel]: {counts}");
     assert!(
         counts.executed > 0,
@@ -1450,7 +1371,7 @@ fn tx_valid_native_column() {
     };
     assert!(!rows.is_empty(), "tx_valid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors_native(&rows, &mut counts);
+    let mismatches = run_tx_vectors(&rows, &mut counts, verify_native_tx);
     println!("tx_valid [native]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_valid rows");
     for m in mismatches.iter().take(mismatch_print_limit()) {
@@ -1477,7 +1398,15 @@ fn tx_valid_kernel_column() {
     };
     assert!(!rows.is_empty(), "tx_valid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors_kernel(&rows, &mut counts);
+    let mismatches = run_tx_vectors(&rows, &mut counts, |row| {
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            &row.tx,
+            &row.prevouts,
+            row.flags,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        );
+        Verdict::from_kernel(&result)
+    });
     println!("tx_valid [kernel]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_valid rows");
     if !mismatches.is_empty() {
@@ -1509,7 +1438,7 @@ fn tx_invalid_native_column() {
     };
     assert!(!rows.is_empty(), "tx_invalid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors_native(&rows, &mut counts);
+    let mismatches = run_tx_vectors(&rows, &mut counts, verify_native_tx);
     println!("tx_invalid [native]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_invalid rows");
     for m in mismatches.iter().take(mismatch_print_limit()) {
@@ -1536,7 +1465,15 @@ fn tx_invalid_kernel_column() {
     };
     assert!(!rows.is_empty(), "tx_invalid produced zero runnable rows");
 
-    let mismatches = run_tx_vectors_kernel(&rows, &mut counts);
+    let mismatches = run_tx_vectors(&rows, &mut counts, |row| {
+        let result = bitcoin_rs_consensus::kernel::verify_tx_scripts(
+            &row.tx,
+            &row.prevouts,
+            row.flags,
+            bitcoin_rs_consensus::ValidationEngine::Kernel,
+        );
+        Verdict::from_kernel(&result)
+    });
     println!("tx_invalid [kernel]: {counts}");
     assert!(counts.executed > 0, "harness executed zero tx_invalid rows");
     if !mismatches.is_empty() {
@@ -1549,116 +1486,4 @@ fn tx_invalid_kernel_column() {
             println!("  {m}");
         }
     }
-}
-
-#[test]
-fn sighash_vectors_match_engine() {
-    let mut counts = Counts::default();
-    let rows = match load_sighash_vectors(&mut counts) {
-        Ok(r) => r,
-        Err(e) => panic!("sighash.json should load: {e}"),
-    };
-    assert!(!rows.is_empty(), "sighash produced zero runnable rows");
-
-    let mismatches = run_sighash_vectors(&rows, &mut counts);
-    println!("sighash: {counts}");
-    assert!(counts.executed > 0, "harness executed zero sighash rows");
-    if !mismatches.is_empty() {
-        println!(
-            "  {}/{} sighash rows mismatched — the engine has a bug or the harness is miswired",
-            mismatches.len(),
-            counts.executed,
-        );
-        for m in mismatches.iter().take(10) {
-            println!("  {m}");
-        }
-    }
-    assert!(
-        mismatches.is_empty(),
-        "sighash engine produced {} mismatches (expected 0):\n{}",
-        mismatches.len(),
-        mismatches
-            .iter()
-            .take(5)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n"),
-    );
-}
-
-#[test]
-fn broken_expectation_is_detected() {
-    // Deliberately flip one sighash expectation and show the harness catches it.
-    let mut counts = Counts::default();
-    let rows = match load_sighash_vectors(&mut counts) {
-        Ok(r) => r,
-        Err(e) => panic!("sighash should load: {e}"),
-    };
-    assert!(!rows.is_empty());
-
-    let row = &rows[0];
-    let wrong = Hash256::from_le_bytes(&[0xaa; 32]);
-    assert_ne!(
-        wrong, row.expected_hash,
-        "anti-vacuity: the wrong hash must differ from the expected hash"
-    );
-
-    let cache = SighashCache::new(&row.tx);
-    let actual = cache
-        .legacy_signature_hash(row.input_index, &row.script_code, row.hash_type)
-        .unwrap_or_else(|e| panic!("sighash computation should succeed: {e}"));
-
-    let detected = actual != wrong;
-    println!(
-        "broken_expectation_is_detected: sighash row {}, actual={actual}, wrong={wrong}, detected={detected}",
-        row.row_index,
-    );
-    assert!(
-        detected,
-        "anti-vacuity: a deliberately wrong sighash must not match the engine output"
-    );
-
-    // Also verify the script_tests comparison logic detects a flipped expectation.
-    let mut st_counts = Counts::default();
-    let st_rows = match load_script_tests(&mut st_counts) {
-        Ok(r) => r,
-        Err(e) => panic!("script_tests should load: {e}"),
-    };
-    let ok_row = st_rows
-        .iter()
-        .find(|r| r.expected.is_ok())
-        .unwrap_or_else(|| panic!("no OK-expected row found in script_tests"));
-
-    let credit = build_crediting_tx(&ok_row.script_pubkey, ok_row.amount);
-    let spend = build_spending_tx(&ok_row.script_sig, &ok_row.witness, &credit);
-    let prevouts = [credit.outputs[0].clone()];
-    let interp = Interpreter;
-    let result = interp.execute_with_prevouts(
-        &ok_row.script_pubkey,
-        &ok_row.script_sig,
-        &ok_row.witness,
-        ok_row.flags,
-        &prevouts,
-        &spend,
-        0,
-    );
-    let verdict = Verdict::from_interpreter(&result);
-
-    // Flip: if the row is accepted, claim it should be rejected.
-    let broken_expected = if verdict == Verdict::Accept {
-        Expectation("EVAL_FALSE")
-    } else {
-        Expectation("OK")
-    };
-    let st_detected = !verdict.matches_expected(broken_expected);
-    println!(
-        "broken_expectation_is_detected: script_tests row {}, verdict={verdict:?}, broken_expected={broken_expected}, detected={st_detected}",
-        ok_row.row_index,
-    );
-    assert!(
-        st_detected,
-        "anti-vacuity: harness failed to detect a broken expectation in script_tests"
-    );
-
-    println!("broken_expectation_is_detected: PASS — harness reports mismatches honestly");
 }

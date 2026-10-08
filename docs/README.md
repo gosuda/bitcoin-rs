@@ -7,11 +7,13 @@
 | Build, configure, and run a node | [Getting started](getting-started.md) |
 | Explore Bitcoin one module at a time | [Architecture contract](contracts/architecture.md) and each crate's `README.md` |
 | Find a normative clause and its tests | [Contract index](contracts/README.md) |
+| Discover and run validation evidence | [Validation tooling](validation-tooling.md) |
 | Understand project vocabulary | [Concepts](../CONCEPTS.md) |
 | Read repository-wide invariants | [Project invariants](../CONSTRAINTS.md) |
 | Change the repository | [Agent guidelines](../AGENTS.md) and [contributing](../CONTRIBUTING.md) |
 | Operate recovery or REST | [Recovery contract](contracts/recovery.md) and [REST guide](rest-interface.md) |
 | Place instrumentation in the right layer | [Observability boundary](observability.md), [tracing/USDT](tracing.md) |
+| Map process tests to their Core functional references | [Reorg coverage map](../e2e/REORG-COVERAGE.md) |
 
 The contract index owns the clause/proof map; this page does not maintain a
 second inventory. Contracts take precedence over local source comments,

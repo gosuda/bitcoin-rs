@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Provision one external proof lane. Normal node tests need Core, not Java.
+# Linux-lane fixtures only: native Windows runs provision the pinned Core
+# through scripts/install-bitcoind.sh (it selects the win64 archive).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -9,33 +11,46 @@ case "$mode" in
   *) echo "usage: $0 {core|formal}" >&2; exit 2 ;;
 esac
 
-mapfile -t identity < <(python3 - "$mode" <<'PY'
-from pathlib import Path
-import re
-import sys
-import tomllib
+# resolve_reference_identity.py carries its own manifest reader for
+# interpreters without tomllib; probe any Python >=3.6 (versioned first,
+# since the system python3 on macOS predates tomllib). The formal lane's
+# check_models.py imports tomllib unconditionally, so its probe requires
+# that instead.
+if [[ "$mode" == formal ]]; then
+  probe='import tomllib'
+  hint='a Python interpreter with tomllib is required'
+else
+  probe='import sys; sys.exit(sys.version_info < (3, 6))'
+  hint='a Python >=3.6 interpreter is required'
+fi
+PYTHON=""
+for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c "$probe" 2>/dev/null; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+[[ -n "$PYTHON" ]] || { echo "$hint" >&2; exit 1; }
 
-with Path("crates/rpc/core-compat.toml").open("rb") as stream:
-    reference = tomllib.load(stream)["reference"]
-if sys.argv[1] == "core":
-    pin = reference["release"]
-    values = tuple(pin[key] for key in (
-        "core_version", "archive", "archive_sha256", "bitcoind_sha256", "version_output"
-    ))
-else:
-    pin = reference["formal_tool"]
-    if pin["name"] != "apalache-mc":
-        raise SystemExit("unexpected formal tool")
-    contract = Path("docs/contracts/formal-verification.md").read_text()
-    archive = re.search(r"^\| Archive \| `([^`]+)`", contract, re.MULTILINE)
-    if archive is None:
-        raise SystemExit("formal archive identity missing")
-    values = (pin["version"], archive[1], pin["archive_sha256"], pin["jar_sha256"], pin["version"])
-if not all(isinstance(value, str) and "\n" not in value for value in values):
-    raise SystemExit("invalid fixture identity")
-print("\n".join(values))
-PY
-)
+# Exact-match digest gate; stock macOS ships shasum, not sha256sum.
+sha256_check() {
+  local got
+  if command -v sha256sum >/dev/null 2>&1; then
+    got="$(sha256sum < "$2" | awk '{print $1}')"
+  else
+    got="$(shasum -a 256 < "$2" | awk '{print $1}')"
+  fi
+  [[ "$got" == "$1" ]] || { printf 'sha256 mismatch for %s\n' "$2" >&2; exit 1; }
+}
+
+# resolve_reference_identity.py is the single owner of the fixture identity
+# tuple. Capturing stdout propagates the interpreter's exit status; the
+# while-read keeps this working under the bash 3.2 that still ships with
+# macOS (no mapfile, no heredoc inside a substitution — bash 3.2 cannot
+# parse that).
+identity_text="$("$PYTHON" scripts/resolve_reference_identity.py "$mode" .)" || exit 1
+identity=()
+while IFS= read -r line; do identity+=("$line"); done <<< "$identity_text"
 [[ "${#identity[@]}" -eq 5 ]] || { echo "incomplete fixture identity" >&2; exit 1; }
 version="${identity[0]}"
 archive="${identity[1]}"
@@ -90,13 +105,13 @@ else
 fi
 
 curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --output "$download" "$url"
-printf '%s  %s\n' "$archive_hash" "$download" | sha256sum --check --strict
+sha256_check "$archive_hash" "$download"
 # Only the named, ignored fixture install is replaced, after archive custody.
 rm -rf -- "$install"
 if [[ "$mode" == core ]]; then
   mkdir -p "$install"
   tar --extract --gzip --file "$download" --directory "$install"
-  printf '%s  %s\n' "$binary_hash" "$binary" | sha256sum --check --strict
+  sha256_check "$binary_hash" "$binary"
   probe="$(mktemp -d target/ci-reference-downloads/core-version.XXXXXX)"
   trap 'rm -rf -- "$probe"' EXIT
   # The probe result is the version report, so capture stderr too; without a
@@ -114,7 +129,7 @@ if [[ "$mode" == core ]]; then
 else
   mkdir -p "$(dirname "$install")"
   unzip -q "$download" -d "$(dirname "$install")"
-  printf '%s  %s\n' "$binary_hash" "$install/lib/apalache.jar" | sha256sum --check --strict
-  APALACHE_HOME="$install" python3 scripts/check_models.py --check-only
+  sha256_check "$binary_hash" "$install/lib/apalache.jar"
+  APALACHE_HOME="$install" "$PYTHON" scripts/check_models.py --check-only
 fi
 printf 'Provisioned %s\n' "$binary"

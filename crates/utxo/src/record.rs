@@ -251,7 +251,12 @@ impl UtxoRecord {
         txid: Hash256,
         outputs: &[OwnedUtxoOut],
     ) -> Result<Self, UtxoError> {
-        Self::from_owned_parts(txid, outputs.len().min(INLINE_CAPACITY), outputs)
+        let buf = encode_record(
+            txid,
+            outputs.len().min(INLINE_CAPACITY),
+            &owned_parts(outputs),
+        )?;
+        Self::from_encoded(buf)
     }
 
     pub(crate) fn key(&self) -> UtxoKey {
@@ -558,7 +563,8 @@ impl UtxoRecord {
             if additions.is_empty() {
                 return Ok(RemovedRecord::Emptied);
             }
-            let add_unique = additions_are_strictly_increasing(None, additions);
+            let add_unique =
+                vouts_are_strictly_increasing(None, additions.iter().map(|part| part.vout));
             let record = Self::add_run_replacement(None, self.txid(), additions, add_unique, None)?;
             return Ok(RemovedRecord::Replaced(record));
         }
@@ -568,8 +574,10 @@ impl UtxoRecord {
         // pre-removal live outputs, so their max is exactly the record's
         // pre-removal `max_vout`; computing it here from the already-built
         // descriptors avoids a second full decode of every output.
-        let add_unique =
-            additions_are_strictly_increasing(parts.iter().map(|part| part.vout).max(), additions);
+        let add_unique = vouts_are_strictly_increasing(
+            parts.iter().map(|part| part.vout).max(),
+            additions.iter().map(|part| part.vout),
+        );
         for &vout in vouts {
             if let Some(index) = parts.iter().position(|part| part.vout == vout) {
                 remove_part_at(&mut parts, &mut inline_len, index);
@@ -641,17 +649,6 @@ impl UtxoRecord {
         let mut parts = Vec::with_capacity(self.header().output_count);
         parts.extend(self.outputs().map(|output| OutputParts::from_view(&output)));
         parts
-    }
-
-    /// Snapshot/untrusted boundary constructor: re-validates through
-    /// [`Self::from_encoded`].
-    fn from_owned_parts(
-        txid: Hash256,
-        inline_len: usize,
-        outputs: &[OwnedUtxoOut],
-    ) -> Result<Self, UtxoError> {
-        let buf = encode_record(txid, inline_len, &owned_parts(outputs))?;
-        Self::from_encoded(buf)
     }
 
     /// Internal constructor from borrowed descriptors. Every descriptor is
@@ -826,16 +823,18 @@ fn remove_part_at<'a>(
 }
 
 /// Strictly-increasing-vout test for the `add_unique` fast path, seeded with
-/// the pre-removal maximum vout of the surviving set (`None` when nothing
-/// survives). Mirrors `parts_are_increasing_unique` exactly: a non-strictly
-/// greater addition fails on `<=`.
-fn additions_are_strictly_increasing(previous: Option<u32>, additions: &[OutputParts<'_>]) -> bool {
+/// the maximum vout live before the additions; `None` means no seed was
+/// supplied. A non-strictly-greater vout fails on `<=`.
+pub(crate) fn vouts_are_strictly_increasing(
+    previous: Option<u32>,
+    vouts: impl IntoIterator<Item = u32>,
+) -> bool {
     let mut previous = previous;
-    for addition in additions {
-        if previous.is_some_and(|vout| addition.vout <= vout) {
+    for vout in vouts {
+        if previous.is_some_and(|max| vout <= max) {
             return false;
         }
-        previous = Some(addition.vout);
+        previous = Some(vout);
     }
     true
 }
@@ -1504,7 +1503,7 @@ mod tests {
             record.remove_run_replacement(&[], Some(&mut removed))?,
             RemovedRecord::Emptied
         ));
-        assert!(removed.is_empty());
+        assert_eq!(removed, []);
         Ok(())
     }
 
@@ -1770,22 +1769,12 @@ mod tests {
     /// increasing runs after any seed pass.
     #[test]
     fn the_unique_add_guard_rejects_equal_and_decreasing_vouts() {
-        let part = |vout: u32| OutputParts::new(vout, 1, &[0x51], false, 1);
-        assert!(additions_are_strictly_increasing(None, &[part(0)]));
-        assert!(additions_are_strictly_increasing(
-            Some(0),
-            &[part(1), part(2)]
-        ));
-        assert!(additions_are_strictly_increasing(Some(9), &[]));
-        assert!(!additions_are_strictly_increasing(Some(2), &[part(2)]));
-        assert!(!additions_are_strictly_increasing(
-            None,
-            &[part(3), part(3)]
-        ));
-        assert!(!additions_are_strictly_increasing(
-            None,
-            &[part(3), part(1)]
-        ));
+        assert!(vouts_are_strictly_increasing(None, [0]));
+        assert!(vouts_are_strictly_increasing(Some(0), [1, 2]));
+        assert!(vouts_are_strictly_increasing(Some(9), []));
+        assert!(!vouts_are_strictly_increasing(Some(2), [2]));
+        assert!(!vouts_are_strictly_increasing(None, [3, 3]));
+        assert!(!vouts_are_strictly_increasing(None, [3, 1]));
     }
 
     // --- violation tests: state ---

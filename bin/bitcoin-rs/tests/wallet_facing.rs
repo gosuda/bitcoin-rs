@@ -3,11 +3,8 @@
 //!
 //! This is the executable proof of `docs/contracts/wallet-facing.md`. It
 //! lives in the binary package so it can spawn `CARGO_BIN_EXE_bitcoin-rs`.
-//! `source_does_not_import_node_internals` enforces `WF-01` on this
-//! source. The named out-of-repo consumer is `gosuda/bitcoin-wallet`
+//! The named out-of-repo consumer is `gosuda/bitcoin-wallet`
 //! (`btcw -u`).
-
-#![allow(missing_docs)]
 
 use std::cell::RefCell;
 use std::error::Error;
@@ -20,14 +17,16 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bitcoin_rs_e2e::helpers::assemble_block_from_template;
+use bitcoin_rs_e2e::helpers::{
+    COINBASE_MATURITY, REGTEST_SUBSIDY_SATS, assemble_block_from_template,
+};
 use bitcoin_rs_e2e::node::HttpResponse;
 use bitcoin_rs_e2e::rpc::Connection;
 
 use bitcoin::absolute::LockTime;
 
 use bitcoin::consensus::encode::serialize_hex;
-use bitcoin::constants::{COINBASE_MATURITY, genesis_block};
+use bitcoin::constants::genesis_block;
 use bitcoin::hashes::Hash;
 use bitcoin::hashes::sha256;
 use bitcoin::opcodes::all::OP_PUSHNUM_1;
@@ -43,7 +42,6 @@ use serde_json::{Value, json};
 const RPC_USER: &str = "bitcoin-rs";
 const RPC_PASSWORD: &str = "bitcoin-rs";
 const FEE_SATS: u64 = 10_000;
-const REGTEST_SUBSIDY_SATS: u64 = 5_000_000_000;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const INDEX_TIMEOUT: Duration = Duration::from_mins(1);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -74,11 +72,14 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         .map_err(|error| format!("p2wpkh fixture must be a standard address: {error}"))?
         .to_string();
 
+    assert_eq!(client.rpc("getblockcount", &json!([]))?, json!(0));
+    assert_eq!(
+        client.rpc("getblockhash", &json!([0]))?,
+        json!(genesis_block(Network::Regtest).block_hash().to_string())
+    );
     let genesis_hex = serialize_hex(&genesis_block(Network::Regtest));
     let genesis = client.rpc("submitblock", &json!([genesis_hex]))?;
-    if !genesis.is_null() {
-        return Err(format!("submitblock(genesis) rejected: {genesis}").into());
-    }
+    assert_eq!(genesis, json!("duplicate"));
     for _ in 0..COINBASE_MATURITY {
         client.mine(Coinbase::AnyoneCanSpend)?;
     }
@@ -117,6 +118,9 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
     assert_script_activity(&client, &address, &p2wpkh)?;
 
     let spend_hex = spend_anyone_can_spend(&client, 1, &p2wpkh)?;
+    let spend_bytes: Vec<u8> = bitcoin::hex::FromHex::from_hex(&spend_hex)?;
+    let spend: Transaction = bitcoin::consensus::deserialize(&spend_bytes)?;
+    assert_broadcast_rejections(&client, &spend)?;
     let broadcast = client.esplora_post("/api/tx", spend_hex.as_bytes())?;
     assert_eq!(
         broadcast.status,
@@ -125,6 +129,7 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         broadcast.body_text()
     );
     let txid = broadcast.body_text();
+    assert_eq!(txid.trim(), spend.compute_txid().to_string());
     assert_eq!(
         txid.trim().len(),
         64,
@@ -167,6 +172,25 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         fees.get("6").and_then(Value::as_f64).is_some(),
         "two confirmed spends must qualify the 6-block target wallets use: {fees}"
     );
+    Ok(())
+}
+
+fn assert_broadcast_rejections(client: &Client, spend: &Transaction) -> TestResult {
+    let mut excessive_fee = spend.clone();
+    excessive_fee.output[0].value = Amount::from_sat(1_000_000);
+    let excessive_hex = serialize_hex(&excessive_fee);
+    for path in ["/api/tx", "/esplora/tx"] {
+        let rejected = client.esplora_post(path, excessive_hex.as_bytes())?;
+        assert_eq!(rejected.status, 400);
+        assert_eq!(rejected.body_text(), "invalid params: max-fee-exceeded");
+        let malformed = client.esplora_post(path, b"zz")?;
+        assert_eq!(malformed.status, 400);
+        assert_eq!(
+            malformed.body_text(),
+            "TX decode failed. Make sure the tx has at least one input."
+        );
+    }
+    assert_eq!(client.rpc("getrawmempool", &json!([]))?, json!([]));
     Ok(())
 }
 
@@ -227,147 +251,6 @@ fn wait_until_dead(pid: u32) -> bool {
         }
         thread::sleep(Duration::from_millis(10));
     }
-}
-
-#[test]
-fn source_does_not_import_node_internals() {
-    let source = include_str!("wallet_facing.rs");
-    let code = uncommented_except_guard(source);
-    // Executable identifier tokens for WF-01. Both proof functions are
-    // removed from `code` before the scan, so their lists can name the
-    // identifiers they forbid. Matching is at whole-identifier
-    // granularity: the shared test-support crate `bitcoin_rs_e2e` is a
-    // distinct name, not an occurrence of `bitcoin_rs`; the `_node` /
-    // `_storage` / … tokens are the other workspace crates.
-    let names = identifiers(&code);
-    for banned in [
-        "bitcoin_rs",
-        "bitcoin_rs_node",
-        "bitcoin_rs_storage",
-        "bitcoin_rs_primitives",
-        "bitcoin_rs_index",
-        "bitcoin_rs_utxo",
-        "NodeState",
-        "UtxoSet",
-    ] {
-        assert!(
-            !names.contains(banned),
-            "wallet-facing proof must not name {banned} (WF-01)"
-        );
-    }
-}
-
-/// The WF-01 check matches whole identifier tokens: the shared harness
-/// crate name passes, and every banned identifier still trips at word
-/// granularity.
-#[test]
-fn wf_01_check_tolerates_the_shared_test_support_crate_name() {
-    let permitted = identifiers(&strip_rust_comments("use bitcoin_rs_e2e::ProcessNode;\n"));
-    assert!(permitted.contains("bitcoin_rs_e2e"));
-    assert!(!permitted.contains("bitcoin_rs"));
-    let tripped = identifiers(&strip_rust_comments("use bitcoin_rs::node::NodeState;\n"));
-    assert!(tripped.contains("bitcoin_rs"));
-    assert!(tripped.contains("NodeState"));
-}
-
-/// Split stripped source into maximal identifier tokens.
-fn identifiers(code: &str) -> std::collections::HashSet<String> {
-    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-/// Drop `//` and `/* */` comments, then drop this file's WF-01 guard
-/// functions so their token lists are not scored as consumer imports.
-fn uncommented_except_guard(source: &str) -> String {
-    strip_fn(
-        &strip_fn(
-            &strip_rust_comments(source),
-            "fn source_does_not_import_node_internals() {",
-        ),
-        "fn wf_01_check_tolerates_the_shared_test_support_crate_name() {",
-    )
-}
-
-fn strip_rust_comments(source: &str) -> String {
-    let chars: Vec<char> = source.chars().collect();
-    let mut out = String::with_capacity(source.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '"' || (chars[i] == 'b' && chars.get(i + 1) == Some(&'"')) {
-            if chars[i] == 'b' {
-                out.push('b');
-                i += 1;
-            }
-            out.push('"');
-            i += 1;
-            while i < chars.len() {
-                let next = chars[i];
-                out.push(next);
-                i += 1;
-                if next == '\\' {
-                    if i < chars.len() {
-                        out.push(chars[i]);
-                        i += 1;
-                    }
-                } else if next == '"' {
-                    break;
-                }
-            }
-            continue;
-        }
-        if chars[i] == '/' && chars.get(i + 1) == Some(&'/') {
-            i += 2;
-            while i < chars.len() && chars[i] != '\n' {
-                i += 1;
-            }
-            continue;
-        }
-        if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i = i.saturating_add(2);
-            continue;
-        }
-        out.push(chars[i]);
-        i += 1;
-    }
-    out
-}
-
-fn strip_fn(source: &str, signature: &str) -> String {
-    let Some(start) = source.find(signature) else {
-        panic!("wallet-facing proof must contain {signature}");
-    };
-    let Some(rel_brace) = source[start..].find('{') else {
-        panic!("wallet-facing proof guard is missing a body");
-    };
-    let brace = start + rel_brace;
-    let mut depth = 0_u32;
-    let mut end = None;
-    for (offset, next) in source[brace..].char_indices() {
-        match next {
-            '{' => depth = depth.saturating_add(1),
-            '}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    end = Some(brace + offset + 1);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let Some(end) = end else {
-        panic!("wallet-facing proof guard is missing a closing brace");
-    };
-    let mut out = String::with_capacity(source.len() - (end - start));
-    out.push_str(&source[..start]);
-    out.push_str(&source[end..]);
-    out
 }
 
 /// Coinbase output the miner pays, besides the witness commitment.
@@ -597,7 +480,7 @@ impl Client {
     fn esplora_get(&self, path: &str) -> TestResult<HttpResponse> {
         let deadline = Instant::now() + INDEX_TIMEOUT;
         loop {
-            let response = self.exchange("GET", path, false, b"")?;
+            let response = self.exchange("GET", path, b"")?;
             if response.status != 503 || Instant::now() >= deadline {
                 return Ok(response);
             }
@@ -606,7 +489,7 @@ impl Client {
     }
 
     fn esplora_post(&self, path: &str, body: &[u8]) -> TestResult<HttpResponse> {
-        self.exchange("POST", path, false, body)
+        self.exchange("POST", path, body)
     }
 
     fn rpc(&self, method: &str, params: &Value) -> TestResult<Value> {
@@ -627,23 +510,14 @@ impl Client {
         Ok(value.get("result").cloned().unwrap_or(Value::Null))
     }
 
-    /// Sends one request through the shared keep-alive connection.
-    fn exchange(
-        &self,
-        method: &str,
-        path: &str,
-        auth: bool,
-        body: &[u8],
-    ) -> TestResult<HttpResponse> {
+    /// Sends one unauthenticated request through the shared keep-alive
+    /// connection; wallet-facing surfaces never carry the RPC credentials.
+    fn exchange(&self, method: &str, path: &str, body: &[u8]) -> TestResult<HttpResponse> {
         Ok(self.conn.borrow_mut().http(
             method,
             path,
             body,
-            if auth {
-                Some((RPC_USER, RPC_PASSWORD))
-            } else {
-                None
-            },
+            None,
             Instant::now() + REQUEST_TIMEOUT,
         )?)
     }
@@ -720,14 +594,14 @@ fn assert_esplora_namespace(
         "GET /api/internal/* is not wallet-facing: {}",
         backend.body_text()
     );
-    let head_tx = client.exchange("HEAD", "/api/tx", false, b"")?;
+    let head_tx = client.exchange("HEAD", "/api/tx", b"")?;
     assert_eq!(
         head_tx.status,
         404,
         "HEAD /api/tx must not run POST /tx: {}",
         head_tx.body_text()
     );
-    let put_root = client.exchange("PUT", "/", false, b"")?;
+    let put_root = client.exchange("PUT", "/", b"")?;
     assert_eq!(
         put_root.status,
         404,

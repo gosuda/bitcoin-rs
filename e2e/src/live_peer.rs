@@ -1,14 +1,7 @@
 //! One scripted loopback wire peer for the live-sync scenarios.
 //!
-//! PRE: the node's P2P listener is bound; the caller supplies the blocks
-//! the peer may serve.
-//! POST: every frame in either direction is journaled next to the node's
-//! evidence, and every getdata the node sent is recorded for inspection.
-//! INVARIANT: `NODE_NETWORK|WITNESS` service, no compact relay, regtest
-//! v70016. Bodies are served type-faithfully: witness inventory gets the
-//! full body, a plain `MSG_BLOCK` gets a witness-stripped body — the same
-//! behavior a real peer exhibits, which is what makes a plain `MSG_BLOCK`
-//! request fatal for segwit bodies.
+//! Regtest v70016, `NODE_NETWORK|WITNESS`, no compact relay. Witness
+//! inventory gets the full body, a plain `MSG_BLOCK` a witness-stripped one.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -29,7 +22,7 @@ use serde_json::json;
 
 use crate::error::{Error, Result};
 use crate::node::ProcessNode;
-use crate::process_peer::{FrameBuffer, decode_frame, read_frame};
+use crate::process_peer::{FrameBuffer, decode_frame, is_soft_recv_error, read_frame};
 
 /// One decoded getdata frame: every item flattened to `(inv_type, hash)`.
 #[derive(Clone, Debug)]
@@ -78,9 +71,6 @@ impl LivePeer {
     /// deep chain (discovery probes fire and self-recover a
     /// pre-bootstrap-rejected batch); `0` keeps the wire quiet so a lone
     /// `getheaders` can only be the staged-header recovery send.
-    ///
-    /// `NODE_NETWORK|WITNESS`: the recovery getheaders path only considers
-    /// fully-serving peers eligible.
     pub fn connect_with_height(node: &ProcessNode, name: &str, start_height: i32) -> Result<Self> {
         let deadline = Instant::now() + Duration::from_secs(10);
         let stream = crate::process_peer::connect_loopback(node.p2p_addr, deadline)?;
@@ -163,6 +153,12 @@ impl LivePeer {
         self.offer(chain, false);
     }
 
+    /// Send a `headers` frame carrying exactly the headers of `blocks`.
+    pub fn announce_headers(&mut self, blocks: &[Block], deadline: Instant) -> Result<()> {
+        let headers = blocks.iter().map(|block| block.header).collect();
+        self.send(NetworkMessage::Headers(headers), deadline)
+    }
+
     fn offer(&mut self, chain: &[Block], reveal_headers: bool) {
         for block in chain {
             self.blocks.insert(block.block_hash(), block.clone());
@@ -195,7 +191,7 @@ impl LivePeer {
     }
 
     /// Read one wire frame, marking the peer dropped on hard failures.
-    pub fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage> {
+    fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage> {
         match read_frame(&mut self.stream, deadline, &mut self.pending) {
             Ok(frame) => {
                 let message = decode_frame(&frame)?;
@@ -304,18 +300,6 @@ impl LivePeer {
             .count()
     }
 
-    /// The first getdata frame whose item set equals `expected` (order-free).
-    #[must_use]
-    pub fn find_getdata(&self, expected: &[Inventory]) -> Option<&GetdataSeen> {
-        self.getdata_seen.iter().find(|frame| {
-            let mut want: Vec<(u32, String)> = expected.iter().map(inv_item_desc).collect();
-            let mut got = frame.items.clone();
-            want.sort();
-            got.sort();
-            want == got
-        })
-    }
-
     /// Every hash requested at least once, deduplicated, in first-seen order.
     #[must_use]
     pub fn requested_hashes(&self) -> Vec<String> {
@@ -343,19 +327,6 @@ impl LivePeer {
             );
         }
         eprintln!("[E2E {:>5}ms {direction}] {detail}", self.at_ms());
-    }
-}
-
-/// True when a frame-read failure is just "no data yet" (read timeout or
-/// deadline bookkeeping) rather than a dropped connection.
-fn is_soft_recv_error(error: &Error) -> bool {
-    match error {
-        Error::Io(io) => matches!(
-            io.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ),
-        Error::Protocol(detail) => detail.contains("deadline"),
-        _ => false,
     }
 }
 
@@ -387,4 +358,40 @@ fn strip_witnesses(block: &Block) -> Block {
         }
     }
     stripped
+}
+
+/// Serves bodies type-faithfully until the applied tip reaches `height`.
+///
+/// Every observed height must stay at or above `min_height`, which callers set
+/// to a height already applied before the wait: a lower height is an
+/// observable rewind and fails the wait immediately.
+pub fn pump_until_tip(
+    peer: &mut LivePeer,
+    node: &mut ProcessNode,
+    min_height: u64,
+    height: u64,
+    hash: &str,
+    dur: Duration,
+) -> Result<bool> {
+    let deadline = Instant::now() + dur;
+    loop {
+        let count = crate::helpers::block_count(node)?;
+        if count < min_height {
+            return Err(Error::Assertion(format!(
+                "applied tip rewound below h{min_height} while waiting for h{height}: h{count}"
+            )));
+        }
+        if count == height && crate::helpers::best_hash(node)? == hash {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline || peer.dropped {
+            return Ok(false);
+        }
+        peer.pump(Duration::from_millis(400), &mut |peer, items| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for item in items {
+                let _ = peer.serve_item(item, deadline);
+            }
+        });
+    }
 }

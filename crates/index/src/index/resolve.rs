@@ -1,7 +1,7 @@
 //! Exact transaction and script resolution over lossy prefix rows.
 
 use super::{error::IndexError, reader::Indexer};
-use bitcoin_rs_primitives::{Block, OutPoint, Tx, Txid};
+use bitcoin_rs_primitives::{Block, OutPoint, Tx, Txid, deserialize};
 use bitcoin_rs_storage::KvStore;
 
 /// One confirmed transaction discovered by the generic script-history resolver.
@@ -63,7 +63,7 @@ impl<S: KvStore> Indexer<S> {
     ///
     /// The lossy 8-byte prefix is exact-resolved here: only outputs whose script
     /// hashes match the full 32-byte `scripthash` are emitted.
-    /// Same as `resolve_unspent_outputs` but each tuple carries the funding height.
+    /// Each emitted tuple also carries the funding height.
     ///
     /// Returns `(txid, vout, value_sats, funding_height)` quadruples sorted by
     /// funding height (ascending). Use this when callers need the confirmation
@@ -163,7 +163,7 @@ fn transaction_at<B: BlockSource + ?Sized>(
     source: &B,
 ) -> Option<Tx> {
     let bytes = source.block_bytes_at_height(height, position.offset(), position.byte_len())?;
-    Tx::consensus_decode(&bytes).ok()
+    deserialize::<Tx>(&bytes).ok()
 }
 
 /// Resolves one funding row's history entries from its positions.

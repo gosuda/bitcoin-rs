@@ -1,18 +1,12 @@
 //! Orders [`bitcoin_rs_utxo::contract::rollback_block`] against the journal, the
 //! durable head, and publication.
 
-use super::Chainstate;
-use super::DisconnectOutcome;
-use super::DisconnectPlan;
 use super::durable::commit_disconnect_head;
-use super::publication::publish_applied;
-use super::publication::tx_count_delta_for;
+use super::publication::{publish_applied, tx_count_delta_for};
+use super::{Chainstate, DisconnectOutcome, DisconnectPlan};
 use crate::error::ApplyError;
 use bitcoin_rs_chain::{ChainTxCount, TipSnapshot};
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Tx;
-use bitcoin_rs_primitives::Txid;
+use bitcoin_rs_primitives::{Block, Hash256, Tx, Txid};
 use bitcoin_rs_utxo::contract::{RollbackError, load_block_undo, rollback_block};
 
 pub(super) fn plan_disconnect(
@@ -34,6 +28,15 @@ pub(super) fn plan_disconnect(
             hash: block_hash,
             tip: applied.hash,
         });
+    }
+
+    if let crate::assumeutxo::ChainstateRole::AssumedActive { base_height, .. } = handles.role() {
+        if height <= base_height {
+            return Err(ApplyError::DisconnectBelowSnapshotBase {
+                height,
+                base_height,
+            });
+        }
     }
 
     // The head must already certify this block: a disconnect advances the
@@ -166,7 +169,7 @@ pub(super) fn disconnect_block_admitted(
     })?;
     // Journal rewinds before the head advances so a kill between the two
     // leaves the head as high-water mark.
-    let journal_rewound = handles.journal.as_ref().is_some_and(|journal| {
+    let journal_rewound = handles.journal.read().clone().is_some_and(|journal| {
         let rewound = journal.lock().rewind_to(
             parent_tip.height,
             parent_tip.hash.to_le_bytes(),
@@ -219,7 +222,6 @@ pub(super) fn disconnect_block_admitted(
     // checkpoint still holding this block, and `write_clean_checkpoint`
     // disarms it only after publishing the rolled-back set.
     Ok(DisconnectOutcome {
-        parent_tip,
         hash: block_hash,
         restored_parents: rollback.restored_parents,
     })

@@ -28,8 +28,9 @@ holds the reference pins and the admission-profile evidence.
 
 ### `POL-02`: One admission owner and admission mode
 
-- `MempoolGateway` owns RPC and peer submission, preview, reorg reconsideration,
-  typed policy verdicts and publication. RPC/P2P do not repeat replacement rules.
+- `MempoolGateway` owns RPC, Esplora and peer submission, preview, reorg
+  reconsideration, typed policy verdicts and publication. Producers do not
+  repeat replacement rules.
 - Single preview follows the same preparation, graph and script verification
   as a single commit, stopping before mutation. Multi-transaction preview uses
   Core's `PackageTestAccept` semantics: replacement and fee aggregation are
@@ -146,5 +147,5 @@ model matrix remain unmeasured. Correctness tests do not promote defaults.
 
 ## Vocabulary
 
-[ReadStamp](../../CONCEPTS.md),
+[Chain generation](../../CONCEPTS.md),
 [MempoolGateway](../../CONCEPTS.md).

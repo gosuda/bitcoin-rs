@@ -10,9 +10,7 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
-use bitcoin_rs_chain::{
-    BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader, block_work, compact_is_met_by,
-};
+use bitcoin_rs_chain::{BlockTree, BlockTreeReader, ChainWork, NodeStatus, TipReader, block_work};
 use bitcoin_rs_p2p::sync::{HeaderAnchor, HeadersSyncPhase, HeadersSyncState};
 use bitcoin_rs_p2p::{ActiveChainQuery, ChainQuery};
 use bitcoin_rs_primitives::{
@@ -46,8 +44,10 @@ fn mine_header(prev: BlockHash, height: u32) -> Header {
         bits: EASY_BITS,
         nonce: height,
     };
-    while !compact_is_met_by(EASY_BITS, Hash256::from(header.compute_hash())) {
-        header.nonce = header.nonce.wrapping_add(1);
+    if let Err(error) =
+        bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut header)
+    {
+        panic!("easy regtest target must be reachable: {error}");
     }
     header
 }

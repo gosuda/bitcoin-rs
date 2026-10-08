@@ -130,7 +130,7 @@ pub fn mempool_min_fee_sat_per_kvb(pool: &Mempool, incremental_relay_fee_sat_per
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
     use bitcoin_rs_primitives::{

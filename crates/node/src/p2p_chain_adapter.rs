@@ -11,21 +11,23 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bitcoin_rs_p2p::sync::chain::{
-    BranchSwitchError, HeaderAdmission, SyncChain, SyncChainError, WindowCommitDisposition,
-    WindowCommitError,
+    HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
+    WindowApplyDisposition, WindowCommitError,
 };
 use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256, Header, Network};
 use crossbeam_channel::Receiver;
-use parking_lot::Mutex;
 
-pub use bitcoin_rs_p2p::sync::{BlockSync, SyncBudget, default_sync_budget};
+pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
 
 /// The [`SyncChain`] implementation over [`bitcoin_rs_chainstate::Chainstate`]:
 /// applied-tip mutation behind the chain-transition lock plus the derived
 /// consumers that must fire inside it.
-pub struct NodeSyncChain {
+struct NodeSyncChain {
+    assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
     handles: Arc<bitcoin_rs_chainstate::Chainstate>,
+    /// The chainstate's read-only block-tree capability.
+    block_tree: bitcoin_rs_chain::BlockTreeReader,
     followers: crate::chain_effects::ChainFollowers,
 }
 
@@ -35,12 +37,19 @@ pub fn block_sync(
     handles: Arc<bitcoin_rs_chainstate::Chainstate>,
     followers: crate::chain_effects::ChainFollowers,
     peer_table: Arc<PeerTable>,
-    inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundBlock>>>,
+    inbound_headers_rx: Receiver<InboundHeaders>,
+    inbound_blocks_rx: Receiver<bitcoin_rs_p2p::InboundBlock>,
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
 ) -> BlockSync {
+    let block_tree = handles.block_tree_reader();
     BlockSync::new(
-        Arc::new(NodeSyncChain { handles, followers }),
+        Arc::new(NodeSyncChain {
+            assumeutxo,
+            handles,
+            block_tree,
+            followers,
+        }),
         peer_table,
         inbound_headers_rx,
         inbound_blocks_rx,
@@ -48,7 +57,7 @@ pub fn block_sync(
     )
 }
 
-pub(crate) fn settle_window_failure(
+fn settle_window_failure(
     transition: bitcoin_rs_chainstate::ChainTransition<'_>,
     mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
     mut error: bitcoin_rs_chainstate::WindowApplyError,
@@ -80,8 +89,8 @@ pub(crate) fn settle_window_failure(
 /// Symmetric with [`settle_window_failure`]: both paths attempt `finish`
 /// and surface a `Fatal` disposition when the CAS fails, so the caller
 /// stops retrying instead of wedging on an odd generation.
-#[allow(clippy::result_large_err)]
-pub(crate) fn settle_window_success(
+#[expect(clippy::result_large_err)]
+fn settle_window_success(
     transition: bitcoin_rs_chainstate::ChainTransition<'_>,
     mempool_change: Option<bitcoin_rs_mempool::ChainChangeGuard>,
     applied: usize,
@@ -111,23 +120,6 @@ pub(crate) fn settle_window_success(
     }
 }
 
-fn window_disposition(
-    disposition: bitcoin_rs_chainstate::WindowApplyDisposition,
-) -> WindowCommitDisposition {
-    match disposition {
-        bitcoin_rs_chainstate::WindowApplyDisposition::Permanent => {
-            WindowCommitDisposition::Permanent
-        }
-        bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated => {
-            WindowCommitDisposition::BodyMutated
-        }
-        bitcoin_rs_chainstate::WindowApplyDisposition::Operational => {
-            WindowCommitDisposition::Operational
-        }
-        bitcoin_rs_chainstate::WindowApplyDisposition::Fatal => WindowCommitDisposition::Fatal,
-    }
-}
-
 /// Test fixture: the one owner of header-tree writes node tests must
 /// synthesize directly — mid-chain forks that must not become the best tip,
 /// and subtrees admission would reject — which [`Chainstate::admit_headers`]
@@ -147,12 +139,44 @@ pub(crate) fn fixture_insert_header_node(
 }
 
 impl SyncChain for NodeSyncChain {
+    fn historical_base(&self) -> Option<Hash256> {
+        match self.handles.role() {
+            bitcoin_rs_chainstate::assumeutxo::ChainstateRole::AssumedActive {
+                base_hash, ..
+            } => Some(base_hash),
+            _ => None,
+        }
+    }
+
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
+        let Some(manager) = &self.assumeutxo else {
+            return Ok(HistoricalAdvance::Complete);
+        };
+        manager
+            .advance_historical()
+            .map_err(|error| -> SyncChainError {
+                self.handles.fail_closed_for_recovery();
+                Box::new(error)
+            })
+    }
+
+    fn connect_historical(&self, block: &Block, body: bytes::Bytes) -> Result<(), SyncChainError> {
+        let manager = self
+            .assumeutxo
+            .as_ref()
+            .ok_or("historical validation is not configured")?;
+        manager
+            .step_historical(block, Some(body))
+            .map(|_| ())
+            .map_err(|error| -> SyncChainError { Box::new(error) })
+    }
+
     fn network(&self) -> Network {
         self.handles.network()
     }
 
     fn block_tree(&self) -> parking_lot::RwLockReadGuard<'_, bitcoin_rs_chain::BlockTree> {
-        self.handles.read_block_tree()
+        self.block_tree.read()
     }
 
     fn chain_tip(&self) -> Option<Arc<bitcoin_rs_chain::TipSnapshot>> {
@@ -164,25 +188,9 @@ impl SyncChain for NodeSyncChain {
     }
 
     fn bootstrap_genesis(&self) {
-        if self.handles.applied_tip_snapshot().is_some() {
-            return;
-        }
-
-        let genesis = self.handles.network().genesis_block();
-        match self.followers.apply_connect(&self.handles, &genesis) {
-            // The header-tip cell is the chainstate's to publish.
-            Ok(outcome) => self.handles.publish_genesis_tip(outcome.tip),
-            Err(crate::chain_effects::ConnectMutationError::CommittedButSettlementFailed {
-                outcome,
-                source,
-            }) => {
-                self.handles.publish_genesis_tip(outcome.tip);
-                tracing::error!(%source, "block sync: genesis committed but settlement failed");
-            }
-            // Genesis apply failed before an applied tip could be published.
-            Err(crate::chain_effects::ConnectMutationError::NotCommitted(error)) => {
-                tracing::warn!(%error, "block sync: failed to bootstrap genesis");
-            }
+        if let Err(error) = crate::chain_effects::bootstrap_genesis(&self.handles, &self.followers)
+        {
+            tracing::warn!(%error, "failed to bootstrap genesis");
         }
     }
 
@@ -205,7 +213,7 @@ impl SyncChain for NodeSyncChain {
     fn check_body_binding(&self, block: &Block) -> Result<(), SyncChainError> {
         let hash = Hash256::from(block.block_hash());
         let segwit_active = {
-            let tree = self.handles.read_block_tree();
+            let tree = self.block_tree.read();
             tree.lookup(hash)
                 .and_then(|node_id| tree.node(node_id).ok())
                 .is_none_or(|node| {
@@ -237,7 +245,7 @@ impl SyncChain for NodeSyncChain {
             // A closed or already-active generation refuses a new window.
             .map_err(|source| WindowCommitError {
                 applied: 0,
-                disposition: WindowCommitDisposition::Operational,
+                disposition: WindowApplyDisposition::Operational,
                 invalidated: Box::default(),
                 source: Box::new(source),
             })?;
@@ -246,7 +254,7 @@ impl SyncChain for NodeSyncChain {
                 .begin_mempool_change()
                 .map_err(|source| WindowCommitError {
                     applied: 0,
-                    disposition: WindowCommitDisposition::Operational,
+                    disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                     source: Box::new(source),
                 })?;
@@ -268,7 +276,7 @@ impl SyncChain for NodeSyncChain {
         };
         result.map_err(|error| WindowCommitError {
             applied: error.applied,
-            disposition: window_disposition(error.disposition),
+            disposition: error.disposition,
             invalidated: error.invalidated,
             source: Box::new(error.source),
         })
@@ -279,77 +287,19 @@ impl SyncChain for NodeSyncChain {
         target: bitcoin_rs_chain::NodeId,
         staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
         connected_body: &mut dyn FnMut(Hash256),
-    ) -> Result<(), BranchSwitchError> {
-        match crate::reorg::switch_to_branch(
+    ) -> Result<(), ReorgError> {
+        crate::reorg::switch_to_branch(
             &self.handles,
             &self.followers,
             target,
             staged_body,
             connected_body,
-        ) {
-            Ok(()) => Ok(()),
-            // A required disconnect/connect body was absent from staged storage.
-            Err(crate::reorg::ReorgError::MissingBody { height, .. }) => {
-                Err(BranchSwitchError::MissingBody { height })
+        )
+        .inspect_err(|error| {
+            if matches!(error, ReorgError::ConnectFailed { invalidated, .. } if !invalidated.is_empty()) {
+                self.handles.reevaluate_assume_valid();
             }
-            // A disconnect or old-branch restoration failure requires
-            // recovery; chainstate has already closed admission.
-            Err(
-                error @ (crate::reorg::ReorgError::Fatal(_)
-                | crate::reorg::ReorgError::RestorationFailed { .. }),
-            ) => Err(BranchSwitchError::Fatal(Box::new(error))),
-            // The transition generation could not be settled after reorg work.
-            Err(error @ crate::reorg::ReorgError::TransitionSettlement { .. }) => {
-                Err(BranchSwitchError::TransitionSettlement(Box::new(error)))
-            }
-            // The checkpoint settlement failed after reorg mutation.
-            Err(error @ crate::reorg::ReorgError::CheckpointSettlement { .. }) => {
-                Err(BranchSwitchError::CheckpointSettlement(Box::new(error)))
-            }
-            // A target-branch body failed while connecting the branch.
-            Err(crate::reorg::ReorgError::ConnectFailed {
-                hash,
-                disposition,
-                invalidated,
-                ..
-            }) => {
-                if !invalidated.is_empty() {
-                    // Invalidation can move the active branch away from the
-                    // pinned assume-valid anchor.
-                    self.handles.reevaluate_assume_valid();
-                }
-                Err(BranchSwitchError::ConnectFailed {
-                    hash,
-                    disposition: window_disposition(disposition),
-                    invalidated: invalidated.into_boxed_slice(),
-                })
-            }
-            // A disconnect body was unavailable after the disconnect started.
-            Err(crate::reorg::ReorgError::DisconnectBodyLost {
-                disconnected,
-                stopped_at,
-                ..
-            }) => Err(BranchSwitchError::DisconnectBodyLost {
-                disconnected,
-                stopped_at,
-            }),
-            // A connect body absent mid-switch is retryable at the coherent
-            // prefix; any other load failure keeps its causal error in `Other`.
-            Err(crate::reorg::ReorgError::ConnectBodyLost {
-                disconnected,
-                connected,
-                stopped_at,
-                source,
-            }) if matches!(*source, crate::reorg::ReorgError::MissingBody { .. }) => {
-                Err(BranchSwitchError::ConnectBodyLost {
-                    disconnected,
-                    connected,
-                    stopped_at,
-                })
-            }
-            // An unclassified reorg error crossed the seam unchanged.
-            Err(error) => Err(BranchSwitchError::Other(Box::new(error))),
-        }
+        })
     }
 }
 

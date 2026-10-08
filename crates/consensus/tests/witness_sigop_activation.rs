@@ -13,7 +13,7 @@ use bitcoin_rs_consensus::verify_tx::{
     BlockScriptChecks, prepare_block_script_checks, verify_prepared_units,
 };
 use bitcoin_rs_consensus::{
-    BlockView, ConsensusError, MAX_BLOCK_SIGOPS_COST, UtxoView, ValidationEngine,
+    BlockFacts, BlockView, ConsensusError, MAX_BLOCK_SIGOPS_COST, UtxoView, ValidationEngine,
     transaction_sigop_cost, verify_transaction, verify_transaction_non_script,
 };
 use bitcoin_rs_primitives::{
@@ -49,7 +49,7 @@ impl WitnessFixture {
             inputs.push(TxIn {
                 previous_output: outpoint,
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::from_stack(vec![script]),
             });
             prevouts.push((
@@ -68,7 +68,7 @@ impl WitnessFixture {
                     value: Amount::from_sat(1),
                     script_pubkey: Script::from_bytes(vec![opcode::OP_PUSHNUM_1]),
                 }],
-                lock_time: LockTime::from_consensus(0),
+                lock_time: LockTime::ZERO,
             },
             prevouts,
         }
@@ -96,7 +96,9 @@ impl WitnessFixture {
         flags: VerifyFlags,
         block: &'b BlockParse,
     ) -> Result<BlockScriptChecks<'b>, ConsensusError> {
-        let mut view = BlockView::new(core::slice::from_ref(&self.tx), vec![self.tx.txid()]);
+        let txs = core::slice::from_ref(&self.tx);
+        let mut view =
+            BlockView::from_facts(txs, BlockFacts::from_txids(txs, vec![self.tx.txid()]));
         let resolved = self
             .prevouts
             .iter()

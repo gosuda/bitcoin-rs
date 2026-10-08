@@ -3,6 +3,7 @@
 
 /// Applied-block records shared with derived-index readers.
 pub mod block_log;
+pub use block_log::{BlockLog, BlockLogReader, BlockRecord};
 /// Core-compatible capability status projection.
 mod capabilities;
 /// Confirmed block indexing over the workspace key-value store.
@@ -18,18 +19,18 @@ pub mod runtime;
 /// Stable electrs-shaped row types.
 pub mod types;
 /// Object-safe, fenced access to the durable index writer.
-pub mod writer;
+mod writer;
 
 pub use capabilities::{
     CapabilitySnapshot, CapabilityState, CapabilityStatus, DerivedIndexCapabilitySource,
-    TXINDEX_CAPABILITY, derived_index_status, disabled_txindex, txindex_snapshot,
+    derived_index_status, txindex_snapshot,
 };
+pub(crate) use index::NoSpentScripts;
 pub use index::{
     BlockSource, ConsumerCursorUpdate, IndexCapabilities, IndexCapability, IndexError, IndexReader,
     IndexRowCounts, IndexWatermark, IndexWatermarks, IndexWriteFence, IndexWriter, Indexer,
-    MAX_LIVE_SCRIPT_SIZE, NoSpentScripts, PreparedBatch, PreparedBatchLimits, PreparedBlock,
-    ScriptHistoryEntry, ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow,
-    TxIndexSnapshot,
+    MAX_LIVE_SCRIPT_SIZE, PreparedBatch, PreparedBatchLimits, PreparedBlock, ScriptHistoryEntry,
+    ScriptLiveScan, SpentCoinScripts, TxIndexScan, TxIndexScanRow, TxIndexSnapshot,
 };
 pub use query_api::{
     DerivedIndexInfo, DerivedIndexQuery, RollbackWarningSource, ScriptHistoryRecord,

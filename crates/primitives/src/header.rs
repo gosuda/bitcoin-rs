@@ -1,9 +1,6 @@
 //! Native block header type and header hash computation.
 
-use crate::{
-    BlockHash, CompactTarget, Hash256,
-    encode::{DecodeError, deserialize, double_sha256},
-};
+use crate::{BlockHash, CompactTarget, Hash256, encode::double_sha256};
 
 /// A Bitcoin block header in native owned form.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -69,16 +66,12 @@ impl Header {
     pub fn compute_hash(&self) -> BlockHash {
         BlockHash(double_sha256(&self.to_bytes()))
     }
-
-    /// Decodes exactly one 80-byte header, rejecting any trailing bytes.
-    pub fn consensus_decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        deserialize(bytes)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Header;
+    use crate::deserialize;
     use crate::{BlockHash, encode::DecodeError};
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
@@ -86,7 +79,7 @@ mod tests {
     #[test]
     fn genesis_header_hash_matches_published_id() -> Result<()> {
         let bytes = std::fs::read("tests/testdata/0.bin")?;
-        let header = Header::consensus_decode(&bytes[..80])?;
+        let header = deserialize::<Header>(&bytes[..80])?;
 
         assert_eq!(header.version, 1);
         assert_eq!(header.time, 1_231_006_505);
@@ -105,12 +98,12 @@ mod tests {
     #[test]
     fn header_decode_rejects_trailing_bytes() -> Result<()> {
         let bytes = std::fs::read("tests/testdata/0.bin")?;
-        assert!(Header::consensus_decode(&bytes[..80]).is_ok());
+        assert!(deserialize::<Header>(&bytes[..80]).is_ok());
 
         let mut trailing = bytes[..80].to_vec();
         trailing.push(0xFF);
         assert_eq!(
-            Header::consensus_decode(&trailing),
+            deserialize::<Header>(&trailing),
             Err(DecodeError::TrailingBytes { remaining: 1 })
         );
         Ok(())

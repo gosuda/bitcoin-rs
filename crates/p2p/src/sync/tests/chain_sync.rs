@@ -332,7 +332,7 @@ fn progress_to_the_benchmark_re_arms_the_timeout() {
 /// request it never received, and the operator counter does not count the
 /// silence as a probe.
 #[test]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 fn an_unsent_chain_sync_probe_arms_no_response_window() {
     let t0 = Instant::now();
     // A mined tree whose tip is one header past the last body: the frontier
@@ -347,14 +347,14 @@ fn an_unsent_chain_sync_probe_arms_no_response_window() {
             Arc::new(RwLock::new(tree)),
         )),
         Arc::new(PeerTable::new()),
-        Arc::new(Mutex::new({
+        {
             let (_tx, rx) = unbounded::<crate::InboundHeaders>();
             rx
-        })),
-        Arc::new(Mutex::new({
+        },
+        {
             let (_tx, rx) = unbounded::<crate::InboundBlock>();
             rx
-        })),
+        },
         super::synced_ibd_latch(),
     ));
     sync.chain.bootstrap_genesis();
@@ -388,7 +388,7 @@ fn an_unsent_chain_sync_probe_arms_no_response_window() {
 /// cannot return the header tip while IBD lags a page behind it, and a
 /// correct answer would credit only the applied side.
 #[test]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 fn chain_sync_probe_locator_anchors_at_the_header_tips_parent() {
     let t0 = Instant::now();
     // Bodies to 1, headers to 3, genesis applied: the applied anchor sits
@@ -446,7 +446,7 @@ fn chain_sync_probe_locator_anchors_at_the_header_tips_parent() {
 /// it, so the next tick retries instead of holding a response window against
 /// a request that never arrived.
 #[test]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 fn a_failed_sweep_probe_restores_the_armed_record() {
     let t0 = Instant::now();
     let (tree, _blocks) = mined_chain(1, 1).expect("chain fixture builds");

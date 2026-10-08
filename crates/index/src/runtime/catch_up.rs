@@ -2,7 +2,6 @@
 
 use super::BlockIdentity;
 use super::ChunkAction;
-use super::DerivedIndexRuntime;
 use super::DerivedIndexWorkerError;
 use super::IDENTITY_CHUNK_BLOCKS;
 use super::POSITION_PREFETCH_BLOCKS;
@@ -25,9 +24,8 @@ use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_storage::StorageError;
 use bitcoin_rs_storage::block_body::BlockBodyReader;
 use bitcoin_rs_storage::pruning::{HistoryLease, HistoryUnavailable};
-use crossbeam_channel::Receiver;
 use rayon::prelude::*;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 impl Worker {
     /// Copies one bounded chunk of active-chain identities under one short
@@ -198,8 +196,6 @@ impl Worker {
     /// the loaded prefix. Returns `Stalled` if a body is missing or shutdown
     /// was requested, `Progressed` if the batch filled and was committed, or
     /// `Continue` to keep processing.
-    #[allow(clippy::too_many_lines)]
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_and_admit_chunk(
         &self,
         identities: &mut &[BlockIdentity],
@@ -224,10 +220,9 @@ impl Worker {
             return Ok(ChunkAction::Stalled);
         }
 
-        let Some(bodies) = load_body_prefix(body_reader.as_mut(), identities, &|| {
-            self.runtime.should_stop()
-        })
-        .map_err(DerivedIndexWorkerError::Storage)?
+        let Some(bodies) = self
+            .load_body_prefix(body_reader.as_mut(), identities)
+            .map_err(DerivedIndexWorkerError::Storage)?
         else {
             if !state.batch.is_empty() {
                 *pending = Some(state.take(self.batch_limits));
@@ -429,37 +424,78 @@ impl Worker {
             .map_err(DerivedIndexWorkerError::Index)?;
         Ok(ReconcileAction::Progressed)
     }
-}
 
-/// Loads bodies for a prefix of `identities` in order, stopping once
-/// `PREPARE_CHUNK_BLOCKS` bodies are held or the serialized total reaches
-/// `PREPARE_CHUNK_BYTES`. Every body the reader hands out is retained, so the
-/// returned prefix is exactly the set of prefetched positions the reader
-/// consumed; the body that reaches the byte cap may carry the total past it.
-/// Stops early, keeping what was loaded, when `should_stop` reports shutdown.
-/// `Ok(None)` when a body is unavailable.
-fn load_body_prefix(
-    reader: &mut dyn BlockBodyReader,
-    identities: &[BlockIdentity],
-    should_stop: &dyn Fn() -> bool,
-) -> Result<Option<Vec<Vec<u8>>>, StorageError> {
-    let mut bodies = Vec::new();
-    let mut loaded_bytes = 0_usize;
-    for identity in identities.iter().take(PREPARE_CHUNK_BLOCKS) {
-        if should_stop() {
-            break;
+    /// Loads bodies for a prefix of `identities` in order, stopping once
+    /// `PREPARE_CHUNK_BLOCKS` bodies are held or the serialized total reaches
+    /// `PREPARE_CHUNK_BYTES`. Every body the reader hands out is retained, so the
+    /// returned prefix is exactly the set of prefetched positions the reader
+    /// consumed; the body that reaches the byte cap may carry the total past it.
+    /// Stops early, keeping what was loaded, on shutdown. `Ok(None)` when a
+    /// body is unavailable.
+    fn load_body_prefix(
+        &self,
+        reader: &mut dyn BlockBodyReader,
+        identities: &[BlockIdentity],
+    ) -> Result<Option<Vec<Vec<u8>>>, StorageError> {
+        let mut bodies = Vec::new();
+        let mut loaded_bytes = 0_usize;
+        for identity in identities.iter().take(PREPARE_CHUNK_BLOCKS) {
+            if self.runtime.should_stop() {
+                break;
+            }
+            let hash = Hash256::from_le_bytes(&identity.hash);
+            let Some(body) = reader.load_block_body(identity.height, hash)? else {
+                return Ok(None);
+            };
+            loaded_bytes = loaded_bytes.saturating_add(body.len());
+            bodies.push(body);
+            if loaded_bytes >= PREPARE_CHUNK_BYTES {
+                break;
+            }
         }
-        let hash = Hash256::from_le_bytes(&identity.hash);
-        let Some(body) = reader.load_block_body(identity.height, hash)? else {
-            return Ok(None);
-        };
-        loaded_bytes = loaded_bytes.saturating_add(body.len());
-        bodies.push(body);
-        if loaded_bytes >= PREPARE_CHUNK_BYTES {
-            break;
+        Ok(Some(bodies))
+    }
+
+    pub(super) fn wait_for_revision_quiet(&self, mut seen_revision: u64) -> Option<u64> {
+        loop {
+            if self.runtime.should_stop() {
+                return None;
+            }
+            match self.wake_rx.recv_timeout(self.quiet_period) {
+                Ok(()) => seen_revision = self.runtime.revision(),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    let current = self.runtime.revision();
+                    if current == seen_revision {
+                        return Some(current);
+                    }
+                    seen_revision = current;
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
+            }
         }
     }
-    Ok(Some(bodies))
+
+    /// Waits for a wake hint or the pending batch's original deadline.
+    pub(super) fn wait_for_batch_deadline(&self, deadline: Instant) -> BatchWait {
+        if self.runtime.should_stop() {
+            return BatchWait::Stopped;
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return BatchWait::Deadline;
+        };
+        if remaining.is_zero() {
+            return BatchWait::Deadline;
+        }
+        match self.wake_rx.recv_timeout(remaining) {
+            Ok(()) if self.runtime.should_stop() => BatchWait::Stopped,
+            Ok(()) => BatchWait::Woken,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) if self.runtime.should_stop() => {
+                BatchWait::Stopped
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => BatchWait::Deadline,
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => BatchWait::Stopped,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -467,53 +503,4 @@ pub(super) enum BatchWait {
     Woken,
     Deadline,
     Stopped,
-}
-
-pub(super) fn wait_for_revision_quiet(
-    runtime: &DerivedIndexRuntime,
-    wake_rx: &Receiver<()>,
-    quiet_period: Duration,
-    mut seen_revision: u64,
-) -> Option<u64> {
-    loop {
-        if runtime.should_stop() {
-            return None;
-        }
-        match wake_rx.recv_timeout(quiet_period) {
-            Ok(()) => seen_revision = runtime.revision(),
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                let current = runtime.revision();
-                if current == seen_revision {
-                    return Some(current);
-                }
-                seen_revision = current;
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
-        }
-    }
-}
-/// Waits for a wake hint or the pending batch's original deadline.
-pub(super) fn wait_for_batch_deadline(
-    runtime: &DerivedIndexRuntime,
-    wake_rx: &Receiver<()>,
-    deadline: Instant,
-) -> BatchWait {
-    if runtime.should_stop() {
-        return BatchWait::Stopped;
-    }
-    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-        return BatchWait::Deadline;
-    };
-    if remaining.is_zero() {
-        return BatchWait::Deadline;
-    }
-    match wake_rx.recv_timeout(remaining) {
-        Ok(()) if runtime.should_stop() => BatchWait::Stopped,
-        Ok(()) => BatchWait::Woken,
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) if runtime.should_stop() => {
-            BatchWait::Stopped
-        }
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) => BatchWait::Deadline,
-        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => BatchWait::Stopped,
-    }
 }

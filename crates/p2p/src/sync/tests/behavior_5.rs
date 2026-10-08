@@ -5,7 +5,13 @@ use super::*;
 /// idle instead of churning an `AlreadyActive` refusal every round.
 #[test]
 fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, _peers, _applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
+    let (control, _, _, control_main, _) = sync_with_mined_chain(1)?;
+    control.chain.bootstrap_genesis();
+    stage_body(&control, &control_main[0]);
+    assert_eq!(control.apply_buffered_blocks(None), (1, 0));
+
+    let (sync, _peers, applied_tip, main, _blocks_tx) = sync_with_mined_chain(1)?;
+    sync.chain.bootstrap_genesis();
     stage_body(&sync, &main[0]);
     let staged = sync.scheduler.lock().stager.received_len();
     assert!(
@@ -27,6 +33,7 @@ fn fatal_settlement_halts_further_apply_attempts() -> Result<(), Box<dyn std::er
         staged,
         "halted ticks must preserve staged blocks for recreation"
     );
+    assert_eq!(applied_tip.load_full().map(|tip| tip.height), Some(0));
     Ok(())
 }
 
@@ -291,7 +298,6 @@ fn far_future_matching_peer_retries_without_peer_blame() -> Result<(), Box<dyn s
 /// disconnects the chain has a real readmission candidate. Returns the
 /// handles, the blocks, and their serialized bodies for the reorg body
 /// loader.
-#[allow(clippy::type_complexity)]
 #[test]
 fn tick_sorts_out_of_order_peers_before_requesting_blocks() -> Result<(), Box<dyn std::error::Error>>
 {

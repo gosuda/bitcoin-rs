@@ -6,7 +6,7 @@
 #[path = "support/block_facts_fixture.rs"]
 mod fixtures;
 
-use bitcoin_rs_consensus::{BlockView, block_view::BlockFacts};
+use bitcoin_rs_consensus::{BlockFacts, BlockView};
 use bitcoin_rs_primitives::layout::ParsedBlock;
 use bitcoin_rs_primitives::{Block, LockTime, Tx, Witness, consensus_bytes};
 
@@ -105,7 +105,7 @@ fn legacy_and_mixed_lazy_witness_ids_match_oracle_and_reuse_cache() {
         let bytes = consensus_bytes(&block);
         let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes).expect("oracle");
         let txids = block.txs.iter().map(Tx::txid).collect();
-        let mut view = BlockView::new(&block.txs, txids);
+        let mut view = BlockView::from_facts(&block.txs, BlockFacts::from_txids(&block.txs, txids));
         assert!(view.facts().wtxids().is_none());
         let ids = view.witness_ids().to_vec();
         assert_eq!(ids.len(), oracle.txdata.len());
@@ -131,8 +131,9 @@ fn empty_blocks_preserve_lazy_and_parsed_fact_shapes() {
     assert!(!actual.has_witness());
     assert!(actual.merkle_root().is_none());
     assert!(!actual.merkle_mutated());
-    let mut view = BlockView::new(&block.txs, Vec::new());
-    assert!(view.witness_ids().is_empty());
+    let mut view =
+        BlockView::from_facts(&block.txs, BlockFacts::from_txids(&block.txs, Vec::new()));
+    assert_eq!(view.witness_ids(), []);
 }
 
 #[test]

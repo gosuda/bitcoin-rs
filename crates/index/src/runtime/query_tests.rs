@@ -24,15 +24,9 @@ struct ScanResponse {
 #[derive(Clone)]
 struct QuerySnapshot {
     watermark: IndexWatermark,
-    script_history_watermark: ScriptHistoryWatermark,
     scans: Vec<ScanResponse>,
     aba: Option<Arc<AbaMutation>>,
     chain_transition: bitcoin_rs_chain::StableRead,
-}
-
-#[derive(Clone, Copy)]
-enum ScriptHistoryWatermark {
-    MatchTx,
 }
 
 impl QuerySnapshot {
@@ -82,15 +76,10 @@ impl QuerySnapshot {
 }
 
 impl TxIndexSnapshot for QuerySnapshot {
-    fn watermark(&self) -> Result<Option<IndexWatermark>, IndexError> {
-        Ok(Some(self.watermark))
-    }
-
     fn capability_watermark(
         &self,
         _capability: IndexCapability,
     ) -> Result<Option<IndexWatermark>, IndexError> {
-        let _ = self.script_history_watermark;
         Ok(Some(self.watermark))
     }
 
@@ -288,7 +277,6 @@ impl QueryFixture {
         let reader = Arc::new(QueryReader {
             snapshot: QuerySnapshot {
                 watermark,
-                script_history_watermark: ScriptHistoryWatermark::MatchTx,
                 scans: config.scans,
                 aba,
                 chain_transition: chain_transition.clone(),

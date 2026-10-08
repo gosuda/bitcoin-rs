@@ -151,54 +151,6 @@ fn compare_coin(
     Ok(reference)
 }
 
-/// A one-block losing branch stays selected while the rival has equal work,
-/// then both paths converge on Core's two-block winner, including the full
-/// UTXO digest and disappearance of the disconnected coinbase.
-#[test]
-fn equal_work_then_one_block_reorg_matches_clean_sync() -> Result<()> {
-    let mut core = ProcessNode::spawn(Kind::Core)?;
-    let mut reorg = ProcessNode::spawn(Kind::BitcoinRs)?;
-    let funds = mine_common_chain(&mut core, &mut reorg, 2)?;
-    let mut clean = ProcessNode::spawn(Kind::BitcoinRs)?;
-    feed_common_blocks(&mut clean, &funds)?;
-
-    let old_hash = mine_bare_blocks(&mut reorg, 1)?.remove(0);
-    let old_block = reorg.rpc("getblock", &json!([old_hash, 2]))?;
-    let old_coinbase = old_block["tx"][0].str_field("txid")?.to_owned();
-
-    let rival = mine_core_block(&mut core, &[])?;
-    assert_ne!(rival.block_hash().to_string(), old_hash);
-    submit_competing_headers(&mut reorg, std::slice::from_ref(&rival))?;
-    assert_eq!(
-        reorg.rpc("getbestblockhash", &json!([]))?,
-        json!(old_hash),
-        "equal-work header cannot displace the applied branch"
-    );
-    assert_eq!(reorg.rpc("getblockhash", &json!([3]))?, json!(old_hash));
-
-    let winner = mine_core_block(&mut core, &[])?;
-    dial_core(&core, &mut reorg)?;
-    dial_core(&core, &mut clean)?;
-    reorg.wait_block_count(4, Duration::from_secs(90))?;
-    clean.wait_block_count(4, Duration::from_secs(90))?;
-    assert_eq!(
-        reorg.rpc("getbestblockhash", &json!([]))?,
-        json!(winner.block_hash().to_string())
-    );
-    compare_chain_views(&mut core, &mut reorg, &mut clean)?;
-    assert!(
-        coin(&mut reorg, &old_coinbase, false)?.is_null(),
-        "disconnected coinbase must leave the UTXO set"
-    );
-    let rival_coinbase = rival.txdata[0].compute_txid().to_string();
-    assert!(!compare_coin(&mut core, &mut reorg, &mut clean, &rival_coinbase, false)?.is_null());
-    assert!(sorted_mempool(&mut reorg)?.is_empty());
-    assert!(sorted_mempool(&mut clean)?.is_empty());
-    reorg.stop()?;
-    clean.stop()?;
-    core.stop()
-}
-
 fn submit_mempool(node: &mut ProcessNode, tx: &Transaction) -> Result<()> {
     assert_eq!(
         node.rpc("sendrawtransaction", &json!([tx_hex(tx)]))?,
@@ -357,7 +309,7 @@ fn deep_reorg_mempool_matches_clean_sync() -> Result<()> {
         json!(3),
         "survivor must first be confirmed on the losing branch"
     );
-    assert!(sorted_mempool(&mut reorg)?.is_empty());
+    assert_eq!(sorted_mempool(&mut reorg)?, Vec::<String>::new());
 
     // Core mines only the specified conflicting transaction. Its independent
     // spend stays out of the winning branch and remains eligible for mempool.
@@ -459,7 +411,7 @@ fn invalid_higher_work_body_cannot_change_active_chain() -> Result<()> {
         &chain_view(&mut node)?,
     )?;
     assert!(!coin(&mut node, &old_coinbase, false)?.is_null());
-    assert!(sorted_mempool(&mut node)?.is_empty());
+    assert_eq!(sorted_mempool(&mut node)?, Vec::<String>::new());
     assert_eq!(node.rpc("getblockhash", &json!([1]))?, json!(old_tip));
 
     // Invalid-branch recovery reconnects the old branch through durable

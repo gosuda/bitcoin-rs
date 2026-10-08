@@ -22,6 +22,16 @@ use super::{
 
 pub(super) static SERVER_TEST_LOCK: Mutex<()> = const_mutex(());
 
+impl MetricsServer {
+    pub(crate) fn with_worker_for_test(worker: thread::JoinHandle<()>) -> Self {
+        Self {
+            local_addr: unused_ephemeral(),
+            stop: Arc::new(AtomicBool::new(false)),
+            thread: Some(worker),
+        }
+    }
+}
+
 fn unused_ephemeral() -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
 }
@@ -103,7 +113,9 @@ fn occupied_address_bind_errors_and_in_process_retry_succeeds() {
         body.contains("node_metrics_retry_probe"),
         "retry scrape missing recorded metric: {body}"
     );
-    server.stop_and_join();
+    server
+        .stop_and_join()
+        .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
 }
 
 #[test]
@@ -156,7 +168,9 @@ fn scrape_returns_operator_metrics_without_evidence_identity_labels() {
             }
         }
     }
-    server.stop_and_join();
+    server
+        .stop_and_join()
+        .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
 }
 
 #[test]
@@ -169,7 +183,9 @@ fn two_sequential_servers_in_one_process_both_serve() {
     let (status, body) = scrape(first.local_addr());
     assert_eq!(status, 200);
     assert!(body.contains("node_metrics_sequential_probe"));
-    first.stop_and_join();
+    first
+        .stop_and_join()
+        .unwrap_or_else(|error| panic!("join first metrics scrape worker: {error}"));
 
     let mut second = MetricsServer::bind(unused_ephemeral(), shutdown, &identity())
         .unwrap_or_else(|error| panic!("second: {error}"));
@@ -177,7 +193,9 @@ fn two_sequential_servers_in_one_process_both_serve() {
     let (status, body) = scrape(second.local_addr());
     assert_eq!(status, 200);
     assert!(body.contains("node_metrics_sequential_probe"));
-    second.stop_and_join();
+    second
+        .stop_and_join()
+        .unwrap_or_else(|error| panic!("join second metrics scrape worker: {error}"));
 }
 
 #[test]
@@ -202,7 +220,9 @@ fn shutdown_exits_the_listener_thread() {
         }
         thread::sleep(Duration::from_millis(20));
     }
-    server.stop_and_join();
+    server
+        .stop_and_join()
+        .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
 }
 
 /// One rendered readiness sample: `(state label, value)`.
@@ -313,5 +333,7 @@ fn published_gauge_flips_its_active_label_with_the_rpc_source() {
     let samples = readiness_samples(&scrape_body(server.local_addr()));
     assert_one_active(&samples, "Disabled");
 
-    server.stop_and_join();
+    server
+        .stop_and_join()
+        .unwrap_or_else(|error| panic!("join metrics scrape worker: {error}"));
 }

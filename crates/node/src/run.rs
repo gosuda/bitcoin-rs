@@ -1,7 +1,6 @@
 //! Daemon signal wrapper over the node-owned lifecycle.
 
 use std::io::IsTerminal as _;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -50,8 +49,8 @@ fn build_filter_directive(level: &str) -> String {
 /// PRE: the node lifecycle owns the shutdown flag and teardown runs on it.
 /// POST: returns after an acquire read of the flag observes `true`.
 /// INVARIANT: waits no longer than 100 ms between observations.
-fn wait_for_shutdown(shutdown: &AtomicBool) {
-    while !shutdown.load(Ordering::Acquire) {
+fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader) {
+    while !shutdown.is_triggered() {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -64,7 +63,8 @@ fn wait_for_shutdown(shutdown: &AtomicBool) {
 pub fn run(config: NodeConfig, runtime: RuntimeInputs) -> Result<()> {
     install_tracing(&config.observability.log_level);
     let node = crate::lifecycle::start_node(config, runtime, true)?;
-    wait_for_shutdown(&node.state.shutdown());
+    let shutdown_reader = node.state.shutdown_reader();
+    wait_for_shutdown(&shutdown_reader);
     node.shutdown_blocking()
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
@@ -88,10 +88,21 @@ mod tests {
     }
 
     #[test]
-    fn bare_debug_directive_parses_successfully() {
-        let directive = build_filter_directive("debug");
-        EnvFilter::try_new(&directive).unwrap_or_else(|error| {
-            panic!("bare-debug directive with per-target caps must parse: {error}")
-        });
+    fn bare_levels_cap_storage_targets() {
+        for (level, expected) in [
+            ("", "info,fjall=warn,rocksdb=warn"),
+            ("info", "info,fjall=warn,rocksdb=warn"),
+            ("debug", "debug,fjall=warn,rocksdb=warn"),
+            ("warn", "warn,fjall=warn,rocksdb=warn"),
+            ("error", "error,fjall=warn,rocksdb=warn"),
+            ("trace", "trace,fjall=warn,rocksdb=warn"),
+            ("off", "off,fjall=warn,rocksdb=warn"),
+        ] {
+            let directive = build_filter_directive(level);
+            assert_eq!(directive, expected, "bare level {level:?}");
+            EnvFilter::try_new(&directive).unwrap_or_else(|error| {
+                panic!("bare level {level:?} with per-target caps must parse: {error}")
+            });
+        }
     }
 }

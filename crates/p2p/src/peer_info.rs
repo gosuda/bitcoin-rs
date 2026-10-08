@@ -35,7 +35,7 @@ impl PeerRole {
     /// POST: `true` only for `FullRelay`.
     /// INVARIANT: block and header relay is never restricted by role.
     #[must_use]
-    pub const fn relays_transactions(&self) -> bool {
+    pub(crate) const fn relays_transactions(self) -> bool {
         matches!(self, Self::FullRelay)
     }
 }
@@ -116,7 +116,7 @@ impl PeerInfo {
 
     /// Constructs a `PeerInfo` for an outbound peer from the captured remote `VersionMessage`.
     #[must_use]
-    pub fn outbound_from_version(
+    pub(crate) fn outbound_from_version(
         addr: SocketAddr,
         addr_bind: SocketAddr,
         version: &VersionMessage,
@@ -301,7 +301,7 @@ mod tests {
         let version = version_with_services(ServiceFlags::NONE);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
         let info = PeerInfo::inbound_from_version(addr, addr, &version, 0, 0, counters());
-        assert!(info.services_names().is_empty());
+        assert_eq!(info.services_names(), Vec::<&'static str>::new());
     }
 
     /// `services_names` is Bitcoin Core-compatible `getpeerinfo` output: the
@@ -332,13 +332,15 @@ mod tests {
         );
 
         // No recognized bits -> no names (Core reports an empty array).
-        assert!(peer_info_with_services(0).services_names().is_empty());
+        assert_eq!(
+            peer_info_with_services(0).services_names(),
+            Vec::<&'static str>::new()
+        );
 
         // Unrecognized bits (e.g. bit 63) contribute no names.
-        assert!(
-            peer_info_with_services(1_u64 << 63)
-                .services_names()
-                .is_empty()
+        assert_eq!(
+            peer_info_with_services(1_u64 << 63).services_names(),
+            Vec::<&'static str>::new()
         );
     }
 }

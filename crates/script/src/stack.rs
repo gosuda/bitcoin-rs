@@ -3,8 +3,8 @@ use thiserror::Error;
 use tinyvec::ArrayVec;
 
 /// One stack item.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ScriptItem {
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ScriptItem {
     /// A minimally encoded script integer.
     Num(i64),
     /// A byte vector kept inline for common small pushes.
@@ -18,23 +18,23 @@ impl Default for ScriptItem {
 }
 
 /// Bounded script stack with Core's 1000-item maximum depth.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Stack {
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Stack {
     items: ArrayVec<[ScriptItem; Self::MAX_DEPTH]>,
 }
 
 impl Stack {
     /// Maximum stack depth permitted by consensus script evaluation.
-    pub const MAX_DEPTH: usize = 1000;
+    pub(crate) const MAX_DEPTH: usize = 1000;
 
     /// Creates an empty stack.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
     /// Pushes one item, rejecting capacity overflow instead of panicking.
-    pub fn push(&mut self, item: ScriptItem) -> Result<(), StackError> {
+    pub(crate) fn push(&mut self, item: ScriptItem) -> Result<(), StackError> {
         match self.items.try_push(item) {
             Some(_) => Err(StackError::Overflow),
             None => Ok(()),
@@ -42,17 +42,17 @@ impl Stack {
     }
 
     /// Pops the top item.
-    pub fn pop(&mut self) -> Result<ScriptItem, StackError> {
+    pub(crate) fn pop(&mut self) -> Result<ScriptItem, StackError> {
         self.items.pop().ok_or(StackError::Underflow)
     }
 
     /// Returns the top item without removing it.
-    pub fn peek(&self) -> Result<&ScriptItem, StackError> {
+    pub(crate) fn peek(&self) -> Result<&ScriptItem, StackError> {
         self.items.last().ok_or(StackError::Underflow)
     }
 
     /// Returns an item at `depth`, where zero is the top item.
-    pub fn peek_at(&self, depth: usize) -> Result<&ScriptItem, StackError> {
+    pub(crate) fn peek_at(&self, depth: usize) -> Result<&ScriptItem, StackError> {
         self.items
             .get(
                 self.items
@@ -65,7 +65,7 @@ impl Stack {
     }
 
     /// Removes and returns an item at `depth`, where zero is the top item.
-    pub fn remove_at(&mut self, depth: usize) -> Result<ScriptItem, StackError> {
+    pub(crate) fn remove_at(&mut self, depth: usize) -> Result<ScriptItem, StackError> {
         let index = self
             .items
             .len()
@@ -76,7 +76,7 @@ impl Stack {
     }
 
     /// Inserts an item at `depth`, where zero places it on top.
-    pub fn insert_at(&mut self, depth: usize, item: ScriptItem) -> Result<(), StackError> {
+    pub(crate) fn insert_at(&mut self, depth: usize, item: ScriptItem) -> Result<(), StackError> {
         if depth > self.items.len() {
             return Err(StackError::Underflow);
         }
@@ -88,18 +88,8 @@ impl Stack {
         Ok(())
     }
 
-    /// Swaps the top two items.
-    pub fn swap(&mut self) -> Result<(), StackError> {
-        if self.items.len() < 2 {
-            return Err(StackError::Underflow);
-        }
-        let len = self.items.len();
-        self.items.swap(len - 1, len - 2);
-        Ok(())
-    }
-
     /// Swaps the items at the given depths (0 = top, 1 = second-from-top, …).
-    pub fn swap_at(&mut self, depth_a: usize, depth_b: usize) -> Result<(), StackError> {
+    pub(crate) fn swap_at(&mut self, depth_a: usize, depth_b: usize) -> Result<(), StackError> {
         let len = self.items.len();
         if depth_a >= len || depth_b >= len {
             return Err(StackError::Underflow);
@@ -109,13 +99,13 @@ impl Stack {
     }
 
     /// Moves the item at `depth` to the top.
-    pub fn roll(&mut self, depth: usize) -> Result<(), StackError> {
+    pub(crate) fn roll(&mut self, depth: usize) -> Result<(), StackError> {
         let item = self.remove_at(depth)?;
         self.push(item)
     }
 
     /// Removes the top `count` items, preserving their stack order.
-    pub fn drain(&mut self, count: usize) -> Result<Vec<ScriptItem>, StackError> {
+    pub(crate) fn drain(&mut self, count: usize) -> Result<Vec<ScriptItem>, StackError> {
         if count > self.items.len() {
             return Err(StackError::Underflow);
         }
@@ -125,25 +115,25 @@ impl Stack {
 
     /// Returns the number of stack items.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.items.len()
     }
 
     /// Returns true when the stack is empty.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
 
     /// Removes all stack items.
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.items.clear();
     }
 }
 
 /// Errors returned by bounded stack operations.
-#[derive(Copy, Clone, Debug, Error, PartialEq, Eq)]
-pub enum StackError {
+#[derive(Debug, Error, PartialEq)]
+pub(crate) enum StackError {
     /// Pushing would exceed the 1000-item consensus maximum.
     #[error("script stack overflow")]
     Overflow,
@@ -167,5 +157,42 @@ mod tests {
         }
         assert_eq!(stack.len(), Stack::MAX_DEPTH);
         assert_eq!(stack.push(ScriptItem::Num(1)), Err(StackError::Overflow));
+    }
+
+    /// `peek_at`, `remove_at`, and `roll` use top-relative depth (`0` is the
+    /// top); an out-of-range depth returns `StackError::Underflow` and leaves
+    /// the stack unchanged.
+    #[test]
+    fn invalid_depths_return_underflow_without_mutating() -> Result<(), StackError> {
+        for len in [0, 1, Stack::MAX_DEPTH] {
+            let mut stack = Stack::new();
+            for _ in 0..len {
+                stack.push(ScriptItem::Num(7))?;
+            }
+            let before = stack.clone();
+            for depth in [len, len + 1, usize::MAX] {
+                assert_eq!(stack.peek_at(depth), Err(StackError::Underflow));
+                assert_eq!(stack.remove_at(depth), Err(StackError::Underflow));
+                assert_eq!(stack.roll(depth), Err(StackError::Underflow));
+                assert_eq!(stack, before);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn valid_depths_preserve_top_relative_order() -> Result<(), StackError> {
+        let mut stack = Stack::new();
+        for value in [1, 2, 3] {
+            stack.push(ScriptItem::Num(value))?;
+        }
+        assert_eq!(stack.peek_at(0), Ok(&ScriptItem::Num(3)));
+        assert_eq!(stack.peek_at(2), Ok(&ScriptItem::Num(1)));
+        assert_eq!(stack.remove_at(1), Ok(ScriptItem::Num(2)));
+        stack.roll(1)?;
+        assert_eq!(stack.pop(), Ok(ScriptItem::Num(1)));
+        assert_eq!(stack.pop(), Ok(ScriptItem::Num(3)));
+        assert!(stack.is_empty());
+        Ok(())
     }
 }

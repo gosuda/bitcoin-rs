@@ -14,8 +14,8 @@ use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_script::{
-    Instruction, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh,
-    is_push_only, minimal_non_dust, multisig_key_count, opcode, script::instructions,
+    Instruction, instructions, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr,
+    is_p2wpkh, is_p2wsh, is_push_only, minimal_non_dust, multisig_key_count, opcode,
 };
 use thiserror::Error;
 
@@ -382,9 +382,7 @@ pub(crate) fn evaluate_one(
 /// Returns true if `tx` is a coinbase transaction: exactly one input whose
 /// previous output is the null outpoint (zero txid, `vout == u32::MAX`).
 fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1
-        && tx.inputs[0].previous_output.txid == Txid::default()
-        && tx.inputs[0].previous_output.vout == u32::MAX
+    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Minimum non-witness serialization Core relays, `tx-size-small`.
@@ -548,7 +546,6 @@ fn is_standard_nulldata(script: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 

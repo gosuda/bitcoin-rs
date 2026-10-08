@@ -8,7 +8,6 @@
 use std::task::{Context, Poll, Waker};
 
 use anyhow::{Result, bail};
-use bitcoin_rs_chain::compact_is_met_by;
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_mempool::MutationOutcome;
 use bitcoin_rs_node::state::NodeState;
@@ -17,6 +16,7 @@ use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx,
     TxIn, TxOut, Txid, Witness, consensus_bytes,
 };
+use bitcoin_rs_script::push_int;
 
 const SEED_BLOCKS: u32 = 100;
 const SEED_BASE_TIME: u32 = 1_296_688_603;
@@ -46,7 +46,7 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path().join("node");
 
-    // --- seed chain state on the same datadir through the public types ------
+    // --- seed chain state on the same datadir through the test seam --------
     // The height-1 coinbase (anyone-can-spend OP_1) becomes spendable by the
     // next block once the tip reaches height 100 — the same fixture shape
     // the mining e2e test uses.
@@ -68,6 +68,18 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
     ))?;
 
     assert_embedded_node_readiness(&node, seed_tip_hash, first_block_hash, &first_block_bytes)?;
+
+    let before_import = node.snapshot();
+    let summary = node.chainstates_summary()?;
+    assert!(summary.active_chainstate.validated);
+    assert!(summary.historical_chainstate.is_none());
+    let invalid_snapshot = dir.path().join("invalid-snapshot.dat");
+    std::fs::write(&invalid_snapshot, b"not a UTXO snapshot")?;
+    assert!(matches!(
+        block_on(node.activate_assumeutxo_snapshot_file(&invalid_snapshot)),
+        Err(NodeError::Snapshot(_))
+    ));
+    assert_eq!(node.snapshot(), before_import);
 
     assert_broadcast_and_lookups(&node)?;
 
@@ -279,7 +291,7 @@ fn seed_chain(state: &NodeState, count: u32) -> Result<(Hash256, Hash256, Vec<u8
         };
         block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
             .ok_or_else(|| anyhow::anyhow!("seed block must have a merkle root"))?;
-        grind_pow(&mut block)?;
+        regtest_fixture::mine_block_to_declared_target(&mut block)?;
         state.apply_block(&block)?;
         tip = applied
             .load_full()
@@ -299,12 +311,10 @@ fn seed_coinbase(height: u32) -> Tx {
     Tx {
         version: 2,
         inputs: vec![TxIn {
-            previous_output: null_prevout(),
+            previous_output: OutPoint::null(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: [script_push_int(i64::from(height)), script_push_int(0)]
-                .concat()
-                .into(),
+            script_sig: [push_int(i64::from(height)), push_int(0)].concat().into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -335,49 +345,6 @@ fn seed_coinbase_spend() -> Tx {
             script_pubkey: [vec![0x00, 0x14], vec![0x11; 20]].concat().into(),
         }],
         lock_time: LockTime::ZERO,
-    }
-}
-
-/// The one-input null-prevout coinbase outpoint (Core `COINBASE_OUTPOINT`).
-fn null_prevout() -> OutPoint {
-    OutPoint::new(Txid::default(), u32::MAX)
-}
-
-/// Minimal script push of a small integer, mirroring rust-bitcoin
-/// `Builder::push_int`: `OP_0` for zero, `OP_N` for 1..=16, otherwise a
-/// length-prefixed little-endian payload (BIP34 heights).
-fn script_push_int(value: i64) -> Vec<u8> {
-    match value {
-        0 => vec![0x00],
-        // `value` is pinned to 1..=16 by the match arm.
-        1..=16 => vec![0x50 + u8::try_from(value).unwrap_or_default()],
-        _ => {
-            let mut payload = Vec::new();
-            let mut magnitude = value.unsigned_abs();
-            while magnitude > 0 {
-                // Low byte only; the shift below consumes it fully.
-                payload.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
-                magnitude >>= 8;
-            }
-            let mut out = Vec::with_capacity(payload.len() + 1);
-            // A small-int push never exceeds 8 payload bytes.
-            out.push(u8::try_from(payload.len()).unwrap_or_default());
-            out.extend(payload);
-            out
-        }
-    }
-}
-
-/// Grinds the header nonce until the hash meets the compact bits target.
-fn grind_pow(block: &mut Block) -> Result<()> {
-    loop {
-        if compact_is_met_by(block.header.bits, block.header.compute_hash().into()) {
-            return Ok(());
-        }
-        let Some(next) = block.header.nonce.checked_add(1) else {
-            bail!("nonce exhausted while grinding block");
-        };
-        block.header.nonce = next;
     }
 }
 
@@ -469,7 +436,10 @@ fn startup_failure_after_state_open_rolls_back_releases_state() -> Result<()> {
         Err(NodeError::Startup(message)) => {
             let lowered = message.to_lowercase();
             assert!(
-                lowered.contains("address") || lowered.contains("bind"),
+                lowered.contains("address")
+                    || lowered.contains("bind")
+                    || lowered.contains("10048")
+                    || lowered.contains("주소"),
                 "the failure should name the bind conflict, got: {message}"
             );
         }

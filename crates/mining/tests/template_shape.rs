@@ -1,5 +1,8 @@
 //! Candidate scalar, dependency-index, and shape tests.
 
+#[path = "common/fixtures.rs"]
+mod common;
+
 use std::error::Error;
 use std::sync::Arc;
 
@@ -16,10 +19,11 @@ use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness,
 };
+use common::context;
 
 /// Checks whole-block scalars and selected dependency indexes against wire and hash oracles.
 #[test]
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box<dyn Error>> {
     let mut mempool = Mempool::new(MempoolLimits {
         min_relay_fee_sat_per_kvb: 0,
@@ -86,20 +90,12 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
     assert_eq!(candidate.segwit_active, context.segwit_active);
 
     let mut fees = 0_u64;
-    let mut sigops = 0_u64;
     let mut positions = std::collections::BTreeMap::new();
     for (offset, tx) in candidate.transactions.iter().enumerate() {
         positions.insert(tx.txid, u32::try_from(offset + 1)?);
         fees = fees.checked_add(tx.fee).ok_or("fee")?;
-        sigops = sigops
-            .checked_add(u64::from(tx.sigop_cost))
-            .ok_or("sigops")?;
         assert_eq!(tx.txid, tx.tx.txid());
         assert_eq!(tx.wtxid, tx.tx.wtxid());
-        assert_eq!(
-            tx.modified_fee,
-            i128::from(tx.fee) + i128::from(tx.fee_delta)
-        );
     }
     for tx in &candidate.transactions {
         let mut expected = tx
@@ -116,13 +112,10 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
             assert!(usize::try_from(depend)? <= candidate.transactions.len());
         }
     }
-    assert_eq!(candidate.fees, fees);
     let block = candidate.into_unsolved_block()?;
     let oracle: bitcoin::Block =
         bitcoin::consensus::deserialize(&bitcoin_rs_primitives::encode::consensus_bytes(&block))?;
     assert_eq!(candidate.weight, oracle.weight().to_wu());
-    assert_eq!(candidate.size, u64::try_from(oracle.total_size())?);
-    assert_eq!(candidate.sigop_cost, sigops);
     assert_eq!(
         candidate.coinbase_value,
         bitcoin_rs_consensus::block_subsidy(250, Network::Regtest.subsidy_halving_interval())
@@ -139,7 +132,6 @@ fn candidate_scalars_and_depends_match_selected_transactions() -> Result<(), Box
     );
     let root = bitcoin::merkle_tree::calculate_root(leaves.into_iter()).ok_or("root")?;
     let root = Hash256::from_le_bytes(root.as_byte_array());
-    assert_eq!(candidate.witness_merkle_root, Some(root));
     let mut engine = sha256d::Hash::engine();
     engine.input(root.as_byte_array());
     engine.input(&WITNESS_RESERVED_VALUE);
@@ -169,44 +161,15 @@ fn equal_fee_ties_follow_snapshot_order_deterministically() -> Result<(), Box<dy
         ))?;
     }
     let snapshot = mempool.mining_snapshot();
-    let first = assemble_candidate(
-        &CandidateContext {
-            previous_block_hash: Hash256::from_le_bytes(&[0x22; 32]),
-            height: 10,
-            version: 1,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            min_time: 1,
-            current_time: 2,
-            locktime_cutoff: 1,
-            network: Network::Regtest,
-            csv_active: false,
-            segwit_active: false,
-            max_weight: 4_000_000,
-            max_size: 4_000_000,
-            max_sigops: 80_000,
-        },
-        &snapshot,
-        &[0x51],
-    )?;
-    let second = assemble_candidate(
-        &CandidateContext {
-            previous_block_hash: Hash256::from_le_bytes(&[0x22; 32]),
-            height: 10,
-            version: 1,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            min_time: 1,
-            current_time: 2,
-            locktime_cutoff: 1,
-            network: Network::Regtest,
-            csv_active: false,
-            segwit_active: false,
-            max_weight: 4_000_000,
-            max_size: 4_000_000,
-            max_sigops: 80_000,
-        },
-        &snapshot,
-        &[0x51],
-    )?;
+    let context = CandidateContext {
+        previous_block_hash: Hash256::from_le_bytes(&[0x22; 32]),
+        height: 10,
+        version: 1,
+        csv_active: false,
+        ..context(false, 80_000)
+    };
+    let first = assemble_candidate(&context, &snapshot, &[0x51])?;
+    let second = assemble_candidate(&context, &snapshot, &[0x51])?;
     assert_eq!(
         first
             .transactions
@@ -264,25 +227,12 @@ fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
         min_relay_fee_sat_per_kvb: 0,
         ..MempoolLimits::default()
     });
-    let zero = assemble_candidate(
-        &CandidateContext {
-            previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
-            height: 100,
-            version: 1,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            min_time: 1,
-            current_time: 2,
-            locktime_cutoff: 1,
-            network: Network::Regtest,
-            csv_active: true,
-            segwit_active: true,
-            max_weight: 4_000_000,
-            max_size: 4_000_000,
-            max_sigops: 80_000,
-        },
-        &empty.mining_snapshot(),
-        &payout,
-    )?;
+    let context = CandidateContext {
+        previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
+        version: 1,
+        ..context(true, 80_000)
+    };
+    let zero = assemble_candidate(&context, &empty.mining_snapshot(), &payout)?;
     assert_eq!(
         zero.transactions.len(),
         0,
@@ -301,25 +251,7 @@ fn currentblocktx_counts_exclude_the_coinbase() -> Result<(), Box<dyn Error>> {
         100,
         0,
     ))?;
-    let one = assemble_candidate(
-        &CandidateContext {
-            previous_block_hash: Hash256::from_le_bytes(&[0x44; 32]),
-            height: 100,
-            version: 1,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            min_time: 1,
-            current_time: 2,
-            locktime_cutoff: 1,
-            network: Network::Regtest,
-            csv_active: true,
-            segwit_active: true,
-            max_weight: 4_000_000,
-            max_size: 4_000_000,
-            max_sigops: 80_000,
-        },
-        &one_pool.mining_snapshot(),
-        &payout,
-    )?;
+    let one = assemble_candidate(&context, &one_pool.mining_snapshot(), &payout)?;
     assert_eq!(one.transactions.len(), 1);
     Ok(())
 }
@@ -339,16 +271,8 @@ fn assembly_copies_deployment_boundary_flags() -> Result<(), Box<dyn Error>> {
                 previous_block_hash: Hash256::from_le_bytes(&[0x55; 32]),
                 height: 432,
                 version: 1,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
-                min_time: 1,
-                current_time: 2,
-                locktime_cutoff: 1,
-                network: Network::Regtest,
                 csv_active,
-                segwit_active,
-                max_weight: 4_000_000,
-                max_size: 4_000_000,
-                max_sigops: 80_000,
+                ..context(segwit_active, 80_000)
             },
             &snapshot,
             &payout,
@@ -368,19 +292,9 @@ fn candidate_solves_an_unsolved_regtest_header() -> Result<(), Box<dyn Error>> {
     });
     let snapshot = mempool.mining_snapshot();
     let context = CandidateContext {
-        previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
         height: 1,
         version: 1,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        min_time: 1,
-        current_time: 2,
-        locktime_cutoff: 1,
-        network: Network::Regtest,
-        csv_active: true,
-        segwit_active: true,
-        max_weight: 4_000_000,
-        max_size: 4_000_000,
-        max_sigops: 80_000,
+        ..context(true, 80_000)
     };
     let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
     let unsolved = candidate.into_unsolved_block()?;
@@ -423,22 +337,11 @@ fn ordered_assembly_keeps_snapshot_order() -> Result<(), Box<dyn Error>> {
     ))?;
     let snapshot = mempool.mining_snapshot();
     let context = CandidateContext {
-        previous_block_hash: Hash256::from_le_bytes(&[0x11; 32]),
         height: 1,
         version: 1,
-        bits: CompactTarget::from_consensus(0x207f_ffff),
-        min_time: 1,
-        current_time: 2,
-        locktime_cutoff: 1,
-        network: Network::Regtest,
-        csv_active: true,
-        segwit_active: true,
-        max_weight: 4_000_000,
-        max_size: 4_000_000,
-        max_sigops: 80_000,
+        ..context(true, 80_000)
     };
     let candidate = assemble_ordered_candidate(&context, &snapshot, &[0x51])?;
-    assert_eq!(candidate.fees, 0);
     assert_eq!(candidate.coinbase_value, 5_000_000_000);
     assert_eq!(
         candidate

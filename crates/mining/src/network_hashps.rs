@@ -44,7 +44,7 @@ pub fn network_hash_ps(
         tree.node_at_height_from(tip.tip_id, requested)
             .ok_or_else(missing_height)?
     };
-    Ok(estimate_network_hashps(tree, Some(start), lookup, network))
+    Ok(estimate_network_hashps(tree, start, lookup, network))
 }
 
 /// Estimates hashes/s over `lookup` blocks ending at an already-resolved start.
@@ -56,29 +56,19 @@ pub fn network_hash_ps(
 // CONTRACT: docs/contracts/external-api.md#API-06
 pub fn estimate_network_hashps(
     tree: &BlockTree,
-    start_id: Option<NodeId>,
+    start_id: NodeId,
     lookup: i64,
     network: Network,
 ) -> f64 {
-    let Some(start_id) = start_id else {
-        return 0.0;
-    };
     let Some(start_node) = tree.node(start_id).ok().filter(|node| node.height != 0) else {
         return 0.0;
     };
-    let mut walk = if lookup == -1 {
-        let interval = i64::from(network.retarget_interval());
-        if interval <= 0 {
-            1
-        } else {
-            i64::from(start_node.height) % interval + 1
-        }
+    let walk = if lookup == -1 {
+        i64::from(start_node.height) % i64::from(network.retarget_interval()) + 1
     } else {
         lookup
-    };
-    if walk > i64::from(start_node.height) {
-        walk = i64::from(start_node.height);
     }
+    .min(i64::from(start_node.height));
     // A negative lookup other than -1 has no window; treat it as an empty walk.
     let walk = u32::try_from(walk).unwrap_or(0);
     if walk == 0 {

@@ -8,12 +8,12 @@
 //! data pushes are skipped, and a malformed push ends the count (Core's
 //! `if (!GetOp(pc, opcode)) break;`).
 
-use bitcoin_rs_primitives::{Block, Tx};
+use bitcoin_rs_primitives::Tx;
 
 use crate::script::{EarlyEndOfScript, Instruction, instructions, is_p2wpkh, is_p2wsh, opcode};
 
 /// Counts legacy sigops in a script (Core's `GetSigOpCount(false)`).
-pub fn count_legacy(script: &[u8]) -> u32 {
+fn count_legacy(script: &[u8]) -> u32 {
     count_script(script, false)
 }
 
@@ -54,14 +54,6 @@ pub fn count_tx_legacy(tx: &Tx) -> u32 {
     count
 }
 
-/// Counts the legacy sigop cost of a whole block without prevout resolution.
-pub fn count_block(block: &Block) -> u32 {
-    block
-        .txs
-        .iter()
-        .fold(0_u32, |count, tx| count.saturating_add(count_tx_legacy(tx)))
-}
-
 fn count_script(script: &[u8], accurate: bool) -> u32 {
     let mut count = 0_u32;
     let mut pushnum_cache = None;
@@ -91,23 +83,18 @@ fn count_script(script: &[u8], accurate: bool) -> u32 {
 #[cfg(test)]
 mod tests {
     use bitcoin::ScriptBuf as OracleScriptBuf;
-    use bitcoin_rs_primitives::{
-        Amount, Block, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
-    };
 
-    use super::{count_block, count_legacy, count_segwit, count_tx_legacy};
-    use crate::script::{opcode, push_data};
+    use bitcoin_rs_primitives::{
+        Amount, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+    };
 
     const fn pushnum(n: u8) -> u8 {
         opcode::OP_PUSHNUM_1 + (n - 1)
     }
 
-    /// Legacy counting always charges 20 per `CHECKMULTISIG`; accurate counting
-    /// charges the declared key count only when an `OP_1..OP_16` push is the
-    /// immediately preceding opcode. Core v31.1 `CScript::GetSigOpCount`
-    /// advances `lastOpcode` after every opcode, so an intervening sigop opcode
-    /// resets the key count — rust-bitcoin 0.32 does not, which is why the
-    /// oracle cross-check below is limited to the legacy rule.
+    use super::{count_legacy, count_segwit, count_tx_legacy};
+    use crate::script::{opcode, push_data};
+
     #[test]
     fn sigop_counts_follow_core_multisig_rules() {
         let three_keys: Vec<u8> = [
@@ -188,26 +175,23 @@ mod tests {
     }
 
     #[test]
-    fn tx_and_block_counts_cover_script_sig_and_script_pubkey() {
+    fn tx_counts_cover_script_sig_and_script_pubkey() {
+        let script_sig: Vec<u8> = vec![opcode::OP_CHECKSIG];
+        let script_pubkey: Vec<u8> = vec![opcode::OP_CHECKMULTISIG];
         let tx = Tx {
             version: 2,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
-                script_sig: vec![opcode::OP_CHECKSIG].into(),
+                script_sig: script_sig.into(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
                 value: Amount::SAT,
-                script_pubkey: vec![opcode::OP_CHECKMULTISIG].into(),
+                script_pubkey: script_pubkey.into(),
             }],
             lock_time: LockTime::ZERO,
         };
         assert_eq!(count_tx_legacy(&tx), 1 + 20);
-        let block = Block {
-            header: bitcoin_rs_primitives::Header::default(),
-            txs: vec![tx.clone(), tx],
-        };
-        assert_eq!(count_block(&block), 42);
     }
 }
