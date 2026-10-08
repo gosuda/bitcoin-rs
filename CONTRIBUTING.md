@@ -249,11 +249,10 @@ architecture or validation specification in this guide.
 
 ### Architectural changes
 
-The project boundary is
-[stable external contracts, replaceable internal architecture](README.md#external-compatibility).
-Internal breaking changes are acceptable with clear rationale; breaking a
-supported external contract is a regression. For a change that reshapes
-internals, reviewers evaluate:
+The project boundary is stable external contracts, replaceable internal
+architecture. Internal breaking changes are acceptable with clear rationale;
+breaking a supported external contract is a regression. For a change that
+reshapes internals, reviewers evaluate:
 
 1. **External contract preserved?** Consensus, P2P, and every affected
    supported external API keep observable behavior, proven with the
