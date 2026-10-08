@@ -20,7 +20,7 @@ use parking_lot::RwLock;
 #[derive(Default)]
 pub(crate) struct MemoryStore {
     cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
-    pub(crate) fail_next_durable: AtomicBool,
+    pub(crate) fail_next_fenced_write: AtomicBool,
 }
 
 impl MemoryStore {
@@ -95,9 +95,9 @@ impl KvStore for MemoryStore {
         conditions: &[WriteCondition<'_>],
         batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
-        if self.fail_next_durable.swap(false, Ordering::SeqCst) {
+        if self.fail_next_fenced_write.swap(false, Ordering::SeqCst) {
             return Err(StorageError::Backend(
-                "injected durable write failure".into(),
+                "injected fenced write failure".into(),
             ));
         }
         // Every condition observes pre-batch state; the batch is allowed to
