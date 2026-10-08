@@ -1,17 +1,30 @@
-"""Offline checks for accepting or replacing a pinned Core installation cache."""
+"""Offline checks for accepting or replacing a pinned Core installation cache.
+
+The archive digest comes from the same resolve_reference_identity.py selector
+the installer runs, so the stamp assertion tracks the manifest with no second
+owner. Requires Python >=3.7 (the selector carries its own manifest reader
+when tomllib is absent; capture_output/text needs 3.7).
+"""
 
 import os
-import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "install-bitcoind.sh"
-PIN = re.search(r'^readonly TARBALL_SHA256="([0-9a-f]{64})"$', SCRIPT.read_text(), re.M)
-if PIN is None:
-    raise RuntimeError("Installer must declare its pinned archive digest")
+REPO = Path(__file__).resolve().parents[2]
+SCRIPT = REPO / "scripts/install-bitcoind.sh"
+PIN = subprocess.check_output(
+    [
+        sys.executable,
+        str(REPO / "scripts/resolve_reference_identity.py"),
+        "core",
+        str(REPO),
+    ],
+    text=True,
+).splitlines()[2]
 
 
 class InstallBitcoindTest(unittest.TestCase):
@@ -33,7 +46,7 @@ class InstallBitcoindTest(unittest.TestCase):
                     f"exit {version_exit}\n"
                 )
                 binary.chmod(0o755)
-                (prefix / ".bitcoin-rs-core-tarball-sha256").write_text(PIN.group(1) + "\n")
+                (prefix / ".bitcoin-rs-core-tarball-sha256").write_text(PIN + "\n")
                 shims = root / "bin"
                 shims.mkdir()
                 curl = shims / "curl"

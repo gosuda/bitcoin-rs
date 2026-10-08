@@ -4,6 +4,10 @@
 
 #![expect(clippy::expect_used, reason = "reference identity rejection tests")]
 
+#[expect(
+    dead_code,
+    reason = "the manifest gate reads the parser only, not the artifact selectors"
+)]
 #[path = "support/reference_set.rs"]
 mod reference_set;
 
@@ -101,6 +105,37 @@ fn unbound_source_and_artifact_identities_are_rejected() {
             "{field}"
         );
     }
+}
+
+/// REF-02: every artifact row joins the custody tuple, and duplicate targets
+/// are ambiguous rather than extra coverage.
+#[test]
+fn platform_artifacts_join_custody_and_reject_duplicate_targets() {
+    let edit_platform_target = |target: &str| {
+        edit_reference(Some("release"), |table| {
+            table
+                .get_mut("platforms")
+                .and_then(toml::Value::as_array_mut)
+                .expect("platform rows")[0]
+                .as_table_mut()
+                .expect("platform row")
+                .insert("target".to_owned(), target.into());
+        })
+    };
+    // Renaming the platform row's target detaches it from its binding.
+    assert_eq!(
+        load_reference_set(&edit_platform_target("x86_64-apple-darwin")),
+        Err(ReferenceError::CustodyMismatch {
+            identity: "reference.release",
+        })
+    );
+    // A row claiming the canonical target is ambiguous, not extra coverage.
+    assert_eq!(
+        load_reference_set(&edit_platform_target("x86_64-linux-gnu")),
+        Err(ReferenceError::DuplicateArtifactTarget {
+            target: "x86_64-linux-gnu".to_owned(),
+        })
+    );
 }
 
 /// REF-02: missing, short and non-hex digests retain their typed refusal.

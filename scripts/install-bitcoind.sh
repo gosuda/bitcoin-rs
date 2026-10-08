@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Install the pinned Bitcoin Core 31.1 bitcoind used by the live differential.
 #
-# Downloads the official x86_64 Linux tarball from bitcoincore.org, checks it
-# against the hardcoded SHA-256, and extracts bitcoind. Prints the bitcoind
-# path on stdout (log lines go to stderr).
+# Downloads the official tarball for this platform from bitcoincore.org,
+# checks it against the SHA-256 pinned in crates/rpc/core-compat.toml, and
+# extracts bitcoind. Prints the bitcoind path on stdout (log lines go to
+# stderr).
 #
 #   scripts/install-bitcoind.sh --print-path
 #   eval "$(scripts/install-bitcoind.sh --export)"   # exports BITCOIND_COMMAND
@@ -11,13 +12,6 @@
 # Owner: docs/contracts/core-differential.md (CORE-01).
 
 set -euo pipefail
-
-readonly CORE_VERSION="31.1"
-readonly TARBALL="bitcoin-${CORE_VERSION}-x86_64-linux-gnu.tar.gz"
-readonly TARBALL_SHA256="b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
-readonly TARBALL_URL="https://bitcoincore.org/bin/bitcoin-core-${CORE_VERSION}/${TARBALL}"
-readonly PREFIX="${BITCOIND_PREFIX:-${HOME}/bitcoin-core-${CORE_VERSION}}"
-readonly BITCOIND="${PREFIX}/bin/bitcoind"
 
 usage() {
   printf '%s\n' 'usage: scripts/install-bitcoind.sh [--print-path|--export]'
@@ -31,6 +25,47 @@ case "${1:-}" in
   "") ;;
   *) usage >&2; exit 2 ;;
 esac
+
+# Resolve the manifest without changing the process directory: a relative
+# BITCOIND_PREFIX keeps meaning the caller's directory.
+REPO="$(cd -- "$(dirname -- "$0")/.." && pwd)"
+
+# resolve_reference_identity.py carries its own manifest reader for
+# interpreters without tomllib; probe any Python >=3.6 (versioned first,
+# since the system python3 on macOS predates tomllib).
+PYTHON=""
+for candidate in python3.13 python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.6 python3; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2>/dev/null; then
+    PYTHON="$candidate"
+    break
+  fi
+done
+[[ -n "$PYTHON" ]] || { echo "a Python >=3.6 interpreter is required" >&2; exit 1; }
+
+# Stock macOS has no sha256sum; shasum ships with it.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | awk '{print $1}'
+  else
+    shasum -a 256 < "$1" | awk '{print $1}'
+  fi
+}
+
+# The manifest owns the pinned digests; resolve_reference_identity.py is the
+# single owner of the host-platform artifact selection. Capturing stdout
+# propagates the interpreter's exit status; the while-read keeps this
+# working under the bash 3.2 that still ships with macOS (no mapfile, no
+# heredoc inside a substitution — bash 3.2 cannot parse that).
+pin_text="$("$PYTHON" "$REPO/scripts/resolve_reference_identity.py" core "$REPO")" || exit 1
+pin=()
+while IFS= read -r line; do pin+=("$line"); done <<< "$pin_text"
+[[ "${#pin[@]}" -ge 3 ]] || { echo "incomplete Core artifact pin" >&2; exit 1; }
+readonly CORE_VERSION="${pin[0]}"
+readonly TARBALL="${pin[1]}"
+readonly TARBALL_SHA256="${pin[2]}"
+readonly TARBALL_URL="https://bitcoincore.org/bin/bitcoin-core-${CORE_VERSION}/${TARBALL}"
+readonly PREFIX="${BITCOIND_PREFIX:-${HOME}/bitcoin-core-${CORE_VERSION}}"
+readonly BITCOIND="${PREFIX}/bin/bitcoind"
 
 log() { printf '[install-bitcoind] %s\n' "$*" >&2; }
 
@@ -66,7 +101,7 @@ else
   WORKDIR="$(mktemp -d /tmp/bitcoind-install.XXXXXX)"
   trap 'rm -rf -- "${WORKDIR:?}"' EXIT
   curl -fsSL --retry 4 --retry-delay 4 -o "${WORKDIR}/${TARBALL}" "${TARBALL_URL}"
-  got="$(sha256sum -- "${WORKDIR}/${TARBALL}" | awk '{ print $1 }')"
+  got="$(sha256_of "${WORKDIR}/${TARBALL}")"
   if [[ "${got}" != "${TARBALL_SHA256}" ]]; then
     log "ABORT: tarball sha256 ${got} != ${TARBALL_SHA256}"
     exit 1
