@@ -173,17 +173,7 @@ mod tests {
         }
     }
 
-    struct SingleBlockSource {
-        height: u32,
-        hash: BlockHash,
-        body: Vec<u8>,
-    }
-
-    impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
-        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-            (height == self.height && hash == self.hash).then(|| self.body.clone())
-        }
-    }
+    use crate::test_support::BlockBodies;
 
     fn transaction(input: Option<OutPoint>, output: TxOut) -> Tx {
         Tx {
@@ -543,10 +533,8 @@ mod tests {
         let txid = transaction.txid();
         let mut context = Context::new();
         context.chain.chain_network = bitcoin_rs_primitives::Network::Regtest;
-        context.chain.block_body_source = Some(Arc::new(SingleBlockSource {
-            height: 0,
-            hash: record.hash,
-            body: consensus_bytes(&block),
+        context.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(0, record.hash, consensus_bytes(&block))],
         }));
         context.chain.add_block(record);
         let tip = {
@@ -1049,20 +1037,6 @@ mod tests {
         use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
         use bitcoin_rs_primitives::Header;
 
-        /// Serves every fixture block's body by identity, so the block list
-        /// can project each record.
-        struct BranchBodies {
-            bodies: Vec<(u32, BlockHash, Vec<u8>)>,
-        }
-        impl bitcoin_rs_chain::BlockBodySource for BranchBodies {
-            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-                self.bodies
-                    .iter()
-                    .find(|(h, k, _)| *h == height && *k == hash)
-                    .map(|(_, _, body)| body.clone())
-            }
-        }
-
         let header = |prev: BlockHash, nonce: u32, time: u32| Header {
             version: 1,
             prev_blockhash: prev,
@@ -1125,7 +1099,7 @@ mod tests {
             bodies.push((record.height, record.hash, consensus_bytes(&block)));
             context.chain.add_block(record);
         }
-        context.chain.block_body_source = Some(Arc::new(BranchBodies { bodies }));
+        context.chain.block_body_source = Some(Arc::new(BlockBodies { bodies }));
         context.chain.applied_tip.store(Some(Arc::clone(&a_tip)));
 
         let ctx = Arc::new(context);
@@ -1951,10 +1925,8 @@ mod tests {
         };
         let stale_record = bitcoin_rs_index::block_log::BlockRecord::from_block(1, &stale_block);
         let mut ctx = Context::new();
-        ctx.chain.block_body_source = Some(Arc::new(SingleBlockSource {
-            height: 1,
-            hash: stale_record.hash,
-            body: consensus_bytes(&stale_block),
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
+            bodies: vec![(1, stale_record.hash, consensus_bytes(&stale_block))],
         }));
         ctx.chain.add_block(stale_record.clone());
         {

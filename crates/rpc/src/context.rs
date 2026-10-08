@@ -1627,25 +1627,11 @@ mod tests {
 
     #[test]
     fn context_reads_metadata_only_block_record_from_body_source() {
-        struct SingleBlockSource {
-            height: u32,
-            hash: BlockHash,
-            body: Vec<u8>,
-        }
-
-        impl BlockBodySource for SingleBlockSource {
-            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-                (height == self.height && hash == self.hash).then(|| self.body.clone())
-            }
-        }
-
         let block = Network::Regtest.genesis_block();
         let body = consensus_bytes(&block);
         let record = BlockRecord::from_block(0, &block);
-        let source = Arc::new(SingleBlockSource {
-            height: 0,
-            hash: record.hash,
-            body: body.clone(),
+        let source = Arc::new(crate::test_support::BlockBodies {
+            bodies: vec![(0, record.hash, body.clone())],
         });
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
