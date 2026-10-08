@@ -72,11 +72,14 @@ fn external_wallet_can_scan_estimate_and_broadcast() -> TestResult {
         .map_err(|error| format!("p2wpkh fixture must be a standard address: {error}"))?
         .to_string();
 
+    assert_eq!(client.rpc("getblockcount", &json!([]))?, json!(0));
+    assert_eq!(
+        client.rpc("getblockhash", &json!([0]))?,
+        json!(genesis_block(Network::Regtest).block_hash().to_string())
+    );
     let genesis_hex = serialize_hex(&genesis_block(Network::Regtest));
     let genesis = client.rpc("submitblock", &json!([genesis_hex]))?;
-    if !genesis.is_null() {
-        return Err(format!("submitblock(genesis) rejected: {genesis}").into());
-    }
+    assert_eq!(genesis, json!("duplicate"));
     for _ in 0..COINBASE_MATURITY {
         client.mine(Coinbase::AnyoneCanSpend)?;
     }
