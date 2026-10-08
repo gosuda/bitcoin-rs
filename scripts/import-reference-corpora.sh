@@ -155,7 +155,7 @@ Authored content lives above this heading.
 | Import date | @@IMPORT_DATE@@ | @@IMPORT_DATE@@ |
 | License | MIT | ISC |
 | Import tool | scripts/import-reference-corpora.sh + scripts/import_reference_corpora.py | (same) |
-| Size policy | rows and payloads larger than ${FUZZ_MAX_SEED_BYTES} bytes are skipped or truncated and counted in the import log; witness stacks longer than the harness cap are skipped |
+| Size policy | rows and payloads larger than ${FUZZ_MAX_SEED_BYTES} bytes are skipped or truncated and counted in the import log; witness stacks longer than the harness cap and framed elements over the u16 bound are skipped, never truncated |
 
 EOF
 

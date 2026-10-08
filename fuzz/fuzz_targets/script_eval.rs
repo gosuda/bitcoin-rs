@@ -25,6 +25,7 @@ use bitcoin_rs_script::{Interpreter, VerifyFlags};
 /// bytes       script_pubkey
 /// byte        witness element count (cap 8)
 /// per element u16 len + bytes
+/// [optional]  u64 LE  prevout amount in satoshis (default 10_000)
 /// rest        ignored
 /// ```
 ///
@@ -33,7 +34,9 @@ use bitcoin_rs_script::{Interpreter, VerifyFlags};
 /// `FLAGS` entry `NONE` for raw scripts and, for files >= 32 bytes, a P2TR
 /// variant using its `TAPROOT` entry. Reference-vector seeds written by
 /// `scripts/import-reference-corpora.sh` use `EXPLICIT_FLAGS` so each seed
-/// carries its own row's flag bits.
+/// carries its own row's flag bits and a trailing prevout amount when the
+/// source row declares one (script_tests witness rows, tx_valid prevouts,
+/// taproot-ref TxOuts).
 const FLAGS: [VerifyFlags; 6] = [
     VerifyFlags::NONE,
     VerifyFlags::MANDATORY,
@@ -49,7 +52,9 @@ const FLAGS: [VerifyFlags; 6] = [
 ];
 
 const WITNESS_ELEMENTS_MAX: usize = 8;
-const ELEMENT_LEN_MAX: usize = 1024;
+/// Largest framed script or witness element. The u16 wire length can never
+/// exceed this, so the bound is defensive, not a truncation of real vectors.
+const ELEMENT_LEN_MAX: usize = 0xFFFF;
 
 /// Selector value choosing the explicit-flags framing: the next four input
 /// bytes are little-endian `VerifyFlags` bits used verbatim, letting vector
@@ -115,10 +120,16 @@ fuzz_target!(|data: &[u8]| {
         witness.push(element.to_vec());
     }
 
+    // Trailing optional prevout amount: seeds imported from rows that declare
+    // one (witness rows sign over it) carry it here; the rest get the default.
+    let amount = take(&mut rest, 8)
+        .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
+        .unwrap_or(10_000);
+
     let script_sig = script_sig.to_vec();
     let script_pubkey = script_pubkey.to_vec();
     let prevout = bitcoin_rs_primitives::TxOut {
-        value: Amount::from_sat(10_000),
+        value: Amount::from_sat(amount),
         script_pubkey: script_pubkey.clone().into(),
     };
     let tx = bitcoin_rs_primitives::Tx {

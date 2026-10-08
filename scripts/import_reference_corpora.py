@@ -436,28 +436,33 @@ def _load_json_prefix(path: Path) -> object | None:
     return value
 
 
-def script_rows(path: Path) -> Iterator[tuple[str, str, str, list[str]]]:
+def script_rows(path: Path) -> Iterator[tuple[str, str, str, list[str], int | None]]:
     """script_tests.json rows -> (scriptSig asm, scriptPubKey asm, flags,
-    witness elements). Comment rows and malformed rows are skipped."""
+    witness elements, prevout amount in satoshis or None). Comment rows and
+    malformed rows are skipped."""
     for row in _load_json(path):
         if not isinstance(row, list) or len(row) < 4:
             continue
         pos = 0
         witness: list[str] = []
+        amount: int | None = None
         if isinstance(row[0], list):
-            # Last inner element is the prevout amount (a float); the rest
-            # are hex witness elements or #SCRIPT#/#CONTROLBLOCK# markers.
+            # Last inner element is the prevout amount in BTC (a float); the
+            # rest are hex witness elements or #SCRIPT#/#CONTROLBLOCK# markers.
             witness = [element for element in row[0][:-1] if isinstance(element, str)]
+            btc = row[0][-1]
+            if isinstance(btc, (int, float)):
+                amount = round(btc * 100_000_000)
             pos = 1
         fields = row[pos:]
         if len(fields) < 3 or not all(isinstance(field, str) for field in fields[:3]):
             continue
-        yield fields[0], fields[1], fields[2], witness
+        yield fields[0], fields[1], fields[2], witness, amount
 
 
-def tx_rows(path: Path) -> Iterator[tuple[list[str], bytes, str]]:
-    """tx_valid/tx_invalid rows -> (prevout scriptPubKey asm per input,
-    serialized tx bytes, flag csv)."""
+def tx_rows(path: Path) -> Iterator[tuple[list[tuple[str, int | None]], bytes, str]]:
+    """tx_valid/tx_invalid rows -> ((prevout scriptPubKey asm, amount sat or
+    None) per input, serialized tx bytes, flag csv)."""
     for row in _load_json(path):
         if (
             isinstance(row, list)
@@ -468,7 +473,10 @@ def tx_rows(path: Path) -> Iterator[tuple[list[str], bytes, str]]:
         ):
             blob = _hex(row[1])
             prevouts = [
-                entry[2]
+                (
+                    entry[2],
+                    entry[3] if len(entry) >= 4 and isinstance(entry[3], int) else None,
+                )
                 for entry in row[0]
                 if isinstance(entry, list) and len(entry) >= 3 and isinstance(entry[2], str)
             ]
@@ -534,8 +542,9 @@ def _txout_script(txout: bytes) -> bytes | None:
     return script if len(script) == length else None
 
 
-def taproot_ref_spend(row: dict) -> tuple[bytes, bytes, list[bytes], str] | None:
-    """A taproot-ref row -> (scriptPubKey, scriptSig, witness, flags)."""
+def taproot_ref_spend(row: dict) -> tuple[bytes, bytes, list[bytes], str, int] | None:
+    """A taproot-ref row -> (scriptPubKey, scriptSig, witness, flags, prevout
+    amount in satoshis from the spent TxOut)."""
     index = row.get("index")
     prevouts = row.get("prevouts")
     if not isinstance(index, int) or not isinstance(prevouts, list):
@@ -557,7 +566,8 @@ def taproot_ref_spend(row: dict) -> tuple[bytes, bytes, list[bytes], str] | None
     elements = [_hex(element) for element in witness]
     if any(element is None for element in elements):
         return None
-    return script_pubkey, script_sig, elements, flags  # type: ignore[misc]
+    amount = int.from_bytes(txout[:8], "little")
+    return script_pubkey, script_sig, elements, flags, amount  # type: ignore[misc]
 
 
 def blk_dat_blocks(blob: bytes) -> Iterator[bytes]:
@@ -609,6 +619,7 @@ def _script_seed(
     script_sig: bytes,
     script_pubkey: bytes,
     witness: Sequence[bytes],
+    amount_sat: int | None,
     max_bytes: int,
     emitted: Emitted,
 ) -> None:
@@ -631,9 +642,16 @@ def _script_seed(
         # row is skipped rather than reframed into a different spend.
         emitted.bump("skip_witness_overflow")
         return
-    script_sig = script_sig[:cap]
-    script_pubkey = script_pubkey[:cap]
-    witness = [element[:cap] for element in witness]
+    # Cutting an oversized script or witness element mid-push would reframe
+    # the row into a different spend, so the row is skipped rather than
+    # truncated; the u16 wire bound covers every upstream element today.
+    if (
+        len(script_sig) > cap
+        or len(script_pubkey) > cap
+        or any(len(element) > cap for element in witness)
+    ):
+        emitted.bump("skip_element_overflow")
+        return
     frame = bytearray([explicit])
     frame += bits.to_bytes(4, "little")
     frame += len(script_sig).to_bytes(2, "little") + script_sig
@@ -641,6 +659,8 @@ def _script_seed(
     frame.append(len(witness))
     for element in witness:
         frame += len(element).to_bytes(2, "little") + element
+    if amount_sat is not None:
+        frame += amount_sat.to_bytes(8, "little")
     if len(frame) > max_bytes:
         emitted.bump("skip_oversize")
         return
@@ -671,7 +691,7 @@ def map_script_tests(
     emitted: Emitted,
 ) -> None:
     element_limit, witness_max, explicit = contract
-    for script_sig_asm, script_pubkey_asm, flags, witness_raw in script_rows(path):
+    for script_sig_asm, script_pubkey_asm, flags, witness_raw, amount in script_rows(path):
         witness: list[bytes] = []
         last_script: bytes | None = None
         try:
@@ -698,7 +718,7 @@ def map_script_tests(
             continue
         _script_seed(
             out, flags_bits_map, explicit, element_limit, witness_max,
-            flags, script_sig, script_pubkey, witness, max_bytes, emitted,
+            flags, script_sig, script_pubkey, witness, amount, max_bytes, emitted,
         )
 
 
@@ -721,10 +741,10 @@ def map_taproot_ref(
         if spend is None:
             script_emitted.bump("skip_malformed_spend")
             continue
-        script_pubkey, script_sig, witness, flags = spend
+        script_pubkey, script_sig, witness, flags, amount = spend
         _script_seed(
             script_out, flags_bits_map, explicit, element_limit, witness_max,
-            flags, script_sig, script_pubkey, witness, max_bytes, script_emitted,
+            flags, script_sig, script_pubkey, witness, amount, max_bytes, script_emitted,
         )
 
 
@@ -748,7 +768,7 @@ def map_tx_rows(
         if parsed is None:
             script_emitted.bump("skip_unparsed_tx")
             continue
-        for (script_sig, witness), prevout in zip(parsed, prevouts):
+        for (script_sig, witness), (prevout, amount) in zip(parsed, prevouts):
             try:
                 script_pubkey = assemble(prevout)
             except AssemblyError as error:
@@ -756,7 +776,7 @@ def map_tx_rows(
                 continue
             _script_seed(
                 script_out, flags_bits_map, explicit, element_limit, witness_max,
-                flags, script_sig, script_pubkey, witness, max_bytes, script_emitted,
+                flags, script_sig, script_pubkey, witness, amount, max_bytes, script_emitted,
             )
 
 
@@ -785,7 +805,7 @@ def map_bip341(
     for spk in spks:
         _script_seed(
             script_out, flags_bits_map, explicit, element_limit, witness_max,
-            "TAPROOT", b"", spk, [], max_bytes, script_emitted,
+            "TAPROOT", b"", spk, [], None, max_bytes, script_emitted,
         )
 
 
