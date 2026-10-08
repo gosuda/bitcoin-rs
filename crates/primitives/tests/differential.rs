@@ -1,11 +1,16 @@
 //! Native codec, hashing, and sighash contracts: round-trip fixtures, Core
 //! `sighash.json` vectors, and fuzz-corpus self-consistency.
 //!
-//! Fuzz-corpus gates loud-skip (with a stderr note) only when `fuzz/corpus/<target>/`
-//! is entirely absent; a present-but-empty corpus, or seeds that all fail to parse,
-//! fails. Corpus seeds are gated by the expected-verdict manifest under the
-//! native-consensus-codec round-trip contract `QAC-05`
-//! (docs/contracts/qa-corpus.md).
+//! Fuzz-corpus gates read `BITCOIN_RS_FUZZ_CORPUS/<target>` first (the
+//! `corpus/` directory of a gosuda/bitcoin-rs-fuzz-corpus checkout, the
+//! canonical seed home) and fall back to a local `fuzz/corpus/<target>/`
+//! overlay; they loud-skip (with a stderr note) only when neither exists. A
+//! present-but-empty corpus fails. When the corpus root carries
+//! `verdicts.json`, every seed is checked against its pinned verdict
+//! (accepted seeds re-encode byte-identically; rejected seeds keep their
+//! typed `DecodeError` kind) so a decoder change cannot silently flip a
+//! verdict — `QAC-05`, docs/contracts/qa-corpus.md. Without the file the
+//! gate degrades to checking that each seed yields a well-formed verdict.
 
 #![expect(
     clippy::expect_used,
@@ -52,26 +57,35 @@ fn fixture_blocks() -> Vec<(String, Vec<u8>)> {
     blocks
 }
 
-/// Reads fuzz seeds from `fuzz/corpus/<target>/`.
+/// Root directory that holds per-target corpus directories.
 ///
-/// Returns `None` when the corpus directory is entirely absent (the QA-corpora track
-/// owns `fuzz/corpus` and may not have landed on this branch); `Some` — possibly empty —
-/// when the directory exists.
+/// `BITCOIN_RS_FUZZ_CORPUS` points at the `corpus/` directory of a
+/// gosuda/bitcoin-rs-fuzz-corpus checkout (`<dir>/<target>`) and is
+/// authoritative when set; a local `fuzz/corpus/` overlay is consulted when
+/// the variable is unset.
+fn corpus_root() -> PathBuf {
+    std::env::var_os("BITCOIN_RS_FUZZ_CORPUS")
+        .map_or_else(|| repo_root().join("fuzz/corpus"), PathBuf::from)
+}
+
+/// Reads fuzz seeds for `target`.
+///
+/// Returns `None` only when the selected directory does not exist (the
+/// corpus lives in another repository and may not be checked out);
+/// `Some` — possibly empty — when it does.
 fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
-    let dir = repo_root().join("fuzz/corpus").join(target);
-    let entries = std::fs::read_dir(&dir).ok()?;
+    let dir = corpus_root().join(target);
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("{}: {error}", dir.display()),
+    };
     let mut seeds = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() {
             if let Ok(bytes) = std::fs::read(&path) {
-                seeds.push((
-                    path.file_name()
-                        .expect("corpus seed entry is a file")
-                        .to_string_lossy()
-                        .into_owned(),
-                    bytes,
-                ));
+                seeds.push((entry.file_name().to_string_lossy().into_owned(), bytes));
             }
         }
     }
@@ -131,32 +145,36 @@ fn fixture_blocks_roundtrip_byte_identically() {
 }
 
 /// Expected decoder verdicts for every corpus seed, pinned in
-/// `fuzz/corpus/manifest.json` (`QAC-05`, docs/contracts/qa-corpus.md).
+/// `verdicts.json` at the corpus root (`QAC-05`, docs/contracts/qa-corpus.md).
 ///
 /// Accepted seeds must decode and re-encode byte-identically; rejected seeds
-/// must still be rejected with the pinned error kind, so a decoder change that
-/// silently flips a verdict fails here instead of drifting. Rejections are
-/// dominated by Core's "Superfluous witness record" rule (`superfluous_witness`):
-/// a BIP144 marker/flag with an all-empty witness section can never re-encode
-/// byte-identically, so the codec rejects it before the lock time, matching the
-/// check position of both Core and rust-bitcoin.
+/// must still be rejected with the pinned error kind, so a decoder change
+/// that silently flips a verdict fails here instead of drifting. Rejections
+/// are dominated by Core's "Superfluous witness record" rule
+/// (`superfluous_witness`): a BIP144 marker/flag with an all-empty witness
+/// section can never re-encode byte-identically, so the codec rejects it
+/// before the lock time, matching the check position of both Core and
+/// rust-bitcoin.
 ///
-/// `CORPUS_MANIFEST_WRITE=1` regenerates the manifest from observed verdicts
-/// (test-local write path, the documented maintenance route; not a library
-/// path). Without it the manifest is read-only and enforced.
+/// `CORPUS_VERDICTS_WRITE=1` regenerates `verdicts.json` from observed
+/// verdicts (test-local write path, the documented maintenance route; the
+/// publish-corpus job runs it after applying campaign output). When
+/// `verdicts.json` is absent — a local overlay, or a corpus checkout from
+/// before the file existed — the gate degrades to the verdict-shape check
+/// alone and says so.
 fn enforce_corpus_verdicts(target: &str) {
     let Some(seeds) = corpus_seeds(target) else {
         // Test-binary runner output (allowed exception: not a library path):
         // an absent corpus must skip loudly, not pass silently.
         eprintln!(
-            "SKIP {target}: fuzz/corpus/{target} is entirely absent \
-             (QA corpora land via another track)"
+            "SKIP {target}: no corpus directory \
+             (set BITCOIN_RS_FUZZ_CORPUS to a bitcoin-rs-fuzz-corpus checkout)"
         );
         return;
     };
     assert!(
         !seeds.is_empty(),
-        "fuzz/corpus/{target} exists but contains no seeds; gate would be vacuous"
+        "corpus for {target} exists but contains no seeds; gate would be vacuous"
     );
 
     let mut observed: BTreeMap<String, String> = BTreeMap::new();
@@ -167,12 +185,16 @@ fn enforce_corpus_verdicts(target: &str) {
             "block_validate" => decode_verdict::<NativeBlock>(bytes),
             other => panic!("unknown corpus target {other}"),
         };
+        assert!(
+            verdict == "accepted" || verdict.starts_with("rejected:"),
+            "{target}: seed {name} has unknown verdict {verdict}"
+        );
         observed.insert(name.to_owned(), verdict);
     }
 
-    let manifest_path = repo_root().join("fuzz/corpus/manifest.json");
-    if std::env::var_os("CORPUS_MANIFEST_WRITE").is_some() {
-        // Read-modify-write so per-target invocations merge into one manifest.
+    let manifest_path = corpus_root().join("verdicts.json");
+    if std::env::var_os("CORPUS_VERDICTS_WRITE").is_some() {
+        // Read-modify-write so per-target invocations merge into one file.
         let mut root = std::fs::read_to_string(&manifest_path)
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
@@ -182,7 +204,8 @@ fn enforce_corpus_verdicts(target: &str) {
             "_contract".to_owned(),
             serde_json::Value::String(
                 "QAC-05 (docs/contracts/qa-corpus.md): expected decoder verdict per seed; \
-                 regenerate with CORPUS_MANIFEST_WRITE=1 cargo test -p bitcoin-rs-primitives"
+                 regenerate with BITCOIN_RS_FUZZ_CORPUS=<corpus> \
+                 CORPUS_VERDICTS_WRITE=1 cargo test -p bitcoin-rs-primitives"
                     .to_owned(),
             ),
         );
@@ -196,45 +219,46 @@ fn enforce_corpus_verdicts(target: &str) {
             ),
         );
         let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(root))
-            .expect("manifest renders");
+            .expect("verdicts.json renders");
         std::fs::write(&manifest_path, rendered + "\n")
             .unwrap_or_else(|error| panic!("writing {}: {error}", manifest_path.display()));
         eprintln!(
-            "wrote {}; re-run without CORPUS_MANIFEST_WRITE to enforce",
+            "wrote {}; re-run without CORPUS_VERDICTS_WRITE to enforce",
             manifest_path.display()
         );
         return;
     }
 
-    let manifest_text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|error| {
-        panic!(
-            "reading {}: {error}; run CORPUS_MANIFEST_WRITE=1 to pin expected verdicts",
+    let Ok(manifest_text) = std::fs::read_to_string(&manifest_path) else {
+        eprintln!(
+            "WARN {target}: {} absent; checking verdict shape only \
+             (regenerate with CORPUS_VERDICTS_WRITE=1 to pin per-seed verdicts)",
             manifest_path.display()
-        )
-    });
+        );
+        return;
+    };
     let manifest = serde_json::from_str::<serde_json::Value>(&manifest_text)
-        .unwrap_or_else(|error| panic!("manifest.json: {error}"));
+        .unwrap_or_else(|error| panic!("{}: {error}", manifest_path.display()));
     let expected = manifest
         .get(target)
-        .unwrap_or_else(|| panic!("fuzz/corpus/manifest.json has no \"{target}\" section"));
-    let expected = expected.as_object().expect("manifest section is an object");
+        .unwrap_or_else(|| panic!("{} has no \"{target}\" section", manifest_path.display()));
+    let expected = expected
+        .as_object()
+        .expect("verdicts.json section is an object");
 
     for (name, observed_verdict) in &observed {
         match expected.get(name) {
             None => panic!(
-                "fuzz/corpus/{target}: seed {name} is not listed in manifest.json; \
-                 pin its verdict with CORPUS_MANIFEST_WRITE=1"
+                "{target}: seed {name} is not listed in {}; \
+                 pin its verdict with CORPUS_VERDICTS_WRITE=1",
+                manifest_path.display()
             ),
             Some(expected_verdict) => {
                 let expected_verdict = expected_verdict.as_str().expect("verdict is a string");
                 assert_eq!(
                     observed_verdict, expected_verdict,
-                    "fuzz/corpus/{target}: seed {name} verdict drifted; if intentional, \
-                     re-pin with CORPUS_MANIFEST_WRITE=1"
-                );
-                assert!(
-                    observed_verdict == "accepted" || observed_verdict.starts_with("rejected:"),
-                    "fuzz/corpus/{target}: seed {name} has unknown verdict {observed_verdict}"
+                    "{target}: seed {name} verdict drifted; if intentional, \
+                     re-pin with CORPUS_VERDICTS_WRITE=1"
                 );
             }
         }
@@ -242,8 +266,8 @@ fn enforce_corpus_verdicts(target: &str) {
     for name in expected.keys() {
         assert!(
             observed.contains_key(name),
-            "fuzz/corpus/{target}: manifest lists {name} but the corpus no longer has it; \
-             drop the entry with CORPUS_MANIFEST_WRITE=1"
+            "{target}: verdicts.json lists {name} but the corpus no longer has it; \
+             drop the entry with CORPUS_VERDICTS_WRITE=1"
         );
     }
 }
@@ -264,7 +288,7 @@ fn decode_verdict<T: ConsensusDecode + ConsensusEncode>(bytes: &[u8]) -> String 
     }
 }
 
-/// Stable short name for a decode error, used as the manifest verdict suffix.
+/// Stable short name for a decode error, the rejected-verdict suffix.
 fn error_kind(error: &DecodeError) -> String {
     match error {
         DecodeError::EndOfData { .. } => "end_of_data".to_owned(),
@@ -276,12 +300,10 @@ fn error_kind(error: &DecodeError) -> String {
 }
 
 // Both corpus gates enforce the QAC-05 round-trip contract
-// (docs/contracts/qa-corpus.md) through the pinned verdict manifest. One
-// test walks both targets: each enforce pass read-modify-writes the shared
-// manifest.json under CORPUS_MANIFEST_WRITE, and parallel tests doing that
-// concurrently lose each other's section.
+// (docs/contracts/qa-corpus.md): every seed decodes to a typed verdict and
+// accepted seeds re-encode byte-identically.
 #[test]
-fn corpus_seeds_match_expected_verdicts() {
+fn corpus_seeds_decode_with_typed_verdicts() {
     for target in ["tx_validate", "block_validate"] {
         enforce_corpus_verdicts(target);
     }

@@ -30,7 +30,8 @@ use bitcoin_rs_script::{Interpreter, VerifyFlags};
 /// bytes       script_pubkey
 /// byte        witness element count (cap 8)
 /// per element u16 len + bytes
-/// [optional]  u64 LE  prevout amount in satoshis (default 10_000)
+/// [optional]  u64 LE  prevout amount in satoshis (default 0, matching the
+///               zero-value output Core's BuildCreditingTransaction pays)
 /// [0xFD only] transaction-context frame:
 ///   u32 LE    explicit Core-compatible VerifyFlags bits
 ///   u16  len  serialized spending tx
@@ -196,10 +197,13 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Trailing optional prevout amount: seeds imported from rows that declare
-    // one (witness rows sign over it) carry it here; the rest get the default.
+    // one (witness rows sign over it) carry it here. Legacy rows declare none
+    // and must default to Core's zero-value crediting output: the crediting
+    // txid commits to nValue, so any other default would change the outpoint
+    // txid legacy signatures hash.
     let amount = take(&mut rest, 8)
         .map(|b| u64::from_le_bytes(b.try_into().unwrap_or([0; 8])))
-        .unwrap_or(10_000);
+        .unwrap_or(0);
 
     let script_sig = script_sig.to_vec();
     let script_pubkey = script_pubkey.to_vec();

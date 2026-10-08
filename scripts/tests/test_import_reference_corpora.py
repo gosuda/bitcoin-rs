@@ -37,6 +37,10 @@ class ImportFlowTests(unittest.TestCase):
         self.home.mkdir()
         scripts = self.root / "scripts"
         scripts.mkdir()
+        # Stand-in for the gosuda/bitcoin-rs-fuzz-corpus checkout the
+        # importer now writes into (FUZZ_CORPUS_DIR points at its corpus/).
+        self.corpus_dir = self.root / "fuzz-corpus/corpus"
+        self.corpus_dir.mkdir(parents=True)
         self.provenance = self.root / "fuzz/CORPUS_PROVENANCE.md"
         self.provenance.parent.mkdir(parents=True)
         self.provenance.write_text(
@@ -113,6 +117,7 @@ printf '%s\\n' "${!#}" >> "$TEST_ROOT/cmin.log"
             HOME=str(self.home),
             TEST_ROOT=str(self.root), TMPDIR=str(self.tmp), FAIL_STAGE=fail,
             BITCOIN_PIN=self.pins["BITCOIN_PIN"], BTCD_PIN=self.pins["BTCD_PIN"],
+            FUZZ_CORPUS_DIR=str(self.corpus_dir),
             RUSTC_WRAPPER="must-be-unset", CARGO_BUILD_BUILD_DIR="must-be-unset",
         )
         result = subprocess.run(["bash", str(SCRIPT)], cwd=self.root, env=environment,
@@ -120,6 +125,9 @@ printf '%s\\n' "${!#}" >> "$TEST_ROOT/cmin.log"
         self.assertEqual(list(self.tmp.iterdir()), [], "clone leaked after importer exit")
         self.assertEqual(list((self.root / "fuzz").glob(".corpus-provenance.*")), [],
                          "provenance staging leaked after importer exit")
+        self.assertEqual(
+            [p for p in (self.root / "fuzz/corpus").rglob("*")],
+            [], "nothing may remain under the in-repo fuzz/corpus staging")
         return result
 
     def test_success_maps_minimizes_and_records_reference_provenance(self):
@@ -145,7 +153,7 @@ printf '%s\\n' "${!#}" >> "$TEST_ROOT/cmin.log"
         head = self.previous_provenance.split("## Reference corpora", 1)[0]
         self.assertTrue(record.startswith(head))
         for target in ("block_validate", "tx_validate"):
-            self.assertTrue((self.root / "fuzz/corpus" / target / "seed").is_file())
+            self.assertTrue((self.corpus_dir / target / "seed").is_file())
 
     def test_missing_reference_section_refuses_to_overwrite_provenance(self):
         head = self.previous_provenance.split("## Reference corpora", 1)[0]
@@ -153,6 +161,15 @@ printf '%s\\n' "${!#}" >> "$TEST_ROOT/cmin.log"
         result = self.run_import()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.provenance.read_text(), head)
+
+    def test_missing_corpus_checkout_stops_before_any_staging(self):
+        self.corpus_dir.rmdir()
+        self.corpus_dir.parent.rmdir()
+        result = self.run_import()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "cmin.log").exists())
+        self.assertFalse((self.root / "fetch.log").exists())
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_minimization_preserves_provenance(self):
         result = self.run_import("cmin")

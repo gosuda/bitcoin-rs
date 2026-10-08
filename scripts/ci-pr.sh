@@ -76,6 +76,10 @@ clippy_profiles() {
 test_crates_profiles() {
   # Fixture-free per-crate profiles. Process tests requiring the pinned Core
   # fixture run in the workspace lane below. Smallest first.
+  # primitives owns the QAC-05 corpus-decoder gate (BITCOIN_RS_FUZZ_CORPUS);
+  # it must run in the PR lane, not only the merge-only workspace lane.
+  profile "test: bitcoin-rs-primitives" \
+    cargo_test -p bitcoin-rs-primitives
   profile "test: bitcoin-rs-consensus (native)" \
     cargo_test -p bitcoin-rs-consensus --no-default-features
   profile "test: bitcoin-rs-chainstate (native,fjall)" \
