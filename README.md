@@ -38,10 +38,9 @@ Bitcoin is unusually well suited to independent implementation because its
 behavior can be checked against Bitcoin Core, `libbitcoinkernel`, historical
 chain data, consensus test vectors, fuzzing, and differential tests.
 
-Bitcoin Core prioritizes stability, compatibility, and minimizing change risk.
-Those properties are essential for the reference implementation, but they also
-make large architectural changes difficult to explore within the same
-codebase.
+However, Bitcoin Core prioritizes stability, compatibility, and minimizing
+change risk. While essential for the reference implementation, these priorities
+make large architectural changes difficult to explore within the same codebase.
 
 **That is why we built `bitcoin-rs`: to preserve Bitcoin's consensus while
 making architectural experimentation practical—build alternatives, verify them
@@ -189,18 +188,36 @@ exercising the public boundary) and in-tree reference/differential suites.
 For reproduction commands, prerequisites, and artifact custody for each lane, see
 the [validation tooling index](docs/validation-tooling.md).
 
-| Evidence lane | Scope | Status | Canonical owner |
-|---|---|---|---|
-| Live Bitcoin Core P2P & chain identity | Unmodified Bitcoin Core 31.1 peer handshake, IBD sync, compact blocks (BIP152), disconnects, and chain identity | Externally verified | [Core differential contract](docs/contracts/core-differential.md) · [`scripts/run-p2p-core-interop.sh`](scripts/run-p2p-core-interop.sh) |
-| Bitcoin Core script & transaction vectors | Pinned Core `script_tests.json`, `tx_valid.json`, `tx_invalid.json` consensus vectors | Implemented / tested | [`crates/script/tests/core_vectors.rs`](crates/script/tests/core_vectors.rs) · [`crates/consensus/tests/vectors.rs`](crates/consensus/tests/vectors.rs) |
-| Native sighash differential | Legacy, SegWit v0 (BIP143), and Taproot (BIP341) sighash checked against independent `rust-bitcoin` engine and Core vectors | Implemented / tested | [`crates/consensus/tests/shared_sighash.rs`](crates/consensus/tests/shared_sighash.rs) · [`crates/primitives/tests/differential.rs`](crates/primitives/tests/differential.rs) |
-| Native ↔ `libbitcoinkernel` differential | Script engine verdicts compared against C++ `libbitcoinkernel` on Core vectors and mutated mainnet block fixtures | Implemented / tested | [`crates/consensus/tests/kernel_vector_parity.rs`](crates/consensus/tests/kernel_vector_parity.rs) · [`crates/consensus/tests/kernel_block_parity.rs`](crates/consensus/tests/kernel_block_parity.rs) |
-| Contextual consensus rules | MTP, BIP94 timewarp, difficulty adjustment, BIP30/BIP34/BIP68/BIP141 softfork rules, and undo persistence atomicity | Implemented / tested | [`crates/chain/src/header_sync.rs`](crates/chain/src/header_sync.rs) · [`crates/consensus/src/verify_block.rs`](crates/consensus/src/verify_block.rs) · [`crates/chainstate/src/connect.rs`](crates/chainstate/src/connect.rs) |
-| Live Core block & transaction acceptance | Curated live `submitblock` and `testmempoolaccept` differential against Core 31.1 (`CORE-04`); broader differential fuzzing planned (#1323) | Implemented / tested (curated); Planned (#1323) | [Core differential contract](docs/contracts/core-differential.md) · [`e2e/tests/acceptance.rs`](e2e/tests/acceptance.rs) |
-| Fuzzing & QA-assets corpus | Pinned seeds from `qa-assets`, `bitcoin/bitcoin`, and `btcd` feeding 5 fuzz targets; native codec roundtrip and invariant checks (`QAC-01`..`QAC-05`) | Implemented / tested | [QA corpus contract](docs/contracts/qa-corpus.md) · [`fuzz/CORPUS_PROVENANCE.md`](fuzz/CORPUS_PROVENANCE.md) |
-| Chainstate crash recovery & reorgs | Atomic durable head commits, process termination (SIGKILL) mid-progress, lost receipt retention, and deep reorg consistency | Implemented / tested | [Recovery contract](docs/contracts/recovery.md) · [`crates/chainstate/tests/unit/assumeutxo_recovery_tests.rs`](crates/chainstate/tests/unit/assumeutxo_recovery_tests.rs) |
-| Offline full-validation comparator | Dual-node replay over hash-pinned Core-framed archive comparing certified state (MuHash, UTXO, total amount) and timing | Harness tested; Campaign planned / not yet executed | [Offline full-validation](docs/benchmarks/offline-full-validation.md) · [`tools/benchmark-campaign/`](tools/benchmark-campaign/) |
-| External ecosystem compatibility matrix | Per-surface consumability tracking across JSON-RPC, REST, ZMQ, Esplora, GBT/mining, P2P, and USDT probes | P2P verified; Other surfaces implemented | [Ecosystem compatibility contract](docs/contracts/ecosystem-compatibility.md) · [Evidence matrix](docs/api/ecosystem-compat.toml) |
+Implemented and tested lanes:
+
+- [Core vectors](docs/validation-tooling.md#3-bitcoin-core-script-and-transaction-vectors):
+  native script evaluation with pinned skips; consensus transaction tests cover
+  loading and deserialization, not validity.
+- [Sighash differentials](docs/validation-tooling.md#4-native-sighash-checks-against-independent-implementation):
+  legacy, SegWit v0, and Taproot checks against independent implementations.
+- [Kernel oracle and scoped parity](docs/validation-tooling.md#5-libbitcoinkernel-oracle-and-scoped-native-parity):
+  Core script-vector verdicts and selected native/kernel fixture comparisons,
+  not a full-corpus differential.
+- [Contextual consensus rules](docs/validation-tooling.md#6-contextual-consensus-rule-tests):
+  difficulty, activation rules, and undo persistence.
+- [Fuzzing and corpus regression](docs/validation-tooling.md#7-daily-fuzz-targets-and-qa-assets-corpus-provenance):
+  five targets, pinned reference seeds, and codec invariants.
+- [Crash recovery and reorgs](docs/validation-tooling.md#8-chainstate-crash-recovery-and-reorg-evidence):
+  durable commits, process-death boundaries, and restart consistency.
+
+External evidence and remaining work:
+
+- [Live Core P2P](docs/validation-tooling.md#1-live-bitcoin-core-p2p-and-chain-identity-differential):
+  externally verified handshake, sync, compact blocks, and chain identity.
+- [Live Core acceptance](docs/validation-tooling.md#2-live-core-block-and-transaction-acceptance-differential):
+  curated block/transaction cases tested; broader differential fuzzing is not
+  currently implemented.
+- [Offline full-validation comparator](docs/validation-tooling.md#9-offline-full-validation-comparator):
+  harness tested; full-mainnet campaigns not yet executed.
+- [Ecosystem compatibility](docs/validation-tooling.md#10-external-ecosystem-compatibility-matrix):
+  P2P externally verified; other surfaces tracked separately.
+- [USDT observability](docs/validation-tooling.md#11-usdt--bpftrace-observability-validation):
+  probe ABI tested; live tracing remains planned.
 
 ## External compatibility
 

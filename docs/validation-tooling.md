@@ -24,19 +24,21 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
 
 ## Evidence lanes summary
 
-| Evidence lane | Tier | Canonical owner | Status | Prerequisites | Reproduction command |
-|---|---|---|---|---|---|
-| [Live Bitcoin Core P2P & chain identity](#1-live-bitcoin-core-p2p-and-chain-identity-differential) | Real external consumer | [`contracts/core-differential.md`](contracts/core-differential.md) (`CORE-01`..`CORE-03`) | Externally verified | Pinned Core 31.1 binary | `scripts/run-p2p-core-interop.sh` |
-| [Live Core acceptance differential](#2-live-core-block-and-transaction-acceptance-differential) | Real external consumer | [`contracts/core-differential.md`](contracts/core-differential.md) (`CORE-04`) | Implemented (curated); Planned (#1323) | Pinned Core 31.1 binary | `cargo test --locked -p bitcoin-rs-e2e --test acceptance` |
-| [Bitcoin Core script & tx vectors](#3-bitcoin-core-script-and-transaction-vectors) | In-tree reference vectors | `crates/script/tests/core_vectors.rs`, `crates/consensus/tests/vectors.rs` | Implemented / tested | Rust toolchain | `cargo test -p bitcoin-rs-script --test core_vectors` |
-| [Native sighash differential](#4-native-sighash-checks-against-independent-implementation) | In-tree differential | `crates/consensus/tests/shared_sighash.rs`, `crates/primitives/tests/differential.rs` | Implemented / tested | Rust toolchain | `cargo test -p bitcoin-rs-consensus --test shared_sighash` |
-| [Native ↔ libbitcoinkernel parity](#5-native--libbitcoinkernel-parity-and-oracle-tests) | In-tree oracle & differential | `crates/consensus/tests/kernel_vector_parity.rs`, `kernel_block_parity.rs` | Implemented / tested | `cmake`, `libboost-dev` | `cargo test -p bitcoin-rs-consensus --features kernel --test kernel_vector_parity` |
-| [Contextual consensus rules](#6-contextual-consensus-rule-tests) | In-tree consensus suite | `crates/chain/src/header_sync.rs`, `crates/consensus/src/verify_block.rs` | Implemented / tested | Rust toolchain | `cargo test -p bitcoin-rs-chain header_sync::contextual_header_tests` |
-| [Fuzz targets & QA corpus](#7-daily-fuzz-targets-and-qa-assets-corpus-provenance) | In-tree fuzz & regression | [`contracts/qa-corpus.md`](contracts/qa-corpus.md), [`fuzz/CORPUS_PROVENANCE.md`](../fuzz/CORPUS_PROVENANCE.md) | Implemented / tested | Companion corpus checkout, `cargo-fuzz` | `cargo test -p bitcoin-rs-primitives --test differential` |
-| [Chainstate crash & reorg recovery](#8-chainstate-crash-recovery-and-reorg-evidence) | In-tree fault injection | [`contracts/recovery.md`](contracts/recovery.md), `crates/chainstate/tests/unit/` | Implemented / tested | Rust toolchain | `cargo test -p bitcoin-rs-chainstate --test assumeutxo_recovery_tests` |
-| [Offline full-validation comparator](#9-offline-full-validation-comparator) | In-tree comparator harness | [`benchmarks/offline-full-validation.md`](benchmarks/offline-full-validation.md), `tools/benchmark-campaign/` | Harness tested; Campaign planned | Python 3.13, pinned corpus | `pytest tools/benchmark-campaign/test_offline_full_validation.py` |
-| [Ecosystem compatibility matrix](#10-external-ecosystem-compatibility-matrix) | Contract & evidence matrix | [`contracts/ecosystem-compatibility.md`](contracts/ecosystem-compatibility.md), [`api/ecosystem-compat.toml`](api/ecosystem-compat.toml) | P2P verified; others implemented | Varies per surface | Verified via matrix audit |
-| [USDT / bpftrace observability](#11-usdt--bpftrace-observability-validation) | In-tree ABI inspection | [`tracing.md`](tracing.md), `crates/consensus/tests/sdt_notes.rs` | ABI tested; Live tooling planned | Linux, `bpftrace` (for live) | `cargo test -p bitcoin-rs-consensus --test sdt_notes` |
+Owners, prerequisites, commands, and scope limitations are listed in each section.
+
+| Lane | Evidence status |
+|---|---|
+| [Live Core P2P](#1-live-bitcoin-core-p2p-and-chain-identity-differential) | Externally verified |
+| [Live Core acceptance](#2-live-core-block-and-transaction-acceptance-differential) | Curated cases tested |
+| [Core vectors](#3-bitcoin-core-script-and-transaction-vectors) | Script evaluation / tx parsing |
+| [Sighash differential](#4-native-sighash-checks-against-independent-implementation) | Implemented / tested |
+| [Kernel oracle & parity](#5-libbitcoinkernel-oracle-and-scoped-native-parity) | Tested; scoped differential |
+| [Consensus rules](#6-contextual-consensus-rule-tests) | Implemented / tested |
+| [Fuzzing & corpus](#7-daily-fuzz-targets-and-qa-assets-corpus-provenance) | Implemented / tested |
+| [Crash recovery & reorgs](#8-chainstate-crash-recovery-and-reorg-evidence) | Implemented / tested |
+| [Offline comparator](#9-offline-full-validation-comparator) | Harness tested; campaign pending |
+| [Ecosystem compatibility](#10-external-ecosystem-compatibility-matrix) | Per-surface evidence |
+| [USDT observability](#11-usdt--bpftrace-observability-validation) | ABI tested; live tracing planned |
 
 ---
 
@@ -92,7 +94,8 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
     merkle roots, multiple coinbases, short scriptSig, excessive values, BIP34
     height mismatches, MTP boundaries, mature spends, immature coinbase spends,
     duplicate inputs, overspends, and relative lock times.
-  - Broader differential fuzzing and rule coverage remain planned under #1323.
+  - Broader differential fuzzing and rule coverage are future work, not currently
+    implemented.
 - **Reproduce**:
   ```sh
   cargo build --release -p bitcoin-rs
@@ -107,15 +110,22 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
 
 - **Tier**: In-tree reference vector evidence.
 - **Owner suites**:
-  - `crates/script/tests/core_vectors.rs`: Bitcoin Core `script_tests.json`.
-  - `crates/consensus/tests/vectors.rs`: Bitcoin Core `tx_valid.json`, `tx_invalid.json`.
+  - `crates/script/tests/core_vectors.rs`: Bitcoin Core `script_tests.json`,
+    `tx_valid.json`, and `tx_invalid.json` script-verification columns.
+  - `crates/consensus/tests/vectors.rs`: Transaction-vector loading/deserialization,
+    script flag parsing, and legacy sighash checks.
 - **What is verified**:
-  - Native script interpreter evaluates Core's known script test vectors and policy flags.
-  - Native transaction validator evaluates Core's known valid and invalid transaction vectors.
+  - The script suite evaluates runnable rows with the native interpreter and
+    pins executed, skipped, and mismatch counts. Its transaction columns check
+    script verification, not full transaction validity; `BADTX` rows requiring
+    non-script `CheckTransaction` checks are skipped.
+  - The consensus suite loads `tx_valid.json` and `tx_invalid.json` and checks
+    transaction deserialization. It does not compare consensus-validator
+    accept/reject decisions with those vectors' expected validity.
 - **Reproduce**:
   ```sh
-  cargo test -p bitcoin-rs-script --test core_vectors
-  cargo test -p bitcoin-rs-consensus --test vectors
+  cargo test --locked -p bitcoin-rs-script --test core_vectors
+  cargo test --locked -p bitcoin-rs-consensus --test vectors
   ```
 
 ---
@@ -143,16 +153,20 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
 
 ---
 
-## 5. Native ↔ libbitcoinkernel parity and oracle tests
+## 5. libbitcoinkernel oracle and scoped native parity
 
 - **Tier**: In-tree oracle & differential evidence.
 - **Contract & clauses**: [`docs/contracts/validation-default.md`](contracts/validation-default.md) (`VAL-02`).
 - **Owner suites**:
   - `crates/consensus/tests/kernel_vector_parity.rs`: Core transaction vectors
-    evaluated through `libbitcoinkernel`'s `verify_tx_scripts`.
-  - `crates/consensus/tests/kernel_block_parity.rs`: Replays 6 committed mainnet
-    block fixtures comparing native Rust interpreter verdicts directly against
-    `libbitcoinkernel`, verifying that clean fixtures pass and mutated inputs fail.
+    evaluated through `libbitcoinkernel`'s `verify_tx_scripts` against expected
+    script verdicts. `BADTX` rows are excluded because this entry point does not
+    perform non-script transaction checks. This is a kernel-versus-vector oracle,
+    not a native-versus-kernel differential over the full corpus.
+  - `crates/consensus/tests/kernel_block_parity.rs`: Kernel acceptance/rejection
+    checks on pristine and mutated mainnet transaction fixtures. Direct native
+    interpreter parity is limited to fixtures opting into `interpreter_parity`
+    (currently Taproot key-path), plus a Taproot script-path non-vacuity check.
 - **Prerequisites**: `libboost-dev`, `cmake`, and C++ compiler toolchain.
 - **Reproduce**:
   ```sh
@@ -177,7 +191,7 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
   ```sh
   cargo test -p bitcoin-rs-chain header_sync::contextual_header_tests
   cargo test -p bitcoin-rs-consensus verify_block::tests
-  cargo test -p bitcoin-rs-chainstate apply::persistence_tests
+  cargo test --locked -p bitcoin-rs-chainstate --lib persistence_tests
   ```
 
 ---
@@ -187,6 +201,9 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
 - **Tier**: In-tree fuzzing and corpus regression.
 - **Contract & clauses**: [`docs/contracts/qa-corpus.md`](contracts/qa-corpus.md) (`QAC-01`..`QAC-05`).
 - **Provenance record**: [`fuzz/CORPUS_PROVENANCE.md`](../fuzz/CORPUS_PROVENANCE.md).
+- **Campaign prerequisites**: Linux shell tools (`jq`, `sha1sum`), `cargo-fuzz`,
+  and nightly Rust with `llvm-tools-preview`. Keep the writable companion corpus
+  checkout on the same filesystem as this repository; the campaign minimizes it.
 - **Owner scripts & suites**:
   - Seed importer: `scripts/import-qa-assets.sh`, `scripts/import-reference-corpora.sh`.
   - Seed validator: `scripts/validate-corpus-seeds.sh`.
@@ -204,8 +221,11 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
   BITCOIN_RS_FUZZ_CORPUS=../bitcoin-rs-fuzz-corpus/corpus \
     cargo test -p bitcoin-rs-primitives --test differential
 
-  # Run a bounded fuzz campaign (requires cargo-fuzz):
-  ./scripts/run-fuzz-campaign.sh --target p2p_message --duration 60
+  # Run a bounded fuzz campaign with target, seconds, corpus, and output paths:
+  ./scripts/run-fuzz-campaign.sh \
+    p2p_message 60 \
+    ../bitcoin-rs-fuzz-corpus/corpus/p2p_message \
+    target/fuzz-campaign/p2p_message
   ```
 
 ---
@@ -224,11 +244,14 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
   - `crates/storage/src/checkpoint/tests.rs`: Checkpoint generation publication failpoints and retention.
   - `e2e/tests/reorg.rs`, `e2e/tests/reorg_state.rs`: Reorg tip rewinds, invalid higher-work branches,
     and mempool restoration.
+- **Feature requirement**: The AssumeUTXO recovery unit module is gated by
+  `fjall`; without it, that filter selects no tests.
 - **Reproduce**:
   ```sh
-  cargo test -p bitcoin-rs-chainstate --test recovery_marker_order_tests
-  cargo test -p bitcoin-rs-chainstate --test durable_replay_tests
-  cargo test -p bitcoin-rs-chainstate --test assumeutxo_recovery_tests
+  cargo test --locked -p bitcoin-rs-chainstate --lib recovery_marker_order_tests
+  cargo test --locked -p bitcoin-rs-chainstate --lib durable::tests
+  cargo test --locked -p bitcoin-rs-chainstate \
+    --features fjall --lib assumeutxo::tests::recovery
   cargo test -p bitcoin-rs-storage --test durable_head_store
   cargo test -p bitcoin-rs-e2e --test reorg
   ```
@@ -293,6 +316,11 @@ Following the [ecosystem compatibility contract](contracts/ecosystem-compatibili
   - Live external tracing via `bpftrace`/BCC remains planned as an ecosystem consumer.
 - **Reproduce**:
   ```sh
-  # Verify probe SDT notes in the compiled binary:
-  cargo test -p bitcoin-rs-consensus --test sdt_notes
+  # Verify enabled probe SDT notes in the compiled binary (Linux ELF64):
+  cargo test --locked -p bitcoin-rs-consensus \
+    --features usdt --test sdt_notes
+
+  # Separately verify that a feature-off build contains no probe notes:
+  cargo test --locked -p bitcoin-rs-consensus \
+    --no-default-features --test sdt_notes
   ```
