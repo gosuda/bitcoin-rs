@@ -254,7 +254,7 @@ echo "==> core p2p: ${CORE_P2P_PORT} rpc: ${CORE_RPC_PORT}; bitcoin-rs p2p: ${RS
 # under target/, so a restored datadir can carry an obsolete schema epoch that
 # the node correctly refuses to open. Node state is per-run: always start from
 # empty datadirs and let each side write its own CURRENT_SCHEMA marker.
-rm -rf -- "${CORE_DATADIR}" "${RS_DATADIR}"
+rm -rf -- "${CORE_DATADIR:?core datadir unset}" "${RS_DATADIR:?rs datadir unset}"
 mkdir -p "${CORE_DATADIR}" "${RS_DATADIR}"
 
 echo "==> starting bitcoind"
