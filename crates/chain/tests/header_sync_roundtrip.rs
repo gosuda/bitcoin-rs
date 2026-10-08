@@ -195,8 +195,8 @@ fn next_work_required_recovers_minimum_difficulty_past_the_spacing_window()
 
     // Within 2*spacing of the parent the difficulty carries over unchanged.
     assert_eq!(
-        next_work_required(&tree, parent_id, spacing, Network::Testnet3)?.to_consensus(),
-        bits
+        next_work_required(&tree, parent_id, spacing, Network::Testnet3)?,
+        CompactTarget::from_consensus(bits)
     );
 
     // Past the window the testnet minimum-difficulty rule returns the
@@ -207,9 +207,8 @@ fn next_work_required_recovers_minimum_difficulty_past_the_spacing_window()
             parent_id,
             spacing.saturating_mul(2).saturating_add(1),
             Network::Testnet3
-        )?
-        .to_consensus(),
-        0x1d00_ffff_u32
+        )?,
+        CompactTarget::from_consensus(0x1d00_ffff)
     );
     Ok(())
 }
@@ -499,46 +498,16 @@ fn pow_limit_bits(network: Network) -> u32 {
 }
 
 fn target_to_compact_lossy(target: bitcoin_rs_chain::ChainWork) -> u32 {
-    if target == bitcoin_rs_chain::ChainWork::ZERO {
-        return 0;
-    }
-    let mut size = target.bit_len().div_ceil(8);
-    let mut compact = if size <= 3 {
-        u32::try_from(target.as_limbs()[0] << (8 * (3 - size))).unwrap_or(0)
-    } else {
-        u32::try_from((target >> (8 * (size - 3))).as_limbs()[0]).unwrap_or(0)
-    };
-    if compact & 0x0080_0000 != 0 {
-        compact >>= 8;
-        size += 1;
-    }
-    compact | (u32::try_from(size).unwrap_or(0) << 24)
+    bitcoin::Target::from_be_bytes(target.to_be_bytes())
+        .to_compact_lossy()
+        .to_consensus()
 }
 
-/// Independent `SetCompact` decoder: the test oracle for difficulty
-/// expectations. Hand-rolled against the encoding spec, never importing the
-/// production decoder, so a decoder regression cannot move both sides of an
-/// assertion together.
+// Difficulty expectations use bitcoin's codec, not the production codec.
 fn decode_compact_to_target(bits: u32) -> bitcoin_rs_chain::ChainWork {
-    use bitcoin_rs_chain::ChainWork;
-    let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
-    let mut mantissa = bits & 0x007f_ffff;
-    let target = if exponent <= 3 {
-        mantissa >>= 8 * (3 - exponent);
-        ChainWork::from(mantissa)
-    } else {
-        let shift = 8 * (exponent - 3);
-        if shift < 256 {
-            ChainWork::from(mantissa) << shift
-        } else {
-            ChainWork::ZERO
-        }
-    };
-    if mantissa != 0 && bits & 0x0080_0000 != 0 {
-        ChainWork::ZERO
-    } else {
-        target
-    }
+    bitcoin_rs_chain::ChainWork::from_be_bytes(
+        bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(bits)).to_be_bytes(),
+    )
 }
 
 fn scaled_pow_limit_bits(network: Network, divisor: u64) -> u32 {
@@ -602,256 +571,201 @@ fn seed_period(
         .collect();
     seed_headers(tree, &headers)
 }
-
-#[expect(clippy::needless_pass_by_value)]
-fn assert_nbits_mismatch(result: Result<(), ChainError>, actual: u32, expected: u32, height: u32) {
-    assert!(matches!(
-        result,
-        Err(ChainError::NbitsMismatch {
-            actual: got_actual,
-            expected: got_expected,
-            height: got_height,
-        }) if got_actual == actual && got_expected == expected && got_height == height
-    ));
+// Period(bits, elapsed seconds, tip height), or explicit (bits, time) headers.
+enum Seed {
+    Period(u32, u32, u32),
+    Headers(Vec<(u32, u32)>),
 }
 
-#[test]
-fn testnet_allows_min_difficulty_after_time_gap() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
-    let min_bits = pow_limit_bits(Network::Testnet3);
-    let (parent_id, _) = seed_headers(
-        &mut tree,
-        &[
-            (regular_bits, DAA_ANCHOR_TIME),
-            (regular_bits, DAA_ANCHOR_TIME + 600),
-        ],
-    )?;
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        2,
-        DAA_ANCHOR_TIME + 1_801,
-        min_bits,
-    );
-    assert_eq!(
-        validate_header_nbits(&tree, parent_id, &header, Network::Testnet3),
-        Ok(())
-    );
-    Ok(())
-}
+type NbitsCase = (&'static str, Network, Seed, u32, u32, Option<u32>);
 
-#[test]
-fn testnet_timely_block_after_min_difficulty_inherits_last_non_min_bits()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
-    let min_bits = pow_limit_bits(Network::Testnet3);
-    let (parent_id, _) = seed_headers(
-        &mut tree,
-        &[
-            (regular_bits, DAA_ANCHOR_TIME),
-            (regular_bits, DAA_ANCHOR_TIME + 600),
-            (min_bits, DAA_ANCHOR_TIME + 1_801),
-        ],
-    )?;
-    let timely_time = DAA_ANCHOR_TIME + 2_400;
-    let accepted = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        3,
-        timely_time,
-        regular_bits,
-    );
-    assert_eq!(
-        validate_header_nbits(&tree, parent_id, &accepted, Network::Testnet3),
-        Ok(())
-    );
-    let rejected = raw_header_with(tree.node(parent_id)?.hash.into(), 3, timely_time, min_bits);
-    assert_nbits_mismatch(
-        validate_header_nbits(&tree, parent_id, &rejected, Network::Testnet3),
-        min_bits,
-        regular_bits,
-        3,
-    );
-    Ok(())
-}
-
-#[test]
-fn mainnet_rejects_min_difficulty_after_time_gap() -> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let regular_bits = MAINNET_POW_LIMIT_DIV_4_BITS;
-    let min_bits = pow_limit_bits(Network::Mainnet);
-    let (parent_id, _) = seed_headers(
-        &mut tree,
-        &[
-            (regular_bits, DAA_ANCHOR_TIME),
-            (regular_bits, DAA_ANCHOR_TIME + 600),
-        ],
-    )?;
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        2,
-        DAA_ANCHOR_TIME + 1_801,
-        min_bits,
-    );
-    assert_nbits_mismatch(
-        validate_header_nbits(&tree, parent_id, &header, Network::Mainnet),
-        min_bits,
-        regular_bits,
-        2,
-    );
-    Ok(())
-}
-
-#[test]
-fn testnet4_retarget_uses_first_period_bits_after_min_difficulty_tip()
--> Result<(), Box<dyn std::error::Error>> {
-    let mut tree = BlockTree::new();
-    let network = Network::Testnet4;
-    let interval = network.retarget_interval();
-    let expected_timespan = interval * 600;
-    let first_period_bits = scaled_pow_limit_bits(network, 16);
-    let min_bits = pow_limit_bits(network);
-    let mut headers = Vec::with_capacity(usize::try_from(interval).unwrap_or(usize::MAX));
-    for height in 0..interval {
-        let bits = if height == interval - 1 {
-            min_bits
-        } else {
-            first_period_bits
-        };
-        headers.push((
-            bits,
-            DAA_ANCHOR_TIME.saturating_add(
-                u32::try_from(
-                    u64::from(expected_timespan) * u64::from(height) / u64::from(interval - 1),
-                )
-                .unwrap_or(u32::MAX),
-            ),
-        ));
-    }
-    let (parent_id, _) = seed_headers(&mut tree, &headers)?;
-    let expected_bits = retarget_bits_for_test(
-        network,
-        first_period_bits,
-        expected_timespan,
-        expected_timespan,
-    );
-    let header = raw_header_with(
-        tree.node(parent_id)?.hash.into(),
-        interval,
-        DAA_ANCHOR_TIME + expected_timespan + 600,
-        expected_bits,
-    );
-    assert_eq!(
-        validate_header_nbits(&tree, parent_id, &header, network),
-        Ok(())
-    );
-    Ok(())
-}
-
-// Times are offsets from DAA_ANCHOR_TIME; mismatch is the required bits.
-struct DaaCase {
-    name: &'static str,
-    network: Network,
-    start_bits: u32,
-    span: u32,
-    tip_height: u32,
-    time: u32,
-    bits: u32,
-    mismatch: Option<u32>,
-}
-
-#[test]
-fn period_difficulty_rules_match_core() -> Result<(), Box<dyn std::error::Error>> {
+fn mainnet_nbits_cases() -> Vec<NbitsCase> {
     let interval = Network::Mainnet.retarget_interval();
     let span = interval * 600;
-    let slow_start = scaled_pow_limit_bits(Network::Mainnet, 16);
-    let slow_bits = retarget_bits_for_test(Network::Mainnet, slow_start, span * 4 + 1, span);
-    let on_schedule = DaaCase {
-        name: "on-schedule period keeps bits",
-        network: Network::Mainnet,
-        start_bits: MAINNET_POW_LIMIT_BITS,
-        span,
-        tip_height: interval - 1,
-        time: span + 600,
-        bits: MAINNET_POW_LIMIT_BITS,
-        mismatch: None,
+    let limit = MAINNET_POW_LIMIT_BITS;
+    let regular = MAINNET_POW_LIMIT_DIV_4_BITS;
+    let slow = scaled_pow_limit_bits(Network::Mainnet, 16);
+    let slower = retarget_bits_for_test(Network::Mainnet, slow, span * 4, span);
+    [
+        ("inherit", limit, 600, 1, 1_200, regular, Some(limit)),
+        ("steady", limit, span, interval - 1, span + 600, limit, None),
+        (
+            "wrong retarget",
+            limit,
+            span,
+            interval - 1,
+            span + 600,
+            regular,
+            Some(limit),
+        ),
+        (
+            "fast clamp",
+            limit,
+            span / 4 - 1,
+            interval - 1,
+            span,
+            regular,
+            None,
+        ),
+        (
+            "slow clamp boundary",
+            slow,
+            span * 4 + 1,
+            interval - 1,
+            span * 4 + 600,
+            slower,
+            None,
+        ),
+        (
+            "slow clamp far beyond",
+            slow,
+            span * 8,
+            interval - 1,
+            span * 8 + 600,
+            slower,
+            None,
+        ),
+        (
+            "pow limit cap",
+            limit,
+            span * 4,
+            interval - 1,
+            span * 4 + 600,
+            limit,
+            None,
+        ),
+        (
+            "no min-difficulty",
+            regular,
+            600,
+            1,
+            1_801,
+            limit,
+            Some(regular),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, bits, span, height, time, candidate, expected)| {
+        (
+            name,
+            Network::Mainnet,
+            Seed::Period(bits, span, height),
+            time,
+            candidate,
+            expected,
+        )
+    })
+    .collect()
+}
+
+fn testnet_nbits_cases() -> Vec<NbitsCase> {
+    let interval = Network::Testnet3.retarget_interval();
+    let span = interval * 600;
+    let regular = MAINNET_POW_LIMIT_DIV_4_BITS;
+    let min_bits = pow_limit_bits(Network::Testnet3);
+    let after_min_difficulty = || {
+        Seed::Headers(vec![
+            (regular, DAA_ANCHOR_TIME),
+            (regular, DAA_ANCHOR_TIME + 600),
+            (min_bits, DAA_ANCHOR_TIME + 1_801),
+        ])
     };
-    let cases = [
-        DaaCase {
-            name: "non-retarget height inherits pow-limit parent bits",
-            span: 600,
-            tip_height: 1,
-            time: 1_200,
-            bits: MAINNET_POW_LIMIT_DIV_4_BITS,
-            mismatch: Some(MAINNET_POW_LIMIT_BITS),
-            ..on_schedule
-        },
-        DaaCase {
-            name: "on-schedule period rejects changed bits",
-            bits: MAINNET_POW_LIMIT_DIV_4_BITS,
-            mismatch: Some(MAINNET_POW_LIMIT_BITS),
-            ..on_schedule
-        },
-        DaaCase {
-            name: "fast period clamps to a quarter target",
-            span: span / 4 - 1,
-            time: span,
-            bits: MAINNET_POW_LIMIT_DIV_4_BITS,
-            ..on_schedule
-        },
-        DaaCase {
-            name: "slow period clamps to a quadruple target",
-            start_bits: slow_start,
-            span: span * 4 + 1,
-            time: span * 4 + 600,
-            bits: slow_bits,
-            ..on_schedule
-        },
-        DaaCase {
-            name: "slow clamp remains observable after compact-target rounding",
-            start_bits: slow_start,
-            span: span * 8,
-            time: span * 8 + 600,
-            bits: slow_bits,
-            ..on_schedule
-        },
-        DaaCase {
-            name: "slow period caps at the pow limit",
-            span: span * 4,
-            time: span * 4 + 600,
-            ..on_schedule
-        },
-        DaaCase {
-            name: "testnet min-difficulty does not override a retarget boundary",
-            network: Network::Testnet3,
-            start_bits: MAINNET_POW_LIMIT_DIV_4_BITS,
-            time: span + 1_201,
-            bits: pow_limit_bits(Network::Testnet3),
-            mismatch: Some(MAINNET_POW_LIMIT_DIV_4_BITS),
-            ..on_schedule
-        },
-        on_schedule,
-    ];
-    for case in cases {
+    let mut cases = [
+        (
+            "min-difficulty",
+            Seed::Period(regular, 600, 1),
+            1_801,
+            min_bits,
+            None,
+        ),
+        (
+            "timely recovery",
+            after_min_difficulty(),
+            2_400,
+            regular,
+            None,
+        ),
+        (
+            "reject lingering minimum",
+            after_min_difficulty(),
+            2_400,
+            min_bits,
+            Some(regular),
+        ),
+        (
+            "retarget before minimum",
+            Seed::Period(regular, span, interval - 1),
+            span + 1_201,
+            min_bits,
+            Some(regular),
+        ),
+    ]
+    .into_iter()
+    .map(|(name, seed, time, bits, expected)| (name, Network::Testnet3, seed, time, bits, expected))
+    .collect::<Vec<_>>();
+
+    // A testnet4 retarget uses the first period target, not a min-difficulty tip.
+    let t4_interval = Network::Testnet4.retarget_interval();
+    let t4_span = t4_interval * 600;
+    let t4_bits = scaled_pow_limit_bits(Network::Testnet4, 16);
+    let headers = (0..t4_interval)
+        .map(|height| {
+            let bits = if height == t4_interval - 1 {
+                pow_limit_bits(Network::Testnet4)
+            } else {
+                t4_bits
+            };
+            let offset = u64::from(t4_span) * u64::from(height) / u64::from(t4_interval - 1);
+            (
+                bits,
+                DAA_ANCHOR_TIME + u32::try_from(offset).unwrap_or(u32::MAX),
+            )
+        })
+        .collect();
+    let expected = retarget_bits_for_test(Network::Testnet4, t4_bits, t4_span, t4_span);
+    cases.push((
+        "BIP94 anchor",
+        Network::Testnet4,
+        Seed::Headers(headers),
+        t4_span + 600,
+        expected,
+        None,
+    ));
+    cases
+}
+
+#[test]
+fn contextual_nbits_enforces_the_difficulty_rules() -> Result<(), Box<dyn std::error::Error>> {
+    for (name, network, seed, time, bits, expected) in mainnet_nbits_cases()
+        .into_iter()
+        .chain(testnet_nbits_cases())
+    {
         let mut tree = BlockTree::new();
-        let (parent_id, parent_hash) = seed_period(
-            &mut tree,
-            case.start_bits,
-            DAA_ANCHOR_TIME,
-            DAA_ANCHOR_TIME + case.span,
-            case.tip_height,
-        )?;
-        let height = case.tip_height + 1;
-        let header = raw_header_with(parent_hash, height, DAA_ANCHOR_TIME + case.time, case.bits);
-        let result = validate_header_nbits(&tree, parent_id, &header, case.network);
-        let expected = case.mismatch.map_or(Ok(()), |expected| {
+        let (parent_id, _) = match &seed {
+            Seed::Period(bits, span, height) => seed_period(
+                &mut tree,
+                *bits,
+                DAA_ANCHOR_TIME,
+                DAA_ANCHOR_TIME + span,
+                *height,
+            )?,
+            Seed::Headers(headers) => seed_headers(&mut tree, headers)?,
+        };
+        let parent = tree.node(parent_id)?;
+        let height = parent.height + 1;
+        let header = raw_header_with(parent.hash.into(), height, DAA_ANCHOR_TIME + time, bits);
+        let wanted = expected.map_or(Ok(()), |expected| {
             Err(ChainError::NbitsMismatch {
-                actual: case.bits,
+                actual: bits,
                 expected,
                 height,
             })
         });
-        assert_eq!(result, expected, "{}", case.name);
+        assert_eq!(
+            validate_header_nbits(&tree, parent_id, &header, network),
+            wanted,
+            "{name}"
+        );
     }
     Ok(())
 }

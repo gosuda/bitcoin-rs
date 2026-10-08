@@ -3,16 +3,10 @@
 use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
 
-/// A domain authoritative chain transitions and stable reads exclude each other through.
+/// Exclusion domain split into non-convertible mutation and stable-read roles.
 ///
-/// Node composition mints one domain for each opened node and splits it into
-/// [`TransitionAuthority`] for mutation and [`StableRead`] for readers. The
-/// roles cannot produce each other or expose the mutex. Their provenance is
-/// still a wiring requirement: `new` and `Default` are public, so another
-/// caller can mint a disconnected domain and pass its read role to a consumer.
-///
-/// The mutex itself never leaves this type. A holder of only one role cannot
-/// reach the shared cell or obtain the other role from that value.
+/// Composition must share one domain per opened node: a separately
+/// constructed domain excludes nothing on the live chain.
 #[derive(Default)]
 pub struct TransitionDomain {
     inner: Arc<Mutex<()>>,
@@ -20,10 +14,6 @@ pub struct TransitionDomain {
 
 impl TransitionDomain {
     /// Mints a fresh domain that no other component shares yet.
-    ///
-    /// Node composition calls this once while opening a node. Public callers
-    /// can also mint independent domains; test fixtures do so, but a role from
-    /// one of those domains does not exclude transitions of a live node.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -48,9 +38,8 @@ impl TransitionDomain {
 
 /// Mutation-side role: excludes stable reads for as long as a chain transition runs.
 ///
-/// Production composition passes this role only to chainstate and destructive
-/// pruning, which take it through their own admission first. The public domain
-/// constructor allows other callers to produce independent mutation roles.
+/// Production composition passes it only to chainstate and destructive
+/// pruning, which take it through their own admission first.
 #[derive(Clone)]
 pub struct TransitionAuthority {
     inner: Arc<Mutex<()>>,
@@ -95,10 +84,7 @@ impl StableRead {
     }
 }
 
-/// Proof that stable reads are excluded for as long as it lives.
-///
-/// The guard is opaque: dropping it is the only way to end the exclusion, so a
-/// reader cannot release the fence early and re-open the window it closed.
+/// Opaque guard excluding stable reads until dropped.
 pub struct TransitionAuthorityGuard<'a> {
     _guard: MutexGuard<'a, ()>,
 }
