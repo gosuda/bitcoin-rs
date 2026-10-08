@@ -54,6 +54,10 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
     `p2p`, `rpc`, `node`, or the binary. Admission retains peer attribution
     as data without owning connections or runtime assembly. The
     `g17_dependency_direction` gate checks this boundary explicitly.
+    `p2p` also consumes chainstate-owned historical progress, window-failure
+    dispositions and reorg outcomes, without enabling backend features. Node
+    retains transition settlement and follower dispatch; P2P consumes these
+    outcomes for scheduling, retry and peer policy through `SyncChain`.
   - In Layer 4, the footprint package is an offline Linux
     filesystem utility with no node/runtime-workspace or storage-engine
     dependencies.

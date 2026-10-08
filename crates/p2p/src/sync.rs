@@ -207,7 +207,7 @@ pub struct BlockSync {
     /// the next tick's header drain.
     block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
-    /// Latched by the first [`WindowCommitDisposition::Fatal`] settlement.
+    /// Latched by the first [`WindowApplyDisposition::Fatal`] settlement.
     /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
     /// no chain transition: the failed settlement left the implementation's
     /// admission closed, so every further attempt would churn staged state.

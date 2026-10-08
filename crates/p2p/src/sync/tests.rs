@@ -34,8 +34,8 @@ use parking_lot::RwLock;
 mod historical;
 
 use super::chain::{
-    BranchSwitchError, HeaderAdmission, HistoricalAdvance, SyncChain, SyncChainError,
-    WindowCommitDisposition, WindowCommitError,
+    HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
+    WindowApplyDisposition, WindowCommitError,
 };
 use super::receive::unrequested_body_admissible;
 use super::{BlockSync, Inventory};
@@ -47,7 +47,7 @@ use crate::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable}
 /// is returned, mirroring a connect walk that stopped partway.
 struct ScriptedBranchSwitch {
     connected: Vec<Hash256>,
-    error: BranchSwitchError,
+    error: ReorgError,
 }
 
 /// Applied-chain stub for executor tests: real [`BlockTree`] header admission
@@ -59,7 +59,7 @@ pub(crate) struct TestChain {
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     minimum_chain_work: ChainWork,
-    scripted_commit_failure: Mutex<Option<(Hash256, WindowCommitDisposition)>>,
+    scripted_commit_failure: Mutex<Option<(Hash256, WindowApplyDisposition)>>,
     scripted_branch_switch: Mutex<Option<ScriptedBranchSwitch>>,
     historical: Mutex<std::collections::VecDeque<(u32, Hash256)>>,
     historical_connected: Mutex<Vec<Hash256>>,
@@ -273,7 +273,7 @@ impl SyncChain for TestChain {
             let Some(node_id) = tree.lookup(hash) else {
                 return Err(WindowCommitError {
                     applied,
-                    disposition: WindowCommitDisposition::Operational,
+                    disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                     source: Box::new(std::io::Error::other("commit block not in tree")),
                 });
@@ -290,7 +290,7 @@ impl SyncChain for TestChain {
                     .unwrap_or_default();
                 return Err(WindowCommitError {
                     applied,
-                    disposition: WindowCommitDisposition::Permanent,
+                    disposition: WindowApplyDisposition::Permanent,
                     invalidated,
                     source: Box::new(std::io::Error::other("extra coinbase")),
                 });
@@ -299,7 +299,7 @@ impl SyncChain for TestChain {
                 if let Err(source) = self.body_binding(&tree, block) {
                     return Err(WindowCommitError {
                         applied,
-                        disposition: WindowCommitDisposition::BodyMutated,
+                        disposition: WindowApplyDisposition::BodyMutated,
                         invalidated: Box::default(),
                         source,
                     });
@@ -308,7 +308,7 @@ impl SyncChain for TestChain {
             let Ok(node) = tree.node(node_id) else {
                 return Err(WindowCommitError {
                     applied,
-                    disposition: WindowCommitDisposition::Operational,
+                    disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                     source: Box::new(std::io::Error::other("commit node missing")),
                 });
@@ -330,7 +330,7 @@ impl SyncChain for TestChain {
         _target: NodeId,
         _staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
         connected_body: &mut dyn FnMut(Hash256),
-    ) -> Result<(), BranchSwitchError> {
+    ) -> Result<(), ReorgError> {
         let scripted = self.scripted_branch_switch.lock().take();
         if let Some(scripted) = scripted {
             for hash in &scripted.connected {
@@ -353,9 +353,9 @@ impl SyncChain for TestChain {
                 }
                 connected_body(*hash);
             }
-            if let BranchSwitchError::ConnectFailed {
+            if let ReorgError::ConnectFailed {
                 hash,
-                disposition: WindowCommitDisposition::Permanent,
+                disposition: WindowApplyDisposition::Permanent,
                 ..
             } = &scripted.error
             {
@@ -366,9 +366,7 @@ impl SyncChain for TestChain {
             }
             return Err(scripted.error);
         }
-        Err(BranchSwitchError::Other(Box::new(std::io::Error::other(
-            "test chain does not switch branches",
-        ))))
+        Err(ReorgError::NoAppliedTip)
     }
 }
 
@@ -429,7 +427,7 @@ impl SyncChain for RefusingChain {
         target: NodeId,
         staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
         connected_body: &mut dyn FnMut(Hash256),
-    ) -> Result<(), BranchSwitchError> {
+    ) -> Result<(), ReorgError> {
         self.0.switch_to_branch(target, staged_body, connected_body)
     }
 }
@@ -2665,8 +2663,7 @@ fn deliver_attributed_body(fixture: &PunishmentFixture) -> TestResult {
 fn permanent_consensus_body_disconnects_delivering_source() -> TestResult {
     let fixture = punishment_fixture()?;
     let hash = Hash256::from(fixture.block2.block_hash());
-    *fixture.chain.scripted_commit_failure.lock() =
-        Some((hash, WindowCommitDisposition::Permanent));
+    *fixture.chain.scripted_commit_failure.lock() = Some((hash, WindowApplyDisposition::Permanent));
 
     deliver_attributed_body(&fixture)?;
 
@@ -2680,8 +2677,8 @@ fn permanent_consensus_body_disconnects_delivering_source() -> TestResult {
 #[test]
 fn binding_and_operational_failures_do_not_disconnect() -> TestResult {
     for disposition in [
-        WindowCommitDisposition::BodyMutated,
-        WindowCommitDisposition::Operational,
+        WindowApplyDisposition::BodyMutated,
+        WindowApplyDisposition::Operational,
     ] {
         let fixture = punishment_fixture()?;
         let hash = Hash256::from(fixture.block2.block_hash());

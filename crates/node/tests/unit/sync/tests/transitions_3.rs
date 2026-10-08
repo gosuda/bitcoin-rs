@@ -5,7 +5,14 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
 -> Result<(), Box<dyn std::error::Error>> {
     use bitcoin_rs_primitives::{Amount, Script};
     let (handles, main, mut bodies) = matured_chain(101)?;
+    let handles = Arc::new(handles);
     let followers = crate::chain_effects::ChainFollowers::noop();
+    let adapter = super::super::NodeSyncChain {
+        block_tree: handles.block_tree_reader(),
+        handles: Arc::clone(&handles),
+        followers,
+        assumeutxo: None,
+    };
     let applied_tip = handles.applied_tip_reader();
     let main_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
 
@@ -39,12 +46,10 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
     }
 
     let mut retired = Vec::new();
-    let outcome = crate::reorg::switch_to_branch(
-        &handles,
-        &followers,
+    let outcome = adapter.switch_to_branch(
         fork_parent,
-        |hash| bodies.get(&hash).cloned(),
-        |hash| retired.push(hash),
+        &mut |hash| bodies.get(&hash).cloned(),
+        &mut |hash| retired.push(hash),
     );
     assert!(
         matches!(
@@ -96,7 +101,14 @@ fn branch_switch_retires_only_the_connected_prefix_after_connect_failure()
 #[test]
 fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::error::Error>> {
     let (handles, main, mut bodies) = matured_chain(101)?;
+    let handles = Arc::new(handles);
     let followers = crate::chain_effects::ChainFollowers::noop();
+    let adapter = super::super::NodeSyncChain {
+        block_tree: handles.block_tree_reader(),
+        handles: Arc::clone(&handles),
+        followers,
+        assumeutxo: None,
+    };
     let applied_tip = handles.applied_tip_reader();
 
     let main_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
@@ -135,12 +147,10 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
         );
     }
 
-    let outcome = crate::reorg::switch_to_branch(
-        &handles,
-        &followers,
+    let outcome = adapter.switch_to_branch(
         descendant_id,
-        |hash| bodies.get(&hash).cloned(),
-        |_| {},
+        &mut |hash| bodies.get(&hash).cloned(),
+        &mut |_| {},
     );
     assert!(
         matches!(
@@ -181,6 +191,13 @@ fn permanent_reorg_failure_invalidates_descendants() -> Result<(), Box<dyn std::
 fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
 -> Result<(), Box<dyn std::error::Error>> {
     let (handles, main, mut bodies) = matured_chain(101)?;
+    let handles = Arc::new(handles);
+    let adapter = super::super::NodeSyncChain {
+        block_tree: handles.block_tree_reader(),
+        handles: Arc::clone(&handles),
+        followers: crate::chain_effects::ChainFollowers::noop(),
+        assumeutxo: None,
+    };
     let old_tip_hash = Hash256::from_le_bytes(main[100].block_hash().as_bytes());
     let fork_root_hash = main[99].block_hash();
     let fork_root_id = handles
@@ -207,11 +224,9 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
     // disappears before restoration. The transition must fail closed rather
     // than settle the fork ancestor as a normal stable result.
     let mut old_body_reads = 0;
-    let outcome = crate::reorg::switch_to_branch(
-        &handles,
-        &crate::chain_effects::ChainFollowers::noop(),
+    let outcome = adapter.switch_to_branch(
         invalid_id,
-        |hash| {
+        &mut |hash| {
             if hash == old_tip_hash {
                 old_body_reads += 1;
                 if old_body_reads == 3 {
@@ -220,7 +235,7 @@ fn invalid_first_reorg_body_closes_if_old_body_disappears_during_restoration()
             }
             bodies.get(&hash).cloned()
         },
-        |_| {},
+        &mut |_| {},
     );
     let Err(crate::reorg::ReorgError::RestorationFailed { source, original }) = outcome else {
         panic!("restoration body loss must require recovery, got {outcome:?}");

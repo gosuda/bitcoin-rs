@@ -9,7 +9,7 @@ use super::BlockSync;
 use super::ExpectedApplyCache;
 use super::ExpectedBlockHashes;
 use super::ExpectedRun;
-use super::chain::WindowCommitDisposition;
+use super::chain::WindowApplyDisposition;
 use bitcoin_rs_primitives::Block;
 use bitcoin_rs_primitives::Hash256;
 use std::time::Instant;
@@ -190,8 +190,8 @@ impl BlockSync {
                     if let Some(blocker) = blocker {
                         failed_hash = Some(blocker.hash);
                     }
-                    failed_permanent = error.disposition == WindowCommitDisposition::Permanent;
-                    if error.disposition == WindowCommitDisposition::Fatal {
+                    failed_permanent = error.disposition == WindowApplyDisposition::Permanent;
+                    if error.disposition == WindowApplyDisposition::Fatal {
                         self.note_fatal_settlement(stopped, error.source.as_ref());
                     } else if let Some(blocker) = blocker {
                         tracing::warn!(
@@ -216,7 +216,7 @@ impl BlockSync {
                         .lock()
                         .stager
                         .restore_many(drained[restore_from..].iter().cloned());
-                    if error.disposition == WindowCommitDisposition::Permanent {
+                    if error.disposition == WindowApplyDisposition::Permanent {
                         // The failed block's descendants can never become
                         // valid, so they must not occupy bounded download
                         // state or the frontier would cycle on them forever.

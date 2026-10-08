@@ -1,8 +1,8 @@
 //! Heavier-branch handoff and committed reorganization body retirement.
 
 use super::BlockSync;
-use super::chain::BranchSwitchError;
-use super::chain::WindowCommitDisposition;
+use super::chain::ReorgError;
+use super::chain::WindowApplyDisposition;
 use bitcoin_rs_chain::NodeId;
 use bitcoin_rs_chain::plan_reorg;
 use bitcoin_rs_primitives::Hash256;
@@ -37,10 +37,10 @@ impl BlockSync {
                 let height = self.chain.applied_tip().map_or(0, |tip| tip.height);
                 tracing::info!(height, "block sync: switched to the heavier branch");
             }
-            Err(BranchSwitchError::MissingBody { height }) => {
+            Err(ReorgError::MissingBody { height, .. }) => {
                 tracing::trace!(height, "block sync: heavier branch still downloading");
             }
-            Err(error @ BranchSwitchError::Fatal(_)) => {
+            Err(error @ (ReorgError::Fatal(_) | ReorgError::RestorationFailed { .. })) => {
                 // The implementation has already closed admission and
                 // requested shutdown.
                 tracing::error!(
@@ -48,17 +48,17 @@ impl BlockSync {
                     "block sync: branch switch requires chainstate recovery, shutting down"
                 );
             }
-            Err(error @ BranchSwitchError::TransitionSettlement(_)) => {
+            Err(error @ ReorgError::TransitionSettlement { .. }) => {
                 // The reorg owner has closed admission and requested shutdown.
                 tracing::error!(%error, "block sync: reorg generation settlement failed");
             }
-            Err(error @ BranchSwitchError::CheckpointSettlement(_)) => {
+            Err(error @ ReorgError::CheckpointSettlement { .. }) => {
                 tracing::error!(
                     %error,
                     "block sync: reorg left checkpoint debt unsettled; a clean shutdown will retry"
                 );
             }
-            Err(BranchSwitchError::ConnectFailed {
+            Err(ReorgError::ConnectFailed {
                 hash,
                 disposition,
                 invalidated,
@@ -67,10 +67,10 @@ impl BlockSync {
                 // Capture the delivering connection before the purge drops
                 // the staged entry that carries it.
                 let failed_source = self.scheduler.lock().stager.staged_source(&hash);
-                if disposition == WindowCommitDisposition::Permanent {
+                if disposition == WindowApplyDisposition::Permanent {
                     self.punish_permanent_delivery_source(failed_source, hash);
                 }
-                if disposition == WindowCommitDisposition::BodyMutated {
+                if disposition == WindowApplyDisposition::BodyMutated {
                     // Only the delivered body is bad. Keep the header branch
                     // and its descendants, but free this slot for a new body;
                     // the tree-owned height keeps the retry cursor exact.
@@ -95,9 +95,10 @@ impl BlockSync {
                     "block sync: connect failed"
                 );
             }
-            Err(BranchSwitchError::DisconnectBodyLost {
+            Err(ReorgError::DisconnectBodyLost {
                 disconnected,
                 stopped_at,
+                ..
             }) => {
                 tracing::debug!(
                     disconnected,
@@ -105,11 +106,12 @@ impl BlockSync {
                     "block sync: disconnect body unreadable mid-rollback, coherent at reached tip"
                 );
             }
-            Err(BranchSwitchError::ConnectBodyLost {
+            Err(ReorgError::ConnectBodyLost {
                 disconnected,
                 connected,
                 stopped_at,
-            }) => {
+                source,
+            }) if matches!(*source, ReorgError::MissingBody { .. }) => {
                 tracing::debug!(
                     disconnected,
                     connected,
