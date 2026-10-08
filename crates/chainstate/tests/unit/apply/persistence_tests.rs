@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use bitcoin_rs_chain::regtest_fixture::{coinbase, mined_regtest_child_at as mined_child};
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, Tx, TxOut,
@@ -15,7 +16,7 @@ use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use hashbrown::HashMap;
 
 use super::{ApplyError, ResolvedUtxoView};
-use crate::test_fixtures::{coinbase, handles, mined_child, seed_genesis};
+use crate::test_fixtures::{handles, seed_genesis};
 
 struct RejectingUndoStore {
     inner: InMemoryUndoStore,
@@ -54,6 +55,28 @@ impl UndoStore for RejectingUndoStore {
     fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
         self.inner.load_disconnect_marker()
     }
+}
+
+#[test]
+fn canonical_regtest_chain_connects_through_bip34_activation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let network = Network::Regtest;
+    let handles = handles(network, Arc::new(UtxoSet::new()));
+    let genesis = network.genesis_block();
+    handles.apply_block(&genesis, None)?;
+    let mut parent = genesis.block_hash();
+    for height in 1..=500 {
+        let block = mined_child(parent, height)?;
+        let outcome = handles.apply_block(&block, None)?;
+        assert_eq!(outcome.tip.height, height);
+        assert_eq!(outcome.hash, Hash256::from(block.block_hash()));
+        assert_eq!(
+            outcome.tip.chain_tx_count,
+            bitcoin_rs_chain::ChainTxCount::established(u64::from(height) + 1)
+        );
+        parent = block.block_hash();
+    }
+    Ok(())
 }
 
 #[test]

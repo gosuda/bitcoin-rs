@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use bitcoin_rs_chain::current_unix_seconds;
+use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network, consensus_bytes};
 use bitcoin_rs_storage::block_body::BlockBodyStore;
 use bitcoin_rs_storage::{
@@ -10,7 +11,7 @@ use bitcoin_rs_storage::{
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 
-use crate::test_fixtures::{MemoryBodies, handles, mined_child, seed_genesis};
+use crate::test_fixtures::{MemoryBodies, handles, seed_genesis};
 use crate::{ApplyError, Chainstate};
 
 fn restored_chainstate() -> Result<(Chainstate, Block), Box<dyn std::error::Error>> {

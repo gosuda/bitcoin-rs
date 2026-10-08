@@ -17,7 +17,9 @@ use metrics::{
 };
 use parking_lot::Mutex;
 
-use crate::test_fixtures::{handles, mined_child, seed_genesis};
+use bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at as mined_child;
+
+use crate::test_fixtures::{handles, seed_genesis};
 
 /// Retired names exercised by the coinbase-only single-block fixture.
 const RETIRED_APPLY_METRICS: &[&str] = &[
