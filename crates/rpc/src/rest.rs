@@ -1670,6 +1670,14 @@ mod tests {
         for (path, query, status) in &cases {
             let response = route(&ctx, path, query, true);
             assert_eq!(response.status, *status, "{path}?{query}");
+            if *status == 200 {
+                let content_type = match path.rsplit_once('.') {
+                    Some((_, "json")) => "application/json",
+                    Some((_, "hex")) => "text/plain",
+                    _ => "application/octet-stream",
+                };
+                assert_eq!(response.content_type, content_type, "{path}?{query}");
+            }
             assert_eq!(
                 route(&ctx, path, query, false).status,
                 404,
@@ -1682,19 +1690,21 @@ mod tests {
                 "no row probes {prefix}"
             );
         }
-        assert_eq!(
-            route(&ctx, "/rest/mempool/info.json", "", true).content_type,
-            "application/json"
-        );
-        assert_eq!(
-            route(&ctx, "/rest/chaininfo.json", "", true).content_type,
-            "application/json"
-        );
         let unknown = route(&ctx, "/rest/unknown", "", true);
         assert_eq!(
             String::from_utf8(unknown.body).expect("not-found body"),
             "not found"
         );
+    }
+
+    #[test]
+    fn chaininfo_json_uses_enforcer_field_names() {
+        let ctx = Arc::new(Context::new());
+        let response = route(&ctx, "/rest/chaininfo.json", "", true);
+        let value: Value = sonic_rs::from_slice(&response.body).expect("chaininfo JSON");
+        for field in ["chain", "blocks", "headers", "bestblockhash"] {
+            assert!(value.get(field).is_some(), "{field}: {value:?}");
+        }
     }
 
     #[test]

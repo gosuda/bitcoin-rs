@@ -2090,7 +2090,12 @@ mod tests {
                 "{error}"
             );
         }
+    }
 
+    /// Contract clause: `docs/contracts/muhash-rpc.md` `MRPC-01`.
+    #[test]
+    fn gettxoutsetinfo_rejects_trailing_parameters() {
+        let ctx = Arc::new(Context::new());
         let trailing = gettxoutsetinfo(&ctx, &json!(["muhash", null, false, true]))
             .expect_err("trailing parameters must be refused");
         assert_eq!(trailing.code(), RpcError::INVALID_PARAMS, "{trailing}");

@@ -1200,7 +1200,7 @@ mod tests {
 
     // CONTRACT: docs/contracts/external-api.md#API-26
     #[test]
-    fn estimatesmartfee_follows_core_argument_contract() {
+    fn estimatesmartfee_rejects_conf_target_outside_core_range() {
         let ctx = Arc::new(Context::new());
         for target in [-1_i64, 0, 1009] {
             let error = match estimatesmartfee(&ctx, &json!([target])) {
@@ -1211,7 +1211,11 @@ mod tests {
             assert_eq!(error.code(), RpcError::CORE_INVALID_PARAMETER);
             assert_eq!(error.to_string(), ESTIMATE_SMART_FEE_TARGET_ERROR);
         }
+    }
 
+    #[test]
+    fn estimatesmartfee_rejects_unknown_estimate_mode() {
+        let ctx = Arc::new(Context::new());
         let unknown_mode = match estimatesmartfee(&ctx, &json!([3, "hurry"])) {
             Err(e) => e,
             Ok(_) => panic!("unknown estimate_mode must fail"),
@@ -1226,7 +1230,11 @@ mod tests {
         };
         assert!(matches!(typed_mode, RpcError::InvalidType(_)));
         assert_eq!(typed_mode.code(), RpcError::CORE_INVALID_TYPE);
+    }
 
+    #[test]
+    fn estimatesmartfee_accepts_core_estimate_modes_and_rejects_trailing() {
+        let ctx = Arc::new(Context::new());
         for params in [
             json!([3, "unset"]),
             json!([3, "ECONOMICAL"]),
