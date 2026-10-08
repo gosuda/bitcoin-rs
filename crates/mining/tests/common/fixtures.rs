@@ -52,10 +52,10 @@ pub(crate) fn insert(
     tx: Tx,
     vsize: u32,
     fee: u64,
-    sequence: u64,
+    time: u64,
     height: u32,
 ) -> Result<(), Box<dyn Error>> {
-    insert_with_cost(pool, tx, vsize, fee, sequence, height, 0)
+    insert_with_cost(pool, tx, vsize, fee, time, height, 0)
 }
 
 pub(crate) fn insert_with_cost(
@@ -63,7 +63,7 @@ pub(crate) fn insert_with_cost(
     tx: Tx,
     vsize: u32,
     fee: u64,
-    sequence: u64,
+    time: u64,
     height: u32,
     sigop_cost: u32,
 ) -> Result<(), Box<dyn Error>> {
@@ -71,7 +71,7 @@ pub(crate) fn insert_with_cost(
         Arc::new(tx),
         vsize,
         fee,
-        sequence,
+        time,
         height,
         sigop_cost,
     ))?;

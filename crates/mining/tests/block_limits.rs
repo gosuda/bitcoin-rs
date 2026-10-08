@@ -172,7 +172,6 @@ fn snapshot(count: usize, witness: bool) -> Result<MempoolMiningSnapshot, Box<dy
 }
 
 /// Creates a measured transaction with optional witness and an explicit dependency edge.
-/// Labels run past 252, so the outpoint takes two label bytes rather than one.
 fn entry(
     label: u16,
     parent: Option<Txid>,

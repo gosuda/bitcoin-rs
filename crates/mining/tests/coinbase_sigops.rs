@@ -88,7 +88,7 @@ fn coinbase_and_admitted_package_costs_share_one_inclusive_limit() -> TestResult
         let cost = transaction_sigop_cost(&tx, &[], VerifyFlags::NONE);
         assert_eq!(cost, 4);
         let vsize = u32::try_from(tx.vsize())?;
-        insert_with_cost(&mut pool, tx, vsize, fee, 1, 1, cost)?;
+        insert_with_cost(&mut pool, tx, vsize, fee, 1, 100, cost)?;
     }
     let snapshot = pool.mining_snapshot();
     for segwit_active in [false, true] {

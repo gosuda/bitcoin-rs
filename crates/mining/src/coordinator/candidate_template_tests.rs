@@ -139,27 +139,26 @@ fn template_projects_candidate_generation_and_deployment_flags() {
             vec!["segwit", "csv", "taproot", "signet"],
         ),
     ];
-    let mut previous_id = None;
-    for (index, (network, label, submit_old, csv_active, segwit_active, expected)) in
-        cases.into_iter().enumerate()
-    {
+    let mut generations: Vec<(Hash256, TemplateId)> = Vec::new();
+    for (network, label, submit_old, csv_active, segwit_active, expected) in cases {
         let prev = Hash256::from_le_bytes(&[label; 32]);
-        let template = template_from_candidate(
-            network,
-            Arc::new(sample_candidate(prev, 1, csv_active, segwit_active)),
-            submit_old,
-            Vec::new(),
-            0,
-        );
+        let candidate = sample_candidate(prev, 1, csv_active, segwit_active);
+        let expected_id = candidate.template_id.clone();
+        let template =
+            template_from_candidate(network, Arc::new(candidate), submit_old, Vec::new(), 0);
         assert_eq!(template.candidate.previous_block_hash, prev);
         assert_eq!(template.candidate.csv_active, csv_active);
         assert_eq!(template.candidate.segwit_active, segwit_active);
         assert_eq!(template.submit_old, submit_old);
         assert_eq!(rule_names(&template), expected);
-        if index == 1 {
-            assert_ne!(Some(&template.candidate.template_id), previous_id.as_ref());
+        assert_eq!(template.candidate.template_id, expected_id);
+        for (other_prev, other_id) in &generations {
+            assert_eq!(
+                prev == *other_prev,
+                template.candidate.template_id == *other_id
+            );
         }
-        previous_id = Some(template.candidate.template_id.clone());
+        generations.push((prev, template.candidate.template_id.clone()));
         assert_eq!(
             template
                 .capabilities
