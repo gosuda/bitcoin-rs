@@ -13,7 +13,7 @@ const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
 /// manifest remains their value owner; changing any value requires reviewing
 /// the external artifact evidence and deliberately updating its fingerprint.
 const RELEASE_CUSTODY_SHA256: &str =
-    "12e58454e41bb8d15c6998b999c25c8ce407e513cb4ce7d09ccb494b321d24be";
+    "19c4f540d597ff5482cb39fdeccba654b26dda24a601115cd0db6bc3f10d4eaf";
 const KERNEL_CUSTODY_SHA256: &str =
     "567455b412b76af4b394b371defc42f7e01c2a4e1dd2cdd1b891ca549c775f3b";
 
@@ -58,11 +58,26 @@ impl ReferenceSet {
     }
 }
 
+/// One pinned release artifact: a bitcoincore.org archive and the digests
+/// of the tarball and the `bitcoind` binary inside it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReleaseArtifact {
+    /// The archive's platform suffix (e.g. `x86_64-linux-gnu`).
+    pub(crate) target: String,
+    /// Release archive the binary digest is taken from.
+    pub(crate) archive: String,
+    /// SHA-256 of the release archive.
+    pub(crate) archive_sha256: [u8; 32],
+    /// SHA-256 of the `bitcoind` binary inside the archive.
+    pub(crate) bitcoind_sha256: [u8; 32],
+}
+
 /// The released Bitcoin Core product identity.
 ///
 /// `core_version` is a released `MAJOR.MINOR` product (e.g. `31.1`), pinned
-/// by source commit and by the digests of the archive and the `bitcoind`
-/// binary inside it.
+/// by source commit and by digested artifacts: the canonical one whose
+/// `bitcoind` captured the checked-in fixtures, plus one row per additional
+/// platform a lane may run on.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReleaseIdentity {
     /// Released product version, `MAJOR.MINOR`.
@@ -71,14 +86,52 @@ pub(crate) struct ReleaseIdentity {
     pub(crate) git_tag: String,
     /// Source commit the release was built from.
     pub(crate) source_commit: String,
-    /// Release archive the binary digest is taken from.
-    pub(crate) archive: String,
-    /// SHA-256 of the release archive.
-    pub(crate) archive_sha256: [u8; 32],
-    /// SHA-256 of the `bitcoind` binary inside the archive.
-    pub(crate) bitcoind_sha256: [u8; 32],
+    /// The canonical artifact: the fixture-capture platform's pinning.
+    pub(crate) canonical: ReleaseArtifact,
+    /// Additional runnable artifacts keyed by `target`; no target may repeat
+    /// the canonical one or a sibling's.
+    pub(crate) platforms: Vec<ReleaseArtifact>,
     /// The exact `bitcoind -version` line the pinned binary must print.
     pub(crate) version_output: String,
+}
+
+impl ReleaseIdentity {
+    /// The pinned artifact runnable on `target`: the canonical artifact when
+    /// it names the target, else the matching `platforms` row. `None` means
+    /// the manifest pins no artifact for the platform — an identity failure,
+    /// never a skipped check.
+    pub(crate) fn artifact_for(&self, target: &str) -> Option<&ReleaseArtifact> {
+        if self.canonical.target == target {
+            return Some(&self.canonical);
+        }
+        self.platforms.iter().find(|row| row.target == target)
+    }
+
+    /// The `bitcoind` digest that captured the checked-in fixtures: always
+    /// the canonical artifact's, regardless of the platform running this
+    /// suite.
+    pub(crate) fn capture_bitcoind_sha256(&self) -> [u8; 32] {
+        self.canonical.bitcoind_sha256
+    }
+
+    /// The pinned artifact runnable on the host platform, when the manifest
+    /// carries one.
+    pub(crate) fn current_artifact(&self) -> Option<&ReleaseArtifact> {
+        self.artifact_for(current_platform_target()?)
+    }
+}
+
+/// The host platform's release-archive suffix, mirroring the uname mapping in
+/// `scripts/install-bitcoind.sh`. `None` on platforms no pinned artifact can
+/// execute on.
+pub(crate) fn current_platform_target() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("x86_64-linux-gnu"),
+        ("linux", "aarch64") => Some("aarch64-linux-gnu"),
+        ("macos", "aarch64") => Some("arm64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        _ => None,
+    }
 }
 
 /// The Core development tree the oracle lane links.
@@ -169,6 +222,13 @@ pub(crate) enum ReferenceError {
         /// The complete identity tuple that did not match.
         identity: &'static str,
     },
+    /// Two artifact rows pin the same platform target, making the runnable
+    /// artifact ambiguous.
+    #[error("more than one release artifact pins target `{target}`")]
+    DuplicateArtifactTarget {
+        /// The repeated platform target.
+        target: String,
+    },
     /// The released product and the kernel development tree were confused.
     #[error(
         "the released product identity and the 31.99.x kernel tree identity were \
@@ -203,11 +263,29 @@ pub(crate) fn load_reference_set(manifest: &str) -> Result<ReferenceSet, Referen
         core_version: required_str(release_table, "core_version")?,
         git_tag: required_str(release_table, "git_tag")?,
         source_commit: required_commit(release_table, "source_commit")?,
-        archive: required_str(release_table, "archive")?,
-        archive_sha256: required_sha256(release_table, "archive_sha256")?,
-        bitcoind_sha256: required_sha256(release_table, "bitcoind_sha256")?,
+        canonical: release_artifact(release_table)?,
+        platforms: release_platforms(release_table)?,
         version_output: required_str(release_table, "version_output")?,
     };
+    if release
+        .platforms
+        .iter()
+        .any(|row| row.target == release.canonical.target)
+    {
+        return Err(ReferenceError::DuplicateArtifactTarget {
+            target: release.canonical.target,
+        });
+    }
+    for (index, row) in release.platforms.iter().enumerate() {
+        if release.platforms[..index]
+            .iter()
+            .any(|prior| prior.target == row.target)
+        {
+            return Err(ReferenceError::DuplicateArtifactTarget {
+                target: row.target.clone(),
+            });
+        }
+    }
 
     let kernel = KernelIdentity {
         core_version: required_str(reference, "core_version")?,
@@ -241,19 +319,29 @@ fn check_custody_bindings(
     release: &ReleaseIdentity,
     kernel: &KernelIdentity,
 ) -> Result<(), ReferenceError> {
-    let release_archive = sha256::Hash::from_byte_array(release.archive_sha256).to_string();
-    let release_binary = sha256::Hash::from_byte_array(release.bitcoind_sha256).to_string();
-    let release_tuple = [
-        "bitcoin-rs/reference-release/v1",
-        release.core_version.as_str(),
-        release.git_tag.as_str(),
-        release.source_commit.as_str(),
-        release.archive.as_str(),
-        release_archive.as_str(),
-        release_binary.as_str(),
-        release.version_output.as_str(),
-    ]
-    .join("\0");
+    // v2 tuple layout: the product identity fields, then each pinned
+    // artifact (canonical first, `platforms` rows in manifest order).
+    let artifact_fields = |artifact: &ReleaseArtifact| {
+        format!(
+            "{}\0{}\0{}\0{}",
+            artifact.target,
+            artifact.archive,
+            sha256::Hash::from_byte_array(artifact.archive_sha256),
+            sha256::Hash::from_byte_array(artifact.bitcoind_sha256),
+        )
+    };
+    let mut release_tuple = format!(
+        "bitcoin-rs/reference-release/v2\0{}\0{}\0{}\0{}\0{}",
+        release.core_version,
+        release.git_tag,
+        release.source_commit,
+        release.version_output,
+        artifact_fields(&release.canonical),
+    );
+    for row in &release.platforms {
+        release_tuple.push('\0');
+        release_tuple.push_str(&artifact_fields(row));
+    }
     check_custody_fingerprint("reference.release", &release_tuple, RELEASE_CUSTODY_SHA256)?;
 
     let kernel_package = sha256::Hash::from_byte_array(kernel.kernel_sys_crate_sha256).to_string();
@@ -272,6 +360,37 @@ fn check_custody_bindings(
     ]
     .join("\0");
     check_custody_fingerprint("reference.kernel", &kernel_tuple, KERNEL_CUSTODY_SHA256)
+}
+
+/// One `[reference.release]`-shaped table as a digested artifact: the
+/// canonical table and each `[[reference.release.platforms]]` row share it.
+fn release_artifact(section: &toml::Table) -> Result<ReleaseArtifact, ReferenceError> {
+    Ok(ReleaseArtifact {
+        target: required_str(section, "target")?,
+        archive: required_str(section, "archive")?,
+        archive_sha256: required_sha256(section, "archive_sha256")?,
+        bitcoind_sha256: required_sha256(section, "bitcoind_sha256")?,
+    })
+}
+
+/// The optional `[[reference.release.platforms]]` rows; absent means only the
+/// canonical artifact may execute.
+fn release_platforms(section: &toml::Table) -> Result<Vec<ReleaseArtifact>, ReferenceError> {
+    let Some(rows) = section.get("platforms") else {
+        return Ok(Vec::new());
+    };
+    let rows = rows
+        .as_array()
+        .ok_or(ReferenceError::VersionLabelOnly { field: "platforms" })?;
+    rows.iter()
+        .map(|value| {
+            release_artifact(
+                value
+                    .as_table()
+                    .ok_or(ReferenceError::VersionLabelOnly { field: "platforms" })?,
+            )
+        })
+        .collect()
 }
 
 fn check_custody_fingerprint(
