@@ -71,21 +71,13 @@ use std::{
 };
 
 mod capability;
-
 mod catch_up;
-
 mod cursor;
-
 mod lifecycle;
-
 mod namespace;
-
 mod query;
-
 mod reconciliation;
-
 mod rollback;
-
 mod startup;
 pub use startup::open_derived_index_store_on_worker;
 
@@ -369,15 +361,12 @@ impl DerivedIndexQueryAdapter {
         let snapshot = self.lifecycle.load_full();
         match &*snapshot {
             DerivedIndexLifecycle::Serving(engine) => Ok(Arc::clone(engine)),
-            // Opening has not published a query engine yet.
             DerivedIndexLifecycle::Opening => {
                 Err(TxQueryError::Unavailable("txindex is opening".into()))
             }
-            // Failed startup leaves the index unavailable.
             DerivedIndexLifecycle::Failed(_) => {
                 Err(TxQueryError::Unavailable("txindex is unavailable".into()))
             }
-            // Shutdown abandoned the backend before it opened.
             DerivedIndexLifecycle::ShutdownAbandoned => Err(TxQueryError::Unavailable(
                 "txindex was abandoned at shutdown".into(),
             )),

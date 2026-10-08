@@ -1036,24 +1036,6 @@ mod tests {
     }
 
     #[test]
-    fn disabled_rest_is_not_found() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/chaininfo.json", "", false);
-        assert_eq!(response.status, 404);
-    }
-
-    #[test]
-    fn chaininfo_json_uses_enforcer_field_names() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/chaininfo.json", "", true);
-        assert_eq!(response.status, 200);
-        let value: Value = sonic_rs::from_slice(&response.body).expect("chaininfo JSON");
-        for field in ["chain", "blocks", "headers", "bestblockhash"] {
-            assert!(value.get(field).is_some(), "missing {field}");
-        }
-    }
-
-    #[test]
     fn exhausted_block_render_budget_returns_service_unavailable() {
         let mut ctx = Context::new();
         let block = Block {
@@ -1609,160 +1591,120 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn tx_not_found_returns_404() {
+    fn route_status_table() {
+        const HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
         let ctx = Arc::new(Context::new());
-        let txid = "0000000000000000000000000000000000000000000000000000000000000001";
-        for format in ["json", "hex", "bin"] {
-            let response = route(&ctx, &format!("/rest/tx/{txid}.{format}"), "", true);
-            assert_eq!(response.status, 404, "{format}");
+        let cases: Vec<(String, &str, u16)> = vec![
+            (format!("/rest/tx/{HASH}.json"), "", 404),
+            (format!("/rest/tx/{HASH}.hex"), "", 404),
+            (format!("/rest/tx/{HASH}.bin"), "", 404),
+            (format!("/rest/tx/{HASH}"), "", 404),
+            (format!("/rest/tx/{HASH}.txt"), "", 400),
+            ("/rest/tx/not-a-hash.json".into(), "", 400),
+            (format!("/rest/block/notxdetails/{HASH}.json"), "", 404),
+            (format!("/rest/block/{HASH}.json"), "", 404),
+            (format!("/rest/block/{HASH}.hex"), "", 404),
+            (format!("/rest/block/{HASH}.bin"), "", 404),
+            ("/rest/block/not-a-hash.json".into(), "", 400),
+            (format!("/rest/blockpart/{HASH}.bin"), "", 404),
+            (format!("/rest/blockpart/{HASH}.hex"), "", 404),
+            // blockpart serves bin and hex only.
+            (format!("/rest/blockpart/{HASH}.json"), "", 404),
+            ("/rest/chaininfo.json".into(), "", 200),
+            ("/rest/chaininfo.bin".into(), "", 404),
+            ("/rest/mempool/info.json".into(), "", 200),
+            ("/rest/mempool/contents.json".into(), "", 200),
+            ("/rest/mempool/contents.json".into(), "verbose=false", 200),
+            ("/rest/mempool/contents.json".into(), "verbose=maybe", 400),
+            (
+                "/rest/mempool/contents.json".into(),
+                "verbose=true&mempool_sequence=true",
+                400,
+            ),
+            ("/rest/mempool/foo.json".into(), "", 400),
+            ("/rest/mempool/info.bin".into(), "", 404),
+            (format!("/rest/headers/{HASH}.json"), "count=1", 200),
+            (format!("/rest/headers/{HASH}.txt"), "count=1", 400),
+            ("/rest/getutxos.json".into(), "", 400),
+            ("/rest/getutxos/not-a-txid-0.json".into(), "", 400),
+            (format!("/rest/getutxos/{HASH}-0"), "", 404),
+            (format!("/rest/getutxos/{HASH}-0.json"), "", 200),
+            ("/rest/deploymentinfo.json".into(), "", 200),
+            ("/rest/deploymentinfo.bin".into(), "", 404),
+            ("/rest/deploymentinfo/not-a-hash.json".into(), "", 400),
+            // A well-formed but unknown hash is a bad request, not a 404.
+            (format!("/rest/deploymentinfo/{HASH}.json"), "", 400),
+            // An empty context still knows genesis at height 0.
+            ("/rest/blockhashbyheight/0.json".into(), "", 200),
+            ("/rest/blockhashbyheight/0.hex".into(), "", 200),
+            ("/rest/blockhashbyheight/0.bin".into(), "", 200),
+            ("/rest/blockhashbyheight/999.json".into(), "", 404),
+            ("/rest/blockhashbyheight/999.hex".into(), "", 404),
+            ("/rest/blockhashbyheight/999.bin".into(), "", 404),
+            ("/rest/blockhashbyheight/abc.json".into(), "", 400),
+            ("/rest/blockhashbyheight/0".into(), "", 404),
+            ("/rest/blockhashbyheight/0.txt".into(), "", 400),
+            (format!("/rest/spenttxouts/{HASH}.json"), "", 404),
+            ("/rest/spenttxouts/not-a-hash.json".into(), "", 400),
+            (format!("/rest/block/notxdetails/{HASH}.hex"), "", 404),
+            (format!("/rest/block/notxdetails/{HASH}.txt"), "", 400),
+            (format!("/rest/block/{HASH}.txt"), "", 400),
+            (format!("/rest/blockpart/{HASH}.txt"), "", 400),
+            (format!("/rest/headers/{HASH}.hex"), "count=1", 200),
+            (format!("/rest/headers/{HASH}.bin"), "count=1", 200),
+            (format!("/rest/headers/{HASH}.json"), "count=0", 400),
+            (format!("/rest/getutxos/{HASH}-0.txt"), "", 400),
+            (
+                format!("/rest/getutxos/checkmempool/{HASH}-0.json"),
+                "",
+                200,
+            ),
+            ("/rest/mempool/info.hex".into(), "", 404),
+            ("/rest/mempool/info.txt".into(), "", 400),
+            (format!("/rest/spenttxouts/{HASH}.hex"), "", 404),
+            (format!("/rest/spenttxouts/{HASH}.bin"), "", 404),
+            (format!("/rest/spenttxouts/{HASH}.txt"), "", 400),
+            ("/rest/unknown".into(), "", 404),
+        ];
+
+        for (path, query, status) in &cases {
+            let response = route(&ctx, path, query, true);
+            assert_eq!(response.status, *status, "{path}?{query}");
+            if *status == 200 {
+                let content_type = match path.rsplit_once('.') {
+                    Some((_, "json")) => "application/json",
+                    Some((_, "hex")) => "text/plain",
+                    _ => "application/octet-stream",
+                };
+                assert_eq!(response.content_type, content_type, "{path}?{query}");
+            }
+            assert_eq!(
+                route(&ctx, path, query, false).status,
+                404,
+                "disabled REST must 404 for {path}?{query}"
+            );
         }
-    }
-
-    #[test]
-    fn tx_bad_hash_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/tx/not-a-hash.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn tx_missing_format_returns_404() {
-        let ctx = Arc::new(Context::new());
-        let response = route(
-            &ctx,
-            "/rest/tx/0000000000000000000000000000000000000000000000000000000000000001",
-            "",
-            true,
-        );
-        assert_eq!(response.status, 404);
-    }
-
-    #[test]
-    fn block_not_found_returns_404() {
-        let ctx = Arc::new(Context::new());
-        let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-        for format in ["json", "hex", "bin"] {
-            let response = route(&ctx, &format!("/rest/block/{hash}.{format}"), "", true);
-            assert_eq!(response.status, 404, "{format}");
+        for prefix in REGISTRATIONS {
+            assert!(
+                cases.iter().any(|(path, _, _)| path.starts_with(prefix)),
+                "no row probes {prefix}"
+            );
         }
-    }
-
-    #[test]
-    fn block_bad_hash_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/block/not-a-hash.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn block_notxdetails_prefix_is_distinct_from_block() {
-        let ctx = Arc::new(Context::new());
-        let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-        let response = route(
-            &ctx,
-            &format!("/rest/block/notxdetails/{hash}.json"),
-            "",
-            true,
+        let unknown = route(&ctx, "/rest/unknown", "", true);
+        assert_eq!(
+            String::from_utf8(unknown.body).expect("not-found body"),
+            "not found"
         );
-        assert_eq!(response.status, 404);
     }
 
     #[test]
-    fn blockpart_rejects_json_format() {
+    fn chaininfo_json_uses_enforcer_field_names() {
         let ctx = Arc::new(Context::new());
-        let hash = "0000000000000000000000000000000000000000000000000000000000000001";
-        let response = route(&ctx, &format!("/rest/blockpart/{hash}.json"), "", true);
-        // blockpart only serves bin/hex; json is not a valid format
-        assert_eq!(response.status, 404);
-    }
-
-    #[test]
-    fn chaininfo_rejects_non_json_format() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/chaininfo.bin", "", true);
-        assert_eq!(response.status, 404);
-    }
-
-    #[test]
-    fn mempool_info_json() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/mempool/info.json", "", true);
-        assert_eq!(response.status, 200);
-        assert_eq!(response.content_type, "application/json");
-    }
-
-    #[test]
-    fn mempool_contents_json() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/mempool/contents.json", "", true);
-        assert_eq!(response.status, 200);
-        assert_eq!(response.content_type, "application/json");
-    }
-
-    #[test]
-    fn mempool_contents_verbose_false() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/mempool/contents.json", "verbose=false", true);
-        assert_eq!(response.status, 200);
-    }
-
-    #[test]
-    fn mempool_contents_verbose_bad_value_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/mempool/contents.json", "verbose=maybe", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn mempool_contents_verbose_and_sequence_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(
-            &ctx,
-            "/rest/mempool/contents.json",
-            "verbose=true&mempool_sequence=true",
-            true,
-        );
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn mempool_invalid_kind_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/mempool/foo.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn mempool_non_json_format_returns_404() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/mempool/info.bin", "", true);
-        assert_eq!(response.status, 404);
-    }
-
-    #[test]
-    fn getutxos_empty_request_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/getutxos.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn getutxos_bad_outpoint_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/getutxos/not-a-txid-0.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn getutxos_missing_format_returns_404() {
-        let ctx = Arc::new(Context::new());
-        let response = route(
-            &ctx,
-            "/rest/getutxos/0000000000000000000000000000000000000000000000000000000000000001-0",
-            "",
-            true,
-        );
-        assert_eq!(response.status, 404);
+        let response = route(&ctx, "/rest/chaininfo.json", "", true);
+        let value: Value = sonic_rs::from_slice(&response.body).expect("chaininfo JSON");
+        for field in ["chain", "blocks", "headers", "bestblockhash"] {
+            assert!(value.get(field).is_some(), "{field}: {value:?}");
+        }
     }
 
     #[test]
@@ -1928,6 +1870,7 @@ mod tests {
         arm_rival(&ctx);
         let response = route(&ctx, "/rest/deploymentinfo.json", "", true);
         let value: Value = sonic_rs::from_slice(&response.body).expect("deploymentinfo JSON");
+        assert_eq!(value.get("deployments"), Some(&json!({})));
         assert_eq!(
             value.get("height").and_then(Value::as_u64),
             Some(u64::from(applied_height)),
@@ -1987,57 +1930,6 @@ mod tests {
     }
 
     #[test]
-    fn deploymentinfo_json() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/deploymentinfo.json", "", true);
-        assert_eq!(response.status, 200);
-        let value: Value = sonic_rs::from_slice(&response.body).expect("deploymentinfo JSON");
-        assert!(value.get("deployments").is_some());
-    }
-
-    #[test]
-    fn deploymentinfo_non_json_returns_404() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/deploymentinfo.bin", "", true);
-        assert_eq!(response.status, 404);
-    }
-
-    #[test]
-    fn deploymentinfo_bad_hash_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/deploymentinfo/not-a-hash.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn blockhashbyheight_out_of_range_returns_404() {
-        let ctx = Arc::new(Context::new());
-        for format in ["json", "hex", "bin"] {
-            let response = route(
-                &ctx,
-                &format!("/rest/blockhashbyheight/999.{format}"),
-                "",
-                true,
-            );
-            assert_eq!(response.status, 404, "{format}");
-        }
-    }
-
-    #[test]
-    fn blockhashbyheight_bad_height_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/blockhashbyheight/abc.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn blockhashbyheight_missing_format_returns_404() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/blockhashbyheight/0", "", true);
-        assert_eq!(response.status, 404);
-    }
-
-    #[test]
     fn spenttxouts_returns_unavailable() {
         let ctx = Arc::new(Context::new());
         let hash = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -2055,76 +1947,6 @@ mod tests {
                     .contains("undo not available"),
                 "{format}"
             );
-        }
-    }
-
-    #[test]
-    fn spenttxouts_bad_hash_returns_400() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/spenttxouts/not-a-hash.json", "", true);
-        assert_eq!(response.status, 400);
-    }
-
-    #[test]
-    fn unknown_rest_path_returns_404() {
-        let ctx = Arc::new(Context::new());
-        let response = route(&ctx, "/rest/unknown", "", true);
-        assert_eq!(response.status, 404);
-    }
-
-    /// Every REGISTRATIONS prefix must be dispatched — none falls through to
-    /// the generic 404. We verify by checking that each prefix produces a
-    /// response distinct from the generic "not found" body (or at minimum is
-    /// handled, not silently passed through).
-    #[test]
-    fn all_registration_prefixes_are_dispatched() {
-        let ctx = Arc::new(Context::new());
-        // Each prefix gets a well-formed-ish path appended; the assertion is
-        // that the route function handles it (returns a response) rather than
-        // panicking or falling through.
-        let cases: &[(&str, &str)] = &[
-            (
-                "/rest/tx/0000000000000000000000000000000000000000000000000000000000000001.json",
-                "",
-            ),
-            (
-                "/rest/block/notxdetails/0000000000000000000000000000000000000000000000000000000000000001.json",
-                "",
-            ),
-            (
-                "/rest/block/0000000000000000000000000000000000000000000000000000000000000001.json",
-                "",
-            ),
-            (
-                "/rest/blockpart/0000000000000000000000000000000000000000000000000000000000000001.bin",
-                "",
-            ),
-            ("/rest/chaininfo.json", ""),
-            ("/rest/mempool/info.json", ""),
-            (
-                "/rest/headers/0000000000000000000000000000000000000000000000000000000000000001.json",
-                "count=1",
-            ),
-            (
-                "/rest/getutxos/0000000000000000000000000000000000000000000000000000000000000001-0.json",
-                "",
-            ),
-            ("/rest/deploymentinfo.json", ""),
-            (
-                "/rest/deploymentinfo/0000000000000000000000000000000000000000000000000000000000000001.json",
-                "",
-            ),
-            ("/rest/blockhashbyheight/0.json", ""),
-            (
-                "/rest/spenttxouts/0000000000000000000000000000000000000000000000000000000000000001.json",
-                "",
-            ),
-        ];
-        assert_eq!(cases.len(), REGISTRATIONS.len());
-        for (path, query) in cases {
-            let _response = route(&ctx, path, query, true);
-            // The assertion is that route handles the prefix without panicking.
-            // Specific status codes are covered by the per-route tests above.
         }
     }
 }

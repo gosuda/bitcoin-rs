@@ -56,9 +56,6 @@ pub struct SnapshotLoad {
 }
 
 /// A live coin borrowed while a snapshot is traversed.
-///
-/// The script borrows the snapshot record only for the duration of the
-/// observer callback.
 #[derive(Copy, Clone)]
 pub struct SnapshotCoin<'a> {
     /// Transaction identifier that created this output.
@@ -76,10 +73,6 @@ pub struct SnapshotCoin<'a> {
 }
 
 /// Observes each live coin traversed by snapshot serialization or strict loading.
-///
-/// A later I/O or validation error can follow an observation. Implementations
-/// must keep derived state inside the owned observer and publish only the
-/// observer returned by a successful traversal.
 pub trait SnapshotCoinObserver {
     /// Observes one live coin.
     fn observe_coin(&mut self, coin: SnapshotCoin<'_>);
@@ -95,9 +88,6 @@ impl SnapshotCoinObserver for () {
 }
 
 /// Streams a native bitcoin-rs UTXO snapshot while observing every live coin.
-///
-/// Returns the selected trailer and observer only after the complete snapshot is
-/// written successfully.
 pub fn write_snapshot_observed<O: SnapshotCoinObserver, W: Write + ?Sized>(
     set: &UtxoSet,
     tip_hash: &Hash256,
@@ -178,9 +168,6 @@ pub fn read_snapshot_strict_v4(reader: &mut impl Read) -> Result<SnapshotLoad, U
 }
 
 /// Strictly decodes a complete v4 snapshot while observing each inserted coin.
-///
-/// The observer is returned only after trailer and EOF validation succeeds.
-/// Callbacks can precede a later error, so they must not publish external state.
 pub fn read_snapshot_strict_v4_observed<O: SnapshotCoinObserver>(
     reader: &mut impl Read,
     mut observer: O,

@@ -1,5 +1,5 @@
 use crate::TxIndexSnapshot;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::block_log::BlockRecord;
 use crate::types::{TxPosition, TxPositionValue, TxidRow};
@@ -7,8 +7,8 @@ use crate::{HashPrefixRow, IndexCapabilities, ScriptHashRow, ScriptLiveRow, Spen
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_chain::{NodeStatus, regtest_fixture};
 use bitcoin_rs_primitives::{
-    Block, BlockHash, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes,
+    Block, BlockHash, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness, consensus_bytes,
 };
 use bitcoin_rs_storage::{ColumnFamily, PrefixScan, PrefixScanLimit};
 
@@ -25,7 +25,6 @@ struct ScanResponse {
 struct QuerySnapshot {
     watermark: IndexWatermark,
     scans: Vec<ScanResponse>,
-    aba: Option<Arc<AbaMutation>>,
     chain_transition: bitcoin_rs_chain::StableRead,
 }
 
@@ -44,9 +43,6 @@ impl QuerySnapshot {
     }
 
     fn typed_scan(&self, cf: ColumnFamily, prefix: &[u8]) -> Result<TxIndexScan, IndexError> {
-        if let Some(aba) = &self.aba {
-            aba.trigger_on(cf, prefix);
-        }
         let scan = self.scan_for(cf, prefix);
         let encoded_bytes = scan.rows.iter().fold(0_usize, |total, (key, value)| {
             total.saturating_add(key.len()).saturating_add(value.len())
@@ -122,12 +118,6 @@ impl TxIndexSnapshot for QuerySnapshot {
             self.chain_transition.try_lock().is_none(),
             "ScriptLive scan must run under chain-transition exclusion"
         );
-        if let Some(aba) = &self.aba {
-            aba.trigger_on(
-                ColumnFamily::ScriptLive,
-                &ScriptHashRow::scan_prefix(scripthash),
-            );
-        }
         let scan = self.scan_for(
             ColumnFamily::ScriptLive,
             &ScriptHashRow::scan_prefix(scripthash),
@@ -163,37 +153,10 @@ impl IndexReader for QueryReader {
     }
 }
 
-struct AbaMutation {
-    trigger_cf: ColumnFamily,
-    trigger_prefix: Vec<u8>,
-    triggered: AtomicBool,
-    runtime: Arc<DerivedIndexRuntime>,
-    applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    away: Arc<TipSnapshot>,
-    home: Arc<TipSnapshot>,
-}
-
-impl AbaMutation {
-    fn trigger_on(&self, cf: ColumnFamily, prefix: &[u8]) {
-        if cf != self.trigger_cf
-            || prefix != self.trigger_prefix
-            || self.triggered.swap(true, Ordering::AcqRel)
-        {
-            return;
-        }
-
-        self.applied_tip.store(Some(Arc::clone(&self.away)));
-        self.runtime.wake();
-        self.applied_tip.store(Some(Arc::clone(&self.home)));
-        self.runtime.wake();
-    }
-}
-
 struct FixtureConfig {
     block: Block,
     retain_body: bool,
     scans: Vec<ScanResponse>,
-    aba_trigger: Option<(ColumnFamily, Vec<u8>)>,
     watermark: Option<IndexWatermark>,
 }
 
@@ -208,7 +171,6 @@ pub(super) struct SingleBlockBody {
     pub(super) hash: BlockHash,
     pub(super) body: Vec<u8>,
     pub(super) full_reads: AtomicUsize,
-    pub(super) range_reads: AtomicUsize,
 }
 
 impl BlockBodySource for SingleBlockBody {
@@ -229,7 +191,6 @@ impl BlockBodySource for SingleBlockBody {
         if height != self.height || hash != self.hash {
             return None;
         }
-        self.range_reads.fetch_add(1, Ordering::Relaxed);
         let start = usize::try_from(offset).ok()?;
         let end = start.checked_add(usize::try_from(len).ok()?)?;
         self.body.get(start..end).map(<[u8]>::to_vec)
@@ -256,20 +217,6 @@ impl QueryFixture {
 
         let (wake_tx, _wake_rx) = crossbeam_channel::bounded(4);
         let runtime = Arc::new(DerivedIndexRuntime::new(wake_tx));
-        let aba = config.aba_trigger.map(|(trigger_cf, trigger_prefix)| {
-            let mut away = tip.clone();
-            away.hash = Hash256::from_le_bytes(&[0x5a; 32]);
-            Arc::new(AbaMutation {
-                trigger_cf,
-                trigger_prefix,
-                triggered: AtomicBool::new(false),
-                runtime: Arc::clone(&runtime),
-                applied_tip: Arc::clone(&applied_tip),
-                away: Arc::new(away),
-                home,
-            })
-        });
-
         let watermark = config.watermark.unwrap_or(IndexWatermark {
             height: tip.height,
             hash: *tip.hash.as_byte_array(),
@@ -278,7 +225,6 @@ impl QueryFixture {
             snapshot: QuerySnapshot {
                 watermark,
                 scans: config.scans,
-                aba,
                 chain_transition: chain_transition.clone(),
             },
         });
@@ -293,7 +239,6 @@ impl QueryFixture {
                 hash: config.block.block_hash(),
                 body: consensus_bytes(&config.block),
                 full_reads: AtomicUsize::new(0),
-                range_reads: AtomicUsize::new(0),
             })
         });
         let body_source: Option<Arc<dyn BlockBodySource>> = body.as_ref().map(|source| {
@@ -332,42 +277,30 @@ impl QueryFixture {
 }
 
 #[test]
-fn failed_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let txid = block.txs[0].txid();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block,
-        retain_body: true,
-        scans: Vec::new(),
-        aba_trigger: None,
-        watermark: None,
-    })?;
-    fixture.runtime.publish_failed("injected worker failure");
+fn unusable_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error::Error>> {
+    for (publish, expected) in [
+        (true, "injected worker failure"),
+        (false, "txindex worker stopped"),
+    ] {
+        let block = Network::Regtest.genesis_block();
+        let txid = block.txs[0].txid();
+        let fixture = QueryFixture::new(FixtureConfig {
+            block,
+            retain_body: true,
+            scans: Vec::new(),
+            watermark: None,
+        })?;
+        if publish {
+            fixture.runtime.publish_failed("injected worker failure");
+        } else {
+            fixture.runtime.request_shutdown();
+        }
 
-    assert!(matches!(
-        fixture.engine.transaction(&txid),
-        Err(TxQueryError::Unavailable(reason)) if reason == "injected worker failure"
-    ));
-    Ok(())
-}
-
-#[test]
-fn stopped_worker_makes_queries_unavailable() -> Result<(), Box<dyn std::error::Error>> {
-    let block = Network::Regtest.genesis_block();
-    let txid = block.txs[0].txid();
-    let fixture = QueryFixture::new(FixtureConfig {
-        block,
-        retain_body: true,
-        scans: Vec::new(),
-        aba_trigger: None,
-        watermark: None,
-    })?;
-    fixture.runtime.request_shutdown();
-
-    assert!(matches!(
-        fixture.engine.transaction(&txid),
-        Err(TxQueryError::Unavailable(reason)) if reason == "txindex worker stopped"
-    ));
+        assert!(matches!(
+            fixture.engine.transaction(&txid),
+            Err(TxQueryError::Unavailable(reason)) if reason == expected
+        ));
+    }
     Ok(())
 }
 
@@ -443,7 +376,6 @@ fn transaction_rejects_watermark_from_rival_tip() -> Result<(), Box<dyn std::err
             vec![(indexed_row, Vec::new())],
             true,
         )],
-        aba_trigger: None,
         watermark: Some(IndexWatermark {
             height: 0,
             hash: [0x5a; 32],
@@ -472,7 +404,6 @@ fn transaction_rejects_incomplete_prefix_scan() -> Result<(), Box<dyn std::error
             vec![(tempting_row, Vec::new())],
             false,
         )],
-        aba_trigger: None,
         watermark: None,
     })?;
 
@@ -499,7 +430,6 @@ fn transaction_reports_unavailable_when_indexed_body_is_missing()
             vec![(indexed_row, Vec::new())],
             true,
         )],
-        aba_trigger: None,
         watermark: None,
     })?;
 
@@ -526,7 +456,6 @@ fn spending_position_mismatch_falls_back_to_full_block() -> Result<(), Box<dyn s
             )],
             true,
         )],
-        aba_trigger: None,
         watermark: None,
     })?;
 

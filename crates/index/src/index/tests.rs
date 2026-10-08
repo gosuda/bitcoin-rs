@@ -7,7 +7,9 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_storage::{BufferedWriteBatch, ColumnFamily, KvStore, RocksDbStore};
 
-use super::{BlockSource, IndexError, IndexWatermark, IndexWriter, Indexer};
+use super::{
+    BlockSource, IndexCapability, IndexError, IndexReader, IndexWatermark, IndexWriter, Indexer,
+};
 use crate::{ScriptHash, ScriptHashRow, ScriptHistoryEntry, ScriptLiveRow, SpendingPrefixRow};
 
 type StoredRows = Vec<(ColumnFamily, Vec<u8>)>;
@@ -602,8 +604,6 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
 #[test]
 fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
 -> Result<(), Box<dyn std::error::Error>> {
-    use super::{IndexCapability, IndexReader, IndexWatermark};
-
     let (_dir, writer) = writer()?;
     let anchor = IndexWatermark {
         height: 41,
