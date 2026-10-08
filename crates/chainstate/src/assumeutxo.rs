@@ -414,6 +414,13 @@ impl AssumeUtxoManager {
         manager.recover_pending().inspect_err(|_| {
             manager.active_chainstate.fail_closed_for_recovery();
         })?;
+        if let AssumeUtxoDiskStatus::Validating {
+            checkpoint: Some(checkpoint),
+            ..
+        } = manager.status()?
+        {
+            manager.retire_historical_checkpoint(checkpoint.checkpoint);
+        }
         Ok(manager)
     }
 
@@ -458,7 +465,7 @@ impl AssumeUtxoManager {
             &data,
             config,
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
-            checkpoint.generation,
+            checkpoint.checkpoint,
         )
         .map_err(|error| anyhow::anyhow!("historical checkpoint load failed: {error}"))?;
         let crate::checkpoint::CheckpointLoad::Complete(restored) = loaded else {
@@ -467,7 +474,7 @@ impl AssumeUtxoManager {
             )
             .into());
         };
-        if restored.generation != checkpoint.generation
+        if restored.generation != checkpoint.checkpoint.generation
             || restored.applied_tip.height != checkpoint.height
             || restored.applied_tip.hash != checkpoint.hash
         {
@@ -1196,23 +1203,32 @@ impl AssumeUtxoManager {
                 AssumeUtxoDiskStatus::Validating { checkpoint, .. } => checkpoint,
                 _ => None,
             };
-            if previous != Some(checkpoint)
-                && let Some(data_dir) = &self.data_dir
-            {
-                let cleanup = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
-                    .map_err(bitcoin_rs_storage::checkpoint::CheckpointError::from)
-                    .and_then(|data| {
-                        bitcoin_rs_storage::checkpoint::retire_historical_checkpoints(
-                            &data,
-                            checkpoint.generation,
-                        )
-                    });
-                if let Err(error) = cleanup {
-                    tracing::warn!(%error, "historical checkpoint cleanup deferred");
-                }
+            if previous != Some(checkpoint) {
+                self.retire_historical_checkpoint(checkpoint.checkpoint);
             }
         }
         Ok(())
+    }
+
+    fn retire_historical_checkpoint(
+        &self,
+        reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
+    ) {
+        let Some(data_dir) = &self.data_dir else {
+            return;
+        };
+        let cleanup = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
+            .map_err(bitcoin_rs_storage::checkpoint::CheckpointError::from)
+            .and_then(|data| {
+                bitcoin_rs_storage::checkpoint::retire_checkpoint_generations_at(
+                    &data,
+                    bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+                    reference.generation,
+                )
+            });
+        if let Err(error) = cleanup {
+            tracing::warn!(%error, "historical checkpoint cleanup deferred");
+        }
     }
 
     fn maybe_publish_historical_checkpoint(
@@ -1261,7 +1277,7 @@ impl AssumeUtxoManager {
             network: self.network,
             genesis: self.network.genesis_block_hash(),
         };
-        let generation = match crate::checkpoint::write_checkpoint_from_dir_at(
+        let reference = match crate::checkpoint::write_checkpoint_from_dir_at(
             &data,
             config,
             &historical.block_tree,
@@ -1269,16 +1285,17 @@ impl AssumeUtxoManager {
             &historical.coin_stats,
             Some(&tip),
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+            bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
         )
         .map_err(|error| anyhow::anyhow!("publish historical checkpoint: {error}"))?
         {
-            crate::checkpoint::CheckpointWrite::Published { generation } => generation,
+            crate::checkpoint::CheckpointWrite::Published { reference } => reference,
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => {
                 return Err(AssumeUtxoError::NoHistoricalChainstate);
             }
         };
         *checkpoint = Some(HistoricalCheckpointRef {
-            generation,
+            checkpoint: reference,
             height: tip.height,
             hash: tip.hash,
         });

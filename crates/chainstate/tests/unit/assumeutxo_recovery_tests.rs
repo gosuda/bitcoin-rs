@@ -1,5 +1,7 @@
 //! RCV-02/04 and ARCH-07b: root-selected snapshot recovery with real storage.
 use super::*;
+use crate::assumeutxo::DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL;
+use bitcoin_rs_storage::assumeutxo::HistoricalCheckpointRef;
 use bitcoin_rs_storage::block_body::IndexedBlockBodyStore;
 use bitcoin_rs_storage::{FjallStore, FlatFileBlockStore, KvDurableHeadStore, KvUndoStore};
 use std::path::Path;
@@ -218,6 +220,10 @@ fn durable_snapshot_restarts_foreground_and_background_then_allows_base_reorg() 
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Exercise orphan publication, retirement and suffix replay in one datadir"
+)]
 fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> TestResult {
     let fixture = Fixture::new()?;
     let dir = tempfile::tempdir()?;
@@ -273,6 +279,7 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
             &historical.coin_stats,
             historical.applied_tip_snapshot().as_deref(),
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+            bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
         )?;
     }
     drop(historical);
@@ -303,6 +310,19 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     assert_eq!(restored_tip.hash, fixture.blocks[1].block_hash().0);
     assert_eq!(restored_tip.chain_tx_count.to_wire(), 2);
     assert_eq!(historical.coin_stats.snapshot().tx_count, 2);
+    let generations = std::fs::read_dir(
+        dir.path()
+            .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT),
+    )?
+    .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        generations
+            .iter()
+            .filter(|entry| entry.path().is_dir())
+            .count(),
+        1,
+        "startup must retire publication residue"
+    );
 
     // The checkpoint restored blocks 0..1.  Only the remaining archived suffix
     // is replayed before the historical role reaches the pinned base.
@@ -417,7 +437,29 @@ impl DurableHeadStore for KillPointHead {
         next: &DurableHead,
         records: &CommitRecords<'_>,
     ) -> Result<(), StorageError> {
+        let checkpoint_replaced = match next.assumeutxo {
+            AssumeUtxoDiskStatus::Validating {
+                checkpoint: Some(checkpoint),
+                ..
+            } => {
+                checkpoint.height == 1
+                    && expected.is_some_and(|head| {
+                        matches!(
+                            head.assumeutxo,
+                            AssumeUtxoDiskStatus::Validating { checkpoint: Some(previous), .. }
+                                if previous != checkpoint
+                        )
+                    })
+            }
+            _ => false,
+        };
+        if self.phase == "checkpoint-published" && checkpoint_replaced {
+            await_kill(&self.dir);
+        }
         self.inner.commit(expected, next, records)?;
+        if self.phase == "checkpoint-committed" && checkpoint_replaced {
+            await_kill(&self.dir);
+        }
         let kill = match (self.phase.as_str(), next.assumeutxo) {
             ("activation", AssumeUtxoDiskStatus::Validating { .. }) => expected.is_none(),
             ("foreground", _) => next.height == 3,
@@ -473,15 +515,58 @@ fn crash_writer() -> TestResult {
         crate::assumeutxo_snapshot::write_coins(&dir, &fixture.load()?.set, &fixture.pinned)?;
         await_kill(&dir);
     }
-    let manager = AssumeUtxoManager::open(Network::Regtest, active.clone(), Some(dir))?;
+    let checkpoint_phase = phase.starts_with("checkpoint-");
+    let manager = AssumeUtxoManager::open_with_historical_checkpoint_interval(
+        Network::Regtest,
+        active.clone(),
+        Some(dir.clone()),
+        if checkpoint_phase {
+            1
+        } else {
+            DEFAULT_HISTORICAL_CHECKPOINT_INTERVAL
+        },
+    )?;
     manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned)?;
     let child = bitcoin_rs_chain::regtest_fixture::mined_regtest_child_at(
         fixture.blocks[2].block_hash(),
         3,
     )?;
     active.begin_transition()?.connect(&child, None)?;
-    for block in &fixture.blocks {
+    for (height, block) in fixture.blocks.iter().enumerate() {
         manager.step_historical(block, None)?;
+        if checkpoint_phase && height == 0 {
+            // Seed an accepted genesis checkpoint so the next production step
+            // replaces an existing head reference at the kill boundary.
+            let historical = manager.historical_chainstate().ok_or("missing history")?;
+            let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(&dir)?;
+            let crate::checkpoint::CheckpointWrite::Published { reference } =
+                crate::checkpoint::write_checkpoint_from_dir_at(
+                    &data,
+                    crate::checkpoint::headers::HeaderCheckpointConfig {
+                        network: Network::Regtest,
+                        genesis: Network::Regtest.genesis_block_hash(),
+                    },
+                    &historical.block_tree,
+                    &historical.utxo,
+                    &historical.coin_stats,
+                    historical.applied_tip_snapshot().as_deref(),
+                    bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+                    bitcoin_rs_storage::checkpoint::CheckpointRetention::UntilReferenced,
+                )?
+            else {
+                return Err("missing genesis checkpoint".into());
+            };
+            let mut status = manager.status()?;
+            let AssumeUtxoDiskStatus::Validating { checkpoint, .. } = &mut status else {
+                return Err("missing validating status".into());
+            };
+            *checkpoint = Some(HistoricalCheckpointRef {
+                checkpoint: reference,
+                height: 0,
+                hash: block.block_hash().0,
+            });
+            manager.persist_status(status, None)?;
+        }
     }
     Err("crash failpoint was not reached".into())
 }
@@ -496,6 +581,8 @@ fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestR
         "historical",
         "checking",
         "finalized",
+        "checkpoint-published",
+        "checkpoint-committed",
     ] {
         let dir = tempfile::tempdir()?;
         let mut child = std::process::Command::new(std::env::current_exe()?)
@@ -537,7 +624,34 @@ fn process_death_recovers_each_snapshot_phase_from_the_committed_root() -> TestR
                 .height,
             if phase == "activation" { 2 } else { 3 }
         );
-        if phase == "finalized" || phase == "checking" {
+        if phase.starts_with("checkpoint-") {
+            let historical_height = u32::from(phase != "checkpoint-published");
+            assert_eq!(
+                manager
+                    .historical_chainstate()
+                    .ok_or("missing history")?
+                    .applied_tip_snapshot()
+                    .ok_or("missing historical tip")?
+                    .height,
+                1
+            );
+            // A second restart uses the same accepted reference regardless of
+            // the publication pointer left ahead by the interrupted writer.
+            drop(manager);
+            drop(active);
+            let active = open_persistent(dir.path(), &fixture.pinned)?;
+            let manager =
+                AssumeUtxoManager::open(Network::Regtest, active, Some(dir.path().to_path_buf()))?;
+            assert_eq!(
+                manager
+                    .historical_chainstate()
+                    .ok_or("missing history")?
+                    .applied_tip_snapshot()
+                    .ok_or("missing historical tip")?
+                    .height,
+                historical_height
+            );
+        } else if phase == "finalized" || phase == "checking" {
             assert!(active.role().is_ordinary());
         } else {
             assert!(active.role().is_assumed_active());

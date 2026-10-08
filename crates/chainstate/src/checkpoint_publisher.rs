@@ -125,13 +125,13 @@ impl CheckpointPublisher {
         let retire_full_revalidation_marker =
             !matches!(retirement, DisconnectRetirement::RecoveryProgress);
 
-        if let (Ok(CheckpointWrite::Published { generation }), Some(tip), Some(writer)) =
+        if let (Ok(CheckpointWrite::Published { reference }), Some(tip), Some(writer)) =
             (&result, applied_tip.as_ref(), journal.as_mut())
         {
             let compact_result = self.tip_prev_hash(tip).and_then(|tip_prev_hash| {
                 writer
                     .compact_to_checkpoint(
-                        *generation,
+                        reference.generation,
                         tip.height,
                         tip.hash.to_le_bytes(),
                         tip_prev_hash.to_le_bytes(),

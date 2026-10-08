@@ -1182,7 +1182,9 @@ impl Chainstate {
         };
         match publisher.publish()? {
             crate::checkpoint::CheckpointWrite::SkippedNoAppliedTip => Ok(None),
-            crate::checkpoint::CheckpointWrite::Published { generation } => Ok(Some(generation)),
+            crate::checkpoint::CheckpointWrite::Published { reference } => {
+                Ok(Some(reference.generation))
+            }
         }
     }
 

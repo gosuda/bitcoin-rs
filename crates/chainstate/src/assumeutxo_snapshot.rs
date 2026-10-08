@@ -56,7 +56,7 @@ pub(super) fn write_headers(data_dir: &Path, tree: &BlockTree, base: &TipSnapsho
 
 pub(crate) fn trusted_anchor(
     network: Network,
-    status: AssumeUtxoDiskStatus,
+    status: &AssumeUtxoDiskStatus,
 ) -> Result<Option<&'static AssumeUtxoData>> {
     let (height, hash, commitment) = match status {
         AssumeUtxoDiskStatus::Uninitialized => return Ok(None),
@@ -76,13 +76,13 @@ pub(crate) fn trusted_anchor(
         } => (base_height, base_hash, validated_hash_serialized),
     };
     let pinned = network
-        .assume_utxo_for_height(height)
+        .assume_utxo_for_height(*height)
         .context("unrecognized durable snapshot base")?;
-    if pinned.block_hash != hash || pinned.hash_serialized != commitment {
+    if pinned.block_hash != *hash || pinned.hash_serialized != *commitment {
         bail!("durable snapshot identity differs from the network trust anchor");
     }
     if let AssumeUtxoDiskStatus::Validating { chain_tx_count, .. } = status
-        && chain_tx_count != pinned.chain_tx_count
+        && *chain_tx_count != pinned.chain_tx_count
     {
         bail!("durable snapshot transaction count differs from the network trust anchor");
     }

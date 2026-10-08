@@ -97,7 +97,9 @@ pub(crate) struct RestoredChainstate {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CheckpointWrite {
     SkippedNoAppliedTip,
-    Published { generation: u64 },
+    Published {
+        reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -161,10 +163,10 @@ pub(crate) fn load_checkpoint_generation_from_dir(
     data_dir: &Dir,
     config: headers::HeaderCheckpointConfig,
     root_name: &str,
-    generation: u64,
+    reference: bitcoin_rs_storage::checkpoint::CheckpointReference,
 ) -> Result<CheckpointLoad, CheckpointLoadError> {
     let opened = bitcoin_rs_storage::checkpoint::open_checkpoint_generation_at(
-        data_dir, root_name, generation,
+        data_dir, root_name, reference,
     )?;
     load_opened_checkpoint(opened, config)
 }
@@ -173,16 +175,16 @@ fn load_opened_checkpoint(
     opened: CheckpointOpen,
     config: headers::HeaderCheckpointConfig,
 ) -> Result<CheckpointLoad, CheckpointLoadError> {
-    let CheckpointOpen::Current {
+    let CheckpointOpen::Selected {
         generation_dir,
-        current,
+        reference,
     } = opened
     else {
         return Ok(CheckpointLoad::Cold);
     };
     let manifest = read_manifest(
         &generation_dir,
-        &current,
+        &reference,
         CheckpointIdentity {
             network: config.network,
             genesis: config.genesis,
@@ -521,6 +523,7 @@ pub(crate) fn write_checkpoint_from_dir(
         coin_stats,
         applied_tip,
         bitcoin_rs_storage::checkpoint::CHECKPOINT_ROOT,
+        bitcoin_rs_storage::checkpoint::CheckpointRetention::Replace,
     )
 }
 
@@ -536,6 +539,7 @@ pub(crate) fn write_checkpoint_from_dir_at(
     coin_stats: &CoinStatsListener,
     applied_tip: Option<&TipSnapshot>,
     root_name: &str,
+    retention: bitcoin_rs_storage::checkpoint::CheckpointRetention,
 ) -> Result<CheckpointWrite, CheckpointError> {
     let Some(applied_tip) = applied_tip else {
         return Ok(CheckpointWrite::SkippedNoAppliedTip);
@@ -564,12 +568,14 @@ pub(crate) fn write_checkpoint_from_dir_at(
     let stage = bitcoin_rs_storage::checkpoint::begin_publication_at_with_failpoint(
         data_dir,
         root_name,
+        retention,
         NEXT_CHECKPOINT_FAILPOINT.with(std::cell::Cell::take),
     )
     .map_err(CheckpointError::Store)?;
     #[cfg(not(any(test, feature = "test-seam")))]
-    let stage = bitcoin_rs_storage::checkpoint::begin_publication_at(data_dir, root_name)
-        .map_err(CheckpointError::Store)?;
+    let stage =
+        bitcoin_rs_storage::checkpoint::begin_publication_at(data_dir, root_name, retention)
+            .map_err(CheckpointError::Store)?;
     let (headers_meta, headers_digest) = {
         let tree = block_tree.read();
         let (meta, digest) =
@@ -690,8 +696,8 @@ pub(crate) fn write_checkpoint_from_dir_at(
             muhash: hex_encode(&persisted_stats.muhash.finalize()),
         },
     };
-    let generation = commit_publication(stage, &manifest)?;
-    Ok(CheckpointWrite::Published { generation })
+    let reference = commit_publication(stage, &manifest)?;
+    Ok(CheckpointWrite::Published { reference })
 }
 fn manifest_tip(tip: headers::HeaderCheckpointTip, chain_tx_count: u64) -> CheckpointTipV1 {
     let chainwork: [u8; 32] = tip.chainwork.to_be_bytes();

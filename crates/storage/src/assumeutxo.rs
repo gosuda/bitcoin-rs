@@ -21,8 +21,8 @@ pub struct PendingHistoricalBlock {
 /// validation has durably progressed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HistoricalCheckpointRef {
-    /// Published checkpoint generation in the historical namespace.
-    pub generation: u64,
+    /// Published generation and manifest digest in the historical namespace.
+    pub checkpoint: crate::checkpoint::CheckpointReference,
     /// Historical applied height represented by the checkpoint.
     pub height: u32,
     /// Historical applied block hash represented by the checkpoint.
@@ -108,7 +108,7 @@ pub enum AssumeUtxoDiskStatus {
 }
 
 impl AssumeUtxoDiskStatus {
-    const CHECKPOINT_ENCODED_LEN: usize = 45;
+    const CHECKPOINT_ENCODED_LEN: usize = 77;
     pub(crate) const ENCODED_LEN: usize = 166 + Self::CHECKPOINT_ENCODED_LEN;
 
     pub(crate) fn encode(self) -> [u8; Self::ENCODED_LEN] {
@@ -142,9 +142,10 @@ impl AssumeUtxoDiskStatus {
                 }
                 if let Some(checkpoint) = checkpoint {
                     out[166] = 1;
-                    out[167..175].copy_from_slice(&checkpoint.generation.to_be_bytes());
+                    out[167..175].copy_from_slice(&checkpoint.checkpoint.generation.to_be_bytes());
                     out[175..179].copy_from_slice(&checkpoint.height.to_be_bytes());
                     out[179..211].copy_from_slice(checkpoint.hash.as_byte_array());
+                    out[211..243].copy_from_slice(&checkpoint.checkpoint.manifest_sha256);
                 }
             }
             Self::Finalized {
@@ -206,7 +207,10 @@ impl AssumeUtxoDiskStatus {
                 checkpoint: match bytes[166] {
                     0 => None,
                     1 => Some(HistoricalCheckpointRef {
-                        generation: u64::from_be_bytes(bytes[167..175].try_into().ok()?),
+                        checkpoint: crate::checkpoint::CheckpointReference {
+                            generation: u64::from_be_bytes(bytes[167..175].try_into().ok()?),
+                            manifest_sha256: bytes[211..243].try_into().ok()?,
+                        },
                         height: u32::from_be_bytes(bytes[175..179].try_into().ok()?),
                         hash: Hash256::from_le_bytes(&bytes[179..211].try_into().ok()?),
                     }),

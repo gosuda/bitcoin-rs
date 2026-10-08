@@ -40,8 +40,8 @@ fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &AtomicBool) {
             prev_pressure = true;
         }
         match publisher.publish() {
-            Ok(CheckpointWrite::Published { generation }) => tracing::info!(
-                ?generation,
+            Ok(CheckpointWrite::Published { reference }) => tracing::info!(
+                generation = reference.generation,
                 "retention compaction published a chainstate checkpoint"
             ),
             Ok(CheckpointWrite::SkippedNoAppliedTip) => {

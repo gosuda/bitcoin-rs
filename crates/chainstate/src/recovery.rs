@@ -181,7 +181,7 @@ pub fn prepare_initial_chainstate(
     bitcoin_rs_storage::checkpoint::fs::ensure_current_schema(&checkpoint_data_dir)
         .with_context(|| format!("validate CURRENT_SCHEMA for datadir {}", data_dir.display()))?;
     let anchor = durable_head
-        .map(|head| crate::assumeutxo_snapshot::trusted_anchor(network, head.assumeutxo))
+        .map(|head| crate::assumeutxo_snapshot::trusted_anchor(network, &head.assumeutxo))
         .transpose()?
         .flatten();
     let checkpoint_config = crate::checkpoint::headers::HeaderCheckpointConfig {

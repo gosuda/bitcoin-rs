@@ -9,7 +9,7 @@ use cap_std::fs::{Dir, File, OpenOptions};
 /// Marker filename containing the current datadir schema epoch.
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 // This serialized marker is the single source of truth for the current
 // persistent format epoch. Increment it for a schema-breaking storage change;
 // no converter or compatibility reader accompanies the bump.

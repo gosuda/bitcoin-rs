@@ -127,7 +127,15 @@ Snapshot recovery validates the root's network pin, restores a compatible
  progress never pretends to be a recovered coin set.
 Finalized history supplies ordinary undo/reorg behavior. A disconnect below
 the base clears the snapshot anchor in its head batch. These bytes use datadir
-schema epoch 1; older datadirs are refused without conversion.
+schema epoch 2; older datadirs are refused without conversion.
+
+Ordinary and historical checkpoints share the same generation and manifest-digest
+reference and manifest/artifact verification. The ordinary owner selects that
+reference through `CURRENT`; historical recovery uses the durable head's reference
+directly, even when `CURRENT` is ahead. Historical publication explicitly retains
+generations until the new reference commits. Retirement runs after that commit and
+again at startup after the accepted generation has been validated, using the same
+cleanup routine without a second durable cleanup record.
 
 Snapshot recovery is exercised by
 `crates/chainstate/tests/unit/assumeutxo_tests.rs` (commitment verification,

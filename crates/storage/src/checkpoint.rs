@@ -19,7 +19,7 @@ pub use load::open_current_checkpoint_at;
 pub use publish::begin_publication_at;
 #[cfg(any(test, feature = "test-seam"))]
 pub use publish::begin_publication_at_with_failpoint;
-pub use publish::retire_historical_checkpoints;
+pub use publish::retire_checkpoint_generations_at;
 
 use cap_std::fs::File;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,23 @@ use thiserror::Error;
 pub const CHECKPOINT_ROOT: &str = "chainstate-checkpoints";
 /// Root containing checkpoints for the background `AssumeUTXO` chainstate.
 pub const HISTORICAL_CHECKPOINT_ROOT: &str = "assumeutxo-historical-checkpoints";
+/// Immutable checkpoint identity and publication-time manifest digest.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CheckpointReference {
+    /// Published generation.
+    pub generation: u64,
+    /// SHA-256 of the manifest bytes synchronized by publication.
+    pub manifest_sha256: [u8; 32],
+}
+
+/// When publication may retire older generations.
+#[derive(Clone, Copy)]
+pub enum CheckpointRetention {
+    /// CURRENT is the owner; retire older generations after publishing it.
+    Replace,
+    /// A separate durable reference owns recovery; retirement follows its commit.
+    UntilReferenced,
+}
 /// Published pointer file for the active checkpoint generation.
 pub const CURRENT_FILE: &str = "CURRENT";
 /// Manifest filename inside each checkpoint generation.

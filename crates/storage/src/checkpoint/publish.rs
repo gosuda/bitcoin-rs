@@ -36,7 +36,7 @@ pub struct CheckpointStage {
     pub(crate) staging: Dir,
     pub(crate) generation: u64,
     pub(crate) paths: GenerationPaths,
-    retain_generations: bool,
+    retention: super::CheckpointRetention,
     #[cfg(any(test, feature = "test-seam"))]
     pub(crate) failpoint: Option<CheckpointFailpoint>,
 }
@@ -105,17 +105,23 @@ impl CheckpointStage {
 }
 /// Reserves a new generation directory and opens its staging transaction.
 pub fn begin_publication(data_dir: &Dir) -> Result<CheckpointStage, CheckpointError> {
-    begin_publication_at(data_dir, super::CHECKPOINT_ROOT)
+    begin_publication_at(
+        data_dir,
+        super::CHECKPOINT_ROOT,
+        super::CheckpointRetention::Replace,
+    )
 }
 
 /// Reserves a generation in an explicit checkpoint namespace.
 pub fn begin_publication_at(
     data_dir: &Dir,
     root_name: &str,
+    retention: super::CheckpointRetention,
 ) -> Result<CheckpointStage, CheckpointError> {
     begin_publication_inner(
         data_dir,
         root_name,
+        retention,
         #[cfg(any(test, feature = "test-seam"))]
         None,
     )
@@ -127,7 +133,12 @@ pub fn begin_publication_with_failpoint(
     data_dir: &Dir,
     failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointStage, CheckpointError> {
-    begin_publication_at_with_failpoint(data_dir, super::CHECKPOINT_ROOT, failpoint)
+    begin_publication_at_with_failpoint(
+        data_dir,
+        super::CHECKPOINT_ROOT,
+        super::CheckpointRetention::Replace,
+        failpoint,
+    )
 }
 
 /// Reserves a generation in an explicit checkpoint namespace with a test-only
@@ -136,14 +147,16 @@ pub fn begin_publication_with_failpoint(
 pub fn begin_publication_at_with_failpoint(
     data_dir: &Dir,
     root_name: &str,
+    retention: super::CheckpointRetention,
     failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointStage, CheckpointError> {
-    begin_publication_inner(data_dir, root_name, failpoint)
+    begin_publication_inner(data_dir, root_name, retention, failpoint)
 }
 
 fn begin_publication_inner(
     data_dir: &Dir,
     root_name: &str,
+    retention: super::CheckpointRetention,
     #[cfg(any(test, feature = "test-seam"))] failpoint: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointStage, CheckpointError> {
     let root = CheckpointRoot::open_or_create(data_dir, root_name)?;
@@ -157,7 +170,7 @@ fn begin_publication_inner(
         staging,
         generation,
         paths,
-        retain_generations: root_name == super::HISTORICAL_CHECKPOINT_ROOT,
+        retention,
         #[cfg(any(test, feature = "test-seam"))]
         failpoint,
     })
@@ -172,7 +185,7 @@ fn begin_publication_inner(
 pub fn commit_publication(
     stage: CheckpointStage,
     manifest: &CheckpointManifestV1,
-) -> Result<u64, CheckpointError> {
+) -> Result<super::CheckpointReference, CheckpointError> {
     #[cfg(any(test, feature = "test-seam"))]
     let failpoint = stage.failpoint;
     let CheckpointStage {
@@ -180,7 +193,7 @@ pub fn commit_publication(
         staging,
         generation,
         paths,
-        retain_generations,
+        retention,
         ..
     } = stage;
     // Caller built the manifest for a different generation than the stage
@@ -215,12 +228,16 @@ pub fn commit_publication(
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::GenerationRootSync)?;
     sync_root(&root)?;
+    let reference = super::CheckpointReference {
+        generation,
+        manifest_sha256: Sha256::digest(&manifest_bytes).into(),
+    };
     let current = CurrentV1 {
         format: CURRENT_FORMAT.to_owned(),
         version: CURRENT_VERSION,
         generation,
         directory: paths.directory.clone(),
-        manifest_sha256: super::format::hex_encode(&Sha256::digest(&manifest_bytes)),
+        manifest_sha256: super::format::hex_encode(&reference.manifest_sha256),
     };
     let current_bytes = serde_json::to_vec(&current)?;
     let mut cf = root.create_file(&paths.current_temp)?;
@@ -237,19 +254,19 @@ pub fn commit_publication(
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::CurrentRootSync)?;
     sync_root(&root)?;
-    if !retain_generations {
+    if matches!(retention, super::CheckpointRetention::Replace) {
         cleanup_after_publication(&root, &paths.directory);
     }
-    Ok(generation)
+    Ok(reference)
 }
-/// Retires historical generations only after the authoritative head accepts
-/// `generation`. Cleanup failure leaves recoverable extra files in place.
-pub fn retire_historical_checkpoints(
+/// Retires generations only after the authoritative owner accepts `generation`.
+/// Cleanup failure leaves recoverable extra files in place.
+pub fn retire_checkpoint_generations_at(
     data_dir: &Dir,
+    root_name: &str,
     generation: u64,
 ) -> Result<(), CheckpointError> {
-    if let Some(root) = CheckpointRoot::open_existing(data_dir, super::HISTORICAL_CHECKPOINT_ROOT)?
-    {
+    if let Some(root) = CheckpointRoot::open_existing(data_dir, root_name)? {
         cleanup_after_publication(&root, &generation_name(generation));
     }
     Ok(())
