@@ -16,8 +16,8 @@ the first embedder — there is one lifecycle implementation, not two.
   P2P core, ingress, and relay workers; join bootstrap,
   checkpoint, and signal workers; then publish a clean checkpoint if eligible.
   On every stop path — including `StartupGuard` rollback — the
-  derived-index worker is stopped under a bounded join before `teardown`
-  runs, so the clean checkpoint publishes and chainstate closes only
+  derived-index worker is stopped under a bounded join as `teardown`
+  begins, so the clean checkpoint publishes and chainstate closes only
   after the index released its stores. A join abandoned at the deadline
   records a teardown error, and so does a worker whose backend open was
   abandoned: its supervisor can exit while the detached open thread still
@@ -164,14 +164,6 @@ rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
   publishes nothing.
 - `crates/node/tests/shutdown.rs::run_exits_cleanly_after_fast_shutdown_signal`
   exercises the daemon path.
-
-## Removed internal entry points
-
-The lifecycle owner cut removes `run::start_node`, `run::NodeServices`,
-`run::TeardownMode`, `run::DRAIN_DEADLINE`, `embed::node_from_parts`,
-`NodeServices::cleanup`, and the detached-parts `StartupGuard::disarm`.
-No aliases or re-exports retain these paths. Callers enter the lifecycle
-owner directly; public `Node` and daemon APIs are not alternate owners.
 
 ## Vocabulary
 

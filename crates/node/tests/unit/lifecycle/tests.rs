@@ -154,7 +154,7 @@ fn shutdown_checkpoint_io_failure_is_returned_and_preserves_current() -> anyhow:
 fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("node-join-failure"));
-    let state = NodeState::open(config.clone(), None)?;
+    let mut state = NodeState::open(config.clone(), None)?;
     let (current, previous) = seed_checkpoint(&state)?;
     let panicker = std::thread::Builder::new()
         .name("bitcoin-rs-outbound-drain".to_owned())
@@ -164,7 +164,7 @@ fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow
 
     assert!(
         services
-            .teardown(Some(&state), TeardownMode::CleanShutdown, None)
+            .teardown(Some(&mut state), TeardownMode::CleanShutdown)
             .is_err()
     );
     assert_eq!(shutdown::take_shutdown_stages_reached(), 1);
@@ -185,7 +185,7 @@ fn teardown_join_failure_completes_cleanup_and_suppresses_checkpoint() -> anyhow
 fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let config = isolated_config(&temp.path().join("node-slow-bootstrap"));
-    let state = NodeState::open(config, None)?;
+    let mut state = NodeState::open(config, None)?;
     let (current, previous) = seed_checkpoint(&state)?;
     let (_gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
     let (exited_tx, exited_rx) = std::sync::mpsc::channel();
@@ -198,7 +198,7 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()
     let mut services = NodeServices::default();
     state.p2p().test_install_bootstrap_worker(worker);
     let started = std::time::Instant::now();
-    services.teardown(Some(&state), TeardownMode::CleanShutdown, None)?;
+    services.teardown(Some(&mut state), TeardownMode::CleanShutdown)?;
     let elapsed = started.elapsed();
     assert!(elapsed >= std::time::Duration::from_secs(2));
     assert!(
@@ -210,6 +210,31 @@ fn teardown_joins_bootstrap_worker_beyond_former_deadline() -> anyhow::Result<()
     assert_ne!(std::fs::read(current)?, previous);
     drop(services);
     drop(state);
+    Ok(())
+}
+
+#[test]
+fn teardown_metrics_panic_reports_failure_and_preserves_checkpoint() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let mut state = NodeState::open(isolated_config(temp.path()), None)?;
+    let (current, previous) = seed_checkpoint(&state)?;
+    let worker = std::thread::Builder::new()
+        .name("bitcoin-rs-metrics".to_owned())
+        .spawn(|| panic!("injected scrape worker panic"))?;
+    let mut services = NodeServices::default();
+    services.metrics = Some(crate::metrics::MetricsServer::with_worker_for_test(worker));
+
+    let Err(error) = services.teardown(Some(&mut state), TeardownMode::CleanShutdown) else {
+        anyhow::bail!("a metrics panic must fail teardown");
+    };
+    assert!(error.to_string().contains("metrics scrape thread panicked"));
+    assert_eq!(shutdown::take_shutdown_stages_reached(), 1);
+    assert!(bootstrap_drain_was_reached());
+    assert_eq!(std::fs::read(&current)?, previous);
+    assert!(services.metrics.is_none());
+    services.teardown(Some(&mut state), TeardownMode::CleanShutdown)?;
+    assert_eq!(shutdown::take_shutdown_stages_reached(), 0);
+    assert_eq!(std::fs::read(current)?, previous);
     Ok(())
 }
 
@@ -260,8 +285,8 @@ fn repeated_teardown_and_drop_join_workers_once() -> anyhow::Result<()> {
     services.tx_ingress = Some(std::thread::spawn(move || {
         worker_joins.fetch_add(1, Ordering::Release);
     }));
-    services.teardown(None, TeardownMode::StartupAbort, None)?;
-    services.teardown(None, TeardownMode::StartupAbort, None)?;
+    services.teardown(None, TeardownMode::StartupAbort)?;
+    services.teardown(None, TeardownMode::StartupAbort)?;
     drop(services);
     assert_eq!(joins.load(Ordering::Acquire), 1);
     assert_eq!(shutdown::take_shutdown_stages_reached(), 1);
@@ -351,7 +376,7 @@ fn a_queued_shutdown_wake_does_not_block_teardown() -> anyhow::Result<()> {
     let worker = std::thread::spawn(move || {
         let mut services = NodeServices::default();
         services.event_loop_signal = Some(wake_tx);
-        let result = services.teardown(None, TeardownMode::StartupAbort, None);
+        let result = services.teardown(None, TeardownMode::StartupAbort);
         let _ = done_tx.send(result);
     });
     let result = done_rx.recv_timeout(DRAIN_DEADLINE + Duration::from_secs(5));
