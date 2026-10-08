@@ -768,6 +768,11 @@ def map_tx_rows(
         if parsed is None:
             script_emitted.bump("skip_unparsed_tx")
             continue
+        if len(parsed) != len(prevouts):
+            # A mismatched row would pair an input with the wrong prevout, so
+            # the row is skipped rather than silently zipped to the shorter.
+            script_emitted.bump("skip_input_prevout_mismatch")
+            continue
         for (script_sig, witness), (prevout, amount) in zip(parsed, prevouts):
             try:
                 script_pubkey = assemble(prevout)
