@@ -1,12 +1,9 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use arc_swap::ArcSwapOption;
-use bitcoin_rs_chain::{BlockTree, TipSnapshot};
 use bitcoin_rs_consensus::MAX_SCRIPT_SIZE;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint, Script,
-    Sequence, Tx, TxIn, TxOut, Witness,
+    Amount, Block, BlockHash, CompactTarget, Hash256, Header, Network, OutPoint, Script, Tx, TxOut,
 };
 use bitcoin_rs_storage::{
     CommitRecords, DisconnectMarker, DurableHead, DurableHeadStore, InMemoryDurableHeadStore,
@@ -15,11 +12,10 @@ use bitcoin_rs_storage::{
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::contract::build_block_changes;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
-use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use hashbrown::HashMap;
-use parking_lot::RwLock;
 
-use super::{ApplyError, Chainstate, ResolvedUtxoView};
+use super::{ApplyError, ResolvedUtxoView};
+use crate::test_fixtures::{coinbase, handles, mined_child, seed_genesis};
 
 struct RejectingUndoStore {
     inner: InMemoryUndoStore,
@@ -58,77 +54,6 @@ impl UndoStore for RejectingUndoStore {
     fn load_disconnect_marker(&self) -> Result<Option<DisconnectMarker>, StorageError> {
         self.inner.load_disconnect_marker()
     }
-}
-
-pub(crate) fn handles(network: Network, utxo: Arc<UtxoSet>) -> Chainstate {
-    Chainstate::new(
-        network,
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(ArcSwapOption::empty()),
-        Arc::new(RwLock::new(BlockTree::new())),
-        utxo,
-        Arc::new(CoinStatsListener::new(CoinStats::default())),
-        Arc::new(crate::events::ChainEventPublisher::detached(0)),
-    )
-}
-
-pub(crate) fn seed_genesis(handles: &Chainstate) -> Result<TipSnapshot, ApplyError> {
-    let genesis = Network::Regtest.genesis_block();
-    let tip = crate::connect::applied_header_tip(
-        handles,
-        Hash256::from(genesis.block_hash()),
-        &genesis,
-        0,
-    )?;
-    let tip = bitcoin_rs_chain::TipSnapshot {
-        chain_tx_count: bitcoin_rs_chain::ChainTxCount::established(1),
-        ..tip
-    };
-    handles.applied_tip.store(Some(Arc::new(tip.clone())));
-    Ok(tip)
-}
-
-pub(crate) fn coinbase(height: u32) -> Tx {
-    let Ok(encoded_height) = u8::try_from(height) else {
-        panic!("test coinbase height must fit in one byte");
-    };
-    Tx {
-        version: 2,
-        inputs: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: Script::from_bytes(vec![1, encoded_height, 0]),
-            sequence: Sequence::MAX,
-            witness: Witness::new(),
-        }],
-        outputs: vec![TxOut {
-            value: Amount::from_sat(1),
-            script_pubkey: Script::new(),
-        }],
-        lock_time: LockTime::ZERO,
-    }
-}
-
-pub(crate) fn mined_child(
-    parent: BlockHash,
-    height: u32,
-) -> Result<Block, Box<dyn std::error::Error>> {
-    let tx = coinbase(height);
-    let mut leaves = vec![*tx.txid().as_bytes()];
-    let merkle = bitcoin_rs_consensus::verify_block::compute_merkle_root(&mut leaves)
-        .ok_or("coinbase merkle root missing")?;
-    let mut block = Block {
-        header: Header {
-            version: 1,
-            prev_blockhash: parent,
-            merkle_root: Hash256::from_le_bytes(&merkle),
-            time: 1_296_688_602_u32.saturating_add(height),
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            nonce: 0,
-        },
-        txs: vec![tx],
-    };
-    bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut block.header)?;
-    Ok(block)
 }
 
 #[test]
