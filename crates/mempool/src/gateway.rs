@@ -684,10 +684,14 @@ impl MempoolGateway {
                 )
                 .map_err(RbfError::into_pool_error)?;
             let plan = inputs.verify().map_err(RbfError::into_pool_error)?;
-            let result = self.commit(origin, move |pool| {
-                pool.commit_pool_change(plan)
-                    .map_err(RbfError::into_pool_error)
-            });
+            let result = self.commit(
+                origin,
+                move |pool| {
+                    pool.commit_pool_change(plan)
+                        .map_err(RbfError::into_pool_error)
+                },
+                |result| Some(result),
+            );
             if !matches!(result, Err(MempoolError::StalePolicy)) {
                 return result;
             }
@@ -713,7 +717,11 @@ impl MempoolGateway {
                 crate::rbf::FeeEstimation::Estimate,
             )?;
             let plan = inputs.verify()?;
-            let result = self.commit(origin, move |pool| pool.commit_pool_change(plan));
+            let result = self.commit(
+                origin,
+                move |pool| pool.commit_pool_change(plan),
+                |result| Some(result),
+            );
             if !matches!(result, Err(RbfError::StalePlan)) {
                 return result;
             }
@@ -766,65 +774,53 @@ impl MempoolGateway {
         #[cfg(any(test, feature = "test-seam"))]
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
-        let mut pool = self.pool.write();
-        self.check_admission_state(
-            &pool,
-            request.expected_generation,
-            request.expected_sequence,
-            fence,
-            Some(prepared.stamp),
-        )?;
-        if claim.is_some_and(|(claim, announcer)| {
-            !self.lifecycle.lock().orphans.is_current(claim, announcer)
-        }) {
-            return Ok(AdmitOutcome::AlreadyKnown);
-        }
-        let txid = request.tx.txid();
-        if pool.contains_txid(&txid) {
-            self.lifecycle
-                .lock()
-                .orphans
-                .remove_transaction_variants(txid);
-            return Ok(AdmitOutcome::AlreadyKnown);
-        }
-        if let Some((error, scope)) = prepared.rejection {
-            self.record_peer_failure(&pool, request, error, scope);
-            return Err(error);
-        }
-        let default_reject_scope = rejection_scope(&request.tx);
+        self.commit(
+            request.origin,
+            |pool| {
+                self.check_admission_state(
+                    pool,
+                    request.expected_generation,
+                    request.expected_sequence,
+                    fence,
+                    Some(prepared.stamp),
+                )?;
+                if claim.is_some_and(|(claim, announcer)| {
+                    !self.lifecycle.lock().orphans.is_current(claim, announcer)
+                }) {
+                    return Ok(AdmitOutcome::AlreadyKnown);
+                }
+                let txid = request.tx.txid();
+                if pool.contains_txid(&txid) {
+                    self.lifecycle
+                        .lock()
+                        .orphans
+                        .remove_transaction_variants(txid);
+                    return Ok(AdmitOutcome::AlreadyKnown);
+                }
+                if let Some((error, scope)) = prepared.rejection {
+                    self.record_peer_failure(pool, request, error, scope);
+                    return Err(error);
+                }
+                let default_reject_scope = rejection_scope(&request.tx);
 
-        // The writer consumes the already verified graph plan. It checks
-        // the stamp again but never reruns the solver or script verifier.
-        let ReplacementStage::Verified(plan) = prepared.replacement else {
-            return Err(AdmitError::MempoolChanged);
-        };
-        let outcome = pool.commit_pool_change(plan).map_err(replacement_rejection);
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.record_peer_failure(&pool, request, error, default_reject_scope);
-                return Err(error);
-            }
-        };
-
-        // 6. Enqueue the committed mutation and elect a drainer if needed.
-        let result = outcome;
-        self.update_admission_lifecycle(&pool, &result);
-        let mut elected = false;
-        if !result.changes.is_empty() && self.observer.is_some() {
-            let mut publish = self.publish.lock();
-            publish.queue.push_back(MutationEnvelope {
-                origin: request.origin,
-                result: result.clone(),
-            });
-            elected = !publish.draining;
-            publish.draining = true;
-        }
-        drop(pool);
-        if elected {
-            self.drain();
-        }
-        Ok(AdmitOutcome::Committed(result))
+                // The writer consumes the already verified graph plan. It checks
+                // the stamp again but never reruns the solver or script verifier.
+                let ReplacementStage::Verified(plan) = prepared.replacement else {
+                    return Err(AdmitError::MempoolChanged);
+                };
+                pool.commit_pool_change(plan)
+                    .map(AdmitOutcome::Committed)
+                    .map_err(|error| {
+                        let error = replacement_rejection(error);
+                        self.record_peer_failure(pool, request, error, default_reject_scope);
+                        error
+                    })
+            },
+            |outcome| match outcome {
+                AdmitOutcome::AlreadyKnown => None,
+                AdmitOutcome::Committed(result) => Some(result),
+            },
+        )
     }
 
     /// Rejects an attempt whose captured admittance facts no longer hold.
@@ -1145,13 +1141,17 @@ impl MempoolGateway {
                 failing.push(tx.txid());
             }
         }
-        self.commit(AdmissionOrigin::Reorg, |pool| {
-            let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
-            if fence.current(self) != Some(change.odd_generation()) {
-                return Err(ChainChangeError::GenerationMoved);
-            }
-            Ok(pool.remove_for_reorg(&failing))
-        })
+        self.commit(
+            AdmissionOrigin::Reorg,
+            |pool| {
+                let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
+                if fence.current(self) != Some(change.odd_generation()) {
+                    return Err(ChainChangeError::GenerationMoved);
+                }
+                Ok(pool.remove_for_reorg(&failing))
+            },
+            |result| Some(result),
+        )
     }
 
     /// Commits `pool.remove_for_block` and publishes its result.
@@ -1202,10 +1202,14 @@ impl MempoolGateway {
     ) -> Result<MutationResult, MempoolError> {
         let inputs = self.pool.read().capture_eviction(max_bytes)?;
         let plan = inputs.verify()?;
-        self.commit(origin, move |pool| {
-            pool.commit_pool_change(plan)
-                .map_err(RbfError::into_pool_error)
-        })
+        self.commit(
+            origin,
+            move |pool| {
+                pool.commit_pool_change(plan)
+                    .map_err(RbfError::into_pool_error)
+            },
+            |result| Some(result),
+        )
     }
 
     /// Retires entries and fee history tied to the pre-snapshot chain view.
@@ -1217,17 +1221,21 @@ impl MempoolGateway {
         if !change.owns(self) {
             return Err(ChainChangeError::ForeignGuard);
         }
-        self.commit(AdmissionOrigin::Block, |pool| {
-            let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
-            if fence.current(self) != Some(change.odd_generation()) {
-                return Err(ChainChangeError::GenerationMoved);
-            }
-            let removed = pool.clear();
-            let mut lifecycle = self.lifecycle.lock();
-            lifecycle.orphans.clear();
-            lifecycle.clear_rejects();
-            Ok(removed)
-        })
+        self.commit(
+            AdmissionOrigin::Block,
+            |pool| {
+                let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
+                if fence.current(self) != Some(change.odd_generation()) {
+                    return Err(ChainChangeError::GenerationMoved);
+                }
+                let removed = pool.clear();
+                let mut lifecycle = self.lifecycle.lock();
+                lifecycle.orphans.clear();
+                lifecycle.clear_rejects();
+                Ok(removed)
+            },
+            |result| Some(result),
+        )
     }
 
     /// Commits `pool.clear` and publishes its result.
@@ -1290,25 +1298,27 @@ impl MempoolGateway {
     /// every accepted/removed change from its prevalidated plan.
     /// Successful mutations acquire the publish mutex before releasing the
     /// pool guard, then call observers only after releasing the pool guard.
-    fn commit<E>(
+    fn commit<T, E>(
         &self,
         origin: AdmissionOrigin,
-        mutate: impl FnOnce(&mut Mempool) -> Result<MutationResult, E>,
-    ) -> Result<MutationResult, E> {
+        mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,
+        mutation: impl FnOnce(&T) -> Option<&MutationResult>,
+    ) -> Result<T, E> {
         let mut elected = false;
         let outcome = {
             let mut pool = self.pool.write();
             let outcome = mutate(&mut pool)?;
-            let result = &outcome;
-            self.update_admission_lifecycle(&pool, result);
-            if !result.changes.is_empty() && self.observer.is_some() {
-                let mut publish = self.publish.lock();
-                publish.queue.push_back(MutationEnvelope {
-                    origin,
-                    result: result.clone(),
-                });
-                elected = !publish.draining;
-                publish.draining = true;
+            if let Some(result) = mutation(&outcome) {
+                self.update_admission_lifecycle(&pool, result);
+                if !result.changes.is_empty() && self.observer.is_some() {
+                    let mut publish = self.publish.lock();
+                    publish.queue.push_back(MutationEnvelope {
+                        origin,
+                        result: result.clone(),
+                    });
+                    elected = !publish.draining;
+                    publish.draining = true;
+                }
             }
             outcome
         };
@@ -1372,9 +1382,11 @@ impl MempoolGateway {
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> MutationResult,
     ) -> MutationResult {
-        let Ok(result) = self.commit(origin, |pool| {
-            Ok::<_, core::convert::Infallible>(mutate(pool))
-        });
+        let Ok(result) = self.commit(
+            origin,
+            |pool| Ok::<_, core::convert::Infallible>(mutate(pool)),
+            |result| Some(result),
+        );
         result
     }
 
@@ -2083,6 +2095,30 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_clear_publishes_removals_while_admission_is_fenced() {
+        let observer = Arc::new(RecordingObserver::default());
+        let gateway = gateway_with(Some(dyn_observer(&observer)));
+        let transaction = tx(14);
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&transaction))
+            .expect("insert");
+        observer.seen.lock().clear();
+        observer.origins.lock().clear();
+
+        let change = gateway.begin_chain_change().expect("snapshot fence");
+        gateway.clear_for_snapshot(&change).expect("clear snapshot");
+
+        assert_eq!(
+            *observer.seen.lock(),
+            vec![(hash(&transaction.txid()), removed(RemovalReason::Clear))]
+        );
+        assert_eq!(*observer.origins.lock(), vec![AdmissionOrigin::Block]);
+        assert!(!gateway.read().contains_txid(&transaction.txid()));
+        assert_eq!(gateway.stable_generation(), None);
+        change.finish().expect("settle snapshot");
+    }
+
+    #[test]
     fn clear_reports_every_entry_and_empty_clear_moves_nothing() {
         let gateway = gateway_with(None);
         let first = tx(15);
@@ -2160,71 +2196,92 @@ mod tests {
     /// and both mutations are in the pool.
     #[test]
     fn gated_callback_lets_concurrent_mutation_enqueue_and_return() {
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let observer = Arc::new(GatedObserver {
-            entered: Mutex::new(Some(entered_tx)),
-            release: Mutex::new(Some(release_rx)),
-            stream: Mutex::new(Vec::new()),
-        });
-        let gateway = Arc::new(MempoolGateway::new(
-            Arc::clone(&pool),
-            Some(dyn_observer(&observer)),
-            ValidationEngine::Native,
-        ));
+        for (first_admission, second_admission) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let observer = Arc::new(GatedObserver {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(Some(release_rx)),
+                stream: Mutex::new(Vec::new()),
+            });
+            let gateway = gateway_with(Some(dyn_observer(&observer)));
 
-        let first_txid = tx(20).txid();
-        let first = Arc::clone(&gateway);
-        let first_handle = std::thread::spawn(move || {
-            first
-                .insert_entry(AdmissionOrigin::Rpc, entry(&tx(20)))
-                .expect("first in")
-        });
-        entered_rx
-            .recv_timeout(core::time::Duration::from_secs(10))
-            .expect("first observer call started");
+            let first_tx = if first_admission {
+                standard_tx(20)
+            } else {
+                tx(20)
+            };
+            let first_txid = first_tx.txid();
+            let first = Arc::clone(&gateway);
+            let first_handle =
+                std::thread::spawn(move || commit_ordering_tx(&first, &first_tx, first_admission));
+            entered_rx
+                .recv_timeout(core::time::Duration::from_secs(10))
+                .expect("first observer call started");
 
-        let second_txid = tx(21).txid();
-        let second = Arc::clone(&gateway);
-        let second_handle = std::thread::spawn(move || {
-            let result = second
-                .insert_entry(AdmissionOrigin::Rpc, entry(&tx(21)))
-                .expect("second in");
-            let _ = done_tx.send(result);
-        });
+            let second_tx = if second_admission {
+                standard_tx(21)
+            } else {
+                tx(21)
+            };
+            let second_txid = second_tx.txid();
+            let second = Arc::clone(&gateway);
+            let second_handle = std::thread::spawn(move || {
+                let result = commit_ordering_tx(&second, &second_tx, second_admission);
+                let _ = done_tx.send(result);
+            });
 
-        // The concurrent mutation must enqueue and return while the first
-        // callback is still gated: its thread hands back the committed
-        // result with the next sequence even though nothing has published.
-        let queued_result = done_rx
-            .recv_timeout(core::time::Duration::from_secs(10))
-            .expect("the concurrent mutation must return while the callback is gated");
-        assert_eq!(
-            queued_result.sequence_base, 2,
-            "the enqueued batch keeps its committed sequence"
-        );
+            // The concurrent mutation must enqueue and return while the first
+            // callback is still gated: its thread hands back the committed
+            // result with the next sequence even though nothing has published.
+            let queued_result = done_rx
+                .recv_timeout(core::time::Duration::from_secs(10))
+                .expect("the concurrent mutation must return while the callback is gated");
+            assert_eq!(
+                queued_result.sequence_base, 2,
+                "the enqueued batch keeps its committed sequence"
+            );
 
-        // Nothing may publish while the gate is closed.
-        assert_eq!(
-            observer.stream.lock().len(),
-            1,
-            "only the gated first batch is published so far"
-        );
+            // Nothing may publish while the gate is closed.
+            assert_eq!(
+                observer.stream.lock().len(),
+                1,
+                "only the gated first batch is published so far"
+            );
 
-        release_tx.send(()).expect("gate thread alive");
-        first_handle.join().expect("first publisher");
-        second_handle.join().expect("second publisher");
+            release_tx.send(()).expect("gate thread alive");
+            first_handle.join().expect("first publisher");
+            second_handle.join().expect("second publisher");
 
-        assert_eq!(
-            *observer.stream.lock(),
-            vec![1, 2],
-            "publish order matches sequence order"
-        );
-        let pool_read = gateway.read();
-        assert!(pool_read.contains_txid(&first_txid));
-        assert!(pool_read.contains_txid(&second_txid));
+            assert_eq!(
+                *observer.stream.lock(),
+                vec![1, 2],
+                "publish order matches sequence order"
+            );
+            let pool_read = gateway.read();
+            assert!(pool_read.contains_txid(&first_txid));
+            assert!(pool_read.contains_txid(&second_txid));
+        }
+    }
+
+    fn commit_ordering_tx(
+        gateway: &MempoolGateway,
+        tx: &Tx,
+        admission: bool,
+    ) -> crate::mutation::MutationResult {
+        if !admission {
+            return gateway
+                .insert_entry(AdmissionOrigin::Rpc, entry(tx))
+                .expect("inserted");
+        }
+        let outcome = gateway.admit_transaction(admit_request(gateway, tx, AdmissionOrigin::Rpc));
+        let Ok(AdmitOutcome::Committed(result)) = outcome else {
+            panic!("admission did not commit: {outcome:?}");
+        };
+        result
     }
 
     /// An observer that re-enters the gateway from its first callback and
