@@ -1,15 +1,10 @@
 //! Regtest fixture builders for cross-crate test harnesses.
 //!
-//! PRE: the caller supplies a parent hash, a height, and (where a non-default
-//! timestamp is needed) a header time.
-//! POST: every returned block meets its declared compact target, its header
-//! carries a version-4 number (regtest rejects version 1 from the BIP34
-//! height 500, and longer fixture chains must connect through the shared
-//! contextual header gate), its header merkle root equals the consensus fold
-//! over its transactions, and its coinbase spends the null outpoint at
-//! sequence MAX.
-//! INVARIANT: a returned block is accepted by `validate_pow` and its header
-//! merkle root equals `merkle_root(&block.txs)`.
+//! Every returned block meets its declared compact target, carries a
+//! version-4 header (regtest's BIP34 height is 500, and longer fixture chains
+//! must clear the shared contextual header gate), has a header merkle root
+//! equal to the consensus fold over its transactions, and spends the null
+//! outpoint at sequence MAX in its coinbase.
 
 use bitcoin_rs_consensus::{block_subsidy, compute_merkle_root};
 use bitcoin_rs_primitives::{
@@ -40,15 +35,10 @@ pub fn genesis_time() -> u32 {
     Network::Regtest.genesis_block().header.time
 }
 
-/// Sign-magnitude `CScriptNum` push (the encoding the node and p2p fixtures use).
+/// Minimal sign-magnitude `CScriptNum` push.
 ///
-/// Mirrors `bitcoin_rs_script::push_int`, which is also the encoding the
-/// BIP34 checker expects, without pulling a script-crate dependency into
-/// chain: `OP_0` for zero, `OP_1NEGATE` for minus one, `OP_1`..`OP_16` for
-/// 1..=16, and a length-prefixed sign-magnitude push otherwise.
-///
-/// PRE: `value` is a BIP34-height-sized integer.
-/// POST: the returned bytes are a minimal script-num push.
+/// Mirrors `bitcoin_rs_script::push_int`, the encoding the BIP34 checker
+/// expects, without pulling the script crate into chain.
 #[must_use]
 pub fn script_num_push(value: i64) -> Vec<u8> {
     if value == 0 {
@@ -83,13 +73,11 @@ pub fn script_num_push(value: i64) -> Vec<u8> {
 
 /// The canonical one-coinbase transaction for `height`.
 ///
-/// PRE: `height` fits an i64 script number.
-/// POST: the coinbase spends the null outpoint, carries `script_num_push(height)`
-/// followed by an `OP_0` extranonce byte in its scriptSig (consensus requires
-/// 2..=100 scriptSig bytes, and the height push alone is one byte for heights
-/// 1..=16), and pays the regtest block subsidy at `height` to an empty
-/// script — the subsidy, not a fixed amount, so fixtures stay valid once a
-/// halving (every 150 blocks) pulls it under one satoshi.
+/// The scriptSig is `script_num_push(height)` plus an `OP_0` extranonce byte,
+/// because consensus requires 2..=100 scriptSig bytes and the height push
+/// alone is one byte for heights 1..=16. The output pays the regtest subsidy
+/// at `height` rather than a fixed amount, so fixtures stay valid past a
+/// halving.
 #[must_use]
 pub fn coinbase(height: u32) -> Tx {
     let mut script_sig = script_num_push(i64::from(height));
@@ -113,9 +101,7 @@ pub fn coinbase(height: u32) -> Tx {
     }
 }
 
-/// Consensus merkle root over transaction ids.
-///
-/// POST: `None` only for an empty transaction list.
+/// Consensus merkle root over transaction ids, `None` only when `txs` is empty.
 #[must_use]
 pub fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
     let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
@@ -123,9 +109,6 @@ pub fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
 }
 
 /// Grinds `header.nonce` until the header hash meets `header.bits`.
-///
-/// PRE: `header.bits` is a valid nonzero compact target.
-/// POST: `compact_is_met_by(header.bits, hash)` holds for the final header.
 pub fn mine_header_to_declared_target(header: &mut Header) -> Result<(), RegtestFixtureError> {
     while !compact_is_met_by(header.bits, Hash256::from(header.compute_hash())) {
         header.nonce = header

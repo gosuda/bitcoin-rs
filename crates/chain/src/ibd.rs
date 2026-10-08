@@ -1,60 +1,27 @@
-//! Initial block download state of the applied chain.
-//!
-//! The decision is chain state, so it lives beside the chain handles it reads:
-//! one process-wide [`InitialBlockDownload`] latch shared by every consumer.
-//! Bitcoin Core owns the same decision inside `ChainstateManager`
-//! (`IsInitialBlockDownload`, `m_cached_is_ibd`); keeping one latch here means
-//! RPC and P2P can never answer differently.
+//! Process-wide initial block download latch shared by RPC and P2P.
 
 use std::sync::atomic::AtomicBool;
 
 use crate::Network;
 use crate::view::{BlockTreeReader, TipReader};
 
-/// How stale the applied tip may be while the node still counts as synced.
-///
-/// Bitcoin Core's `DEFAULT_MAX_TIP_AGE`, 24 hours. Core exposes it as
-/// `-maxtipage`; this node has no such option yet, so the default stands.
+// Core's DEFAULT_MAX_TIP_AGE; this node does not expose -maxtipage.
 const MAX_TIP_AGE_SECONDS: u64 = 24 * 60 * 60;
 
 /// Initial block download state of the applied chain
 /// (Core `ChainstateManager::IsInitialBlockDownload`).
 ///
-/// PRE: `applied_tip` and `block_tree` are the node's published handles; the
-/// same instances stay shared for the life of the latch.
-/// POST: [`Self::is_active`] reports whether the applied chain still counts
-/// as initial block download, judged against the network the caller passes
-/// to it.
-/// INVARIANT: once the exit latches, every answer ordered after it is
-/// `false` for the life of the process (Core `m_cached_is_ibd`); an active
-/// verdict rechecks the latch, so an answer paused on a superseded snapshot
-/// never reports active after a concurrently latched exit.
+/// Once the exit latches, every answer ordered after it is `false` for the
+/// life of the process.
 pub struct InitialBlockDownload {
-    /// Whether this node has ever observed itself to be out of initial block
-    /// download. Once set it is never cleared.
-    ///
-    /// Bitcoin Core latches the same way (`m_cached_is_ibd`, cleared once by
-    /// `UpdateIBDStatus` and never set again) and logs "Leaving
-    /// `InitialBlockDownload (latching to false)`" when it happens. Without the
-    /// latch the answer oscillates: a synced node that has not seen a block for
-    /// longer than the tip-age window would announce that it is back in initial
-    /// sync, and callers treat that as "do not trust this node's data yet".
-    /// An active verdict re-reads this flag before returning, so a call that
-    /// judged a superseded tip yields to an exit another caller latched while
-    /// it ran.
     left: AtomicBool,
     applied_tip: TipReader,
     block_tree: BlockTreeReader,
 }
 
 impl InitialBlockDownload {
-    /// Builds the latch over node-owned chain handles.
-    ///
-    /// PRE: the readers observe the node whose downloads are being judged.
-    /// POST: the latch starts active (Core leaves `m_cached_is_ibd` unset at
-    /// startup); an absent applied tip always reports active.
-    /// INVARIANT: construction copies no chain state; the readers share the
-    /// node's published cells, never private copies.
+    /// Builds the latch over the node's published chain handles, starting
+    /// active.
     #[must_use]
     pub fn new(applied_tip: TipReader, block_tree: BlockTreeReader) -> Self {
         Self {
@@ -64,26 +31,13 @@ impl InitialBlockDownload {
         }
     }
 
-    /// PRE: `now` is UNIX seconds; `network` is the node's live configured
-    ///   network, read at each call.
-    /// POST: returns true while the applied tip is absent, carries less than
-    ///   `network`'s minimum chain work, or is older than 24 hours
-    ///   ([`MAX_TIP_AGE_SECONDS`]); the first false answer latches.
-    /// INVARIANT: once the exit latches, later answers stay false for the
-    ///   life of the process (Core `m_cached_is_ibd`); an active verdict
-    ///   rechecks the latch before returning, so an answer that paused on a
-    ///   superseded snapshot yields to a concurrently latched exit.
+    /// Whether the applied chain still counts as initial block download.
     ///
-    /// The node counts as synced only when its applied tip carries at least
-    /// the supplied network's `nMinimumChainWork` **and** carries a timestamp
-    /// no older than `max_tip_age` (Core's 24-hour default). Both are
-    /// required: work alone would trust a stale chain, and recency alone
-    /// would trust a cheap one that simply claims a recent timestamp. The
-    /// latch stores no network; every query supplies the node's live one, so
-    /// a network assigned after construction is honored.
-    ///
-    /// `now` is UNIX seconds, taken by the caller so the decision itself stays a
-    /// pure function of observable state.
+    /// Synced requires both at least `network`'s `nMinimumChainWork` and a tip
+    /// no older than [`MAX_TIP_AGE_SECONDS`]: work alone would trust a stale
+    /// chain, recency alone a cheap one claiming a recent timestamp. `now` is
+    /// UNIX seconds from the caller, and `network` is read per call, so a
+    /// network assigned after construction is honored.
     #[must_use]
     pub fn is_active(&self, now: u64, network: Network) -> bool {
         use core::sync::atomic::Ordering;
@@ -152,11 +106,7 @@ mod initial_block_download_tests {
 
     const DAY: u64 = 24 * 60 * 60;
 
-    /// A latch whose applied tip is a real tree node stamped `tip_time`, so
-    /// the tip has an age to be judged on. Chain work comes from the tree's own
-    /// accounting, which for a two-block regtest chain is far below any
-    /// production `nMinimumChainWork` — the `network` a query passes decides
-    /// whether that floor holds the tip in initial block download.
+    // Two regtest headers have enough work only for regtest's zero floor.
     fn latch_with_tip_at(tip_time: u32) -> InitialBlockDownload {
         let applied_tip = Arc::new(arc_swap::ArcSwapOption::empty());
         let block_tree = Arc::new(RwLock::new(BlockTree::new()));
@@ -174,12 +124,10 @@ mod initial_block_download_tests {
                 panic!("genesis insert failed");
             };
             let child = BlockHeader {
-                version: 1,
                 prev_blockhash: genesis.compute_hash(),
-                merkle_root: Hash256::default(),
                 time: tip_time,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
                 nonce: 1,
+                ..genesis
             };
             let Ok(_child_id) = tree.insert_node(Some(genesis_id), child, NodeStatus::Active)
             else {
@@ -208,58 +156,30 @@ mod initial_block_download_tests {
     }
 
     #[test]
-    fn a_recent_tip_without_the_networks_minimum_work_is_still_initial_block_download() {
+    fn initial_sync_requires_the_network_work_floor_and_a_recent_tip() {
         let now = 1_800_000_000_u64;
-        // Timestamped one minute ago, so recency is satisfied and only the work
-        // floor can be what decides. A two-block regtest-difficulty chain has
-        // nowhere near mainnet's `nMinimumChainWork`.
-        let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
-        assert!(
-            latch.is_active(now, Network::Mainnet),
-            "a chain this cheap must not count as synced merely for being recent"
-        );
+        for (network, age, active) in [
+            (Network::Mainnet, 60, true),
+            (Network::Regtest, DAY + 60, true),
+            (Network::Regtest, 60, false),
+            (Network::Regtest, DAY, false),
+            (Network::Regtest, DAY + 1, true),
+        ] {
+            let latch = latch_with_tip_at(u32::try_from(now - age).unwrap_or(u32::MAX));
+            assert_eq!(
+                latch.is_active(now, network),
+                active,
+                "{network:?}, age {age}"
+            );
+        }
     }
 
     #[test]
     fn is_active_judges_the_work_floor_of_the_network_the_caller_supplies() {
         let now = 1_800_000_000_u64;
-        // One recent, cheap tip. Only the query's network separates the
-        // answers: mainnet's `nMinimumChainWork` holds it in initial block
-        // download, and regtest pins the floor at zero, so the same tip counts
-        // as synced. The latch stores no network, so a caller that assembles a
-        // context before its network is chosen is still judged by the network
-        // it runs.
         let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
         assert!(latch.is_active(now, Network::Mainnet));
         assert!(!latch.is_active(now, Network::Regtest));
-    }
-
-    #[test]
-    fn a_stale_tip_with_enough_work_is_still_initial_block_download() {
-        let now = 1_800_000_000_u64;
-        // Regtest's work floor is zero, so only the tip's age is left to decide.
-        let latch = latch_with_tip_at(u32::try_from(now - DAY - 60).unwrap_or(u32::MAX));
-        assert!(latch.is_active(now, Network::Regtest));
-    }
-
-    #[test]
-    fn a_recent_tip_with_enough_work_exits_initial_block_download() {
-        let now = 1_800_000_000_u64;
-        let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
-        assert!(!latch.is_active(now, Network::Regtest));
-    }
-
-    #[test]
-    fn the_tip_age_boundary_is_twenty_four_hours() {
-        let now = 1_800_000_000_u64;
-        let at_the_edge = latch_with_tip_at(u32::try_from(now - DAY).unwrap_or(u32::MAX));
-        assert!(
-            !at_the_edge.is_active(now, Network::Regtest),
-            "exactly `max_tip_age` old is still recent enough"
-        );
-
-        let past_the_edge = latch_with_tip_at(u32::try_from(now - DAY - 1).unwrap_or(u32::MAX));
-        assert!(past_the_edge.is_active(now, Network::Regtest));
     }
 
     #[test]
@@ -268,10 +188,7 @@ mod initial_block_download_tests {
         let latch = latch_with_tip_at(u32::try_from(now - 60).unwrap_or(u32::MAX));
         assert!(!latch.is_active(now, Network::Regtest));
 
-        // Two days later, with no new block. Judged afresh the tip is stale and
-        // the answer would flip back to `true`; latched, it does not. This is
-        // the defect the field had — it went true again every time the node went
-        // quiet, and callers read that as "resyncing, do not trust me".
+        // A latched node must not re-enter IBD when its tip becomes stale.
         assert!(
             !latch.is_active(now + 2 * DAY, Network::Regtest),
             "the answer must not flip back once the node has left initial sync"

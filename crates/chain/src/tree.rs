@@ -123,13 +123,7 @@ impl BlockTree {
         Ok(())
     }
 
-    /// Re-publishes the header tip when `id` is the published tip.
-    ///
-    /// A tip snapshot is immutable, so a node whose count becomes known after
-    /// the tip published — the apply path records it, and an authenticated
-    /// restore replaces it — would otherwise keep being advertised with the
-    /// stale count. Only the published tip is refreshed; tip selection does
-    /// not change here.
+    /// Refreshes an immutable tip snapshot after its count changes, without reselecting it.
     fn refresh_published_tip(&self, id: NodeId) {
         if self.tip.load_full().is_none_or(|tip| tip.tip_id != id) {
             return;
@@ -197,8 +191,6 @@ impl BlockTree {
 
     /// Returns a reference to the node whose header hash matches `hash`, or
     /// `None` if no such node exists.
-    ///
-    /// Composite of [`lookup`] + [`node`] for the common 2-step pattern.
     #[must_use]
     pub fn node_by_hash(&self, hash: Hash256) -> Option<&BlockTreeNode> {
         self.node(self.lookup(hash)?).ok()
@@ -206,20 +198,12 @@ impl BlockTree {
 
     /// Returns the height of the block at `hash`, or `None` if no node with
     /// that hash exists in the tree.
-    ///
-    /// Composes [`node_by_hash`] + `.height` projection.
     #[must_use]
     pub fn height_of_hash(&self, hash: Hash256) -> Option<u32> {
         self.node_by_hash(hash).map(|node| node.height)
     }
 
-    /// Returns the `NodeId`s of every node not referenced as a parent.
-    ///
-    /// A leaf is a tip of either the active chain (most common: 1 leaf, the
-    /// canonical tip) or a stale/fork branch. Multi-tip RPCs like Bitcoin
-    /// Core's `getchaintips` enumerate these.
-    ///
-    /// Order is iteration order of the underlying slab.
+    /// Returns active and fork leaves in slab iteration order.
     #[must_use]
     pub fn leaf_node_ids(&self) -> Vec<NodeId> {
         let mut parents: hashbrown::HashSet<u32> = hashbrown::HashSet::new();
@@ -272,14 +256,8 @@ impl BlockTree {
         self.tip().map(|tip| tip.hash)
     }
 
-    /// Returns a cheap-clonable handle to the canonical best-tip pointer.
-    ///
-    /// Sharing this handle lets lock-free readers observe tip advances
-    /// without acquiring the `BlockTree`'s outer `RwLock`. Writes happen
-    /// through `publish_tip_if_best` (called by `insert_header`). Sharing is
-    /// therefore part of the tree's mutation authority: callers that only
-    /// hold a read guard can observe the tip through [`Self::tip`] but must
-    /// not be able to extract this writable cell.
+    /// Shares the writable tip cell for lock-free publication. Requires mutation authority;
+    /// read-only callers use [`Self::tip`] and cannot extract the cell.
     #[must_use]
     pub fn tip_handle(&mut self) -> Arc<ArcSwapOption<TipSnapshot>> {
         Arc::clone(&self.tip)
@@ -453,9 +431,7 @@ impl BlockTree {
             cursor = parent;
         }
     }
-    /// Returns the active-chain `BlockTreeNode` at `height`, looking up via the
-    /// published tip. Returns `None` when no tip is published or no active-chain
-    /// node exists at that height.
+    /// Returns the active node at `height`, or `None` if no such published ancestor exists.
     #[must_use]
     pub fn active_node_at_height(&self, height: u32) -> Option<&BlockTreeNode> {
         let tip = self.tip()?;
@@ -666,7 +642,6 @@ impl BlockTree {
             }
         }
 
-        // Wipe the published tip and active index before republishing.
         self.tip.store(None);
         self.active_by_height.clear_tainted();
 
@@ -684,7 +659,6 @@ impl BlockTree {
             }
         }
 
-        // Republish the best valid tip (if any), which also rebuilds the active index.
         if let Some(best) = best {
             self.publish_tip_if_best(best)?;
         }
@@ -702,7 +676,6 @@ impl BlockTree {
         let root_index = root.index().ok_or(ChainError::UnknownNode { id: root })?;
         self.node(root)?;
 
-        // Build child adjacency in one forward pass over the slab.
         let node_count = self.nodes.capacity();
         let mut children: Vec<Vec<NodeId>> = (0..node_count).map(|_| Vec::new()).collect();
         for (index, node) in &self.nodes {
@@ -717,7 +690,6 @@ impl BlockTree {
             }
         }
 
-        // Worklist traversal of the child adjacency: each node is visited once.
         let mut invalid = vec![false; node_count];
         let mut worklist = vec![root];
         invalid[root_index] = true;
@@ -875,78 +847,86 @@ mod tests {
 
     use super::{BlockTree, Hash256, hash_from_header};
     use crate::{
-        ChainTxCount,
+        ChainError, ChainTxCount,
         node::{BlockHeader, NodeId, NodeStatus},
     };
 
-    #[test]
-    fn block_locator_walks_back_to_genesis_on_short_chain() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let mut tip_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let mut hashes = vec![hash_from_header(&genesis)];
+    // Distinct nonces distinguish same-height siblings.
+    fn extend(tree: &mut BlockTree, parent: NodeId, nonce: u32) -> Result<NodeId, ChainError> {
+        let header = test_header(BlockHash(tree.node(parent)?.hash), nonce);
+        tree.insert_node(Some(parent), header, NodeStatus::HeaderValid)
+    }
 
-        for height in 1..5 {
-            let parent_hash = BlockHash(tree.node(tip_id)?.hash);
-            let header = test_header(parent_hash, height);
-            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-            hashes.push(hash_from_header(&header));
+    fn extend_branch(
+        tree: &mut BlockTree,
+        parent: NodeId,
+        nonces: impl IntoIterator<Item = u32>,
+    ) -> Result<Vec<NodeId>, ChainError> {
+        let mut cursor = parent;
+        let mut ids = Vec::new();
+        for nonce in nonces {
+            cursor = extend(tree, cursor, nonce)?;
+            ids.push(cursor);
         }
+        Ok(ids)
+    }
 
-        let locator = tree.block_locator(tip_id, 32);
+    /// Genesis plus `count` children, so `ids[h]` is the node at height `h`.
+    fn linear_chain(count: u32) -> Result<(BlockTree, Vec<NodeId>), ChainError> {
+        let mut tree = BlockTree::new();
+        let genesis = tree.insert_node(
+            None,
+            test_header(BlockHash::default(), 0),
+            NodeStatus::HeaderValid,
+        )?;
+        let mut ids = vec![genesis];
+        ids.extend(extend_branch(&mut tree, genesis, 1..=count)?);
+        Ok((tree, ids))
+    }
 
-        assert_eq!(locator.len(), 5);
-        assert_eq!(locator[0], hashes[4]);
-        assert_eq!(locator[1], hashes[3]);
-        assert_eq!(locator[2], hashes[2]);
-        assert_eq!(locator[3], hashes[1]);
-        assert_eq!(locator[4], hashes[0]);
-        assert_eq!(locator.last(), hashes.first());
-        Ok(())
+    fn timed_chain(count: u32) -> Result<(BlockTree, Vec<NodeId>, Vec<u32>), ChainError> {
+        let mut tree = BlockTree::new();
+        let mut prev_blockhash = BlockHash::default();
+        let (mut ids, mut times) = (Vec::new(), Vec::new());
+        for i in 0..count {
+            let header = BlockHeader {
+                version: 1,
+                prev_blockhash,
+                merkle_root: Hash256::default(),
+                time: 1_000_000 + i * 600,
+                bits: CompactTarget::from_consensus(0x207f_ffff),
+                nonce: 0,
+            };
+            prev_blockhash = header.compute_hash();
+            times.push(header.time);
+            ids.push(tree.insert_header(header, NodeStatus::HeaderValid)?);
+        }
+        Ok((tree, ids, times))
     }
 
     #[test]
     fn block_locator_falls_back_after_active_parent_mutation()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let a = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let b_header = test_header(BlockHash(tree.node(a)?.hash), 1);
-        let b = tree.insert_node(Some(a), b_header, NodeStatus::HeaderValid)?;
-        let c_header = test_header(BlockHash(tree.node(b)?.hash), 2);
-        let c = tree.insert_node(Some(b), c_header, NodeStatus::HeaderValid)?;
+        let (mut tree, ids) = linear_chain(2)?;
+        let (a, c) = (ids[0], ids[2]);
 
         // Mutating an indexed active node's parent invalidates the height
         // index, forcing block_locator onto the parent-walk fallback.
         tree.node_mut(c)?.parent = Some(a);
 
-        let c_hash = tree.node(c)?.hash;
-        let a_hash = tree.node(a)?.hash;
-        assert_eq!(tree.block_locator(c, 3), vec![c_hash, a_hash]);
+        let expected = vec![tree.node(c)?.hash, tree.node(a)?.hash];
+        assert_eq!(tree.block_locator(c, 3), expected);
         Ok(())
     }
 
     #[test]
     fn block_locator_falls_back_on_same_height_fork_index_corruption()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let genesis_hash = BlockHash(tree.node(genesis_id)?.hash);
-
-        let main_child = test_header(genesis_hash, 1);
-        let main_child_id =
-            tree.insert_node(Some(genesis_id), main_child, NodeStatus::HeaderValid)?;
-        let main_child_hash = BlockHash(tree.node(main_child_id)?.hash);
-        let main_tip = test_header(main_child_hash, 2);
-        let main_tip_id =
-            tree.insert_node(Some(main_child_id), main_tip, NodeStatus::HeaderValid)?;
+        let (mut tree, ids) = linear_chain(2)?;
+        let (genesis_id, main_child_id, main_tip_id) = (ids[0], ids[1], ids[2]);
 
         // Same-height side fork (shares genesis parent with main_child).
-        let fork_child = test_header(genesis_hash, 11);
-        let fork_child_id =
-            tree.insert_node(Some(genesis_id), fork_child, NodeStatus::HeaderValid)?;
+        let fork_child_id = extend(&mut tree, genesis_id, 11)?;
         let fork_hash = tree.node(fork_child_id)?.hash;
 
         assert_eq!(tree.active_by_height.last(), Some(main_tip_id));
@@ -980,32 +960,14 @@ mod tests {
     #[test]
     fn block_locator_rejects_coherent_side_fork_index_substitution()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let mut tip_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let mut main_ids = vec![tip_id];
-
-        for height in 1..=40_u32 {
-            let parent_hash = BlockHash(tree.node(tip_id)?.hash);
-            let header = test_header(parent_hash, height);
-            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-            main_ids.push(tip_id);
-        }
+        let (mut tree, main_ids) = linear_chain(40)?;
 
         // Side branch from main[18] at heights 19..=26; must not become tip.
-        let mut side_parent_id = main_ids[18];
-        let mut side_parent_hash = BlockHash(tree.node(side_parent_id)?.hash);
-        let mut side_ids = Vec::new();
-        let mut side_hashes = Vec::new();
-        for height in 19..=26_u32 {
-            let header = test_header(side_parent_hash, height.wrapping_add(1000));
-            let side_id =
-                tree.insert_node(Some(side_parent_id), header, NodeStatus::HeaderValid)?;
-            side_ids.push(side_id);
-            side_hashes.push(tree.node(side_id)?.hash);
-            side_parent_id = side_id;
-            side_parent_hash = BlockHash(tree.node(side_id)?.hash);
-        }
+        let side_ids = extend_branch(&mut tree, main_ids[18], 1019..=1026)?;
+        let side_hashes = side_ids
+            .iter()
+            .map(|id| tree.node(*id).map(|node| node.hash))
+            .collect::<Result<Vec<_>, _>>()?;
 
         assert_eq!(tree.tip_id(), Some(main_ids[40]));
         assert!(tree.active_by_height.is_trusted());
@@ -1050,20 +1012,8 @@ mod tests {
 
     #[test]
     fn node_at_height_from_ignores_tainted_index_slot() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let mut tip_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let mut main_ids = vec![tip_id];
-
-        for height in 1..=40_u32 {
-            let parent_hash = BlockHash(tree.node(tip_id)?.hash);
-            let header = test_header(parent_hash, height);
-            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-            main_ids.push(tip_id);
-        }
-
-        let side_header = test_header(BlockHash(tree.node(main_ids[18])?.hash), 1019);
-        let side_id = tree.insert_node(Some(main_ids[18]), side_header, NodeStatus::HeaderValid)?;
+        let (mut tree, main_ids) = linear_chain(40)?;
+        let side_id = extend(&mut tree, main_ids[18], 1019)?;
 
         // Height 19 is not in the tip-40 locator sample set (40..30,28,24,16,0).
         assert!(tree.active_by_height.replace_slot_for_test(19, side_id));
@@ -1080,32 +1030,9 @@ mod tests {
     #[test]
     fn node_at_height_from_indexes_active_prefix_but_walks_side_chain()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let mut main_tip = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let mut main_ids = vec![main_tip];
-
-        for height in 1..=5_u32 {
-            let parent_hash = BlockHash(tree.node(main_tip)?.hash);
-            main_tip = tree.insert_node(
-                Some(main_tip),
-                test_header(parent_hash, height),
-                NodeStatus::HeaderValid,
-            )?;
-            main_ids.push(main_tip);
-        }
-
-        let mut side_tip = main_ids[0];
-        let mut side_ids = vec![side_tip];
-        for nonce in 11..=13_u32 {
-            let parent_hash = BlockHash(tree.node(side_tip)?.hash);
-            side_tip = tree.insert_node(
-                Some(side_tip),
-                test_header(parent_hash, nonce),
-                NodeStatus::HeaderValid,
-            )?;
-            side_ids.push(side_tip);
-        }
+        let (mut tree, main_ids) = linear_chain(5)?;
+        let mut side_ids = vec![main_ids[0]];
+        side_ids.extend(extend_branch(&mut tree, main_ids[0], 11..=13)?);
 
         assert_eq!(tree.node_at_height_from(side_ids[3], 1), Some(side_ids[1]));
 
@@ -1122,151 +1049,42 @@ mod tests {
         Ok(())
     }
 
+    /// The median matches an independent sort-and-pick over the same sample
+    /// for a zero, short, BIP113-sized, and oversized window, truncates to the
+    /// available history on a chain shorter than the window, and reports an
+    /// unknown start as `None` rather than an arbitrary median.
+    ///
+    /// `median_time_past_before_height` is the same median taken one block
+    /// earlier, so height 0 has no predecessor and height 1 sees genesis alone.
     #[test]
-    fn block_locator_indexed_path_matches_parent_walk() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let mut tip_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let mut mid_node = None;
-
-        for height in 1..=25_u32 {
-            let parent_hash = BlockHash(tree.node(tip_id)?.hash);
-            let header = test_header(parent_hash, height);
-            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-            if height == 10 {
-                mid_node = Some(tip_id);
-            }
-        }
-
-        let indexed = tree.block_locator(tip_id, 32);
-        tree.active_by_height.taint();
-        let walked = tree.block_locator(tip_id, 32);
-        assert_eq!(indexed, walked);
-
-        // A non-active-tip node still yields a non-empty locator via the
-        // parent-walk fallback once the height index is cleared.
-        let side = mid_node.ok_or("height 10 node was recorded")?;
-        let side_locator = tree.block_locator(side, 32);
-        assert!(!side_locator.is_empty());
-        assert_eq!(side_locator[0], tree.node(side)?.hash);
-        Ok(())
-    }
-
-    #[test]
-    fn median_time_past_at_returns_median_of_recent_timestamps()
+    fn median_time_past_matches_an_independent_median_over_every_window()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let mut prev_hash = BlockHash::default();
-        let mut tip = None;
-
-        for i in 0..11_u32 {
-            let header = BlockHeader {
-                version: 1,
-                prev_blockhash: prev_hash,
-                merkle_root: Hash256::default(),
-                time: 1_000_000 + i * 600,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
-                nonce: 0,
-            };
-            prev_hash = header.compute_hash();
-            tip = Some(tree.insert_header(header, NodeStatus::HeaderValid)?);
-        }
-
-        let Some(tip) = tip else {
-            panic!("chain has 11 blocks should yield a tip");
-        };
-        let Some(mtp) = tree.median_time_past_at(tip, 11) else {
-            panic!("chain has 11 blocks should yield Some");
-        };
-        assert_eq!(mtp, 1_003_000);
-        Ok(())
-    }
-
-    #[test]
-    fn median_time_past_before_height_rejects_zero() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let mut prev_hash = BlockHash::default();
-        let mut tip = None;
-        for i in 0..3_u32 {
-            let header = BlockHeader {
-                version: 1,
-                prev_blockhash: prev_hash,
-                merkle_root: Hash256::default(),
-                time: 1_000_000 + i * 600,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
-                nonce: 0,
-            };
-            prev_hash = header.compute_hash();
-            tip = Some(tree.insert_header(header, NodeStatus::HeaderValid)?);
-        }
-        let Some(tip) = tip else {
-            panic!("three blocks should yield a tip");
-        };
-        // No block precedes height 0.
-        assert_eq!(tree.median_time_past_before_height(tip, 0), None);
-        // The block before height 1 is genesis; the median over the single
-        // available timestamp is that timestamp.
-        assert_eq!(tree.median_time_past_before_height(tip, 1), Some(1_000_000));
-        Ok(())
-    }
-
-    #[test]
-    fn median_time_past_at_parity_across_zero_short_eleven_and_wider_windows()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let mut prev_hash = BlockHash::default();
-        let mut tip = None;
-        let mut times = Vec::new();
-        let mut ids = Vec::new();
-
-        for i in 0..15_u32 {
-            let header = BlockHeader {
-                version: 1,
-                prev_blockhash: prev_hash,
-                merkle_root: Hash256::default(),
-                time: 1_000_000 + i * 600,
-                bits: CompactTarget::from_consensus(0x207f_ffff),
-                nonce: 0,
-            };
-            prev_hash = header.compute_hash();
-            times.push(header.time);
-            let id = tree.insert_header(header, NodeStatus::HeaderValid)?;
-            ids.push(id);
-            tip = Some(id);
-        }
-
-        let Some(tip) = tip else {
-            panic!("chain has 15 blocks should yield a tip");
-        };
+        let (tree, ids, times) = timed_chain(15)?;
+        let tip = *ids.last().ok_or("chain has a tip")?;
 
         assert_eq!(tree.median_time_past_at(tip, 0), Some(0));
+        assert_eq!(tree.median_time_past_at(ids[10], 11), Some(1_003_000));
+        for window in [5, 11, 15] {
+            assert_eq!(
+                tree.median_time_past_at(tip, window),
+                Some(expected_median_time_past(&times, window)),
+                "window {window}"
+            );
+        }
         assert_eq!(
-            tree.median_time_past_at(tip, 5),
-            Some(expected_median_time_past(&times, 5))
+            tree.median_time_past_at(ids[2], 11),
+            Some(expected_median_time_past(&times[..=2], 11)),
+            "a chain shorter than the window uses the history it has"
         );
-        assert_eq!(
-            tree.median_time_past_at(tip, 11),
-            Some(expected_median_time_past(&times, 11))
-        );
-        assert_eq!(
-            tree.median_time_past_at(tip, 15),
-            Some(expected_median_time_past(&times, 15))
-        );
+        for window in [5, 11] {
+            assert_eq!(
+                tree.median_time_past_at(crate::node::NodeId::new(u32::MAX), window),
+                None
+            );
+        }
 
-        let short_tip = ids[2];
-        assert_eq!(
-            tree.median_time_past_at(short_tip, 11),
-            Some(expected_median_time_past(&times[..=2], 11))
-        );
-
-        assert_eq!(
-            tree.median_time_past_at(crate::node::NodeId::new(u32::MAX), 11),
-            None
-        );
-        assert_eq!(
-            tree.median_time_past_at(crate::node::NodeId::new(u32::MAX), 5),
-            None
-        );
+        assert_eq!(tree.median_time_past_before_height(tip, 0), None);
+        assert_eq!(tree.median_time_past_before_height(tip, 1), Some(times[0]));
         Ok(())
     }
 
@@ -1280,50 +1098,32 @@ mod tests {
     #[test]
     fn tip_id_returns_published_tip() -> Result<(), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::Active)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
+        let genesis_id = tree.insert_node(
+            None,
+            test_header(BlockHash::default(), 0),
+            NodeStatus::Active,
+        )?;
 
-        assert_eq!(tree.tip_id(), Some(genesis_id));
-        assert_eq!(tree.node(genesis_id)?.hash, genesis_hash);
         // The published snapshot is coherent with the active insertion:
         // genesis's height and hash, not hand-stored values.
+        assert_eq!(tree.tip_id(), Some(genesis_id));
         assert_eq!(tree.tip_height(), Some(0));
-        assert_eq!(tree.tip_hash(), Some(genesis_hash));
+        assert_eq!(tree.tip_hash(), Some(tree.node(genesis_id)?.hash));
         Ok(())
     }
 
     #[test]
     fn node_at_height_from_uses_rebuilt_active_height_index_after_fork_switch()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let genesis_hash = BlockHash(tree.node(genesis_id)?.hash);
-
-        let main_child = test_header(genesis_hash, 1);
-        let main_child_id =
-            tree.insert_node(Some(genesis_id), main_child, NodeStatus::HeaderValid)?;
-        let main_child_hash = BlockHash(tree.node(main_child_id)?.hash);
-        let main_tip = test_header(main_child_hash, 2);
-        let main_tip_id =
-            tree.insert_node(Some(main_child_id), main_tip, NodeStatus::HeaderValid)?;
-
+        let (mut tree, main_ids) = linear_chain(2)?;
+        let (genesis_id, main_child_id, main_tip_id) = (main_ids[0], main_ids[1], main_ids[2]);
         assert_eq!(
             tree.node_at_height_from(main_tip_id, 1),
             Some(main_child_id)
         );
 
-        let fork_child = test_header(genesis_hash, 11);
-        let fork_child_id =
-            tree.insert_node(Some(genesis_id), fork_child, NodeStatus::HeaderValid)?;
-        let fork_child_hash = BlockHash(tree.node(fork_child_id)?.hash);
-        let fork_mid = test_header(fork_child_hash, 12);
-        let fork_mid_id =
-            tree.insert_node(Some(fork_child_id), fork_mid, NodeStatus::HeaderValid)?;
-        let fork_mid_hash = BlockHash(tree.node(fork_mid_id)?.hash);
-        let fork_tip = test_header(fork_mid_hash, 13);
-        let fork_tip_id = tree.insert_node(Some(fork_mid_id), fork_tip, NodeStatus::HeaderValid)?;
+        let fork_ids = extend_branch(&mut tree, genesis_id, 11..=13)?;
+        let (fork_child_id, fork_tip_id) = (fork_ids[0], fork_ids[2]);
 
         assert_eq!(
             tree.node_at_height_from(fork_tip_id, 1),
@@ -1343,32 +1143,8 @@ mod tests {
     }
 
     #[test]
-    fn leaf_node_ids_returns_all_branches_when_forked() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let mut variant_a = test_header(BlockHash(hash_from_header(&genesis)), 1);
-        variant_a.nonce = 1;
-        let mut variant_b = test_header(BlockHash(hash_from_header(&genesis)), 2);
-        variant_b.nonce = 2;
-        let leaf_a = tree.insert_node(Some(genesis_id), variant_a, NodeStatus::HeaderValid)?;
-        let leaf_b = tree.insert_node(Some(genesis_id), variant_b, NodeStatus::HeaderValid)?;
-
-        let mut leaves = tree.leaf_node_ids();
-        leaves.sort_by_key(|id| id.index().unwrap_or(usize::MAX));
-
-        assert_eq!(
-            leaves.len(),
-            2,
-            "expected two leaves on fork, got {leaves:?}"
-        );
-        assert!(leaves.contains(&leaf_a));
-        assert!(leaves.contains(&leaf_b));
-        Ok(())
-    }
-
-    #[test]
-    fn find_common_ancestor_returns_parent_for_fork() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_fork_has_two_leaves_whose_common_ancestor_is_the_fork_point()
+    -> Result<(), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
         let genesis = test_header(BlockHash::default(), 0);
         let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
@@ -1380,17 +1156,22 @@ mod tests {
         let leaf_b = tree.insert_node(Some(genesis_id), variant_b, NodeStatus::HeaderValid)?;
 
         assert_eq!(tree.find_common_ancestor(leaf_a, leaf_b), Some(genesis_id));
+
+        let leaves = tree.leaf_node_ids();
+        assert_eq!(
+            leaves.len(),
+            2,
+            "expected two leaves on fork, got {leaves:?}"
+        );
+        assert!(leaves.contains(&leaf_a) && leaves.contains(&leaf_b));
         Ok(())
     }
 
     #[test]
     fn node_at_height_from_terminates_on_two_node_cycle_with_malformed_height()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let a = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let b_header = test_header(BlockHash(tree.node(a)?.hash), 1);
-        let b = tree.insert_node(Some(a), b_header, NodeStatus::HeaderValid)?;
+        let (mut tree, ids) = linear_chain(1)?;
+        let (a, b) = (ids[0], ids[1]);
 
         // Two-node parent cycle with a non-decreasing height so the fallback
         // walk cannot reach the target by ordinary height descent.
@@ -1402,80 +1183,46 @@ mod tests {
     }
 
     #[test]
-    fn refresh_active_height_index_terminates_on_parent_cycle()
+    fn refresh_active_height_index_clears_on_every_untrustworthy_chain_shape()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let a = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let b_header = test_header(BlockHash(tree.node(a)?.hash), 1);
-        let b = tree.insert_node(Some(a), b_header, NodeStatus::HeaderValid)?;
+        type Corruption = fn(&mut BlockTree, &[NodeId]) -> Result<(), ChainError>;
+        let corruptions: [(&str, u32, Corruption); 3] = [
+            ("parent cycle", 1, |tree, ids| {
+                tree.node_mut(ids[0])?.parent = Some(ids[1]);
+                Ok(())
+            }),
+            ("parent not in the tree", 2, |tree, ids| {
+                tree.node_mut(ids[1])?.parent = Some(crate::node::NodeId::new(u32::MAX));
+                Ok(())
+            }),
+            ("height disagrees with the walk", 2, |tree, ids| {
+                tree.node_mut(ids[1])?.height = 99;
+                Ok(())
+            }),
+        ];
 
-        tree.node_mut(a)?.parent = Some(b);
+        for (name, height, corrupt) in corruptions {
+            let (mut tree, ids) = linear_chain(height)?;
+            assert!(tree.active_by_height.is_trusted(), "{name} precondition");
+            corrupt(&mut tree, &ids)?;
+            let next = extend(&mut tree, ids[usize::try_from(height)?], height + 1)?;
 
-        let c_header = test_header(BlockHash(tree.node(b)?.hash), 2);
-        let c = tree.insert_node(Some(b), c_header, NodeStatus::HeaderValid)?;
-
-        assert_eq!(tree.tip_id(), Some(c));
-        assert!(tree.active_by_height.is_empty_for_test());
+            assert_eq!(tree.tip_id(), Some(next), "{name}");
+            assert!(tree.active_by_height.is_empty_for_test(), "{name}");
+            assert!(
+                tree.active_node_at_height(1)
+                    .is_none_or(|node| node.height == 1),
+                "{name}"
+            );
+        }
         Ok(())
     }
 
-    #[test]
-    fn refresh_active_height_index_clears_on_unknown_parent()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let a = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let b_header = test_header(BlockHash(tree.node(a)?.hash), 1);
-        let b = tree.insert_node(Some(a), b_header, NodeStatus::HeaderValid)?;
-        let c_header = test_header(BlockHash(tree.node(b)?.hash), 2);
-        let c = tree.insert_node(Some(b), c_header, NodeStatus::HeaderValid)?;
-
-        tree.node_mut(b)?.parent = Some(crate::node::NodeId::new(u32::MAX));
-
-        let d_header = test_header(BlockHash(tree.node(c)?.hash), 3);
-        let d = tree.insert_node(Some(c), d_header, NodeStatus::HeaderValid)?;
-
-        assert_eq!(tree.tip_id(), Some(d));
-        assert!(tree.active_by_height.is_empty_for_test());
-        Ok(())
-    }
-
-    #[test]
-    fn refresh_active_height_index_clears_on_changed_height_republish()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let a = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let b_header = test_header(BlockHash(tree.node(a)?.hash), 1);
-        let b = tree.insert_node(Some(a), b_header, NodeStatus::HeaderValid)?;
-        let c_header = test_header(BlockHash(tree.node(b)?.hash), 2);
-        let c = tree.insert_node(Some(b), c_header, NodeStatus::HeaderValid)?;
-
-        tree.node_mut(b)?.height = 99;
-
-        let d_header = test_header(BlockHash(tree.node(c)?.hash), 3);
-        let d = tree.insert_node(Some(c), d_header, NodeStatus::HeaderValid)?;
-
-        assert_eq!(tree.tip_id(), Some(d));
-        assert!(tree.active_by_height.is_empty_for_test());
-        assert!(
-            tree.active_node_at_height(1)
-                .is_none_or(|node| node.height == 1)
-        );
-        Ok(())
-    }
-
-    /// The Core block-locator height schedule for an active chain whose tip
-    /// sits at height 40: ten consecutive steps, then doubling. Derived from
-    /// bitcoin-core `GetLocator` (`src/chain.cpp:34-48`), which doubles only
-    /// after `have.size() > 10`.
+    // Core GetLocator (src/chain.cpp): double only after have.size() > 10.
     const CORE_LOCATOR_HEIGHTS_40: [u32; 16] = [
         40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 27, 23, 15, 0,
     ];
 
-    /// Maps a height schedule to the block-tree hashes at those heights.
-    /// `nodes[h]` is the node at height `h`.
     fn locator_hashes_at_heights(
         tree: &BlockTree,
         nodes: &[NodeId],
@@ -1490,23 +1237,27 @@ mod tests {
         Ok(out)
     }
 
-    /// PRE: an active chain of 41 blocks, tip at height 40.
-    /// POST: both the indexed walk and the forced parent-walk fallback return
-    /// the Core locator schedule, which doubles only after more than ten
-    /// entries.
-    /// INVARIANT: the two walks agree; neither may double at ten entries.
     #[test]
     fn locator_doubles_only_after_more_than_ten() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let mut tip_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let mut main_ids = vec![tip_id];
-        for height in 1..=40_u32 {
-            let parent_hash = BlockHash(tree.node(tip_id)?.hash);
-            let header = test_header(parent_hash, height);
-            tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
-            main_ids.push(tip_id);
-        }
+        let (short, ids) = linear_chain(4)?;
+        let mut short_expected: Vec<_> = (0..=4)
+            .scan(BlockHash::default(), |prev, height| {
+                let header = test_header(*prev, height);
+                *prev = header.compute_hash();
+                Some(hash_from_header(&header))
+            })
+            .collect();
+        short_expected.reverse();
+        assert_eq!(short.block_locator(ids[4], 32), short_expected);
+        let (mut medium, ids) = linear_chain(25)?;
+        let indexed = medium.block_locator(ids[25], 32);
+        medium.active_by_height.taint();
+        assert_eq!(medium.block_locator(ids[25], 32), indexed);
+        let side = medium.block_locator(ids[10], 32);
+        assert!(!side.is_empty());
+        assert_eq!(side[0], medium.node(ids[10])?.hash);
+        let (mut tree, main_ids) = linear_chain(40)?;
+        let tip_id = main_ids[40];
         assert_eq!(tree.tip_id(), Some(tip_id));
 
         let expected = locator_hashes_at_heights(&tree, &main_ids, &CORE_LOCATOR_HEIGHTS_40)?;
@@ -1519,6 +1270,13 @@ mod tests {
         // produce the same schedule.
         tree.active_by_height.taint();
         assert_eq!(tree.block_locator(tip_id, 32), expected);
+
+        // A node that is not the active tip still yields a locator rooted at
+        // itself, through the same fallback walk.
+        let side = *main_ids.get(10).ok_or("node exists at height 10")?;
+        let side_locator = tree.block_locator(side, 32);
+        assert_eq!(side_locator.first(), Some(&tree.node(side)?.hash));
+        assert_eq!(side_locator.last(), Some(&tree.node(main_ids[0])?.hash));
         Ok(())
     }
 
@@ -1538,31 +1296,16 @@ mod tests {
     #[test]
     fn invalidate_subtree_marks_root_and_descendants_invalid_and_reselects_tip()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
+        // Main chain: genesis -> a1 -> a2.
+        let (mut tree, main_ids) = linear_chain(2)?;
+        let (genesis_id, a2_id) = (main_ids[0], main_ids[2]);
 
-        // Main chain: genesis -> a1 -> a2
-        let a1_header = test_header(BlockHash(genesis_hash), 1);
-        let a1_id = tree.insert_node(Some(genesis_id), a1_header, NodeStatus::HeaderValid)?;
-        let a1_hash = tree.node(a1_id)?.hash;
-        let a2_header = test_header(BlockHash(a1_hash), 2);
-        let a2_id = tree.insert_node(Some(a1_id), a2_header, NodeStatus::HeaderValid)?;
-
-        // Side chain: genesis -> b1 -> b2 -> b3 (longer, active)
-        let mut side_parent = genesis_id;
-        let mut side_parent_hash = genesis_hash;
-        let mut side_ids = Vec::new();
-        let mut side_hashes = Vec::new();
-        for height in 1..=3 {
-            let header = test_header(BlockHash(side_parent_hash), 100 + height);
-            let id = tree.insert_node(Some(side_parent), header, NodeStatus::HeaderValid)?;
-            side_ids.push(id);
-            side_hashes.push(tree.node(id)?.hash);
-            side_parent = id;
-            side_parent_hash = tree.node(id)?.hash;
-        }
+        // Side chain: genesis -> b1 -> b2 -> b3 (longer, active).
+        let side_ids = extend_branch(&mut tree, genesis_id, 101..=103)?;
+        let side_hashes = side_ids
+            .iter()
+            .map(|id| tree.node(*id).map(|node| node.hash))
+            .collect::<Result<Vec<_>, _>>()?;
 
         // The side chain is the active tip because it is longer.
         assert_eq!(tree.tip_id(), Some(side_ids[2]));
@@ -1593,19 +1336,17 @@ mod tests {
     fn invalidate_subtree_uses_insertion_order_for_equal_work_tie_break()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut tree = BlockTree::new();
-        let genesis = test_header(BlockHash::default(), 0);
-        let genesis_id = tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
-        let genesis_hash = tree.node(genesis_id)?.hash;
+        let genesis_id = tree.insert_node(
+            None,
+            test_header(BlockHash::default(), 0),
+            NodeStatus::HeaderValid,
+        )?;
 
-        // Three equal-length forks: a, b, c (inserted in that order).
+        // Three equal-length forks, inserted in order.
         let mut fork_tips = Vec::new();
         for fork in 0..3 {
-            let first = test_header(BlockHash(genesis_hash), 10 + fork);
-            let first_id = tree.insert_node(Some(genesis_id), first, NodeStatus::HeaderValid)?;
-            let first_hash = tree.node(first_id)?.hash;
-            let second = test_header(BlockHash(first_hash), 20 + fork);
-            let second_id = tree.insert_node(Some(first_id), second, NodeStatus::HeaderValid)?;
-            fork_tips.push(second_id);
+            let branch = extend_branch(&mut tree, genesis_id, [10 + fork, 20 + fork])?;
+            fork_tips.push(branch[1]);
         }
 
         // a is active because it was inserted first and all forks have equal chainwork.

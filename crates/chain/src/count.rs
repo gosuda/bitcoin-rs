@@ -3,10 +3,9 @@
 /// Cumulative transaction count through a chain tip.
 ///
 /// Bitcoin Core's `CBlockIndex::m_chain_tx_count`, including its convention
-/// that a zero in a persisted field means *unset* rather than *empty*
-/// (`HaveNumChainTxs()`). In memory the absence is explicit: an unknown count
-/// never takes part in arithmetic that would manufacture a plausible partial
-/// total. This type is the one implementation of that arithmetic.
+/// that a persisted zero means *unset* rather than *empty*
+/// (`HaveNumChainTxs()`). In memory the absence is explicit, and this type is
+/// the one implementation of the arithmetic that preserves it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ChainTxCount(Option<u64>);
 
@@ -50,14 +49,8 @@ impl ChainTxCount {
     /// Carries the count forward across the block at `height`, which adds
     /// `delta` transactions.
     ///
-    /// PRE: `delta` is the exact transaction count added by the block at
-    /// `height`.
-    ///
-    /// POST: genesis can establish from unknown; otherwise only a known count
-    /// with checked addition remains known.
-    ///
-    /// INVARIANT: overflow or an unknown non-genesis parent never produces a
-    /// guessed or wrapped total.
+    /// Genesis can establish a count from unknown; otherwise overflow or an
+    /// unknown parent stays unknown rather than becoming a wrapped total.
     #[must_use]
     pub fn advance(self, height: u32, delta: u64) -> Self {
         match self.0 {
@@ -74,13 +67,7 @@ impl ChainTxCount {
     /// Takes `delta` transactions back out of the count, as the disconnect of
     /// the block that added them does.
     ///
-    /// PRE: `delta` is the exact transaction count removed by the disconnected
-    /// block.
-    ///
-    /// POST: a known count remains known only when checked subtraction
-    /// succeeds.
-    ///
-    /// INVARIANT: unknown or underflow never becomes a clamped total.
+    /// Underflow stays unknown rather than becoming a clamped total.
     #[must_use]
     pub fn rewind(self, delta: u64) -> Self {
         match self.0 {

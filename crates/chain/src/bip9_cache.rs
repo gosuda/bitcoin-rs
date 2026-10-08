@@ -15,11 +15,8 @@ use parking_lot::RwLock;
 
 use crate::node::NodeId;
 
-/// Cached BIP9 deployment-state lookup.
-///
-/// Wraps an interior `RwLock<HashMap>` so the cache is `Send + Sync` and the
-/// reader/writer paths are non-blocking under contention. State is stored as
-/// a stable `u8` tag supplied by consensus.
+/// Cached BIP9 deployment-state lookup, `Send + Sync` through interior
+/// mutability.
 #[derive(Debug, Default)]
 pub(crate) struct Bip9Cache {
     entries: RwLock<HashMap<(NodeId, u32), CachedState>>,
@@ -29,10 +26,6 @@ pub(crate) struct Bip9Cache {
 ///
 /// The `tag` is an opaque stable u8 supplied by the deployment-state encoder;
 /// the chain crate does not interpret it.
-///
-/// PRE: `tag` is the deployment state's encoded discriminant.
-/// POST: Cache readers obtain the same tag for a live `(node_id, deployment_id)`.
-/// INVARIANT: Branch invalidation discards entries by node, not by height.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CachedState {
     /// Caller-defined state discriminant.
