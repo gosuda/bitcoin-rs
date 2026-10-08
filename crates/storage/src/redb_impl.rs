@@ -34,6 +34,119 @@ pub const REDB_TXINDEX_DEFAULT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 /// redb's builder-default page-cache capacity for unbudgeted opens.
 pub const REDB_DEFAULT_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
 
+fn write_with_durability(
+    db: &Database,
+    batch: BufferedWriteBatch,
+    durability: Durability,
+    apply_ops: impl FnOnce(
+        &redb::WriteTransaction,
+        std::vec::IntoIter<BatchOp>,
+    ) -> Result<(), StorageError>,
+    #[cfg(any(test, feature = "test-seam"))] faults: &crate::trait_::PersistFaultSlot,
+) -> Result<(), StorageError> {
+    let durability_label = match durability {
+        Durability::Immediate => "durable",
+        Durability::None => "deferred",
+        _ => "other",
+    };
+    metrics::counter!("storage.writes_total", "backend" => "redb", "durability" => durability_label)
+        .increment(1);
+    metrics::histogram!("storage.write_bytes", "backend" => "redb")
+        .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+
+    #[cfg(any(test, feature = "test-seam"))]
+    if let Some(fault) = faults.take_at(crate::trait_::PersistBoundary::Apply) {
+        if fault == crate::PersistFault::PartialApply {
+            let write_txn = db.begin_write().map_err(StorageError::backend)?;
+            apply_ops(&write_txn, prefix_ops(batch.ops))?;
+            drop(write_txn);
+        }
+        return Err(fault.injected_error());
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    let sync_fault = if matches!(durability, Durability::Immediate) {
+        faults.take_at(crate::trait_::PersistBoundary::Sync)
+    } else {
+        None
+    };
+    #[cfg(any(test, feature = "test-seam"))]
+    let effective_durability = if sync_fault.is_some() {
+        Durability::None
+    } else {
+        durability
+    };
+    #[cfg(not(any(test, feature = "test-seam")))]
+    let effective_durability = durability;
+    let mut write_txn = db.begin_write().map_err(StorageError::backend)?;
+    write_txn
+        .set_durability(effective_durability)
+        .map_err(StorageError::backend)?;
+    apply_ops(&write_txn, batch.ops.into_iter())?;
+    write_txn.commit().map_err(StorageError::backend)?;
+    #[cfg(any(test, feature = "test-seam"))]
+    if let Some(fault) = sync_fault {
+        return Err(fault.injected_error());
+    }
+    Ok(())
+}
+
+fn write_durable_if(
+    db: &Database,
+    conditions: &[WriteCondition<'_>],
+    batch: BufferedWriteBatch,
+    condition_matches: impl Fn(
+        &redb::WriteTransaction,
+        &WriteCondition<'_>,
+    ) -> Result<bool, StorageError>,
+    apply_ops: impl FnOnce(
+        &redb::WriteTransaction,
+        std::vec::IntoIter<BatchOp>,
+    ) -> Result<(), StorageError>,
+    #[cfg(any(test, feature = "test-seam"))] faults: &crate::trait_::PersistFaultSlot,
+) -> Result<bool, StorageError> {
+    let mut write_txn = db.begin_write().map_err(StorageError::backend)?;
+    write_txn
+        .set_durability(Durability::Immediate)
+        .map_err(StorageError::backend)?;
+    for condition in conditions {
+        if !condition_matches(&write_txn, condition)? {
+            return Ok(false);
+        }
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    if let Some(fault) = faults.take_at(crate::trait_::PersistBoundary::Apply) {
+        if fault == crate::PersistFault::PartialApply {
+            apply_ops(&write_txn, prefix_ops(batch.ops))?;
+            drop(write_txn);
+        }
+        return Err(fault.injected_error());
+    }
+    #[cfg(any(test, feature = "test-seam"))]
+    let sync_fault = faults.take_at(crate::trait_::PersistBoundary::Sync);
+    #[cfg(any(test, feature = "test-seam"))]
+    let durability = if sync_fault.is_some() {
+        Durability::None
+    } else {
+        Durability::Immediate
+    };
+    #[cfg(not(any(test, feature = "test-seam")))]
+    let durability = Durability::Immediate;
+    write_txn
+        .set_durability(durability)
+        .map_err(StorageError::backend)?;
+    apply_ops(&write_txn, batch.ops.into_iter())?;
+    write_txn.commit().map_err(StorageError::backend)?;
+    metrics::counter!("storage.writes_total", "backend" => "redb", "durability" => "durable")
+        .increment(1);
+    metrics::histogram!("storage.write_bytes", "backend" => "redb")
+        .record(crate::metric_f64_from_usize(batch.encoded_bytes));
+    #[cfg(any(test, feature = "test-seam"))]
+    if let Some(fault) = sync_fault {
+        return Err(fault.injected_error());
+    }
+    Ok(true)
+}
+
 /// redb-backed key-value store.
 pub struct RedbStore {
     db: Database,
@@ -86,53 +199,14 @@ impl RedbStore {
         durability: Durability,
     ) -> Result<(), StorageError> {
         validate_redb_store_batch(&batch)?;
-        let durability_label = match durability {
-            Durability::Immediate => "durable",
-            Durability::None => "deferred",
-            _ => "other",
-        };
-        metrics::counter!("storage.writes_total", "backend" => "redb", "durability" => durability_label)
-            .increment(1);
-        metrics::histogram!("storage.write_bytes", "backend" => "redb")
-            .record(crate::metric_f64_from_usize(batch.encoded_bytes));
-
-        #[cfg(any(test, feature = "test-seam"))]
-        {
-            // Apply boundary: the atomic transaction commit.
-            if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
-                if fault == crate::PersistFault::PartialApply {
-                    // A strict prefix of the batch is staged into a
-                    // transaction that is dropped uncommitted: no family
-                    // observes a partial batch.
-                    let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-                    apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;
-                    drop(write_txn);
-                }
-                return Err(fault.injected_error());
-            }
-
-            // Sync boundary: the durability tier of the commit.
-            if matches!(durability, Durability::Immediate) {
-                if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
-                    // The batch commits at the deferred tier; completion then
-                    // faults or is lost.
-                    let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-                    write_txn
-                        .set_durability(Durability::None)
-                        .map_err(StorageError::backend)?;
-                    apply_redb_ops(&write_txn, batch.ops.into_iter())?;
-                    write_txn.commit().map_err(StorageError::backend)?;
-                    return Err(fault.injected_error());
-                }
-            }
-        }
-
-        let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-        write_txn
-            .set_durability(durability)
-            .map_err(StorageError::backend)?;
-        apply_redb_ops(&write_txn, batch.ops.into_iter())?;
-        write_txn.commit().map_err(StorageError::backend)
+        write_with_durability(
+            &self.db,
+            batch,
+            durability,
+            apply_redb_ops,
+            #[cfg(any(test, feature = "test-seam"))]
+            &self.faults,
+        )
     }
 }
 
@@ -204,62 +278,15 @@ impl KvStore for RedbStore {
         batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
         validate_redb_store_batch(&batch)?;
-        let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-        write_txn
-            .set_durability(Durability::Immediate)
-            .map_err(StorageError::backend)?;
-        for condition in conditions {
-            let (cf, key) = condition.location();
-            let table = write_txn
-                .open_table(table_for(cf))
-                .map_err(StorageError::backend)?;
-            let guard = table.get(key).map_err(StorageError::backend)?;
-            let matched = match condition {
-                WriteCondition::Absent { .. } => guard.is_none(),
-                WriteCondition::Equals { expected, .. } => match &guard {
-                    Some(g) => g.value() == *expected,
-                    None => false,
-                },
-            };
-            if !matched {
-                // Dropping the transaction aborts it, so no batch operation is applied.
-                return Ok(false);
-            }
-        }
-        #[cfg(any(test, feature = "test-seam"))]
-        if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
-            if fault == crate::PersistFault::PartialApply {
-                apply_redb_ops(&write_txn, prefix_ops(batch.ops))?;
-                drop(write_txn);
-            }
-            return Err(fault.injected_error());
-        }
-        #[cfg(any(test, feature = "test-seam"))]
-        let sync_fault = self.faults.take_at(crate::trait_::PersistBoundary::Sync);
-        #[cfg(any(test, feature = "test-seam"))]
-        let durability = if sync_fault.is_some() {
-            // The commit runs at the deferred tier; the completion fault or
-            // loss is reported after the batch applies.
-            Durability::None
-        } else {
-            Durability::Immediate
-        };
-        #[cfg(not(any(test, feature = "test-seam")))]
-        let durability = Durability::Immediate;
-        write_txn
-            .set_durability(durability)
-            .map_err(StorageError::backend)?;
-        apply_redb_ops(&write_txn, batch.ops.into_iter())?;
-        write_txn.commit().map_err(StorageError::backend)?;
-        metrics::counter!("storage.writes_total", "backend" => "redb", "durability" => "durable")
-            .increment(1);
-        metrics::histogram!("storage.write_bytes", "backend" => "redb")
-            .record(crate::metric_f64_from_usize(batch.encoded_bytes));
-        #[cfg(any(test, feature = "test-seam"))]
-        if let Some(fault) = sync_fault {
-            return Err(fault.injected_error());
-        }
-        Ok(true)
+        write_durable_if(
+            &self.db,
+            conditions,
+            batch,
+            redb_condition_matches,
+            apply_redb_ops,
+            #[cfg(any(test, feature = "test-seam"))]
+            &self.faults,
+        )
     }
 
     fn flush(&self) -> Result<(), StorageError> {
@@ -368,52 +395,14 @@ impl RedbTxIndexStore {
         batch: BufferedWriteBatch,
         durability: Durability,
     ) -> Result<(), StorageError> {
-        let durability_label = match durability {
-            Durability::Immediate => "durable",
-            Durability::None => "deferred",
-            _ => "other",
-        };
-        metrics::counter!("storage.writes_total", "backend" => "redb", "durability" => durability_label)
-            .increment(1);
-        metrics::histogram!("storage.write_bytes", "backend" => "redb")
-            .record(crate::metric_f64_from_usize(batch.encoded_bytes));
-
-        #[cfg(any(test, feature = "test-seam"))]
-        if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
-            if fault == crate::PersistFault::PartialApply {
-                let write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-                apply_txindex_ops(&write_txn, prefix_ops(batch.ops))?;
-                drop(write_txn);
-            }
-            return Err(fault.injected_error());
-        }
-        #[cfg(any(test, feature = "test-seam"))]
-        let sync_fault = if matches!(durability, Durability::Immediate) {
-            self.faults.take_at(crate::trait_::PersistBoundary::Sync)
-        } else {
-            None
-        };
-        #[cfg(any(test, feature = "test-seam"))]
-        let effective_durability = if sync_fault.is_some() {
-            // The commit runs at the deferred tier; the completion fault or
-            // loss is reported after the batch applies.
-            Durability::None
-        } else {
-            durability
-        };
-        #[cfg(not(any(test, feature = "test-seam")))]
-        let effective_durability = durability;
-        let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-        write_txn
-            .set_durability(effective_durability)
-            .map_err(StorageError::backend)?;
-        apply_txindex_ops(&write_txn, batch.ops.into_iter())?;
-        write_txn.commit().map_err(StorageError::backend)?;
-        #[cfg(any(test, feature = "test-seam"))]
-        if let Some(fault) = sync_fault {
-            return Err(fault.injected_error());
-        }
-        Ok(())
+        write_with_durability(
+            &self.db,
+            batch,
+            durability,
+            apply_txindex_ops,
+            #[cfg(any(test, feature = "test-seam"))]
+            &self.faults,
+        )
     }
 }
 
@@ -489,52 +478,15 @@ impl KvStore for RedbTxIndexStore {
             let (cf, key) = condition.location();
             validate_txindex_key(cf, key)?;
         }
-        let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-        write_txn
-            .set_durability(Durability::Immediate)
-            .map_err(StorageError::backend)?;
-        for condition in conditions {
-            if !txindex_condition_matches(&write_txn, condition)? {
-                // Dropping the transaction aborts it, so no batch operation is applied.
-                return Ok(false);
-            }
-        }
-        // Seam: the apply and sync boundaries of this commit, after every
-        // condition matched. A mismatch consumes no fault.
-        #[cfg(any(test, feature = "test-seam"))]
-        if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
-            if fault == crate::PersistFault::PartialApply {
-                apply_txindex_ops(&write_txn, prefix_ops(batch.ops))?;
-                drop(write_txn);
-            }
-            return Err(fault.injected_error());
-        }
-        #[cfg(any(test, feature = "test-seam"))]
-        let sync_fault = self.faults.take_at(crate::trait_::PersistBoundary::Sync);
-        #[cfg(any(test, feature = "test-seam"))]
-        let durability = if sync_fault.is_some() {
-            // The commit runs at the deferred tier; the completion fault or
-            // loss is reported after the batch applies.
-            Durability::None
-        } else {
-            Durability::Immediate
-        };
-        #[cfg(not(any(test, feature = "test-seam")))]
-        let durability = Durability::Immediate;
-        write_txn
-            .set_durability(durability)
-            .map_err(StorageError::backend)?;
-        apply_txindex_ops(&write_txn, batch.ops.into_iter())?;
-        write_txn.commit().map_err(StorageError::backend)?;
-        metrics::counter!("storage.writes_total", "backend" => "redb", "durability" => "durable")
-            .increment(1);
-        metrics::histogram!("storage.write_bytes", "backend" => "redb")
-            .record(crate::metric_f64_from_usize(batch.encoded_bytes));
-        #[cfg(any(test, feature = "test-seam"))]
-        if let Some(fault) = sync_fault {
-            return Err(fault.injected_error());
-        }
-        Ok(true)
+        write_durable_if(
+            &self.db,
+            conditions,
+            batch,
+            txindex_condition_matches,
+            apply_txindex_ops,
+            #[cfg(any(test, feature = "test-seam"))]
+            &self.faults,
+        )
     }
 
     fn flush(&self) -> Result<(), StorageError> {
@@ -599,6 +551,24 @@ impl BatchOp {
             Self::Put { cf, .. } | Self::Delete { cf, .. } | Self::DeleteRange { cf, .. } => *cf,
         }
     }
+}
+
+fn redb_condition_matches(
+    write_txn: &redb::WriteTransaction,
+    condition: &WriteCondition<'_>,
+) -> Result<bool, StorageError> {
+    let (cf, key) = condition.location();
+    let table = write_txn
+        .open_table(table_for(cf))
+        .map_err(StorageError::backend)?;
+    let guard = table.get(key).map_err(StorageError::backend)?;
+    Ok(match condition {
+        WriteCondition::Absent { .. } => guard.is_none(),
+        WriteCondition::Equals { expected, .. } => match &guard {
+            Some(g) => g.value() == *expected,
+            None => false,
+        },
+    })
 }
 
 fn apply_redb_batch_op(
