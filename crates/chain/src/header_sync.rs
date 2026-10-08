@@ -645,49 +645,6 @@ mod timestamp_tests {
     };
     use bitcoin_rs_primitives::{BlockHash, Network};
 
-    /// The future bound must follow the supplied time, not the host clock.
-    ///
-    /// A host running slow used to reject headers that were well inside the
-    /// two-hour window relative to network time, and it would do that against
-    /// every peer at once.
-    #[test]
-    fn the_future_bound_follows_the_supplied_time_not_the_host_clock() {
-        let (tree, tip) = chain_with_median_five();
-        // Far past any plausible host clock, so a raw-clock bound rejects it.
-        let network_now = 2_000_000_000_u32;
-        let header = mine_regtest(
-            tip.compute_hash(),
-            11,
-            network_now + MAX_FUTURE_TIME_SECONDS,
-            1,
-        );
-
-        assert!(
-            super::current_unix_seconds() + MAX_FUTURE_TIME_SECONDS < header.time,
-            "the host clock must reject this header, or the test proves nothing"
-        );
-        assert!(
-            check(&tree, &header, network_now).is_ok(),
-            "a header exactly at the bound relative to the supplied time is valid"
-        );
-
-        // One second past it is not.
-        let beyond = mine_regtest(
-            tip.compute_hash(),
-            12,
-            network_now + MAX_FUTURE_TIME_SECONDS + 1,
-            1,
-        );
-
-        assert!(
-            matches!(
-                check(&tree, &beyond, network_now),
-                Err(ChainError::TimestampTooFarAhead { .. })
-            ),
-            "one second past the bound must still be rejected"
-        );
-    }
-
     /// Builds a chain of 11 headers with times 0..=10, so the median-time-past
     /// of the tip is exactly 5. Insertion bypasses `accept_headers` so the
     /// fixture itself is not subject to the rule under test.
@@ -712,56 +669,125 @@ mod timestamp_tests {
         )
     }
 
-    fn check(tree: &BlockTree, header: &BlockHeader, now: u32) -> Result<(), ChainError> {
+    fn check(
+        tree: &BlockTree,
+        header: &BlockHeader,
+        now: u32,
+        mode: HeaderValidationMode,
+    ) -> Result<(), ChainError> {
         let parent_id = tree
             .lookup(header.prev_blockhash.0)
             .ok_or(ChainError::MissingParent {
                 prev_hash: header.prev_blockhash.0,
             })?;
-        validate_contextual_header(
-            tree,
-            parent_id,
-            header,
-            Network::Regtest,
-            now,
-            HeaderValidationMode::LiveAdmission,
-        )
+        validate_contextual_header(tree, parent_id, header, Network::Regtest, now, mode)
     }
 
-    #[test]
-    fn timestamp_equal_to_median_is_rejected() {
-        let (tree, tip) = chain_with_median_five();
-        let candidate = mine_regtest(tip.compute_hash(), 11, 5, 1);
-        assert!(matches!(
-            check(&tree, &candidate, 1_000_000),
-            Err(ChainError::TimestampTooEarly { median: 5, .. })
-        ));
+    enum Want {
+        Valid,
+        TooEarly,
+        TooFarAhead,
     }
 
+    // Every mode enforces the median; only live admission enforces the
+    // caller-supplied drift ceiling, including its exact boundary.
     #[test]
-    fn timestamp_one_past_median_is_accepted() {
+    fn header_time_bounds_follow_the_median_and_the_supplied_time() {
+        use HeaderValidationMode::{HistoricalReplay, LiveAdmission};
+        const LOW: u32 = 1_000_000;
+        const HIGH: u32 = 2_000_000_000;
+        assert!(
+            super::current_unix_seconds() + MAX_FUTURE_TIME_SECONDS
+                < HIGH + MAX_FUTURE_TIME_SECONDS,
+            "the host clock must reject the HIGH header, or the test proves nothing"
+        );
+        let cases = [
+            (
+                "time equal to the median",
+                11,
+                5,
+                LOW,
+                LiveAdmission,
+                Want::TooEarly,
+            ),
+            (
+                "time one past the median",
+                11,
+                6,
+                LOW,
+                LiveAdmission,
+                Want::Valid,
+            ),
+            (
+                "replay enforces the median",
+                11,
+                5,
+                LOW,
+                HistoricalReplay,
+                Want::TooEarly,
+            ),
+            (
+                "at the cap below the host clock",
+                11,
+                LOW + MAX_FUTURE_TIME_SECONDS,
+                LOW,
+                LiveAdmission,
+                Want::Valid,
+            ),
+            (
+                "past the cap below the host clock",
+                11,
+                LOW + MAX_FUTURE_TIME_SECONDS + 1,
+                LOW,
+                LiveAdmission,
+                Want::TooFarAhead,
+            ),
+            (
+                "at the cap above the host clock",
+                11,
+                HIGH + MAX_FUTURE_TIME_SECONDS,
+                HIGH,
+                LiveAdmission,
+                Want::Valid,
+            ),
+            (
+                "past the cap above the host clock",
+                12,
+                HIGH + MAX_FUTURE_TIME_SECONDS + 1,
+                HIGH,
+                LiveAdmission,
+                Want::TooFarAhead,
+            ),
+            (
+                "live admission rejects after a clock rollback",
+                11,
+                1_000 + MAX_FUTURE_TIME_SECONDS + 100,
+                1_000,
+                LiveAdmission,
+                Want::TooFarAhead,
+            ),
+            (
+                "replay skips the cap after a clock rollback",
+                11,
+                1_000 + MAX_FUTURE_TIME_SECONDS + 100,
+                1_000,
+                HistoricalReplay,
+                Want::Valid,
+            ),
+        ];
         let (tree, tip) = chain_with_median_five();
-        let candidate = mine_regtest(tip.compute_hash(), 11, 6, 1);
-        assert!(check(&tree, &candidate, 1_000_000).is_ok());
-    }
-
-    #[test]
-    fn timestamp_exactly_at_the_drift_bound_is_accepted() {
-        let (tree, tip) = chain_with_median_five();
-        let now = 1_000_000_u32;
-        let candidate = mine_regtest(tip.compute_hash(), 11, now + MAX_FUTURE_TIME_SECONDS, 1);
-        assert!(check(&tree, &candidate, now).is_ok());
-    }
-
-    #[test]
-    fn timestamp_one_past_the_drift_bound_is_rejected() {
-        let (tree, tip) = chain_with_median_five();
-        let now = 1_000_000_u32;
-        let candidate = mine_regtest(tip.compute_hash(), 11, now + MAX_FUTURE_TIME_SECONDS + 1, 1);
-        assert!(matches!(
-            check(&tree, &candidate, now),
-            Err(ChainError::TimestampTooFarAhead { .. })
-        ));
+        for (name, seed, time, now, mode, want) in cases {
+            let candidate = mine_regtest(tip.compute_hash(), seed, time, 1);
+            let result = check(&tree, &candidate, now, mode);
+            let matched = match want {
+                Want::Valid => result.is_ok(),
+                Want::TooEarly => {
+                    matches!(result, Err(ChainError::TimestampTooEarly { median: 5, .. }))
+                }
+                Want::TooFarAhead => matches!(result, Err(ChainError::TimestampTooFarAhead { .. })),
+            };
+            assert!(matched, "{name}: {result:?}");
+        }
     }
 
     #[test]
@@ -775,78 +801,6 @@ mod timestamp_tests {
     fn wall_clock_conversion_maps_pre_epoch_to_zero() {
         let before_epoch = std::time::UNIX_EPOCH - std::time::Duration::from_secs(1);
         assert_eq!(super::unix_seconds_at(before_epoch), 0);
-    }
-
-    #[test]
-    fn historical_replay_skips_future_drift_but_live_admission_rejects() {
-        let (tree, tip) = chain_with_median_five();
-        // Simulate a host clock rollback: `now` is far behind the header
-        // time, so the live future-drift ceiling rejects it.
-        let rolled_back_now = 1_000_u32;
-        let candidate = mine_regtest(
-            tip.compute_hash(),
-            11,
-            rolled_back_now + MAX_FUTURE_TIME_SECONDS + 100,
-            1,
-        );
-        let parent_id = tree
-            .lookup(tip.compute_hash().0)
-            .ok_or_else(|| ChainError::MissingParent {
-                prev_hash: tip.compute_hash().0,
-            })
-            .unwrap_or_else(|e| panic!("tip not in tree: {e:?}"));
-
-        // LiveAdmission rejects: header time exceeds now + 2h.
-        assert!(matches!(
-            validate_contextual_header(
-                &tree,
-                parent_id,
-                &candidate,
-                Network::Regtest,
-                rolled_back_now,
-                HeaderValidationMode::LiveAdmission
-            ),
-            Err(ChainError::TimestampTooFarAhead { .. })
-        ));
-
-        // HistoricalReplay accepts: the same header is valid historical
-        // history — the wall clock rolling back must not invalidate it.
-        assert!(
-            validate_contextual_header(
-                &tree,
-                parent_id,
-                &candidate,
-                Network::Regtest,
-                rolled_back_now,
-                HeaderValidationMode::HistoricalReplay
-            )
-            .is_ok(),
-            "HistoricalReplay must not enforce the future-drift ceiling"
-        );
-    }
-
-    #[test]
-    fn historical_replay_still_enforces_median_time_past() {
-        let (tree, tip) = chain_with_median_five();
-        let parent_id = tree
-            .lookup(tip.compute_hash().0)
-            .ok_or_else(|| ChainError::MissingParent {
-                prev_hash: tip.compute_hash().0,
-            })
-            .unwrap_or_else(|e| panic!("tip not in tree: {e:?}"));
-        // Candidate with time <= median (5): rejected in BOTH modes.
-        let candidate = mine_regtest(tip.compute_hash(), 11, 5, 1);
-        assert!(matches!(
-            validate_contextual_header(
-                &tree,
-                parent_id,
-                &candidate,
-                Network::Regtest,
-                1_000_000,
-                HeaderValidationMode::HistoricalReplay
-            ),
-            Err(ChainError::TimestampTooEarly { .. })
-        ));
     }
 }
 
