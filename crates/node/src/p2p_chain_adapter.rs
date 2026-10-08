@@ -11,8 +11,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bitcoin_rs_p2p::sync::chain::{
-    BranchSwitchError, HeaderAdmission, HistoricalAdvance, SyncChain, SyncChainError,
-    WindowCommitDisposition, WindowCommitError,
+    HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
+    WindowApplyDisposition, WindowCommitError,
 };
 use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256, Header, Network};
@@ -120,23 +120,6 @@ fn settle_window_success(
     }
 }
 
-fn window_disposition(
-    disposition: bitcoin_rs_chainstate::WindowApplyDisposition,
-) -> WindowCommitDisposition {
-    match disposition {
-        bitcoin_rs_chainstate::WindowApplyDisposition::Permanent => {
-            WindowCommitDisposition::Permanent
-        }
-        bitcoin_rs_chainstate::WindowApplyDisposition::BodyMutated => {
-            WindowCommitDisposition::BodyMutated
-        }
-        bitcoin_rs_chainstate::WindowApplyDisposition::Operational => {
-            WindowCommitDisposition::Operational
-        }
-        bitcoin_rs_chainstate::WindowApplyDisposition::Fatal => WindowCommitDisposition::Fatal,
-    }
-}
-
 /// Test fixture: the one owner of header-tree writes node tests must
 /// synthesize directly — mid-chain forks that must not become the best tip,
 /// and subtrees admission would reject — which [`Chainstate::admit_headers`]
@@ -171,18 +154,6 @@ impl SyncChain for NodeSyncChain {
         };
         manager
             .advance_historical()
-            .map(|progress| match progress {
-                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::Complete => {
-                    HistoricalAdvance::Complete
-                }
-                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::ReplayPending => {
-                    HistoricalAdvance::ReplayPending
-                }
-                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::MissingBody {
-                    height,
-                    hash,
-                } => HistoricalAdvance::MissingBody { height, hash },
-            })
             .map_err(|error| -> SyncChainError {
                 self.handles.fail_closed_for_recovery();
                 Box::new(error)
@@ -274,7 +245,7 @@ impl SyncChain for NodeSyncChain {
             // A closed or already-active generation refuses a new window.
             .map_err(|source| WindowCommitError {
                 applied: 0,
-                disposition: WindowCommitDisposition::Operational,
+                disposition: WindowApplyDisposition::Operational,
                 invalidated: Box::default(),
                 source: Box::new(source),
             })?;
@@ -283,7 +254,7 @@ impl SyncChain for NodeSyncChain {
                 .begin_mempool_change()
                 .map_err(|source| WindowCommitError {
                     applied: 0,
-                    disposition: WindowCommitDisposition::Operational,
+                    disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                     source: Box::new(source),
                 })?;
@@ -305,7 +276,7 @@ impl SyncChain for NodeSyncChain {
         };
         result.map_err(|error| WindowCommitError {
             applied: error.applied,
-            disposition: window_disposition(error.disposition),
+            disposition: error.disposition,
             invalidated: error.invalidated,
             source: Box::new(error.source),
         })
@@ -316,77 +287,19 @@ impl SyncChain for NodeSyncChain {
         target: bitcoin_rs_chain::NodeId,
         staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
         connected_body: &mut dyn FnMut(Hash256),
-    ) -> Result<(), BranchSwitchError> {
-        match crate::reorg::switch_to_branch(
+    ) -> Result<(), ReorgError> {
+        crate::reorg::switch_to_branch(
             &self.handles,
             &self.followers,
             target,
             staged_body,
             connected_body,
-        ) {
-            Ok(()) => Ok(()),
-            // A required disconnect/connect body was absent from staged storage.
-            Err(crate::reorg::ReorgError::MissingBody { height, .. }) => {
-                Err(BranchSwitchError::MissingBody { height })
+        )
+        .inspect_err(|error| {
+            if matches!(error, ReorgError::ConnectFailed { invalidated, .. } if !invalidated.is_empty()) {
+                self.handles.reevaluate_assume_valid();
             }
-            // A disconnect or old-branch restoration failure requires
-            // recovery; chainstate has already closed admission.
-            Err(
-                error @ (crate::reorg::ReorgError::Fatal(_)
-                | crate::reorg::ReorgError::RestorationFailed { .. }),
-            ) => Err(BranchSwitchError::Fatal(Box::new(error))),
-            // The transition generation could not be settled after reorg work.
-            Err(error @ crate::reorg::ReorgError::TransitionSettlement { .. }) => {
-                Err(BranchSwitchError::TransitionSettlement(Box::new(error)))
-            }
-            // The checkpoint settlement failed after reorg mutation.
-            Err(error @ crate::reorg::ReorgError::CheckpointSettlement { .. }) => {
-                Err(BranchSwitchError::CheckpointSettlement(Box::new(error)))
-            }
-            // A target-branch body failed while connecting the branch.
-            Err(crate::reorg::ReorgError::ConnectFailed {
-                hash,
-                disposition,
-                invalidated,
-                ..
-            }) => {
-                if !invalidated.is_empty() {
-                    // Invalidation can move the active branch away from the
-                    // pinned assume-valid anchor.
-                    self.handles.reevaluate_assume_valid();
-                }
-                Err(BranchSwitchError::ConnectFailed {
-                    hash,
-                    disposition: window_disposition(disposition),
-                    invalidated: invalidated.into_boxed_slice(),
-                })
-            }
-            // A disconnect body was unavailable after the disconnect started.
-            Err(crate::reorg::ReorgError::DisconnectBodyLost {
-                disconnected,
-                stopped_at,
-                ..
-            }) => Err(BranchSwitchError::DisconnectBodyLost {
-                disconnected,
-                stopped_at,
-            }),
-            // A connect body absent mid-switch is retryable at the coherent
-            // prefix; any other load failure keeps its causal error in `Other`.
-            Err(crate::reorg::ReorgError::ConnectBodyLost {
-                disconnected,
-                connected,
-                stopped_at,
-                source,
-            }) if matches!(*source, crate::reorg::ReorgError::MissingBody { .. }) => {
-                Err(BranchSwitchError::ConnectBodyLost {
-                    disconnected,
-                    connected,
-                    stopped_at,
-                })
-            }
-            // An unclassified reorg error crossed the seam unchanged.
-            Err(error) => Err(BranchSwitchError::Other(Box::new(error))),
-        }
+        })
     }
 }
 
