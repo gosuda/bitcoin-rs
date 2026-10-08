@@ -1143,10 +1143,9 @@ mod tests {
     #[test]
     fn find_common_ancestor_resolves_uneven_branches_after_index_taint()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let trunk = insert_branch(&mut tree, None, 0..=8)?;
-        let side = insert_branch(&mut tree, Some(trunk[2]), 101..=103)?;
-        let other = insert_branch(&mut tree, Some(trunk[4]), 201..=202)?;
+        let (mut tree, trunk) = linear_chain(8)?;
+        let side = extend_branch(&mut tree, trunk[2], 101..=103)?;
+        let other = extend_branch(&mut tree, trunk[4], 201..=202)?;
         let cases = [
             (trunk[8], trunk[4], trunk[4]),
             (trunk[1], side[2], trunk[1]),
@@ -1171,18 +1170,22 @@ mod tests {
     #[test]
     fn find_common_ancestor_refuses_disconnected_and_broken_chains()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut tree = BlockTree::new();
-        let a = insert_branch(&mut tree, None, 0..=3)?;
-        let b = insert_branch(&mut tree, None, 101..=103)?;
+        let (mut tree, a) = linear_chain(3)?;
+        let b_root = tree.insert_node(
+            None,
+            test_header(BlockHash::default(), 101),
+            NodeStatus::HeaderValid,
+        )?;
+        let b_tip = extend_branch(&mut tree, b_root, 102..=103)?[1];
         let unknown = NodeId::new(u32::MAX);
-        for (left, right) in [(a[3], b[2]), (a[3], unknown), (unknown, a[3])] {
+        for (left, right) in [(a[3], b_tip), (a[3], unknown), (unknown, a[3])] {
             assert_eq!(tree.find_common_ancestor(left, right), None);
         }
         tree.node_mut(a[1])?.parent = Some(unknown);
         assert_eq!(tree.find_common_ancestor(a[3], a[2]), None);
         tree.node_mut(a[1])?.parent = Some(a[2]);
-        assert_eq!(tree.find_common_ancestor(a[3], b[2]), None);
-        assert_eq!(tree.find_common_ancestor(b[2], a[3]), None);
+        assert_eq!(tree.find_common_ancestor(a[3], b_tip), None);
+        assert_eq!(tree.find_common_ancestor(b_tip, a[3]), None);
         Ok(())
     }
 
