@@ -200,12 +200,6 @@ impl Reconstruction {
     }
 
     /// Receive-side entry for `blocktxn`.
-    ///
-    /// Places the announced transactions at the pending entry's missing
-    /// indexes and completes the block, or falls back when the response does
-    /// not match the outstanding request. A completion that fails
-    /// verification flags the entry first: a late `blocktxn` for the same
-    /// block is then ignored, not re-guessed.
     pub fn receive_blocktxn(&mut self, txn: &BlockTxn, now: Instant) -> Outcome {
         self.prune(now);
         let hash = native_block_hash(txn.transactions.block_hash);
@@ -482,9 +476,8 @@ mod tests {
     }
 
     /// Builds a native block over `txs` whose header commits to their
-    /// transaction-ID merkle root, the property the reconstruction
-    /// verifier enforces. The registry round trip pins the merkle byte
-    /// order at the fixture level.
+    /// transaction-ID merkle root, the property the reconstruction verifier
+    /// enforces.
     fn conforming_block(txs: Vec<Tx>) -> Block {
         let mut native = Block {
             header: Header {
@@ -558,9 +551,6 @@ mod tests {
         Instant::now()
     }
 
-    /// v2 (wtxid identity): all transactions live in the hints, so the
-    /// compact block reconstructs fully — the identity profile peers use
-    /// toward us, round-tripped through the registry encoder.
     #[test]
     fn v2_compact_block_with_all_txs_hinted_reconstructs_completely() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2), test_tx(3)], 2, 0x1234);
@@ -579,8 +569,6 @@ mod tests {
         assert_eq!(block.txs, native.txs);
     }
 
-    /// v1 (txid identity, witness-stripped prefills): identities match by
-    /// txid, so reconstruction still completes.
     #[test]
     fn v1_compact_block_matches_by_txid() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 1, 0x4321);
@@ -600,9 +588,6 @@ mod tests {
         );
     }
 
-    /// A transaction missing from the mempool becomes a bounded
-    /// `getblocktxn` request for its absolute index, and the late
-    /// `blocktxn` completes the block.
     #[test]
     fn missing_tx_requests_getblocktxn_and_completes_on_blocktxn() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2), test_tx(3)], 2, 0x99);
@@ -635,9 +620,6 @@ mod tests {
         assert_eq!(block.txs, native.txs);
     }
 
-    /// Two missing transactions become one ordered `getblocktxn`
-    /// request for both absolute indexes, and the `blocktxn`
-    /// completes the block.
     #[test]
     fn missing_txs_request_ordered_getblocktxn_and_complete_on_blocktxn() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2), test_tx(3)], 2, 0x9a);
@@ -666,9 +648,6 @@ mod tests {
         assert_eq!(block.txs, native.txs);
     }
 
-    /// A `blocktxn` whose size does not match the outstanding request falls
-    /// back to the full block instead of guessing. A late retry for the same
-    /// block after fallback is ignored.
     #[test]
     fn mismatched_blocktxn_falls_back() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x77);
@@ -704,8 +683,6 @@ mod tests {
         ));
     }
 
-    /// A `blocktxn` for an unknown (or expired) block does nothing, and the
-    /// deadline release leaves nothing pending behind.
     #[test]
     fn stale_or_expired_blocktxn_is_idle_and_state_is_released() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x55);
@@ -743,12 +720,6 @@ mod tests {
         ));
     }
 
-    /// More than [`MAX_REQUESTED_MISSING`] missing transactions skips the
-    /// `getblocktxn` round trip in favor of the full-block fallback; the
-    /// bound itself is still worth one request.
-    ///
-    /// CONTRACT: docs/policies/p2p-compatibility.md#5-message-surface (bounded
-    /// missing list gates the getblocktxn round trip).
     #[test]
     fn cmpctblock_missing_above_the_request_bound_falls_back() {
         let hints = SetHints { txs: Vec::new() };
@@ -768,17 +739,10 @@ mod tests {
         assert_eq!(request.txs_request.indexes.len(), MAX_REQUESTED_MISSING);
     }
 
-    // ---- Compact conformance fixtures and tests ----
-
-    /// Rebuilds the precomputed colliding pair: two transactions whose
-    /// distinct wtxids collide on one BIP152 short ID under `native`'s
-    /// header and `nonce` — the fixture behind the per-slot collision path,
-    /// which a hash collision makes unreachable by construction. The varying
-    /// bytes sit in a trailing `OP_RETURN` payload; distinct outpoints separate
-    /// the two inputs so the pair can coexist in one mempool. Setup asserts
-    /// both hashes really do produce the same short ID: a fixture that
-    /// silently stopped colliding would make the collision path unreachable
-    /// and the test vacuous.
+    /// Rebuilds the precomputed colliding pair: two transactions whose distinct
+    /// wtxids collide on one BIP152 short ID under `native`'s header and
+    /// `nonce` — the fixture behind the per-slot collision path, which a hash
+    /// collision makes unreachable by construction.
     fn colliding_hint_pair(native: &Block, nonce: u64) -> (Tx, Tx, ShortId) {
         let keys = ShortId::calculate_siphash_keys(&registry_block(native).header, nonce);
         let (first_payload, second_payload) = COLLIDING_PAYLOADS;
@@ -803,18 +767,11 @@ mod tests {
         (first, second, sid)
     }
 
-    /// Two mempool identities colliding on one short ID retire only their
-    /// own slot and request exactly that slot: the unrelated hinted slot
-    /// stays filled, a later candidate for the collided slot does not refill
-    /// it, and the correct `blocktxn` completes the block without a
-    /// full-block fallback (Core 31.1 `blockencodings.cpp:116-166`).
     #[test]
     fn colliding_hint_requests_only_its_slot() {
         let native = conforming_block(vec![test_tx(1), test_tx(2), test_tx(3)]);
         let (first, second, collided) = colliding_hint_pair(&native, 0x515);
         let unrelated = wtxid_short_id(&native, 0x515, &native.txs[2]);
-        // The last entry repeats `first`: after the collision retires the
-        // slot, a later candidate for it must not refill it.
         let hints = SetHints {
             txs: vec![first.clone(), second, native.txs[2].clone(), first],
         };
@@ -828,9 +785,6 @@ mod tests {
             panic!("expected a getblocktxn request for the collided slot, got {outcome:?}");
         };
         assert_eq!(request.txs_request.indexes, vec![1]);
-        // Retained bytes: two short IDs, the prefilled coinbase, and the
-        // unrelated hinted body; the collided candidate's body was returned
-        // exactly once.
         assert_eq!(
             reconstruction.retained_bytes(),
             2 * 6 + native.txs[0].total_size() + native.txs[2].total_size()
@@ -849,10 +803,6 @@ mod tests {
         assert_eq!(block.txs, native.txs);
     }
 
-    /// A `cmpctblock` declaring the same short ID twice is structurally
-    /// malformed: the slot accounting cannot be trusted, so the message
-    /// falls back immediately instead of reconstructing from a collapsed
-    /// wanted map.
     #[test]
     fn duplicate_declared_short_ids_fall_back() {
         let native = conforming_block(vec![test_tx(1), test_tx(2), test_tx(3)]);
@@ -873,10 +823,7 @@ mod tests {
     }
 
     /// Hints that notice a body lookup made while the identity walk is still
-    /// running: [`SetHints`] behind a walk flag. The mempool holds its pool
-    /// read lock across the walk callback and a body lookup takes that lock
-    /// again, so a nested lookup deadlocks the moment a writer queues behind
-    /// the reader.
+    /// running: [`SetHints`] behind a walk flag.
     struct WalkGuardedHints {
         inner: SetHints,
         walking: AtomicBool,
@@ -911,8 +858,6 @@ mod tests {
         }
     }
 
-    /// A fully hinted reconstruction fetches every body after the identity
-    /// walk returns, never during it.
     #[test]
     fn hint_bodies_are_fetched_outside_the_identity_walk() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2), test_tx(3)], 2, 0x77);
@@ -937,9 +882,6 @@ mod tests {
         );
     }
 
-    /// A fully hinted reconstruction whose transaction set does not hash to
-    /// the header's merkle root is never delivered as complete — the cheap
-    /// reconstruction verdict runs before the block enters the sink.
     #[test]
     fn compact_completion_merkle_mismatch_falls_back() {
         let txs = vec![test_tx(1), test_tx(2)];
@@ -977,18 +919,9 @@ mod tests {
         );
     }
 
-    /// A completion whose transaction list ends in a duplicated final
-    /// transaction hashes to the header's merkle root (CVE-2012-2459: the
-    /// duplicate leaf pairs with itself exactly as the padded single leaf
-    /// does), so the root check alone would deliver the mutated body; the
-    /// mutation-aware completion rejects it with the same-peer full-block
-    /// fallback (Core 31.1 `blockencodings.cpp:207-219`).
     #[test]
     fn duplicate_final_transaction_completion_falls_back() {
         let native = conforming_block(vec![test_tx(1), test_tx(2), test_tx(3)]);
-        // Fixture validity: the mutated four-transaction set really does
-        // commit to the honest header's root — the collision this test
-        // exists to reject.
         let mut mutated = native.clone();
         mutated.txs.push(native.txs[2].clone());
         assert_eq!(
@@ -1000,9 +933,6 @@ mod tests {
         let compact = HeaderAndShortIds {
             header: registry_block(&native).header,
             nonce: 0x77,
-            // The two honest non-coinbase transactions as hinted short-ID
-            // slots; the duplicated final transaction arrives as the
-            // prefill at slot 3.
             short_ids: vec![
                 wtxid_short_id(&native, 0x77, &native.txs[1]),
                 wtxid_short_id(&native, 0x77, &native.txs[2]),
@@ -1038,10 +968,6 @@ mod tests {
         );
     }
 
-    /// A `blocktxn` response that fills the pending slots with the wrong
-    /// bodies produces a transaction set that does not hash to the header's
-    /// merkle root; the reconstruction falls back, the pending entry stays
-    /// closed for late responses, and no wrong block is delivered.
     #[test]
     fn blocktxn_merkle_mismatch_falls_back() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x78);
@@ -1080,10 +1006,6 @@ mod tests {
         ));
     }
 
-    /// A `blocktxn` that fails verification drops its bodies, so the dead
-    /// entry must release its byte charge: until the deadline the pool would
-    /// otherwise refuse later reconstructions for bytes that no longer
-    /// exist, while the entry itself stays closed for late responses.
     #[test]
     fn failed_verification_releases_retained_bytes() {
         let (native, cmpct) = sample_cmpct(vec![test_tx(1), test_tx(2)], 2, 0x78);
@@ -1130,8 +1052,6 @@ mod tests {
         ));
     }
 
-    /// A failed delayed completion frees the retained-byte budget for a
-    /// later compact block before the original entry's deadline.
     #[test]
     fn failed_blocktxn_completion_releases_retained_byte_budget() {
         let mut first_prefill = test_tx(1);

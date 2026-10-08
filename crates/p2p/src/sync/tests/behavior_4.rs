@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn tick_retries_expired_pending_before_new_heights() -> Result<(), Box<dyn std::error::Error>> {
+fn tick_retries_expired_pending_before_new_heights() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(5)?;
     install_budget(
         &sync,
@@ -34,7 +34,7 @@ fn tick_retries_expired_pending_before_new_heights() -> Result<(), Box<dyn std::
 }
 
 #[test]
-fn tick_fills_mixed_retry_and_new_height_batch() -> Result<(), Box<dyn std::error::Error>> {
+fn tick_fills_mixed_retry_and_new_height_batch() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
     install_budget(
         &sync,
@@ -73,13 +73,12 @@ fn tick_fills_mixed_retry_and_new_height_batch() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn tick_applies_contiguous_blocks_before_requesting_more() -> Result<(), Box<dyn std::error::Error>>
-{
+fn tick_applies_contiguous_blocks_before_requesting_more() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let child = regtest_fixture::mined_regtest_header(genesis.block_hash(), 1)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     let child_id = tree.insert_node(Some(genesis_id), child, NodeStatus::HeaderValid)?;
     let expected = BlockHash::from(tree.node(child_id)?.hash);
 
@@ -106,15 +105,14 @@ fn tick_applies_contiguous_blocks_before_requesting_more() -> Result<(), Box<dyn
 }
 
 #[test]
-fn oversized_received_block_releases_pending_budget_for_retry()
--> Result<(), Box<dyn std::error::Error>> {
+fn oversized_received_block_releases_pending_budget_for_retry() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let block = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
         1,
         vec![regtest_fixture::coinbase(1), transaction(0x41)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let mut tree = BlockTree::new();
     let genesis_id = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let block_id = tree.insert_node(Some(genesis_id), block.header, NodeStatus::HeaderValid)?;
@@ -173,27 +171,26 @@ fn oversized_received_block_releases_pending_budget_for_retry()
 }
 
 #[test]
-fn staging_byte_exhaustion_backpressures_requests_then_recovers()
--> Result<(), Box<dyn std::error::Error>> {
+fn staging_byte_exhaustion_backpressures_requests_then_recovers() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let block1 = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block2 = regtest_fixture::mined_block_with_prev_hash(
         block1.block_hash(),
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block3 = regtest_fixture::mined_block_with_prev_hash(
         block2.block_hash(),
         3,
         vec![regtest_fixture::coinbase(3)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block1_hash = block1.block_hash();
     let block2_hash = block2.block_hash();
     let block3_hash = block3.block_hash();
@@ -271,7 +268,7 @@ fn staging_byte_exhaustion_backpressures_requests_then_recovers()
 }
 
 #[test]
-fn staging_byte_exhaustion_blocks_all_requests() -> Result<(), Box<dyn std::error::Error>> {
+fn staging_byte_exhaustion_blocks_all_requests() -> TestResult {
     let ExhaustionFixture {
         sync,
         stalled_rx,
@@ -279,10 +276,6 @@ fn staging_byte_exhaustion_blocks_all_requests() -> Result<(), Box<dyn std::erro
         ..
     } = staging_exhaustion_fixture()?;
 
-    // While the staged bytes are exhausted no getdata is issued at all —
-    // the gate is checked before expired-pending retry, so even though
-    // block1's pending entry is already expired (zero pending timeout)
-    // neither peer is asked for anything.
     sync.tick();
     while let Ok(message) = stalled_rx.try_recv() {
         if matches!(message, Message::GetData(_)) {
@@ -305,8 +298,7 @@ fn staging_byte_exhaustion_blocks_all_requests() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
--> Result<(), Box<dyn std::error::Error>> {
+fn staging_byte_exhaustion_recovers_via_staged_block_expiry() -> TestResult {
     let ExhaustionFixture {
         sync,
         stalled_rx,
@@ -316,14 +308,9 @@ fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
         ..
     } = staging_exhaustion_fixture()?;
 
-    // Drain the first tick's messages before testing recovery.
     sync.tick();
     while stalled_rx.try_recv().is_ok() {}
 
-    // Let the staged successor outlive its received timeout, then tick:
-    // prune_expired drops it from the stager, which releases its bytes
-    // (gate reopens), and expire_pending re-queues the stalled frontier
-    // height-first toward the healthy peer.
     std::thread::sleep(Duration::from_millis(125));
     sync.tick();
 
@@ -355,8 +342,7 @@ fn staging_byte_exhaustion_recovers_via_staged_block_expiry()
 }
 
 #[test]
-fn deterministic_initial_sync_proxy_reports_pipeline_budgets()
--> Result<(), Box<dyn std::error::Error>> {
+fn deterministic_initial_sync_proxy_reports_pipeline_budgets() -> TestResult {
     let recorder = TestRecorder::default();
     metrics::with_local_recorder(&recorder, || {
         let fixture = deterministic_proxy_fixture()?;

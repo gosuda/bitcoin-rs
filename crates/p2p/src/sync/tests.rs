@@ -1,3 +1,4 @@
+pub(crate) use crate::test_support::{OrFail, TestResult};
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
@@ -6,7 +7,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use arc_swap::ArcSwapOption;
-// Wire seam: byte-array access on the retained bitcoin:: wire hash types.
 use bitcoin::hashes::Hash;
 use bitcoin_rs_chain::{
     BlockTree, ChainWork, InitialBlockDownload, NodeId, NodeStatus, TipSnapshot, regtest_fixture,
@@ -52,10 +52,7 @@ struct ScriptedBranchSwitch {
 
 /// Applied-chain stub for executor tests: real [`BlockTree`] header admission
 /// and block-at-a-time applied-tip advance, with one-shot scripted commit and
-/// branch-switch failures. Body classification mirrors node's apply
-/// classifier: a second coinbase-shaped transaction is a permanent
-/// `ExtraCoinbase` invalidity, while a body that fails the header binding
-/// (txid merkle root or witness commitment) is `BodyMutated`.
+/// branch-switch failures.
 pub(crate) struct TestChain {
     network: Network,
     block_tree: Arc<RwLock<BlockTree>>,
@@ -221,7 +218,6 @@ impl SyncChain for TestChain {
                     active_height,
                 }
             }
-            // Header validation rejected the fixture batch.
             Err(error) => HeaderAdmission::Rejected(error),
         }
     }
@@ -267,7 +263,6 @@ impl SyncChain for TestChain {
                 _ => None,
             };
             if let Some((_, disposition)) = failure {
-                // The test explicitly scripted this block to fail once.
                 return Err(WindowCommitError {
                     applied,
                     disposition,
@@ -276,7 +271,6 @@ impl SyncChain for TestChain {
                 });
             }
             let Some(node_id) = tree.lookup(hash) else {
-                // The staged body has no corresponding header-tree node.
                 return Err(WindowCommitError {
                     applied,
                     disposition: WindowApplyDisposition::Operational,
@@ -284,10 +278,6 @@ impl SyncChain for TestChain {
                     source: Box::new(std::io::Error::other("commit block not in tree")),
                 });
             };
-            // Mirrors node's apply classifier order: a second coinbase-shaped
-            // transaction trips `ExtraCoinbase` before the merkle compare —
-            // a permanent invalidity whose subtree is invalidated while the
-            // transition is held. Empty bodies are header-chain fixtures.
             let coinbase_shaped = |tx: &Tx| {
                 tx.inputs.len() == 1
                     && tx.inputs[0].previous_output.txid == Txid::default()
@@ -305,9 +295,6 @@ impl SyncChain for TestChain {
                     source: Box::new(std::io::Error::other("extra coinbase")),
                 });
             }
-            // A non-empty body that does not bind to its header is
-            // `BodyMutated`: the body is dropped for retry and nothing is
-            // invalidated.
             if !block.txs.is_empty() {
                 if let Err(source) = self.body_binding(&tree, block) {
                     return Err(WindowCommitError {
@@ -319,7 +306,6 @@ impl SyncChain for TestChain {
                 }
             }
             let Ok(node) = tree.node(node_id) else {
-                // The looked-up header node disappeared during the fixture run.
                 return Err(WindowCommitError {
                     applied,
                     disposition: WindowApplyDisposition::Operational,
@@ -348,9 +334,6 @@ impl SyncChain for TestChain {
         let scripted = self.scripted_branch_switch.lock().take();
         if let Some(scripted) = scripted {
             for hash in &scripted.connected {
-                // Mirror the impl: each committed connect advances the
-                // applied tip and fires `connected_body` so the executor
-                // retires its download accounting.
                 let tip = {
                     let tree = self.block_tree.read();
                     tree.lookup(*hash).and_then(|node_id| {
@@ -376,8 +359,6 @@ impl SyncChain for TestChain {
                 ..
             } = &scripted.error
             {
-                // Mirror the impl marking the failed block's subtree while
-                // the transition is held.
                 let mut tree = self.block_tree.write();
                 if let Some(node_id) = tree.lookup(*hash) {
                     let _ = tree.invalidate_subtree(node_id);
@@ -385,15 +366,13 @@ impl SyncChain for TestChain {
             }
             return Err(scripted.error);
         }
-        // Branch-switch behavior is covered by node-only reorg tests.
         Err(ReorgError::NoAppliedTip)
     }
 }
 
 /// Chain stub whose header admission is always refused, mirroring the
 /// production executor's paused admission: the chain transition lock is
-/// unavailable, so the batch is dropped before validation. Every other
-/// operation delegates to [`TestChain`], whose admission always validates.
+/// unavailable, so the batch is dropped before validation.
 struct RefusingChain(Arc<TestChain>);
 
 impl SyncChain for RefusingChain {
@@ -453,23 +432,8 @@ impl SyncChain for RefusingChain {
     }
 }
 
-/// A batch forwarded out of a delivered body (`wire_response = false`) is
-/// not an answer to the pending `getheaders`, whatever admission does with
-/// it: neither a rejected batch (`TimestampTooFarAhead`) nor a refused one
-/// (paused admission) may consume the gate. Unconditional consumption would
-/// free the gate at every body delivery, so a connection that silently
-/// ignored its wire request would never age the request out.
-///
-/// PRE: `a` owns the pending header request and `b` is a second usable
-///   peer, so expiry has a fallback; the batch from `a` is carried by a
-///   body delivery, not by the wire answer.
-/// POST: the gate keeps its owner and deadline through the body-forwarded
-///   batch; once the deadline lapses the probe rotates past `a` and `b` is
-///   asked on that tick.
-/// INVARIANT: only a wire answer may clear a pending header request.
 #[test]
-fn body_forwarded_batch_does_not_consume_the_pending_header_gate()
--> Result<(), Box<dyn std::error::Error>> {
+fn body_forwarded_batch_does_not_consume_the_pending_header_gate() -> TestResult {
     for build_fixture in [header_sync_with_genesis, header_sync_with_refusing_chain] {
         let HeaderSyncFixture {
             genesis,
@@ -506,10 +470,6 @@ fn body_forwarded_batch_does_not_consume_the_pending_header_gate()
             "a body-forwarded batch is not an answer: the gate stays with `a`",
         );
 
-        // Strictly short of the deadline the request keeps the gate: expiry
-        // is a boundary, not a window. The margin is a millisecond because
-        // the tick reads the wall clock — a nanosecond would be swallowed
-        // by scheduling latency.
         let almost = Instant::now()
             .checked_sub(super::HEADER_REQUEST_TIMEOUT.saturating_sub(Duration::from_millis(1)))
             .ok_or_else(|| std::io::Error::other("test instant underflow"))?;
@@ -568,8 +528,7 @@ fn body_forwarded_batch_does_not_consume_the_pending_header_gate()
 }
 
 #[test]
-fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(4)?;
     install_budget(
         &sync,
@@ -605,13 +564,8 @@ fn tick_allows_demoted_peer_when_it_is_the_only_eligible_peer()
     Ok(())
 }
 
-/// A purge of one invalidated batch stamps the owner's remaining queue
-/// age at a single instant: entries of one batched request share one
-/// `requested_at`, so releasing them leaves the queue start at the batch
-/// origin instead of re-stamping it once per removed hash.
 #[test]
-fn purge_of_one_invalidated_batch_keeps_the_owner_queue_start_at_one_instant()
--> Result<(), Box<dyn std::error::Error>> {
+fn purge_of_one_invalidated_batch_keeps_the_owner_queue_start_at_one_instant() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(8)?;
     install_budget(
         &sync,
@@ -625,8 +579,6 @@ fn purge_of_one_invalidated_batch_keeps_the_owner_queue_start_at_one_instant()
     let addr = test_addr(9345, 0)?;
     let rx = connect_peer(&peers, synthetic_peer(addr, 100));
 
-    // One peer takes the whole window: the striped getdata is one batched
-    // request, so all four pendings share one request stamp.
     sync.tick();
 
     assert_applied_genesis(&applied_tip, &block_tree)?;
@@ -641,11 +593,8 @@ fn purge_of_one_invalidated_batch_keeps_the_owner_queue_start_at_one_instant()
             .window
             .owner_queue_start_for_test(owner)
     };
-    let before = queue_start(&sync)
-        .unwrap_or_else(|| panic!("the batched request stamps the owner's queue start"));
+    let before = queue_start(&sync).or_fail("the batched request stamps the owner's queue start");
 
-    // Releasing the first two invalidated hashes leaves the surviving pair
-    // owning the queue start at the batch origin.
     sync.purge_invalidated(&all[..2]);
     assert_eq!(
         queue_start(&sync),
@@ -657,22 +606,13 @@ fn purge_of_one_invalidated_batch_keeps_the_owner_queue_start_at_one_instant()
         Some(owner)
     );
 
-    // Releasing the rest drops the queue start with the owner's last
-    // pending.
     sync.purge_invalidated(&all[2..]);
     assert_eq!(queue_start(&sync), None);
     Ok(())
 }
 
-/// Near-tip requests to a compact-relaying peer ride the compact flavor;
-/// deep IBD requests and non-relaying peers keep the witness flavor. The
-/// download window resolves either answer by hash, unchanged.
-///
-/// CONTRACT: docs/policies/p2p-compatibility.md#5-message-surface (compact
-/// flavor fetch eligibility).
 #[test]
-fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
--> Result<(), Box<dyn std::error::Error>> {
+fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip() -> TestResult {
     let assert_flavor = |inventory: &[Inventory], compact: bool| {
         assert_ne!(inventory, []);
         for item in inventory {
@@ -693,8 +633,6 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
         }
     };
 
-    // Relaying peer, whole four-block chain within the near-tip window:
-    // every entry asks for the compact flavor.
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_101);
@@ -704,7 +642,6 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
     sync.tick();
     assert_flavor(&first_getdata(&rx), true);
 
-    // Same proximity without the published relay preference: witness flavor.
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(4)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9_102);
@@ -712,7 +649,6 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
     sync.tick();
     assert_flavor(&first_getdata(&rx), false);
 
-    // Relaying peer deep behind the tip (IBD): witness flavor dominates.
     let (sync, peers, _block_tree, _applied, _expected) = sync_with_header_chain(9)?;
     install_budget(
         &sync,
@@ -733,21 +669,20 @@ fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
 }
 
 #[test]
-fn unsolicited_stale_block_retries_from_resolved_header_height()
--> Result<(), Box<dyn std::error::Error>> {
+fn unsolicited_stale_block_retries_from_resolved_header_height() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let block1 = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block2 = regtest_fixture::mined_block_with_prev_hash(
         block1.block_hash(),
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block1_hash = block1.block_hash();
     let expected_hash = block2.block_hash();
     let mut tree = BlockTree::new();
@@ -813,21 +748,15 @@ fn unsolicited_stale_block_retries_from_resolved_header_height()
     Ok(())
 }
 
-/// A block delivered ahead of its header — the `inv`/compact announcement
-/// path fetches bodies directly, so no `headers` batch ever travels —
-/// carries the only copy of its header. The drain admits it through the
-/// headers seam, so the body applies, and the delivery earns the same
-/// demonstrated-tip credit a `headers` announcement would.
 #[test]
-fn inv_delivered_block_admits_carried_header_and_applies() -> Result<(), Box<dyn std::error::Error>>
-{
+fn inv_delivered_block_admits_carried_header_and_applies() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let block = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block_hash = block.block_hash();
     let mut tree = BlockTree::new();
     tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
@@ -877,26 +806,21 @@ fn inv_delivered_block_admits_carried_header_and_applies() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// Two blocks delivered child-before-parent in one chunk stage their
-/// carried headers and both apply. When the admission pass happens to try
-/// the child first it may fire a benign gap-recovery `getheaders` — the
-/// staged parent admits in the same drain, so no body re-download may
-/// follow.
 #[test]
-fn out_of_order_delivered_blocks_admit_and_apply() -> Result<(), Box<dyn std::error::Error>> {
+fn out_of_order_delivered_blocks_admit_and_apply() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let block1 = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block2 = regtest_fixture::mined_block_with_prev_hash(
         block1.block_hash(),
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let mut tree = BlockTree::new();
     tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let SyncHarness {
@@ -942,26 +866,21 @@ fn out_of_order_delivered_blocks_admit_and_apply() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// A delivered block whose carried header refers to an unlearned parent is
-/// not a peer fault — the announced chain extends past a gap the deliverer
-/// provably covers — so the sync asks it for the headers spanning the gap.
-/// Once the ancestors land, the already-staged body applies in place.
 #[test]
-fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dyn std::error::Error>>
-{
+fn missing_parent_block_delivery_recovers_with_getheaders() -> TestResult {
     let genesis = Network::Regtest.genesis_block();
     let block1 = regtest_fixture::mined_block_with_prev_hash(
         genesis.block_hash(),
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block2 = regtest_fixture::mined_block_with_prev_hash(
         block1.block_hash(),
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let mut tree = BlockTree::new();
     tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
     let SyncHarness {
@@ -980,8 +899,6 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dy
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
 
-    // The height-2 body arrives first; its carried header's parent is the
-    // unlearned height-1 header — a chain gap, not a peer fault.
     let serialized = bytes::Bytes::from(consensus_bytes(&block2));
     inbound_blocks_tx.send(crate::InboundBlock {
         block: block2.clone(),
@@ -1026,9 +943,6 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dy
         "header admission must reconcile the staged child's height"
     );
 
-    // Delivering the parent applies both: the staged child body commits
-    // right behind it (the second tick drains past the requested-prefix
-    // apply window that capped the first).
     let serialized = bytes::Bytes::from(consensus_bytes(&block1));
     inbound_blocks_tx.send(crate::InboundBlock {
         block: block1,
@@ -1046,37 +960,19 @@ fn missing_parent_block_delivery_recovers_with_getheaders() -> Result<(), Box<dy
     Ok(())
 }
 
-/// Cross-tick regression for the bounded prefix-race-before-fanout
-/// handoff: a probe created below the threshold must defer fanout when the
-/// eligible count reaches the threshold on a following tick while the
-/// probe is still fresh, then fanout must engage once the injected time
-/// crosses the `stall_timeout_initial` deadline. Exercises the real
-/// `tick()` / `configure_request_mode` / `set_fanout_eligible_peers`
-/// path for probe creation and the deferral, then injects a future
-/// `Instant` (the only available time seam, since `tick()` reads
-/// `Instant::now()`) to cross the deadline. This is the exact cross-tick
-/// boundary test; the direct window-boundary test lives in
-/// `window::tests::fanout_cancels_prefix_probe_without_rearming_it`. No
-/// sleeps, no network.
 #[test]
-fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline() -> TestResult {
     // A 16-block chain: the deep single-peer window takes all 16 while
     // the one-shot probe sends the first 8 (PREFIX_PROBE_BLOCK_LIMIT), so
     // the probe getdata is distinguishable from the deep getdata.
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(16)?;
     install_budget(&sync, super::default_sync_budget(Network::Regtest));
 
-    // Two eligible peers: below the 8-peer fanout threshold. The owner
-    // (highest) takes the deep window; the alternate is the probe racer.
     let owner_addr = test_addr(9401, 0)?;
     let alternate_addr = test_addr(9401, 1)?;
     let owner_rx = connect_peer(&peers, synthetic_peer(owner_addr, 201));
     let alternate_rx = connect_peer(&peers, synthetic_peer(alternate_addr, 200));
 
-    // Tick 1: below the threshold, a prefix probe is created. The owner
-    // receives the deep getdata (all 16) and the alternate receives the
-    // one-shot probe getdata (the first 8).
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
     assert_eq!(
@@ -1094,10 +990,6 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
         "below the threshold fanout must stay off"
     );
 
-    // Reach the fanout threshold on the following tick: add six more
-    // eligible peers (eight total) and tick again. The probe is still
-    // fresh (age well under stall_timeout_initial = 2s), so the bounded
-    // deferral holds fanout off and the probe survives the transition.
     for idx in 2..super::MIN_PEERS_FOR_FANOUT {
         connect_peer(&peers, synthetic_peer(test_addr(9401, idx)?, 200));
     }
@@ -1107,11 +999,6 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
         "a fresh prefix probe must defer the threshold-crossing tick"
     );
 
-    // Cross the injected time deadline measured from the active probe's
-    // stored `started_at`. The cross-tick path cannot control the
-    // `Instant::now()` used when the probe is created, so read it back and
-    // add exactly `stall_timeout_initial`. Then assert the planned
-    // duration equals the budget before engaging fanout.
     let mut scheduler = sync.scheduler.lock();
     let window = &mut scheduler.window;
     let started_at = window
@@ -1137,23 +1024,13 @@ fn tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
     Ok(())
 }
 
-/// Seven eligible peers plus one candidate that fails a fan-out clause:
-/// were that peer counted, fan-out (many shallow getdatas) would engage;
-/// instead the window collapses to one deep single-peer batch. Header
-/// requests stay open to the candidate: fetching headers is not block
-/// download.
-///
-/// The candidate connects first, so at height 300 it is the highest peer.
-/// When it still passes the block-service clause, the fallback keeps using
-/// it — an inbound-only node must still sync, so the outbound requirement
-/// gates fan-out striping, not the deep request path. When it fails the
-/// service clause itself (no witness, pruned beyond its retained window),
-/// it receives no body request on any path and the highest eligible peer
-/// takes the deep batch.
+/// Seven eligible peers plus one candidate that fails a fan-out clause: were
+/// that peer counted, fan-out (many shallow getdatas) would engage; instead the
+/// window collapses to one deep single-peer batch.
 fn assert_fallback_with_ineligible_candidate(
     ineligible: PeerInfo,
     serves_fallback: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain(u32::try_from(super::PENDING_BUDGET)?)?;
     let ineligible_rx = connect_peer(&peers, ineligible);
@@ -1179,8 +1056,6 @@ fn assert_fallback_with_ineligible_candidate(
     };
     assert_eq!(witness_block_inventory(inventory)?, expected);
     if !serves_fallback {
-        // Header sync is not block download: the refused peer may still be
-        // the header peer, so only a body request would be a defect.
         assert_no_getdata(&ineligible_rx)?;
     }
     for rx in &rxs[usize::from(!serves_fallback)..] {
@@ -1190,22 +1065,17 @@ fn assert_fallback_with_ineligible_candidate(
 }
 
 /// The candidate passes the block-service clause and holds the deep batch.
-fn assert_fallback_served_by_candidate(
-    candidate: PeerInfo,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_fallback_served_by_candidate(candidate: PeerInfo) -> TestResult {
     assert_fallback_with_ineligible_candidate(candidate, true)
 }
 
 /// The candidate fails the block-service clause and receives no body request.
-fn assert_fallback_refused_to_candidate(
-    candidate: PeerInfo,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_fallback_refused_to_candidate(candidate: PeerInfo) -> TestResult {
     assert_fallback_with_ineligible_candidate(candidate, false)
 }
 
 #[test]
-fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued()
--> Result<(), Box<dyn std::error::Error>> {
+fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued() -> TestResult {
     // R8 core scenario and the terminator for the U6 wedge's bounded
     // cycle (and the first-audit ADV-2 shape: the staller is the
     // highest-advertising peer, holding the front on claimed height it
@@ -1218,19 +1088,11 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
     let (sync, peers, expected, rxs, _blocks_tx) = staged_count_wedge(budget)?;
     let staller = test_addr(9320, 0)?;
 
-    // Cold-start disarm: the wedge fixture never advances the window
-    // front, so the cadence EWMA would stay unseeded and conviction
-    // would defer to the 60s pending-timeout fallback (the cold-start
-    // suppression, pinned at the window level). Seed it at 50ms — the
-    // decay floor stays max(2x50ms, 100ms) = the injected initial
-    // threshold — so this test keeps pinning the adaptive-timeout fire.
     sync.scheduler
         .lock()
         .window
         .seed_front_cadence_for_test(50, Instant::now());
 
-    // Tick 2: the wedge forms (staged 14 + pending 2 at the count
-    // budget) and the stall episode starts on the front-stripe owner.
     sync.tick();
     {
         let scheduler = sync.scheduler.lock();
@@ -1243,9 +1105,6 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
         );
     }
 
-    // Past the adaptive threshold: the staller is disconnected, its
-    // front stripe re-queues, and a healthy peer is asked for it in the
-    // same tick — with the staged set intact (no prune involvement).
     std::thread::sleep(Duration::from_millis(150));
     sync.tick();
 
@@ -1291,7 +1150,7 @@ fn stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued
 }
 
 #[test]
-fn clean_fast_path_caps_request_at_peer_height() -> Result<(), Box<dyn std::error::Error>> {
+fn clean_fast_path_caps_request_at_peer_height() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(8)?;
     install_budget(
         &sync,
@@ -1335,19 +1194,19 @@ fn staging_exhaustion_fixture() -> Result<ExhaustionFixture, Box<dyn std::error:
         1,
         vec![regtest_fixture::coinbase(1)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block2 = regtest_fixture::mined_block_with_prev_hash(
         block1.block_hash(),
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block3 = regtest_fixture::mined_block_with_prev_hash(
         block2.block_hash(),
         3,
         vec![regtest_fixture::coinbase(3)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     let block1_hash = block1.block_hash();
     let block2_hash = block2.block_hash();
     let mut tree = BlockTree::new();
@@ -1525,7 +1384,7 @@ fn cache_snapshot(sync: &BlockSync) -> Option<super::ExpectedApplyCache> {
 
 /// Commit a delivered fixture through the ordinary binding and apply path.
 /// Scheduler tests must not fake application by only erasing a window slot.
-fn apply_fixture_block(sync: &BlockSync, block: Block) -> Result<(), Box<dyn std::error::Error>> {
+fn apply_fixture_block(sync: &BlockSync, block: Block) -> TestResult {
     let hash = Hash256::from(block.block_hash());
     sync.buffer_received_block_chunk(
         &mut vec![crate::InboundBlock::from_decoded(block)],
@@ -1539,15 +1398,8 @@ fn apply_fixture_block(sync: &BlockSync, block: Block) -> Result<(), Box<dyn std
     Ok(())
 }
 
-/// BLK-06/07 follow-up: a Permanent commit failure purges the failed
-/// subtree instead of re-queueing it. The failed block heads its own
-/// invalidated subtree, so the purge releases it; the unconditional
-/// tree-height retry requeue must not run for that disposition, or it
-/// rewinds the request cursor onto the invalidated block and the frontier
-/// cycles on a block the tree has marked Invalid.
 #[test]
-fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block()
--> Result<(), Box<dyn std::error::Error>> {
+fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block() -> TestResult {
     // One valid block, then a two-coinbase body whose header the tree
     // knows: the commit classifier treats the body as a permanent
     // ExtraCoinbase invalidity and invalidates its subtree while the
@@ -1559,7 +1411,7 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block()
         2,
         vec![regtest_fixture::coinbase(90), regtest_fixture::coinbase(91)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
+    .or_fail("regtest fixture");
     let extra_id =
         tree.insert_node(Some(tip_id), extra_coinbase.header, NodeStatus::HeaderValid)?;
     let follower = regtest_fixture::mined_block_with_prev_hash(
@@ -1567,7 +1419,7 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block()
         3,
         vec![regtest_fixture::coinbase(92)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture: {error}"));
+    .or_fail("regtest fixture");
     tree.insert_node(Some(extra_id), follower.header, NodeStatus::HeaderValid)?;
     let SyncHarness {
         sync,
@@ -1612,12 +1464,8 @@ fn permanent_rejection_keeps_the_request_cursor_off_the_invalidated_block()
     Ok(())
 }
 
-/// BLK-06/07: an unrequested body stages only when Core's `AcceptBlock`
-/// would process it with `fRequested == false` (validation.cpp:4327-4353):
-/// on the active branch, with at least the applied tip's work, and at most
-/// 288 blocks above the applied tip. Requested bodies are not gated.
 #[test]
-fn unrequested_body_admission_matches_core_acceptance() -> Result<(), Box<dyn std::error::Error>> {
+fn unrequested_body_admission_matches_core_acceptance() -> TestResult {
     let (mut tree, blocks) = mined_chain(300, 0)?;
     let fork_parent = tree
         .lookup(Hash256::from(blocks[4].block_hash()))
@@ -1627,7 +1475,7 @@ fn unrequested_body_admission_matches_core_acceptance() -> Result<(), Box<dyn st
         606,
         vec![regtest_fixture::coinbase(606)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     tree.insert_node(Some(fork_parent), fork_body.header, NodeStatus::HeaderValid)?;
     let applied = {
         let node = tree.node(fork_parent)?;
@@ -1677,13 +1525,8 @@ fn unrequested_body_admission_matches_core_acceptance() -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// Clause coverage the regtest fixture cannot reach: its floor is zero and
-/// its candidates all sit above the applied tip, so clauses 2 and 3 never
-/// fire. The floor is injected through the gate's parameter — no network
-/// identity is faked — and the below-applied candidate isolates clause 2.
 #[test]
-fn unrequested_body_gate_rejects_below_floor_and_below_applied_work()
--> Result<(), Box<dyn std::error::Error>> {
+fn unrequested_body_gate_rejects_below_floor_and_below_applied_work() -> TestResult {
     fn snapshot(
         tree: &BlockTree,
         hash: Hash256,
@@ -1708,8 +1551,6 @@ fn unrequested_body_gate_rejects_below_floor_and_below_applied_work()
         tree.node(node_id)?.chainwork.to_be_bytes()
     };
 
-    // Clause 3: on the active branch and above the applied tip, but with
-    // less work than the injected floor.
     let above_applied = Hash256::from(blocks[5].block_hash());
     assert!(
         !unrequested_body_admissible(
@@ -1732,7 +1573,6 @@ fn unrequested_body_gate_rejects_below_floor_and_below_applied_work()
         "the same candidate passes with the regtest zero floor, isolating the floor clause"
     );
 
-    // Clause 2: on the active branch with less work than the applied tip.
     let below_applied = Hash256::from(blocks[1].block_hash());
     assert!(
         !unrequested_body_admissible(
@@ -1876,14 +1716,14 @@ pub(crate) fn mined_chain(
             height,
             vec![regtest_fixture::coinbase(height)],
         )
-        .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+        .or_fail("regtest fixture block");
         tip_id = tree.insert_node(Some(tip_id), block.header, NodeStatus::HeaderValid)?;
         prev_hash = block.block_hash();
         blocks.push(block);
     }
     for height in body_height.saturating_add(1)..=body_height.saturating_add(header_only) {
         let header = regtest_fixture::mined_regtest_header(prev_hash, height)
-            .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+            .or_fail("regtest fixture header");
         tip_id = tree.insert_node(Some(tip_id), header, NodeStatus::HeaderValid)?;
         prev_hash = header.compute_hash();
     }
@@ -1953,8 +1793,7 @@ fn sync_with_mined_chain(count: u32) -> Result<MinedChainFixture, Box<dyn std::e
 }
 
 #[test]
-fn historical_delivery_retries_corruption_and_does_not_rewind_foreground()
--> Result<(), Box<dyn std::error::Error>> {
+fn historical_delivery_retries_corruption_and_does_not_rewind_foreground() -> TestResult {
     let (tree, blocks) = mined_chain(3, 0)?;
     let mut harness = SyncHarness::new(tree);
     let chain = Arc::new(TestChain::new(
@@ -2055,8 +1894,7 @@ fn historical_delivery_retries_corruption_and_does_not_rewind_foreground()
 }
 
 #[test]
-fn historical_requests_use_archive_peers_and_replace_disconnected_leases()
--> Result<(), Box<dyn std::error::Error>> {
+fn historical_requests_use_archive_peers_and_replace_disconnected_leases() -> TestResult {
     let (tree, blocks) = mined_chain(1, 0)?;
     let mut harness = SyncHarness::new(tree);
     let chain = Arc::new(TestChain::new(
@@ -2110,14 +1948,11 @@ type WedgeFixture = (
     InboundBlockSender,
 );
 
-/// The recorded-collapse construction at `install_budget` scale: eight
-/// eligible peers stripe a 16-block window at per-peer fan-out cap 2
-/// against a 64-block header chain; the front-stripe owner (the highest
-/// peer, heights 1-2) stalls while the seven healthy peers deliver
-/// heights 3..=16 into the inbound channel. After the caller's next tick
-/// drains them, staged (14) + pending (2) sit exactly at the count
-/// budget (16) with the apply frontier frozen behind the stall. Byte
-/// budgets are unbounded so only count-denominated behavior is exercised.
+/// The recorded-collapse construction at `install_budget` scale: eight eligible
+/// peers stripe a 16-block window at per-peer fan-out cap 2 against a 64-block
+/// header chain; the front-stripe owner (the highest peer, heights 1-2) stalls
+/// while the seven healthy peers deliver heights 3..=16 into the inbound
+/// channel.
 fn wedge_budget(pending_timeout: Duration) -> super::SyncBudget {
     super::SyncBudget {
         max_pending_blocks: 16,
@@ -2183,9 +2018,7 @@ fn next_getdata(
 }
 
 /// Drains `rx`, failing on any `getdata` while ignoring header traffic.
-fn assert_no_getdata(
-    rx: &crossbeam_channel::Receiver<Message>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_no_getdata(rx: &crossbeam_channel::Receiver<Message>) -> TestResult {
     while let Ok(message) = rx.try_recv() {
         if matches!(message, Message::GetData(_)) {
             return Err(std::io::Error::other("unexpected getdata").into());
@@ -2212,7 +2045,7 @@ fn header_chain_block(
         height,
         vec![regtest_fixture::coinbase(height)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     assert_eq!(
         block.block_hash(),
         expected[index],
@@ -2387,7 +2220,6 @@ fn witness_block_inventory(
     inventory
         .into_iter()
         .map(|item| match item {
-            // Wire seam: Inventory payloads stay bitcoin::; convert to native.
             Inventory::WitnessBlock(hash) => {
                 Ok(BlockHash(Hash256::from_le_bytes(hash.as_byte_array())))
             }
@@ -2399,10 +2231,9 @@ fn witness_block_inventory(
 fn nbits_mismatch_header(prev_blockhash: BlockHash, height: u32) -> Header {
     use bitcoin_rs_primitives::CompactTarget;
     let mut header = regtest_fixture::mined_regtest_header(prev_blockhash, height)
-        .unwrap_or_else(|error| panic!("regtest fixture header: {error}"));
+        .or_fail("regtest fixture header");
     header.bits = CompactTarget::from_consensus(0x207f_fffe);
-    regtest_fixture::mine_header_to_declared_target(&mut header)
-        .unwrap_or_else(|error| panic!("regtest fixture grind: {error}"));
+    regtest_fixture::mine_header_to_declared_target(&mut header).or_fail("regtest fixture grind");
     header
 }
 
@@ -2477,8 +2308,6 @@ fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, Box<dyn std::e
         inbound_blocks_rx,
         crate::sync::syncing_ibd_latch(),
     );
-    // Dropping the sender mirrors the header-only fixture: an inbound-blocks
-    // channel that never yields a block.
     drop(inbound_blocks_tx);
     install_budget(
         &sync,
@@ -2519,7 +2348,7 @@ fn transaction(seed: u8) -> Tx {
 fn assert_applied_genesis(
     applied_tip: &Arc<ArcSwapOption<TipSnapshot>>,
     block_tree: &Arc<RwLock<BlockTree>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> TestResult {
     let genesis_hash = Network::Regtest.genesis_block_hash();
     let tip = applied_tip
         .load_full()
@@ -2548,9 +2377,8 @@ fn register_info(peer_table: &Arc<PeerTable>, info: PeerInfo) {
     peer_table.register(info.addr, lease.clone());
     peer_table.publish_info(info.addr, &lease, info);
 }
-/// The canonical sync-test peer: outbound, and advertising `NODE_NETWORK`
-/// plus `NODE_WITNESS`, so it may serve block bodies at any height. A peer
-/// that must not be chosen for bodies comes from [`ineligible_peer`].
+/// The canonical sync-test peer: outbound, and advertising `NODE_NETWORK` plus
+/// `NODE_WITNESS`, so it may serve block bodies at any height.
 pub(crate) fn synthetic_peer(addr: SocketAddr, start_height: i32) -> PeerInfo {
     PeerInfo {
         addr,
@@ -2602,7 +2430,7 @@ pub(crate) fn connect_peer(
 }
 
 #[test]
-fn service_and_range_gate_both_request_paths() -> Result<(), Box<dyn std::error::Error>> {
+fn service_and_range_gate_both_request_paths() -> TestResult {
     use super::frontier::{BodyState, ChainFrontier, RequiredBody, SyncFrontier, UsablePeer};
 
     const WITNESS: u64 = 1 << 3;
@@ -2612,7 +2440,6 @@ fn service_and_range_gate_both_request_paths() -> Result<(), Box<dyn std::error:
     let mut previous = BlockHash::default();
     let mut historical_hash = None;
     let mut recent_hash = None;
-    // At tip 300, height 14 is at Core's 286-block cutoff; height 15 is recent enough.
     for height in 0..=300 {
         let header = regtest_fixture::mined_regtest_header(previous, height)?;
         previous = header.compute_hash();
@@ -2638,7 +2465,6 @@ fn service_and_range_gate_both_request_paths() -> Result<(), Box<dyn std::error:
     let limited_rx = connect_peer(&peers, limited_info.clone());
     let no_service_addr = test_addr(18_900, 2)?;
     let mut no_service_info = synthetic_peer(no_service_addr, 300);
-    // WITNESS alone advertises neither NODE_NETWORK nor NODE_NETWORK_LIMITED.
     no_service_info.services = WITNESS;
     let no_service_rx = connect_peer(&peers, no_service_info.clone());
     let no_service = current_source(&peers, no_service_addr);
@@ -2761,10 +2587,6 @@ mod stale_tip;
 
 /// A sync loop over an applied chain whose commit fails on command for one
 /// hash, with block 2 announced and its body owed to one live connection.
-///
-/// The fixture is the `SYNC-BR-01` setup: the node has applied block 1, the
-/// header tip is block 2, and the body that will fail is attributable to
-/// `source`.
 struct PunishmentFixture {
     sync: Arc<BlockSync>,
     peers: Arc<PeerTable>,
@@ -2798,7 +2620,6 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
         blocks_rx,
         crate::sync::syncing_ibd_latch(),
     ));
-    // Apply block 1 so the apply frontier needs block 2's body.
     blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
     sync.tick();
 
@@ -2810,7 +2631,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
         2,
         vec![regtest_fixture::coinbase(2)],
     )
-    .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
+    .or_fail("regtest fixture block");
     headers_tx.send(InboundHeaders {
         headers: vec![block2.header],
         source: Some(source),
@@ -2830,7 +2651,7 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
 }
 
 /// Delivers the fixture's block 2 body from the connection that announced it.
-fn deliver_attributed_body(fixture: &PunishmentFixture) -> Result<(), Box<dyn std::error::Error>> {
+fn deliver_attributed_body(fixture: &PunishmentFixture) -> TestResult {
     let mut inbound = crate::InboundBlock::from_decoded(fixture.block2.clone());
     inbound.source = Some(fixture.source);
     fixture.blocks_tx.send(inbound)?;
@@ -2838,13 +2659,8 @@ fn deliver_attributed_body(fixture: &PunishmentFixture) -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// A body the chain rejects for a permanent consensus reason is the delivering
-/// connection's fault: Core disconnects its source
-/// (`net_processing.cpp:2031-2068`). At the base of this change the same body
-/// purged its subtree and left the connection serving it.
 #[test]
-fn permanent_consensus_body_disconnects_delivering_source() -> Result<(), Box<dyn std::error::Error>>
-{
+fn permanent_consensus_body_disconnects_delivering_source() -> TestResult {
     let fixture = punishment_fixture()?;
     let hash = Hash256::from(fixture.block2.block_hash());
     *fixture.chain.scripted_commit_failure.lock() = Some((hash, WindowApplyDisposition::Permanent));
@@ -2858,11 +2674,8 @@ fn permanent_consensus_body_disconnects_delivering_source() -> Result<(), Box<dy
     Ok(())
 }
 
-/// The exclusions: a body that does not bind to its header and an operational
-/// settlement failure are not the delivering connection's fault, so neither may
-/// end the conversation.
 #[test]
-fn binding_and_operational_failures_do_not_disconnect() -> Result<(), Box<dyn std::error::Error>> {
+fn binding_and_operational_failures_do_not_disconnect() -> TestResult {
     for disposition in [
         WindowApplyDisposition::BodyMutated,
         WindowApplyDisposition::Operational,
@@ -2881,13 +2694,8 @@ fn binding_and_operational_failures_do_not_disconnect() -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// Sync progress must publish the shared latch's initial-block-download
-/// answer, not a height heuristic (#1149 acceptance 1/12). The two fixtures
-/// below are the snapshots where the old `applied < header` rule disagreed
-/// with the latch: an active latch over an empty frontier, and a latched-off
-/// latch over headers ahead of an absent applied tip.
 #[test]
-fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> Result<(), Box<dyn std::error::Error>> {
+fn telemetry_ibd_bit_agrees_with_the_shared_latch() -> TestResult {
     let now = crate::counters::now_seconds();
 
     let syncing = SyncHarness::new(BlockTree::new());

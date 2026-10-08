@@ -17,14 +17,9 @@ use crate::counters::PeerCounters;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerRole {
     /// Full relay: transactions, addresses, blocks, and announcements.
-    ///
-    /// Core: an inbound or `OUTBOUND_FULL_RELAY` connection.
     FullRelay,
     /// Block relay only: blocks and headers, never a transaction or address
     /// message in either direction.
-    ///
-    /// Core: a `BLOCK_RELAY` connection
-    /// (`MAX_BLOCK_RELAY_ONLY_CONNECTIONS`, `net.h:73`).
     BlockRelayOnly,
 }
 
@@ -63,12 +58,9 @@ pub struct PeerInfo {
     pub user_agent: String,
     /// Best-chain height the remote reports at handshake.
     pub start_height: i32,
-    /// Highest chain height this peer has demonstrated while connected:
-    /// starts at the handshake `start_height` and is raised monotonically as
-    /// the peer hands us accepted headers. Sync request eligibility and
-    /// per-request truncation read this, not the handshake snapshot, so a
-    /// long-lived connection at the tip can still serve newly announced
-    /// blocks (the `pindexBestKnownBlock` role, headers-fed).
+    /// Highest chain height this peer has demonstrated while connected: starts
+    /// at the handshake `start_height` and is raised monotonically as the peer
+    /// hands us accepted headers.
     pub best_known_height: i32,
     /// Unix-epoch seconds of handshake completion.
     pub conn_time: u64,
@@ -82,9 +74,6 @@ pub struct PeerInfo {
     /// interfaces nothing about which one carried the connection.
     pub addr_bind: SocketAddr,
     /// Seconds the peer's clock is ahead of this node's, from its version.
-    ///
-    /// Bitcoin Core's `timeoffset`, measured once at handshake as the peer's
-    /// declared time minus local time.
     pub time_offset: i64,
     /// Live traffic counters for the connection.
     pub counters: Arc<PeerCounters>,
@@ -145,8 +134,6 @@ impl PeerInfo {
     }
 
     /// Returns Bitcoin Core service-flag names decoded from `self.services`.
-    ///
-    /// Order follows Bitcoin Core's bit assignment. Unrecognized bits are dropped.
     #[must_use]
     pub fn services_names(&self) -> Vec<&'static str> {
         service_flag_names(self.services)
@@ -208,9 +195,7 @@ mod tests {
         }
     }
 
-    /// A `version` message whose remote peer advertises `services`. The
-    /// advertised set is resolved once by the node's service policy, so no
-    /// test restates a local advertisement inline.
+    /// A `version` message whose remote peer advertises `services`.
     fn version_with_services(services: ServiceFlags) -> VersionMessage {
         VersionMessage {
             services,
@@ -222,10 +207,6 @@ mod tests {
         Arc::new(PeerCounters::default())
     }
 
-    /// The offset is what the peer claimed, against the clock we read it at.
-    ///
-    /// A peer two minutes ahead must read as `+120`, not as an absolute time
-    /// and not as zero -- the placeholder this replaced.
     #[test]
     fn time_offset_is_the_peers_clock_against_ours() {
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
@@ -253,7 +234,6 @@ mod tests {
         assert_eq!(behind.time_offset, -60);
     }
 
-    /// The bind address is the node's own end of the connection.
     #[test]
     fn addr_bind_is_kept_apart_from_the_peer_address() {
         let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 8333);
@@ -304,10 +284,6 @@ mod tests {
         assert_eq!(info.services_names(), Vec::<&'static str>::new());
     }
 
-    /// `services_names` is Bitcoin Core-compatible `getpeerinfo` output: the
-    /// recognized service bits decode to Core's canonical names in bit order,
-    /// and unrecognized bits are dropped. This pins the external RPC contract,
-    /// not the helper's internal representation.
     #[test]
     fn services_names_match_bitcoin_core_service_flag_names() {
         let all_known = (1_u64 << 0)  // NETWORK
@@ -331,13 +307,11 @@ mod tests {
             ]
         );
 
-        // No recognized bits -> no names (Core reports an empty array).
         assert_eq!(
             peer_info_with_services(0).services_names(),
             Vec::<&'static str>::new()
         );
 
-        // Unrecognized bits (e.g. bit 63) contribute no names.
         assert_eq!(
             peer_info_with_services(1_u64 << 63).services_names(),
             Vec::<&'static str>::new()

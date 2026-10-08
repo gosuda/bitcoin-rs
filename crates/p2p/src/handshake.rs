@@ -304,7 +304,6 @@ mod tests {
         }
     }
 
-    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn inbound_handshake_reaches_ready_after_remote_version_and_verack() -> Result<(), PeerError> {
         let magic = Magic::BITCOIN;
@@ -377,9 +376,6 @@ mod tests {
         Ok(())
     }
 
-    /// An outbound block-relay-only dial advertises no transaction relay, as
-    /// Core's `PushNodeVersion` does for a `BLOCK_RELAY` connection
-    /// (`net_processing.cpp:1651-1689`).
     #[test]
     fn version_message_advertises_relay_only_for_full_relay() {
         assert!(
@@ -392,8 +388,6 @@ mod tests {
         );
     }
 
-    /// The role reaches the wire through the handshake start messages, and
-    /// nothing else about the advertisement changes.
     #[test]
     fn outbound_handshake_start_carries_the_connection_role() {
         let stream: std::io::Cursor<Vec<u8>> = Cursor::new(Vec::new());

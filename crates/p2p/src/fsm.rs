@@ -121,27 +121,21 @@ mod tests {
         })
     }
 
-    /// A complete version/verack handshake makes a peer usable: ordinary
-    /// application traffic is accepted only once the handshake is done.
     #[test]
     fn valid_handshake_reaches_a_usable_peer() -> Result<(), PeerError> {
         let mut peer = fresh_peer();
 
-        // Before the handshake, application traffic is refused.
         assert!(step(&mut peer, &Message::Ping(1)).is_err());
 
         step(&mut peer, &Message::Version(version_message()))?;
-        // Version received but verack outstanding: still not usable.
         assert!(step(&mut peer, &Message::Ping(1)).is_err());
 
         step(&mut peer, &Message::Verack)?;
 
-        // Handshake complete: ordinary application traffic is now accepted.
         step(&mut peer, &Message::Ping(1))?;
         Ok(())
     }
 
-    /// A second version after a completed handshake is a protocol violation.
     #[test]
     fn duplicate_version_after_handshake_is_rejected() -> Result<(), PeerError> {
         let mut peer = fresh_peer();
@@ -152,15 +146,12 @@ mod tests {
         Ok(())
     }
 
-    /// Verack before version is an ordering violation.
     #[test]
     fn verack_before_version_is_rejected() {
         let mut peer = fresh_peer();
         assert!(step(&mut peer, &Message::Verack).is_err());
     }
 
-    /// Feature negotiation is legal during and after the handshake, but
-    /// illegal before negotiation has started.
     #[test]
     fn feature_negotiation_is_rejected_before_handshake() {
         let mut peer = fresh_peer();
@@ -170,11 +161,9 @@ mod tests {
     #[test]
     fn feature_negotiation_is_accepted_during_and_after_handshake() -> Result<(), PeerError> {
         let mut peer = fresh_peer();
-        // During negotiation (version received, verack outstanding).
         step(&mut peer, &Message::Version(version_message()))?;
         step(&mut peer, &sendcmpct_message(true, 2))?;
 
-        // After the handshake completes.
         step(&mut peer, &Message::Verack)?;
         step(&mut peer, &sendcmpct_message(false, 1))?;
         Ok(())

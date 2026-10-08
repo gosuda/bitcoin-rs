@@ -3,12 +3,10 @@
 
 use super::*;
 
-/// Answers every request `rx` carried, as an honest peer does: its own
-/// headers for a `getheaders`, and the bodies it holds for a `getdata`.
-///
-/// `wire_response` marks whether the headers reply is the answer to the
-/// node's request (`true`) or a batch forwarded out of a delivery
-/// (`false`), which is what the header gate distinguishes.
+/// Answers every request `rx` carried, as an honest peer does: its own headers
+/// for a `getheaders`, and the bodies it holds for a `getdata`.
+/// `wire_response` is true for a reply to the node's request and false for
+/// headers forwarded from a delivery; the header gate distinguishes them.
 fn answer_requests(
     rx: &crossbeam_channel::Receiver<Message>,
     source: PeerSource,
@@ -17,7 +15,7 @@ fn answer_requests(
     inbound_headers_tx: &crossbeam_channel::Sender<InboundHeaders>,
     inbound_blocks_tx: &crossbeam_channel::Sender<crate::InboundBlock>,
     wire_response: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> TestResult {
     while let Ok(message) = rx.try_recv() {
         match message {
             Message::GetHeaders(_) => {
@@ -43,15 +41,9 @@ fn answer_requests(
     Ok(())
 }
 
-/// The incident shape: both serving peers demonstrate the active tip and
-/// own frontier work, then miss the block-request timeout and are
-/// convicted one after the other; freshly handshaked replacements arrive
-/// afterwards. The replacements must be driven into header sync past the
-/// stuck tip and serve the requeued bodies, so the apply frontier advances.
 #[test]
 #[expect(clippy::too_many_lines)]
-fn replacements_carry_frontier_after_serving_peer_timeouts()
--> Result<(), Box<dyn std::error::Error>> {
+fn replacements_carry_frontier_after_serving_peer_timeouts() -> TestResult {
     // Header tip at 6, bodies for 1..=6; the public tip sits at 8, two
     // blocks past the header tip, so the replacements have headers to bring
     // as well as bodies.
@@ -92,9 +84,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts()
     // Apply block 1 so the apply frontier needs block 2's body.
     inbound_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
 
-    // Two serving peers at the header tip. Each demonstrates the active tip
-    // through headers carried by its earlier deliveries, then answers
-    // nothing else — the request that times out is its own fault.
     let s1 = test_addr(9821, 0)?;
     let s2 = test_addr(9821, 1)?;
     let _s1_rx = connect_peer(&peers, synthetic_peer(s1, 6));
@@ -130,8 +119,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts()
         "the fixture must reach the stall state: applied frozen behind the header tip",
     );
 
-    // The replacements: freshly handshaked, no demonstrated tips, claiming
-    // the public height 8, and answering every request they receive.
     let r1 = test_addr(9821, 2)?;
     let r2 = test_addr(9821, 3)?;
     let r1_rx = connect_peer(&peers, synthetic_peer(r1, 8));
@@ -139,8 +126,6 @@ fn replacements_carry_frontier_after_serving_peer_timeouts()
     let r1_source = current_source(&peers, r1);
     let r2_source = current_source(&peers, r2);
 
-    // The frontier must advance: the replacements carry both the requeued
-    // bodies and the headers past the stuck tip.
     let mut advanced = false;
     for _ in 0..120 {
         std::thread::sleep(Duration::from_millis(50));
@@ -176,21 +161,8 @@ fn replacements_carry_frontier_after_serving_peer_timeouts()
     Ok(())
 }
 
-/// One connection, never asked, holding the frontier block: the report's
-/// `no_capable_peer` loop with a healthy peer set.
-///
-/// The peer proved a tip on a branch this node no longer follows, so its
-/// demonstrated evidence resolves at the fork point — below the frontier —
-/// while its handshake claim covers the frontier and its store holds the
-/// frontier block. Its `getheaders` answer follows that losing branch, so
-/// the probe meant to restore capability only replays headers this node
-/// already holds: the evidence never refreshes, and the body path that
-/// reads it never asks. The frontier then reports no capable peer for the
-/// life of the connection, which is what a restart "cures" by dropping the
-/// per-connection evidence.
 #[test]
-fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at()
--> Result<(), Box<dyn std::error::Error>> {
+fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at() -> TestResult {
     // Active branch X: genesis plus six mined blocks, block 1 applied, so
     // the frontier needs block 2's body.
     let (tree, blocks) = mined_chain(6, 0)?;
@@ -215,9 +187,6 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at()
         "the fixture applies block 1, so the frontier needs block 2's body",
     );
 
-    // The peer claims this node's own header height, so no header ask can
-    // reach it either: the body path is its only route to the frontier. Its
-    // best chain is a losing fork off block 1, which it proved to us.
     let p = test_addr(9823, 0)?;
     let p_rx = connect_peer(&peers, synthetic_peer(p, 6));
     let p_source = current_source(&peers, p);
@@ -255,9 +224,6 @@ fn losing_fork_evidence_never_revokes_the_height_a_peer_was_asked_at()
         "a peer that claimed the frontier must not leave the frontier reporting no_capable_peer",
     );
 
-    // The peer answers every request it receives and is at fault for none:
-    // its `getheaders` reply is its own losing branch, its `getdata` reply
-    // is the frontier block it holds.
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(20));
         sync.tick();

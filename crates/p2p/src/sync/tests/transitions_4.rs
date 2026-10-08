@@ -1,8 +1,7 @@
 use super::*;
 
 #[test]
-fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders()
--> Result<(), Box<dyn std::error::Error>> {
+fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders() -> TestResult {
     let HeaderSyncFixture {
         genesis,
         sync,
@@ -14,8 +13,6 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders()
     let (invalid_tx, invalid_rx) = unbounded::<Message>();
     let (other_tx, other_rx) = unbounded::<Message>();
 
-    // Seed only the invalid peer so the first tick routes a GetHeaders to
-    // it and arms the pending gate against its address.
     let invalid_lease = crate::PeerLease::new(invalid_tx);
     peers.register(invalid_peer, invalid_lease.clone());
     peers.publish_info(
@@ -90,8 +87,7 @@ fn invalid_nbits_headers_disconnect_source_and_rotate_getheaders()
 }
 
 #[test]
-fn unattributed_invalid_headers_do_not_disconnect_any_peer()
--> Result<(), Box<dyn std::error::Error>> {
+fn unattributed_invalid_headers_do_not_disconnect_any_peer() -> TestResult {
     let HeaderSyncFixture {
         genesis,
         sync,
@@ -122,8 +118,7 @@ fn unattributed_invalid_headers_do_not_disconnect_any_peer()
 }
 
 #[test]
-fn disconnected_outbound_channel_does_not_mark_blocks_pending()
--> Result<(), Box<dyn std::error::Error>> {
+fn disconnected_outbound_channel_does_not_mark_blocks_pending() -> TestResult {
     let (sync, peers, block_tree, applied_tip, _expected) = sync_with_header_chain(3)?;
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);
     register_info(&peers, synthetic_peer(addr, 100));
@@ -139,8 +134,7 @@ fn disconnected_outbound_channel_does_not_mark_blocks_pending()
 }
 
 #[test]
-fn tick_fanout_distributes_window_front_first_across_eligible_peers()
--> Result<(), Box<dyn std::error::Error>> {
+fn tick_fanout_distributes_window_front_first_across_eligible_peers() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) =
         sync_with_header_chain(u32::try_from(super::super::PENDING_BUDGET)?)?;
     let mut rxs = Vec::new();
@@ -155,7 +149,6 @@ fn tick_fanout_distributes_window_front_first_across_eligible_peers()
     sync.tick();
 
     assert_applied_genesis(&applied_tip, &block_tree)?;
-    // Effective fan-out stripe (mirrors `effective_peer_inflight`).
     let cap = super::super::PENDING_BUDGET
         .div_ceil(super::super::MIN_PEERS_FOR_FANOUT)
         .clamp(
@@ -166,9 +159,6 @@ fn tick_fanout_distributes_window_front_first_across_eligible_peers()
         let Message::GetData(inventory) = rx.try_recv()? else {
             return Err(std::io::Error::other("expected getdata for every eligible peer").into());
         };
-        // Window-front-first and capped: peers are scanned highest-first,
-        // each taking the next `cap` in-order heights — fan-out changes
-        // who is asked, never what order the window wants.
         assert_eq!(
             witness_block_inventory(inventory)?,
             expected[idx * cap..(idx + 1) * cap]
@@ -189,22 +179,13 @@ fn tick_fanout_distributes_window_front_first_across_eligible_peers()
 }
 
 #[test]
-fn wedged_window_expires_stalled_front_and_rerequests_through_count_clamp()
--> Result<(), Box<dyn std::error::Error>> {
+fn wedged_window_expires_stalled_front_and_rerequests_through_count_clamp() -> TestResult {
     let (sync, _peers, expected, rxs, _blocks_tx) =
         staged_count_wedge(wedge_budget(Duration::from_millis(250)))?;
 
-    // Tick 2: wedge — staged + pending at the count budget, scan limit
-    // zero, the stalled front still pending.
     sync.tick();
     assert_eq!(sync.scheduler.lock().window.pending_len(), 2);
 
-    // Past the pending timeout the wedge must process its own deadlines:
-    // the expired front credits the scan-limit count headroom, the
-    // request path expires it (U5 chain through the new clamps' pending
-    // terms), soft demotion keeps the staller out, and a healthy peer is
-    // asked for the front stripe — all without the received-prune
-    // discarding a single staged block into re-download.
     std::thread::sleep(Duration::from_millis(300));
     sync.tick();
 
@@ -239,7 +220,7 @@ fn wedged_window_expires_stalled_front_and_rerequests_through_count_clamp()
 }
 
 #[test]
-fn common_prefix_winner_takes_over_deep_window() -> Result<(), Box<dyn std::error::Error>> {
+fn common_prefix_winner_takes_over_deep_window() -> TestResult {
     let (sync, peers, _applied_tip, blocks, blocks_tx) = sync_with_mined_chain(16)?;
     let owner = test_addr(9321, 0)?;
     let alternate = test_addr(9321, 1)?;
@@ -297,12 +278,8 @@ fn common_prefix_winner_takes_over_deep_window() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// RC2: a same-address reconnect neither inherits its dead predecessor's
-/// deep-window election nor loses its own in-flight work when its
-/// readiness is reported.
 #[test]
-fn same_address_reconnect_does_not_inherit_stalled_inflight()
--> Result<(), Box<dyn std::error::Error>> {
+fn same_address_reconnect_does_not_inherit_stalled_inflight() -> TestResult {
     let (sync, peers, _applied_tip, blocks, blocks_tx) = sync_with_mined_chain(16)?;
     let owner = test_addr(9322, 0)?;
     let winner = test_addr(9322, 1)?;
@@ -367,8 +344,7 @@ fn same_address_reconnect_does_not_inherit_stalled_inflight()
 }
 
 #[test]
-fn stall_eviction_does_not_disconnect_replacement_connection()
--> Result<(), Box<dyn std::error::Error>> {
+fn stall_eviction_does_not_disconnect_replacement_connection() -> TestResult {
     let budget = super::super::SyncBudget {
         stall_timeout_initial: Duration::from_millis(100),
         ..wedge_budget(Duration::from_mins(1))
@@ -415,8 +391,6 @@ fn stall_eviction_does_not_disconnect_replacement_connection()
     let replacement = PeerLease::new(replacement_tx);
     peers.register(staller, replacement.clone());
     peers.publish_info(staller, &replacement, synthetic_peer(staller, 200));
-    // The convicted owner is the predecessor's source: the replacement at
-    // the same address must not be blamed for it.
     let evicted = selected.is_some_and(|owner| sync.peer_table.disconnect_source(owner));
 
     assert!(selected.is_some());
@@ -427,8 +401,7 @@ fn stall_eviction_does_not_disconnect_replacement_connection()
 }
 
 #[test]
-fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
--> Result<(), Box<dyn std::error::Error>> {
+fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout() -> TestResult {
     // RE-ADV-1 byte-denominated R+P wedge: staged bytes + the stalled
     // front's estimated bytes exhaust the staging byte headroom, so the
     // request gate is closed while the gate itself (`staged_bytes_
@@ -439,16 +412,7 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
     install_budget(
         &sync,
         super::super::SyncBudget {
-            // One initial-estimate slot (the pending front) plus the
-            // delivered successor: byte headroom is exactly zero once
-            // both are accounted.
             max_received_bytes: 256 * 1024 + consensus_bytes(&blocks[1]).len(),
-            // Phase 1: arming reads the staged-count fraction, not
-            // request capacity, so the single staged successor must be
-            // >= half the count window (2 / 2 = 1) for the episode to
-            // arm. The byte clamp still closes the request gate (the
-            // wedge under test); the count budget only sizes the arming
-            // bar to this two-block construction.
             max_received_blocks: 2,
             getdata_batch_limit: 2,
             stall_timeout_initial: Duration::from_millis(100),
@@ -460,11 +424,6 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
     let staller_rx = connect_peer(&peers, synthetic_peer(staller, 200));
     let honest_rx = connect_peer(&peers, synthetic_peer(honest, 100));
 
-    // Cold-start disarm: this byte-wedge construction depends on the
-    // pristine 256KiB initial block-size estimate, so the cadence EWMA
-    // is seeded directly instead of via two real front deliveries (the
-    // real sampling path is pinned by the window tests). 50ms keeps the
-    // decay floor at the injected 100ms initial threshold.
     sync.scheduler
         .lock()
         .window
@@ -479,8 +438,6 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
         std::vec![blocks[0].block_hash(), blocks[1].block_hash()]
     );
 
-    // The successor stages; byte headroom hits zero (R + P at the byte
-    // budget) with the front still pending to the staller.
     blocks_tx.send(crate::InboundBlock::from_decoded(blocks[1].clone()))?;
     sync.tick();
     {
@@ -493,10 +450,6 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
     }
     assert!(honest_rx.try_recv().is_err());
 
-    // Fire: the staller's disconnect releases its pending bytes, which
-    // reopens exactly enough headroom to re-request the front from the
-    // honest peer — with the staged successor untouched (the 1-minute
-    // prune never ran).
     std::thread::sleep(Duration::from_millis(150));
     sync.tick();
     assert!(!peers.is_connected(staller));
@@ -515,8 +468,6 @@ fn byte_wedged_window_recovers_via_staller_disconnect_before_received_timeout()
 
     blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;
     sync.tick();
-    // The re-request narrowed the expected-apply cache to the front, so
-    // the staged successor drains on the following tick's tree walk.
     sync.tick();
     let applied_height = applied_tip
         .load_full()

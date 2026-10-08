@@ -446,9 +446,7 @@ impl BlockSync {
     }
 
     /// Resolves deferred owned-fetch marks now that this drain may have
-    /// admitted the ancestry their tips were waiting on. Marks whose source
-    /// went stale are dropped: the dead connection's fetch died with it and
-    /// normal scheduling asks a live peer instead.
+    /// admitted the ancestry their tips were waiting on.
     pub(super) fn resolve_owned_body_fetches(&self) {
         let deferred = {
             let mut scheduler = self.scheduler.lock();
@@ -539,11 +537,7 @@ impl BlockSync {
             })
     }
 
-    /// Asks `source` for the header ancestry past our tip. The delivering
-    /// peer demonstrably knows a chain beyond ours whenever its batch cannot
-    /// attach (`MissingParent`) or cannot be admitted (`Refused`): the
-    /// response makes the next batch attachable instead of leaving the live
-    /// tip wedged on one missed header.
+    /// Asks `source` for the header ancestry past our tip.
     fn request_headers_from(&self, source: Option<PeerSource>) {
         let Some(source) = source else {
             return;
@@ -561,8 +555,6 @@ impl BlockSync {
     }
 
     /// Asks any live full-witness peer for the header ancestry past our tip.
-    /// Used when a staged body's parent header is unknown and no delivering
-    /// source was recorded; every fully serving peer can fill the gap.
     pub(super) fn request_headers_from_eligible(&self) {
         let required = bitcoin::p2p::ServiceFlags::NETWORK.to_u64()
             | bitcoin::p2p::ServiceFlags::WITNESS.to_u64();
@@ -666,8 +658,6 @@ impl BlockSync {
     /// Requests the next header batch from the highest usable peer above the
     /// applied tip, using a locator taken after `drain_inbound_headers` so it
     /// reflects headers accepted this tick.
-    /// `exclude` carries the source whose probe send failed this tick, so the
-    /// same-tick fallback cannot retry it.
     pub(super) fn request_headers_from_best_peer(
         &self,
         frontier: &SyncFrontier,
@@ -1032,9 +1022,7 @@ impl BlockSync {
         if outcome.finished && !outcome.request_more && outcome.ready_headers.is_empty() {
             // The sync ended below the floor without releasing headers: the
             // peer demonstrated it has nothing past the cursor, so cap its
-            // advertised horizon there. An unchanged handshake height would
-            // keep winning `request_headers_from_best_peer` while it serves
-            // the same terminal page, starving every other peer.
+            // advertised horizon there.
             self.peer_table.note_headers_horizon(source, outcome.height);
         } else {
             // A batch that advanced the verified cursor past a previous

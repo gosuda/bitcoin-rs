@@ -103,10 +103,10 @@ pub trait ChainQuery: Send + Sync {
 /// requests for transactions the node already holds and to serve
 /// transaction bodies in reply to `getdata`.
 pub trait TxInventory: Send + Sync {
-    /// Returns `true` when the node already holds the transaction identified
-    /// by `hash` — in the mempool, the orphan map, or the recent-rejects
-    /// cache. `hash_is_wtxid` follows the inventory item's type: `WTx`
-    /// carries a wtxid, while `Transaction`/`WitnessTransaction` carry a txid.
+    /// Returns `true` when the node already holds the transaction identified by
+    /// `hash` — in the mempool, the orphan map, or the recent-rejects cache.
+    /// `hash_is_wtxid` is true for `WTx` (wtxid) and false for
+    /// `Transaction`/`WitnessTransaction` (txid).
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool;
 
     /// Returns the witness transaction body for `txid`, or `None` when the
@@ -220,9 +220,7 @@ pub fn dispatch_inbound_full<S>(
         }
         Message::Inv(items) => {
             step(peer, message)?;
-            // Evaluated once per `inv`. While the relay gate is closed no
-            // tx-typed vector is ever requested, in either inventory branch
-            // (Core 31.1 net_processing.cpp:4401-4404).
+            // Evaluated once per `inv`.
             let relay_open = tx_relay_open();
             let mut requested = Vec::new();
             for item in items {
@@ -338,8 +336,7 @@ fn serve_getdata(
     };
 
     // Item-by-item: tx-typed items resolve through the tx inventory; block
-    // items stream through the chain query behind the headroom gate. The
-    // trailing notfound collects every unservable item in request order.
+    // items stream through the chain query behind the headroom gate.
     let mut not_found: Vec<Inventory> = Vec::new();
     for item in items {
         match item {
@@ -364,10 +361,9 @@ fn serve_getdata(
                     not_found.push(*item);
                 }
             }
-            // Block-typed and unknown items: resolve through the chain
-            // query one at a time so headroom is honoured per load and block
-            // misses merge into the single trailing notfound. With no chain
-            // view every non-tx item is missing.
+            // Block-typed and unknown items: resolve through the chain query
+            // one at a time so headroom is honoured per load and block misses
+            // merge into the single trailing notfound.
             block_item => {
                 if let Some(chain) = chain {
                     let outcome = chain.serve_inventory_blocks(
@@ -876,10 +872,6 @@ mod tests {
         }
     }
 
-    /// An empty or non-increasing `getblocktxn` index list is refused at the
-    /// inbound boundary, so a malformed request never reaches a chain query
-    /// and the peer is dropped through the listener's error path (Core 31.1
-    /// `net_processing.cpp:4560-4574`).
     #[test]
     fn invalid_getblocktxn_indexes_disconnect() {
         assert_getblocktxn_refused(Vec::new());
@@ -887,10 +879,6 @@ mod tests {
         assert_getblocktxn_refused(vec![3, 2]);
     }
 
-    /// A saturated headroom gate leaves a `getblocktxn` unanswered through
-    /// the real dispatch arm: the chain view is consulted with the dispatch
-    /// closure itself, and a chain that honours it neither loads nor
-    /// replies, exactly as `getdata` block serving behaves.
     #[test]
     fn getblocktxn_is_unanswered_while_the_production_gate_is_saturated()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -979,8 +967,7 @@ mod tests {
 
     /// Streaming chain fake mirroring `ActiveChainQuery`: block-typed items
     /// that resolve to a stored body are served behind `headroom`; all other
-    /// items land in `not_found` without a load. Counters and the tripwire
-    /// back the hostile-preload gates.
+    /// items land in `not_found` without a load.
     struct StreamingChain {
         blocks: Vec<Block>,
         loads: AtomicUsize,
@@ -1144,8 +1131,6 @@ mod tests {
     fn hostile_50000_item_getdata_cannot_materialize_unbounded_blocks() {
         let block = Block::default();
         let block_wire_len = wire_len_of(&Message::Block(block.clone()));
-        // Zero-drain attacker: the outbound channel is never drained, so
-        // every admitted message stays charged to the budget.
         let (outbound_tx, _undrained_rx) = crossbeam_channel::unbounded();
         let lease = PeerLease::new_with_budget(
             outbound_tx,
@@ -1160,10 +1145,6 @@ mod tests {
             blocks: vec![block],
             loads: AtomicUsize::new(0),
             headroom_calls: AtomicUsize::new(0),
-            // B = 7 serves: the gate allows a load while
-            // pending_bytes + reserve <= 4 * reserve with each served block
-            // charging block_wire_len = reserve / 2. The tripwire fires on
-            // the first bound-breaking load.
             load_tripwire: Some(8),
         };
         let mut peer = ready_peer();
@@ -1241,7 +1222,6 @@ mod tests {
             "three admitted plus one refused load"
         );
         assert!(lease.is_cancelled());
-        // The refused fourth block is dropped with the error, never queued.
         assert_eq!(budget.pending(), (3, 3 * block_wire_len));
     }
 
@@ -1261,8 +1241,6 @@ mod tests {
         ));
         assert_eq!(peer_snapshot(&peer), before);
     }
-
-    // --- TxInventory filter and getdata tx serving tests ---
 
     /// A fake `TxInventory` that knows a fixed set of txids/wtxids and can
     /// serve their bodies.
@@ -1332,9 +1310,6 @@ mod tests {
         }
     }
 
-    /// P2P-01 / BIP144: `NODE_WITNESS` controls getdata serialization, not
-    /// hashes. Block vectors are announced to header sync, never requested.
-    /// <https://github.com/bitcoin/bips/blob/master/bip-0144.mediawiki#relay>
     #[test]
     fn announced_transactions_request_witness_without_changing_hashes() {
         let inventory = FakeTxInventory::empty();
@@ -1381,8 +1356,6 @@ mod tests {
         }
     }
 
-    /// A closed transaction-relay gate suppresses every tx-typed vector while
-    /// block vectors are still announced to header sync, in both gate states.
     #[test]
     fn inv_tx_vectors_not_requested_while_tx_relay_closed() {
         let txid = bitcoin::Txid::from_byte_array([1; 32]);
@@ -1424,8 +1397,6 @@ mod tests {
         assert_eq!(announced, vec![announced_hash(block_hash)]);
     }
 
-    /// Same suppression on the filtered branch: a closed gate wins over the
-    /// have-filter, so an unknown wtxid is never requested either.
     #[test]
     fn inv_wtx_vectors_not_requested_while_tx_relay_closed() {
         let inventory = FakeTxInventory::empty();
@@ -1449,10 +1420,6 @@ mod tests {
         assert_eq!(announced, vec![announced_hash(block_hash)]);
     }
 
-    /// Block inventory is availability information, never a body request:
-    /// Core 31.1 updates the peer's best-known block and asks for headers
-    /// (`net_processing.cpp:4370-4410`). At the base of this change the same
-    /// message produced `GetData(WitnessBlock(..))` straight from dispatch.
     #[test]
     fn inv_block_uses_headers_not_body_getdata() {
         let block_hash = bitcoin::BlockHash::from_byte_array([3; 32]);
@@ -1494,7 +1461,6 @@ mod tests {
         }
     }
 
-    /// P2P-01 / BIP144 / BIP339: requested serialization must preserve stored witnesses.
     #[test]
     fn gateway_inventory_filters_and_serves_txid_and_wtxid() {
         use std::sync::Arc;
@@ -1537,8 +1503,6 @@ mod tests {
             );
         }
 
-        // BIP339 MSG_WTX resolves the witness hash; txid requests keep their
-        // own lookup even on a wtxid-relay connection. Unknowns remain notfound.
         let mut stripped = tx.clone();
         for input in &mut stripped.inputs {
             input.witness.clear();
@@ -1642,10 +1606,6 @@ mod tests {
                 if remote_requested {
                     peer.wtxid_relay.mark_peer_supported();
                 }
-                // A resident orphan suppresses only its own wtxid: a txid
-                // inventory stays requestable because another witness of the
-                // same txid can still be a valid body. Pool entries suppress
-                // either identity.
                 let held_suppresses = !orphan || matches!(item, Inventory::WTx(_));
                 let responses = dispatch_collect_full(
                     &mut peer,
@@ -1796,7 +1756,6 @@ mod tests {
         let inv_wtx = Inventory::WTx(bitcoin::Wtxid::from_byte_array(*wtxid.as_bytes()));
         let inventory = FakeTxInventory::empty().with_have(*wtxid.as_bytes());
         let mut peer = ready_peer();
-        // Simulate BIP339 negotiation: peer advertised wtxid relay.
         peer.wtxid_relay.mark_peer_supported();
 
         let responses = dispatch_collect_full(

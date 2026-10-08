@@ -50,10 +50,6 @@ fn pinned(port: u16, height: u32, at: Instant) -> UsablePeer {
     peer
 }
 
-/// A handshake claim of the tip height is not evidence. Core protects and
-/// clears only from `pindexBestKnownBlock`, a tip the peer actually sent
-/// (`net_processing.cpp:3203-3210`), so a silent claimant is armed like any
-/// other lagging outbound connection and answers to the timer.
 #[test]
 fn a_claimed_height_without_headers_is_probed_then_retired() {
     let t0 = Instant::now();
@@ -95,8 +91,6 @@ fn a_claimed_height_without_headers_is_probed_then_retired() {
     );
 }
 
-/// A connection that never brings a better chain is probed once at the
-/// timeout and retired one response window later.
 #[test]
 fn behind_tip_connection_is_probed_then_retired() {
     let t0 = Instant::now();
@@ -156,8 +150,6 @@ fn behind_tip_connection_is_probed_then_retired() {
     assert_eq!(protected, 0, "a lagging connection earns no protection");
 }
 
-/// A connection that reaches the tip is protected for the life of the
-/// connection, even after the tip moves away from it.
 #[test]
 fn tip_reaching_connection_is_protected_from_the_timer() {
     let t0 = Instant::now();
@@ -171,7 +163,6 @@ fn tip_reaching_connection_is_protected_from_the_timer() {
     );
     assert_eq!(protected, 1, "the connection took a protection slot");
 
-    // The network moves on and this connection stops contributing.
     for minutes in [30, 60, 120] {
         assert_eq!(
             consider_eviction(
@@ -188,8 +179,6 @@ fn tip_reaching_connection_is_protected_from_the_timer() {
     assert_eq!(protected, 1, "protection is not counted twice");
 }
 
-/// Only the first four tip-reaching connections are spared; the next one is
-/// timed out like any other.
 #[test]
 fn protection_is_bounded_to_four_connections() {
     let t0 = Instant::now();
@@ -230,7 +219,6 @@ fn protection_is_bounded_to_four_connections() {
     );
 }
 
-/// The rule applies to aged outbound full-relay connections only.
 #[test]
 fn only_aged_outbound_full_relay_connections_are_subjects() {
     let t0 = Instant::now();
@@ -260,9 +248,6 @@ fn only_aged_outbound_full_relay_connections_are_subjects() {
     );
 }
 
-/// Progress to the benchmark recorded at arming restarts the window, even
-/// while our own tip has moved past it: Core re-arms when the peer reaches
-/// `m_work_header` (`net_processing.cpp:5519-5527`).
 #[test]
 fn progress_to_the_benchmark_re_arms_the_timeout() {
     let t0 = Instant::now();
@@ -275,7 +260,6 @@ fn progress_to_the_benchmark_re_arms_the_timeout() {
         "the first sight of the lag arms it with the tip-100 benchmark"
     );
 
-    // The peer delivers the tip we had at arming; ours has moved to 150.
     let at_benchmark = outbound(9_604, 100, PeerRole::FullRelay, t0);
     assert_eq!(
         consider_eviction(
@@ -323,21 +307,10 @@ fn progress_to_the_benchmark_re_arms_the_timeout() {
     );
 }
 
-/// The response window starts only on a probe the connection was actually
-/// asked to answer. The chain-sync probe ignores frontier body ownership —
-/// the lagging peer owes an answer for its own silence — so the fixture's
-/// owned frontier does not suppress the send; the unregistered fixture
-/// connection fails the send instead, and the sweep must still restore the
-/// record untouched so the connection cannot be retired for ignoring a
-/// request it never received, and the operator counter does not count the
-/// silence as a probe.
 #[test]
 #[expect(clippy::expect_used)]
 fn an_unsent_chain_sync_probe_arms_no_response_window() {
     let t0 = Instant::now();
-    // A mined tree whose tip is one header past the last body: the frontier
-    // owes a body, and genesis is applied so the probes below have tips and
-    // a locator to build from.
     let (mut tree, blocks) = mined_chain(1, 1).expect("fixture chain mines");
     let chain_tip = tree.tip_handle();
     let sync = Arc::new(BlockSync::new(
@@ -358,7 +331,6 @@ fn an_unsent_chain_sync_probe_arms_no_response_window() {
         super::synced_ibd_latch(),
     ));
     sync.chain.bootstrap_genesis();
-    // Own the frontier body: pending in the window, so nothing may be sent.
     stage_body(&sync, &blocks[0]);
 
     let chain_frontier = sync.observe_chain_frontier();
@@ -383,16 +355,10 @@ fn an_unsent_chain_sync_probe_arms_no_response_window() {
     );
 }
 
-/// The eviction benchmark is taken from the header tip, so the probe's
-/// locator anchors at the best header's parent — an applied-tip anchor
-/// cannot return the header tip while IBD lags a page behind it, and a
-/// correct answer would credit only the applied side.
 #[test]
 #[expect(clippy::expect_used)]
 fn chain_sync_probe_locator_anchors_at_the_header_tips_parent() {
     let t0 = Instant::now();
-    // Bodies to 1, headers to 3, genesis applied: the applied anchor sits
-    // two headers under the benchmark.
     let (tree, _blocks) = mined_chain(1, 2).expect("fixture chain mines");
     let SyncHarness {
         sync,
@@ -439,12 +405,6 @@ fn chain_sync_probe_locator_anchors_at_the_header_tips_parent() {
     );
 }
 
-/// The sweep-level guarantee for the same contract
-/// `a_probe_that_never_reached_the_wire_is_not_a_probe` checks on
-/// `probe_chain_sync`: when the sweep's probe send fails — the lease's queue
-/// is gone — the connection's record is put back exactly as the sweep found
-/// it, so the next tick retries instead of holding a response window against
-/// a request that never arrived.
 #[test]
 #[expect(clippy::expect_used)]
 fn a_failed_sweep_probe_restores_the_armed_record() {
@@ -455,7 +415,6 @@ fn a_failed_sweep_probe_restores_the_armed_record() {
 
     let addr = test_addr(9_920, 0).expect("test address");
     let (tx, rx) = unbounded::<Message>();
-    // Old enough that the connection is a chain-sync subject on every tick.
     let connected_at = t0
         .checked_sub(MINIMUM_CONNECT_TIME)
         .expect("the test clock predates the connect age");
@@ -478,7 +437,6 @@ fn a_failed_sweep_probe_restores_the_armed_record() {
         );
     }
 
-    // Kill the connection's outbound queue so the probe send must fail.
     drop(rx);
     let stale = sync.observe_frontier(sync.observe_chain_frontier(), t0);
     sync.sweep_chain_sync(&stale, t0 + Duration::from_mins(20));

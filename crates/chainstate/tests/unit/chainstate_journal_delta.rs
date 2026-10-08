@@ -1,19 +1,8 @@
-use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut, Txid};
+use bitcoin_rs_primitives::Amount;
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 
-use super::{Coin, Mutation, mutations_for_block};
-
-fn coin(marker: u8, height: u32, value: u64) -> Coin {
-    Coin {
-        outpoint: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
-        txout: TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: vec![0x51].into(),
-        },
-        height,
-        coinbase: true,
-    }
-}
+use super::{Mutation, mutations_for_block};
+use crate::test_fixtures::journal_coin as coin;
 
 #[test]
 fn classifies_bip30_restore_as_overwrite_before_spends() -> Result<(), super::JournalDeltaError> {

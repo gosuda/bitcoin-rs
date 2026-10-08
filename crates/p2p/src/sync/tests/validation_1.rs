@@ -1,11 +1,8 @@
 use super::*;
 
 #[test]
-fn non_witness_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn std::error::Error>>
-{
+fn non_witness_peer_not_counted_toward_fanout_threshold() -> TestResult {
     let ineligible = PeerInfo {
-        // NODE_NETWORK only — no NODE_WITNESS: the peer fails the
-        // block-service clause, so no body path asks it for anything.
         services: 1,
         ..synthetic_peer(test_addr(9210, 0)?, 300)
     };
@@ -13,7 +10,7 @@ fn non_witness_peer_not_counted_toward_fanout_threshold() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn far_behind_duplicate_of_applied_block_is_not_staged() -> Result<(), Box<dyn std::error::Error>> {
+fn far_behind_duplicate_of_applied_block_is_not_staged() -> TestResult {
     let (sync, peers, applied_tip, blocks, blocks_tx) = sync_with_mined_chain(64)?;
     let peer = test_addr(9321, 0)?;
     let rx = connect_peer(&peers, synthetic_peer(peer, 100));
@@ -53,11 +50,8 @@ fn far_behind_duplicate_of_applied_block_is_not_staged() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn received_only_state_uses_scan_path_without_duplicate_request()
--> Result<(), Box<dyn std::error::Error>> {
+fn received_only_state_uses_scan_path_without_duplicate_request() -> TestResult {
     let (sync, peers, block_tree, applied_tip, expected) = sync_with_header_chain(3)?;
-    // The tree owns heights: received-only state is a stager insert; the
-    // window holds no staged-body copy to reconcile.
     let (_, blocks) = mined_chain(3, 0)?;
     stage_body(&sync, &blocks[1]);
     let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8333);

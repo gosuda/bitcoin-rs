@@ -178,11 +178,6 @@ impl Message {
     }
 
     /// Large relay payloads that the writer emits as their own writev.
-    ///
-    /// Control messages (`inv`, `getdata`, `ping`, `pong`, `verack`, …) are
-    /// small and latency-sensitive, so the writer coalesces a ready burst of
-    /// them. Blocks, transactions, and headers stay one frame per syscall so
-    /// a 1 MiB body cannot pin a 16-message encode behind it.
     #[must_use]
     pub(crate) const fn is_bulk_payload(&self) -> bool {
         matches!(
@@ -329,9 +324,6 @@ impl FramedMessage {
 }
 
 /// Encodes `message` into its wire frame.
-///
-/// `BlockPayload` shares its borrowed `Bytes` allocation instead of copying
-/// it into a fresh buffer.
 pub(crate) fn encode_frame(magic: Magic, message: &Message) -> Result<FramedMessage, PeerError> {
     let payload = match message {
         Message::BlockPayload(bytes) => bytes.clone(),
@@ -396,9 +388,6 @@ pub(crate) fn write_frames<W: Write + ?Sized>(
 }
 
 /// Write a Bitcoin v1 network message.
-///
-/// Returns the number of bytes written to the wire (header plus payload) so
-/// callers can account per-connection and aggregate traffic.
 pub fn write_message<W: Write + ?Sized>(
     writer: &mut W,
     magic: Magic,
@@ -409,8 +398,6 @@ pub fn write_message<W: Write + ?Sized>(
 }
 
 /// Read and validate a Bitcoin v1 network message.
-///
-/// Returns the decoded message and the raw payload bytes (checksum-validated).
 pub fn read_message<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
@@ -419,9 +406,6 @@ pub fn read_message<R: Read>(
 }
 
 /// Read one validated wire payload, observing it before typed decoding.
-///
-/// The callback sees checksum-valid messages even when their typed payload is
-/// malformed. It does not run for invalid framing or checksums.
 pub(crate) fn read_message_with<R: Read>(
     reader: &mut R,
     expected_magic: Magic,
@@ -518,9 +502,7 @@ fn encode_varint(payload: &mut Vec<u8>, value: u64) {
 }
 
 fn decode_payload(command: &str, payload: &[u8]) -> Result<Message, PeerError> {
-    // COMMANDS is the allow-list for typed decoding. Keep this gate before the
-    // dispatch table so a decoder arm cannot silently create an unlisted
-    // typed command.
+    // COMMANDS is the allow-list for typed decoding.
     if !crate::compat::is_typed_command(command) {
         return Ok(Message::Unknown {
             command: command_string(command)?,
@@ -767,12 +749,6 @@ mod tests {
     };
 
     /// Serves exactly one v1 wire header and fails on any read beyond it.
-    ///
-    /// Used to prove that `read_message` rejects oversized payload lengths
-    /// before attempting to read the payload body. (The buffer allocation
-    /// sits between the size guard and the body read, so guard-before-read
-    /// implies guard-before-allocation in the current code; only the read
-    /// ordering is directly enforced by this reader.)
     struct HeaderOnlyReader {
         header: Cursor<Vec<u8>>,
     }
@@ -801,8 +777,6 @@ mod tests {
 
     #[test]
     fn observer_sees_valid_wire_payload_before_typed_decode() {
-        // A zero-length version payload has a valid wire checksum but cannot
-        // decode as a VersionMessage. Core's inbound probe sees this frame.
         let mut frame = Vec::with_capacity(HEADER_LEN);
         frame.extend_from_slice(&Magic::REGTEST.to_bytes());
         frame.extend_from_slice(b"version\0\0\0\0\0");
@@ -850,11 +824,9 @@ mod tests {
             ));
         };
 
-        // Native re-encoding must be byte-identical to the original wire bytes.
         let reencoded = bitcoin_rs_primitives::consensus_bytes(&decoded_block);
         assert_eq!(raw.as_ref(), reencoded.as_slice());
         assert_eq!(raw.as_ref(), payload.as_slice());
-        // Native block hash must match bitcoin's block hash.
         let native_hash = decoded_block.header.compute_hash();
         assert_eq!(native_hash.as_bytes(), &expected_hash.to_byte_array());
 
@@ -868,9 +840,6 @@ mod tests {
             header: Cursor::new(header_declaring(oversize)?),
         };
 
-        // `HeaderOnlyReader` errors on any read past the 24-byte header, so
-        // getting `PayloadTooLarge` (not `Io`) proves the size guard fires
-        // before the payload buffer is allocated or read.
         match read_message(&mut reader, Magic::REGTEST) {
             Err(PeerError::PayloadTooLarge(len)) => {
                 assert_eq!(len, oversize);
@@ -889,8 +858,6 @@ mod tests {
             header: Cursor::new(header_declaring(MAX_MESSAGE_PAYLOAD)?),
         };
 
-        // Exactly MAX_MESSAGE_PAYLOAD passes the size guard; the failure must
-        // come from reading the (absent) body, never from the size check.
         match read_message(&mut reader, Magic::REGTEST) {
             Err(PeerError::PayloadTooLarge(_)) => Err(PeerError::Protocol(
                 "size guard rejected payload length exactly at the cap",
@@ -905,7 +872,6 @@ mod tests {
         }
     }
 
-    /// P2P-01: block payloads preserve the canonical wire frame.
     #[test]
     fn block_payload_writes_the_same_frame_as_decoded_block() -> Result<(), PeerError> {
         let block = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);

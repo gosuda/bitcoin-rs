@@ -40,9 +40,6 @@ impl ConnectionId {
 }
 
 /// Attribution token for an event delivered by one connection.
-///
-/// This value intentionally contains no outbound sender, so queued inbound
-/// events cannot keep a retired connection's writer alive.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PeerSource {
     /// Remote socket address at delivery time.
@@ -80,9 +77,6 @@ impl From<PeerSource> for bitcoin_rs_mempool::PeerToken {
 const OUTBOUND_QUEUE_MAX_MESSAGES: usize = 4096;
 
 /// Maximum queued full wire bytes for one peer connection.
-///
-/// Admission tests usage before adding, so sixteen worst-case block messages
-/// fit: after fifteen, 60,000,360 bytes remain below this 64 MiB high-water.
 const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// Consensus maximum serialized block size. `peer` owns the value
@@ -91,9 +85,6 @@ const OUTBOUND_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const BLOCK_SERIALIZED_SIZE: usize = crate::peer::MAX_BLOCK_SERIALIZED_SIZE_USIZE;
 
 /// Full framed-wire bytes reserved before loading a worst-case block body.
-///
-/// Equals `HEADER_LEN + MAX_BLOCK_SERIALIZED_SIZE_USIZE`: the full encoded wire
-/// byte count that `wire_len` charges and `write_message` releases.
 const BLOCK_PRODUCTION_RESERVE_BYTES: usize = crate::wire::HEADER_LEN + BLOCK_SERIALIZED_SIZE;
 
 const _: () = assert!(OUTBOUND_QUEUE_MAX_BYTES > 15 * BLOCK_PRODUCTION_RESERVE_BYTES);
@@ -222,9 +213,6 @@ impl OutboundBudget {
     }
 
     /// Returns whether one more worst-case block body may be loaded.
-    ///
-    /// This gate is evaluated immediately before each body load. The empty
-    /// queue arm preserves progress for a block larger than a configured cap.
     #[must_use]
     pub(crate) fn has_block_production_headroom(&self) -> bool {
         self.pending_messages.load(Ordering::Acquire) == 0
@@ -248,9 +236,6 @@ pub struct PeerLease {
     /// Live unsolicited block forwards admitted by this connection.
     unsolicited_forwards: Arc<AtomicUsize>,
     /// Instant the writer queue last admitted a message on this connection.
-    /// The connection loop reads it so traffic from every sender — compact
-    /// follow-ups, transaction relay, dispatch replies — refreshes the
-    /// send-silence ledger, not just pings.
     last_send: Arc<Mutex<Instant>>,
     inbound: bool,
     role: crate::peer_info::PeerRole,
@@ -308,9 +293,6 @@ impl PeerLease {
     }
 
     /// Creates an inbound lease with a fresh process-unique identity.
-    ///
-    /// Inbound connections always relay fully: the role split is a choice
-    /// about whom we dial.
     #[must_use]
     pub fn new_inbound(outbound: Sender<crate::Message>) -> Self {
         Self::with_direction(outbound, true, crate::peer_info::PeerRole::FullRelay, false)
@@ -508,11 +490,6 @@ impl PeerLease {
     }
 
     /// Queues a message for this connection's writer.
-    ///
-    /// Saturation applies the disconnect policy documented on
-    /// [`OutboundBudget`]: the lease is cancelled and the message is returned.
-    /// A successful queue admission is also this connection's `last_send`,
-    /// which the connection loop reads into its keepalive ledger.
     #[expect(clippy::result_large_err)]
     pub fn send(&self, message: crate::Message) -> Result<(), SendError<crate::Message>> {
         if self.is_cancelled() {
@@ -708,11 +685,6 @@ mod tests {
 
     #[test]
     fn block_production_reserve_admits_worst_case_block() {
-        // A worst-case block body is the consensus limit that
-        // `bitcoin_rs_consensus` owns. Its full wire message (header + body)
-        // must be admissible into a queue whose byte cap equals the reserve.
-        // A smaller reserve would refuse a real 4 MB block; a larger one
-        // would over-reserve.
         let Ok(block_size) = usize::try_from(bitcoin_rs_consensus::MAX_BLOCK_SERIALIZED_SIZE)
         else {
             panic!("MAX_BLOCK_SERIALIZED_SIZE exceeds usize on this platform")
@@ -733,14 +705,9 @@ mod tests {
             "a worst-case block must be admissible when the byte cap equals the reserve"
         );
 
-        // Empty-queue progress arm: the first worst-case body is always
-        // allowed, even when its reserve alone exceeds the byte cap.
         let progress = super::OutboundBudget::with_block_reserve(4, 100, 1_000);
         assert!(progress.has_block_production_headroom());
 
-        // Reserve arithmetic at the boundary: three worst-case bodies fill
-        // the three-reserve budget exactly; the next load would exceed it
-        // and the gate halts. A released queue regains headroom.
         let reserve = 100;
         let budget = super::OutboundBudget::with_block_reserve(10, 3 * reserve, reserve);
         assert!(budget.has_block_production_headroom());
@@ -761,8 +728,6 @@ mod tests {
         let items = super::OutboundBudget::with_block_reserve(2, 100 * ping_len, 0);
         assert!(items.admit(ping_len));
         assert!(items.admit(ping_len));
-        // pending_messages == max refuses; a `<=` admission check would let
-        // this third message through.
         assert!(!items.admit(ping_len));
         assert_eq!(items.pending(), (2, 2 * ping_len));
 
@@ -779,7 +744,6 @@ mod tests {
 
         assert!(budget.admit(1_000));
         assert_eq!(budget.pending(), (1, 1_000));
-        // The queue is no longer empty, so every further message refuses.
         assert!(!budget.admit(1));
         budget.release(1_000);
         assert!(budget.admit(1));
@@ -845,16 +809,13 @@ mod tests {
         assert!(lease.send(first).is_ok());
         assert_eq!(lease.budget_handle().pending(), (1, ping_len));
 
-        // At cap: the refused send leaves the admitted accounting in place.
         assert!(lease.send(crate::Message::Ping(8)).is_err());
         assert!(lease.is_cancelled());
         assert_eq!(lease.budget_handle().pending(), (1, ping_len));
 
-        // Writer-side release empties the accounting...
         lease.budget_handle().release(ping_len);
         assert_eq!(lease.budget_handle().pending(), (0, 0));
 
-        // ...and a fresh connection admits again.
         let (fresh_tx, _fresh_rx) = crossbeam_channel::unbounded();
         let fresh = PeerLease::new_with_budget(
             fresh_tx,
@@ -867,9 +828,6 @@ mod tests {
 
     #[test]
     fn saturated_getdata_fourth_send_refuses_and_closes_lease() {
-        // Direct queue-admission proof: no dispatch, no writer, no chain
-        // view, no body loads. The outbound receiver stays undrained, so
-        // every admitted message remains charged to the budget.
         let (tx, _undrained_rx) = crossbeam_channel::unbounded();
         let test_block = bitcoin_rs_primitives::Block::default();
         let block_wire_len = wire_len_of(&crate::Message::Block(test_block.clone()));
@@ -891,8 +849,6 @@ mod tests {
         assert!(lease.is_cancelled());
         assert_eq!(lease.budget_handle().pending(), (3, 3 * block_wire_len));
 
-        // Connection-local failure: an independent lease on its own budget
-        // is unaffected by the saturated peer's closure.
         let (independent_tx, _independent_rx) = crossbeam_channel::unbounded();
         let independent = PeerLease::new(independent_tx);
         assert!(independent.send(crate::Message::Ping(1)).is_ok());

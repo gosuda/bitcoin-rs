@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn apply_cache_invalidated_on_chain_tip_move() -> Result<(), Box<dyn std::error::Error>> {
+fn apply_cache_invalidated_on_chain_tip_move() -> TestResult {
     let fixture = apply_cache_fixture(4, 0)?;
     install_budget(
         &fixture.sync,
@@ -14,8 +14,6 @@ fn apply_cache_invalidated_on_chain_tip_move() -> Result<(), Box<dyn std::error:
         },
     );
 
-    // Round 1: stage one body, miss populates the cache, advance retains it
-    // with the original chain-tip hash as a validity key.
     stage_body(&fixture.sync, &fixture.blocks[0]);
     let (applied, _failed) = fixture.sync.apply_buffered_blocks(None);
     assert_eq!(applied, 1);
@@ -24,8 +22,6 @@ fn apply_cache_invalidated_on_chain_tip_move() -> Result<(), Box<dyn std::error:
     let original_chain_tip_hash = cache.chain_tip_hash;
     assert_eq!(cache.offset, 1);
 
-    // Move the chain tip: publish a snapshot whose hash differs from the one
-    // the cache was keyed against (a reorg replaces the active-chain tip).
     let moved_tip = {
         let current = fixture
             .chain_tip
@@ -52,17 +48,11 @@ fn apply_cache_invalidated_on_chain_tip_move() -> Result<(), Box<dyn std::error:
         "chain tip must move for this test to be meaningful"
     );
 
-    // The decisive probe: with the tip moved, the stale entry must be
-    // rejected by its validity keys BEFORE any repopulation can mask a
-    // broken eviction (a later apply round always rekeys the cache, so
-    // asserting on the post-apply snapshot alone is vacuous).
     assert!(
         fixture.sync.drain_cached_expected_blocks(1).is_none(),
         "stale cache keyed to the old chain tip must not serve a drain"
     );
 
-    // Round 2: stage the next body. The miss recomputes the run against the
-    // new tip and repopulates the cache keyed to the moved tip's hash.
     stage_body(&fixture.sync, &fixture.blocks[1]);
     let _ = fixture.sync.apply_buffered_blocks(None);
     let after = cache_snapshot(&fixture.sync)
@@ -75,7 +65,7 @@ fn apply_cache_invalidated_on_chain_tip_move() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn window_failure_applies_prefix_and_restores_suffix() -> Result<(), Box<dyn std::error::Error>> {
+fn window_failure_applies_prefix_and_restores_suffix() -> TestResult {
     // Blocks now apply in windows, so a mid-window failure has to split the
     // chunk three ways: the prefix committed, the one block that failed, and
     // an untouched suffix that must go back on the stager. Getting that
@@ -83,10 +73,6 @@ fn window_failure_applies_prefix_and_restores_suffix() -> Result<(), Box<dyn std
     // this asserts the stager contents too.
     let fixture = apply_cache_fixture(4, 0)?;
 
-    // Corrupt the second body without touching its header: the stager keys
-    // on the header hash, so this still drains as the expected block, and
-    // apply rejects it on the merkle root. A body that changed its own hash
-    // would never be drained and the window would never see it.
     let mut corrupted = fixture.blocks[1].clone();
     corrupted.txs.push(regtest_fixture::coinbase(99));
     assert_eq!(
@@ -112,11 +98,6 @@ fn window_failure_applies_prefix_and_restores_suffix() -> Result<(), Box<dyn std
         "the chain stops at the last good block"
     );
 
-    // The merkle-root rejection is a permanent consensus failure, so the
-    // window invalidated the corrupted block and its (never-attempted)
-    // descendants while the transition was held. They can never become
-    // applicable, so instead of returning to the stager they are purged
-    // from it: the frontier must not cycle on invalidated blocks.
     let restored = fixture.sync.scheduler.lock().stager.received_len();
     assert_eq!(
         restored, 0,
@@ -133,8 +114,7 @@ fn restore_split_pins_off_by_one() {
 }
 
 #[test]
-fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
--> Result<(), Box<dyn std::error::Error>> {
+fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers() -> TestResult {
     const PEER_COUNT: usize = 9;
     const SELECTED_PEERS: usize = super::super::MIN_PEERS_FOR_FANOUT;
     let (sync, peers, block_tree, applied_tip, expected) =
@@ -152,8 +132,6 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
     }
     sync.tick();
     assert_applied_genesis(&applied_tip, &block_tree)?;
-    // Nine live peers at the first tick: the window divides nine ways
-    // (mirrors `effective_peer_inflight`).
     let cap = super::super::PENDING_BUDGET.div_ceil(PEER_COUNT).clamp(
         super::super::MAX_BLOCKS_IN_TRANSIT_PER_PEER,
         super::super::PEER_INFLIGHT_BUDGET,
@@ -168,8 +146,6 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
         );
     }
     let _ = receivers[0].try_recv()?;
-    // The spare takes the window remainder past the eight full stripes;
-    // drain it now so the next read sees only the requeued stripe.
     let Message::GetData(remainder) = receivers[SELECTED_PEERS].try_recv()? else {
         return Err(std::io::Error::other("expected remainder getdata for spare peer").into());
     };
@@ -183,10 +159,6 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
     let Message::GetData(inventory) = receivers[SELECTED_PEERS].try_recv()? else {
         return Err(std::io::Error::other("expected requeued getdata").into());
     };
-    // The freed stripe spreads across remaining capacity (the spare tops
-    // up its remainder share while the other peers absorb the rest), so
-    // prove the union over every remaining peer is exactly the freed
-    // stripe: every freed block re-requested, nothing else.
     let mut requeued = witness_block_inventory(inventory)?;
     for (idx, rx) in receivers.iter().enumerate() {
         if idx == 1 || idx == SELECTED_PEERS {
@@ -206,8 +178,7 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
 }
 
 #[test]
-fn same_address_registration_after_window_eviction_keeps_replacement()
--> Result<(), Box<dyn std::error::Error>> {
+fn same_address_registration_after_window_eviction_keeps_replacement() -> TestResult {
     let (sync, peers, _tree, _applied, _expected) = sync_with_header_chain(3)?;
     let addr = test_addr(9508, 0)?;
     let (old_tx, old_rx) = unbounded::<Message>();
@@ -230,8 +201,7 @@ fn same_address_registration_after_window_eviction_keeps_replacement()
 }
 
 #[test]
-fn reconcile_forgets_window_state_only_when_connection_identity_changes()
--> Result<(), Box<dyn std::error::Error>> {
+fn reconcile_forgets_window_state_only_when_connection_identity_changes() -> TestResult {
     let HeaderSyncFixture { sync, peers, .. } = header_sync_with_genesis()?;
     install_budget(
         &sync,

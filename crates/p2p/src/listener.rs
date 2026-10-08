@@ -51,10 +51,6 @@ type SyncWakeHandle = Option<Sender<()>>;
 type PeerReadyHandle = Option<Arc<dyn Fn(crate::PeerSource) + Send + Sync>>;
 
 /// Optional node-owned handles passed to [`crate::P2pService::start`].
-///
-/// The service copies each handle into the start epoch's
-/// [`ConnectionShared`], so a new handle extends that one wiring value
-/// instead of adding another entry point.
 #[derive(Clone, Default)]
 pub struct ListenerExtras {
     /// Mempool / orphan / recent-rejects view for the `inv` filter and
@@ -73,10 +69,10 @@ pub struct ListenerExtras {
     /// network travels with the latch because the wire magic is not an
     /// identity: a `--p2p-magic` override can carry another network's bytes.
     pub ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
-    /// Block-download orchestrator, used to route block inventory
-    /// announcements and to ask whether an inbound body was requested.
-    /// `None` (tests, and a node without a sync loop) announces nothing and
-    /// treats every body as unsolicited.
+    /// Block-download orchestrator, used to route block inventory announcements
+    /// and to ask whether an inbound body was requested.
+    /// When `None`, announcements are ignored and inbound bodies are treated
+    /// as unsolicited.
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
 }
 
@@ -383,10 +379,6 @@ impl ConnectionShared {
     }
 
     /// Forwards a decoded transaction into the node's ingress channel.
-    ///
-    /// The `tx` sink contract lives in `docs/policies/p2p-compatibility.md`.
-    /// A full channel drops this body so the read loop can still service
-    /// ping, headers, and blocks from this peer.
     fn send_tx(&self, source: crate::PeerSource, tx: bitcoin_rs_primitives::Tx) {
         let Some(inbound_tx) = self.inbound_tx.as_ref() else {
             return;
@@ -745,10 +737,6 @@ fn run_outbound_handshake<S: std::io::Read + std::io::Write>(
     while peer.state != crate::peer::PeerState::Ready {
         let (inbound, _) = crate::handshake::read_handshake_message(peer, lease, deadline)?;
         let responses = crate::dispatch::dispatch_inbound(peer, &inbound)?;
-        // Core disconnects an outbound peer whose `version` does not offer
-        // the expected services (`net_processing.cpp:3864-3871`); an
-        // ineligible peer would otherwise hold an outbound slot that
-        // maintenance cannot replace.
         if peer.remote_version.as_ref().is_some_and(|version| {
             !has_all_desirable_service_flags(version.services, best_block_depth)
         }) {
@@ -824,8 +812,6 @@ fn spawn_handshake_thread(
             "failed to spawn p2p inbound handshake thread",
         );
     }
-    // The handle is intentionally dropped: per-connection threads outlive
-    // this listener thread by up to HANDSHAKE_TIMEOUT.
 }
 
 fn run_handshake(
@@ -843,7 +829,6 @@ fn run_handshake(
         return Err(error);
     }
 
-    // Wrapped before the handshake, so the bytes it spends are counted too.
     let counters = std::sync::Arc::new(crate::PeerCounters::default());
     let stream = match crate::CountingStream::from_connected(stream, counters)
         .map_err(crate::wire::PeerError::Io)
@@ -969,10 +954,6 @@ fn run_connected_session(
     let writer = match setup_result {
         Ok(handle) => handle,
         Err(error) => {
-            // The lease was already registered into peer_table at
-            // handshake time.  Run the same cleanup the normal exit path
-            // does so a spawn failure (e.g. EAGAIN under thread/fd
-            // pressure) does not leave a phantom peer registered.
             shared.peer_table.remove_current(peer_addr, &lease);
             lease.cancel();
             let _ = peer.stream.shutdown(std::net::Shutdown::Both);
@@ -1105,10 +1086,6 @@ struct Keepalive {
 
 impl Keepalive {
     /// Starts a ledger for a connection whose loop begins at `now`.
-    ///
-    /// PRE: `now` is the monotonic instant the session loop starts.
-    /// POST: both directions count as fresh at `now`; the first probe is owed
-    ///   once a direction has been idle for one [`PING_INTERVAL`].
     fn starting(now: Instant) -> Self {
         Self {
             last_recv: now,
@@ -1161,9 +1138,6 @@ impl Keepalive {
         {
             return KeepaliveAction::Expired;
         }
-        // A probe exists to detect a dead connection; a connection already
-        // carrying traffic in either direction inside this interval does not
-        // need one.
         let idle = now.saturating_duration_since(self.last_recv) >= PING_INTERVAL
             || now.saturating_duration_since(self.last_send) >= PING_INTERVAL;
         let probe_owed = self
@@ -1211,8 +1185,6 @@ mod keepalive_tests {
         );
     }
 
-    /// Receive silence past the timeout interval ends the connection even
-    /// while pings keep the send direction fresh.
     #[test]
     fn receive_silence_expires_the_connection() {
         let t0 = Instant::now();
@@ -1224,8 +1196,6 @@ mod keepalive_tests {
         );
     }
 
-    /// Send silence alone ends it too: Core weighs each direction separately
-    /// (`InactivityCheck`, `net.cpp:2068-2080`).
     #[test]
     fn send_silence_expires_the_connection() {
         let t0 = Instant::now();
@@ -1237,8 +1207,6 @@ mod keepalive_tests {
         );
     }
 
-    /// A message in each direction inside the window clears the timeout, so a
-    /// live-but-quiet peer is kept and merely probed.
     #[test]
     fn fresh_activity_defers_the_timeout() {
         let t0 = Instant::now();
@@ -1302,10 +1270,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             return Ok(());
         }
 
-        // Every admitted `lease.send` — compact follow-ups, relay `inv`s,
-        // dispatch replies — stamps `lease.last_send`, not just the ping and
-        // response paths below. Fold it in so sustained outbound traffic
-        // counts as send activity.
         keepalive.observe_send(lease.last_send());
         match keepalive.next_action(Instant::now()) {
             KeepaliveAction::Idle => {}
@@ -1332,9 +1296,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
             }
         }
 
-        // The deadline is enforced on every loop pass — including read
-        // timeouts — so a peer that stops sending compact messages cannot
-        // pin pending reconstruction state past its deadline.
         compact_reconstruction.prune(Instant::now());
 
         let read_result = peer.read_message();
@@ -1655,9 +1616,6 @@ fn write_ready_burst(
     let mut pending = Some(first);
     while let Some(head) = pending.take() {
         let (burst, leftover) = collect_write_burst(head, outbound_rx);
-        // Encode once per message: the probe consumes the same frame bytes
-        // the write emits, the way Core's `CSerializedNetMsg` is shared by
-        // its send path and the `net:outbound_message` probe.
         let frames = match crate::wire::encode_frames(magic, &burst) {
             Ok(frames) => frames,
             Err(error) => {
@@ -1714,9 +1672,6 @@ fn run_writer_loop(
                 if signal.is_ok() {
                     break;
                 }
-                // A disconnected close channel is permanently ready. Disable
-                // that select arm so the disconnected outbound channel alone
-                // drains any messages accepted before the last lease dropped.
                 close_rx = crossbeam_channel::never();
             }
         }
@@ -1738,8 +1693,6 @@ fn forward_tx_if_relay_open(
     if relay_open {
         shared.send_tx(source, tx);
     } else {
-        // Unsolicited transactions are not a protocol violation; Core drops
-        // them unpunished while in initial block download (:4716).
         tracing::debug!(peer_addr = %peer_addr, "tx dropped: initial block download");
     }
 }
@@ -1962,7 +1915,6 @@ mod session_socket_tests {
 
     use crate::socket::{HANDSHAKE_TIMEOUT, STREAM_POLL_INTERVAL, configure_peer_stream};
 
-    /// Contract: `docs/contracts/p2p-wire.md` `P2P-04`.
     #[test]
     fn session_sockets_disable_nagle() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
@@ -2012,19 +1964,16 @@ mod resilient_accept_tests {
         let (blocks_tx, _blocks_rx) = crossbeam_channel::unbounded();
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
 
-        // Inject one transient accept error.
         ACCEPT_ERROR_INJECT.store(true, Ordering::Relaxed);
 
         let thread_shutdown = Arc::clone(&shutdown);
         let handle = std::thread::spawn(move || serve(listener, thread_shutdown, shared));
 
-        // Give the loop time to process the injected error and continue.
         std::thread::sleep(Duration::from_millis(300));
 
         // The listener must still be alive — connect a real client to prove it.
         let _client = TcpStream::connect(addr).expect("listener should still accept");
 
-        // Shut down cleanly.
         shutdown.store(true, Ordering::Relaxed);
         let result = handle.join().expect("listener thread panicked");
         assert!(
@@ -2046,9 +1995,6 @@ mod inbound_admission_tests {
     use super::{bind_listener, serve, test_shared};
     use crate::PeerTable;
 
-    /// With the inbound capacity at one, the second accepted socket is
-    /// closed by the listener before any lease registers, while the first
-    /// socket's reservation stays live.
     #[test]
     fn inbound_admission_over_cap_drops_stream() -> Result<(), Box<dyn std::error::Error>> {
         let listener = bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
@@ -2123,7 +2069,6 @@ mod writer_setup_cleanup_tests {
         }
     }
 
-    /// When the writer-thread setup fails (`try_clone` or `spawn`), the lease
     #[test]
     fn writer_setup_failure_cleans_up_lease() {
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
@@ -2148,7 +2093,6 @@ mod writer_setup_cleanup_tests {
             "lease must be registered before writer setup"
         );
 
-        // Inject writer setup failure.
         WRITER_SETUP_FAIL.store(true, Ordering::Relaxed);
 
         let counters = std::sync::Arc::new(crate::PeerCounters::default());
@@ -2422,8 +2366,6 @@ mod writer_shutdown_tests {
         assert!(table.is_current(replacement.source(addr)));
     }
 
-    // CONTRACT: docs/policies/p2p-compatibility.md#4-handshake-contract (a
-    // known-version sendcmpct raises the published relay preference).
     /// Drives one scripted `sendcmpct` through the message loop on a fresh
     /// table and reports the published relay preference afterwards.
     fn sendcmpct_scenario(send_compact: bool, version: u64, port: u16) -> bool {
@@ -2468,7 +2410,6 @@ mod writer_shutdown_tests {
             crossbeam_channel::unbounded().0,
             crossbeam_channel::unbounded().0,
         );
-        // Script end ends the connection; the arm already ran.
         assert!(run_message_loop(&mut peer, addr, &lease, &shared, None).is_err());
         table.compact_relay_of(addr)
     }
@@ -2480,7 +2421,6 @@ mod writer_shutdown_tests {
         // for push, and fetch eligibility must not depend on it.
         assert!(sendcmpct_scenario(true, 2, 18_448));
         assert!(sendcmpct_scenario(false, 2, 18_449));
-        // An unknown BIP152 version is not a relay announcement.
         assert!(!sendcmpct_scenario(false, 7, 18_450));
     }
 
@@ -2547,8 +2487,6 @@ mod writer_shutdown_tests {
         assert_eq!(reads.load(Ordering::Relaxed), 2);
     }
 
-    /// A connection quiet for less than one `PING_INTERVAL` owes no probe:
-    /// its loop ends on the read error without emitting a `ping`.
     #[test]
     fn message_loop_does_not_probe_a_peer_inside_one_interval() {
         let (outbound_tx, outbound_rx) = crossbeam_channel::unbounded();
@@ -2775,8 +2713,6 @@ mod writer_shutdown_tests {
             "a failed burst releases nothing"
         );
 
-        // The close signal alone cannot interrupt a mid-`write_all` writer;
-        // the unblock failure simulates the stream shutdown.
         lease.cancel();
         let _ = unblock_tx.send(());
         done_rx
@@ -2784,7 +2720,6 @@ mod writer_shutdown_tests {
             .expect("unblock must release the blocked writer");
         worker.join().expect("worker join");
 
-        // The write-error path deliberately releases nothing.
         assert_eq!(lease.budget_handle().pending(), (5, 5 * frame));
     }
 
@@ -2820,8 +2755,6 @@ mod writer_shutdown_tests {
             let _ = done_tx.send(());
         });
 
-        // Drop every sender clone (the lease holds the last one) so the
-        // writer exits on Disconnected after processing the queue.
         drop(lease);
 
         event_rx
@@ -2832,8 +2765,6 @@ mod writer_shutdown_tests {
             .expect("writer must exit after senders drop");
         worker.join().expect("worker join");
 
-        // Release was processed between the write and the next recv; the
-        // released byte count equals the admitted wire length.
         assert_eq!(
             budget.pending(),
             (0, 0),
@@ -2874,7 +2805,6 @@ mod writer_shutdown_tests {
     fn run_connected_session_publishes_peer_relay_preference_and_joins_writer() {
         for peer_requested_wtxid in [false, true] {
             let (client, server, peer_addr) = loopback_pair();
-            // The client EOFs immediately, so the session's first read fails.
             drop(client);
 
             let peer_table = Arc::new(crate::PeerTable::new());
@@ -3153,8 +3083,6 @@ mod block_forward_tests {
         sync.tick();
 
         let flooded = test_addr(9780, 0)?;
-        // The outbound queue stays alive: a closed queue would cancel the
-        // lease and masquerade as a disconnect.
         let _rx: crossbeam_channel::Receiver<crate::Message> =
             connect_peer(&peers, synthetic_peer(flooded, 3));
         let source = current_source(&peers, flooded);
@@ -3176,7 +3104,6 @@ mod block_forward_tests {
             "fixture: the window must own block 2's body for this connection"
         );
 
-        // Listener wiring over the same peer table and sync loop.
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, blocks_rx) = crossbeam_channel::unbounded();
         let mut shared = test_shared(Arc::clone(&peers), headers_tx, blocks_tx);

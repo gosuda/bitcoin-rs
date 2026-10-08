@@ -57,9 +57,7 @@ fn reset_journal_dir(data_dir: &Path) -> Result<cap_std::fs::Dir> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).with_context(|| format!("remove {}", path.display())),
     }
-    std::fs::create_dir_all(&path).with_context(|| format!("create {}", path.display()))?;
-    bitcoin_rs_storage::checkpoint::fs::open_data_dir(&path)
-        .with_context(|| format!("open {}", path.display()))
+    open_journal_dir(data_dir)
 }
 
 /// Opens or creates the chainstate journal directory.

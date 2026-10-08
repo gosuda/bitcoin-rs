@@ -1,9 +1,4 @@
 //! Per-connection traffic counters.
-//!
-//! Bitcoin Core keeps these on `CNode` and `getpeerinfo` reports them as
-//! `bytessent`, `bytesrecv`, `lastsend` and `lastrecv`. They are what an
-//! operator reads to tell a peer that is feeding the node from one that is
-//! merely connected to it.
 
 use std::io::{IoSlice, IoSliceMut, Read, Result as IoResult, Write};
 use std::sync::Arc;
@@ -105,10 +100,9 @@ pub struct CountingStream<S> {
     read_end: usize,
 }
 
-/// Matches `std::io::BufReader`'s default. Unauthenticated inbound
-/// connections allocate this on the first small read; a 256 KiB cache would
-/// let a flood of half-open handshakes pin large RSS. Payloads whose caller
-/// buffer is already this size or larger bypass the cache.
+/// Matches `std::io::BufReader`'s default.
+/// Unauthenticated inbound peers allocate this on their first small read;
+/// keep it small to bound the memory pinned by half-open handshakes.
 const INBOUND_READ_BUFFER: usize = 8 * 1024;
 
 impl<S> CountingStream<S> {
@@ -150,10 +144,6 @@ impl CountingStream<std::net::TcpStream> {
     }
 
     /// Whether Nagle's algorithm is disabled on this socket.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error `TcpStream::nodelay` returned.
     pub fn nodelay(&self) -> IoResult<bool> {
         self.inner.nodelay()
     }
@@ -174,28 +164,16 @@ impl CountingStream<std::net::TcpStream> {
     }
 
     /// Applies a read timeout to the wrapped socket.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error `TcpStream::set_read_timeout` returned.
     pub fn set_read_timeout(&self, timeout: Option<core::time::Duration>) -> IoResult<()> {
         self.inner.set_read_timeout(timeout)
     }
 
     /// The local address the connection is bound to.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error `TcpStream::local_addr` returned.
     pub fn local_addr(&self) -> IoResult<std::net::SocketAddr> {
         self.inner.local_addr()
     }
 
     /// Closes one or both halves of the connection.
-    ///
-    /// # Errors
-    ///
-    /// Returns the error `TcpStream::shutdown` returned.
     pub fn shutdown(&self, how: std::net::Shutdown) -> IoResult<()> {
         self.inner.shutdown(how)
     }
@@ -279,11 +257,6 @@ impl<S: Write> Write for CountingStream<S> {
 mod tests {
     use super::*;
 
-    /// The count is of bytes that actually moved, not of bytes offered.
-    ///
-    /// A short write is the case that separates the two: counting the buffer
-    /// length would over-report every time the socket accepted less than it
-    /// was given.
     #[test]
     fn a_short_write_counts_what_the_socket_took() {
         struct ShortWriter;
@@ -307,7 +280,6 @@ mod tests {
         assert_eq!(counters.bytes_recv(), 0);
     }
 
-    /// Reads accumulate rather than replacing the previous count.
     #[test]
     fn reads_accumulate() {
         let counters = Arc::new(PeerCounters::default());
@@ -324,10 +296,6 @@ mod tests {
         assert_ne!(counters.last_recv(), 0, "a read must stamp the time");
     }
 
-    /// One kernel delivery can contain the next message. The wrapper must
-    /// keep those leftover bytes instead of asking the socket again.
-    ///
-    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn leftover_bytes_do_not_revisit_the_socket() {
         struct OneShot {
@@ -370,10 +338,6 @@ mod tests {
         assert_eq!(counters.bytes_recv(), 5);
     }
 
-    /// Handshake and message loops retry `TimedOut`. A refill that fails
-    /// after leftover bytes were consumed must not revive those bytes.
-    ///
-    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn a_timed_out_refill_does_not_replay_consumed_bytes() {
         struct TimeoutAfterFirst {
@@ -422,10 +386,6 @@ mod tests {
         assert_eq!(counters.bytes_recv(), 3);
     }
 
-    /// Two framed pings delivered in one inner read must both decode without
-    /// a second socket read — the IBD headers path between small messages.
-    ///
-    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn two_wire_messages_decode_from_one_socket_read() {
         struct OneShot {
@@ -475,11 +435,6 @@ mod tests {
         assert_eq!(second, crate::wire::Message::Ping(2));
     }
 
-    /// A read that moves nothing is not activity.
-    ///
-    /// Asserted against a *fresh* counter rather than against a timestamp taken
-    /// a moment earlier: both readings would fall in the same second, so a
-    /// stamp-on-every-read bug would compare equal and survive.
     #[test]
     fn an_empty_read_stamps_nothing() {
         let counters = Arc::new(PeerCounters::default());
@@ -496,13 +451,6 @@ mod tests {
         assert_eq!(counters.last_recv(), 0, "an empty read is not activity");
     }
 
-    /// CONTRACT: P2P-04. Vectored writes count every slice, not only the first.
-    ///
-    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
-    ///
-    /// `write_message` emits header and payload as two `IoSlice`s. The default
-    /// `Write::write_vectored` would take only the header and leave the payload
-    /// for a second syscall; this wrapper must not reintroduce that split.
     #[test]
     fn a_vectored_write_counts_every_slice() {
         struct VectoredSink {
@@ -547,9 +495,6 @@ mod tests {
         assert_eq!(stream.inner.bytes, [1, 2, 3, 4, 5, 6, 7]);
     }
 
-    /// `write_message` through this wrapper still issues one vectored write.
-    ///
-    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
     #[test]
     fn write_message_through_the_wrapper_is_one_vectored_write() {
         use bitcoin::p2p::Magic;
@@ -594,9 +539,6 @@ mod tests {
         assert!(written > 24, "framed ping is header plus 8-byte payload");
     }
 
-    /// `from_connected` is the socket-posture owner: Nagle is off.
-    ///
-    /// CONTRACT: P2P-04 (`docs/contracts/p2p-wire.md`).
     #[test]
     fn from_connected_disables_nagle() {
         use std::net::{TcpListener, TcpStream};
@@ -629,11 +571,6 @@ mod tests {
         let _accepted = accepting.join();
     }
 
-    /// A cloned socket counts into the same place as the original.
-    ///
-    /// The writer thread owns a clone, so if the clone carried its own counters
-    /// `bytessent` would report the handshake and nothing after it -- the exact
-    /// under-count this wrapper exists to avoid.
     #[test]
     fn a_cloned_socket_counts_into_the_same_place() {
         use std::net::{TcpListener, TcpStream};
@@ -672,10 +609,6 @@ mod tests {
         let _accepted = accepting.join();
     }
 
-    /// getpeerinfo byte accounting (module header, Core `CNode` parity):
-    /// a vectored header+payload write counts every byte exactly once and
-    /// forwards as one inner `write_vectored` call. The default `Write` impl
-    /// would split the coalescing this wrapper exists to preserve.
     #[test]
     fn a_vectored_write_counts_every_slice_in_one_inner_call() {
         struct RecordingWriter {
@@ -714,7 +647,6 @@ mod tests {
         assert_eq!(stream.inner.writes, 0);
     }
 
-    /// Nothing sent means no timestamp, which is what Core reports as zero.
     #[test]
     fn an_untouched_connection_reports_no_activity() {
         let counters = PeerCounters::default();
@@ -723,11 +655,6 @@ mod tests {
         assert_eq!(counters.last_recv(), 0);
     }
 
-    /// Default `Write::write_vectored` writes only the first non-empty slice.
-    /// Production `write_message` emits header + payload through that method,
-    /// so the wrapper must forward both slices and count every byte taken.
-    ///
-    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn a_vectored_write_counts_every_slice_the_socket_took() {
         struct VectoredWriter;
@@ -755,10 +682,6 @@ mod tests {
         assert_eq!(counters.bytes_sent(), 10);
     }
 
-    /// A short vectored write still counts only the bytes the inner writer
-    /// accepted, matching the scalar `write` contract.
-    ///
-    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`.
     #[test]
     fn a_short_vectored_write_counts_what_the_socket_took() {
         struct ShortVectoredWriter;
@@ -790,13 +713,6 @@ mod tests {
         assert_eq!(counters.bytes_sent(), 3);
     }
 
-    /// `write_message` must reach the inner `write_vectored` through this
-    /// wrapper. Falling back to `write` would split header and payload into
-    /// two syscalls and under-count if the first slice were taken as the whole
-    /// message.
-    ///
-    /// Contract: `docs/contracts/p2p-wire.md` `P2P-01`. Syscall shape is the
-    /// named invariant; elapsed time is `crates/p2p/benches/write_message.rs`.
     #[test]
     fn write_message_through_counting_stream_stays_vectored() {
         struct FailOnUnvectored {

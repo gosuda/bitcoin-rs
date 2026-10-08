@@ -1,11 +1,4 @@
 //! Deterministic Bitcoin Core 31.1 P2P compatibility contract tests.
-//!
-//! Pins the inventory in [`bitcoin_rs_p2p::COMMANDS`] against rust-bitcoin's
-//! v1 envelope and the decoder it drives: handshake fields,
-//! per-network magic and service bits, getheaders/headers exchange bounds,
-//! inv/getdata relay round-trips, the reject-or-ignore policy for malformed
-//! and unsupported messages, and the peer-visible effect of a chain switch
-//! (reorg) and restart at the [`ChainQuery`] seam the node implements.
 
 use std::error::Error;
 use std::io::Cursor;
@@ -44,10 +37,6 @@ use bitcoin_rs_primitives::{
 };
 use bitcoin_rs_primitives::{Network, USER_AGENT};
 use hashbrown::HashMap;
-
-// ---------------------------------------------------------------------------
-// Shared fixtures
-// ---------------------------------------------------------------------------
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
@@ -110,11 +99,6 @@ fn headers_into_blocks(headers: &[Header]) -> HashMap<NativeBlockHash, Block> {
 }
 
 /// Model of the node's active-chain view at the [`ChainQuery`] seam.
-///
-/// Semantics mirror `ActiveChainQuery` in `crates/p2p/src/chain_query.rs`:
-/// the first locator hash on the active chain anchors the response walk, a
-/// total miss anchors after genesis, an empty locator answers only the stop
-/// header, and only active-chain bodies are served (`notfound` otherwise).
 struct FakeChain {
     active: Vec<Header>,
     bodies: HashMap<NativeBlockHash, Block>,
@@ -370,10 +354,6 @@ fn our_frame(message: &Message) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(buffer)
 }
 
-// ---------------------------------------------------------------------------
-// Inventory owner: code table, decoder, rust-bitcoin envelope
-// ---------------------------------------------------------------------------
-
 #[test]
 fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), Box<dyn Error>> {
     let magic = Magic::REGTEST;
@@ -446,10 +426,6 @@ fn v1_envelope_matches_rust_bitcoin_for_core_handshake_and_inventory() -> Result
     }
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Handshake: version fields, service bits, feature negotiation
-// ---------------------------------------------------------------------------
 
 #[test]
 fn version_message_pins_core_31_handshake_fields() {
@@ -534,10 +510,6 @@ fn late_wtxidrelay_is_ignored_after_verack() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Network identity: magic + ports + per-network framing
-// ---------------------------------------------------------------------------
-
 #[test]
 fn network_magic_and_default_ports_match_core() -> Result<(), Box<dyn Error>> {
     for (network, magic, port) in NETWORK_TABLE {
@@ -585,10 +557,6 @@ fn foreign_network_frames_are_rejected_before_payload_decode() -> Result<(), Box
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// getheaders / headers exchange
-// ---------------------------------------------------------------------------
-
 #[test]
 fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<dyn Error>> {
     let genesis = genesis_block()?;
@@ -596,7 +564,6 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
     let chain = FakeChain::new(headers.clone(), HashMap::new());
     let mut peer = ready_peer(Magic::REGTEST)?;
 
-    // A locator hit at height 1 serves heights 2..=tip.
     let response = dispatch_collect(
         &mut peer,
         &get_headers(vec![headers[0].compute_hash()], NativeBlockHash::default()),
@@ -609,7 +576,6 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
     assert_eq!(served[0].compute_hash(), headers[1].compute_hash());
     assert_eq!(served[2].compute_hash(), headers[3].compute_hash());
 
-    // Stop hash truncates the walk inclusive, like Core's getheaders.
     let response = dispatch_collect(
         &mut peer,
         &get_headers(locator_hashes(&headers), headers[2].compute_hash()),
@@ -628,7 +594,6 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
         Some(headers[2].compute_hash())
     );
 
-    // Empty locator + known stop answers exactly the stop header (node contract).
     let response = dispatch_collect(
         &mut peer,
         &get_headers(Vec::new(), headers[3].compute_hash()),
@@ -640,7 +605,6 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
     assert_eq!(served.len(), 1);
     assert_eq!(served[0].compute_hash(), headers[3].compute_hash());
 
-    // Empty locator + zero stop answers nothing.
     let response = dispatch_collect(
         &mut peer,
         &get_headers(Vec::new(), NativeBlockHash::default()),
@@ -660,7 +624,6 @@ fn headers_responses_truncate_at_the_core_2000_limit() -> Result<(), Box<dyn Err
     let chain = FakeChain::new(headers.clone(), HashMap::new());
     let mut peer = ready_peer(Magic::REGTEST)?;
 
-    // Core clients send at most 101 locator hashes even on long chains.
     let response = dispatch_collect(
         &mut peer,
         &get_headers(locator_hashes(&headers[..101]), NativeBlockHash::default()),
@@ -699,23 +662,15 @@ fn oversized_getheaders_locator_disconnects_before_state_mutation() -> Result<()
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// inv / getdata / tx / block relay round-trips
-// ---------------------------------------------------------------------------
-
 #[test]
 fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(), Box<dyn Error>> {
     let genesis = genesis_block()?;
-    // The active chain is genesis plus one child; only the genesis body is
-    // stored, so the child resolves to notfound.
     let mut active = vec![genesis.header];
     active.extend(child_headers(&genesis.header, 1));
     let mut bodies = HashMap::new();
     bodies.insert(genesis.block_hash(), genesis.clone());
     let chain = FakeChain::new(active, bodies);
     let mut peer = ready_peer(Magic::REGTEST)?;
-    // P2P-01 / BIP144: this handshake advertises NODE_WITNESS, so request
-    // witness serialization without changing the announced transaction's txid.
     let txid = Txid::from_byte_array([9u8; 32]);
     let tx_inv = Inventory::Transaction(txid);
     let response = dispatch_collect(&mut peer, &Message::Inv(vec![tx_inv]), Some(&chain))?;
@@ -724,7 +679,6 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
         vec![Message::GetData(vec![Inventory::WitnessTransaction(txid)])],
     );
 
-    // getdata over known + missing inventory serves blocks and notfounds the rest.
     let genesis_hash = genesis.block_hash();
     let known = Inventory::Block(btc_bh(genesis_hash));
     let mut missing_hash = *genesis_hash.as_bytes();
@@ -744,7 +698,6 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
     assert_eq!(served.block_hash(), genesis.block_hash());
     assert_eq!(not_found, &vec![missing]);
 
-    // The served block round-trips the wire byte-identically.
     let mut wire = Cursor::new(Vec::new());
     write_message(
         &mut wire,
@@ -804,13 +757,6 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Bo
     Ok(())
 }
 
-/// A block-relay-only dial is prohibited from transaction relay on the real
-/// wire: it advertises `relay = false`, keeps taking blocks, drops address
-/// gossip unheard, and ends the connection on a transaction. Core
-/// disconnects a block-relay peer that pushes a transaction
-/// (`RejectIncomingTxs`, `net_processing.cpp:4706-4711`, and the `inv` branch
-/// at `net_processing.cpp:4385-4390`) and declines address relay instead of
-/// punishing it (`SetupAddressRelay`, `net_processing.cpp:5952-5970`).
 #[test]
 fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Box<dyn Error>> {
     let magic = Magic::BITCOIN;
@@ -869,8 +815,6 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
     }
     assert!(completed, "the block-relay handshake completes");
 
-    // Address gossip is dropped unheard, and the next message still reaches
-    // the node: a live `block` proves the connection survived the `addr`.
     let genesis = genesis_block()?;
     write_message(&mut server, magic, &Message::Addr(Vec::new()))?;
     write_message(&mut server, magic, &Message::Block(genesis.clone()))?;
@@ -886,11 +830,6 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
         return Err("genesis carries a coinbase transaction".into());
     };
     write_message(&mut server, magic, &Message::Tx(coinbase.clone()))?;
-    // If transaction enforcement regresses, the peer loop keeps polling while
-    // this socket stays open and a bare `join` would wait forever. Give the
-    // disconnect a bounded window, and on timeout close the socket so the
-    // loop ends and the assertion below reports the regression instead of
-    // hanging CI.
     let enforcement_deadline = Instant::now() + Duration::from_secs(5);
     while !dial.is_finished() && Instant::now() < enforcement_deadline {
         thread::sleep(Duration::from_millis(10));
@@ -913,15 +852,10 @@ fn block_relay_only_dial_is_prohibited_from_transaction_relay() -> Result<(), Bo
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Malformed / unsupported messages: reject-or-ignore policy
-// ---------------------------------------------------------------------------
-
 #[test]
 fn malformed_frames_reject_with_typed_errors() -> Result<(), Box<dyn Error>> {
     let magic = Magic::REGTEST;
 
-    // Corrupted checksum is a hard disconnect, like Core.
     let mut frame = raw_frame(magic, b"ping\0\0\0\0\0\0\0\0", &7u64.to_le_bytes());
     let last = frame.len() - 1;
     frame[last] ^= 0xff;
@@ -930,7 +864,6 @@ fn malformed_frames_reject_with_typed_errors() -> Result<(), Box<dyn Error>> {
         Err(PeerError::BadChecksum)
     ));
 
-    // Declared length beyond 32 MiB rejects before reading a payload.
     let mut oversized = Vec::new();
     oversized.extend_from_slice(&magic.to_bytes());
     oversized.extend_from_slice(b"ping\0\0\0\0\0\0\0\0");
@@ -941,7 +874,6 @@ fn malformed_frames_reject_with_typed_errors() -> Result<(), Box<dyn Error>> {
         Err(PeerError::PayloadTooLarge(_))
     ));
 
-    // Garbage after the command NUL terminator rejects the header.
     let mut command = [0u8; 12];
     command[..4].copy_from_slice(b"inv\0");
     command[4..].copy_from_slice(b"garbage!");
@@ -951,7 +883,6 @@ fn malformed_frames_reject_with_typed_errors() -> Result<(), Box<dyn Error>> {
         Err(PeerError::InvalidCommand(_))
     ));
 
-    // Structurally malformed payload (truncated ping nonce) rejects the decode.
     let frame = raw_frame(magic, b"ping\0\0\0\0\0\0\0\0", &[1u8, 2, 3, 4]);
     assert!(matches!(
         read_message(&mut Cursor::new(frame), magic),
@@ -998,8 +929,6 @@ fn messages_before_handshake_disconnect_like_core() -> Result<(), Box<dyn Error>
 fn unknown_commands_are_ignored_once_ready_like_core() -> Result<(), Box<dyn Error>> {
     let mut peer = ready_peer(Magic::REGTEST)?;
 
-    // Core 31 may announce BIP330 sendtxrcncl; we have no decoder for it, so it
-    // decodes as Unknown and is ignored while ready (Core ignores unknowns too).
     let command = "sendtxrcncl".parse::<CommandString>()?;
     let responses = dispatch_inbound(
         &mut peer,
@@ -1024,7 +953,6 @@ fn decode_only_messages_are_accepted_silently_per_policy() -> Result<(), Box<dyn
     let chain = FakeChain::new(headers, HashMap::new());
     let mut peer = ready_peer(Magic::REGTEST)?;
 
-    // getblocks: legacy locator request; Core answers with inv, we stay silent.
     let responses = dispatch_collect(
         &mut peer,
         &Message::GetBlocks(GetBlocksMessage::new(
@@ -1035,25 +963,18 @@ fn decode_only_messages_are_accepted_silently_per_policy() -> Result<(), Box<dyn
     )?;
     assert_eq!(responses, []);
 
-    // BIP35 mempool snapshot request: accepted, unanswered (documented deviation).
     let responses = dispatch_inbound(&mut peer, &Message::MemPool)?;
     assert_eq!(responses, []);
 
-    // getaddr: accepted, unanswered (no address gossip).
     let responses = dispatch_inbound(&mut peer, &Message::GetAddr)?;
     assert_eq!(responses, []);
 
-    // BIP133 feefilter: accepted, never enforced or echoed.
     let responses = dispatch_inbound(&mut peer, &Message::FeeFilter(1_000))?;
     assert_eq!(responses, []);
 
     assert_eq!(peer.state, PeerState::Ready);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Reorg / restart peer-visible behavior at the ChainQuery seam
-// ---------------------------------------------------------------------------
 
 /// Shared prefix plus its two competing extensions.
 type ForkBranches = (Vec<Header>, Vec<Header>, Vec<Header>);
@@ -1089,8 +1010,6 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
     let mut state = FakeChain::new(active.clone(), bodies);
     let mut peer = ready_peer(Magic::REGTEST)?;
 
-    // Before the reorg: a locator anchored at the stale tip has nothing newer.
-    // The fallback entry is the common ancestor (the fork point itself).
     let stale_tip = branch_a.last().ok_or("branch A tip")?.compute_hash();
     let fork_point = shared.last().ok_or("shared prefix")?.compute_hash();
     let locator = vec![stale_tip, fork_point];
@@ -1107,13 +1026,10 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
         "locator at the active tip has nothing newer to serve"
     );
 
-    // The reorg: the active branch flips to B over the same shared prefix.
     let mut active_b = shared;
     active_b.extend(branch_b.iter().copied());
     state = FakeChain::new(active_b, state.bodies);
 
-    // The stale-fork locator misses; the shared-prefix entry anchors the walk,
-    // so the peer now receives branch B's headers from the fork point.
     let response = dispatch_collect(
         &mut peer,
         &get_headers(locator, NativeBlockHash::default()),
@@ -1126,9 +1042,6 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
     assert_eq!(served[0].compute_hash(), branch_b[0].compute_hash());
     assert_eq!(served[1].compute_hash(), branch_b[1].compute_hash());
 
-    // Stale-fork bodies become notfound; new-chain bodies are served.
-    // Responses emit served blocks first, then one notfound for the misses —
-    // the same shape streamed serving produces for any getdata.
     let response = dispatch_collect(
         &mut peer,
         &Message::GetData(vec![
@@ -1188,8 +1101,6 @@ fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Err
     ];
     let (expected_blocks, expected_missing) = serve_collect(&before, &inventory)?;
 
-    // Restart: a fresh query rebuilt from the same persisted records must
-    // answer identically — a peer cannot see the restart.
     let after = FakeChain::new(headers, bodies);
     for ((locator, stop), (wide, narrow)) in cases.iter().zip(&expected) {
         assert_eq!(
@@ -1203,10 +1114,6 @@ fn restart_rebuild_serves_identical_answers_to_peers() -> Result<(), Box<dyn Err
     assert_eq!(actual_missing, expected_missing);
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Live listener: per-network handshake over real TCP
-// ---------------------------------------------------------------------------
 
 #[test]
 fn handshake_completes_over_tcp_for_every_network() -> Result<(), Box<dyn Error>> {
@@ -1324,7 +1231,6 @@ fn drive_handshake_as_core(
 
     write_message(&mut client, magic, &Message::Verack)?;
 
-    // Post-handshake service: ping is answered with an echoing pong.
     write_message(&mut client, magic, &Message::Ping(0xfeed_face))?;
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1388,11 +1294,6 @@ fn remote_version(services: ServiceFlags) -> Message {
     Message::Version(version)
 }
 
-/// Core's outbound desirable-service policy (`HasAllDesirableServiceFlags`
-/// and `GetDesirableServiceFlags`, `net_processing.cpp:1857-1872`):
-/// NETWORK|WITNESS is always required, and a LIMITED peer is desirable only
-/// while the local tip is younger than `NODE_NETWORK_LIMITED_ALLOW_CONN_BLOCKS`
-/// — 144 target-spacing units (`net_processing.cpp:161`).
 #[test]
 fn desirable_service_policy_matches_core() {
     let network_witness = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
@@ -1431,10 +1332,6 @@ fn desirable_service_policy_matches_core() {
     ));
 }
 
-/// A dialed peer that does not offer the desirable services is disconnected
-/// right after its `version` and never published: it would otherwise hold an
-/// outbound slot that maintenance cannot replace
-/// (`net_processing.cpp:3864-3871`).
 #[test]
 fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error>> {
     let magic = Magic::BITCOIN;
@@ -1476,7 +1373,6 @@ fn outbound_peer_without_network_flag_disconnected() -> Result<(), Box<dyn Error
     Ok(())
 }
 
-/// A NETWORK|WITNESS peer passes the service gate and is published ready.
 #[test]
 fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Error>> {
     let magic = Magic::BITCOIN;
@@ -1512,10 +1408,6 @@ fn outbound_peer_with_network_and_witness_is_accepted() -> Result<(), Box<dyn Er
     Ok(())
 }
 
-/// A LIMITED|WITNESS peer is desirable while the local tip is near
-/// (`GetDesirableServiceFlags`, `net_processing.cpp:1865-1871`): with the
-/// chain view's tip header stamped now, the dial completes instead of
-/// disconnecting.
 #[test]
 fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
     let magic = Magic::BITCOIN;
@@ -1560,9 +1452,6 @@ fn outbound_near_tip_limited_peer_is_accepted() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// A pruned node advertises `WITNESS | NODE_NETWORK_LIMITED` and never the
-/// full-history bit, because the advertisement would be false after bodies
-/// are pruned (Core `init.cpp:2022-2026`).
 #[test]
 fn pruned_version_message_advertises_network_limited_only() {
     let pruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK_LIMITED;
@@ -1574,8 +1463,6 @@ fn pruned_version_message_advertises_network_limited_only() {
     assert_eq!(version.receiver.services, pruned);
 }
 
-/// The unpruned advertisement is the inverse: NETWORK set, LIMITED clear,
-/// WITNESS kept.
 #[test]
 fn unpruned_version_message_advertises_network() {
     let unpruned = ServiceFlags::WITNESS | ServiceFlags::NETWORK;
