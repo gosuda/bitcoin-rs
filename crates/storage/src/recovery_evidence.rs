@@ -195,9 +195,6 @@ fn write_sidecar(
     let prev = dir.join(format!("{name}.prev"));
     let tmp = dir.join(format!("{name}.tmp"));
     let result = (|| -> Result<(), EvidenceError> {
-        // Reject an oversized payload before staging anything: the readers
-        // refuse files over MAX_FILE_BYTES, so staging one would report a
-        // success no read can ever observe while displacing `.prev`.
         let staged = payload.len() + 1;
         if staged > MAX_FILE_BYTES {
             return Err(EvidenceError::TooLarge {
@@ -205,14 +202,9 @@ fn write_sidecar(
                 limit: MAX_FILE_BYTES,
             });
         }
-        // A payload the readers cannot decode must never be staged: it would
-        // report success while displacing a valid current with unreadable
-        // bytes (foreign format, wrong genesis, or oversized fields).
         if !valid(payload.as_bytes()) {
             return Err(EvidenceError::InvalidRecord);
         }
-        // A stale tmp is left by a crashed earlier write; create_new below
-        // fails if it still exists.
         let _ = std::fs::remove_file(&tmp);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -225,10 +217,8 @@ fn write_sidecar(
         if let Ok(data) = std::fs::read(&current) {
             if valid(&data) {
                 let _ = std::fs::remove_file(&prev);
-                // Only a valid current may displace `.prev`.
                 std::fs::rename(&current, &prev)?;
             } else {
-                // Invalid or oversized current: remove it, keep `.prev`.
                 let _ = std::fs::remove_file(&current);
             }
         }
@@ -244,7 +234,6 @@ fn write_sidecar(
         Ok(())
     })();
     if result.is_err() {
-        // A returned failure must not leave the staged tmp behind (RCV-03).
         let _ = std::fs::remove_file(&tmp);
     }
 

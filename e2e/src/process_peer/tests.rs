@@ -5,7 +5,7 @@
 )]
 
 use std::fs::File;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -83,6 +83,38 @@ fn write_failure_keeps_the_attempt_and_error() {
         .expect_err("write failure");
     assert!(matches!(error, super::Error::Io(_)));
     assert_failure(&dir, "sending", &error);
+}
+
+#[test]
+fn send_deadline_keeps_the_attempt_and_error() {
+    let (mut peer, mut remote, dir) = fixture();
+    let error = peer
+        .send(NetworkMessage::Ping(1), Instant::now())
+        .expect_err("expired time limit");
+    assert!(
+        matches!(error, super::Error::Protocol(ref message) if message == "P2P operation deadline")
+    );
+    assert_failure(&dir, "sending", &error);
+    remote.set_nonblocking(true).expect("nonblocking reader");
+    let mut byte = [0];
+    assert_eq!(
+        remote
+            .read(&mut byte)
+            .expect_err("expired send must not write")
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn read_completion_fails_after_the_time_limit() {
+    let (mut peer, _remote, _dir) = fixture();
+    let result = super::read_frame(
+        &mut peer.stream,
+        Instant::now(),
+        &mut super::FrameBuffer::default(),
+    );
+    assert!(result.is_err(), "an expired operation must not succeed");
 }
 
 #[test]

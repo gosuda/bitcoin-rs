@@ -15,6 +15,12 @@ type TxIndexValueTable = TableDefinition<'static, &'static [u8; 12], &'static [u
 /// `ScriptLive` key width: `prefix(8) || txid(32) || vout(4)`.
 const SCRIPT_LIVE_KEY_LEN: usize = 44;
 
+/// Unbounded scan budget: `iter_prefix` returns every matching row.
+const UNBOUNDED: crate::PrefixScanLimit = crate::PrefixScanLimit {
+    max_rows: usize::MAX,
+    max_bytes: usize::MAX,
+};
+
 const TXINDEX_TX_CONFIRMED: FixedTable<12> = TableDefinition::new("txindex_v1_tx_confirmed");
 const TXINDEX_TX_CONFIRMED_VALUES: TxIndexValueTable =
     TableDefinition::new("txindex_v1_tx_confirmed_values");
@@ -228,7 +234,7 @@ impl KvStore for RedbStore {
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
-        let rows = collect_prefix(&read_txn, table_for(cf), prefix)?;
+        let rows = scan_prefix(&read_txn, table_for(cf), prefix, UNBOUNDED)?.rows;
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
@@ -296,7 +302,6 @@ impl KvStore for RedbStore {
             return Err(fault.injected_error());
         }
         let mut write_txn = self.db.begin_write().map_err(StorageError::backend)?;
-        // An empty Immediate commit makes all earlier None commits durable.
         write_txn
             .set_durability(Durability::Immediate)
             .map_err(StorageError::backend)?;
@@ -435,7 +440,7 @@ impl KvStore for RedbTxIndexStore {
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
         let read_txn = self.db.begin_read().map_err(StorageError::backend)?;
-        let rows = collect_txindex_prefix(&read_txn, cf, prefix)?;
+        let rows = scan_txindex_prefix(&read_txn, cf, prefix, UNBOUNDED)?.rows;
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
@@ -470,9 +475,6 @@ impl KvStore for RedbTxIndexStore {
         conditions: &[WriteCondition<'_>],
         batch: BufferedWriteBatch,
     ) -> Result<bool, StorageError> {
-        // Width and family validation happens before any transaction begins so an
-        // invalid request never opens (and aborts) a write transaction. Every
-        // condition is validated, not only the first.
         validate_txindex_batch(&batch)?;
         for condition in conditions {
             let (cf, key) = condition.location();
@@ -528,9 +530,6 @@ pub fn open_redb_tx_index_store(path: &Path) -> Result<impl KvStore, StorageErro
 
 /// Opens the fixed-width redb transaction-index store with an explicit
 /// page-cache capacity.
-///
-/// The tables and layout are unchanged. `cache_bytes` configures only the
-/// cache window; zero selects the store default.
 pub fn open_redb_tx_index_store_with_cache(
     path: &Path,
     cache_bytes: u64,
@@ -650,7 +649,7 @@ impl KvSnapshot for RedbSnapshot {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
-        let rows = collect_prefix(&self.read_txn, table_for(cf), prefix)?;
+        let rows = scan_prefix(&self.read_txn, table_for(cf), prefix, UNBOUNDED)?.rows;
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
@@ -698,7 +697,7 @@ impl KvSnapshot for RedbTxIndexSnapshot {
         cf: ColumnFamily,
         prefix: &[u8],
     ) -> Result<crate::trait_::KvIter<'a>, StorageError> {
-        let rows = collect_txindex_prefix(&self.read_txn, cf, prefix)?;
+        let rows = scan_txindex_prefix(&self.read_txn, cf, prefix, UNBOUNDED)?.rows;
         Ok(Box::new(rows.into_iter().map(Ok)))
     }
 
@@ -737,7 +736,6 @@ fn scan_prefix(
                     value.value(),
                     limit,
                 ) {
-                    // Stop before copying the first row that exceeds limits.
                     return Ok(crate::PrefixScan {
                         rows,
                         complete: false,
@@ -801,38 +799,6 @@ const fn table_for(cf: ColumnFamily) -> ByteTable {
     }
 }
 
-fn collect_prefix(
-    read_txn: &ReadTransaction,
-    table_def: ByteTable,
-    prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
-    let table = read_txn
-        .open_table(table_def)
-        .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
-    match prefix_end(prefix) {
-        Some(end) => {
-            for item in table
-                .range(prefix..end.as_slice())
-                .map_err(StorageError::backend)?
-            {
-                let (key, value) = item.map_err(StorageError::backend)?;
-                rows.push((key.value().to_vec(), value.value().to_vec()));
-            }
-        }
-        None => {
-            for item in table.range(prefix..).map_err(StorageError::backend)? {
-                let (key, value) = item.map_err(StorageError::backend)?;
-                if !key.value().starts_with(prefix) {
-                    break;
-                }
-                rows.push((key.value().to_vec(), value.value().to_vec()));
-            }
-        }
-    }
-    Ok(rows)
-}
-
 fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
     let mut end = prefix.to_vec();
     while let Some(byte) = end.last_mut() {
@@ -847,10 +813,6 @@ fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Rejects a `ScriptLive` write that is not a 44-byte key with an empty value.
-///
-/// The dedicated txindex store enforces this with a fixed-width table. The
-/// generic [`RedbStore`] path uses variable-width tables, so the same
-/// `ScriptLiveRow` contract is checked here before any write is persisted.
 fn validate_script_live_put(key: &[u8], value: &[u8]) -> Result<(), StorageError> {
     fixed_key::<SCRIPT_LIVE_KEY_LEN>(key).map(|_| ())?;
     if !value.is_empty() {
@@ -959,55 +921,6 @@ fn byte_get(
         .map_err(StorageError::backend)
 }
 
-fn fixed_prefix_collect<const N: usize>(
-    read_txn: &ReadTransaction,
-    table_def: FixedTable<N>,
-    prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
-    let (start, end) = fixed_prefix_bounds::<N>(prefix)?;
-    let table = read_txn
-        .open_table(table_def)
-        .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
-    for item in table
-        .range::<&[u8; N]>(&start..=&end)
-        .map_err(StorageError::backend)?
-    {
-        let (key, _) = item.map_err(StorageError::backend)?;
-        rows.push((key.value().to_vec(), Vec::new()));
-    }
-    Ok(rows)
-}
-
-fn fixed_value_prefix_collect(
-    read_txn: &ReadTransaction,
-    main_def: FixedTable<12>,
-    value_def: TxIndexValueTable,
-    prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
-    let (start, end) = fixed_prefix_bounds::<12>(prefix)?;
-    let main = read_txn
-        .open_table(main_def)
-        .map_err(StorageError::backend)?;
-    let values = read_txn
-        .open_table(value_def)
-        .map_err(StorageError::backend)?;
-    let mut rows = Vec::new();
-    for item in main
-        .range::<&[u8; 12]>(&start..=&end)
-        .map_err(StorageError::backend)?
-    {
-        let (key, _) = item.map_err(StorageError::backend)?;
-        let key = key.value();
-        let value = values
-            .get(key)
-            .map_err(StorageError::backend)?
-            .map_or_else(Vec::new, |bytes| bytes.value().to_vec());
-        rows.push((key.to_vec(), value));
-    }
-    Ok(rows)
-}
-
 fn fixed_prefix_scan<const N: usize>(
     read_txn: &ReadTransaction,
     table_def: FixedTable<N>,
@@ -1075,35 +988,6 @@ fn fixed_value_prefix_scan(
         rows,
         complete: true,
     })
-}
-
-fn collect_txindex_prefix(
-    read_txn: &ReadTransaction,
-    cf: ColumnFamily,
-    prefix: &[u8],
-) -> Result<Vec<crate::trait_::KvPair>, StorageError> {
-    match cf {
-        ColumnFamily::TxConfirmed => fixed_value_prefix_collect(
-            read_txn,
-            TXINDEX_TX_CONFIRMED,
-            TXINDEX_TX_CONFIRMED_VALUES,
-            prefix,
-        ),
-        ColumnFamily::Funding => {
-            fixed_value_prefix_collect(read_txn, TXINDEX_FUNDING, TXINDEX_FUNDING_VALUES, prefix)
-        }
-        ColumnFamily::Spending => {
-            fixed_value_prefix_collect(read_txn, TXINDEX_SPENDING, TXINDEX_SPENDING_VALUES, prefix)
-        }
-        ColumnFamily::BlockHeaders => {
-            fixed_prefix_collect::<80>(read_txn, TXINDEX_BLOCK_HEADERS, prefix)
-        }
-        ColumnFamily::ScriptLive => {
-            fixed_prefix_collect::<SCRIPT_LIVE_KEY_LEN>(read_txn, TXINDEX_SCRIPT_LIVE, prefix)
-        }
-        ColumnFamily::UtxoMeta => collect_prefix(read_txn, TXINDEX_META, prefix),
-        _ => Err(invalid_txindex_cf()),
-    }
 }
 
 fn scan_txindex_prefix(

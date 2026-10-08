@@ -129,9 +129,6 @@ mod redb_impl;
 mod rocksdb_impl;
 
 /// Converts a `u64` byte count to an `f64` metric value.
-///
-/// Split the value into 32-bit limbs so the conversion uses only exact
-/// `f64::from(u32)` operations and rounds like a direct `u64` conversion.
 #[cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
 pub(crate) fn metric_f64(value: u64) -> f64 {
     const TWO32: f64 = 4_294_967_296.0;

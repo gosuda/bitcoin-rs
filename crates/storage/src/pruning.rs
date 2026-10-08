@@ -270,7 +270,6 @@ pub fn prune_to_height<S: crate::KvStore>(
 ) -> Result<StagedPrune, PruneError> {
     let safe_prune_height = applied_tip_height.saturating_sub(CORE_REORG_SAFETY_MARGIN);
     if pruneheight > safe_prune_height {
-        // The requested line would delete blocks still inside Core's reorg margin.
         return Err(
             StorageError::InvalidOperation("prune height is within reorg safety margin").into(),
         );
@@ -283,9 +282,6 @@ pub fn prune_to_height<S: crate::KvStore>(
     let policy_line = pruner_tip
         .min(durable_tip_height)
         .saturating_sub(policy.retention_depth());
-    // Claim the deletion range before staging anything: from this point a
-    // lease request below the reserved line is refused, so nothing can pin
-    // rows this batch is about to delete.
     let reservation = retention.reserve(policy_line);
 
     let mut batch = store.new_batch();
@@ -296,12 +292,6 @@ pub fn prune_to_height<S: crate::KvStore>(
         PRUNEHEIGHT_METADATA_KEY,
         &pruneheight.to_be_bytes(),
     );
-    // The frontier is the deletion's receipt. It shares this batch's atomic
-    // and durable boundary, so a restart sees the record and the deletions
-    // together and reconciles the committed batch instead of retrying a
-    // pass that may already have applied (#632). Clamping with the
-    // reconstruction keeps the record monotonic when a legacy datadir's
-    // surviving rows prove more deletion than the record did.
     let executed =
         ExecutedFrontier::reconstruct(store)?.advance(ExecutedFrontier::new(staged.pruned_below));
     batch.put(
@@ -309,9 +299,6 @@ pub fn prune_to_height<S: crate::KvStore>(
         PRUNE_EXECUTED_METADATA_KEY,
         &executed.get().to_be_bytes(),
     );
-    // The batch receipt is per-pass: frontier and requested height can both
-    // repeat on a retry at the same line, so only a value unique to this
-    // batch can prove *this* batch applied after a durability error.
     let receipt = load_prune_batch(store)?.unwrap_or(0).wrapping_add(1);
     batch.put(
         crate::ColumnFamily::UtxoMeta,
@@ -319,20 +306,11 @@ pub fn prune_to_height<S: crate::KvStore>(
         &receipt.to_be_bytes(),
     );
     if let Err(error) = store.write_durable(batch) {
-        // A durability error is not a rollback receipt: the batch may already
-        // have been applied, so the claim cannot be released on `Err` alone.
-        // The receipt shares the deletions' atomic boundary, so its presence
-        // proves the outcome.
         return match (
             load_executed_frontier(store),
             load_pruneheight(store),
             load_prune_batch(store),
         ) {
-            // The batch's own receipt persisted, so the deletions did too:
-            // run the same in-memory follow-ups the success path would — the
-            // line promotion and the flat-file reclaim — and hand the caller
-            // the staged result. Answering `Err` here would strand claimable
-            // files and leave every caller-side follow-up unapplied.
             (Ok(Some(persisted)), Ok(Some(persisted_height)), Ok(Some(persisted_receipt)))
                 if persisted.get() >= executed.get()
                     && persisted_height == pruneheight
@@ -342,21 +320,13 @@ pub fn prune_to_height<S: crate::KvStore>(
                 reclaim_staged_flat_block_files(store, block_files, &staged.file_numbers)?;
                 Ok(staged)
             }
-            // No new receipt persisted, so the atomic batch applied nothing:
-            // dropping the reservation safely reopens lease grants.
             (Ok(_), Ok(_), Ok(_)) => Err(error.into()),
-            // The outcome cannot be proven: fail closed and hold the claim
-            // until restart-time recovery reconciles record and deletions.
             _ => {
                 reservation.fail_closed();
                 Err(error.into())
             }
         };
     }
-    // The durable batch is the receipt for the line promoted here. A failed
-    // pass reconciled its outcome above: a provably applied batch promoted
-    // the line, a provably unapplied one released the claim, and an
-    // unprovable one still holds it until restart-time recovery.
     reservation.commit(executed.get());
     reclaim_staged_flat_block_files(store, block_files, &staged.file_numbers)?;
     Ok(staged)
@@ -405,9 +375,6 @@ pub fn stage_block_and_undo_prune<S: crate::KvStore>(
         batch,
         undo_pruner::BLOCK_UNDO_CF,
         undo_pruner::BLOCK_UNDO_PREFIX_BYTES,
-        // The lease-clamped line, not a fresh derivation: the whole pass
-        // must delete through one line, or a lease would hold block bodies
-        // while their undo records delete around them (or the reverse).
         prune_line,
         policy,
     )?;
