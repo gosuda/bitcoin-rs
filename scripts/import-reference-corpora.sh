@@ -171,23 +171,24 @@ for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; 
         exit 1
     fi
     mkdir -p "${OUT_BASE}/${target}" "${staged}"
-    cp -a "${OUT_BASE}/${target}/." "${staged}/"
     STAGED_DIRS+=("${staged}")
+    cp -a "${OUT_BASE}/${target}/." "${staged}/"
 done
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" script_eval
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" utxo_snapshot
-# Publish the minimized sets back: seeds the minimizer dropped are removed
-# from the external corpus (names are flat basenames).
+# Publish the minimized sets back: add the minimizer's output first, then drop
+# basenames it removed (names are flat basenames). A failed copy leaves the
+# prior corpus intact rather than partially deleted.
 for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; do
     staged="${FUZZ_DIR}/corpus/${target}"
+    cp -a "${staged}/." "${OUT_BASE}/${target}/"
     for old in "${OUT_BASE}/${target}"/*; do
         [ -e "${old}" ] || continue
         [[ -e "${staged}/${old##*/}" ]] || rm -f -- "${old}"
     done
-    cp -a "${staged}/." "${OUT_BASE}/${target}/"
 done
 
 # --- 5. Provenance ------------------------------------------------------------

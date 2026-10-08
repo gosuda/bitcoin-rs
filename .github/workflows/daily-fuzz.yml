@@ -112,7 +112,7 @@ jobs:
     needs: fuzz
     if: ${{ always() && !cancelled() && needs.fuzz.result == 'success' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - name: Download campaign outputs
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -199,6 +199,25 @@ jobs:
           echo "changed=true" >> "${GITHUB_OUTPUT}"
           echo "changed_targets=${changed_targets[*]}" >> "${GITHUB_OUTPUT}"
           printf 'Updated targets: %s\n' "${changed_targets[*]}" >> "${GITHUB_STEP_SUMMARY}"
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        if: steps.apply.outputs.changed == 'true'
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        if: steps.apply.outputs.changed == 'true'
+        with:
+          workspaces: policy-owner
+          cache-on-failure: true
+      - uses: ./policy-owner/.github/actions/test-deps
+        if: steps.apply.outputs.changed == 'true'
+      - name: Regenerate pinned decoder verdicts
+        if: steps.apply.outputs.changed == 'true'
+        working-directory: policy-owner
+        env:
+          BITCOIN_RS_FUZZ_CORPUS: ${{ github.workspace }}/corpus-repository/corpus
+          CORPUS_VERDICTS_WRITE: "1"
+        run: |
+          set -euo pipefail
+          cargo test -p bitcoin-rs-primitives --test differential
+          git -C ../corpus-repository add corpus/verdicts.json
       - name: Commit and push corpus
         if: steps.apply.outputs.changed == 'true'
         working-directory: corpus-repository

@@ -63,11 +63,18 @@ end-state evidence roles.
   gate skips) or, when the variable is unset, a local `fuzz/corpus/<target>/`
   overlay. The gate loud-skips only when no corpus directory exists; other
   `read_dir` failures surface as test failures.
-- The corpus evolves in the companion repository — the scheduled campaign
-  minimizes and grows it continuously — so the gate cannot pin per-seed
-  verdicts. A seed may legitimately change classification (rejected↔accepted)
-  as the corpus or codec evolves: this is not pinned. What the gate pins is
-  the verdict *shape* every seed must satisfy:
+- The companion repository is the authoritative verdict record: when
+  `<corpus>/verdicts.json` exists, every seed is checked against its pinned
+  per-seed verdict, in both directions — an unlisted seed fails, a listed
+  seed absent from the corpus fails, and a verdict that changed fails. A
+  decoder change that silently flips a classification (rejected↔accepted, or
+  a different rejection kind) therefore surfaces here rather than drifting.
+- `CORPUS_VERDICTS_WRITE=1` regenerates `verdicts.json` from observed
+  verdicts (the documented maintenance route, run by the publish-corpus job
+  after it applies campaign output). When the file is absent — a local
+  overlay, or a corpus checkout from before the file existed — the gate
+  degrades to the verdict-shape check alone and reports the downgrade.
+- The pinned verdict shape every seed must satisfy:
   - `accepted`: the native consensus codec decodes the seed under the exact-consume
     `deserialize` entry the wire codec uses, and re-encodes it byte-identically;
   - `rejected:<kind>`: the native codec rejects the seed with a typed error
@@ -77,8 +84,7 @@ end-state evidence roles.
     witness section cannot re-encode byte-identically, so the codec rejects it
     before the lock time, at the same check position as Core and rust-bitcoin.
 - A seed that decodes to neither verdict — an untyped error or a panic —
-  fails the gate, so a decoder change that alters verdict classification
-  surfaces here rather than drifting silently.
+  fails the gate regardless of `verdicts.json` presence.
 
 ### `QAC-03`: Importer acquisition and provenance publication
 
@@ -126,8 +132,9 @@ nonzero-status propagation; they are not stable public status-code assignments.
 - `crates/consensus/tests/overhaul_consensus_matrix.rs` (planned): G5 arm;
   counts and classifies invalid corpora with fixed skip reasons.
 - `crates/primitives/tests/differential.rs`: `QAC-05` gate; every
-  `tx_validate`/`block_validate` seed in the external corpus must decode to a
-  typed verdict, with byte-identical re-encoding of accepted seeds.
+  `tx_validate`/`block_validate` seed in the external corpus must match its
+  `verdicts.json` verdict, with byte-identical re-encoding of accepted
+  seeds.
 - Fuzz targets executed via `cargo fuzz run <target> -- -runs=10000` (see
   [fuzz/README.md](../../fuzz/README.md)).
 
