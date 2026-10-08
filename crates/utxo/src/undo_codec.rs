@@ -10,10 +10,6 @@
 //!    block being disconnected. Keying by height alone would let a stale record
 //!    from an abandoned branch be replayed against a different block at the
 //!    same height, which silently corrupts the UTXO set.
-//!
-//! Output payloads use the native `bitcoin_rs_primitives` consensus encoding
-//! rather than a hand-rolled layout, so the format cannot drift from the
-//! encoding the rest of the node already agrees on.
 
 use std::collections::HashSet;
 
@@ -178,9 +174,6 @@ pub(crate) fn decode(bytes: &[u8], expected_hash: Hash256) -> Result<UndoBatch, 
 }
 
 /// Caps the pre-allocation a count field can request.
-///
-/// The count is read from bytes on disk, so a corrupt record must not be able
-/// to ask for an unbounded allocation before its contents are validated.
 fn bounded_capacity(count: u32) -> usize {
     const MAX_PREALLOC: u32 = 4096;
     usize::try_from(count.min(MAX_PREALLOC)).unwrap_or(0)
@@ -255,9 +248,6 @@ impl<'a> Cursor<'a> {
     }
 
     /// Reads an entry count and rejects one the remaining bytes cannot hold.
-    ///
-    /// Without this a corrupt count sends the caller round a loop that can only
-    /// end in a truncation error, and reports the wrong cause.
     fn take_count(&mut self, min_entry_bytes: usize) -> Result<u32, UndoCodecError> {
         let count = self.take_u32()?;
         let available = self.remaining();
@@ -348,98 +338,94 @@ mod tests {
         Ok(())
     }
 
-    fn assert_refused(
-        bytes: &[u8],
-        block_hash: Hash256,
-        expected: impl FnOnce(&UndoCodecError) -> bool,
-    ) {
-        match decode(bytes, block_hash) {
-            Err(error) => assert!(expected(&error), "unexpected {error:?}"),
-            Ok(_) => panic!("corrupt or foreign record accepted"),
+    #[test]
+    fn a_corrupt_record_is_refused_with_the_matching_error() {
+        fn corrupt(mutate: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
+            let mut bytes = encode(&sample(), hash(1));
+            mutate(&mut bytes);
+            bytes
         }
-    }
+        fn single_restore_with_coinbase_byte(byte: u8) -> Vec<u8> {
+            let mut batch = UndoBatch::empty();
+            restore(&mut batch, outpoint(1, 0), 10, false, 5);
+            let mut bytes = encode(&batch, hash(1));
+            let flag = bytes.len() - RESTORE_TRAILER_BYTES;
+            bytes[flag] = byte;
+            bytes
+        }
+        fn twice(outpoint: OutPoint, in_both_halves: bool) -> Vec<u8> {
+            let mut batch = UndoBatch::empty();
+            if in_both_halves {
+                restore(&mut batch, outpoint, 10, false, 4);
+            } else {
+                batch.remove(outpoint);
+            }
+            batch.remove(outpoint);
+            encode(&batch, hash(1))
+        }
 
-    #[test]
-    fn a_record_for_another_block_is_refused() {
-        // A stale record from an abandoned branch must never be replayed
-        // against a different block.
-        let bytes = encode(&sample(), hash(1));
-        assert_refused(&bytes, hash(2), |e| {
-            matches!(e, UndoCodecError::BlockHashMismatch { .. })
-        });
-    }
+        type Expected = fn(&UndoCodecError) -> bool;
+        let cases: [(&str, Vec<u8>, Hash256, Expected); 7] = [
+            (
+                "another block",
+                encode(&sample(), hash(1)),
+                hash(2),
+                |error| matches!(error, UndoCodecError::BlockHashMismatch { .. }),
+            ),
+            (
+                "unknown version",
+                corrupt(|bytes| bytes[0] = UNDO_FORMAT_VERSION.wrapping_add(1)),
+                hash(1),
+                |error| matches!(error, UndoCodecError::UnsupportedVersion { .. }),
+            ),
+            (
+                "trailing bytes",
+                corrupt(|bytes| bytes.push(0)),
+                hash(1),
+                |error| matches!(error, UndoCodecError::TrailingBytes { trailing: 1 }),
+            ),
+            (
+                "impossible entry count",
+                corrupt(|bytes| {
+                    let count = RESTORE_COUNT_OFFSET..RESTORE_COUNT_OFFSET + COUNT_BYTES;
+                    bytes[count].copy_from_slice(&u32::MAX.to_le_bytes());
+                }),
+                hash(1),
+                |error| matches!(error, UndoCodecError::CountTooLarge { .. }),
+            ),
+            (
+                "non-canonical coinbase flag",
+                single_restore_with_coinbase_byte(2),
+                hash(1),
+                |error| matches!(error, UndoCodecError::InvalidCoinbase { found: 2 }),
+            ),
+            (
+                "repeated outpoint",
+                twice(OutPoint::new(hash(5).into(), 0), false),
+                hash(1),
+                |error| matches!(error, UndoCodecError::DuplicateOutpoint { .. }),
+            ),
+            (
+                "outpoint in both halves",
+                twice(OutPoint::new(hash(6).into(), 3), true),
+                hash(1),
+                |error| matches!(error, UndoCodecError::DuplicateOutpoint { .. }),
+            ),
+        ];
 
-    #[test]
-    fn an_unknown_version_is_refused() {
-        let mut bytes = encode(&sample(), hash(1));
-        bytes[0] = UNDO_FORMAT_VERSION.wrapping_add(1);
-        assert_refused(&bytes, hash(1), |e| {
-            matches!(e, UndoCodecError::UnsupportedVersion { .. })
-        });
-    }
+        for (name, bytes, block, expected) in cases {
+            let Err(error) = decode(&bytes, block) else {
+                panic!("{name}: a corrupt record decoded");
+            };
+            assert!(expected(&error), "{name}: unexpected error {error}");
+        }
 
-    #[test]
-    fn a_truncated_record_is_refused() {
-        let bytes = encode(&sample(), hash(1));
-        for cut in [1_usize, 8, 20, bytes.len() - 1] {
+        let whole = encode(&sample(), hash(1));
+        for cut in [1_usize, 8, 20, whole.len() - 1] {
             assert!(
-                decode(&bytes[..cut], hash(1)).is_err(),
+                decode(&whole[..cut], hash(1)).is_err(),
                 "truncation at {cut} must be refused"
             );
         }
-    }
-
-    #[test]
-    fn trailing_bytes_are_refused() {
-        let mut bytes = encode(&sample(), hash(1));
-        bytes.push(0);
-        assert_refused(&bytes, hash(1), |e| {
-            matches!(e, UndoCodecError::TrailingBytes { trailing: 1 })
-        });
-    }
-
-    #[test]
-    fn an_impossible_entry_count_is_refused_without_looping() {
-        let mut bytes = encode(&UndoBatch::empty(), hash(1));
-        bytes[RESTORE_COUNT_OFFSET..RESTORE_COUNT_OFFSET + COUNT_BYTES]
-            .copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_refused(&bytes, hash(1), |e| {
-            matches!(e, UndoCodecError::CountTooLarge { .. })
-        });
-    }
-
-    #[test]
-    fn a_non_canonical_coinbase_flag_is_refused() {
-        let mut batch = UndoBatch::empty();
-        restore(&mut batch, outpoint(1, 0), 10, false, 5);
-        let mut bytes = encode(&batch, hash(1));
-        let flag = bytes.len() - RESTORE_TRAILER_BYTES;
-        bytes[flag] = 2;
-        assert_refused(&bytes, hash(1), |e| {
-            matches!(e, UndoCodecError::InvalidCoinbase { found: 2 })
-        });
-    }
-
-    #[test]
-    fn a_repeated_outpoint_is_refused() {
-        let mut batch = UndoBatch::empty();
-        batch.remove(outpoint(5, 0));
-        batch.remove(outpoint(5, 0));
-        assert_refused(&encode(&batch, hash(1)), hash(1), |e| {
-            matches!(e, UndoCodecError::DuplicateOutpoint { .. })
-        });
-    }
-
-    #[test]
-    fn an_outpoint_in_both_halves_is_refused() {
-        // The apply path filters same-block spends out of both halves, so an
-        // outpoint in both is corrupt, not legal.
-        let shared = outpoint(6, 3);
-        let mut batch = UndoBatch::empty();
-        restore(&mut batch, shared, 10, false, 4);
-        batch.remove(shared);
-        assert_refused(&encode(&batch, hash(1)), hash(1), |e| {
-            matches!(e, UndoCodecError::DuplicateOutpoint { .. })
-        });
     }
 }

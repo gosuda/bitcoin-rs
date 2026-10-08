@@ -109,10 +109,6 @@ pub(crate) struct UtxoChangeEvents<'a> {
 }
 
 /// Read-only view over one committed UTXO event.
-///
-/// One inserted batch or one removed batch. Removed batches include the
-/// one-element batches emitted at overwrite boundaries, ordered ahead of
-/// their replacement insertions.
 #[derive(Clone, Copy)]
 pub(crate) enum UtxoCommittedEvent<'batch, 'coin> {
     /// Batch of inserted UTXOs.
@@ -129,8 +125,6 @@ impl<'a> UtxoChangeEvents<'a> {
         }
     }
 
-    /// Appends a run of insertions, merging into the previous insert batch
-    /// when the stream still ends on one.
     pub(crate) fn push_insert_batch(&mut self, insertions: SmallVec<[UtxoInserted<'a>; 8]>) {
         if insertions.is_empty() {
             return;
@@ -143,20 +137,6 @@ impl<'a> UtxoChangeEvents<'a> {
         }
     }
 
-    /// Appends one insertion, merging into the previous insert batch.
-    pub(crate) fn push_insert_coin(&mut self, insertion: UtxoInserted<'a>) {
-        self.operation_count = self.operation_count.saturating_add(1);
-        if let Some(UtxoChangeEvent::InsertBatch(existing)) = self.events.last_mut() {
-            existing.push(insertion);
-        } else {
-            let mut insertions = SmallVec::<[UtxoInserted<'a>; 8]>::new();
-            insertions.push(insertion);
-            self.events.push(UtxoChangeEvent::InsertBatch(insertions));
-        }
-    }
-
-    /// Appends a run of removals, merging into the previous remove batch when
-    /// the stream still ends on one.
     pub(crate) fn push_remove_batch(&mut self, removals: SmallVec<[UtxoRemoved; 2]>) {
         if removals.is_empty() {
             return;
@@ -169,10 +149,6 @@ impl<'a> UtxoChangeEvents<'a> {
         }
     }
 
-    /// Appends one removal as its own remove batch.
-    ///
-    /// Used for overwrite removals, which must not merge with a previous remove
-    /// batch so the replacement insert is ordered after this exact removal.
     pub(crate) fn push_remove_coin(&mut self, removal: UtxoRemoved) {
         self.operation_count = self.operation_count.saturating_add(1);
         let mut removals = SmallVec::<[UtxoRemoved; 2]>::new();
@@ -180,7 +156,6 @@ impl<'a> UtxoChangeEvents<'a> {
         self.events.push(UtxoChangeEvent::RemoveBatch(removals));
     }
 
-    /// Visits committed events in collection order.
     pub(crate) fn for_each(&self, mut visit: impl FnMut(UtxoCommittedEvent<'_, 'a>)) {
         for event in &self.events {
             match event {
@@ -194,15 +169,11 @@ impl<'a> UtxoChangeEvents<'a> {
         }
     }
 
-    /// Returns the number of output-level mutations represented by these events.
     #[must_use]
     pub(crate) fn operation_count(&self) -> usize {
         self.operation_count
     }
 
-    /// Visits committed events split into bounded chunks.
-    ///
-    /// Chunking is not semantic: any chunk size yields the same mutations.
     pub(crate) fn for_each_chunk<'batch>(
         &'batch self,
         chunk_size: usize,

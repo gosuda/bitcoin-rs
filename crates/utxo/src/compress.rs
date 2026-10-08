@@ -1,19 +1,7 @@
 //! Compact encodings for UTXO record fields.
 //!
-//! These shrink the in-memory record payload, which a mainnet attribution run
-//! measured at 55.1 bytes per live output and 77.4% of process RSS
-//! (`docs/benchmarks/utxo-memory.md`). They are an **internal storage** format:
-//! nothing here is consensus-visible, and `hash_serialized_3` and the MuHash
-//! trailer are computed over decoded consensus values, not over these bytes.
-//!
 //! Two encodings, chosen because both are pure per-output transforms with no
 //! cross-output invariant to violate:
-//!
-//! * [`varint`] — 7 bits per byte with a continuation flag, so the `vout` and
-//!   script length that cost 4 and 2 fixed bytes cost one byte each for the
-//!   values almost every output actually has.
-//! * [`compress_amount`] — Bitcoin Core's `CTxOutCompressor` amount transform,
-//!   which exploits how many amounts are round numbers of satoshis.
 
 use crate::UtxoError;
 use bitcoin_rs_primitives::Amount;
@@ -23,12 +11,6 @@ pub(crate) const VARINT_MAX_LEN: usize = 10;
 
 /// Writes `value` as a base-128 varint into `out` starting at `at`, returning
 /// the offset just past it, or `None` when `out` is too short.
-///
-/// Low 7 bits first, high bit set on every byte except the last.
-///
-/// Exists so an encoder can lay several varints into one stack buffer and issue
-/// a single copy into the record, rather than one bounds-checked push per
-/// field. That difference measured 3.2x on a 16-output record.
 #[inline]
 pub(crate) fn write_varint_at(value: u64, out: &mut [u8], at: usize) -> Option<usize> {
     let mut remaining = value;
@@ -48,11 +30,6 @@ pub(crate) fn write_varint_at(value: u64, out: &mut [u8], at: usize) -> Option<u
 }
 
 /// Bytes [`write_varint`] will produce for `value`.
-///
-/// The record encoder allocates one exact-capacity buffer, so it must know the
-/// payload size before writing a byte. Kept beside `write_varint` and pinned
-/// against it for every width boundary — a disagreement here is a buffer that
-/// is too small (a `CorruptRecord` on a valid output) or one carrying slack.
 #[inline]
 pub(crate) const fn varint_len(value: u64) -> usize {
     let mut remaining = value >> 7;
@@ -65,23 +42,8 @@ pub(crate) const fn varint_len(value: u64) -> usize {
 }
 
 /// Reads a base-128 varint at `offset`, returning the value and the next offset.
-///
-/// Rejects a varint that runs off the end, that exceeds [`VARINT_MAX_LEN`]
-/// bytes, whose final byte would overflow `u64`, or that is **not minimal**. A
-/// record is decoded on every output read, so a malformed one must be an error
-/// rather than a silently truncated value.
-///
-/// Minimality is what keeps the encoding injective in both directions, and the
-/// v4 layout it replaces got that for free from fixed-width fields: `[0x80,
-/// 0x00]` also decodes to zero, so accepting it would let two distinct byte
-/// strings describe one record. `UtxoRecord` compares and hashes by bytes, so
-/// that is not a cosmetic property.
 #[inline]
 pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), UtxoError> {
-    // Single-byte fast path. Every field this codec stores — vout, packed
-    // height, script length, and a compressed round amount — is one byte for
-    // the overwhelming majority of real outputs, so the general loop below is
-    // the exception, not the rule.
     let first = *bytes.get(offset).ok_or(UtxoError::CorruptRecord)?;
     if first & 0x80 == 0 {
         // `get` succeeded, so `offset < bytes.len() <= isize::MAX`.
@@ -114,25 +76,9 @@ pub(crate) fn read_varint(bytes: &[u8], offset: usize) -> Result<(u64, usize), U
 }
 
 /// Largest amount the compression is defined for: 21,000,000 BTC in satoshis.
-///
-/// A consensus bound, not an arbitrary one — no UTXO can hold more. The
-/// transform multiplies by 90, so it overflows `u64` above roughly 2e17; this
-/// ceiling sits two orders of magnitude below that, and making the domain
-/// explicit is better than a debug-only panic on a value that should be
-/// impossible.
 pub(crate) const MAX_COMPRESSIBLE_AMOUNT: u64 = Amount::MAX_MONEY.to_sat();
 
 /// Bitcoin Core's `CTxOutCompressor` amount compression.
-///
-/// Most amounts are round: a whole number of satoshis with a run of trailing
-/// zeros. The transform factors out up to nine powers of ten and encodes the
-/// exponent, so 1 BTC (100,000,000 sat) becomes a two-byte varint instead of
-/// eight fixed bytes. Amounts that are not round cost one extra bit and are
-/// still no worse than a plain varint.
-///
-/// Ported for the same reason Core uses it, and paired with
-/// [`decompress_amount`] under an exhaustive-boundary and property round trip:
-/// an amount that does not survive the round trip is a silently wrong balance.
 #[inline]
 pub(crate) const fn compress_amount(amount: u64) -> Result<u64, UtxoError> {
     if amount > MAX_COMPRESSIBLE_AMOUNT {
@@ -157,9 +103,6 @@ pub(crate) const fn compress_amount(amount: u64) -> Result<u64, UtxoError> {
 }
 
 /// The powers of ten the transform can factor out, indexed by exponent.
-///
-/// Replaces a `while` loop of up to nine dependent multiplies. Decoding an
-/// amount is on the record read path, and that loop was most of its fixed cost.
 const POW10: [u64; 10] = [
     1,
     10,
@@ -175,18 +118,6 @@ const POW10: [u64; 10] = [
 
 /// Inverse of [`compress_amount`], or `None` when `compressed` is not something
 /// [`compress_amount`] could have produced.
-///
-/// The rejection is not defensive tidiness. `read_varint` will hand this any
-/// `u64` a corrupt or hostile record contains, and the transform multiplies by
-/// up to 10^9: `decompress_amount(u64::MAX)` is 2.05e22, which **panics in a
-/// debug build** and wraps silently in a release one. `validate_encoded`
-/// decodes every output of every record loaded from a snapshot, so that path is
-/// reachable from a file on disk.
-///
-/// Requiring the result back inside the compressible domain also completes the
-/// canonicality rule: the compact form may encode only amounts the escape
-/// refuses, and the escape refuses exactly the amounts the compact form
-/// covers. Together they leave each amount exactly one spelling.
 #[inline]
 pub(crate) fn decompress_amount(compressed: u64) -> Option<u64> {
     if compressed == 0 {
@@ -379,12 +310,6 @@ mod tests {
 
         /// No `u64` may panic the decoder, and every value it accepts must be
         /// one the encoder could have produced.
-        ///
-        /// `read_varint` hands this whatever a corrupt or hostile record
-        /// contains, and `validate_encoded` runs it over every output of every
-        /// record loaded from a snapshot. The second half is the canonicality
-        /// rule: if some compressed value outside the encoder's image were
-        /// accepted, one amount would have two spellings.
         #[test]
         fn decompress_accepts_exactly_the_encoder_image(compressed in any::<u64>()) {
             if let Some(value) = decompress_amount(compressed) {
