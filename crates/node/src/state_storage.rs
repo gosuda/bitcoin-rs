@@ -95,7 +95,8 @@ impl NodeStorage {
             .with_context(|| format!("create chainstate_dir {}", chainstate_dir.display()))?;
 
         let backend = config.storage.backend;
-        crate::storage_backend::open_chainstate(
+        crate::storage_backend::open_generic(
+            "chainstate",
             backend,
             &chainstate_dir,
             Some(chainstate_cache_bytes),
