@@ -1206,8 +1206,7 @@ mod tests {
         medium.active_by_height.taint();
         assert_eq!(medium.block_locator(ids[25], 32), indexed);
         let side = medium.block_locator(ids[10], 32);
-        assert!(!side.is_empty());
-        assert_eq!(side[0], medium.node(ids[10])?.hash);
+        assert_eq!(side.first(), Some(&medium.node(ids[10])?.hash));
         let (mut tree, main_ids) = linear_chain(40)?;
         let tip_id = main_ids[40];
         assert_eq!(tree.tip_id(), Some(tip_id));
