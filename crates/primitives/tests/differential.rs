@@ -85,7 +85,7 @@ fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
         let path = entry.path();
         if path.is_file() {
             if let Ok(bytes) = std::fs::read(&path) {
-                seeds.push((path.display().to_string(), bytes));
+                seeds.push((entry.file_name().to_string_lossy().into_owned(), bytes));
             }
         }
     }
@@ -178,8 +178,8 @@ fn enforce_corpus_verdicts(target: &str) {
     );
 
     let mut observed: BTreeMap<String, String> = BTreeMap::new();
-    for (path, bytes) in &seeds {
-        let name = path.rsplit('/').next().unwrap_or(path).to_owned();
+    for (name, bytes) in &seeds {
+        let name = name.as_str();
         let verdict = match target {
             "tx_validate" => decode_verdict::<NativeTx>(bytes),
             "block_validate" => decode_verdict::<NativeBlock>(bytes),
@@ -189,7 +189,7 @@ fn enforce_corpus_verdicts(target: &str) {
             verdict == "accepted" || verdict.starts_with("rejected:"),
             "{target}: seed {name} has unknown verdict {verdict}"
         );
-        observed.insert(name, verdict);
+        observed.insert(name.to_owned(), verdict);
     }
 
     let manifest_path = corpus_root().join("verdicts.json");

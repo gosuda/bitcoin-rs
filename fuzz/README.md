@@ -138,7 +138,8 @@ scripts/import-qa-assets.sh
 The script declares and checks the clone's disk footprint, shallow-clones the
 upstream corpus repo, remaps the seeds to each harness's input framing into
 the corpus checkout, minimizes with `cargo fuzz cmin` (staged through
-`fuzz/corpus/` symlinks), deletes the clone, and rewrites
+a real `fuzz/corpus/<target>` staging directory — `cargo fuzz cmin`
+cannot minimize through a symlink), deletes the clone, and rewrites
 `fuzz/CORPUS_PROVENANCE.md`.
 
 `scripts/import-reference-corpora.sh` does the same for the pinned
