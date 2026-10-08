@@ -247,6 +247,29 @@ architecture or validation specification in this guide.
 - Atomic changes: keep commits self-contained and bisectable; the workspace should compile and pass tests at each step.
 - Tests first: bug fixes should include regression tests proving the defect is resolved.
 
+### Architectural changes
+
+The project boundary is
+[stable external contracts, replaceable internal architecture](README.md#external-compatibility).
+Internal breaking changes are acceptable with clear rationale; breaking a
+supported external contract is a regression. For a change that reshapes
+internals, reviewers evaluate:
+
+1. **External contract preserved?** Consensus, P2P, and every affected
+   supported external API keep observable behavior, proven with the
+   regression, differential, or black-box evidence the owning contract names.
+2. **Better internals?** A concrete improvement — clearer ownership, simpler
+   boundaries, reduced duplication, measurable performance, or more reliable
+   recovery — with its migration/resync and operational cost assessed.
+3. **No compatibility debt without a requirement?** No legacy adapters, dual
+   paths, migration layers, or dead internal interfaces kept solely to avoid
+   an intentional internal break.
+4. **Fail safely?** Durable-format changes keep explicit format gates, crash
+   consistency, and fail-closed recovery; external contracts do not regress.
+
+A breaking change is permitted, not a goal. The more aggressively internals
+are redesigned, the stronger the external validation evidence must be.
+
 ## Documentation references
 
 - [docs/README.md](docs/README.md) — Documentation index
