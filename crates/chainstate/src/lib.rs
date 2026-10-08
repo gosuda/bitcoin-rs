@@ -464,12 +464,10 @@ pub struct Chainstate {
 pub struct ChainstateParts {
     /// Consensus network.
     pub network: Network,
-    /// Best-work header-tip publication cell.
-    pub chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Authoritative applied-tip publication cell.
-    pub applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
-    /// Shared header/block tree.
-    pub block_tree: Arc<RwLock<BlockTree>>,
+    /// Shared header/block tree, transferred by value to the owning chainstate.
+    pub block_tree: BlockTree,
+    /// Restored applied-tip snapshot, if any.
+    pub restored_applied_tip: Option<TipSnapshot>,
     /// Authoritative UTXO set.
     pub utxo: Arc<UtxoSet>,
     /// Coin-statistics listener attached to the UTXO set.
@@ -482,8 +480,6 @@ pub struct ChainstateParts {
     pub undo_store: Arc<dyn UndoStore>,
     /// Durable applied-head store.
     pub durable_head: Arc<dyn DurableHeadStore>,
-    /// Process shutdown signal.
-    pub shutdown: Arc<AtomicBool>,
     /// The mutation role over the transition domain composition minted.
     pub chain_transition: TransitionAuthority,
     /// Highest assume-valid height.
@@ -587,21 +583,25 @@ impl<'a> ChainTransition<'a> {
 impl Chainstate {
     /// Creates the production service from lower-layer capabilities.
     #[must_use]
-    pub fn from_parts(parts: ChainstateParts) -> Self {
+    pub fn from_parts(mut parts: ChainstateParts) -> Self {
+        let chain_tip = parts.block_tree.tip_handle();
         let assume_valid_gate = Arc::new(AssumeValidGate::new(
             parts.network,
             parts.assume_valid_height,
         ));
-        assume_valid_gate.evaluate(&parts.block_tree.read());
+        assume_valid_gate.evaluate(&parts.block_tree);
+        let block_tree = Arc::new(RwLock::new(parts.block_tree));
+        let applied_tip = Arc::new(ArcSwapOption::new(parts.restored_applied_tip.map(Arc::new)));
         let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-            TipReader::new(Arc::clone(&parts.applied_tip)),
-            BlockTreeReader::new(Arc::clone(&parts.block_tree)),
+            TipReader::new(Arc::clone(&applied_tip)),
+            BlockTreeReader::new(Arc::clone(&block_tree)),
         ));
+        let shutdown = Arc::new(AtomicBool::new(false));
         Self {
             network: parts.network,
-            chain_tip: parts.chain_tip,
-            applied_tip: parts.applied_tip,
-            block_tree: parts.block_tree,
+            chain_tip,
+            applied_tip,
+            block_tree,
             utxo: parts.utxo,
             coin_stats: parts.coin_stats,
             chain_events: parts.chain_events,
@@ -609,7 +609,7 @@ impl Chainstate {
             undo_store: parts.undo_store,
             durable_head: parts.durable_head,
             admission: Arc::new(ApplyAdmission::new()),
-            shutdown: parts.shutdown,
+            shutdown,
             chain_transition: parts.chain_transition,
             assume_valid_height: parts.assume_valid_height,
             assume_valid_gate,
@@ -766,8 +766,15 @@ impl Chainstate {
             )?;
         }
         let chain_tip = Arc::new(arc_swap::ArcSwapOption::empty());
+        let assume_valid_gate = Arc::new(AssumeValidGate::new(self.network, 0));
+        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+            TipReader::new(Arc::clone(&applied_tip)),
+            BlockTreeReader::new(Arc::clone(&self.block_tree)),
+        ));
 
-        let parts = ChainstateParts {
+        // Sharing the mutable header tree stays inside its chainstate owner;
+        // production composition transfers an owned tree through ChainstateParts.
+        let historical = Self {
             network: self.network,
             chain_tip,
             applied_tip,
@@ -780,21 +787,36 @@ impl Chainstate {
             block_body_store: None,
             undo_store: undo,
             durable_head: historical_head,
+            admission: Arc::new(ApplyAdmission::new()),
             shutdown,
             chain_transition: transition.authority(),
             assume_valid_height: 0,
+            assume_valid_gate,
             validation_mode: ValidationMode::Full,
             validation_engine: self.validation_engine,
-            journal: None,
+            journal: Arc::new(RwLock::new(None)),
+            checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: self.retention.clone(),
-            role: ChainstateRole::Historical {
+            ibd,
+            role: Arc::new(RwLock::new(ChainstateRole::Historical {
                 base_height,
                 base_hash,
-            },
+            })),
         };
-        Ok(Arc::new(Self::from_parts(parts)))
+        Ok(Arc::new(historical))
+    }
+
+    /// Returns a read-only capability to observe the process shutdown signal.
+    #[must_use]
+    pub fn shutdown_reader(&self) -> bitcoin_rs_chain::LatchReader {
+        bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.shutdown))
+    }
+
+    /// Requests process shutdown across the node.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
     }
 
     /// Permanently closes chain mutation and asks the process to shut down.
@@ -964,7 +986,8 @@ impl Chainstate {
         self.block_body_store.clone()
     }
 
-    /// Clones the process shutdown signal.
+    /// Clones the process shutdown signal for testing.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.shutdown)
@@ -1096,7 +1119,13 @@ impl Chainstate {
         coin_stats: Arc<bitcoin_rs_utxo::stats::CoinStatsListener>,
         chain_events: Arc<crate::events::ChainEventPublisher>,
     ) -> Self {
-        Self::from_parts(ChainstateParts {
+        let assume_valid_gate = Arc::new(AssumeValidGate::new(network, 0));
+        assume_valid_gate.evaluate(&block_tree.read());
+        let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
+            TipReader::new(Arc::clone(&applied_tip)),
+            BlockTreeReader::new(Arc::clone(&block_tree)),
+        ));
+        Self {
             network,
             chain_tip,
             applied_tip,
@@ -1107,17 +1136,21 @@ impl Chainstate {
             block_body_store: None,
             undo_store: Arc::new(InMemoryUndoStore::default()),
             durable_head: Arc::new(bitcoin_rs_storage::InMemoryDurableHeadStore::new()),
+            admission: Arc::new(ApplyAdmission::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             chain_transition: TransitionDomain::new().authority(),
             assume_valid_height: 0,
+            assume_valid_gate,
             validation_mode: ValidationMode::AssumeValid,
             validation_engine: bitcoin_rs_consensus::ValidationEngine::Native,
-            journal: None,
+            journal: Arc::new(RwLock::new(None)),
+            checkpoint_publisher: None,
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: bitcoin_rs_storage::MandatoryRetention::in_memory(),
-            role: ChainstateRole::Ordinary,
-        })
+            role: Arc::new(RwLock::new(ChainstateRole::Ordinary)),
+            ibd,
+        }
     }
 
     /// Copies the published applied tip and its transaction count.

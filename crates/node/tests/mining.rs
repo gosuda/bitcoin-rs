@@ -59,7 +59,7 @@ fn regtest_mining() -> anyhow::Result<(NodeState, MiningCoordinator)> {
 fn coordinator(state: &NodeState) -> MiningCoordinator {
     // Empty template coinbase script matches transport-only GBT wiring.
     MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),
@@ -445,7 +445,7 @@ fn proposal_has_no_side_effects() -> anyhow::Result<()> {
         .applied_tip_snapshot()
         .unwrap_or_else(|| panic!("applied tip missing before proposal"));
     let before_seq = state.mempool().read().sequence_number();
-    let before_blocks = state.blocks().read().len();
+    let before_blocks = state.block_log_reader().read().len();
 
     let genesis = Network::Regtest.genesis_block();
     let child = mined_child(genesis.block_hash())?;
@@ -466,7 +466,7 @@ fn proposal_has_no_side_effects() -> anyhow::Result<()> {
         .unwrap_or_else(|| panic!("applied tip missing after proposal"));
     assert_eq!(before.hash, after.hash);
     assert_eq!(before_seq, state.mempool().read().sequence_number());
-    assert_eq!(before_blocks, state.blocks().read().len());
+    assert_eq!(before_blocks, state.block_log_reader().read().len());
     Ok(())
 }
 
@@ -479,7 +479,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
         .applied_tip_snapshot()
         .unwrap_or_else(|| panic!("applied tip missing before proposal"));
     let before_seq = state.mempool().read().sequence_number();
-    let before_blocks = state.blocks().read().len();
+    let before_blocks = state.block_log_reader().read().len();
 
     let genesis = Network::Regtest.genesis_block();
     let child = excess_coinbase_child(genesis.block_hash())?;
@@ -502,7 +502,7 @@ fn proposal_rejects_excess_coinbase_without_side_effects() -> anyhow::Result<()>
         .unwrap_or_else(|| panic!("applied tip missing after proposal"));
     assert_eq!(before.hash, after.hash);
     assert_eq!(before_seq, state.mempool().read().sequence_number());
-    assert_eq!(before_blocks, state.blocks().read().len());
+    assert_eq!(before_blocks, state.block_log_reader().read().len());
     Ok(())
 }
 
@@ -957,7 +957,7 @@ fn shutdown_ends_long_poll_without_wake() -> anyhow::Result<()> {
     let state = open_at_genesis(Network::Regtest)?;
     let shutdown = state.shutdown();
     let mining = Arc::new(MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),
@@ -1551,7 +1551,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
     // Non-zero cooldown: the old code would wait up to `mempool_update_wait`
     // before returning on a mempool-only change. The fix returns immediately.
     let mining = Arc::new(MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),
@@ -1748,7 +1748,7 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> anyhow::Result<()> {
         .to_p2sh()
         .into_bytes();
     let mining = MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),

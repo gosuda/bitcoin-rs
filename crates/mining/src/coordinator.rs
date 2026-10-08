@@ -8,8 +8,6 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::TipSnapshot;
@@ -227,7 +225,7 @@ pub struct MiningService {
     /// Immutable coinbase payout script for assembled candidates.
     coinbase_script: Vec<u8>,
     /// Shared shutdown flag checked by every unbounded wait.
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     /// Applied-chain tip publisher.
     applied_tip: Arc<dyn AppliedTipSource>,
     /// Read-only mempool facts.
@@ -253,7 +251,7 @@ impl MiningService {
         mempool: Arc<dyn MempoolSnapshotSource>,
         chain: Arc<dyn ChainContextSource>,
         coinbase_script: Vec<u8>,
-        shutdown: Arc<AtomicBool>,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> Self {
         Self {
             network,
@@ -261,7 +259,7 @@ impl MiningService {
             mempool,
             chain,
             coinbase_script,
-            shutdown,
+            shutdown: shutdown.into(),
             state: Mutex::default(),
             wake: Condvar::new(),
         }
@@ -337,7 +335,7 @@ impl MiningService {
     ) -> Result<GenerationKey, MiningControlError> {
         let mut state = self.state.lock();
         loop {
-            if self.shutdown.load(Ordering::Acquire) {
+            if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));
@@ -470,7 +468,7 @@ impl MiningService {
     fn live_candidate(&self) -> Result<Arc<Candidate>, MiningControlError> {
         let mut last_race = None;
         for _attempt in 0..CANDIDATE_GENERATION_RETRIES {
-            if self.shutdown.load(Ordering::Acquire) {
+            if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));
@@ -502,7 +500,7 @@ impl MiningService {
         }
 
         loop {
-            if self.shutdown.load(Ordering::Acquire) {
+            if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));

@@ -347,14 +347,14 @@ fn an_unsent_chain_sync_probe_arms_no_response_window() {
             Arc::new(RwLock::new(tree)),
         )),
         Arc::new(PeerTable::new()),
-        Arc::new(Mutex::new({
+        {
             let (_tx, rx) = unbounded::<crate::InboundHeaders>();
             rx
-        })),
-        Arc::new(Mutex::new({
+        },
+        {
             let (_tx, rx) = unbounded::<crate::InboundBlock>();
             rx
-        })),
+        },
         super::synced_ibd_latch(),
     ));
     sync.chain.bootstrap_genesis();

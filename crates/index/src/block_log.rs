@@ -4,7 +4,59 @@
 //! runtime resolves block identity against the same log. The type lives here
 //! so both owners read it without an edge on the RPC surface crate.
 
+#[cfg(any(test, feature = "test-seam"))]
+use parking_lot::RwLockWriteGuard;
+use parking_lot::{RwLock, RwLockReadGuard};
+use std::sync::Arc;
+
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
+
+/// Cloneable, read-only capability to observe the applied-block log.
+///
+/// Write access stays private to the owning chain followers.
+#[derive(Clone, Debug)]
+pub struct BlockLogReader {
+    inner: Arc<RwLock<BlockLog>>,
+}
+
+impl BlockLogReader {
+    /// Wraps a block log without exposing its write lock in production.
+    #[must_use]
+    pub const fn new(inner: Arc<RwLock<BlockLog>>) -> Self {
+        Self { inner }
+    }
+
+    /// Acquires a shared block-log read guard.
+    pub fn read(&self) -> RwLockReadGuard<'_, BlockLog> {
+        self.inner.read()
+    }
+
+    /// Acquires a fixture-only write guard. Not present in production builds.
+    #[cfg(any(test, feature = "test-seam"))]
+    pub fn write(&self) -> RwLockWriteGuard<'_, BlockLog> {
+        self.inner.write()
+    }
+
+    /// Raw block-log handle for test fixtures.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn raw_handle(&self) -> &Arc<RwLock<BlockLog>> {
+        &self.inner
+    }
+
+    /// Builds an empty block-log fixture for testing.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub fn fixture_empty() -> Self {
+        Self::new(Arc::new(RwLock::new(BlockLog::new())))
+    }
+}
+
+impl From<Arc<RwLock<BlockLog>>> for BlockLogReader {
+    fn from(inner: Arc<RwLock<BlockLog>>) -> Self {
+        Self::new(inner)
+    }
+}
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 

@@ -5,7 +5,6 @@
 //! owns only channel draining and ordering admission results before consumers.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bitcoin_rs_chain::{BlockTreeReader, TipReader};
@@ -16,7 +15,6 @@ use bitcoin_rs_primitives::{Hash256, Network, Txid, Wtxid};
 use bitcoin_rs_rpc::context::ChainAdmissionView;
 use bitcoin_rs_utxo::UtxoReader;
 use crossbeam_channel::Receiver;
-use parking_lot::Mutex;
 
 use crate::state::NodeState;
 
@@ -31,10 +29,11 @@ pub fn spawn_tx_ingress_consumer(
     state: &NodeState,
     gateway: Arc<MempoolGateway>,
     mining_control: Arc<dyn MiningControl>,
-    shutdown: Arc<AtomicBool>,
-    tx_rx: Arc<Mutex<Receiver<bitcoin_rs_p2p::InboundTx>>>,
+    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    tx_rx: Receiver<bitcoin_rs_p2p::InboundTx>,
     relay: TxRelayQueue,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let shutdown = shutdown.into();
     let chainstate = state.chainstate();
     let consumer = TxIngressConsumer {
         utxo: chainstate.utxo_reader(),
@@ -49,7 +48,7 @@ pub fn spawn_tx_ingress_consumer(
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-ingress".to_owned())
         .spawn(move || {
-            while !shutdown.load(Ordering::Relaxed) {
+            while !shutdown.load() {
                 // One bounded pass: transient retries remain with mempool and
                 // cannot starve fresh ingress or shutdown by spinning here.
                 let made_progress = consumer.process_retries();
@@ -62,7 +61,7 @@ pub fn spawn_tx_ingress_consumer(
                 } else {
                     TX_INGRESS_POLL
                 };
-                let recv = tx_rx.lock().recv_timeout(timeout);
+                let recv = tx_rx.recv_timeout(timeout);
                 match recv {
                     Ok(inbound) => consumer.process_one(inbound),
                     Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}

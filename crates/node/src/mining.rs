@@ -14,8 +14,8 @@ use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_chainstate::bytes_are_block;
-use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
+use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mining::AppliedTipSource;
 use bitcoin_rs_mining::AvailableMiningRule;
 use bitcoin_rs_mining::BlockTemplateMode;
@@ -48,16 +48,13 @@ use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::consensus_bytes;
 use compact_str::CompactString;
-use parking_lot::RwLock;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 /// Production mining coordinator owned by the node process.
 pub struct MiningCoordinator {
     chainstate: Arc<Chainstate>,
     block_tree: BlockTreeReader,
     followers: ChainFollowers,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     service: MiningService,
 }
 
@@ -65,7 +62,7 @@ impl MiningCoordinator {
     /// Builds a coordinator over the shared applied-chain and mempool handles.
     #[must_use]
     pub fn new(
-        mempool: Arc<RwLock<Mempool>>,
+        mempool: MempoolReader,
         chainstate: Arc<Chainstate>,
         stable: StableRead,
         followers: ChainFollowers,
@@ -74,7 +71,7 @@ impl MiningCoordinator {
         let network = chainstate.network();
         let applied_tip = chainstate.applied_tip_reader();
         let block_tree = chainstate.block_tree_reader();
-        let shutdown = chainstate.shutdown_handle();
+        let shutdown = chainstate.shutdown_reader();
         let service = MiningService::new(
             network,
             Arc::new(AppliedTipAdapter { tip: applied_tip }),
@@ -88,7 +85,7 @@ impl MiningCoordinator {
                 network,
             }),
             coinbase_script,
-            Arc::clone(&shutdown),
+            shutdown.clone(),
         );
         let block_tree = chainstate.block_tree_reader();
         Self {
@@ -223,7 +220,7 @@ impl AppliedTipSource for AppliedTipAdapter {
 
 /// Serves mempool reads for candidate assembly, one read lock per call.
 struct MempoolAdapter {
-    mempool: Arc<RwLock<Mempool>>,
+    mempool: MempoolReader,
     chainstate: Arc<Chainstate>,
     /// Read role over the same domain chainstate's mutation role uses, so a
     /// candidate assembly cannot observe a tip and UTXO set mid-transition.
@@ -480,7 +477,7 @@ impl MiningControl for MiningCoordinator {
         }
         let mut generated = Vec::new();
         for _ in 0..request.count {
-            if self.shutdown.load(Ordering::Acquire) {
+            if self.shutdown.is_triggered() {
                 return Err(MiningControlError::Unavailable(CompactString::from(
                     "node is shutting down",
                 )));

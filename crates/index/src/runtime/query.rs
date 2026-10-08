@@ -3,11 +3,11 @@
 //! entrypoints retain health, revision, watermark, and chain-transition checks.
 
 use super::{
-    Arc, Block, BlockBodySource, BlockHash, BlockLog, BlockSource, BlockTree, DerivedIndexInfo,
-    DerivedIndexQuery, DerivedIndexRuntime, Hash256, IndexCapabilities, IndexCapability,
-    IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint, PrefixScanLimit,
-    QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT, QUERY_SCAN_ROW_LIMIT,
-    RwLock, ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
+    Arc, Block, BlockBodySource, BlockHash, BlockLogReader, BlockSource, BlockTree,
+    DerivedIndexInfo, DerivedIndexQuery, DerivedIndexRuntime, Hash256, IndexCapabilities,
+    IndexCapability, IndexReader, IndexWatermark, MAX_SERIALIZED_BLOCK_BYTES, Ordering, OutPoint,
+    PrefixScanLimit, QUERY_BODY_READ_LIMIT, QUERY_SCAN_BYTE_LIMIT, QUERY_SCAN_COUNT_LIMIT,
+    QUERY_SCAN_ROW_LIMIT, ScriptHash, ScriptHistoryRecord, ScriptIndexQuery, ScriptIndexRecord,
     ScriptIndexSnapshot, ScriptLiveScan, SpendingRecord, TipSnapshot, Tx, TxIndexScan,
     TxIndexScanRow, TxIndexSnapshot, TxPosition, TxPositionValue, TxQueryError, Txid, deserialize,
     record_at_height,
@@ -20,7 +20,7 @@ mod transactions;
 /// bodies from the chain body store. Not a node-owned concept.
 #[derive(Clone)]
 pub struct IndexBlockSource {
-    blocks: Arc<RwLock<BlockLog>>,
+    blocks: BlockLogReader,
     block_body_source: Option<Arc<dyn BlockBodySource>>,
     block_tree: Option<bitcoin_rs_chain::BlockTreeReader>,
 }
@@ -28,9 +28,9 @@ pub struct IndexBlockSource {
 impl IndexBlockSource {
     /// A source backed only by the log of connected block records.
     #[must_use]
-    pub const fn new(blocks: Arc<RwLock<BlockLog>>) -> Self {
+    pub fn new(blocks: impl Into<BlockLogReader>) -> Self {
         Self {
-            blocks,
+            blocks: blocks.into(),
             block_body_source: None,
             block_tree: None,
         }

@@ -44,7 +44,7 @@
 //! entry's real wtxid only while that acceptance remains resident. The
 //! gateway reference is weak so its observer cannot retain the gateway.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -354,12 +354,13 @@ pub fn spawn_tx_relay_worker<S: RelaySink + 'static>(
     sink: S,
     rx: Receiver<RelayRequest>,
     gateway: Weak<MempoolGateway>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let shutdown = shutdown.into();
     std::thread::Builder::new()
         .name("bitcoin-rs-tx-relay".to_owned())
         .spawn(move || {
-            while !shutdown.load(Ordering::Relaxed) {
+            while !shutdown.load() {
                 match rx.recv_timeout(RELAY_POLL) {
                     Ok(request) => {
                         let Some(gateway) = gateway.upgrade() else {
@@ -386,6 +387,7 @@ mod tests {
     use crossbeam_channel::bounded;
     use parking_lot::Mutex;
     use std::net::SocketAddr;
+    use std::sync::atomic::AtomicBool;
 
     /// A peer in the fake sink: a node id and a remaining send budget.
     #[derive(Clone)]

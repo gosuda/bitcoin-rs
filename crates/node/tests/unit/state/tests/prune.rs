@@ -15,7 +15,11 @@ fn apply_block_persists_body_under_pruning_key_when_pruning_disabled() -> anyhow
     state.apply_block(&block)?;
 
     assert_eq!(
-        state.blocks().read().first().map(|record| record.body_size),
+        state
+            .block_log_reader()
+            .read()
+            .first()
+            .map(|record| record.body_size),
         Some(consensus_bytes(&block).len())
     );
     assert_eq!(

@@ -20,7 +20,9 @@ use bitcoin_rs_primitives::{Amount, Script, Txid};
 use core::fmt;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use hashbrown::HashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
+#[cfg(any(test, feature = "test-seam"))]
+use parking_lot::RwLock;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -83,7 +85,9 @@ impl Drop for RestRenderPermit {
     }
 }
 
-use bitcoin_rs_index::block_log::{BlockLog, BlockRecord, record_at_height, record_at_height_hash};
+use bitcoin_rs_index::block_log::{
+    BlockLogReader, BlockRecord, record_at_height, record_at_height_hash,
+};
 use bitcoin_rs_index::query_api::RollbackWarningSource;
 
 /// Typed synchronization progress behind `getblockchaininfo`.
@@ -231,7 +235,7 @@ pub struct ChainHandles {
     /// [`Self::progress`] by that fact's invariant.
     pub closed_for_recovery: LatchReader,
     /// Applied block metadata log.
-    pub blocks: Arc<RwLock<BlockLog>>,
+    pub blocks: BlockLogReader,
     /// Authoritative UTXO set, read-only: mutation stays with the chain
     /// owner through `utxo::contract`.
     pub utxo: bitcoin_rs_utxo::UtxoReader,
@@ -480,7 +484,7 @@ impl ChainHandles {
             closed_for_recovery: LatchReader::new(Arc::new(core::sync::atomic::AtomicBool::new(
                 false,
             ))),
-            blocks: Arc::new(RwLock::new(BlockLog::new())),
+            blocks: BlockLogReader::fixture_empty(),
             utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(utxo)),
             coin_stats: Arc::new(coin_stats_listener),
             block_tree,
@@ -512,7 +516,7 @@ impl Default for NetworkHandles {
     fn default() -> Self {
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
             bitcoin_rs_p2p::P2pServiceConfig::default(),
-            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            LatchReader::fixture_never(),
         ));
         Self {
             peer_table: p2p.table(),
@@ -770,6 +774,7 @@ impl ChainHandles {
     }
 
     /// Stores a block record for block and header RPCs.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn add_block(&self, record: BlockRecord) {
         self.blocks.write().push(record);
     }
@@ -1430,7 +1435,7 @@ mod tests {
         );
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
             bitcoin_rs_p2p::P2pServiceConfig::default(),
-            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            LatchReader::fixture_never(),
         ));
         let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
         let ctx = Context::from_handles(ContextHandles {
@@ -1438,7 +1443,7 @@ mod tests {
                 chain_tip: TipReader::new(Arc::clone(&chain_tip)),
                 applied_tip: TipReader::new(Arc::clone(&applied_tip)),
                 progress,
-                blocks: Arc::new(RwLock::new(BlockLog::new())),
+                blocks: BlockLogReader::fixture_empty(),
                 utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::clone(&utxo)),
                 coin_stats: Arc::clone(&coin_stats),
                 block_tree: BlockTreeReader::new(Arc::clone(&block_tree)),
@@ -1994,7 +1999,7 @@ mod tests {
                         BlockTreeReader::new(Arc::clone(&block_tree)),
                     )),
                 ),
-                blocks: Arc::new(RwLock::new(BlockLog::new())),
+                blocks: BlockLogReader::fixture_empty(),
                 utxo: bitcoin_rs_utxo::UtxoReader::new(Arc::new(bitcoin_rs_utxo::UtxoSet::new())),
                 coin_stats: Arc::new(bitcoin_rs_utxo::stats::CoinStatsListener::new(
                     bitcoin_rs_utxo::stats::CoinStats::default(),

@@ -193,8 +193,8 @@ pub struct BlockSync {
     /// [`crate::download_window::BlockDownloadPolicy`]; nothing else decides
     /// whether this node is still syncing.
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
-    inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+    inbound_headers_rx: Receiver<InboundHeaders>,
+    inbound_blocks_rx: Receiver<crate::InboundBlock>,
     /// One lock owns the coupled download, staged-body, header-request, and
     /// session-reconciliation state. Consensus and chain I/O stay outside
     /// this lock; each component's policy remains in the P2P crate.
@@ -381,8 +381,8 @@ impl BlockSync {
     pub fn new(
         chain: Arc<dyn SyncChain>,
         peer_table: Arc<PeerTable>,
-        inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
-        inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+        inbound_headers_rx: Receiver<InboundHeaders>,
+        inbound_blocks_rx: Receiver<crate::InboundBlock>,
         ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     ) -> Self {
         let budget = default_sync_budget(chain.network());

@@ -136,9 +136,8 @@ impl BlockSync {
         next_expected_hash: &mut Option<Hash256>,
         apply_head_check: &mut Option<Hash256>,
     ) -> bool {
-        let receiver = self.inbound_blocks_rx.lock();
         while blocks.len() < INBOUND_BLOCK_STAGE_CHUNK {
-            let Ok(inbound) = receiver.try_recv() else {
+            let Ok(inbound) = self.inbound_blocks_rx.try_recv() else {
                 return true;
             };
             let Some(inbound) = self.receive_historical(inbound) else {

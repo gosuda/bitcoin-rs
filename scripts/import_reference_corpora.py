@@ -106,16 +106,21 @@ def _flag_bits(flags: str, flags_bits_map: dict[str, int]) -> tuple[int | None, 
     return bits, None
 
 
+def _flag_fill(bits: int, flags_bits_map: dict[str, int]) -> int:
+    """VerifyFlags::filled(): CLEANSTACK implies WITNESS implies P2SH. Core's
+    script-test harness normalizes row flags the same way at evaluation, so
+    seeds carry the filled set the interpreter computes."""
+    if bits & flags_bits_map["CLEANSTACK"]:
+        bits |= flags_bits_map["WITNESS"]
+    if bits & flags_bits_map["WITNESS"]:
+        bits |= flags_bits_map["P2SH"]
+    return bits
+
+
 def _flag_filled(bits: int, flags_bits_map: dict[str, int]) -> bool:
-    """VerifyFlags::filled(): CLEANSTACK implies WITNESS implies P2SH. A row
-    whose effective flags are not a filled combination is bad test data, which
-    Core reports rather than runs."""
-    filled = bits
-    if filled & flags_bits_map["CLEANSTACK"]:
-        filled |= flags_bits_map["WITNESS"]
-    if filled & flags_bits_map["WITNESS"]:
-        filled |= flags_bits_map["P2SH"]
-    return filled == bits
+    """A row whose effective flags are not a filled combination is bad test
+    data, which Core reports rather than runs."""
+    return _flag_fill(bits, flags_bits_map) == bits
 
 
 # --- Core script assembly (src/test/script_tests.cpp ParseScript) ------------
@@ -785,9 +790,7 @@ def map_script_tests(
         if bits is None:
             emitted.bump(f"skip_unknown_flag_{unknown}")
             continue
-        if not _flag_filled(bits, flags_bits_map):
-            emitted.bump("skip_bad_flag_combination")
-            continue
+        bits = _flag_fill(bits, flags_bits_map)
         _script_seed(
             out, explicit, element_limit, witness_max,
             bits, script_sig, script_pubkey, witness, amount, max_bytes, emitted,
@@ -818,9 +821,7 @@ def map_taproot_ref(
         if bits is None:
             script_emitted.bump(f"skip_unknown_flag_{unknown}")
             continue
-        if not _flag_filled(bits, flags_bits_map):
-            script_emitted.bump("skip_bad_flag_combination")
-            continue
+        bits = _flag_fill(bits, flags_bits_map)
         _script_seed(
             script_out, explicit, element_limit, witness_max,
             bits, script_sig, script_pubkey, witness, amount, max_bytes, script_emitted,

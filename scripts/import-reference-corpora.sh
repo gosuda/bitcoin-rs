@@ -53,6 +53,18 @@ if ! "${CARGO_ENV[@]}" cargo fuzz --version >/dev/null 2>&1; then
     exit 1
 fi
 
+# Seed corpora live in gosuda/bitcoin-rs-fuzz-corpus; FUZZ_CORPUS_DIR points
+# at its `corpus/` directory (default: a sibling checkout named
+# bitcoin-rs-fuzz-corpus, matching fuzz/README.md's local-campaign layout).
+OUT_BASE="${FUZZ_CORPUS_DIR:-${REPO_ROOT}/../bitcoin-rs-fuzz-corpus/corpus}"
+if [[ ! -d "${OUT_BASE}" ]]; then
+    log "ERROR: corpus directory ${OUT_BASE} is missing; clone \
+gosuda/bitcoin-rs-fuzz-corpus beside this checkout or set FUZZ_CORPUS_DIR"
+    exit 1
+fi
+OUT_BASE="$(cd "${OUT_BASE}" && pwd -P)"
+readonly OUT_BASE
+
 # --- 1. Disk discipline: declare footprint, verify free space ---------------
 available_mb() {
     local available
@@ -68,10 +80,14 @@ available_mb() {
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/reference-corpora.XXXXXX")"
 readonly WORKDIR
 PROVENANCE_TMP=""
+STAGED_DIRS=()
 cleanup() {
     if [[ -n "${PROVENANCE_TMP}" ]]; then
         rm -f -- "${PROVENANCE_TMP}"
     fi
+    for dir in "${STAGED_DIRS[@]:-}"; do
+        rm -rf -- "${dir}"
+    done
     rm -rf -- "${WORKDIR:?workdir unset}"
 }
 trap cleanup EXIT
@@ -90,6 +106,14 @@ if [ "${FREE_TMP_MB:?free space unknown}" -lt "${NEEDED_MB}" ] ||
     exit 1
 fi
 log "disk ok: ${FREE_TMP_MB} MiB free for the clones (>= ${NEEDED_MB} MiB), ${FREE_REPO_MB} MiB free on repo (>= ${NEEDED_REPO_MB} MiB)"
+# The corpus volume may differ from the repo filesystem; a full volume must
+# stop the import before publication touches prior seeds.
+FREE_CORPUS_MB="$(available_mb "${OUT_BASE}")"
+readonly FREE_CORPUS_MB
+if [ "${FREE_CORPUS_MB:?free space unknown}" -lt "${NEEDED_REPO_MB}" ]; then
+    log "ABORT: free ${FREE_CORPUS_MB} MiB on corpus volume < needed ${NEEDED_REPO_MB} MiB"
+    exit 1
+fi
 
 # --- 2. Clone pinned to the provenance commits -------------------------------
 # CORPUS_PROVENANCE.md records these exact commits; a rerun must reproduce
@@ -126,7 +150,6 @@ readonly BITCOIN_SIZE_MB BTCD_SIZE_MB
 log "clones at pins (${BITCOIN_SIZE_MB} / ${BTCD_SIZE_MB} MiB actual)"
 
 readonly FUZZ_DIR="${REPO_ROOT}/fuzz"
-readonly OUT_BASE="${FUZZ_DIR}/corpus"
 
 # --- 3. Transform and publish bounded seeds ---------------------------------
 # One mapper owns framing and atomic publication for all targets. Failures in
@@ -137,11 +160,36 @@ readonly OUT_BASE="${FUZZ_DIR}/corpus"
     --out-base "${OUT_BASE}" --max-seed-bytes "${FUZZ_MAX_SEED_BYTES}"
 
 # --- 4. Minimize each target corpus with cargo fuzz cmin ---------------------
+# cargo-fuzz only operates on fuzz/corpus/<target> and replaces that path
+# atomically, so the external corpus is staged as a real directory: cmin
+# minimizes it, and the result publishes back to ${OUT_BASE}. A pre-existing
+# entry aborts rather than clobbering a user-managed corpus.
+for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; do
+    staged="${FUZZ_DIR}/corpus/${target}"
+    if [[ -e "${staged}" ]]; then
+        log "ERROR: ${staged} already exists; move it aside before running the importer"
+        exit 1
+    fi
+    mkdir -p "${OUT_BASE}/${target}" "${staged}"
+    STAGED_DIRS+=("${staged}")
+    cp -a "${OUT_BASE}/${target}/." "${staged}/"
+done
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" script_eval
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" utxo_snapshot
+# Publish the minimized sets back: add the minimizer's output first, then drop
+# basenames it removed (names are flat basenames). A failed copy leaves the
+# prior corpus intact rather than partially deleted.
+for target in p2p_message block_validate tx_validate script_eval utxo_snapshot; do
+    staged="${FUZZ_DIR}/corpus/${target}"
+    cp -a "${staged}/." "${OUT_BASE}/${target}/"
+    for old in "${OUT_BASE}/${target}"/*; do
+        [ -e "${old}" ] || continue
+        [[ -e "${staged}/${old##*/}" ]] || rm -f -- "${old}"
+    done
+done
 
 # --- 5. Provenance ------------------------------------------------------------
 readonly PROVENANCE="${FUZZ_DIR}/CORPUS_PROVENANCE.md"

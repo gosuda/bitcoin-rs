@@ -35,6 +35,8 @@ mod policy;
 mod pool;
 /// Core 31.1 replacement fee and graph policy.
 mod rbf;
+/// Cloneable read-only capability over the mempool.
+mod reader;
 /// Transaction relay standardness policy.
 pub mod standardness;
 /// BIP431 topology policy.
@@ -66,5 +68,6 @@ pub use pool::{
 pub use rbf::RbfError;
 #[cfg(any(test, feature = "test-seam"))]
 pub use rbf::{ReplacementCandidate, ReplacementPlan};
+pub use reader::MempoolReader;
 pub use standardness::{StandardnessError, StandardnessPolicy, is_standard_tx};
 pub use truc::TrucError;

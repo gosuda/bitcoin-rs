@@ -1,7 +1,6 @@
 //! Chainstate-owned idle maintenance: journal durability and retention.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -15,16 +14,16 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Spawns the chainstate maintenance worker thread.
 fn spawn_chainstate_maintenance_worker(
     publisher: Arc<CheckpointPublisher>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("bitcoin-rs-chainstate-maintenance".into())
         .spawn(move || maintenance_loop(&publisher, &shutdown))
 }
 
-fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &AtomicBool) {
+fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &bitcoin_rs_chain::LatchReader) {
     let mut prev_pressure = false;
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.is_triggered() {
         if wait_for_shutdown(shutdown, POLL_INTERVAL) {
             break;
         }
@@ -81,10 +80,10 @@ fn idle_journal_maintenance(publisher: &CheckpointPublisher) -> bool {
 
 /// Sleeps for `duration` unless `shutdown` is set, returning `true` if the
 /// worker should exit.
-fn wait_for_shutdown(shutdown: &AtomicBool, duration: Duration) -> bool {
+fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader, duration: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < duration {
-        if shutdown.load(Ordering::Relaxed) {
+        if shutdown.is_triggered() {
             return true;
         }
         let remaining = duration
@@ -92,7 +91,7 @@ fn wait_for_shutdown(shutdown: &AtomicBool, duration: Duration) -> bool {
             .unwrap_or(Duration::ZERO);
         std::thread::sleep(Duration::from_millis(200).min(remaining));
     }
-    shutdown.load(Ordering::Relaxed)
+    shutdown.is_triggered()
 }
 
 impl crate::Chainstate {
@@ -102,7 +101,7 @@ impl crate::Chainstate {
             .checkpoint_publisher
             .clone()
             .ok_or_else(|| anyhow::anyhow!("maintenance requires checkpoint configuration"))?;
-        spawn_chainstate_maintenance_worker(publisher, self.shutdown_handle())
+        spawn_chainstate_maintenance_worker(publisher, self.shutdown_reader())
             .map_err(anyhow::Error::new)
     }
 }

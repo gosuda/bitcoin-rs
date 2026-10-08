@@ -53,10 +53,14 @@ available_mb() {
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/qa-assets.XXXXXX")"
 readonly WORKDIR
 PROVENANCE_TMP=""
+STAGED_DIRS=()
 cleanup() {
     if [[ -n "${PROVENANCE_TMP}" ]]; then
         rm -f -- "${PROVENANCE_TMP}"
     fi
+    for dir in "${STAGED_DIRS[@]:-}"; do
+        rm -rf -- "${dir}"
+    done
     rm -rf -- "${WORKDIR:?workdir unset}"
 }
 trap cleanup EXIT
@@ -75,6 +79,26 @@ if [ "${FREE_TMP_MB:?free space unknown}" -lt "${NEEDED_MB}" ] ||
     exit 1
 fi
 log "disk ok: ${FREE_TMP_MB} MiB free for the clone (>= ${NEEDED_MB} MiB), ${FREE_REPO_MB} MiB free on repo (>= ${NEEDED_REPO_MB} MiB)"
+
+# Seed corpora live in gosuda/bitcoin-rs-fuzz-corpus; FUZZ_CORPUS_DIR points
+# at its `corpus/` directory (default: a sibling checkout named
+# bitcoin-rs-fuzz-corpus, matching fuzz/README.md's local-campaign layout).
+OUT_BASE="${FUZZ_CORPUS_DIR:-${REPO_ROOT}/../bitcoin-rs-fuzz-corpus/corpus}"
+if [[ ! -d "${OUT_BASE}" ]]; then
+    log "ERROR: corpus directory ${OUT_BASE} is missing; clone \
+gosuda/bitcoin-rs-fuzz-corpus beside this checkout or set FUZZ_CORPUS_DIR"
+    exit 1
+fi
+OUT_BASE="$(cd "${OUT_BASE}" && pwd -P)"
+readonly OUT_BASE
+# The corpus volume may differ from the repo filesystem; a full volume must
+# stop the import before publication touches prior seeds.
+FREE_CORPUS_MB="$(available_mb "${OUT_BASE}")"
+readonly FREE_CORPUS_MB
+if [ "${FREE_CORPUS_MB:?free space unknown}" -lt "${NEEDED_REPO_MB}" ]; then
+    log "ABORT: free ${FREE_CORPUS_MB} MiB on corpus volume < needed ${NEEDED_REPO_MB} MiB"
+    exit 1
+fi
 
 # --- 2. Clone pinned to the provenance commit ---------------------------------
 # CORPUS_PROVENANCE.md records this exact commit; a rerun must reproduce that
@@ -97,7 +121,6 @@ log "clone at ${UPSTREAM_COMMIT} (${UPSTREAM_SIZE_MB} MiB actual)"
 
 readonly CORPORA="${WORKDIR}/qa-assets/fuzz_corpora"
 readonly FUZZ_DIR="${REPO_ROOT}/fuzz"
-readonly OUT_BASE="${FUZZ_DIR}/corpus"
 
 # --- 3. Transform and publish bounded seeds ---------------------------------
 # One mapper owns framing and atomic publication for all targets. Failures in
@@ -114,10 +137,35 @@ done
     --out-base "${OUT_BASE}" --max-seed-bytes "${FUZZ_MAX_SEED_BYTES}"
 
 # --- 4. Minimize each target corpus with cargo fuzz cmin ---------------------
+# cargo-fuzz only operates on fuzz/corpus/<target> and replaces that path
+# atomically, so the external corpus is staged as a real directory: cmin
+# minimizes it, and the result publishes back to ${OUT_BASE}. A pre-existing
+# entry aborts rather than clobbering a user-managed corpus.
+for target in p2p_message block_validate tx_validate script_eval; do
+    staged="${FUZZ_DIR}/corpus/${target}"
+    if [[ -e "${staged}" ]]; then
+        log "ERROR: ${staged} already exists; move it aside before running the importer"
+        exit 1
+    fi
+    mkdir -p "${OUT_BASE}/${target}" "${staged}"
+    STAGED_DIRS+=("${staged}")
+    cp -a "${OUT_BASE}/${target}/." "${staged}/"
+done
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" p2p_message
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" block_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" tx_validate
 "${CARGO_ENV[@]}" cargo fuzz cmin --target "${HOST_TRIPLE}" script_eval
+# Publish the minimized sets back: add the minimizer's output first, then drop
+# basenames it removed (names are flat basenames). A failed copy leaves the
+# prior corpus intact rather than partially deleted.
+for target in p2p_message block_validate tx_validate script_eval; do
+    staged="${FUZZ_DIR}/corpus/${target}"
+    cp -a "${staged}/." "${OUT_BASE}/${target}/"
+    for old in "${OUT_BASE}/${target}"/*; do
+        [ -e "${old}" ] || continue
+        [[ -e "${staged}/${old##*/}" ]] || rm -f -- "${old}"
+    done
+done
 
 # --- 5. Provenance ------------------------------------------------------------
 readonly PROVENANCE="${FUZZ_DIR}/CORPUS_PROVENANCE.md"
@@ -130,9 +178,15 @@ PROVENANCE_TMP="$(mktemp "${FUZZ_DIR}/.corpus-provenance.XXXXXX")"
 cat > "${PROVENANCE_TMP}" <<EOF
 # Fuzz corpus provenance
 
-Seeds under fuzz/corpus/ were imported from the sources recorded in the
-run-dependent sections below: rust-bitcoin/qa-assets (this section) and the
-upstream reference corpora (\`## Reference corpora\`).
+Seeds live in the companion repository
+[gosuda/bitcoin-rs-fuzz-corpus](https://github.com/gosuda/bitcoin-rs-fuzz-corpus)
+under \`corpus/<target>/\` — this document stays the single owner of their
+provenance (per \`docs/contracts/qa-corpus.md\`, \`QAC-01\`). They were imported
+from the sources recorded in the run-dependent sections below:
+rust-bitcoin/qa-assets (this section) and the upstream reference corpora
+(\`## Reference corpora\`). Importers publish into the corpus directory named
+by \`FUZZ_CORPUS_DIR\` (default: the \`corpus/\` of a sibling
+\`bitcoin-rs-fuzz-corpus\` clone).
 
 Seeds from [rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets),
 license [CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)

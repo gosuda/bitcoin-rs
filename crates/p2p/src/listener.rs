@@ -9,7 +9,6 @@ use bitcoin::p2p::Magic;
 use bitcoin::p2p::ServiceFlags;
 use bitcoin_rs_primitives::{Network, unix_time_secs};
 use crossbeam_channel::{SendTimeoutError, Sender};
-use parking_lot::RwLock;
 use thiserror::Error;
 
 use crate::handshake::run_inbound_handshake;
@@ -95,12 +94,12 @@ pub struct ConnectionShared {
     /// Authoritative live-peer table shared with the node.
     pub peer_table: Arc<crate::PeerTable>,
     /// Manual subnet bans shared with the RPC `setban` handler.
-    pub banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    pub banned: crate::BannedReader,
     /// Network kill-switch behind `setnetworkactive`.
     pub activity: Arc<crate::NetworkActivity>,
     /// Start-scoped cancellation token. Tests that never cancel pass a
     /// token that stays `false`.
-    pub session_cancel: Arc<AtomicBool>,
+    pub session_cancel: bitcoin_rs_chain::LatchReader,
     /// Callback run after a connection publishes its ready metadata.
     pub peer_ready: PeerReadyHandle,
     /// Network magic of every framed message.
@@ -151,9 +150,9 @@ impl ConnectionShared {
     #[must_use]
     pub fn new(
         peer_table: Arc<crate::PeerTable>,
-        banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+        banned: impl Into<crate::BannedReader>,
         activity: Arc<crate::NetworkActivity>,
-        session_cancel: Arc<AtomicBool>,
+        session_cancel: impl Into<bitcoin_rs_chain::LatchReader>,
         peer_ready: PeerReadyHandle,
         magic: Magic,
         headers_tx: Sender<crate::InboundHeaders>,
@@ -164,9 +163,9 @@ impl ConnectionShared {
     ) -> Self {
         Self {
             peer_table,
-            banned,
+            banned: banned.into(),
             activity,
-            session_cancel,
+            session_cancel: session_cancel.into(),
             peer_ready,
             magic,
             headers_tx,
@@ -228,7 +227,7 @@ impl ConnectionShared {
     }
 
     fn is_session_cancelled(&self) -> bool {
-        self.session_cancel.load(Ordering::Acquire)
+        self.session_cancel.load()
     }
 
     /// The local tip age in target-spacing units (Core
@@ -506,11 +505,7 @@ fn accept_connections(
         match listener.accept() {
             Ok((stream, peer_addr)) => {
                 accept_backoff = POLL_INTERVAL;
-                if crate::subnet::is_banned(
-                    &shared.banned.read(),
-                    peer_addr.ip(),
-                    SystemTime::now(),
-                ) {
+                if shared.banned.is_banned(peer_addr.ip(), SystemTime::now()) {
                     drop(stream);
                     tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: banned");
                     continue;
@@ -626,7 +621,7 @@ fn run_outbound_connection(
     role: crate::peer_info::PeerRole,
     manual: bool,
 ) -> Result<(), crate::wire::PeerError> {
-    if crate::subnet::is_banned(&shared.banned.read(), addr.ip(), SystemTime::now()) {
+    if shared.banned.is_banned(addr.ip(), SystemTime::now()) {
         return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
     }
     if !shared.activity.is_active() {
@@ -1779,11 +1774,11 @@ fn test_shared(
 ) -> ConnectionShared {
     ConnectionShared::new(
         peer_table,
-        Arc::new(RwLock::new(Vec::new())),
+        crate::BannedReader::fixture_empty(),
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false))),
         None,
         Magic::BITCOIN,
         headers_tx,
@@ -2329,7 +2324,7 @@ mod writer_shutdown_tests {
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
-        let session_cancel = Arc::clone(&shared.session_cancel);
+        let session_cancel = shared.session_cancel.clone();
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_448));
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
@@ -2355,7 +2350,7 @@ mod writer_shutdown_tests {
             !blocked.is_finished(),
             "full inbound block channel must block until cancel"
         );
-        session_cancel.store(true, Ordering::Release);
+        session_cancel.store(true);
         blocked
             .join()
             .map_err(|_| std::io::Error::other("send_block thread panicked"))?;
@@ -3110,7 +3105,7 @@ mod block_forward_tests {
 
     use arc_swap::ArcSwapOption;
     use bitcoin_rs_primitives::{Hash256, consensus_bytes};
-    use parking_lot::{Mutex, RwLock};
+    use parking_lot::RwLock;
 
     use super::test_shared;
     use crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
@@ -3150,8 +3145,8 @@ mod block_forward_tests {
         let sync = Arc::new(BlockSync::new(
             chain,
             Arc::clone(&peers),
-            Arc::new(Mutex::new(sync_headers_rx)),
-            Arc::new(Mutex::new(sync_blocks_rx)),
+            sync_headers_rx,
+            sync_blocks_rx,
             crate::sync::syncing_ibd_latch(),
         ));
         sync_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;

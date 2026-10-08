@@ -1794,8 +1794,8 @@ impl SyncHarness {
         let sync = BlockSync::new(
             chain,
             Arc::clone(&peers),
-            Arc::new(Mutex::new(inbound_headers_rx)),
-            Arc::new(Mutex::new(inbound_blocks_rx)),
+            inbound_headers_rx,
+            inbound_blocks_rx,
             ibd,
         );
         Self {
@@ -2475,8 +2475,8 @@ fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, Box<dyn std::e
             Arc::clone(&block_tree),
         )))),
         Arc::clone(&peers),
-        Arc::new(Mutex::new(inbound_headers_rx)),
-        Arc::new(Mutex::new(inbound_blocks_rx)),
+        inbound_headers_rx,
+        inbound_blocks_rx,
         crate::sync::syncing_ibd_latch(),
     );
     // Dropping the sender mirrors the header-only fixture: an inbound-blocks
@@ -2796,8 +2796,8 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
     let sync = Arc::new(BlockSync::new(
         chain_ref,
         Arc::clone(&peers),
-        Arc::new(Mutex::new(headers_rx)),
-        Arc::new(Mutex::new(blocks_rx)),
+        headers_rx,
+        blocks_rx,
         crate::sync::syncing_ibd_latch(),
     ));
     // Apply block 1 so the apply frontier needs block 2's body.

@@ -14,7 +14,7 @@ workspace = true
 [features]
 default = []
 # Synthetic capability worlds for tests, not production composition.
-test-seam = []
+test-seam = ["bitcoin-rs-index/test-seam"]
 zmq = ["dep:zmq"]
 
 [dependencies]

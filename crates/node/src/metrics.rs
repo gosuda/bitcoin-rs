@@ -268,9 +268,10 @@ impl MetricsServer {
     /// `SetRecorderError`.
     pub(crate) fn bind(
         addr: SocketAddr,
-        shutdown: Arc<AtomicBool>,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
         identity: &EvidenceIdentity,
     ) -> Result<Self> {
+        let shutdown = shutdown.into();
         let listener = TcpListener::bind(addr)?;
         #[cfg(test)]
         let local_addr = listener.local_addr()?;
@@ -319,9 +320,10 @@ impl Drop for MetricsServer {
 /// This is the entry `run` uses after [`crate::state::NodeState::open`].
 pub(crate) fn start_metrics(
     bind: Option<SocketAddr>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     identity: &EvidenceIdentity,
 ) -> Result<Option<MetricsServer>> {
+    let shutdown = shutdown.into();
     bind.map(|addr| MetricsServer::bind(addr, shutdown, identity))
         .transpose()
 }
@@ -330,10 +332,10 @@ fn serve_metrics(
     listener: &TcpListener,
     handle: &PrometheusHandle,
     stop: &Arc<AtomicBool>,
-    shutdown: &Arc<AtomicBool>,
+    shutdown: &bitcoin_rs_chain::LatchReader,
 ) {
     loop {
-        if stop.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire) {
+        if stop.load(Ordering::Acquire) || shutdown.is_triggered() {
             break;
         }
         match listener.accept() {
@@ -393,15 +395,16 @@ pub(crate) fn publish_txindex_readiness(source: &dyn DerivedIndexCapabilitySourc
 /// never touches closed storage.
 pub(crate) fn spawn_readiness_sampler(
     source: Arc<dyn DerivedIndexCapabilitySource>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
 ) -> anyhow::Result<JoinHandle<()>> {
+    let shutdown = shutdown.into();
     std::thread::Builder::new()
         .name("bitcoin-rs-metrics-readiness".into())
         .spawn(move || {
-            while !shutdown.load(Ordering::Acquire) {
+            while !shutdown.is_triggered() {
                 publish_txindex_readiness(source.as_ref());
                 let deadline = Instant::now() + READINESS_SAMPLE_INTERVAL;
-                while !shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
+                while !shutdown.is_triggered() && Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }

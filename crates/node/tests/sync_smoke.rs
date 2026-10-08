@@ -14,7 +14,7 @@ use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::contract::is_coinbase_tx;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 const REGTEST_GENESIS_HEX: &str = "0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4adae5494dffff7f20020000000101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000";
 
@@ -29,11 +29,8 @@ fn tick_buffers_out_of_order_blocks_until_parent_arrives() -> Result<(), Box<dyn
     let chain_tip = block_tree.write().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
     let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
-    let (inbound_headers_tx, inbound_headers_rx_raw) =
-        unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
-    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_p2p::InboundHeaders>();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
     let (handles, coin_stats) = apply_handles_with_coin_stats(
         Network::Regtest,
         Arc::clone(&chain_tip),
@@ -88,11 +85,8 @@ fn tick_applies_non_coinbase_spend_and_updates_utxo_and_coinstats()
     let chain_tip = block_tree.write().tip_handle();
     let applied_tip: Arc<ArcSwapOption<TipSnapshot>> = Arc::new(ArcSwapOption::empty());
     let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
-    let (inbound_headers_tx, inbound_headers_rx_raw) =
-        unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
-    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let (inbound_headers_tx, inbound_headers_rx) = unbounded::<bitcoin_rs_p2p::InboundHeaders>();
+    let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
     let (handles, coin_stats, utxo) = apply_handles_with_coin_stats_and_utxo(
         Network::Regtest,
         Arc::clone(&chain_tip),
