@@ -58,232 +58,86 @@ fn round_trips_ping_pong_version_verack_inv_getheaders() -> Result<(), PeerError
     Ok(())
 }
 
+type FrameBuilder = fn(usize) -> Result<Vec<u8>, PeerError>;
+
+/// Per-command decode caps (Core 31.1 `MAX_INV_SZ`, `MAX_ADDR_TO_SEND`,
+/// `MAX_LOCATOR_SZ`, `MAX_HEADERS_RESULTS`): a frame carrying exactly the
+/// cap decodes with every entry, and one entry more is refused with the
+/// command's protocol error before the entries are materialized.
 #[test]
-fn rejects_inv_message_with_more_than_max_vectors() -> Result<(), PeerError> {
-    let frame = inventory_frame(b"inv", MAX_INV_PER_MSG + 1)?;
-    let mut cursor = Cursor::new(frame);
+fn count_capped_messages_accept_the_cap_and_refuse_one_more() -> Result<(), PeerError> {
+    let cases: [(&str, FrameBuilder, usize, &str); 8] = [
+        (
+            "inv",
+            |n| inventory_frame(b"inv", n),
+            MAX_INV_PER_MSG,
+            "inventory count too large",
+        ),
+        (
+            "getdata",
+            |n| inventory_frame(b"getdata", n),
+            MAX_INV_PER_MSG,
+            "inventory count too large",
+        ),
+        (
+            "notfound",
+            |n| inventory_frame(b"notfound", n),
+            MAX_INV_PER_MSG,
+            "inventory count too large",
+        ),
+        (
+            "addr",
+            addr_frame,
+            MAX_ADDR_MESSAGE_COUNT,
+            "addr count too large",
+        ),
+        (
+            "addrv2",
+            addrv2_frame,
+            MAX_ADDR_MESSAGE_COUNT,
+            "addrv2 count too large",
+        ),
+        (
+            "getheaders",
+            |n| locator_frame(b"getheaders", n),
+            MAX_LOCATOR_HASHES,
+            "getheaders locator too large",
+        ),
+        (
+            "getblocks",
+            |n| locator_frame(b"getblocks", n),
+            MAX_LOCATOR_HASHES,
+            "getblocks locator too large",
+        ),
+        ("headers", headers_frame, 2_000, "headers count too large"),
+    ];
 
-    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
-        Ok(_) => panic!("inv count must be capped"),
-        Err(error) => error,
-    };
+    for (command, frame, cap, refusal) in cases {
+        let (decoded, _) = read_message(&mut Cursor::new(frame(cap)?), Magic::BITCOIN)?;
+        assert_eq!(
+            decoded.command().as_ref(),
+            command,
+            "decode must keep the command"
+        );
+        let decoded_len = match decoded {
+            Message::Inv(items) | Message::GetData(items) | Message::NotFound(items) => items.len(),
+            Message::Addr(addresses) => addresses.len(),
+            Message::AddrV2(addresses) => addresses.len(),
+            Message::GetHeaders(request) => request.locator_hashes.len(),
+            Message::GetBlocks(request) => request.locator_hashes.len(),
+            Message::Headers(headers) => headers.len(),
+            other => panic!("{command} frame decoded as {}", other.command()),
+        };
+        assert_eq!(
+            decoded_len, cap,
+            "{command} at the cap must keep every entry"
+        );
 
-    assert!(matches!(
-        error,
-        PeerError::Protocol("inventory count too large")
-    ));
-    Ok(())
-}
-
-#[test]
-fn rejects_getdata_message_with_more_than_max_vectors() -> Result<(), PeerError> {
-    let frame = inventory_frame(b"getdata", MAX_INV_PER_MSG + 1)?;
-    let mut cursor = Cursor::new(frame);
-
-    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
-        Ok(_) => panic!("getdata count must be capped"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        PeerError::Protocol("inventory count too large")
-    ));
-    Ok(())
-}
-
-#[test]
-fn rejects_notfound_message_with_more_than_max_vectors() -> Result<(), PeerError> {
-    let frame = inventory_frame(b"notfound", MAX_INV_PER_MSG + 1)?;
-    let mut cursor = Cursor::new(frame);
-
-    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
-        Ok(_) => panic!("notfound count must be capped"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        PeerError::Protocol("inventory count too large")
-    ));
-    Ok(())
-}
-
-#[test]
-fn accepts_inv_message_with_max_vectors() -> Result<(), PeerError> {
-    let frame = inventory_frame(b"inv", MAX_INV_PER_MSG)?;
-    let mut cursor = Cursor::new(frame);
-
-    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
-
-    assert!(matches!(decoded, Message::Inv(inventory) if inventory.len() == MAX_INV_PER_MSG));
-    Ok(())
-}
-
-#[test]
-fn accepts_getdata_message_with_max_vectors() -> Result<(), PeerError> {
-    let frame = inventory_frame(b"getdata", MAX_INV_PER_MSG)?;
-    let mut cursor = Cursor::new(frame);
-
-    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
-
-    assert!(matches!(decoded, Message::GetData(inventory) if inventory.len() == MAX_INV_PER_MSG));
-    Ok(())
-}
-
-#[test]
-fn accepts_notfound_message_with_max_vectors() -> Result<(), PeerError> {
-    let frame = inventory_frame(b"notfound", MAX_INV_PER_MSG)?;
-    let mut cursor = Cursor::new(frame);
-
-    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
-
-    assert!(matches!(decoded, Message::NotFound(inventory) if inventory.len() == MAX_INV_PER_MSG));
-    Ok(())
-}
-
-#[test]
-fn rejects_addr_message_with_more_than_max_addresses() -> Result<(), PeerError> {
-    let frame = addr_frame(MAX_ADDR_MESSAGE_COUNT + 1)?;
-    let mut cursor = Cursor::new(frame);
-
-    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
-        Ok(_) => panic!("addr count must be capped"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(error, PeerError::Protocol("addr count too large")));
-    Ok(())
-}
-
-#[test]
-fn accepts_addr_message_with_max_addresses() -> Result<(), PeerError> {
-    let frame = addr_frame(MAX_ADDR_MESSAGE_COUNT)?;
-    let mut cursor = Cursor::new(frame);
-
-    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
-
-    assert!(
-        matches!(decoded, Message::Addr(addresses) if addresses.len() == MAX_ADDR_MESSAGE_COUNT)
-    );
-    Ok(())
-}
-
-#[test]
-fn rejects_addrv2_message_with_more_than_max_addresses() -> Result<(), PeerError> {
-    let frame = addrv2_frame(MAX_ADDR_MESSAGE_COUNT + 1)?;
-    let mut cursor = Cursor::new(frame);
-
-    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
-        Ok(_) => panic!("addrv2 count must be capped"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        PeerError::Protocol("addrv2 count too large")
-    ));
-    Ok(())
-}
-
-#[test]
-fn accepts_addrv2_message_with_max_addresses() -> Result<(), PeerError> {
-    let frame = addrv2_frame(MAX_ADDR_MESSAGE_COUNT)?;
-    let mut cursor = Cursor::new(frame);
-
-    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
-
-    assert!(
-        matches!(decoded, Message::AddrV2(addresses) if addresses.len() == MAX_ADDR_MESSAGE_COUNT)
-    );
-    Ok(())
-}
-
-#[test]
-fn rejects_getheaders_message_with_more_than_max_locator_hashes() -> Result<(), PeerError> {
-    let frame = locator_frame(b"getheaders", MAX_LOCATOR_HASHES + 1)?;
-    let mut cursor = Cursor::new(frame);
-
-    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
-        Ok(_) => panic!("getheaders locator hash count must be capped"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        PeerError::Protocol("getheaders locator too large")
-    ));
-    Ok(())
-}
-
-#[test]
-fn rejects_getblocks_message_with_more_than_max_locator_hashes() -> Result<(), PeerError> {
-    let frame = locator_frame(b"getblocks", MAX_LOCATOR_HASHES + 1)?;
-    let mut cursor = Cursor::new(frame);
-
-    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
-        Ok(_) => panic!("getblocks locator hash count must be capped"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        PeerError::Protocol("getblocks locator too large")
-    ));
-    Ok(())
-}
-
-#[test]
-fn accepts_getheaders_message_with_max_locator_hashes() -> Result<(), PeerError> {
-    let frame = locator_frame(b"getheaders", MAX_LOCATOR_HASHES)?;
-    let mut cursor = Cursor::new(frame);
-
-    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
-
-    assert!(
-        matches!(decoded, Message::GetHeaders(request) if request.locator_hashes.len() == MAX_LOCATOR_HASHES)
-    );
-    Ok(())
-}
-
-#[test]
-fn accepts_getblocks_message_with_max_locator_hashes() -> Result<(), PeerError> {
-    let frame = locator_frame(b"getblocks", MAX_LOCATOR_HASHES)?;
-    let mut cursor = Cursor::new(frame);
-
-    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
-
-    assert!(
-        matches!(decoded, Message::GetBlocks(request) if request.locator_hashes.len() == MAX_LOCATOR_HASHES)
-    );
-    Ok(())
-}
-
-#[test]
-fn rejects_headers_message_with_more_than_2000_headers() -> Result<(), PeerError> {
-    let frame = headers_frame(2_001)?;
-    let mut cursor = Cursor::new(frame);
-
-    let error = match read_message(&mut cursor, Magic::BITCOIN).map(|(message, _)| message) {
-        Ok(_) => panic!("headers count must be capped"),
-        Err(error) => error,
-    };
-
-    assert!(matches!(
-        error,
-        PeerError::Protocol("headers count too large")
-    ));
-    Ok(())
-}
-
-#[test]
-fn accepts_headers_message_with_2000_headers() -> Result<(), PeerError> {
-    let frame = headers_frame(2_000)?;
-    let mut cursor = Cursor::new(frame);
-
-    let (decoded, _) = read_message(&mut cursor, Magic::BITCOIN)?;
-
-    assert!(matches!(decoded, Message::Headers(headers) if headers.len() == 2_000));
+        match read_message(&mut Cursor::new(frame(cap + 1)?), Magic::BITCOIN) {
+            Err(PeerError::Protocol(message)) => assert_eq!(message, refusal, "{command}"),
+            other => panic!("{command} above the cap must be refused, got {other:?}"),
+        }
+    }
     Ok(())
 }
 
@@ -455,9 +309,10 @@ fn locator_frame(command: &[u8], count: usize) -> Result<Vec<u8>, PeerError> {
     message_frame(command, &payload)
 }
 
-fn headers_frame(count: u64) -> Result<Vec<u8>, PeerError> {
+fn headers_frame(count: usize) -> Result<Vec<u8>, PeerError> {
+    let count_u64 = u64::try_from(count).map_err(|_| PeerError::PayloadTooLarge(count))?;
     let mut payload = Vec::new();
-    VarInt(count)
+    VarInt(count_u64)
         .consensus_encode(&mut payload)
         .map_err(|error| PeerError::Io(std::io::Error::other(error.to_string())))?;
     let header = compact_block_header();
