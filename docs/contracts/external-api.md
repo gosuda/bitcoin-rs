@@ -1,29 +1,8 @@
 # External API contract
 
-`API-01`–`API-04` place owners under the
-[contracts precedence rule](README.md). `API-05` is the solo-mining generate
-path. `API-06` is `getnetworkhashps` snapshot consistency. `API-07` is the
-recorded Core reference used by the RPC fixture replay gate. `API-08` is
-bounded public exposure. `API-09` is the Esplora dialects. `API-10` is
-broadcast and preview through the admission gateway. `API-11` is the
-BIP22/BIP23 `getblocktemplate` extras the pinned corepc type does not model.
-`API-12` is mainnet template operational gates. `API-13` is `submitheader`.
-`API-14` is GBT client-rule negotiation. `API-15` is `submitblock` decode.
-`API-16` is GBT proposal request parsing. `API-17` is `submitblock` uncommitted
-witness fill. `API-18` is Core v31 `submitblock` / GBT proposal duplicate
-vocabulary. `API-19` is BIP22 reject-reason mapping. `API-20` is GBT
-`vbrequired` always 0. `API-21` is Core `CheckWitnessMalleation`
-reject reasons. `API-22` is GBT `coinbaseaux.flags`. `API-23` is
-`prioritisetransaction` dummy/`fee_delta` arity. `API-24` is
-`prioritisetransaction` dust-output refusal. `API-25` is
-`getmininginfo` omitting unset optional fields. `API-26` is
-`estimatesmartfee` Core `conf_target` and `estimate_mode` gates. `API-27` is
-`generateblock` txid and raw-tx parse errors. `API-28` is
-`getprioritisedtransactions` `modified_fee` in satoshis. `API-29` is Core
-`generatetoaddress` / `generateblock` invalid-output text. `API-30` is
-`generateblock` `TestBlockValidity` before solve. `API-31` is
-`generateblock` multipath, ranged, and Expand private-key errors. `API-32`
-is the `gettxspendingprevout` mempool snapshot.
+`API-01`–`API-32` govern RPC, REST, Esplora and ZMQ under the
+[contracts precedence rule](README.md). The clauses below own each behavior;
+[Proven by](#proven-by) separates existing tests from planned comparisons.
 
 ## Clauses
 
