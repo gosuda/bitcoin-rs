@@ -81,7 +81,13 @@ fn batch_and_notification() -> Result<()> {
         .as_array()
         .ok_or_else(|| Error::Assertion("batch reply not array".into()))?;
     assert_eq!(items.len(), 2);
-    assert!(items.iter().all(|i| i.get("result").is_some()));
+    assert_eq!(items[0]["id"], json!(1));
+    assert_eq!(items[0]["result"], json!(0));
+    assert_eq!(items[1]["id"], json!(2));
+    assert_eq!(
+        items[1]["result"],
+        json!(genesis_block().block_hash().to_string())
+    );
 
     let note = node.http(
         "POST",
@@ -152,17 +158,18 @@ fn esplora_public_surface() -> Result<()> {
 
     let mempool = node.http_get("/api/mempool")?;
     assert_eq!(mempool.status, 200);
-    let mp = mempool.json()?;
-    for field in ["count", "vsize", "total_fee", "fee_histogram"] {
-        assert!(mp.get(field).is_some(), "mempool lacks {field}: {mp}");
-    }
+    assert_eq!(
+        mempool.json()?,
+        json!({"count": 0, "vsize": 0, "total_fee": 0, "fee_histogram": []}),
+        "an untouched mempool must report zeroes, not just the fields"
+    );
 
     let blocks = node.http_get("/api/blocks")?;
     assert_eq!(blocks.status, 200);
-    let recent = blocks.json()?;
-    assert!(
-        recent.as_array().is_some_and(|a| !a.is_empty()),
-        "recent blocks list: {recent}"
+    assert_eq!(
+        blocks.json()?[0]["id"],
+        json!(hashes[3]),
+        "recent blocks must lead with the tip"
     );
 
     let fees = node.http_get("/api/fee-estimates")?;
@@ -170,117 +177,98 @@ fn esplora_public_surface() -> Result<()> {
     node.stop()
 }
 
-/// Esplora `POST /tx` broadcasts a raw transaction into the mempool.
+/// Esplora `POST /tx` broadcasts a raw transaction, and `GET /api/tx`
+/// either projects it in full or reports the missing-index capability,
+/// depending on whether `--txindex` is on.
 #[test]
-fn esplora_post_tx_broadcasts() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    let (outpoint, prevout) = mature_funding(&mut node)?;
+fn esplora_tx_broadcast_and_projection() -> Result<()> {
+    for txindex in [false, true] {
+        let extra_args: &[&str] = if txindex { &["--txindex=true"] } else { &[] };
+        let mut node = ProcessNode::spawn_with(
+            Kind::BitcoinRs,
+            &SpawnOptions {
+                extra_args,
+                ..SpawnOptions::default()
+            },
+        )?;
+        let (outpoint, prevout) = mature_funding(&mut node)?;
 
-    let spend = spend_anyone(outpoint, &prevout, 1_000);
-    let txid = spend.compute_txid().to_string();
-    let resp = node.http("POST", "/api/tx", tx_hex(&spend).as_bytes(), false)?;
-    assert_eq!(resp.status, 200, "esplora broadcast: {}", resp.status);
-    assert_eq!(resp.text()?, txid);
+        let spend = spend_anyone(outpoint, &prevout, 1_000);
+        let txid = spend.compute_txid().to_string();
+        let resp = node.http("POST", "/api/tx", tx_hex(&spend).as_bytes(), false)?;
+        assert_eq!(resp.status, 200, "esplora broadcast: {}", resp.status);
+        assert_eq!(resp.text()?, txid);
+        bitcoin_rs_e2e::helpers::wait_for_mempool_tx(
+            &mut node,
+            &txid,
+            std::time::Duration::from_secs(15),
+        )?;
 
-    bitcoin_rs_e2e::helpers::wait_for_mempool_tx(
-        &mut node,
-        &txid,
-        std::time::Duration::from_secs(15),
-    )?;
-
-    // Without txindex the full projection cannot resolve the spend's
-    // confirmed prevout, so the capability contract answers 503 rather
-    // than an empty success.
-    let fetched = node.http_get(&format!("/api/tx/{txid}"))?;
-    assert_eq!(fetched.status, 503, "no txindex -> 503: {}", fetched.status);
-    node.stop()
-}
-
-/// With `--txindex` the full `/api/tx` projection resolves prevouts and
-/// confirmation status for a broadcast mempool transaction.
-#[test]
-fn esplora_tx_projection_with_txindex() -> Result<()> {
-    let mut node = ProcessNode::spawn_with(
-        Kind::BitcoinRs,
-        &SpawnOptions {
-            extra_args: &["--txindex=true"],
-            ..SpawnOptions::default()
-        },
-    )?;
-    let (outpoint, prevout) = mature_funding(&mut node)?;
-
-    let spend = spend_anyone(outpoint, &prevout, 1_000);
-    let txid = spend.compute_txid().to_string();
-    let resp = node.http("POST", "/api/tx", tx_hex(&spend).as_bytes(), false)?;
-    assert_eq!(resp.status, 200, "esplora broadcast: {}", resp.status);
-    assert_eq!(resp.text()?, txid);
-
-    bitcoin_rs_e2e::helpers::wait_for_mempool_tx(
-        &mut node,
-        &txid,
-        std::time::Duration::from_secs(15),
-    )?;
-
-    // Esplora answers 503 ("index changed during query; retry") while the
-    // transaction index crosses a snapshot boundary; retry within the same
-    // budget the mempool wait above already allowed.
-    let fetch_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let fetched = loop {
-        let response = node.http_get(&format!("/api/tx/{txid}"))?;
-        if response.status != 503 || std::time::Instant::now() >= fetch_deadline {
-            break response;
+        if !txindex {
+            // Without txindex the full projection cannot resolve the spend's
+            // confirmed prevout, so the capability contract answers 503
+            // rather than an empty success.
+            let fetched = node.http_get(&format!("/api/tx/{txid}"))?;
+            assert_eq!(fetched.status, 503, "no txindex -> 503");
+            node.stop()?;
+            continue;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    assert_eq!(fetched.status, 200, "tx fetch: {}", fetched.status);
-    let body = fetched.json()?;
-    assert_eq!(body["txid"], json!(txid));
-    assert!(
-        body["vin"][0]["prevout"].is_object(),
-        "prevout projection missing: {body}"
-    );
-    assert_eq!(body["status"]["confirmed"], json!(false));
 
-    let status = node.http_get(&format!("/api/tx/{txid}/status"))?;
-    assert_eq!(status.json()?["confirmed"], json!(false));
+        // With txindex, 503 also means "index changed during query; retry"
+        // while the index crosses a snapshot boundary.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let fetched = loop {
+            let response = node.http_get(&format!("/api/tx/{txid}"))?;
+            if response.status != 503 || std::time::Instant::now() >= deadline {
+                break response;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(fetched.status, 200, "tx fetch: {}", fetched.status);
+        let body = fetched.json()?;
+        assert_eq!(body["txid"], json!(txid));
+        assert_eq!(
+            body["vin"][0]["prevout"]["value"],
+            json!(prevout.value.to_sat()),
+            "prevout projection must resolve the funded value: {body}"
+        );
+        assert_eq!(body["status"]["confirmed"], json!(false));
 
-    let hex = node.http_get(&format!("/api/tx/{txid}/hex"))?;
-    assert_eq!(hex.status, 200);
-    assert_eq!(hex.text()?, tx_hex(&spend));
-    node.stop()
+        let status = node.http_get(&format!("/api/tx/{txid}/status"))?;
+        assert_eq!(status.json()?["confirmed"], json!(false));
+
+        let hex = node.http_get(&format!("/api/tx/{txid}/hex"))?;
+        assert_eq!(hex.status, 200);
+        assert_eq!(hex.text()?, tx_hex(&spend));
+        node.stop()?;
+    }
+    Ok(())
 }
 
-/// `getzmqnotifications` is only registered on zmq-feature builds;
-/// without the feature the method is absent, not an erroring stub.
 #[test]
 fn zmq_notifications_feature_gated() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
     let reply = node.rpc_raw(&json!({
         "jsonrpc": "2.0", "id": 1, "method": "getzmqnotifications", "params": []
     }))?;
-    let code = reply["error"]["code"].as_i64();
-    if code == Some(-32601) {
-        // Feature not compiled in — the gated absence is correct.
-        return node.stop();
+    if reply["error"]["code"] != json!(-32601) {
+        assert_eq!(reply.get("result"), Some(&json!([])), "{reply}");
+        assert!(
+            reply.get("error").is_none_or(serde_json::Value::is_null),
+            "{reply}"
+        );
     }
-    let result = reply
-        .get("result")
-        .ok_or_else(|| Error::Assertion(format!("zmq reply: {reply}")))?;
-    assert!(
-        result.as_array().is_some(),
-        "zmq notifications list: {result}"
-    );
     node.stop()
 }
 
-/// `getcapabilities` reports the node's compiled service inventory.
 #[test]
 fn capabilities_reports_surface() -> Result<()> {
     let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    let caps = node.rpc("getcapabilities", &json!([]))?;
-    assert!(
-        caps.as_object().is_some_and(|o| !o.is_empty()),
-        "capabilities must be a non-empty object: {caps}"
+    assert_eq!(
+        node.rpc("getcapabilities", &json!([]))?,
+        json!({"capabilities": [{
+            "id": "txindex", "compiled": true, "enabled": false, "state": "Disabled"
+        }]})
     );
     node.stop()
 }

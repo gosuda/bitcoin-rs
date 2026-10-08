@@ -4,6 +4,7 @@
 //! and witness activation. rust-bitcoin independently checks active costs;
 //! these fixtures exercise accounting, not script validity or admission.
 
+#[path = "common/fixtures.rs"]
 mod common;
 
 use std::error::Error;
@@ -16,7 +17,7 @@ use bitcoin_rs_mining::{
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid, consensus_bytes,
 };
-use bitcoin_rs_script::script::push_data;
+use bitcoin_rs_script::push_data;
 use common::{context, oracle_transaction, p2pkh};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -54,7 +55,14 @@ fn raw_consensus_costs_obey_exact_ordered_limits() -> TestResult {
             // The P2PKH coinbase contributes four more cost units.
             let mut context = context(segwit_active, u64::from(expected) + 4);
             let candidate = assemble_ordered_candidate(&context, &snapshot, &p2pkh())?;
-            assert_eq!(candidate.sigop_cost, u64::from(expected) + 4);
+            assert_eq!(
+                candidate
+                    .transactions
+                    .iter()
+                    .map(|tx| u64::from(tx.sigop_cost))
+                    .sum::<u64>(),
+                u64::from(expected)
+            );
             context.max_sigops -= 1;
             assert!(matches!(
                 assemble_ordered_candidate(&context, &snapshot, &p2pkh()),

@@ -2,14 +2,13 @@ use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::Magic;
 use bitcoin::p2p::ServiceFlags;
-use bitcoin_rs_primitives::Network;
+use bitcoin_rs_primitives::{Network, unix_time_secs};
 use crossbeam_channel::{SendTimeoutError, Sender};
-use parking_lot::RwLock;
 use thiserror::Error;
 
 use crate::handshake::run_inbound_handshake;
@@ -95,12 +94,12 @@ pub struct ConnectionShared {
     /// Authoritative live-peer table shared with the node.
     pub peer_table: Arc<crate::PeerTable>,
     /// Manual subnet bans shared with the RPC `setban` handler.
-    pub banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+    pub banned: crate::BannedReader,
     /// Network kill-switch behind `setnetworkactive`.
     pub activity: Arc<crate::NetworkActivity>,
     /// Start-scoped cancellation token. Tests that never cancel pass a
     /// token that stays `false`.
-    pub session_cancel: Arc<AtomicBool>,
+    pub session_cancel: bitcoin_rs_chain::LatchReader,
     /// Callback run after a connection publishes its ready metadata.
     pub peer_ready: PeerReadyHandle,
     /// Network magic of every framed message.
@@ -147,13 +146,13 @@ impl ConnectionShared {
     /// POST: Every field is set from the arguments; a caller cannot obtain
     /// a half-wired value.
     /// INVARIANT: `None` for `ibd` means transaction relay is open.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         peer_table: Arc<crate::PeerTable>,
-        banned: Arc<RwLock<Vec<crate::BannedSubnet>>>,
+        banned: impl Into<crate::BannedReader>,
         activity: Arc<crate::NetworkActivity>,
-        session_cancel: Arc<AtomicBool>,
+        session_cancel: impl Into<bitcoin_rs_chain::LatchReader>,
         peer_ready: PeerReadyHandle,
         magic: Magic,
         headers_tx: Sender<crate::InboundHeaders>,
@@ -164,9 +163,9 @@ impl ConnectionShared {
     ) -> Self {
         Self {
             peer_table,
-            banned,
+            banned: banned.into(),
             activity,
-            session_cancel,
+            session_cancel: session_cancel.into(),
             peer_ready,
             magic,
             headers_tx,
@@ -228,7 +227,7 @@ impl ConnectionShared {
     }
 
     fn is_session_cancelled(&self) -> bool {
-        self.session_cancel.load(Ordering::Acquire)
+        self.session_cancel.load()
     }
 
     /// The local tip age in target-spacing units (Core
@@ -242,7 +241,7 @@ impl ConnectionShared {
     /// INVARIANT: reads the shared chain view once; no per-handshake block
     ///   tree walk exists.
     #[must_use]
-    pub fn approximate_best_block_depth(&self) -> u64 {
+    fn approximate_best_block_depth(&self) -> u64 {
         let Some(tip_time) = self
             .chain_query
             .as_ref()
@@ -250,9 +249,7 @@ impl ConnectionShared {
         else {
             return u64::MAX;
         };
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs());
+        let now = unix_time_secs();
         now.saturating_sub(u64::from(tip_time)) / POW_TARGET_SPACING_SECS
     }
 
@@ -480,7 +477,7 @@ pub fn bind_listener(addr: SocketAddr) -> Result<TcpListener, ListenerError> {
 ///
 /// Returns [`ListenerError::Accept`] when the listener cannot report its
 /// local address.
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 pub fn serve(
     listener: TcpListener,
     shutdown: Arc<AtomicBool>,
@@ -508,11 +505,7 @@ fn accept_connections(
         match listener.accept() {
             Ok((stream, peer_addr)) => {
                 accept_backoff = POLL_INTERVAL;
-                if crate::subnet::is_banned(
-                    &shared.banned.read(),
-                    peer_addr.ip(),
-                    SystemTime::now(),
-                ) {
+                if shared.banned.is_banned(peer_addr.ip(), SystemTime::now()) {
                     drop(stream);
                     tracing::debug!(peer_addr = %peer_addr, "p2p inbound rejected: banned");
                     continue;
@@ -590,7 +583,7 @@ pub fn spawn_outbound_connection(
 /// INVARIANT: The lease records the pinned origin at spawn, and the eviction
 ///   rules read it back from there.
 #[must_use]
-pub fn spawn_pinned_outbound_connection(
+pub(crate) fn spawn_pinned_outbound_connection(
     addr: SocketAddr,
     shared: ConnectionShared,
     role: crate::peer_info::PeerRole,
@@ -628,7 +621,7 @@ fn run_outbound_connection(
     role: crate::peer_info::PeerRole,
     manual: bool,
 ) -> Result<(), crate::wire::PeerError> {
-    if crate::subnet::is_banned(&shared.banned.read(), addr.ip(), SystemTime::now()) {
+    if shared.banned.is_banned(addr.ip(), SystemTime::now()) {
         return Err(crate::wire::PeerError::BannedDestination(addr.ip()));
     }
     if !shared.activity.is_active() {
@@ -712,7 +705,7 @@ fn run_outbound_connection(
             "missing remote version after outbound handshake",
         ));
     };
-    let conn_time = unix_secs(SystemTime::now());
+    let conn_time = unix_time_secs();
     let info = crate::PeerInfo::outbound_from_version(
         addr,
         addr_bind,
@@ -917,7 +910,7 @@ fn run_handshake(
             "missing remote version after successful handshake",
         ));
     };
-    let conn_time = unix_secs(SystemTime::now());
+    let conn_time = unix_time_secs();
     let info = crate::PeerInfo::inbound_from_version(
         peer_addr,
         addr_bind,
@@ -1282,7 +1275,7 @@ mod keepalive_tests {
 /// reconnect, and unrelated messages never read it.
 // The transaction-relay gate adds one documented parameter and one lazy
 // closure to an already-large dispatch loop.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn run_message_loop<S: std::io::Read + std::io::Write>(
     peer: &mut Peer<S>,
     peer_addr: SocketAddr,
@@ -1633,7 +1626,7 @@ fn collect_write_burst(
 /// Releases the outbound budget for each successfully written frame.
 ///
 /// PRE: `sizes` holds the full wire length of each written frame, as
-/// `write_messages` returned it.
+/// `write_frames` returned it.
 /// POST: The budget releases exactly those byte counts.
 /// INVARIANT: This function counts no bytes; the counted stream owns byte
 /// accounting.
@@ -1730,11 +1723,6 @@ fn run_writer_loop(
     }
 }
 
-fn unix_secs(now: SystemTime) -> u64 {
-    now.duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
-}
-
 /// Forwards a decoded transaction into ingress while the relay gate is open.
 ///
 /// PRE: `relay_open` was read from the node-owned IBD handle for this
@@ -1754,13 +1742,6 @@ fn forward_tx_if_relay_open(
         // them unpunished while in initial block download (:4716).
         tracing::debug!(peer_addr = %peer_addr, "tx dropped: initial block download");
     }
-}
-
-/// UNIX seconds for the chain-owned initial-block-download latch.
-fn unix_time_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs())
 }
 
 fn wake_sync(sync_wake_tx: Option<&Sender<()>>) {
@@ -1793,11 +1774,11 @@ fn test_shared(
 ) -> ConnectionShared {
     ConnectionShared::new(
         peer_table,
-        Arc::new(RwLock::new(Vec::new())),
+        crate::BannedReader::fixture_empty(),
         Arc::new(crate::NetworkActivity::from_shared(Arc::new(
             AtomicBool::new(true),
         ))),
-        Arc::new(AtomicBool::new(false)),
+        bitcoin_rs_chain::LatchReader::new(Arc::new(AtomicBool::new(false))),
         None,
         Magic::BITCOIN,
         headers_tx,
@@ -1856,7 +1837,7 @@ mod outbound_tests {
         clippy::expect_used,
         reason = "a helper that cannot build its fixture has nothing to report"
     )]
-    fn registered_session(dial: Dial) -> crate::PeerSession {
+    fn registered_session(dial: Dial) -> crate::peer_table::PeerSession {
         use std::time::{Duration, Instant};
 
         let listener =
@@ -1909,7 +1890,7 @@ mod outbound_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod relay_role_tests {
     use bitcoin::hashes::Hash as _;
     use bitcoin::p2p::message_blockdata::Inventory;
@@ -1975,7 +1956,7 @@ mod sync_wake_tests {
 static ACCEPT_ERROR_INJECT: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod session_socket_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
@@ -2009,7 +1990,7 @@ mod session_socket_tests {
 static WRITER_SETUP_FAIL: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod resilient_accept_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
     use std::sync::Arc;
@@ -2054,7 +2035,7 @@ mod resilient_accept_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod inbound_admission_tests {
     use std::io::Read;
     use std::net::{Ipv4Addr, SocketAddr, TcpStream};
@@ -2113,7 +2094,7 @@ mod inbound_admission_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod writer_setup_cleanup_tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::sync::Arc;
@@ -2189,7 +2170,7 @@ mod writer_setup_cleanup_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod writer_shutdown_tests {
     use std::cell::Cell;
     use std::io;
@@ -2291,8 +2272,9 @@ mod writer_shutdown_tests {
         let lease = crate::PeerLease::new(tx);
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let block_bytes = bitcoin::consensus::encode::serialize(&genesis);
-        let block = bitcoin_rs_primitives::Block::consensus_decode(&block_bytes)
-            .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+        let block =
+            bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&block_bytes)
+                .map_err(|_| std::io::Error::other("genesis block must decode"))?;
         let serialized = bytes::Bytes::from(block_bytes);
         let source = lease.source(addr);
 
@@ -2319,8 +2301,9 @@ mod writer_shutdown_tests {
         let lease = crate::PeerLease::new(tx);
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let block_bytes = bitcoin::consensus::encode::serialize(&genesis);
-        let block = bitcoin_rs_primitives::Block::consensus_decode(&block_bytes)
-            .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+        let block =
+            bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&block_bytes)
+                .map_err(|_| std::io::Error::other("genesis block must decode"))?;
         let header = block.header;
         let source = lease.source(addr);
 
@@ -2341,17 +2324,19 @@ mod writer_shutdown_tests {
         let (headers_tx, _headers_rx) = crossbeam_channel::unbounded();
         let (blocks_tx, blocks_rx) = crossbeam_channel::bounded(1);
         let shared = test_shared(Arc::new(crate::PeerTable::new()), headers_tx, blocks_tx);
-        let session_cancel = Arc::clone(&shared.session_cancel);
+        let session_cancel = shared.session_cancel.clone();
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 18_448));
         let (tx, _rx) = crossbeam_channel::unbounded();
         let lease = crate::PeerLease::new(tx);
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let first_bytes = bitcoin::consensus::encode::serialize(&genesis);
-        let first = bitcoin_rs_primitives::Block::consensus_decode(&first_bytes)
-            .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+        let first =
+            bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&first_bytes)
+                .map_err(|_| std::io::Error::other("genesis block must decode"))?;
         let second_bytes = first_bytes.clone();
-        let second = bitcoin_rs_primitives::Block::consensus_decode(&second_bytes)
-            .map_err(|_| std::io::Error::other("genesis block must decode"))?;
+        let second =
+            bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&second_bytes)
+                .map_err(|_| std::io::Error::other("genesis block must decode"))?;
         shared.send_block(&lease, addr, first, bytes::Bytes::from(first_bytes));
 
         let blocked = std::thread::spawn(move || {
@@ -2365,7 +2350,7 @@ mod writer_shutdown_tests {
             !blocked.is_finished(),
             "full inbound block channel must block until cancel"
         );
-        session_cancel.store(true, Ordering::Release);
+        session_cancel.store(true);
         blocked
             .join()
             .map_err(|_| std::io::Error::other("send_block thread panicked"))?;
@@ -2939,8 +2924,6 @@ mod writer_shutdown_tests {
                 // advertisement alone must not switch the remote preference.
                 if peer_requested_wtxid {
                     peer.wtxid_relay.mark_peer_supported();
-                } else {
-                    peer.wtxid_relay.mark_local_advertised();
                 }
                 let result =
                     run_connected_session(&mut peer, peer_addr, &shared, lease, outbound_rx, info);
@@ -3091,7 +3074,7 @@ mod ready_notify_tests {
             "replaced predecessor must not publish or notify"
         );
         assert_eq!(notified.load(Ordering::Relaxed), 0);
-        assert!(shared.peer_table.infos().is_empty());
+        assert_eq!(shared.peer_table.infos(), []);
 
         assert!(shared.publish_info_and_notify_ready(addr, &current, peer_info(addr, 2)));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
@@ -3115,14 +3098,14 @@ mod ready_notify_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod block_forward_tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
     use arc_swap::ArcSwapOption;
     use bitcoin_rs_primitives::{Hash256, consensus_bytes};
-    use parking_lot::{Mutex, RwLock};
+    use parking_lot::RwLock;
 
     use super::test_shared;
     use crate::connection::MAX_UNSOLICITED_BLOCK_FORWARDS;
@@ -3136,7 +3119,7 @@ mod block_forward_tests {
     fn genesis_body() -> bitcoin_rs_primitives::Block {
         let genesis = bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Regtest);
         let bytes = bitcoin::consensus::encode::serialize(&genesis);
-        bitcoin_rs_primitives::Block::consensus_decode(&bytes)
+        bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&bytes)
             .expect("regtest genesis block must decode")
     }
 
@@ -3162,8 +3145,8 @@ mod block_forward_tests {
         let sync = Arc::new(BlockSync::new(
             chain,
             Arc::clone(&peers),
-            Arc::new(Mutex::new(sync_headers_rx)),
-            Arc::new(Mutex::new(sync_blocks_rx)),
+            sync_headers_rx,
+            sync_blocks_rx,
             crate::sync::syncing_ibd_latch(),
         ));
         sync_blocks_tx.send(crate::InboundBlock::from_decoded(blocks[0].clone()))?;

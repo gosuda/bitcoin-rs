@@ -19,7 +19,7 @@ fn standard_network_uses_builtin_defaults() -> Result<()> {
     let config = resolve(&[&layer])?;
     assert_eq!(config.network, Network::Testnet4);
     assert_eq!(config.p2p.magic, Network::Testnet4.magic());
-    assert!(config.p2p.connect.is_empty());
+    assert_eq!(config.p2p.connect, Vec::<String>::new());
     assert!(config.p2p.dns_seeds_enabled);
     Ok(())
 }
@@ -144,7 +144,7 @@ fn zmq_endpoint_groups_keep_topics_and_publisher_default_hwm() -> Result<()> {
         ..Default::default()
     };
     let config = resolve(&[&layer])?;
-    let endpoints = config.zmq_endpoints();
+    let endpoints = config.notifications.zmq;
     assert_eq!(endpoints.len(), 2);
     assert_eq!(endpoints[0].endpoint, "tcp://127.0.0.1:28332");
     assert_eq!(
@@ -218,7 +218,7 @@ fn absent_higher_layer_notifications_preserve_lower_layer() -> Result<()> {
     };
     let higher = UserConfig::default();
     let config = resolve(&[&lower, &higher])?;
-    assert_eq!(config.zmq_endpoints()[0].effective_hwm(), 42);
+    assert_eq!(config.notifications.zmq[0].effective_hwm(), 42);
     Ok(())
 }
 

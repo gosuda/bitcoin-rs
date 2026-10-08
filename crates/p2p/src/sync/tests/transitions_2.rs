@@ -79,10 +79,8 @@ fn two_branches() -> Result<TwoBranches, Box<dyn std::error::Error>> {
     applied_tip.store(Some(Arc::new(genesis_tip)));
     let block_tree = Arc::new(RwLock::new(tree));
     let peers = Arc::new(PeerTable::new());
-    let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
-    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
-    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let (_inbound_headers_tx, inbound_headers_rx) = unbounded::<InboundHeaders>();
+    let (_inbound_blocks_tx, inbound_blocks_rx) = unbounded::<crate::InboundBlock>();
     let sync = BlockSync::new(
         std::sync::Arc::new(TestChain::new(
             Arc::clone(&chain_tip),
@@ -296,10 +294,8 @@ fn retarget_runs_before_the_peer_budget_truncates() -> Result<(), Box<dyn std::e
     applied_tip.store(Some(Arc::new(genesis_tip)));
     let block_tree = Arc::new(RwLock::new(tree));
     let peers = Arc::new(PeerTable::new());
-    let (_inbound_headers_tx, inbound_headers_rx_raw) = unbounded::<InboundHeaders>();
-    let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-    let (_inbound_blocks_tx, inbound_blocks_rx_raw) = unbounded::<crate::InboundBlock>();
-    let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+    let (_inbound_headers_tx, inbound_headers_rx) = unbounded::<InboundHeaders>();
+    let (_inbound_blocks_tx, inbound_blocks_rx) = unbounded::<crate::InboundBlock>();
     let sync = BlockSync::new(
         std::sync::Arc::new(TestChain::new(
             Arc::clone(&chain_tip),

@@ -4,14 +4,14 @@
 
 use std::sync::Arc;
 
-use bitcoin_rs_chain::{NodeStatus, compact_is_met_by};
+use bitcoin_rs_chain::NodeStatus;
 use bitcoin_rs_primitives::{
     Block, BlockHash, CompactTarget, Hash256, Header, Network, consensus_bytes,
 };
 use bitcoin_rs_utxo::UtxoSet;
 
-use super::persistence_tests::{handles, seed_genesis};
 use super::{ApplyError, AssumeValidGate, Chainstate, WindowApplyDisposition};
+use crate::test_fixtures::{handles, seed_genesis};
 
 /// A solved, empty block: the commit refuses its body with `EmptyBlock`, a
 /// permanent failure, while its header is already in the tree.
@@ -27,13 +27,8 @@ fn empty_child(prev_blockhash: BlockHash, height: u32) -> Result<Block, &'static
         },
         txs: Vec::new(),
     };
-    while !compact_is_met_by(block.header.bits, block.header.compute_hash().0) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or("test nonce exhausted")?;
-    }
+    bitcoin_rs_chain::regtest_fixture::mine_header_to_declared_target(&mut block.header)
+        .map_err(|_| "test nonce exhausted")?;
     Ok(block)
 }
 

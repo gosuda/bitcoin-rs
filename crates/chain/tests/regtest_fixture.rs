@@ -6,10 +6,11 @@ use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
 use bitcoin_rs_chain::validate_pow;
 use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network};
 
-fn assert_merkle_root(block: &Block) -> Result<(), Box<dyn std::error::Error>> {
+fn assert_merkle_root(block: &Block, height: u32) -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(
         Some(block.header.merkle_root),
-        regtest_fixture::merkle_root(&block.txs)
+        regtest_fixture::merkle_root(&block.txs),
+        "height {height}"
     );
     let txids = block
         .txs
@@ -18,7 +19,8 @@ fn assert_merkle_root(block: &Block) -> Result<(), Box<dyn std::error::Error>> {
     let root = bitcoin::merkle_tree::calculate_root(txids).ok_or("block has transactions")?;
     assert_eq!(
         block.header.merkle_root,
-        Hash256::from_le_bytes(root.as_byte_array())
+        Hash256::from_le_bytes(root.as_byte_array()),
+        "height {height}"
     );
     Ok(())
 }
@@ -29,13 +31,20 @@ fn mined_children_bind_transactions_and_meet_the_declared_target_deterministical
     let parent = BlockHash::from(Network::Regtest.genesis_block_hash());
     for height in 1..=3 {
         let child = regtest_fixture::mined_regtest_child_at(parent, height)?;
-        assert_eq!(child.header.version, 4);
-        assert_eq!(child.header.bits.to_consensus(), REGTEST_BITS);
+        assert_eq!(child.header.version, 4, "height {height}");
+        assert_eq!(
+            child.header.bits.to_consensus(),
+            REGTEST_BITS,
+            "height {height}"
+        );
         let target =
             bitcoin::Target::from_compact(bitcoin::CompactTarget::from_consensus(REGTEST_BITS));
-        assert!(target.is_met_by(bitcoin::BlockHash::from_byte_array(
-            *child.block_hash().as_bytes()
-        )));
+        assert!(
+            target.is_met_by(bitcoin::BlockHash::from_byte_array(
+                *child.block_hash().as_bytes()
+            )),
+            "height {height}"
+        );
         validate_pow(
             &child.header,
             Hash256::from(child.block_hash()),
@@ -45,13 +54,17 @@ fn mined_children_bind_transactions_and_meet_the_declared_target_deterministical
         assert!(
             script
                 .as_bytes()
-                .starts_with(&regtest_fixture::script_num_push(i64::from(height)))
+                .starts_with(&regtest_fixture::script_num_push(i64::from(height))),
+            "height {height}"
         );
-        assert!((2..=100).contains(&script.as_bytes().len()));
-        assert_merkle_root(&child)?;
+        assert!(
+            (2..=100).contains(&script.as_bytes().len()),
+            "height {height}"
+        );
+        assert_merkle_root(&child, height)?;
         let repeated = regtest_fixture::mined_regtest_child_at(parent, height)?;
-        assert_eq!(child.header, repeated.header);
-        assert_eq!(child.block_hash(), repeated.block_hash());
+        assert_eq!(child.header, repeated.header, "height {height}");
+        assert_eq!(child.block_hash(), repeated.block_hash(), "height {height}");
     }
     Ok(())
 }
@@ -68,7 +81,7 @@ fn mined_block_binds_an_odd_transaction_count() -> Result<(), Box<dyn std::error
         3,
         vec![coinbase, tx2, tx3],
     )?;
-    assert_merkle_root(&block)
+    assert_merkle_root(&block, 3)
 }
 
 #[test]

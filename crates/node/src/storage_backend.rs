@@ -22,35 +22,7 @@ pub(crate) trait StoreConsumer {
         S: KvStore;
 }
 
-/// Opens the selected chainstate backend exactly once and transfers its whole
-/// ownership unit to `consumer`.
-pub(crate) fn open_chainstate<C>(
-    backend: StorageBackend,
-    path: &Path,
-    cache_bytes: Option<u64>,
-    consumer: C,
-) -> Result<C::Output, C::Error>
-where
-    C: StoreConsumer,
-{
-    open_generic("chainstate", backend, path, cache_bytes, consumer)
-}
-
-/// Opens a generic store view for custody-grade logical inspection. The redb
-/// txindex keeps using its specialized runtime representation; this view is
-/// read for the backend-neutral column-family ledger only.
-pub(crate) fn open_store_inspection<C>(
-    backend: StorageBackend,
-    path: &Path,
-    consumer: C,
-) -> Result<C::Output, C::Error>
-where
-    C: StoreConsumer,
-{
-    open_generic("inspection", backend, path, None, consumer)
-}
-
-fn open_generic<C>(
+pub(crate) fn open_generic<C>(
     namespace: &str,
     backend: StorageBackend,
     path: &Path,

@@ -6,7 +6,7 @@
 /// that a persisted zero means *unset* rather than *empty*
 /// (`HaveNumChainTxs()`). In memory the absence is explicit, and this type is
 /// the one implementation of the arithmetic that preserves it.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChainTxCount(Option<u64>);
 
 impl ChainTxCount {

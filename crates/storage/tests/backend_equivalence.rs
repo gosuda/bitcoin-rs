@@ -1,5 +1,7 @@
 //! Cross-backend equivalence tests for the storage abstraction.
 
+#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
+
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvPair, KvStore, StorageError, WriteCondition};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -316,8 +318,6 @@ fn redb_flush_persists_deferred_write_after_reopen() -> TestResult<()> {
 #[cfg(any(feature = "rocksdb", feature = "fjall", feature = "redb"))]
 #[test]
 fn portable_backends_have_identical_aggregate_hashes() -> TestResult<()> {
-    // Exercise each enabled engine once, including single-engine builds.
-    // Multi-engine builds compare the same behavioral suite's final state.
     let hashes = [
         #[cfg(feature = "rocksdb")]
         {
@@ -352,7 +352,6 @@ fn run_single_key_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageErr
     let key = b"write-condition".as_slice();
     let unrelated = b"write-condition-unrelated".as_slice();
 
-    // Absent claim on a missing key: the whole batch applies.
     let mut batch = store.new_batch();
     batch.put(CF, key, b"v1");
     batch.put(CF, unrelated, b"u1");
@@ -360,8 +359,6 @@ fn run_single_key_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageErr
     assert_eq!(store.get(CF, key)?, Some(b"v1".to_vec()));
     assert_eq!(store.get(CF, unrelated)?, Some(b"u1".to_vec()));
 
-    // Absent claim on a present key: mismatch, and no batch operation —
-    // including the unrelated one — is applied.
     let mut batch = store.new_batch();
     batch.put(CF, unrelated, b"u2");
     batch.delete(CF, key);
@@ -369,7 +366,6 @@ fn run_single_key_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageErr
     assert_eq!(store.get(CF, key)?, Some(b"v1".to_vec()));
     assert_eq!(store.get(CF, unrelated)?, Some(b"u1".to_vec()));
 
-    // Exact match: durable replace, and the batch may mutate the condition key.
     let mut batch = store.new_batch();
     batch.put(CF, key, b"v2");
     batch.put(CF, unrelated, b"u2");
@@ -384,7 +380,6 @@ fn run_single_key_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageErr
     assert_eq!(store.get(CF, key)?, Some(b"v2".to_vec()));
     assert_eq!(store.get(CF, unrelated)?, Some(b"u2".to_vec()));
 
-    // Stale expectation after the replace: mismatch preserves everything.
     let mut batch = store.new_batch();
     batch.delete(CF, key);
     batch.delete(CF, unrelated);
@@ -399,7 +394,6 @@ fn run_single_key_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageErr
     assert_eq!(store.get(CF, key)?, Some(b"v2".to_vec()));
     assert_eq!(store.get(CF, unrelated)?, Some(b"u2".to_vec()));
 
-    // Exact match: durable delete of the condition key inside the batch.
     let mut batch = store.new_batch();
     batch.delete(CF, key);
     batch.put(CF, unrelated, b"u3");
@@ -415,7 +409,6 @@ fn run_single_key_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageErr
     assert_eq!(store.get(CF, unrelated)?, Some(b"u3".to_vec()));
     store.flush()?;
 
-    // Repeat against the now-absent key: mismatch applies nothing again.
     let mut batch = store.new_batch();
     batch.put(CF, unrelated, b"u4");
     assert!(!store.write_durable_if(
@@ -428,7 +421,6 @@ fn run_single_key_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageErr
     )?);
     assert_eq!(store.get(CF, unrelated)?, Some(b"u3".to_vec()));
 
-    // Ordered batch operations touching the condition key apply in order.
     store.put(CF, key, b"v3")?;
     let mut batch = store.new_batch();
     batch.put(CF, key, b"v4");
@@ -453,8 +445,6 @@ fn run_conjunction_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageEr
     let second = b"conjunction-second".as_slice();
     let third = b"conjunction-third".as_slice();
 
-    // Multi-key conjunction: the batch lands only when every condition
-    // matches, across different keys and condition kinds.
     let mut batch = store.new_batch();
     batch.put(CF, first, b"c1");
     batch.put(CF, second, b"c2");
@@ -471,8 +461,6 @@ fn run_conjunction_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageEr
     assert_eq!(store.get(CF, first)?, Some(b"c1".to_vec()));
     assert_eq!(store.get(CF, second)?, Some(b"c2".to_vec()));
 
-    // One differing condition rejects the whole conjunction: nothing in the
-    // batch — including writes to keys no condition mentions — is applied.
     let mut batch = store.new_batch();
     batch.put(CF, third, b"c3");
     batch.put(CF, first, b"overwritten");
@@ -495,15 +483,11 @@ fn run_conjunction_condition_laws<S: KvStore>(store: &S) -> Result<(), StorageEr
     assert_eq!(store.get(CF, first)?, Some(b"c1".to_vec()));
     assert_eq!(store.get(CF, second)?, Some(b"c2".to_vec()));
 
-    // The empty slice is an all-true conjunction: the batch commits
-    // unconditionally.
     let mut batch = store.new_batch();
     batch.put(CF, third, b"c3");
     assert!(store.write_durable_if(&[], batch)?);
     assert_eq!(store.get(CF, third)?, Some(b"c3".to_vec()));
 
-    // Conditions observe the pre-batch state even when two of them name the
-    // same key: both members see the same pre-image.
     assert!(!store.write_durable_if(
         &[
             WriteCondition::Equals {

@@ -15,167 +15,15 @@
 
 use std::time::{Duration, Instant};
 
-use bitcoin::absolute::LockTime;
-use bitcoin::block::Header as BlockHeader;
-use bitcoin::hashes::{Hash as _, sha256d};
 use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin::{
-    Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
+use bitcoin_rs_e2e::helpers::{
+    assert_clean_stderr, best_hash, block_count, build_chain, connection_count, genesis_block,
+    wait_for,
 };
 use bitcoin_rs_e2e::live_peer::LivePeer;
+use bitcoin_rs_e2e::live_peer::pump_until_tip;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
-use serde_json::{Value, json};
-
-/// Builds a BIP141 segwit coinbase-only block on `parent`: the coinbase
-/// carries the 32-byte reserved nonce in its input witness and an `OP_RETURN`
-/// commitment output (`aa21a9ed`), so the body binds to the header only when
-/// witness data is intact. `tag` separates competing branches so coinbases
-/// (and therefore txids/headers) differ across forks at equal heights.
-fn segwit_coinbase_block(parent: &Block, height: u32, tag: u8) -> Block {
-    let reserved = [tag; 32];
-    // Coinbase-only tree: witness leaf 0 is zeroed out, so the wtxid merkle
-    // root is exactly [0;32]; commitment = sha256d(root || reserved).
-    let mut buffer = [0_u8; 64];
-    buffer[32..].copy_from_slice(&reserved);
-    let commitment = sha256d::Hash::hash(&buffer).to_byte_array();
-    let mut commit_script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
-    commit_script.extend_from_slice(&commitment);
-    let coinbase = Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(vec![
-                0x01,
-                u8::try_from(height).unwrap_or(0xff),
-                0x01,
-                tag,
-            ]),
-            sequence: Sequence::MAX,
-            witness: Witness::from_slice(&[&reserved[..]]),
-        }],
-        output: vec![
-            TxOut {
-                // 50 BTC regtest subsidy; spend path never exercised.
-                value: Amount::from_sat(5_000_000_000),
-                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
-            },
-            TxOut {
-                value: Amount::ZERO,
-                script_pubkey: ScriptBuf::from_bytes(commit_script),
-            },
-        ],
-    };
-    let mut block = Block {
-        header: BlockHeader {
-            version: parent.header.version,
-            prev_blockhash: parent.block_hash(),
-            merkle_root: parent.header.merkle_root, // placeholder, replaced below
-            time: parent.header.time.saturating_add(1),
-            bits: parent.header.bits,
-            nonce: 0,
-        },
-        txdata: vec![coinbase],
-    };
-    block.header.merkle_root = block.compute_merkle_root().expect("coinbase merkle root");
-    while !pow_met(block.header.bits, block.header.block_hash()) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .expect("nonce space exhausted");
-    }
-    block
-}
-
-fn pow_met(bits: CompactTarget, hash: bitcoin::BlockHash) -> bool {
-    bitcoin::Target::from_compact(bits).is_met_by(hash)
-}
-
-/// RPC helpers.
-fn rpc(node: &mut ProcessNode, method: &str) -> Result<Value, Error> {
-    node.rpc(method, &json!([]))
-}
-
-fn block_count(node: &mut ProcessNode) -> Result<u64, Error> {
-    Ok(rpc(node, "getblockcount")?.as_u64().unwrap_or(u64::MAX))
-}
-
-fn best_hash(node: &mut ProcessNode) -> Result<String, Error> {
-    Ok(rpc(node, "getbestblockhash")?
-        .as_str()
-        .unwrap_or("")
-        .to_owned())
-}
-
-fn connection_count(node: &mut ProcessNode) -> Result<u64, Error> {
-    Ok(rpc(node, "getconnectioncount")?
-        .as_u64()
-        .unwrap_or(u64::MAX))
-}
-
-/// Polls an RPC predicate until it holds or `dur` elapses.
-fn wait_for(dur: Duration, check: &mut dyn FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + dur;
-    while Instant::now() < deadline {
-        if check() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    false
-}
-
-/// Keeps serving bodies (type-faithfully) while waiting for the applied tip
-/// to reach `height`/`hash`.
-fn pump_until_tip(
-    peer: &mut LivePeer,
-    node: &mut ProcessNode,
-    height: u64,
-    hash: &str,
-    dur: Duration,
-) -> Result<bool, Error> {
-    let deadline = Instant::now() + dur;
-    while Instant::now() < deadline && !peer.dropped {
-        if block_count(node)? == height && best_hash(node)? == hash {
-            return Ok(true);
-        }
-        peer.pump(Duration::from_millis(400), &mut |peer, items| {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            for item in items {
-                let _ = peer.serve_item(item, deadline);
-            }
-        });
-    }
-    Ok(block_count(node)? == height && best_hash(node)? == hash)
-}
-
-/// Reads the node's stderr evidence so far.
-fn node_stderr(node: &ProcessNode) -> String {
-    std::fs::read_to_string(node.evidence.join("stderr.log")).unwrap_or_default()
-}
-
-fn count_occurrences(haystack: &str, needle: &str) -> usize {
-    haystack.matches(needle).count()
-}
-
-fn regtest_genesis() -> Block {
-    bitcoin::constants::genesis_block(bitcoin::Network::Regtest)
-}
-
-/// Builds a chain of `count` segwit coinbase blocks extending `parent`.
-fn build_chain(parent: &Block, count: u32, tag: u8, start_height: u32) -> Vec<Block> {
-    let mut chain = Vec::with_capacity(usize::try_from(count).unwrap_or(64));
-    let mut prev = parent.clone();
-    for i in 0..count {
-        let tag = tag.wrapping_add(u8::try_from(i).unwrap_or(0));
-        let block = segwit_coinbase_block(&prev, start_height + i, tag);
-        prev = block.clone();
-        chain.push(block);
-    }
-    chain
-}
 
 /// T1+T2: a block announced by `inv` is availability, not a body order: the
 /// node fetches headers first, and the admitted tip's body rides a window
@@ -196,7 +44,7 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
     );
     eprintln!("[E2E] peer connected (getconnectioncount == 1)");
 
-    let genesis = regtest_genesis();
+    let genesis = genesis_block();
     let chain = build_chain(&genesis, 3, 0xA1, 1);
     peer.offer_chain(&chain);
     let tip = chain.last().expect("chain tip");
@@ -205,10 +53,7 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
     // Send the chain's headers, then announce the tip by `inv` as well: the
     // announcement route must keep the header-led fetch intact.
     let deadline = Instant::now() + Duration::from_secs(10);
-    peer.send(
-        NetworkMessage::Headers(chain.iter().map(|b| b.header).collect()),
-        deadline,
-    )?;
+    peer.announce_headers(&chain, deadline)?;
     peer.send(
         NetworkMessage::Inv(vec![Inventory::Block(tip_hash)]),
         deadline,
@@ -262,6 +107,7 @@ fn announced_tip_fetches_witness_block_and_applies_segwit_chain() -> Result<(), 
         pump_until_tip(
             &mut peer,
             &mut node,
+            0,
             3,
             &tip_hash.to_string(),
             Duration::from_secs(40)
@@ -299,21 +145,19 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
         "node did not report the inbound peer connection"
     );
 
-    let genesis = regtest_genesis();
+    let genesis = genesis_block();
     // Branch A: two blocks, applied first.
     let branch_a = build_chain(&genesis, 2, 0x0A, 1);
     peer.offer_chain(&branch_a);
     let a2_hash = branch_a[1].block_hash();
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    peer.send(
-        NetworkMessage::Headers(branch_a.iter().map(|b| b.header).collect()),
-        deadline,
-    )?;
+    peer.announce_headers(&branch_a, deadline)?;
     assert!(
         pump_until_tip(
             &mut peer,
             &mut node,
+            0,
             2,
             &a2_hash.to_string(),
             Duration::from_secs(40)
@@ -328,10 +172,7 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
     let b_hashes: Vec<bitcoin::BlockHash> =
         branch_b.iter().map(bitcoin::Block::block_hash).collect();
 
-    peer.send(
-        NetworkMessage::Headers(branch_b.iter().map(|b| b.header).collect()),
-        deadline,
-    )?;
+    peer.announce_headers(&branch_b, deadline)?;
 
     // Collect the window getdata for the branch-B bodies, then serve ONLY
     // B3 (the winner-branch block at applied_height+1 = 3). Under the buggy
@@ -369,11 +210,11 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
     // each branch-A body may appear in at most one getdata ever (its
     // original fetch). A re-request is the rewind signature.
     for applied in &branch_a {
+        let hash = applied.block_hash();
+        let requests = peer.requests_for(&hash);
         assert!(
-            peer.requests_for(&applied.block_hash()) <= 1,
-            "already-applied block {} requested {} times (cursor rewind?)",
-            applied.block_hash(),
-            peer.requests_for(&applied.block_hash())
+            requests <= 1,
+            "already-applied block {hash} requested {requests} times (cursor rewind?)"
         );
     }
 
@@ -407,6 +248,7 @@ fn pending_reorg_keeps_staged_winner_then_switches() -> Result<(), Error> {
         pump_until_tip(
             &mut peer,
             &mut node,
+            0,
             3,
             &b_hashes[2].to_string(),
             Duration::from_secs(30)
@@ -437,16 +279,13 @@ fn untracked_delivery_of_tree_known_block_converges() -> Result<(), Error> {
         "node did not report the inbound peer connection"
     );
 
-    let genesis = regtest_genesis();
+    let genesis = genesis_block();
     let chain = build_chain(&genesis, 5, 0xC4, 1);
     peer.offer_chain(&chain);
     let tip_hash = chain[4].block_hash();
 
     let deadline = Instant::now() + Duration::from_secs(10);
-    peer.send(
-        NetworkMessage::Headers(chain.iter().map(|b| b.header).collect()),
-        deadline,
-    )?;
+    peer.announce_headers(&chain, deadline)?;
 
     // Serve every window request EXCEPT the tip: h1..h4 arrive as tracked
     // deliveries while h5 stays pending on this peer.
@@ -562,20 +401,4 @@ fn collect_window_requests_serving_only(
             }
         });
     }
-}
-
-/// Asserts the node's stderr shows no panic and no `PrevHashMismatch` —
-/// `context` names where a mismatch would indicate commit churn.
-fn assert_clean_stderr(node: &ProcessNode, context: &str) {
-    let stderr = node_stderr(node);
-    assert_eq!(
-        count_occurrences(&stderr, "panic"),
-        0,
-        "node stderr contains a panic"
-    );
-    assert_eq!(
-        count_occurrences(&stderr, "PrevHashMismatch"),
-        0,
-        "node stderr shows PrevHashMismatch: {context}"
-    );
 }

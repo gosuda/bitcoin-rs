@@ -10,9 +10,9 @@ use bitcoin_rs_script::VerifyFlags;
 
 use crate::standardness::PackageTxContext;
 
-pub(crate) const BYTES_PER_SIGOP: u64 = 20;
+const BYTES_PER_SIGOP: u64 = 20;
 
-pub(crate) fn adjusted_weight(wire_weight: u64, sigop_cost: u32) -> u64 {
+fn adjusted_weight(wire_weight: u64, sigop_cost: u32) -> u64 {
     wire_weight.max(u64::from(sigop_cost) * BYTES_PER_SIGOP)
 }
 
@@ -31,11 +31,6 @@ pub(crate) fn policy_vsize(tx: &Tx, sigop_cost: u32) -> u32 {
 }
 
 /// Derives admission accounting from the resolved input outputs.
-///
-/// `prevouts` contains one entry per resolved transaction input, in any order.
-/// Missing inputs remain an explicit fact: a saturating provisional fee must
-/// never make an incomplete transaction admissible. Range validation remains
-/// the existing consensus verifier's responsibility.
 #[must_use]
 pub(crate) fn prepared_context(
     tx: &Tx,
@@ -64,7 +59,7 @@ mod tests {
     use bitcoin_rs_primitives::{
         Amount, LockTime, Script, Sequence, TxIn, Txid, Witness, consensus_bytes,
     };
-    use bitcoin_rs_script::script::{opcode, push_data};
+    use bitcoin_rs_script::{opcode, push_data};
 
     use super::*;
 
@@ -74,14 +69,14 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::default(), 0),
                 script_sig: Script::from_bytes(script_sig),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::from_stack(witness),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(9_000),
                 script_pubkey: Script::from_bytes(output),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         }
     }
 
@@ -137,8 +132,6 @@ mod tests {
 
     /// Independent vectors follow BIP141's Sigops section and Core v31.1
     /// `GetTransactionSigOpCost`; rust-bitcoin is the executable oracle.
-    /// <https://github.com/bitcoin/bips/blob/master/bip-0141.mediawiki#sigops>
-    /// <https://github.com/bitcoin/bitcoin/blob/v31.1/src/consensus/tx_verify.cpp>
     #[test]
     fn bip141_accounting_matches_independent_transaction_oracle() {
         assert_oracle(

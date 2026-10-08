@@ -36,11 +36,20 @@ recorded under `[reference.release]` in the manifest:
 - `core_version = "31.1"` — a released `MAJOR.MINOR` product version
 - `git_tag = "v31.1"`
 - `source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"`
+- `target = "x86_64-linux-gnu"` — the canonical artifact, the one whose
+  `bitcoind` captured the checked-in fixtures
 - `archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"` with `archive_sha256`
   `b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e`
 - `bitcoind_sha256`
   `986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08`
 - `version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"`
+
+Additional platform artifacts live under `[[reference.release.platforms]]`
+rows of the same shape, each pinned by target (currently `arm64-apple-darwin`
+and `win64`) so the live lanes can run the same pinned Core release on other
+hosts. The canonical row is the fixture-capture platform and is never
+inferred from the host: fixture provenance always compares against the
+canonical `bitcoind_sha256`.
 
 This is the behavioral reference. No compatibility claim may be made against a
 version string or a source snapshot alone.
@@ -52,9 +61,10 @@ release through the shared parser. Changing the reference leaves an old
 capture stale and fails its gate; it does not relabel the recorded response.
 The process harness separately hashes the actual executable before launch.
 The parser also fingerprints the complete release tuple using NUL-separated
-UTF-8 fields under the `bitcoin-rs/reference-release/v1` domain. Consequently,
-a different but well-formed source commit or artifact digest is a custody
-mismatch, not a valid new reference.
+UTF-8 fields under the `bitcoin-rs/reference-release/v2` domain (product
+fields, then every artifact row in order). Consequently, a different but
+well-formed source commit or artifact digest is a custody mismatch, not a
+valid new reference.
 
 ### `REF-03`: Core 31.99.0 kernel tree evidence
 
@@ -128,8 +138,9 @@ This is an evidence tool pin. No checker run is claimed by this page.
 
 - The default unpruned full-tip storage campaign uses a pinned mainnet
   stop. The stop is `(height, block_hash)` recorded by the run. No stop may be
-  floating or unpinned. The 1 TB budget applies only to that pinned default
-  lane.
+  floating or unpinned. The benchmark campaign owns any 1 TB verdict, which
+  applies only to that pinned default lane; the offline snapshot defined by
+  [FP-04](storage-footprint.md#fp-04-evidence-limits) does not decide it.
 - Missing identities, malformed commits or digests, unbound custody tuples,
   and confused product identities are rejected with a typed `ReferenceError`
   from

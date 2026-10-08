@@ -162,6 +162,20 @@ pub(crate) struct SyncFrontier {
     pub usable_peers: Vec<UsablePeer>,
 }
 
+impl SyncFrontier {
+    /// `(applied, header)` heights; the header height falls back to applied
+    /// when no chain tip is known.
+    pub(crate) fn heights(&self) -> (u32, u32) {
+        let applied = self.chain.applied_tip.as_ref().map_or(0, |tip| tip.height);
+        let header = self
+            .chain
+            .chain_tip
+            .as_ref()
+            .map_or(applied, |tip| tip.height);
+        (applied, header)
+    }
+}
+
 /// What the header side of the scheduler does this tick.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum HeaderAction {
@@ -199,7 +213,7 @@ pub(crate) enum NoProgressReason {
 
 /// The tick's scheduling decision.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct FrontierPlan {
+pub(super) struct FrontierPlan {
     /// Whether the body-request loop runs this tick.
     pub schedule_bodies: bool,
     /// What the header side does.
@@ -217,7 +231,7 @@ impl SyncFrontier {
     /// the canonical next-required body is unowned, this either schedules
     /// recovery work (`schedule_bodies` and/or a header action that can
     /// discover capability) or produces an explicit reason.
-    pub(crate) fn plan(&self) -> FrontierPlan {
+    pub(super) fn plan(&self) -> FrontierPlan {
         let peers_exist = !self.usable_peers.is_empty();
         let body_owned_or_missing =
             matches!(self.body_state, Some(BodyState::Unowned)) && !self.chain.apply_halted;

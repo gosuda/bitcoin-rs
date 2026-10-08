@@ -2,21 +2,14 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-#[cfg(any(
-    target_vendor = "apple",
-    target_os = "linux",
-    target_os = "android",
-    target_os = "redox"
-))]
-use cap_fs_ext::OpenOptionsMaybeDirExt;
-use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, File, OpenOptions};
 
 /// Marker filename containing the current datadir schema epoch.
 pub const CURRENT_SCHEMA_FILE: &str = "CURRENT_SCHEMA";
 const CURRENT_SCHEMA_TEMP_FILE: &str = ".CURRENT_SCHEMA.tmp";
-const CURRENT_SCHEMA_VERSION: u32 = 0;
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 // This serialized marker is the single source of truth for the current
 // persistent format epoch. Increment it for a schema-breaking storage change;
 // no converter or compatibility reader accompanies the bump.
@@ -28,9 +21,8 @@ pub fn open_data_dir(path: &Path) -> io::Result<Dir> {
 
 /// Opens the current datadir epoch.
 ///
-/// A non-empty directory without the marker is treated as baseline epoch 0 and
-/// adopted only while epoch 0 is current; a later schema epoch rejects it and
-/// requires an explicit resync.
+/// A non-empty directory without the marker is implicit epoch 0, rejected
+/// without modification. Older epochs require an explicit fresh resync.
 pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
     match read_file(data, CURRENT_SCHEMA_FILE, 16) {
         Ok(bytes) => validate_current_schema(&bytes),
@@ -45,15 +37,12 @@ pub fn ensure_current_schema(data: &Dir) -> io::Result<()> {
                     has_other_entry = true;
                 }
             }
-            if has_other_entry && CURRENT_SCHEMA_VERSION != 0 {
+            if has_other_entry {
                 return Err(incompatible_schema(
                     "datadir has no CURRENT_SCHEMA marker and is implicitly schema epoch 0, which is not current",
                 ));
             }
             if stale_temp {
-                // This is a reserved temporary marker left by an interrupted
-                // initialization, not user data. Removing it lets the next
-                // attempt start a fresh atomic publication.
                 data.remove_file(CURRENT_SCHEMA_TEMP_FILE)?;
             }
 
@@ -262,16 +251,32 @@ pub fn sync_dir(dir: &Dir) -> io::Result<()> {
     dir.open_with(".", &options)?.sync_all()
 }
 
+#[cfg(windows)]
+/// Flushes a directory entry to durable storage.
+///
+/// Windows flushes a directory handle only when it carries `GENERIC_WRITE`
+/// (`FlushFileBuffers` fails with `ERROR_ACCESS_DENIED` on a read-only
+/// handle), so the reopen requests write access. `maybe_dir` makes the
+/// open add `FILE_FLAG_BACKUP_SEMANTICS`, which directories require.
+pub fn sync_dir(dir: &Dir) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .maybe_dir(true)
+        .follow(FollowSymlinks::No);
+    dir.open_with(".", &options)?.sync_all()
+}
+
 #[cfg(not(any(
     target_vendor = "apple",
     target_os = "linux",
     target_os = "android",
-    target_os = "redox"
+    target_os = "redox",
+    windows
 )))]
 /// Returns success when the platform cannot fsync directory handles.
 pub fn sync_dir(_dir: &Dir) -> io::Result<()> {
-    // Windows does not support flushing a directory handle with the access
-    // mode used by cap-std. File contents are still flushed by File::sync_all.
     Ok(())
 }
 
@@ -288,5 +293,7 @@ pub(crate) fn remove_known_dir(root: &CheckpointRoot, name: &str) -> io::Result<
             dir.remove_file(file_name)?;
         }
     }
+    // Windows refuses RemoveDirectory while a handle on the target is open.
+    drop(dir);
     root.remove_dir(name)
 }

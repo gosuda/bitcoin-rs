@@ -80,6 +80,10 @@ fn consensus_failures_use_core_bip22_reasons() {
             },
             "unsupported validation engine: kernel",
         ),
+        (
+            ConsensusError::PrevoutMismatch { input_index: 1 },
+            "prevout does not match transaction input 1",
+        ),
     ] {
         assert_eq!(consensus_reject_reason(&error), want, "{error:?}");
     }

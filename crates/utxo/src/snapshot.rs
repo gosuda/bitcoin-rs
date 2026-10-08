@@ -94,16 +94,6 @@ impl SnapshotCoinObserver for () {
     fn observe_coin(&mut self, _: SnapshotCoin<'_>) {}
 }
 
-/// Streams a native bitcoin-rs UTXO snapshot to `writer`.
-pub fn write_snapshot(
-    set: &UtxoSet,
-    tip_hash: &Hash256,
-    height: u32,
-    writer: &mut impl Write,
-) -> Result<[u8; MUHASH_TRAILER_LEN], UtxoError> {
-    write_snapshot_observed(set, tip_hash, height, writer, ()).map(|(trailer, ())| trailer)
-}
-
 /// Streams a native bitcoin-rs UTXO snapshot while observing every live coin.
 ///
 /// Returns the selected trailer and observer only after the complete snapshot is
@@ -326,12 +316,24 @@ fn read_snapshot_output(reader: &mut impl Read) -> Result<OwnedUtxoOut, UtxoErro
     Ok(OwnedUtxoOut::new(vout, value, script, coinbase, height))
 }
 
-/// Computes Bitcoin Core's `hash_serialized_3` UTXO-set commitment.
-pub fn hash_serialized_3(set: &UtxoSet) -> Result<Hash256, UtxoError> {
-    set.with_stable_view(hash_serialized_3_stable)
+/// Computes Bitcoin Core's `hash_serialized_3` UTXO-set commitment over a
+/// stable view.
+pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256, UtxoError> {
+    hash_serialized_3_stable_inner(view, None)
 }
 
-pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256, UtxoError> {
+/// Commitment with the additional creation-height rule required by `AssumeUTXO`.
+pub(crate) fn hash_serialized_3_stable_at_height(
+    view: &UtxoSetView<'_>,
+    snapshot_height: u32,
+) -> Result<Hash256, UtxoError> {
+    hash_serialized_3_stable_inner(view, Some(snapshot_height))
+}
+
+fn hash_serialized_3_stable_inner(
+    view: &UtxoSetView<'_>,
+    snapshot_height: Option<u32>,
+) -> Result<Hash256, UtxoError> {
     let mut engine = Sha256::new();
     for shard_idx in 0_u8..=u8::MAX {
         view.shard(usize::from(shard_idx)).with_table(|table| {
@@ -352,6 +354,14 @@ pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256
             });
 
             for entry in entries {
+                if let Some(snapshot_height) = snapshot_height
+                    && entry.output.height > snapshot_height
+                {
+                    return Err(UtxoError::SnapshotCoinHeightOutOfRange {
+                        height: entry.output.height,
+                        snapshot_height,
+                    });
+                }
                 engine.update(entry.txid_le);
                 engine.update(entry.output.vout.to_le_bytes());
                 let code = (entry.output.height << 1) | u32::from(entry.output.coinbase);
@@ -377,28 +387,27 @@ pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256
 }
 
 impl UtxoSetView<'_> {
-    /// Invokes `f` once per live coin in the stable view, passing
-    /// `(txid, vout, value, script_pubkey, height, coinbase)`. The script slice
+    /// Invokes `f` once per live coin in the stable view. The script slice
     /// borrows the record payload only for the duration of the call.
     ///
     /// On-demand scan helper (e.g. `gettxoutsetinfo`); not on any hot path.
-    pub fn for_each_coin<F>(&self, mut f: F) -> Result<(), UtxoError>
+    pub(crate) fn for_each_coin<F>(&self, mut f: F) -> Result<(), UtxoError>
     where
-        F: FnMut(Hash256, u32, u64, &[u8], u32, bool),
+        F: FnMut(SnapshotCoin<'_>),
     {
         for shard_idx in 0_u8..=u8::MAX {
             self.shard(usize::from(shard_idx)).with_table(|table| {
                 for record in &table.table {
                     let txid = record.txid();
                     for output in record.outputs() {
-                        f(
+                        f(SnapshotCoin {
                             txid,
-                            output.vout,
-                            output.value,
-                            output.script_pubkey,
-                            output.height,
-                            output.coinbase,
-                        );
+                            vout: output.vout,
+                            value: output.value,
+                            script_pubkey: output.script_pubkey,
+                            height: output.height,
+                            coinbase: output.coinbase,
+                        });
                     }
                 }
                 Ok::<(), UtxoError>(())
@@ -406,11 +415,6 @@ impl UtxoSetView<'_> {
         }
         Ok(())
     }
-}
-
-/// Computes a deterministic aggregate hash over sorted live UTXO entries.
-pub fn aggregate_hash(set: &UtxoSet) -> Result<Hash256, UtxoError> {
-    hash_serialized_3(set)
 }
 
 struct HashSerializedEntry<'a> {

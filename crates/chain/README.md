@@ -14,10 +14,6 @@ compact-target validation against the network's difficulty rules
 timestamps and the future-drift ceiling (`current_unix_seconds`), the BIP94
 timewarp floor at an adjustment boundary, and the
 version floors of the buried deployments — returning the new `NodeId`s.
-lock-free readers. `accept_headers` admits a header batch after the contextual checks —
-proof of work, compact-target validation against the network's difficulty rules
-(`validate_header_nbits`), median-time-past and future-drift bounds
-(`validate_header_timestamp`, `current_unix_seconds`) — returning the new `NodeId`s.
 `plan_reorg` walks parent pointers to the common ancestor and returns a `ReorgPlan`
 naming the blocks to disconnect and connect. An internal `Bip9Cache` memoizes
 versionbits deployment states per node and is invalidated on reorg. `BlockTreeNode` carries
@@ -27,11 +23,11 @@ off-best-chain), and every failure surfaces as a structured `ChainError` variant
 latch over the published applied-tip and block-tree handles; the node builds
 one `Arc` shared by RPC and P2P, so both surfaces answer identically
 (Core `IsInitialBlockDownload` / `m_cached_is_ibd` semantics).
-
-## Features
-- `rocksdb`: enables the `RocksDB` backend in `bitcoin-rs-storage`
-- `fjall`: enables the fjall backend in `bitcoin-rs-storage`
-- `redb`: enables the redb backend in `bitcoin-rs-storage`
+`ChainProgressReader` (in `progress`) derives synchronization progress beside
+it: heights, best hash, tip time and median time past, Core's
+`GuessVerificationProgress`, that latch's decision, and chain work. Chainstate
+mints it from its own handles, so RPC and the embedding API report progress
+without rebuilding it.
 
 Part of [`bitcoin-rs`](../../README.md); see [`CONCEPTS.md`](../../CONCEPTS.md) for the
 project vocabulary.

@@ -63,7 +63,10 @@ impl<S: KvStore> JournalWriter<S> {
         {
             self.advance_durability()?;
         }
-        let bytes = self.journal_size_bytes()?;
+        let mut bytes = self.journal_size_bytes()?;
+        if bytes >= self.max_journal_bytes && self.discard_invalidated_cold_segments()? {
+            bytes = self.journal_size_bytes()?;
+        }
         if bytes >= self.max_journal_bytes {
             return Err(JournalWriterError::RetentionLimit {
                 bytes,
@@ -71,6 +74,46 @@ impl<S: KvStore> JournalWriter<S> {
             });
         }
         Ok(())
+    }
+
+    /// Cold initialization has no replayable journal suffix. A sticky
+    /// full-revalidation marker invalidates old generations, which may still
+    /// fill the retention budget before genesis creates an applied tip.
+    /// Retire only those segments, leaving the marker and active cursor intact.
+    fn discard_invalidated_cold_segments(&self) -> Result<bool, JournalWriterError> {
+        if self.base_generation != 0
+            || self.base_height != 0
+            || self.durable.height != 0
+            || self.segment_gen != 0
+            || self.segment_offset != 0
+            || self.record_count != 0
+            || !self.pending_records.is_empty()
+        {
+            return Ok(false);
+        }
+        match self.dir.metadata(super::FULL_REVALIDATION_MARKER) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        // Finish traversal before unlinking: deleting entries can invalidate
+        // directory iteration and leave some invalidated generations behind.
+        let mut invalidated_segments = Vec::new();
+        for entry in self.dir.entries()? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if parse_segment_name(name.to_string_lossy().as_ref())
+                .is_some_and(|generation| generation != self.segment_gen)
+            {
+                invalidated_segments.push(name);
+            }
+        }
+        for name in invalidated_segments {
+            self.dir.remove_file(name)?;
+        }
+        crate::checkpoint::fs::sync_dir(&self.dir)?;
+        Ok(true)
     }
 
     pub(crate) fn flush_due(&mut self) -> Result<(), JournalWriterError> {
@@ -110,9 +153,14 @@ impl<S: KvStore> JournalWriter<S> {
             if parse_segment_name(entry.file_name().to_string_lossy().as_ref()).is_none() {
                 return Ok(total);
             }
-            total.checked_add(entry.metadata()?.len()).ok_or_else(|| {
-                JournalWriterError::CursorMismatch("journal segment size overflow".to_owned())
-            })
+            // `DirEntry::metadata` reuses the stale size cached by directory
+            // enumeration on Windows; a fresh stat by name sees the live
+            // length without opening the segment.
+            total
+                .checked_add(self.dir.metadata(entry.file_name())?.len())
+                .ok_or_else(|| {
+                    JournalWriterError::CursorMismatch("journal segment size overflow".to_owned())
+                })
         })
     }
 
@@ -120,6 +168,11 @@ impl<S: KvStore> JournalWriter<S> {
     /// last buffered record; publish the final head. Called by the publication
     /// primitive with admission already closed.
     pub(crate) fn freeze(&mut self) -> Result<(), JournalWriterError> {
+        // An invalidated generation is already frozen with nothing left to
+        // make durable; publication proceeds straight to compaction.
+        if self.generation_invalidated {
+            return Ok(());
+        }
         self.ensure_appendable()?;
         self.state = WriterState::Frozen;
         match self.advance_durability() {
@@ -132,7 +185,9 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     /// §2.5 compact: rebase the empty post-publication journal on the newly
-    /// installed checkpoint and delete every superseded segment.
+    /// installed checkpoint and delete every superseded segment. A recovery
+    /// progress checkpoint preserves the full-revalidation marker; only a
+    /// completed or ordinary replacement checkpoint retires it.
     pub(crate) fn compact_to_checkpoint(
         &mut self,
         checkpoint_generation: u64,
@@ -140,6 +195,7 @@ impl<S: KvStore> JournalWriter<S> {
         tip_hash: [u8; 32],
         tip_prev_hash: [u8; 32],
         chain_tx_count: u64,
+        retire_full_revalidation_marker: bool,
     ) -> Result<(), JournalWriterError> {
         if self.state != WriterState::Frozen {
             return Err(JournalWriterError::NotOpen {
@@ -150,9 +206,15 @@ impl<S: KvStore> JournalWriter<S> {
                 },
             });
         }
-        if self.durable.height != tip_height
-            || self.durable_block_hash != tip_hash
-            || self.durable_chain_tx_count != chain_tx_count
+        if let Some(height) = self.append_gap_height {
+            return Err(JournalWriterError::AppendGap { height });
+        }
+        // Invalidation destroyed the durable head this checkpoint replaces,
+        // so the frozen-identity check has nothing left to compare.
+        if !self.generation_invalidated
+            && (self.durable.height != tip_height
+                || self.durable_block_hash != tip_hash
+                || self.durable_chain_tx_count != chain_tx_count)
         {
             return Err(JournalWriterError::CursorMismatch(format!(
                 "checkpoint tip {tip_height} does not match frozen journal head {}",
@@ -179,9 +241,6 @@ impl<S: KvStore> JournalWriter<S> {
         };
         self.write_head_atomic(&marker)?;
 
-        // The new head is now the logical commit point. Update in-memory state
-        // before best-effort physical cleanup so `resume` cannot republish the
-        // superseded base if cleanup reports an error.
         self.base_generation = checkpoint_generation;
         self.base_height = tip_height;
         self.base_hash = tip_hash;
@@ -203,6 +262,7 @@ impl<S: KvStore> JournalWriter<S> {
             JournalWriterError::CursorMismatch("checkpoint height overflow".to_owned())
         })?;
         self.pending_records.clear();
+        self.generation_invalidated = false;
         self.state = WriterState::Compacted;
 
         let entries: Vec<String> = self
@@ -215,21 +275,27 @@ impl<S: KvStore> JournalWriter<S> {
         for name in entries {
             self.dir.remove_file(name)?;
         }
-        clear_full_revalidation_marker(&self.dir)?;
+        if retire_full_revalidation_marker {
+            clear_full_revalidation_marker(&self.dir)?;
+        }
         crate::checkpoint::fs::sync_dir(&self.dir)?;
         Ok(())
     }
 
     /// §2.5 resume: reopen appends against the (possibly new) base.
     pub(crate) fn resume(&mut self) -> Result<(), JournalWriterError> {
+        // Without a completed compaction the only head available is the
+        // destroyed generation's stale cursor; refuse to republish it.
+        if self.generation_invalidated {
+            return Err(JournalWriterError::NotOpen {
+                state: "invalidated",
+            });
+        }
         if self.state == WriterState::Open {
             return Err(JournalWriterError::NotOpen {
                 state: "already open",
             });
         }
-        // Publish the (possibly unchanged) head with the new base cursor. The
-        // durable cursor was already committed by freeze/compaction, so a
-        // redundant republish failure must not strand the runtime as Frozen.
         let publish_result = self.publish_head_now();
         self.state = WriterState::Open;
         self.last_boundary = Instant::now();

@@ -5,7 +5,7 @@
 )]
 
 use std::fs::File;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
@@ -86,16 +86,24 @@ fn write_failure_keeps_the_attempt_and_error() {
 }
 
 #[test]
-fn record_write_failure_does_not_replace_the_network_error() {
-    let (mut peer, remote, dir) = fixture();
-    remote
-        .shutdown(Shutdown::Write)
-        .expect("close the remote writer");
-    peer.journal = File::open(dir.path().join("p2p.jsonl")).expect("read-only record file");
+fn send_deadline_keeps_the_attempt_and_error() {
+    let (mut peer, mut remote, dir) = fixture();
     let error = peer
-        .receive(Instant::now() + Duration::from_secs(1))
-        .expect_err("closed reader");
-    assert!(matches!(error, super::Error::Protocol(_)));
+        .send(NetworkMessage::Ping(1), Instant::now())
+        .expect_err("expired time limit");
+    assert!(
+        matches!(error, super::Error::Protocol(ref message) if message == "P2P operation deadline")
+    );
+    assert_failure(&dir, "sending", &error);
+    remote.set_nonblocking(true).expect("nonblocking reader");
+    let mut byte = [0];
+    assert_eq!(
+        remote
+            .read(&mut byte)
+            .expect_err("expired send must not write")
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
@@ -107,6 +115,19 @@ fn read_completion_fails_after_the_time_limit() {
         &mut super::FrameBuffer::default(),
     );
     assert!(result.is_err(), "an expired operation must not succeed");
+}
+
+#[test]
+fn record_write_failure_does_not_replace_the_network_error() {
+    let (mut peer, remote, dir) = fixture();
+    remote
+        .shutdown(Shutdown::Write)
+        .expect("close the remote writer");
+    peer.journal = File::open(dir.path().join("p2p.jsonl")).expect("read-only record file");
+    let error = peer
+        .receive(Instant::now() + Duration::from_secs(1))
+        .expect_err("closed reader");
+    assert!(matches!(error, super::Error::Protocol(_)));
 }
 
 #[test]
@@ -200,13 +221,4 @@ fn a_paused_frame_resumes_from_where_it_stopped() {
     )
     .expect("the paused frame resumes");
     assert_eq!(completed, frame);
-}
-
-#[test]
-fn send_deadline_keeps_the_attempt_and_error() {
-    let (mut peer, _remote, dir) = fixture();
-    let error = peer
-        .send(NetworkMessage::Ping(1), Instant::now())
-        .expect_err("expired time limit");
-    assert_failure(&dir, "sending", &error);
 }

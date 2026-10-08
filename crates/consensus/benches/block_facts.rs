@@ -9,7 +9,7 @@ mod fixtures;
 
 use std::hint::black_box;
 
-use bitcoin_rs_consensus::{BlockView, block_view::BlockFacts};
+use bitcoin_rs_consensus::{BlockFacts, BlockView};
 use bitcoin_rs_primitives::layout::ParsedBlock;
 use bitcoin_rs_primitives::{Tx, consensus_bytes};
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};

@@ -2,6 +2,8 @@
 //! durability path, and explicit budgeted cache sizes are configured verbatim
 //! (no backend floor may raise a share above its allocation).
 
+#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
+
 use hashbrown::HashMap;
 use std::sync::Arc;
 
@@ -164,6 +166,7 @@ fn assert_gauge_eq(recorder: &LabeledRecorder, key: &str, expected: u64) {
 }
 
 #[test]
+#[cfg(feature = "fjall")]
 fn fjall_counts_each_durability_path_once() -> Result<(), Box<dyn std::error::Error>> {
     let recorder = LabeledRecorder::default();
     let dir = tempfile::tempdir()?;

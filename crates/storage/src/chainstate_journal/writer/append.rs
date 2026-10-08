@@ -5,6 +5,7 @@ use super::super::record::encode_record;
 use super::DurableCursor;
 use super::JournalWriter;
 use super::JournalWriterError;
+#[cfg(any(test, feature = "test-seam"))]
 use super::JournalWriterFailpoint;
 use super::PendingRecordMeta;
 use super::segment_name;
@@ -85,6 +86,7 @@ impl<S: KvStore> JournalWriter<S> {
         if let Err(error) = self.maybe_rotate() {
             return self.fail_append(height, error);
         }
+        #[cfg(any(test, feature = "test-seam"))]
         if let Err(error) = self.fail_segment_append() {
             return self.fail_append(height, error);
         }
@@ -107,11 +109,15 @@ impl<S: KvStore> JournalWriter<S> {
         };
         let name = segment_name(self.segment_gen);
         let mut options = cap_std::fs::OpenOptions::new();
+        // On Windows the access mapping drops FILE_WRITE_DATA deliberately:
+        // with it granted, every write would go to the file position (zero on
+        // a fresh open) instead of the end of file.
         options.append(true).create(true);
         let mut file = match self.dir.open_with(&name, &options) {
             Ok(file) => file,
             Err(error) => return self.fail_append(height, error.into()),
         };
+        #[cfg(any(test, feature = "test-seam"))]
         let write_result = if self.failpoint == Some(JournalWriterFailpoint::SegmentAppendPartial) {
             let prefix_len = (bytes.len() / 2).max(1);
             file.write_all(&bytes[..prefix_len]).and_then(|()| {
@@ -122,10 +128,22 @@ impl<S: KvStore> JournalWriter<S> {
         } else {
             file.write_all(bytes)
         };
+        #[cfg(not(any(test, feature = "test-seam")))]
+        let write_result = file.write_all(bytes);
         if let Err(append_error) = write_result {
-            let rollback_result = file
-                .set_len(known_good_offset)
-                .and_then(|()| file.sync_all());
+            // The append handle cannot SetEndOfFile on Windows (no
+            // FILE_WRITE_DATA), so the rollback truncates through a fresh
+            // write handle instead.
+            let mut write_options = cap_std::fs::OpenOptions::new();
+            write_options.write(true);
+            let rollback_result =
+                self.dir
+                    .open_with(&name, &write_options)
+                    .and_then(|rollback_file| {
+                        rollback_file
+                            .set_len(known_good_offset)
+                            .and_then(|()| rollback_file.sync_all())
+                    });
             if let Err(rollback_error) = rollback_result {
                 return self.fail_append(
                     height,
@@ -153,8 +171,6 @@ impl<S: KvStore> JournalWriter<S> {
         if self.segment_offset < self.rotate_bytes {
             return Ok(());
         }
-        // Close the current segment durably: the boundary covers buffered
-        // records, then the next append starts a new generation.
         self.advance_durability()?;
         let previous_gen = self.segment_gen;
         let previous_offset = self.segment_offset;
@@ -162,9 +178,6 @@ impl<S: KvStore> JournalWriter<S> {
         let next_gen = previous_gen
             .checked_add(1)
             .ok_or_else(|| JournalWriterError::CursorMismatch("generation overflow".to_owned()))?;
-        // A head may name a zero-offset generation only after the directory
-        // entry itself is durable. Reuse after a pre-head crash truncates the
-        // uncommitted generation before publishing it again.
         let name = segment_name(next_gen);
         let mut options = cap_std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);

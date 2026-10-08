@@ -1,5 +1,3 @@
-use alloc::sync::Arc;
-
 use crate::{
     BlockFilePosition, BufferedWriteBatch, ColumnFamily, FlatFileBlockStore, KvStore, StorageError,
     decode_block_file_max_height,
@@ -47,65 +45,6 @@ pub(crate) fn lowest_stored_height<S: KvStore>(
         }
     }
     Ok(None)
-}
-
-/// Prunes persisted block-body rows according to a [`PrunePolicy`].
-pub struct BlockPruner<S: KvStore> {
-    store: Arc<S>,
-    policy: PrunePolicy,
-}
-
-impl<S: KvStore> BlockPruner<S> {
-    /// Creates a block pruner over `store`.
-    #[must_use]
-    pub const fn new(store: Arc<S>, policy: PrunePolicy) -> Self {
-        Self { store, policy }
-    }
-
-    /// Returns this pruner's policy.
-    #[must_use]
-    pub const fn policy(&self) -> PrunePolicy {
-        self.policy
-    }
-
-    /// Deletes block-body rows below the effective reorg-safety horizon until the target is met.
-    pub fn prune_step(&mut self, current_tip_height: u32) -> Result<PruneOutcome, PruneError> {
-        if self.policy.is_full_node() {
-            return Ok(PruneOutcome::default());
-        }
-
-        prune_prefixed_rows(
-            &*self.store,
-            BLOCK_DATA_CF,
-            BLOCK_BODY_PREFIX_BYTES,
-            current_tip_height,
-            self.policy,
-        )
-    }
-}
-
-pub(crate) fn prune_prefixed_rows<S: KvStore>(
-    store: &S,
-    cf: ColumnFamily,
-    prefix: &[u8],
-    current_tip_height: u32,
-    policy: PrunePolicy,
-) -> Result<PruneOutcome, PruneError> {
-    let mut batch = store.new_batch();
-    let prune_below_height = current_tip_height.saturating_sub(policy.retention_depth());
-    let outcome =
-        prune_prefixed_rows_into_batch(store, &mut batch, cf, prefix, prune_below_height, policy)?;
-
-    if !outcome.is_empty() {
-        store.write(batch)?;
-        tracing::debug!(
-            bytes_freed = outcome.bytes_freed,
-            blocks_removed = outcome.blocks_removed,
-            "pruned block storage rows"
-        );
-    }
-
-    Ok(outcome)
 }
 
 pub(crate) fn prune_prefixed_rows_into_batch<S: KvStore>(
@@ -197,9 +136,6 @@ pub(crate) fn stage_flat_block_file_prune<S: KvStore>(
             )
         })?;
         let selected_file = file_numbers.binary_search(&position.file_no).is_ok();
-        // A row whose height does not parse still rides out with its file
-        // when the file is pruned; it cannot sit at or above the line, so
-        // the line-1 bound is the tallest it could be.
         let height = row_height(&key, BLOCK_BODY_PREFIX_BYTES)
             .unwrap_or_else(|| prune_below_height.saturating_sub(1));
         let below_horizon = height < prune_below_height;

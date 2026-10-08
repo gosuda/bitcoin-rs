@@ -2,14 +2,13 @@
 
 use anyhow::{Context as _, Result, bail};
 
+use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Tx, TxIn, TxOut, Witness,
 };
-
-use sha2::{Digest, Sha256};
 
 use parking_lot::Mutex;
 
@@ -586,11 +585,11 @@ fn assert_tip(state: &NodeState, expected: &bitcoin_rs_chain::TipSnapshot) -> Re
 fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Block> {
     let coinbase = Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: Script::from_bytes(coinbase_height_push(height)?),
-            sequence: Sequence::from_consensus(u32::MAX),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
@@ -609,15 +608,9 @@ fn mined_regtest_child_at(prev_blockhash: BlockHash, height: u32) -> Result<Bloc
         },
         txs: vec![coinbase],
     };
-    block.header.merkle_root = merkle_root(&block.txs)
+    block.header.merkle_root = regtest_fixture::merkle_root(&block.txs)
         .ok_or_else(|| std::io::Error::other("test block has no merkle root"))?;
-    while !pow_met(block.header.bits.to_consensus(), block.block_hash().0) {
-        block.header.nonce = block
-            .header
-            .nonce
-            .checked_add(1)
-            .ok_or_else(|| std::io::Error::other("test nonce exhausted"))?;
-    }
+    regtest_fixture::mine_block_to_declared_target(&mut block)?;
 
     Ok(block)
 }
@@ -636,43 +629,4 @@ fn coinbase_height_push(height: u32) -> Result<Vec<u8>> {
     let mut push = vec![u8::try_from(bytes.len())?];
     push.extend(bytes);
     Ok(push)
-}
-
-fn merkle_root(txs: &[Tx]) -> Option<Hash256> {
-    let mut leaves: Vec<[u8; 32]> = txs.iter().map(|tx| *tx.txid().as_bytes()).collect();
-    if leaves.is_empty() {
-        return None;
-    }
-    while leaves.len() > 1 {
-        let original_len = leaves.len();
-        let mut next = Vec::with_capacity(original_len.div_ceil(2));
-        for pos in 0..original_len.div_ceil(2) {
-            let left = leaves[2 * pos];
-            let right = leaves[(2 * pos + 1).min(original_len - 1)];
-            let mut pair = [0_u8; 64];
-            pair[..32].copy_from_slice(&left);
-            pair[32..].copy_from_slice(&right);
-            next.push(double_sha256(&pair));
-        }
-        leaves = next;
-    }
-    Some(Hash256::from_le_bytes(&leaves[0]))
-}
-
-fn double_sha256(bytes: &[u8]) -> [u8; 32] {
-    let first = Sha256::digest(bytes);
-    Sha256::digest(first).into()
-}
-
-fn pow_met(bits: u32, hash: Hash256) -> bool {
-    let exponent = u8::try_from(bits >> 24).unwrap_or(0);
-    let mantissa = bits & 0x007f_ffff;
-    if exponent <= 3 || exponent > 32 || mantissa > 0x00ff_ffff {
-        return false;
-    }
-    let bytes = hash.as_byte_array();
-    let low = usize::from(exponent - 3);
-    let window =
-        u32::from(bytes[low]) | u32::from(bytes[low + 1]) << 8 | u32::from(bytes[low + 2]) << 16;
-    window <= mantissa && bytes[usize::from(exponent)..].iter().all(|&byte| byte == 0)
 }

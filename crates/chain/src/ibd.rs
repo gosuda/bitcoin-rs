@@ -2,8 +2,8 @@
 
 use std::sync::atomic::AtomicBool;
 
-use crate::Network;
 use crate::view::{BlockTreeReader, TipReader};
+use bitcoin_rs_primitives::Network;
 
 // Core's DEFAULT_MAX_TIP_AGE; this node does not expose -maxtipage.
 const MAX_TIP_AGE_SECONDS: u64 = 24 * 60 * 60;

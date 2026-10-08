@@ -235,7 +235,7 @@ fn block_template(handler: &Handler) -> Response {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod pagination_tests {
     use alloc::sync::Arc;
 
@@ -373,7 +373,7 @@ mod pagination_tests {
         }
         assert_eq!(page(&ctx, None, "max_txs=invalid&max_txs=2"), all[..2]);
         assert_eq!(page(&ctx, None, "max_txs=1&max_txs=2"), all[..1]);
-        assert!(page(&ctx, None, "max_txs=0&max_txs=2").is_empty());
+        assert_eq!(page(&ctx, None, "max_txs=0&max_txs=2"), []);
     }
 
     #[test]
@@ -384,7 +384,7 @@ mod pagination_tests {
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0xaa; 32])), 0),
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
@@ -403,7 +403,7 @@ mod pagination_tests {
             .expect("insert unresolved-prevout fixture");
         assert_eq!(internal_mempool_txs(&ctx, None, "max_txs=1").status, 503);
         assert_eq!(page(&ctx, Some(&cursor), "max_txs=1"), vec![expected[0].1]);
-        assert!(page(&ctx, None, "max_txs=0").is_empty());
+        assert_eq!(page(&ctx, None, "max_txs=0"), []);
     }
 
     // API-09 in docs/contracts/external-api.md owns order and strict cursor

@@ -7,6 +7,7 @@
 //!
 //! These tests pin two contracts:
 //!
+#[path = "support/common.rs"]
 mod common;
 
 use std::sync::Arc;

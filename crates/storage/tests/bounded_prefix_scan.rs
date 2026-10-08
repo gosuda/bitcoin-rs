@@ -1,5 +1,7 @@
 //! Cross-backend tests for bounded prefix scans.
 
+#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
+
 use bitcoin_rs_storage::{ColumnFamily, KvStore, PrefixScanLimit, StorageError};
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -53,7 +55,6 @@ fn assert_limit_semantics<S: KvStore>(store: &S) -> Result<(), StorageError> {
     assert_eq!(scan.rows[1].0, vec![0x00, 0x01]);
     assert!(scan.complete);
 
-    // max_rows = 0 always yields an empty, incomplete scan.
     let scan = store.scan_prefix_bounded(
         ColumnFamily::TxConfirmed,
         &[0x00],
@@ -62,11 +63,9 @@ fn assert_limit_semantics<S: KvStore>(store: &S) -> Result<(), StorageError> {
             max_bytes: usize::MAX,
         },
     )?;
-    assert!(scan.rows.is_empty());
+    assert_eq!(scan.rows, []);
     assert!(!scan.complete);
 
-    // max_bytes = 0 with max_rows > 0 still admits the first row (soft limit),
-    // then stops because every subsequent row exceeds the hard byte budget.
     let scan = store.scan_prefix_bounded(
         ColumnFamily::TxConfirmed,
         &[0x00],
@@ -137,13 +136,11 @@ fn assert_snapshot_isolation<S: KvStore>(store: &S) -> Result<(), StorageError> 
 }
 
 fn assert_oversized_first_row<S: KvStore>(store: &S) -> Result<(), StorageError> {
-    // Seed a prefix range where the first row is larger than max_bytes.
     let mut batch = store.new_batch();
     batch.put(ColumnFamily::Spending, &[0x10], &[0u8; 200]);
     batch.put(ColumnFamily::Spending, &[0x10, 0x01], b"small");
     store.write(batch)?;
 
-    // The first row is admitted even though it alone exceeds max_bytes.
     let scan = store.scan_prefix_bounded(
         ColumnFamily::Spending,
         &[0x10],
@@ -156,7 +153,6 @@ fn assert_oversized_first_row<S: KvStore>(store: &S) -> Result<(), StorageError>
     assert_eq!(scan.rows[0].0, vec![0x10]);
     assert!(!scan.complete);
 
-    // After deleting the oversized row, scanning progresses to the next row.
     let mut batch = store.new_batch();
     batch.delete(ColumnFamily::Spending, &[0x10]);
     store.write(batch)?;
@@ -173,7 +169,6 @@ fn assert_oversized_first_row<S: KvStore>(store: &S) -> Result<(), StorageError>
     assert_eq!(scan.rows[0].0, vec![0x10, 0x01]);
     assert!(scan.complete);
 
-    // Cleanup so the store is reusable.
     let mut batch = store.new_batch();
     batch.delete(ColumnFamily::Spending, &[0x10, 0x01]);
     store.write(batch)?;

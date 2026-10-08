@@ -1,7 +1,7 @@
 //! Process custody for `bitcoin-rs` and pinned Bitcoin Core nodes.
 
 use std::collections::VecDeque;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write as _};
 use std::net::{SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -107,14 +107,6 @@ impl HttpResponse {
         String::from_utf8(self.body.clone())
             .map_err(|e| Error::Assertion(format!("response is not utf-8: {e}")))
     }
-
-    /// Look up a header value by name (case-insensitive).
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
 }
 
 /// A spawned node process with its RPC endpoint and evidence files.
@@ -171,9 +163,10 @@ pub fn bitcoin_rs_binary() -> Result<PathBuf> {
                 }
             },
         );
+    let binary_name = format!("bitcoin-rs{}", std::env::consts::EXE_SUFFIX);
     let newest = ["debug", "release"]
         .iter()
-        .map(|profile| target_dir.join(profile).join("bitcoin-rs"))
+        .map(|profile| target_dir.join(profile).join(&binary_name))
         .filter(|path| path.is_file())
         .max_by_key(|path| {
             path.metadata()
@@ -195,18 +188,26 @@ fn core_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("BITCOIN_RS_REFERENCE_BITCOIND") {
         return PathBuf::from(path);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let path = Path::new(&home).join("bitcoin-core-31.1/bin/bitcoind");
+    let binary_name = format!("bitcoind{}", std::env::consts::EXE_SUFFIX);
+    for home in [std::env::var_os("HOME"), std::env::var_os("USERPROFILE")]
+        .into_iter()
+        .flatten()
+    {
+        let path = Path::new(&home)
+            .join("bitcoin-core-31.1/bin")
+            .join(&binary_name);
         if path.is_file() {
             return path;
         }
     }
-    workspace().join("target/reference-core-31.1/bitcoin-31.1/bin/bitcoind")
+    workspace()
+        .join("target/reference-core-31.1/bitcoin-31.1/bin")
+        .join(&binary_name)
 }
 
 /// Verify the resolved bitcoind matches the pinned digest in the compiled
 /// `core-compat.toml` manifest. Returns the binary path on success.
-pub fn verified_core_binary() -> Result<PathBuf> {
+fn verified_core_binary() -> Result<PathBuf> {
     if let Some(path) = VERIFIED_CORE.get() {
         return Ok(path.clone());
     }
@@ -214,7 +215,7 @@ pub fn verified_core_binary() -> Result<PathBuf> {
     let expected = manifest_reference_sha256()?;
     let actual = file_sha256(&path).map_err(|e| {
         Error::Assertion(format!(
-            "pinned bitcoind {} not readable (install via scripts/install-bitcoind.sh): {e}",
+            "pinned bitcoind {} not readable (install via scripts/install-bitcoind.sh, or install-bitcoind.ps1 on Windows): {e}",
             path.display()
         ))
     })?;
@@ -227,18 +228,59 @@ pub fn verified_core_binary() -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins.
+/// The host platform's release-archive suffix, mirroring the uname mapping in
+/// `scripts/install-bitcoind.sh`. `None` on platforms no pinned artifact can
+/// execute on.
+fn current_platform_target() -> Option<&'static str> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Some("x86_64-linux-gnu"),
+        ("linux", "aarch64") => Some("aarch64-linux-gnu"),
+        ("macos", "aarch64") => Some("arm64-apple-darwin"),
+        ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("windows", "x86_64") => Some("win64"),
+        _ => None,
+    }
+}
+
+/// Read the `bitcoind_sha256` the compiled `core-compat.toml` manifest pins
+/// for the platform this suite runs on: the canonical artifact when its
+/// target matches, else the matching `[[reference.release.platforms]]` row —
+/// and a typed failure when the manifest carries no artifact for this platform.
 pub(crate) fn manifest_reference_sha256() -> Result<String> {
+    let target = current_platform_target().ok_or_else(|| {
+        Error::Assertion(format!(
+            "no pinned Core artifact for {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ))
+    })?;
     let table: toml::Table = bitcoin_rs_rpc::manifest::MANIFEST_TOML
         .parse()
         .map_err(|e| Error::Assertion(format!("cannot parse core-compat.toml: {e}")))?;
-    table
+    let release = table
         .get("reference")
         .and_then(|r| r.get("release"))
-        .and_then(|r| r.get("bitcoind_sha256"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
-        .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| Error::Assertion("reference.release missing in core-compat.toml".into()))?;
+    let artifact = |row: &toml::Table| {
+        row.get("bitcoind_sha256")
+            .and_then(toml::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Assertion("bitcoind_sha256 missing in core-compat.toml".into()))
+    };
+    if release.get("target").and_then(toml::Value::as_str) == Some(target) {
+        return artifact(release);
+    }
+    if let Some(rows) = release.get("platforms").and_then(toml::Value::as_array) {
+        for row in rows.iter().filter_map(toml::Value::as_table) {
+            if row.get("target").and_then(toml::Value::as_str) == Some(target) {
+                return artifact(row);
+            }
+        }
+    }
+    Err(Error::Assertion(format!(
+        "no pinned Core artifact for target {target} in core-compat.toml"
+    )))
 }
 
 /// Hash one file with SHA256; callers shape the error vocabulary.
@@ -330,6 +372,15 @@ fn launch_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        // Give the child its own console process group so
+        // GenerateConsoleCtrlEvent can deliver a graceful stop to it
+        // specifically; group 0 delivery would hit every test process
+        // sharing this console.
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    }
     Ok((command, clock))
 }
 
@@ -344,6 +395,11 @@ fn exited_on_busy_port(evidence: &Path) -> bool {
         || stderr.contains("os error 98")
         || stderr.contains("Unable to bind")
         || stderr.contains("Failed to bind")
+        // Windows: WSAEADDRINUSE and WSAEACCES (excluded/blocked port).
+        || stderr.contains("Only one usage of each socket address")
+        || stderr.contains("os error 10048")
+        || stderr.contains("An attempt was made to access a socket")
+        || stderr.contains("os error 10013")
 }
 
 impl ProcessNode {
@@ -411,9 +467,7 @@ impl ProcessNode {
             launch_command(kind, datadir.path(), rpc_addr, p2p_addr, options)?;
         command.args(options.extra_args);
         let executable = Path::new(command.get_program());
-        let mut engine = sha256::Hash::engine();
-        std::io::copy(&mut File::open(executable)?, &mut engine)?;
-        let digest = sha256::Hash::from_engine(engine);
+        let digest = file_sha256(executable)?;
         let config = match kind {
             Kind::BitcoinRs => Some(fs::read_to_string(datadir.path().join("node.toml"))?),
             Kind::Core => None,
@@ -423,7 +477,7 @@ impl ProcessNode {
             serde_json::to_vec_pretty(&json!({
                 "binary": format!("{kind:?}"),
                 "executable": executable,
-                "executable_sha256": digest.to_string(),
+                "executable_sha256": digest,
                 "argv": command.get_args().map(|a| a.to_string_lossy()).collect::<Vec<_>>(),
                 "config": config,
                 "datadir": datadir.path(),
@@ -477,12 +531,6 @@ impl ProcessNode {
     #[must_use]
     pub fn pid(&self) -> u32 {
         self.child.id()
-    }
-
-    /// Which binary this process wraps.
-    #[must_use]
-    pub fn kind(&self) -> Kind {
-        self.kind
     }
 
     /// Move datadir custody out for a restart.
@@ -638,9 +686,6 @@ impl ProcessNode {
     }
 
     /// GET one `/api/` explorer path and return its parsed JSON body.
-    ///
-    /// PRE: `path` names a resource under the `/api/` namespace.
-    /// POST: the reply carried status 200 and a JSON body.
     pub fn http_get_json(&mut self, path: &str) -> Result<Value> {
         if !path.starts_with("/api/") || path.bytes().any(|byte| byte <= b' ' || byte == 127) {
             return Err(Error::Protocol("invalid explorer HTTP path".into()));
@@ -653,8 +698,7 @@ impl ProcessNode {
     }
 
     /// Common monotonic clock for RPC and P2P evidence.
-    #[must_use]
-    pub const fn evidence_clock(&self) -> Instant {
+    pub(crate) const fn evidence_clock(&self) -> Instant {
         self.started
     }
 
@@ -756,21 +800,54 @@ impl ProcessNode {
         Ok(())
     }
 
-    /// Ask the process for its current exit status.
-    pub fn exited(&mut self) -> Result<Option<std::process::ExitStatus>> {
-        self.child.try_wait().map_err(Error::Io)
-    }
-
     /// Send SIGTERM to the child.
-    pub fn send_sigterm(&self) {
+    #[cfg(unix)]
+    fn send_sigterm(&self) {
         let pid = self.pid().to_string();
         let _ = Command::new("kill").args(["-TERM", pid.as_str()]).status();
     }
 
+    /// Deliver the Windows equivalent of a graceful stop: `CTRL_BREAK_EVENT`
+    /// is the only console event another process can aim at a specific
+    /// process group, and the node maps it through its CRT SIGBREAK
+    /// registration onto the shared shutdown flag. The child was spawned
+    /// with `CREATE_NEW_PROCESS_GROUP` so the group id is its pid.
+    ///
+    /// The event only reaches a child sharing this console; when the
+    /// harness has none (a service or a windowless parent) delivery fails
+    /// and there is no graceful stop to wait for, so the failure escalates
+    /// to a forced terminate immediately rather than stalling the stop
+    /// timeout.
+    #[cfg(windows)]
+    fn send_sigterm(&mut self) {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+        // SAFETY: GenerateConsoleCtrlEvent is safe to call for any process
+        // group id; a stale pid simply makes the call a no-op.
+        let delivered = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid()) };
+        if delivered == 0 {
+            eprintln!(
+                "CTRL_BREAK delivery failed for pid {} ({}); forcing terminate",
+                self.pid(),
+                std::io::Error::last_os_error()
+            );
+            self.send_sigkill();
+        }
+    }
+
     /// Send SIGKILL to the child.
+    #[cfg(unix)]
     pub fn send_sigkill(&self) {
         let pid = self.pid().to_string();
         let _ = Command::new("kill").args(["-KILL", pid.as_str()]).status();
+    }
+
+    /// Forcibly terminate the child, the Windows counterpart of SIGKILL.
+    /// `Child::kill` acts on the process handle owned by `self.child`, so
+    /// a pid recycled after the child exits can never redirect the kill at
+    /// an unrelated process the way an `OpenProcess(pid)` lookup could.
+    #[cfg(windows)]
+    pub fn send_sigkill(&mut self) {
+        let _ = self.child.kill();
     }
 
     fn finish_output(&mut self) {
@@ -792,30 +869,62 @@ impl Drop for ProcessNode {
 
 /// Retains the newest `MAX_OUTPUT` bytes of a child's stream — the tail is
 /// where a late crash or error loop actually shows up; the head is least
-/// diagnostic. The tail is materialized to `file` at EOF.
+/// diagnostic. The tail is mirrored to `file` as it is captured so evidence
+/// readers see output while the child is still running.
 fn capture_output(mut reader: impl Read + Send + 'static, file: PathBuf) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let Ok(mut file) = File::create(&file) else {
+        let path = file;
+        let Ok(mut file) = File::create(&path) else {
             return;
         };
         let mut tail: VecDeque<u8> = VecDeque::new();
         let limit = usize::try_from(MAX_OUTPUT).unwrap_or(usize::MAX);
+        // File bytes already dropped from `tail`; once they reach `limit` the
+        // file (stale head + live tail) is compacted back to the tail.
+        let mut stale = 0_usize;
         let mut buffer = [0_u8; 8192];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) | Err(_) => break,
                 Ok(count) => {
                     tail.extend(buffer[..count].iter().copied());
+                    let _ = file.write_all(&buffer[..count]);
                     let excess = tail.len().saturating_sub(limit);
                     if excess > 0 {
                         tail.drain(..excess);
+                        stale += excess;
                     }
+                    if stale >= limit && publish_tail(&path, tail.make_contiguous()).is_ok() {
+                        // The rename orphaned `file` onto the old inode — reopen
+                        // the published path to keep appending to it.
+                        if let Ok(fresh) = OpenOptions::new().append(true).open(&path) {
+                            file = fresh;
+                        }
+                        stale = 0;
+                    }
+                    let _ = file.flush();
                 }
             }
         }
-        let _ = file.write_all(tail.make_contiguous());
+        // Rest state: file is exactly the retained tail, honoring MAX_OUTPUT.
+        if stale > 0 {
+            let _ = publish_tail(&path, tail.make_contiguous());
+        }
         let _ = file.flush();
     })
+}
+
+/// Writes `bytes` to a side file, then atomically renames it over `path`: a
+/// concurrent reader of the log always sees one complete generation — never
+/// a truncation window between `set_len(0)` and a rewrite.
+fn publish_tail(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let side = path.with_extension("tmp");
+    {
+        let mut tmp = File::create(&side)?;
+        tmp.write_all(bytes)?;
+        tmp.flush()?;
+    }
+    fs::rename(&side, path)
 }
 
 #[cfg(test)]

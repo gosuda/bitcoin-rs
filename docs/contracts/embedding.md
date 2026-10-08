@@ -16,8 +16,8 @@ the first embedder — there is one lifecycle implementation, not two.
   P2P core, ingress, and relay workers; join bootstrap,
   checkpoint, and signal workers; then publish a clean checkpoint if eligible.
   On every stop path — including `StartupGuard` rollback — the
-  derived-index worker is stopped under a bounded join before `teardown`
-  runs, so the clean checkpoint publishes and chainstate closes only
+  derived-index worker is stopped under a bounded join as `teardown`
+  begins, so the clean checkpoint publishes and chainstate closes only
   after the index released its stores. A join abandoned at the deadline
   records a teardown error, and so does a worker whose backend open was
   abandoned: its supervisor can exit while the detached open thread still
@@ -32,21 +32,34 @@ the first embedder — there is one lifecycle implementation, not two.
   `async fn` running on the caller's Tokio runtime; the node never
   creates, enters, or retains a runtime. Startup and shutdown drive the
   node's own threads synchronously. Owner: `crates/node/src/embed.rs`.
-- **EMB-03 — No storage in signatures.** No public embedding signature
-  names a storage backend, `NodeStorage`, or index internals. Owner:
+- **EMB-03 — Internal composition root.** No public embedding signature
+  names a storage backend, `NodeStorage`, index internals, or `NodeState`.
+  The `state` and `tx_ingress` worker-wiring modules are private in normal
+  production builds; the non-default `test-seam` exposes them for integration
+  tests and benchmarks. Deliberate downstream feature opt-in is not a security
+  boundary, and production dependency/feature edges must not enable this seam.
+  Embedders use operation-oriented `Node` methods instead of receiving raw
+  writable locks, subsystem services, channels, or runtime handles. Owner:
   `crates/node/src/embed.rs`.
 - **EMB-04 — Typed reads mirror the RPC facts.** `snapshot()` returns the
-  coherent `ChainSnapshot`; `sync_progress()` derives the
-  `getblockchaininfo` fields from the same handles without RPC JSON. The
-  calculation is `ChainHandles::sync_progress` in `crates/rpc/src/context.rs`, the
-  identical computation `getblockchaininfo` runs. `capabilities()` returns
-  the node's concrete-service `CapabilitySnapshot`. Owners:
+  coherent `ChainSnapshot`; `sync_progress()` returns the
+  `getblockchaininfo` fields without RPC JSON through
+  `ChainHandles::sync_progress` in `crates/rpc/src/context.rs`, the identical
+  projection `getblockchaininfo` runs. The chain facts in it — heights, best
+  hash, tip time and median time past, verification progress, the
+  initial-block-download decision, and chain work — come from the
+  Chainstate-minted `ChainProgressReader` (`crates/chain/src/progress.rs`).
+  The projection adds the network, the rendered difficulty and chain work,
+  and the storage facts; `getblockchaininfo` adds its wire-only fields
+  (`bits`, `target`, warnings, recovery status) on top. `capabilities()`
+  returns the node's concrete-service `CapabilitySnapshot`. Owners:
   `crates/node/src/embed.rs` and `crates/rpc/src/context.rs`; wire types:
   `crates/index/src/capabilities.rs`.
-- **EMB-05 — Broadcast is the shared admission.** `Node::broadcast` runs
-  `Context::admit_transaction` (`crates/rpc/src/context.rs`) — the identical
-  typed admission `sendrawtransaction` runs (`crates/rpc/src/handlers/tx.rs`):
-  the full policy stack is evaluated under the node's one
+- **EMB-05 — Broadcast is the shared admission.** `Node::broadcast`,
+  `sendrawtransaction` (`crates/rpc/src/handlers/tx.rs`) and Esplora
+  broadcasts all call `MempoolGateway::submit_local_transaction`;
+  `Node::broadcast` passes `sendrawtransaction`'s default fee-rate cap. The
+  full policy stack is evaluated under the node's one
   `MempoolGateway` write-lock interval and the authorized mutation
   commits inside it, so no concurrent admission can pass stale policy.
   Block-connect eviction commits through the same gateway's
@@ -79,6 +92,15 @@ the first embedder — there is one lifecycle implementation, not two.
   flag is raised first. Owner: `lifecycle.rs::NodeServices::teardown`.
 
 ## Startup failure and cancellation
+
+`Node::activate_assumeutxo_snapshot_file` enters the node-owned snapshot
+activation boundary after ordinary header synchronization has admitted the
+pinned base. It preserves mempool fencing and consumer alignment without
+exporting `NodeState` or the historical mutation handle. Like startup, this
+async method performs synchronous work when polled; callers choose its runtime
+placement. `Node::chainstates_summary` exposes roles and validation progress.
+Import or activation refusal is `NodeError::Snapshot`; reporting-storage failure
+is `NodeError::Unavailable`. See `ARCH-07b` for the durable lifecycle contract.
 
 ### `EMB-10`: Independent runtime-stall evidence
 
@@ -123,6 +145,11 @@ rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
 
 ## Proof
 
+- `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs::node_composition_root_is_not_a_production_embedding_api`
+  compiles supported `Node` reads in an isolated production consumer and rejects
+  imports of `state::NodeState` and the ingress worker entry point (`EMB-03`).
+  The same gate's Cargo graph validator rejects production feature/dependency
+  edges that enable `test-seam`, excluding legitimate dev-only fixture edges.
 - `crates/node/tests/embed.rs::embedded_node_lifecycle_round_trip` exercises
   typed reads, broadcast, consuming shutdown, and reopen.
 - `crates/node/tests/embed.rs::dropped_node_releases_services_and_datadir_for_reopen`
@@ -132,17 +159,11 @@ rejection). Daemon `run()` exposes teardown failures as `anyhow` errors.
   worker join failure, daemon/embedded identity, repeated teardown, rollback,
   queued-wake, and owned-startup-result regressions.
 - `crates/node/src/embed.rs::tests::broadcast_publishes_one_ordered_a_event_through_the_shared_gateway`
-  retains the gateway publication test and its direct-insertion control.
+  retains the gateway publication test and its direct-insertion control, and
+  checks that a refused broadcast returns the gateway's policy reason and
+  publishes nothing.
 - `crates/node/tests/shutdown.rs::run_exits_cleanly_after_fast_shutdown_signal`
   exercises the daemon path.
-
-## Removed internal entry points
-
-The lifecycle owner cut removes `run::start_node`, `run::NodeServices`,
-`run::TeardownMode`, `run::DRAIN_DEADLINE`, `embed::node_from_parts`,
-`NodeServices::cleanup`, and the detached-parts `StartupGuard::disarm`.
-No aliases or re-exports retain these paths. Callers enter the lifecycle
-owner directly; public `Node` and daemon APIs are not alternate owners.
 
 ## Vocabulary
 

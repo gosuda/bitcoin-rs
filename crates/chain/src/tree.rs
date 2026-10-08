@@ -1,6 +1,4 @@
-extern crate alloc;
-
-use alloc::sync::Arc;
+use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
 use bitcoin_rs_primitives::Hash256;
@@ -8,7 +6,7 @@ use hashbrown::HashTable;
 use slab::Slab;
 
 use crate::{
-    CachedState, ChainError, ChainTxCount,
+    ChainError, ChainTxCount,
     bip9_cache::Bip9Cache,
     node::{BlockHeader, BlockTreeNode, NodeId, NodeStatus},
     tip::TipSnapshot,
@@ -36,7 +34,7 @@ impl BlockTree {
             by_hash: HashTable::new(),
             active_by_height: ActiveHeightIndex::new(),
             tip: Arc::new(ArcSwapOption::empty()),
-            bip9_cache: Bip9Cache::new(),
+            bip9_cache: Bip9Cache::default(),
         }
     }
 
@@ -64,6 +62,7 @@ impl BlockTree {
     ///
     /// Invalidates the active-height index when callers mutate an indexed node,
     /// because they can change its parent or height.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn node_mut(&mut self, id: NodeId) -> Result<&mut BlockTreeNode, ChainError> {
         let is_indexed_active_node = {
             let node = self.node(id)?;
@@ -206,24 +205,19 @@ impl BlockTree {
     /// Returns active and fork leaves in slab iteration order.
     #[must_use]
     pub fn leaf_node_ids(&self) -> Vec<NodeId> {
-        let mut parents: hashbrown::HashSet<u32> = hashbrown::HashSet::new();
+        let mut parents: hashbrown::HashSet<usize> = hashbrown::HashSet::new();
         for (_index, node) in &self.nodes {
-            if let Some(parent_id) = node.parent
-                && let Some(parent_index) = parent_id.index()
-            {
-                // NodeId stores a u32; track parent indices to skip them later.
-                if let Ok(idx_u32) = u32::try_from(parent_index) {
-                    parents.insert(idx_u32);
-                }
+            if let Some(parent_index) = node.parent.and_then(NodeId::index) {
+                parents.insert(parent_index);
             }
         }
 
         let mut leaves = Vec::new();
         for (index, _node) in &self.nodes {
-            if let Ok(idx_u32) = u32::try_from(index)
-                && !parents.contains(&idx_u32)
+            if !parents.contains(&index)
+                && let Ok(id_u32) = u32::try_from(index)
             {
-                leaves.push(NodeId::new(idx_u32));
+                leaves.push(NodeId::new(id_u32));
             }
         }
         leaves
@@ -249,13 +243,6 @@ impl BlockTree {
         self.tip().map(|tip| tip.height)
     }
 
-    /// Returns the hash of the published tip, or `None` if no tip is
-    /// published yet.
-    #[must_use]
-    pub fn tip_hash(&self) -> Option<Hash256> {
-        self.tip().map(|tip| tip.hash)
-    }
-
     /// Shares the writable tip cell for lock-free publication. Requires mutation authority;
     /// read-only callers use [`Self::tip`] and cannot extract the cell.
     #[must_use]
@@ -263,19 +250,15 @@ impl BlockTree {
         Arc::clone(&self.tip)
     }
 
-    /// Returns the cached BIP9 deployment state for `(node_id, deployment_id)`, if any.
+    /// Returns the cached BIP9 deployment-state tag for `(node_id, deployment_id)`, if any.
     #[must_use]
-    pub(crate) fn cached_bip9_state(
-        &self,
-        node_id: NodeId,
-        deployment_id: u32,
-    ) -> Option<CachedState> {
+    pub(crate) fn cached_bip9_state(&self, node_id: NodeId, deployment_id: u32) -> Option<u8> {
         self.bip9_cache.get(node_id, deployment_id)
     }
 
-    /// Stores the cached BIP9 deployment state for `(node_id, deployment_id)`.
-    pub(crate) fn cache_bip9_state(&self, node_id: NodeId, deployment_id: u32, state: CachedState) {
-        self.bip9_cache.insert(node_id, deployment_id, state);
+    /// Stores the cached BIP9 deployment-state tag for `(node_id, deployment_id)`.
+    pub(crate) fn cache_bip9_state(&self, node_id: NodeId, deployment_id: u32, tag: u8) {
+        self.bip9_cache.insert(node_id, deployment_id, tag);
     }
 
     /// Builds a block locator starting from `tip_id`. For active tips, returns
@@ -456,65 +439,40 @@ impl BlockTree {
             return None;
         }
         let node = self.node_at_height_from(tip, height - 1)?;
-        self.median_time_past_at(node, bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW)
+        self.median_time_past_at(node)
     }
 
-    /// Returns the median time of the most recent `window` blocks, inclusive
-    /// of `start_id`, walking backward via parent pointers.
+    /// Returns the BIP113 median time of the most recent
+    /// [`bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW`] blocks, inclusive of
+    /// `start_id`, walking backward via parent pointers.
     ///
-    /// BIP113 uses `window = 11`. When the chain has fewer than `window`
-    /// blocks, the median is computed over however many exist. Returns `None`
-    /// only when `start_id` is not in the tree.
+    /// When the chain has fewer blocks than the window, the median is
+    /// computed over however many exist. Returns `None` only when `start_id`
+    /// is not in the tree.
     #[must_use]
-    pub fn median_time_past_at(&self, start_id: NodeId, window: usize) -> Option<u32> {
-        if window == 0 {
-            return Some(0);
-        }
-
-        if window == 11 {
-            let mut times = [0_u32; 11];
-            let mut len = 0;
-            let mut cursor = start_id;
-            while len < times.len() {
-                let Ok(node) = self.node(cursor) else {
-                    if len == 0 {
-                        return None;
-                    }
-                    break;
-                };
-                times[len] = node.header.time;
-                len += 1;
-                let Some(parent) = node.parent else {
-                    break;
-                };
-                cursor = parent;
-            }
-
-            times[..len].sort_unstable();
-            return Some(times[len / 2]);
-        }
-
-        let mut times = Vec::with_capacity(window);
+    pub fn median_time_past_at(&self, start_id: NodeId) -> Option<u32> {
+        const WINDOW: usize = bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
+        let mut times = [0_u32; WINDOW];
+        let mut len = 0usize;
         let mut cursor = start_id;
-        while times.len() < window {
+        while len < WINDOW {
             let Ok(node) = self.node(cursor) else {
-                if times.is_empty() {
+                if len == 0 {
                     return None;
                 }
                 break;
             };
-            times.push(node.header.time);
+            times[len] = node.header.time;
+            len += 1;
             let Some(parent) = node.parent else {
                 break;
             };
             cursor = parent;
         }
 
-        if times.is_empty() {
-            return None;
-        }
+        let times = &mut times[..len];
         times.sort_unstable();
-        Some(times[times.len() / 2])
+        Some(times[len / 2])
     }
 
     /// Inserts a header whose parent is inferred from `prev_blockhash`.
@@ -567,7 +525,7 @@ impl BlockTree {
             return Err(ChainError::DuplicateHeader { hash });
         }
 
-        let block_work = crate::header_sync::pow::work_from_header(&header);
+        let block_work = crate::block_work(&header);
         let (height, chainwork, status) = match parent {
             Some(parent_id) => {
                 let parent_node = self.node(parent_id)?;
@@ -1037,7 +995,7 @@ mod tests {
         assert_eq!(tree.node_at_height_from(side_ids[3], 1), Some(side_ids[1]));
 
         let active_prefix = main_ids[4];
-        let active_prefix_index = usize::try_from(active_prefix.get())?;
+        let active_prefix_index = active_prefix.index().ok_or("invalid active prefix")?;
         tree.nodes
             .get_mut(active_prefix_index)
             .ok_or("missing active prefix")?
@@ -1049,39 +1007,30 @@ mod tests {
         Ok(())
     }
 
-    /// The median matches an independent sort-and-pick over the same sample
-    /// for a zero, short, BIP113-sized, and oversized window, truncates to the
-    /// available history on a chain shorter than the window, and reports an
-    /// unknown start as `None` rather than an arbitrary median.
-    ///
-    /// `median_time_past_before_height` is the same median taken one block
-    /// earlier, so height 0 has no predecessor and height 1 sees genesis alone.
     #[test]
-    fn median_time_past_matches_an_independent_median_over_every_window()
+    fn median_time_past_matches_an_independent_median_over_every_prefix()
     -> Result<(), Box<dyn std::error::Error>> {
         let (tree, ids, times) = timed_chain(15)?;
         let tip = *ids.last().ok_or("chain has a tip")?;
 
-        assert_eq!(tree.median_time_past_at(tip, 0), Some(0));
-        assert_eq!(tree.median_time_past_at(ids[10], 11), Some(1_003_000));
-        for window in [5, 11, 15] {
+        assert_eq!(tree.median_time_past_at(ids[10]), Some(1_003_000));
+        for (height, &id) in ids.iter().enumerate() {
             assert_eq!(
-                tree.median_time_past_at(tip, window),
-                Some(expected_median_time_past(&times, window)),
-                "window {window}"
+                tree.median_time_past_at(id),
+                Some(expected_median_time_past(&times[..=height], 11)),
+                "height {height}"
+            );
+            assert_eq!(
+                tree.median_time_past_before_height(tip, u32::try_from(height + 1)?),
+                tree.median_time_past_at(id),
+                "before height {}",
+                height + 1
             );
         }
         assert_eq!(
-            tree.median_time_past_at(ids[2], 11),
-            Some(expected_median_time_past(&times[..=2], 11)),
-            "a chain shorter than the window uses the history it has"
+            tree.median_time_past_at(crate::node::NodeId::new(u32::MAX)),
+            None
         );
-        for window in [5, 11] {
-            assert_eq!(
-                tree.median_time_past_at(crate::node::NodeId::new(u32::MAX), window),
-                None
-            );
-        }
 
         assert_eq!(tree.median_time_past_before_height(tip, 0), None);
         assert_eq!(tree.median_time_past_before_height(tip, 1), Some(times[0]));
@@ -1108,7 +1057,10 @@ mod tests {
         // genesis's height and hash, not hand-stored values.
         assert_eq!(tree.tip_id(), Some(genesis_id));
         assert_eq!(tree.tip_height(), Some(0));
-        assert_eq!(tree.tip_hash(), Some(tree.node(genesis_id)?.hash));
+        assert_eq!(
+            tree.tip().map(|tip| tip.hash),
+            Some(tree.node(genesis_id)?.hash)
+        );
         Ok(())
     }
 

@@ -3,14 +3,14 @@
 //! Callers supply applied-chain facts. This module never queries node state and
 //! does not choose JSON-RPC versus REST transport policy.
 
+use bitcoin::hex::DisplayHex as _;
 use bitcoin_rs_primitives::{Block, Header, Network, consensus_bytes};
 use sonic_rs::{Value, json};
 
-use crate::compat::convert::hex_encode;
 use crate::tx_render::transaction_json;
 
 /// Applied-chain facts required to project a header or block.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct BlockChainContext {
     /// Height of this block on the applied chain when active; still reported
     /// for known headers that are not active.
@@ -38,12 +38,6 @@ pub(crate) enum BlockTxVerbosity {
     Full,
 }
 
-/// Render a block header using Bitcoin Core's verbose header shape.
-#[must_use]
-pub(crate) fn header_json(header: &Header, chain: &BlockChainContext) -> Value {
-    header_common_json(header, chain)
-}
-
 /// Render a block using Bitcoin Core's verbose block shape.
 #[must_use]
 pub(crate) fn block_json(
@@ -53,7 +47,7 @@ pub(crate) fn block_json(
     network: Network,
 ) -> Value {
     let header = &block.header;
-    let mut value = header_common_json(header, chain);
+    let mut value = header_json(header, chain);
     let size = block.total_size();
     let weight = block.weight();
     let stripped_size = block.stripped_size();
@@ -80,7 +74,7 @@ pub(crate) fn block_json(
 /// Hex-encode a header using consensus serialization.
 #[must_use]
 pub(crate) fn header_hex(header: &Header) -> String {
-    hex_encode(&consensus_bytes(header))
+    consensus_bytes(header).to_lower_hex_string()
 }
 
 /// Compute Bitcoin Core confirmations from applied-chain membership facts.
@@ -97,7 +91,9 @@ pub(crate) fn confirmations(applied_height: u32, block_height: u32, on_active_ch
         .saturating_add(1)
 }
 
-fn header_common_json(header: &Header, chain: &BlockChainContext) -> Value {
+/// Render a block header using Bitcoin Core's verbose header shape.
+#[must_use]
+pub(crate) fn header_json(header: &Header, chain: &BlockChainContext) -> Value {
     let version = header.version;
     let bits = header.bits;
     let mut value = json!({

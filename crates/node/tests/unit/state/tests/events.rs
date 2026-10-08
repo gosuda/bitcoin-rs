@@ -131,6 +131,10 @@ fn corrupt_process_epoch_file_refuses_start() -> anyhow::Result<()> {
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(&data_dir)?;
     std::fs::write(data_dir.join("process-epoch"), b"seven\n")?;
+    std::fs::write(
+        data_dir.join("CURRENT_SCHEMA"),
+        bitcoin_rs_storage::checkpoint::fs::current_schema_bytes(),
+    )?;
 
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
     config.data_dir = data_dir;
@@ -158,6 +162,10 @@ fn symlinked_epoch_lock_refuses_start() -> anyhow::Result<()> {
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(&data_dir)?;
     std::fs::write(data_dir.join("process-epoch"), b"41\n")?;
+    std::fs::write(
+        data_dir.join("CURRENT_SCHEMA"),
+        bitcoin_rs_storage::checkpoint::fs::current_schema_bytes(),
+    )?;
     std::os::unix::fs::symlink("process-epoch", data_dir.join(".process-epoch.lock"))?;
 
     let mut config = crate::NodeConfig::default_for_network(crate::Network::Regtest);
@@ -187,6 +195,10 @@ fn non_regular_epoch_lock_refuses_start() -> anyhow::Result<()> {
     let data_dir = dir.path().join("node");
     std::fs::create_dir_all(&data_dir)?;
     std::fs::write(data_dir.join("process-epoch"), b"7\n")?;
+    std::fs::write(
+        data_dir.join("CURRENT_SCHEMA"),
+        bitcoin_rs_storage::checkpoint::fs::current_schema_bytes(),
+    )?;
     let lock_dir = cap_std::fs::Dir::open_ambient_dir(&data_dir, cap_std::ambient_authority())?;
     rustix::fs::mkfifoat(
         &lock_dir,

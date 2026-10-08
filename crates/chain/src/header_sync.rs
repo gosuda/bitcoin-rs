@@ -1,7 +1,7 @@
-use bitcoin_rs_consensus::{MAX_TIMEWARP, MEDIAN_TIME_PAST_WINDOW};
+use bitcoin_rs_consensus::MAX_TIMEWARP;
 use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
 
-pub use pow::{compact_is_met_by, compact_within_pow_limit};
+pub use pow::compact_is_met_by;
 use pow::{compact_to_target, target_to_compact};
 
 use crate::{
@@ -73,15 +73,22 @@ pub fn accept_headers(
             continue;
         }
         validate_pow(header, hash, network)?;
-        validate_empty_tree_root(tree, header, hash, network)?;
+        // An empty tree only roots at the network's genesis hash.
+        if tree.is_empty() {
+            if hash != network.genesis_block_hash() {
+                return Err(ChainError::MissingParent {
+                    prev_hash: prev_hash_from_header(header),
+                });
+            }
+            // The validated genesis root: the tree is empty, so the
+            // header has no parent and no contextual rule applies.
+            let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
+            accepted.push(id);
+            continue;
+        }
         let prev_hash = prev_hash_from_header(header);
         let parent_id = match tree.lookup(prev_hash) {
             Some(parent_id) => parent_id,
-            None if tree.is_empty() => {
-                let id = tree.insert_header_with_hash(*header, hash, NodeStatus::HeaderValid)?;
-                accepted.push(id);
-                continue;
-            }
             None => return Err(ChainError::MissingParent { prev_hash }),
         };
         if tree.node(parent_id)?.status == NodeStatus::Invalid {
@@ -133,7 +140,7 @@ pub fn validate_contextual_header(
     validate_header_nbits(tree, parent_id, header, network)?;
 
     let median = tree
-        .median_time_past_at(parent_id, MEDIAN_TIME_PAST_WINDOW)
+        .median_time_past_at(parent_id)
         .ok_or(ChainError::UnknownNode { id: parent_id })?;
     if header.time <= median {
         return Err(ChainError::TimestampTooEarly {
@@ -193,7 +200,7 @@ pub fn validate_contextual_header(
 
 /// The timewarp floor a candidate at `height` inherits from its parent.
 ///
-/// At a difficulty-adjustment boundary that is `parent_time` less
+/// At a difficulty-adjustment boundary, the floor is `parent_time` minus
 /// [`MAX_TIMEWARP`]; off one there is no floor. This is the one boundary
 /// predicate and floor. Core's `GetMinimumTime` (`src/node/miner.cpp:42-49`)
 /// applies it on every network as mining policy; consensus rejection
@@ -203,21 +210,6 @@ pub fn minimum_candidate_time(parent_time: u32, height: u32, network: Network) -
     let retarget_interval = network.retarget_interval();
     (retarget_interval != 0 && height.is_multiple_of(retarget_interval))
         .then(|| parent_time.saturating_sub(MAX_TIMEWARP))
-}
-
-fn validate_empty_tree_root(
-    tree: &BlockTree,
-    header: &BlockHeader,
-    hash: bitcoin_rs_primitives::Hash256,
-    network: Network,
-) -> Result<(), ChainError> {
-    if !tree.is_empty() || hash == network.genesis_block_hash() {
-        return Ok(());
-    }
-
-    Err(ChainError::MissingParent {
-        prev_hash: prev_hash_from_header(header),
-    })
 }
 
 /// Computes the compact target a block extending `parent_id` must carry.
@@ -245,9 +237,9 @@ pub fn next_work_required(
     let retarget_interval = network.retarget_interval();
     let is_retarget = retarget_interval != 0 && height.is_multiple_of(retarget_interval);
     if is_retarget {
-        expected_retarget_bits(network, tree, parent_id, height, retarget_interval)
+        expected_retarget_bits(network, tree, parent_id)
     } else {
-        expected_non_retarget_bits(network, tree, parent_id, candidate_time, retarget_interval)
+        expected_non_retarget_bits(network, tree, parent_id, candidate_time)
     }
 }
 
@@ -261,13 +253,23 @@ pub fn validate_header_nbits(
     header: &BlockHeader,
     network: Network,
 ) -> Result<(), ChainError> {
-    let parent = tree.node(parent_id)?;
-    let height = parent
+    let expected = next_work_required(tree, parent_id, header.time, network)?;
+    let actual = header.bits;
+    if actual == expected {
+        return Ok(());
+    }
+    // `height` only reports the mismatch; resolve it on the failure path
+    // since `next_work_required` already proved the parent resolves.
+    let height = tree
+        .node(parent_id)?
         .height
         .checked_add(1)
         .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
-    let expected = next_work_required(tree, parent_id, header.time, network)?;
-    compare_expected_bits(header, height, expected)
+    Err(ChainError::NbitsMismatch {
+        actual: actual.to_consensus(),
+        expected: expected.to_consensus(),
+        height,
+    })
 }
 
 /// Validates a header's proof-of-work target and hash.
@@ -307,7 +309,6 @@ fn expected_non_retarget_bits(
     tree: &BlockTree,
     parent_id: NodeId,
     candidate_time: u32,
-    retarget_interval: u32,
 ) -> Result<CompactTarget, ChainError> {
     let parent = tree.node(parent_id)?;
     if !network.allow_min_difficulty_blocks() {
@@ -323,6 +324,7 @@ fn expected_non_retarget_bits(
     }
 
     let pow_limit = pow_limit_bits(network);
+    let retarget_interval = network.retarget_interval();
     let mut cursor_id = parent_id;
     loop {
         let cursor = tree.node(cursor_id)?;
@@ -342,15 +344,17 @@ fn expected_retarget_bits(
     network: Network,
     tree: &BlockTree,
     parent_id: NodeId,
-    height: u32,
-    retarget_interval: u32,
 ) -> Result<CompactTarget, ChainError> {
     let prev_node = tree.node(parent_id)?;
     if network.pow_no_retargeting() {
         return Ok(prev_node.header.bits);
     }
 
-    let Some(anchor_height) = height.checked_sub(retarget_interval) else {
+    let height = prev_node
+        .height
+        .checked_add(1)
+        .ok_or(ChainError::HeightOverflow { parent: parent_id })?;
+    let Some(anchor_height) = height.checked_sub(network.retarget_interval()) else {
         return Ok(prev_node.header.bits);
     };
     let Some(anchor_id) = tree.node_at_height_from(parent_id, anchor_height) else {
@@ -391,22 +395,6 @@ fn expected_retarget_bits(
     Ok(target_to_compact(new_target))
 }
 
-fn compare_expected_bits(
-    header: &BlockHeader,
-    height: u32,
-    expected: CompactTarget,
-) -> Result<(), ChainError> {
-    let actual = header.bits;
-    if actual != expected {
-        return Err(ChainError::NbitsMismatch {
-            actual: actual.to_consensus(),
-            expected: expected.to_consensus(),
-            height,
-        });
-    }
-    Ok(())
-}
-
 fn pow_limit_bits(network: Network) -> CompactTarget {
     target_to_compact(network.max_target())
 }
@@ -414,7 +402,11 @@ fn pow_limit_bits(network: Network) -> CompactTarget {
 /// Core's `GetBlockProof`: `~target / (target + 1) + 1`, also used for chainwork.
 #[must_use]
 pub fn block_work(header: &BlockHeader) -> ChainWork {
-    pow::work_from_header(header)
+    let target = pow::compact_to_target(header.bits);
+    if target == ChainWork::ZERO {
+        return ChainWork::ZERO;
+    }
+    (!target / (target + ChainWork::from(1u32))) + ChainWork::from(1u32)
 }
 
 /// Whether a difficulty transition from `old_bits` to `new_bits` at `height`
@@ -456,7 +448,7 @@ pub fn permitted_difficulty_transition(
     pow::compact_to_target(pow::target_to_compact(smallest)) <= observed
 }
 
-/// Compact proof-of-work target decode/encode and block-work helpers.
+/// Compact proof-of-work target decode/encode helpers.
 ///
 /// Mirrors Core's `arith_uint256::SetCompact`/`GetCompact`, with two
 /// deliberate divergences that cannot accept a header Core rejects: an
@@ -464,9 +456,9 @@ pub fn permitted_difficulty_transition(
 /// `pfOverflow`, and a sign-flagged encoding decodes to `ChainWork::ZERO`
 /// instead of being rejected by name.
 pub(crate) mod pow {
-    use bitcoin_rs_primitives::{CompactTarget, Hash256, Network};
+    use bitcoin_rs_primitives::{CompactTarget, Hash256};
 
-    use crate::node::{BlockHeader, ChainWork};
+    use crate::node::ChainWork;
 
     struct DecodedCompact {
         target: ChainWork,
@@ -474,7 +466,7 @@ pub(crate) mod pow {
     }
 
     fn decode_compact(bits: u32) -> DecodedCompact {
-        let exponent = usize::from(u8::try_from(bits >> 24).unwrap_or(0));
+        let exponent = usize::try_from(bits >> 24).unwrap_or(0);
         let mut mantissa = bits & 0x007f_ffff;
         let target = if exponent <= 3 {
             mantissa >>= 8 * (3 - exponent);
@@ -511,23 +503,6 @@ pub(crate) mod pow {
         target != ChainWork::ZERO && ChainWork::from_le_bytes(hash.to_le_bytes()) <= target
     }
 
-    /// Whether a compact target is nonzero and within the network limit.
-    #[must_use]
-    pub fn compact_within_pow_limit(network: Network, bits: CompactTarget) -> bool {
-        let target = compact_to_target(bits);
-        target != ChainWork::ZERO && target <= network.max_target()
-    }
-
-    /// The block-header proof of work: `~target / (target + 1) + 1`.
-    #[must_use]
-    pub(crate) fn work_from_header(header: &BlockHeader) -> ChainWork {
-        let target = compact_to_target(header.bits);
-        if target == ChainWork::ZERO {
-            return ChainWork::ZERO;
-        }
-        (!target / (target + ChainWork::from(1u32))) + ChainWork::from(1u32)
-    }
-
     /// Encodes a non-negative 256-bit target into compact consensus form.
     #[must_use]
     pub(crate) fn target_to_compact(target: ChainWork) -> CompactTarget {
@@ -559,23 +534,12 @@ pub(crate) mod pow {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
-mod contextual_header_tests {
-    use super::{
-        HeaderValidationMode, MAX_FUTURE_TIME_SECONDS, accept_headers, compact_is_met_by,
-        next_work_required, validate_contextual_header,
-    };
-    use crate::{
-        ChainError,
-        node::{BlockHeader, NodeStatus},
-        tree::{BlockTree, hash_from_header},
-    };
-    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+mod fixture {
+    use super::compact_is_met_by;
+    use crate::node::BlockHeader;
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256};
 
-    const REGTEST_BITS: u32 = 0x207f_ffff;
-    const TESTNET4_POW_LIMIT: u32 = 0x1d00_ffff;
-
-    fn mine_regtest(
+    pub(super) fn mine_regtest(
         prev_blockhash: BlockHash,
         height: u32,
         time: u32,
@@ -588,7 +552,7 @@ mod contextual_header_tests {
             prev_blockhash,
             merkle_root: Hash256::from_le_bytes(&merkle),
             time,
-            bits: CompactTarget::from_consensus(REGTEST_BITS),
+            bits: CompactTarget::from_consensus(0x207f_ffff),
             nonce: 0,
         };
         while !compact_is_met_by(header.bits, header.compute_hash().0) {
@@ -596,6 +560,22 @@ mod contextual_header_tests {
         }
         header
     }
+}
+
+#[cfg(test)]
+mod contextual_header_tests {
+    use super::{
+        HeaderValidationMode, MAX_FUTURE_TIME_SECONDS, accept_headers, fixture::mine_regtest,
+        next_work_required, validate_contextual_header,
+    };
+    use crate::{
+        ChainError,
+        node::{BlockHeader, NodeStatus},
+        tree::{BlockTree, hash_from_header},
+    };
+    use bitcoin_rs_primitives::{BlockHash, CompactTarget, Hash256, Network};
+
+    const TESTNET4_POW_LIMIT: u32 = 0x1d00_ffff;
 
     fn extend_regtest(
         tree: &mut BlockTree,
@@ -813,9 +793,9 @@ mod contextual_header_tests {
     fn chain_with_median_five() -> (BlockTree, BlockHeader) {
         let mut tree = BlockTree::new();
         let mut prev = BlockHash::default();
-        let mut tip = mine_regtest(prev, 0, 0, 4);
+        let mut tip = mine_regtest(prev, 0, 0, 1);
         for height in 0_u32..11 {
-            let header = mine_regtest(prev, height, height, 4);
+            let header = mine_regtest(prev, height, height, 1);
             prev = header.compute_hash();
             let hash = hash_from_header(&header);
             tree.insert_header_with_hash(header, hash, NodeStatus::HeaderValid)
@@ -838,13 +818,36 @@ mod contextual_header_tests {
         let drifted = rolled_back + MAX_FUTURE_TIME_SECONDS + 100;
         let ceiling = far_future + MAX_FUTURE_TIME_SECONDS;
         let cases = [
-            ("MTP equality", 5, 1_000_000, live, false),
-            ("above MTP", 6, 1_000_000, live, true),
-            ("replay MTP", 5, 1_000_000, replay, false),
-            ("live drift", drifted, rolled_back, live, false),
-            ("replay drift", drifted, rolled_back, replay, true),
-            ("supplied clock ceiling", ceiling, far_future, live, true),
-            ("one past ceiling", ceiling + 1, far_future, live, false),
+            ("MTP equality", 11, 5, 1_000_000, live, false),
+            ("above MTP", 11, 6, 1_000_000, live, true),
+            ("replay MTP", 11, 5, 1_000_000, replay, false),
+            (
+                "below-host ceiling",
+                11,
+                1_000_000 + MAX_FUTURE_TIME_SECONDS,
+                1_000_000,
+                live,
+                true,
+            ),
+            (
+                "past below-host ceiling",
+                11,
+                1_000_001 + MAX_FUTURE_TIME_SECONDS,
+                1_000_000,
+                live,
+                false,
+            ),
+            ("live drift", 11, drifted, rolled_back, live, false),
+            ("replay drift", 11, drifted, rolled_back, replay, true),
+            (
+                "supplied clock ceiling",
+                11,
+                ceiling,
+                far_future,
+                live,
+                true,
+            ),
+            ("one past ceiling", 12, ceiling + 1, far_future, live, false),
         ];
         assert!(
             super::current_unix_seconds() + MAX_FUTURE_TIME_SECONDS
@@ -852,8 +855,8 @@ mod contextual_header_tests {
             "the host clock must reject the supplied-time case, or it proves nothing"
         );
 
-        for (name, time, now, mode, accepted) in cases {
-            let header = mine_regtest(tip.compute_hash(), 11, time, 4);
+        for (name, seed, time, now, mode, accepted) in cases {
+            let header = mine_regtest(tip.compute_hash(), seed, time, 1);
             let result =
                 validate_contextual_header(&tree, parent_id, &header, Network::Regtest, now, mode);
             if accepted {

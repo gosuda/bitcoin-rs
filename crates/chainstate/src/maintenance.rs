@@ -1,48 +1,29 @@
 //! Chainstate-owned idle maintenance: journal durability and retention.
-//!
-//! This is the non-checkpoint home of the two duties that must run for the
-//! lifetime of the node regardless of whether periodic full-checkpoint
-//! publication exists (#634): flushing chainstate journal records whose
-//! wall-clock batch boundary has passed, and journal retention pressure —
-//! reporting it and draining it through a checkpoint publication, whose
-//! only role here is compaction maintenance (`RCV-10` in
-//! `docs/contracts/recovery.md`: the durable root, not the checkpoint, is
-//! the recovery authority).
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::checkpoint::publisher::CheckpointPublisher;
 use crate::checkpoint::{CheckpointError, CheckpointWrite};
 /// Poll interval for the maintenance loop. Short enough to flush soon after
 /// a journal boundary passes and to drain retention pressure soon after it
 /// appears; long enough to avoid busy-waiting.
-pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Spawns the chainstate maintenance worker thread.
-///
-/// The worker polls every [`POLL_INTERVAL`], flushes due journal records,
-/// and on journal retention pressure reports the transition and drains it
-/// through a checkpoint publication (a compaction-base advance). A
-/// `DisconnectInFlight` refusal or an in-flight publication error is
-/// logged and retried on the next tick. The worker exits when `shutdown`
-/// is set.
 fn spawn_chainstate_maintenance_worker(
     publisher: Arc<CheckpointPublisher>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("bitcoin-rs-chainstate-maintenance".into())
         .spawn(move || maintenance_loop(&publisher, &shutdown))
 }
 
-fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &AtomicBool) {
+fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &bitcoin_rs_chain::LatchReader) {
     let mut prev_pressure = false;
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.is_triggered() {
         if wait_for_shutdown(shutdown, POLL_INTERVAL) {
             break;
         }
@@ -58,8 +39,8 @@ fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &AtomicBool) {
             prev_pressure = true;
         }
         match publisher.publish() {
-            Ok(CheckpointWrite::Published { generation }) => tracing::info!(
-                ?generation,
+            Ok(CheckpointWrite::Published { reference }) => tracing::info!(
+                generation = reference.generation,
                 "retention compaction published a chainstate checkpoint"
             ),
             Ok(CheckpointWrite::SkippedNoAppliedTip) => {
@@ -79,7 +60,7 @@ fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &AtomicBool) {
 /// batch boundary has passed and reports whether segment retention
 /// requires compaction.
 fn idle_journal_maintenance(publisher: &CheckpointPublisher) -> bool {
-    let Some(journal) = publisher.journal.as_ref() else {
+    let Some(journal) = publisher.journal.read().clone() else {
         return false;
     };
     let mut journal = journal.lock();
@@ -99,10 +80,10 @@ fn idle_journal_maintenance(publisher: &CheckpointPublisher) -> bool {
 
 /// Sleeps for `duration` unless `shutdown` is set, returning `true` if the
 /// worker should exit.
-fn wait_for_shutdown(shutdown: &AtomicBool, duration: Duration) -> bool {
+fn wait_for_shutdown(shutdown: &bitcoin_rs_chain::LatchReader, duration: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < duration {
-        if shutdown.load(Ordering::Relaxed) {
+        if shutdown.is_triggered() {
             return true;
         }
         let remaining = duration
@@ -110,7 +91,7 @@ fn wait_for_shutdown(shutdown: &AtomicBool, duration: Duration) -> bool {
             .unwrap_or(Duration::ZERO);
         std::thread::sleep(Duration::from_millis(200).min(remaining));
     }
-    shutdown.load(Ordering::Relaxed)
+    shutdown.is_triggered()
 }
 
 impl crate::Chainstate {
@@ -120,7 +101,7 @@ impl crate::Chainstate {
             .checkpoint_publisher
             .clone()
             .ok_or_else(|| anyhow::anyhow!("maintenance requires checkpoint configuration"))?;
-        spawn_chainstate_maintenance_worker(publisher, self.shutdown_handle())
+        spawn_chainstate_maintenance_worker(publisher, self.shutdown_reader())
             .map_err(anyhow::Error::new)
     }
 }

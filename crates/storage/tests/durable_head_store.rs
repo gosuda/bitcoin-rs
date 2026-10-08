@@ -5,6 +5,8 @@
 //! durability fault never leaves a torn state, and the fence refuses a stale
 //! expectation without applying the batch.
 
+#![cfg(feature = "fjall")]
+
 use std::sync::Arc;
 
 use bitcoin_rs_primitives::Hash256;
@@ -15,6 +17,7 @@ use bitcoin_rs_storage::{
 
 fn head(commit_id: u64, height: u32) -> DurableHead {
     DurableHead {
+        assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
         commit_id,
         height,
         tip: Hash256::from_le_bytes(&[0xB0; 32]),
@@ -30,12 +33,10 @@ fn run_reopen_and_fence_laws() -> Result<(), StorageError> {
         bitcoin_rs_storage::FjallStore::open(temp.path())?,
     )));
 
-    // An empty store must be named with a None fence.
     let first = head(1, 1);
     store.commit(None, &first, &CommitRecords::default())?;
     assert_eq!(store.load()?.map(|h| h.commit_id), Some(1));
 
-    // A stale fence applies nothing and reports the move.
     let second = head(2, 2);
     let stale = head(9, 9);
     assert!(
@@ -46,7 +47,6 @@ fn run_reopen_and_fence_laws() -> Result<(), StorageError> {
     assert_eq!(store.load()?.map(|h| h.commit_id), Some(1));
     store.commit(Some(&first), &second, &CommitRecords::default())?;
 
-    // Ok(()) is the durability receipt: a reopened store sees the head.
     drop(store);
     let reopened =
         KvDurableHeadStore::new(Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?));
@@ -62,6 +62,48 @@ fn fjall_durable_head_reopen_and_fence_laws() -> Result<(), StorageError> {
 }
 
 #[cfg(feature = "fjall")]
+#[test]
+fn malformed_file_maximum_refuses_the_entire_head_batch() -> Result<(), StorageError> {
+    let temp = tempfile::tempdir()?;
+    let backend = Arc::new(bitcoin_rs_storage::FjallStore::open(temp.path())?);
+    let store = KvDurableHeadStore::new(backend.clone());
+    let first = head(1, 20);
+    store.commit(None, &first, &CommitRecords::default())?;
+    let key = bitcoin_rs_storage::block_file_max_height_key(0);
+    let cf = bitcoin_rs_storage::pruning::BLOCK_DATA_CF;
+    let mut batch = backend.new_batch();
+    batch.put(cf, &key, b"corrupt");
+    backend.write_durable(batch)?;
+    let mut records = CommitRecords::default();
+    records.body_rows.push((
+        1,
+        first.tip,
+        bitcoin_rs_storage::BlockFilePosition {
+            file_no: 0,
+            offset: 0,
+            len: 80,
+        },
+    ));
+    assert!(matches!(
+        store.commit(Some(&first), &head(2, 20), &records),
+        Err(StorageError::IncompatibleData(_))
+    ));
+    assert_eq!(store.load()?, Some(first));
+    assert_eq!(
+        backend.get(cf, &key)?.as_deref(),
+        Some(b"corrupt".as_slice())
+    );
+    assert!(
+        backend
+            .get(
+                cf,
+                &bitcoin_rs_storage::pruning::block_body_key(1, first.tip)
+            )?
+            .is_none()
+    );
+    Ok(())
+}
+
 #[test]
 fn fjall_durable_head_faults_never_tear_the_state() -> Result<(), StorageError> {
     for fault in [

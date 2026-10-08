@@ -14,8 +14,8 @@ use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, Wtxid};
 #[cfg(test)]
 use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
 use bitcoin_rs_script::{
-    Instruction, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr, is_p2wpkh, is_p2wsh,
-    is_push_only, minimal_non_dust, multisig_key_count, opcode, script::instructions,
+    Instruction, instructions, is_op_return, is_p2a, is_p2pk, is_p2pkh, is_p2sh, is_p2tr,
+    is_p2wpkh, is_p2wsh, is_push_only, minimal_non_dust, multisig_key_count, opcode,
 };
 use thiserror::Error;
 
@@ -55,9 +55,6 @@ const TX_VERSION_MIN: i32 = 1;
 const TX_VERSION_MAX: i32 = 3;
 
 /// Standardness policy rejection reason for a single transaction.
-///
-/// Each variant corresponds to a distinct `IsStandardTx` / `IsStandard`
-/// failure in Bitcoin Core's mempool policy.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
 pub enum StandardnessError {
     /// Transaction version is outside the standard range (1 through 3).
@@ -93,21 +90,11 @@ pub enum StandardnessError {
 }
 
 /// Checks whether a transaction satisfies Bitcoin Core's standardness policy.
-///
-/// This mirrors `IsStandardTx` in Bitcoin Core's `policy/policy.cpp`:
-/// version, weight, `scriptSig` push-only/size, output script type,
-/// aggregate nulldata script bytes, and dust.
-///
-/// Returns `Ok(())` if the transaction is standard, or the first
-/// `StandardnessError` encountered.
 pub fn is_standard_tx(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), StandardnessError> {
     check_version(tx)?;
     check_weight(tx)?;
     check_script_sigs(tx)?;
     check_outputs(tx, policy)?;
-    // Last, matching Core: `IsStandardTx` runs first and `PreChecks` applies
-    // `tx-size-small` after it, so a transaction that is both undersized and
-    // carries a non-standard output reports the output.
     check_min_size(tx)?;
     Ok(())
 }
@@ -116,10 +103,6 @@ pub fn is_standard_tx(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), Standa
 pub const MAX_PACKAGE_COUNT: usize = 25;
 
 /// Caller-resolved fee and prevout context for one package transaction.
-///
-/// Prevout lookup and fee accounting live outside this module. The acceptance
-/// seam records the already-computed prevout-aware `sigop_cost` so RPC and
-/// admission can project it without recomputing script costs here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PackageTxContext {
     /// Actual fee in satoshis.
@@ -166,11 +149,6 @@ pub struct PackageAcceptanceFacts {
     pub results: Vec<TxAcceptanceFact>,
 }
 /// Next-block BIP68 sequence-lock context for one admission evaluation.
-///
-/// Confirmed inputs carry their origin height and the median-time-past of the
-/// block before the one that created them. Mempool and package parents are
-/// encoded as `next_height` and `next_mtp`, matching the consensus helper's
-/// unconfirmed-prevout convention.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Bip68Admission<'a> {
     /// Whether CSV (BIP68/112/113) is active for the next block.
@@ -255,21 +233,16 @@ pub enum AcceptanceRejectReason {
 }
 
 /// Caller fee guard shared by policy-only evaluation and verified admission.
-/// Core compares the actual fee to `CFeeRate::GetFee(vsize)`, not to a
-/// rounded per-kvB quote. Zero disables the guard. The relay-charge helper
-/// owns the rounding and minimum-one-satoshi rule for both boundaries.
 pub(crate) fn exceeds_max_feerate(fee: u64, vsize: u32, maximum: Option<u64>) -> bool {
     maximum.is_some_and(|max| {
         crate::rbf::required_fee(max, vsize)
             .is_ok_and(|limit| limit != 0 && i128::from(fee) > limit)
     })
 }
-/// Returns true when `tx`'s BIP68 sequence locks are satisfied at the next block.
+/// Returns true when `tx`'s BIP68 sequence locks are satisfied at the next
+/// block.
 ///
-/// Confirmed inputs use the chain metadata from `finality.prevout_meta`. Any
-/// resolved input not present there (mempool/package parents) is encoded as the
-/// next block, so any positive relative lock fails. Missing inputs are not
-/// checked here; callers must reject those first.
+/// Callers must reject missing inputs first; this check skips unresolved inputs.
 pub(crate) fn bip68_final(pool: &Mempool, tx: &Tx, finality: &Bip68Admission<'_>) -> bool {
     if !finality.csv_active || tx.version < 2 {
         return true;
@@ -382,17 +355,10 @@ pub(crate) fn evaluate_one(
 /// Returns true if `tx` is a coinbase transaction: exactly one input whose
 /// previous output is the null outpoint (zero txid, `vout == u32::MAX`).
 fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1
-        && tx.inputs[0].previous_output.txid == Txid::default()
-        && tx.inputs[0].previous_output.vout == u32::MAX
+    tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null()
 }
 
 /// Minimum non-witness serialization Core relays, `tx-size-small`.
-///
-/// The bound is on the stripped size. A one-input `SegWit` spend with an empty
-/// scriptSig and a minimal `OP_RETURN` output serializes to 61 bytes without
-/// its witness while carrying its authorization inside one, so a weight check
-/// alone lets it through.
 const MIN_NON_WITNESS_TX_SIZE: usize = 65;
 
 fn check_min_size(tx: &Tx) -> Result<(), StandardnessError> {
@@ -466,9 +432,6 @@ fn check_outputs(tx: &Tx, policy: &StandardnessPolicy) -> Result<(), Standardnes
 }
 
 /// Returns `true` if `script` is one of the standard output script types.
-///
-/// Standard types: P2PKH, P2SH, P2PK, P2WPKH, P2WSH, P2TR, bare multisig
-/// (up to 3 keys), and `OP_RETURN` (checked separately by the caller).
 fn is_standard_output_script(script: &[u8]) -> bool {
     is_p2pkh(script)
         || is_p2sh(script)
@@ -481,8 +444,6 @@ fn is_standard_output_script(script: &[u8]) -> bool {
 }
 
 /// Returns `true` if `script` is a bare multisig with at most 3 pubkeys.
-///
-/// Bitcoin Core's `IsStandard` allows bare multisig with up to 3 keys.
 fn is_standard_multisig(script: &[u8]) -> bool {
     multisig_key_count(script).is_some_and(|n| n <= 3)
 }
@@ -493,9 +454,6 @@ pub(crate) fn is_dust(output: &TxOut, dust_relay_fee: u64) -> bool {
 }
 
 /// Core `GetDust`: whether any output is below the dust-relay threshold.
-///
-/// `OP_RETURN` outputs have a zero threshold, so a 0-value nulldata output is
-/// not dust.
 #[must_use]
 pub(crate) fn tx_has_dust_outputs(tx: &Tx, dust_relay_fee: u64) -> bool {
     tx.outputs
@@ -517,29 +475,13 @@ const fn compact_size_len(len: usize) -> usize {
 }
 
 /// Extracts the payload length from an `OP_RETURN` script.
-///
-/// An `OP_RETURN` script is `OP_RETURN` followed by zero or more push
-/// operations. The payload length is the total number of bytes pushed.
-/// Returns `None` if the script is not `OP_RETURN`.
-/// Returns `true` if everything after the leading `OP_RETURN` is a data push.
-///
-/// Standard nulldata is `OP_RETURN` followed by pushes and nothing else. A
-/// script that merely starts with `OP_RETURN` and then carries an opcode, or
-/// that fails to parse partway, is not standard — and the old code accepted
-/// both, because it ignored opcodes and treated a parse error as the end of
-/// the payload.
 fn is_standard_nulldata(script: &[u8]) -> bool {
     let mut instructions = instructions(script);
-    // The leading OP_RETURN itself, already established by `is_op_return`.
     if instructions.next().is_none() {
         return false;
     }
     instructions.all(|inst| match inst {
         Ok(Instruction::PushBytes(_)) => true,
-        // `OP_1` through `OP_16` and `OP_1NEGATE` are pushes too, and
-        // rust-bitcoin reports them as `Op` rather than `PushBytes`. Core's
-        // push-only nulldata rule accepts every push opcode, so rejecting
-        // `OP_RETURN OP_1` would call a standard output non-standard.
         Ok(Instruction::Op(op)) => {
             op == opcode::OP_1NEGATE || (opcode::OP_PUSHNUM_1..=opcode::OP_PUSHNUM_16).contains(&op)
         }
@@ -548,7 +490,6 @@ fn is_standard_nulldata(script: &[u8]) -> bool {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -610,51 +551,28 @@ mod tests {
     }
 
     #[test]
-    fn accepts_standard_version_one() {
-        let tx = standard_tx(1);
-        assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
-    }
-
-    #[test]
-    fn accepts_standard_version_two() {
-        let tx = standard_tx(2);
-        assert_eq!(is_standard_tx(&tx, &policy()), Ok(()));
-    }
-
-    #[test]
-    fn rejects_version_zero() {
-        let tx = standard_tx(0);
-        assert_eq!(
-            is_standard_tx(&tx, &policy()),
-            Err(StandardnessError::Version)
-        );
-    }
-
-    #[test]
-    fn version_three_passes_standardness_for_truc_admission() {
-        assert_eq!(is_standard_tx(&standard_tx(3), &policy()), Ok(()));
-    }
-
-    #[test]
-    fn rejects_version_four() {
-        let tx = standard_tx(4);
-        assert_eq!(
-            is_standard_tx(&tx, &policy()),
-            Err(StandardnessError::Version)
-        );
+    fn only_versions_one_through_three_are_standard() {
+        for (version, expected) in [
+            (0_i32, Err(StandardnessError::Version)),
+            (1, Ok(())),
+            (2, Ok(())),
+            (3, Ok(())),
+            (4, Err(StandardnessError::Version)),
+        ] {
+            assert_eq!(
+                is_standard_tx(&standard_tx(version), &policy()),
+                expected,
+                "version {version}"
+            );
+        }
     }
 
     /// Numeric push opcodes are pushes, and standard nulldata accepts them.
-    ///
-    /// The native script iterator reports `OP_1` through `OP_16` as `Op` rather
-    /// than `PushBytes`, so a naive push-only check calls `OP_RETURN OP_1`
-    /// non-standard when Core relays it.
     #[test]
     fn accepts_op_return_followed_by_a_numeric_push() {
         let mut tx = standard_tx(1);
         tx.outputs[0].value = Amount::ZERO;
         tx.outputs[0].script_pubkey = vec![opcode::OP_RETURN, opcode::OP_PUSHNUM_1].into();
-        // Padded to clear the relay minimum, which is a different rule.
         tx.outputs.push(TxOut {
             value: Amount::from_sat(50_000),
             script_pubkey: p2pkh(&[9_u8; 20]).into(),
@@ -675,11 +593,6 @@ mod tests {
     }
 
     /// A push that is not a pubkey length still passes `is_multisig`.
-    ///
-    /// That predicate was measured against this surface: it already rejects a
-    /// declared count that disagrees with the keys present, an `m` greater than
-    /// `n`, and a keyless script. Push length is the one thing it does not
-    /// check, so it is the only thing worth checking here.
     #[test]
     fn rejects_bare_multisig_whose_key_is_not_a_pubkey() {
         let mut script = vec![opcode::OP_PUSHNUM_1];
@@ -749,10 +662,6 @@ mod tests {
     }
 
     /// The pay-to-anchor template, `OP_1` plus a two-byte push of 0x4e73.
-    ///
-    /// Carries a second, ordinary output: a lone 4-byte anchor script makes the
-    /// transaction smaller than the relay minimum, and this test is about the
-    /// script being recognised, not about that.
     #[test]
     fn accepts_a_pay_to_anchor_output() {
         let mut tx = standard_tx(1);
@@ -784,7 +693,6 @@ mod tests {
     #[test]
     fn rejects_non_pushonly_scriptsig() {
         let mut tx = standard_tx(1);
-        // OP_DUP is not a push opcode.
         tx.inputs[0].script_sig = vec![opcode::OP_DUP].into();
         assert_eq!(
             is_standard_tx(&tx, &policy()),
@@ -795,7 +703,6 @@ mod tests {
     #[test]
     fn rejects_oversized_scriptsig() {
         let mut tx = standard_tx(1);
-        // Build a push-only scriptSig that exceeds 1650 bytes.
         let big = vec![0_u8; super::MAX_STANDARD_SCRIPTSIG_SIZE];
         tx.inputs[0].script_sig = push_data(&big).into();
         assert_eq!(
@@ -892,7 +799,6 @@ mod tests {
     #[test]
     fn rejects_non_standard_output_script() {
         let mut tx = standard_tx(1);
-        // A random non-standard script.
         tx.outputs[0].script_pubkey = vec![0x74].into(); // OP_DEPTH
         assert_eq!(
             is_standard_tx(&tx, &policy()),

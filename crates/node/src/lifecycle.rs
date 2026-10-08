@@ -4,7 +4,6 @@
 //! The daemon and embedding surfaces both enter this lifecycle directly.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -75,11 +74,8 @@ struct RpcChainControl {
 
 fn rpc_network_handles(state: &NodeState) -> NetworkHandles {
     NetworkHandles {
-        network_active: state.network_active(),
         peer_table: state.peer_table(),
-        p2p_outbound_sender: Some(state.p2p_outbound_sender()),
-        banned: state.banned_subnets(),
-        added_nodes: state.added_nodes(),
+        p2p: state.p2p(),
         local_services: state.p2p().local_services().to_u64(),
     }
 }
@@ -108,7 +104,6 @@ fn bind_rpc(
     state: &NodeState,
     mining_control: &Arc<dyn MiningControl>,
     block_body_source: Arc<dyn BlockBodySource>,
-    ibd: &Arc<bitcoin_rs_chain::InitialBlockDownload>,
 ) -> Result<(Arc<Context>, RpcServer)> {
     let rpc_auth = Arc::new(state.config().rpc.auth.to_rpc_auth()?);
     let chainstate = state.chainstate();
@@ -116,8 +111,8 @@ fn bind_rpc(
         chain: ChainHandles {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),
-            ibd: Arc::clone(ibd),
-            blocks: state.blocks(),
+            progress: chainstate.chain_progress_reader(),
+            blocks: state.block_log_reader(),
             utxo: chainstate.utxo_reader(),
             coin_stats: chainstate.coin_stats_handle(),
             block_tree: chainstate.block_tree_reader(),
@@ -221,7 +216,7 @@ pub(crate) enum TeardownMode {
 /// shutdown followed by Drop safe, and prevents repeated lifecycle work.
 #[derive(Default)]
 pub(crate) struct NodeServices {
-    event_loop: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+    event_loop: Option<std::thread::JoinHandle<()>>,
     event_loop_signal: Option<crossbeam_channel::Sender<()>>,
     /// Stops and joins its listener in Drop.
     metrics: Option<crate::metrics::MetricsServer>,
@@ -240,25 +235,28 @@ pub(crate) struct NodeServices {
 impl NodeServices {
     /// Raises shutdown, wakes and joins the event loop, joins core services,
     /// drains subsystems, joins bootstrap/maintenance/signal workers, and only
-    /// then publishes a clean checkpoint. The derived-index worker is stopped
-    /// and joined by the caller before this teardown runs; a caller-supplied
-    /// `first_error` — e.g. an index join abandoned at the deadline — seeds
-    /// the remembered error and suppresses the checkpoint just like a
-    /// cleanup-stage failure. The first error is returned after all remaining
-    /// cleanup stages run.
+    /// then publishes a clean checkpoint. The derived-index worker is joined
+    /// before the remaining services. The first error is returned after all
+    /// remaining cleanup stages run and suppresses the clean checkpoint.
     pub(crate) fn teardown(
         &mut self,
-        state: Option<&NodeState>,
+        state: Option<&mut NodeState>,
         mode: TeardownMode,
-        mut first_error: Option<anyhow::Error>,
     ) -> anyhow::Result<()> {
         if self.teardown_started {
             return Ok(());
         }
         self.teardown_started = true;
+        let mut first_error = None;
+        let state = state.map(|state| {
+            if let Err(error) = state.bounded_index_shutdown(DRAIN_DEADLINE) {
+                set_first_error(&mut first_error, error);
+            }
+            &*state
+        });
         let _stage = shutdown::mark_shutdown_stage();
         if let Some(state) = state {
-            state.shutdown().store(true, Ordering::Release);
+            state.request_shutdown();
             state.p2p().shutdown();
         }
         if let Some(tx) = self.event_loop_signal.take() {
@@ -274,7 +272,8 @@ impl NodeServices {
         // no further mempool mutations run and this snapshot is final.
         // docs/policies/db-migration.md — owner-local, degrade-not-fail.
         if let Some(state) = state {
-            bitcoin_rs_mempool::fee_history::save(state.data_dir(), &state.mempool());
+            let history = state.mempool_reader().read().estimator_history();
+            bitcoin_rs_mempool::fee_history::save(state.data_dir(), &history);
         }
         if let Some(error) = first_error {
             return Err(error);
@@ -289,13 +288,9 @@ impl NodeServices {
         first_error: &mut Option<anyhow::Error>,
     ) {
         if let Some(handle) = self.event_loop.take() {
-            match handle.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => set_first_error(first_error, error),
+            if handle.join().is_err() {
                 // Event loop thread panic.
-                Err(_) => {
-                    set_first_error(first_error, anyhow::anyhow!("event loop thread panicked"));
-                }
+                set_first_error(first_error, anyhow::anyhow!("event loop thread panicked"));
             }
         }
         if let Some(handle) = self.rpc_thread.take() {
@@ -313,7 +308,11 @@ impl NodeServices {
                 }
             }
         }
-        self.metrics.take();
+        if let Some(mut metrics) = self.metrics.take()
+            && let Err(error) = metrics.stop_and_join()
+        {
+            set_first_error(first_error, error);
+        }
         if let Some(handle) = self.readiness_sampler.take() {
             // Readiness sampler thread panic.
             if handle.join().is_err() {
@@ -415,7 +414,7 @@ fn set_first_error(slot: &mut Option<anyhow::Error>, error: anyhow::Error) {
 impl Drop for NodeServices {
     fn drop(&mut self) {
         // Abandoned services still run the shared teardown.
-        if let Err(error) = self.teardown(None, TeardownMode::StartupAbort, None) {
+        if let Err(error) = self.teardown(None, TeardownMode::StartupAbort) {
             tracing::warn!(%error, "dropped node services; teardown reported an error");
         }
     }
@@ -445,17 +444,9 @@ impl StartupGuard {
 
 impl Drop for StartupGuard {
     fn drop(&mut self) {
-        // Startup failure rolls the partially built graph back. The index
-        // worker stops through the same bounded path as explicit shutdown, so
-        // a worker stuck in open or storage I/O cannot block rollback
-        // indefinitely inside `DerivedIndexHost::drop`.
-        let index_error = self
-            .state
-            .as_mut()
-            .and_then(|state| state.bounded_index_shutdown(DRAIN_DEADLINE).err());
-        if let Err(error) =
-            self.services
-                .teardown(self.state.as_ref(), TeardownMode::StartupAbort, index_error)
+        if let Err(error) = self
+            .services
+            .teardown(self.state.as_mut(), TeardownMode::StartupAbort)
         {
             tracing::warn!(%error, "startup rollback reported a cleanup failure");
         }
@@ -469,7 +460,7 @@ impl Drop for StartupGuard {
 /// receives detached startup parts or needs to reconstruct lifecycle ownership.
 /// `install_signals` is the daemon's only difference from embedded startup.
 /// A failure after any service starts rolls it back through `StartupGuard`.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 pub(crate) fn start_node(
     config: NodeConfig,
     runtime: RuntimeInputs,
@@ -486,7 +477,7 @@ pub(crate) fn start_node(
     // tracer so consumers (bpftrace, BCC, DTrace) can discover them — shared
     // startup, so daemon (`run`) and embedded (`Node::start`) nodes are
     // equally discoverable. A no-op without the `usdt` feature.
-    bitcoin_rs_trace::register_probes();
+    bitcoin_rs_consensus::trace::register_probes();
     cap_global_thread_pool();
     let injected_shutdown = runtime.shutdown;
     let state = NodeState::open(config, runtime.mempool_observer.as_ref())?;
@@ -506,7 +497,7 @@ pub(crate) fn start_node(
     tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
     guard.services.metrics = if let Some(bind) = state.config().observability.metrics_bind {
         let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
-        crate::metrics::start_metrics(Some(bind), state.shutdown(), &identity)?
+        crate::metrics::start_metrics(Some(bind), state.shutdown_reader(), &identity)?
     } else {
         None
     };
@@ -516,20 +507,20 @@ pub(crate) fn start_node(
     guard.services.readiness_sampler = if guard.services.metrics.is_some() {
         Some(crate::metrics::spawn_readiness_sampler(
             state.derived_index_status(),
-            state.shutdown(),
+            state.shutdown_reader(),
         )?)
     } else {
         None
     };
 
-    let shutdown = state.shutdown();
     let (shutdown_rx, event_loop_signal) = if let Some(rx) = injected_shutdown {
         (rx, None)
     } else {
         let (tx, rx) = bounded(1);
         if install_signals {
+            let chainstate_for_signal = state.chainstate();
             guard.services.signal_handler = Some(crate::signal::ShutdownHandler::install(
-                Arc::clone(&shutdown),
+                move || chainstate_for_signal.request_shutdown(),
                 tx.clone(),
             )?);
         }
@@ -551,7 +542,7 @@ pub(crate) fn start_node(
     let peer_ready_sync = Arc::clone(&sync);
     let loop_handle = EventLoop::with_sync_wake(shutdown_rx, sync, sync_wake_rx);
     let coordinator = Arc::new(crate::MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         Arc::clone(&chainstate),
         state.stable_read(),
         state.chain_followers(),
@@ -564,17 +555,16 @@ pub(crate) fn start_node(
     signal.attach(&mining_control);
     signal.attach_sequence_wake(&sequence_wake);
     let gateway = state.mempool_gateway();
-    // The node's one latch, built with the chainstate at open and already
-    // held by the block-download executor: `initialblockdownload`, the
-    // transaction-relay gate, and block-peer eligibility read one signal.
-    let ibd = state.ibd();
     let tx_inventory: Arc<dyn bitcoin_rs_p2p::TxInventory> = gateway.clone();
     let compact_hints: Arc<dyn bitcoin_rs_p2p::CompactBlockHints> = gateway.clone();
     let listener_extras = bitcoin_rs_p2p::ListenerExtras {
         tx_inventory: Some(tx_inventory),
         compact_hints: Some(compact_hints),
         inbound_tx: Some(state.inbound_tx_sender()),
-        ibd: Some((Arc::clone(&ibd), state.config().network)),
+        // The node's one latch, built with the chainstate at open and already
+        // held by the block-download executor: `initialblockdownload`, the
+        // transaction-relay gate, and block-peer eligibility read one signal.
+        ibd: Some((state.ibd(), state.config().network)),
         // One orchestrator: the listener announces block inventory to the
         // same sync loop the event loop drives.
         block_sync: Some(Arc::clone(&peer_ready_sync)),
@@ -585,14 +575,17 @@ pub(crate) fn start_node(
         bitcoin_rs_p2p::PeerRelaySink::new(state.peer_table()),
         relay_rx,
         Arc::downgrade(&gateway),
-        Arc::clone(&shutdown),
+        state.shutdown_reader(),
     )?);
+    let inbound_tx_rx = state
+        .take_inbound_tx_receiver()
+        .ok_or_else(|| anyhow::anyhow!("inbound tx receiver already taken"))?;
     guard.services.tx_ingress = Some(crate::tx_ingress::spawn_tx_ingress_consumer(
         state,
         Arc::clone(&gateway),
         Arc::clone(&mining_control),
-        Arc::clone(&shutdown),
-        state.inbound_tx_rx_handle(),
+        state.shutdown_reader(),
+        inbound_tx_rx,
         relay_queue.clone(),
     )?);
     gateway
@@ -605,10 +598,17 @@ pub(crate) fn start_node(
         )
         .map_err(anyhow::Error::msg)?;
 
-    let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source, &ibd)?;
+    // A fresh chainstate leaves the applied-tip slot empty until the sync
+    // loop's first tick; applying genesis before the listener binds keeps
+    // RPC from answering mining calls it cannot yet serve, and a refused
+    // or unsettled connect aborts startup rather than serving that broken
+    // state.
+    crate::chain_effects::bootstrap_genesis(&chainstate, &state.chain_followers())
+        .map_err(|error| anyhow::Error::new(error).context("failed to bootstrap genesis"))?;
+    let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source)?;
     let rpc_local_addr = rpc_server.local_addr()?;
     tracing::info!(addr = %rpc_local_addr, "rpc listener bound");
-    let rpc_shutdown = Arc::clone(&shutdown);
+    let rpc_shutdown = state.shutdown_reader();
     guard.services.rpc_thread = Some(
         std::thread::Builder::new()
             .name("bitcoin-rs-rpc".into())
@@ -628,10 +628,14 @@ pub(crate) fn start_node(
         )
         .map_err(anyhow::Error::from)?;
     guard.services.maintenance_worker = Some(state.start_chainstate_maintenance()?);
+    let loop_shutdown = state.shutdown_reader();
+    let loop_chainstate = state.chainstate();
     guard.services.event_loop = Some(
         std::thread::Builder::new()
             .name("bitcoin-rs-event-loop".into())
-            .spawn(move || loop_handle.spin(&shutdown))?,
+            .spawn(move || {
+                loop_handle.spin(&loop_shutdown, move || loop_chainstate.request_shutdown());
+            })?,
     );
     Ok(guard.finish(context))
 }

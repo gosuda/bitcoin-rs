@@ -630,8 +630,8 @@ fn presync_fixture_refusing(
                 .with_minimum_chain_work(minimum_work),
         ))),
         Arc::clone(&peers),
-        Arc::new(Mutex::new(inbound_headers_rx)),
-        Arc::new(Mutex::new(inbound_blocks_rx)),
+        inbound_headers_rx,
+        inbound_blocks_rx,
         crate::sync::syncing_ibd_latch(),
     );
     install_budget(
@@ -735,20 +735,30 @@ fn a_batch_crossing_the_floor_admits_without_presync() -> Result<(), Box<dyn std
 #[test]
 fn an_invalid_anchor_refuses_without_presync() -> Result<(), Box<dyn std::error::Error>> {
     let floor = ChainWork::from(u64::MAX);
-    let (genesis, sync, inbound_headers_tx, peers) = presync_fixture(floor)?;
+    let mut tree = BlockTree::new();
+    let genesis = genesis_header();
+    tree.insert_node(None, genesis, NodeStatus::HeaderValid)?;
     let doomed = chain_on(&genesis, 0, 3);
-    let doomed_len;
-    {
-        let mut tree = sync.chain.block_tree_mut();
-        let mut root = None;
-        for header in &doomed {
-            let id = tree.insert_header(*header, NodeStatus::HeaderValid)?;
-            root = root.or(Some(id));
-        }
-        let root = root.ok_or_else(|| std::io::Error::other("no doomed root"))?;
-        tree.invalidate_subtree(root)?;
-        doomed_len = tree.len();
+    let mut root = None;
+    for header in &doomed {
+        let id = tree.insert_header(*header, NodeStatus::HeaderValid)?;
+        root = root.or(Some(id));
     }
+    let root = root.ok_or_else(|| std::io::Error::other("no doomed root"))?;
+    tree.invalidate_subtree(root)?;
+    let doomed_len = tree.len();
+
+    let harness = SyncHarness::with_chain_work(tree, crate::sync::syncing_ibd_latch(), floor);
+    install_budget(
+        &harness.sync,
+        SyncBudget {
+            max_pending_blocks: 0,
+            ..default_sync_budget(Network::Regtest)
+        },
+    );
+    let sync = harness.sync;
+    let inbound_headers_tx = harness.inbound_headers_tx;
+    let peers = harness.peers;
 
     let (addr, _lease, _rx) = connect(&peers, 9705, 100_000);
     let source = current_source(&peers, addr);

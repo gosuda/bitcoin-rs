@@ -13,11 +13,11 @@ members = [
     "crates/mempool",
     "crates/p2p",
     "crates/mining",
-    "crates/trace",
     "crates/rpc",
     "crates/node",
     "bin/bitcoin-rs",
     "e2e",
+    "tools/storage-footprint",
 ]
 
 [workspace.package]
@@ -25,7 +25,7 @@ edition      = "2024"
 rust-version = "1.95.0"
 license      = "Apache-2.0"
 repository   = "https://github.com/gosuda/bitcoin-rs"
-version      = "0.9.0"
+version      = "0.12.0"
 authors      = ["metaphorics"]
 
 # ============================================================================
@@ -38,24 +38,21 @@ authors      = ["metaphorics"]
 
 # Internal crates — `version` must match `[workspace.package].version` (gate g15).
 # Cargo cannot inherit `version` into `[workspace.dependencies]`; bump both together.
-bitcoin-rs-primitives = { path = "crates/primitives", version = "0.9.0" }
-bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.9.0", default-features = false }
-bitcoin-rs-script     = { path = "crates/script",     version = "0.9.0", default-features = false }
-bitcoin-rs-storage    = { path = "crates/storage",    version = "0.9.0", default-features = false }
-bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.9.0", default-features = false }
-bitcoin-rs-chain      = { path = "crates/chain",      version = "0.9.0", default-features = false }
-bitcoin-rs-chainstate = { path = "crates/chainstate", version = "0.9.0", default-features = false }
-bitcoin-rs-index      = { path = "crates/index",      version = "0.9.0" }
+bitcoin-rs-primitives = { path = "crates/primitives", version = "0.12.0" }
+bitcoin-rs-consensus  = { path = "crates/consensus",  version = "0.12.0", default-features = false }
+bitcoin-rs-script     = { path = "crates/script",     version = "0.12.0", default-features = false }
+bitcoin-rs-storage    = { path = "crates/storage",    version = "0.12.0", default-features = false }
+bitcoin-rs-utxo       = { path = "crates/utxo",       version = "0.12.0", default-features = false }
+bitcoin-rs-chain      = { path = "crates/chain",      version = "0.12.0", default-features = false }
+bitcoin-rs-chainstate = { path = "crates/chainstate", version = "0.12.0", default-features = false }
+bitcoin-rs-index      = { path = "crates/index",      version = "0.12.0" }
 
-bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.9.0" }
-bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.9.0" }
-bitcoin-rs-mining     = { path = "crates/mining",     version = "0.9.0" }
-bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.9.0" }
-bitcoin-rs-node       = { path = "crates/node",       version = "0.9.0", default-features = false }
-# USDT probe emission is optional everywhere the crate is used (feature
-# `usdt`, off by default); see crates/trace.
-bitcoin-rs-trace      = { path = "crates/trace",      version = "0.9.0", default-features = false }
-bitcoin-rs-e2e        = { path = "e2e",               version = "0.9.0" }
+bitcoin-rs-mempool    = { path = "crates/mempool",    version = "0.12.0" }
+bitcoin-rs-p2p        = { path = "crates/p2p",        version = "0.12.0" }
+bitcoin-rs-mining     = { path = "crates/mining",     version = "0.12.0" }
+bitcoin-rs-rpc        = { path = "crates/rpc",        version = "0.12.0" }
+bitcoin-rs-node       = { path = "crates/node",       version = "0.12.0", default-features = false }
+bitcoin-rs-e2e        = { path = "e2e",               version = "0.12.0" }
 
 # Allocator. Defaults pull `secure` and `extended` overhead — disable for perf.
 mimalloc = { version = ">=0.1.50, <0.2", default-features = false }
@@ -91,6 +88,11 @@ bitcoin_hashes = { version = ">=0.14, <0.15", default-features = false, features
 cap-std = "=4.0.3"
 cap-fs-ext = "=4.0.3"
 rustix = { version = "=1.1.5", features = ["fs"] }
+# windows-sys: the console-control and process APIs the e2e harness uses to
+# signal (CTRL_BREAK_EVENT) and reap spawned nodes on Windows.
+windows-sys = { version = "=0.61.2", features = [
+    "Win32_Foundation", "Win32_System_Console", "Win32_System_Threading",
+] }
 
 # Miniscript supplies the key-free PSBT finalizer retained by the RPC crate.
 miniscript = { version = ">=13, <14", default-features = false, features = ["std"] }
@@ -181,8 +183,8 @@ clap       = { version = ">=4.6, <5",   default-features = false, features = [
 
 # --- Observability ------------------------------------------------------------
 tracing            = { version = ">=0.1.44, <0.2", default-features = false, features = ["std", "attributes"] }
-# USDT probe emission for crates/trace (optional; pulled in only by the `usdt`
-# feature). Apache-2.0, pure Rust, no C toolchain or AWS-LC/ring providers.
+# USDT probe emission for the consensus crate's `trace` module (optional;
+# pulled in only by the `usdt` feature). Apache-2.0, pure Rust, no C toolchain or AWS-LC/ring providers.
 # `default-features = false` drops the `asm` feature, an empty marker in 0.6.0 —
 # `.note.stapsdt` emission is unconditional and asserted by sdt_notes in CI.
 usdt               = { version = "=0.6.0", default-features = false }
@@ -208,6 +210,7 @@ zmq       = { version = ">=0.10, <0.11", default-features = false }
 
 # --- Test / bench -------------------------------------------------------------
 proptest        = { version = ">=1.11, <2",    default-features = false, features = ["std"] }
+tempfile        = { version = ">=3.20.0, <4" }
 # criterion 0.8 line.
 criterion       = { version = ">=0.8.2, <0.9", default-features = false, features = [
     "cargo_bench_support", "html_reports", "plotters", "rayon",

@@ -1,24 +1,13 @@
 //! Exact serialized-body validation, transaction planning, and resolved prevout preparation.
 
-use super::BlockLocalUtxoView;
-use super::BlockProvenance;
-use super::BlockTxPlan;
-use super::BlockValidationContext;
-use super::ByteEquality;
-use super::Chainstate;
-use super::LOCAL_OVERLAY_TXID_SET_THRESHOLD;
-use super::PreparedApply;
-use super::ResolvedUtxoView;
-use super::WitnessPresence;
 use super::scratch::SameBlockSpentSet;
+use super::{
+    BlockLocalUtxoView, BlockProvenance, BlockTxPlan, BlockValidationContext, ByteEquality,
+    Chainstate, LOCAL_OVERLAY_TXID_SET_THRESHOLD, PreparedApply, ResolvedUtxoView,
+};
 use crate::error::ApplyError;
 use bitcoin_rs_consensus::UtxoView;
-use bitcoin_rs_primitives::Block;
-use bitcoin_rs_primitives::ConsensusEncode;
-use bitcoin_rs_primitives::OutPoint;
-use bitcoin_rs_primitives::TxOut;
-use bitcoin_rs_primitives::Txid;
-use bitcoin_rs_primitives::consensus_bytes;
+use bitcoin_rs_primitives::{Block, ConsensusEncode, OutPoint, TxOut, Txid, consensus_bytes};
 use bitcoin_rs_utxo::contract::is_coinbase_tx;
 use hashbrown::HashSet;
 use rayon::prelude::*;
@@ -80,10 +69,6 @@ pub(super) fn parse_block_for_apply(
 }
 
 /// Parses a block and resolves the outputs it spends.
-///
-/// `source` is where prevouts come from. Every caller outside a window passes
-/// the committed UTXO set; a window passes an overlay so a block can see
-/// outputs an earlier block in the same window created.
 pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::contract::OutputSource + ?Sized>(
     block: &'b Block,
     provided_serialized: Option<bytes::Bytes>,
@@ -104,12 +89,6 @@ pub(super) fn prepare_apply<'b, S: bitcoin_rs_utxo::contract::OutputSource + ?Si
 }
 
 /// Plans a block whose txids are already known.
-///
-/// Identities come from the parse-once view: the kernel parse hashes every
-/// transaction on the way past using the SHA-256 implementation Core picks at
-/// runtime, and the native parse derives them in its single layout pass.
-/// Either way the plan borrows them instead of re-hashing with a scalar
-/// implementation.
 pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxPlan {
     let mut only_coinbase = true;
     let mut needs_local_utxo_overlay = false;
@@ -185,7 +164,7 @@ pub(super) fn plan_block_transactions(block: &Block, txids: &[Txid]) -> BlockTxP
         only_coinbase,
         needs_local_utxo_overlay,
         overlay_capacity,
-        witness_presence: WitnessPresence::from_bool(has_witness),
+        has_witness,
         has_bip68_sequence_locks,
         created_output_count,
         spent_input_count,
@@ -250,14 +229,9 @@ pub(super) fn resolve_block_prevouts(
     }
 }
 
-#[allow(
-    clippy::as_conversions,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_truncation
-)]
 /// Runs every non-script transaction check for a block whose scripts are
 /// verified upstream: assume-valid or local replay.
-pub(super) fn run_non_script_checks_only(
+fn run_non_script_checks_only(
     block: &Block,
     tx_plan: &BlockTxPlan,
     resolved: Arc<ResolvedUtxoView>,
@@ -302,7 +276,7 @@ pub(super) fn run_non_script_checks_only(
     Ok(())
 }
 
-#[allow(
+#[expect(
     clippy::as_conversions,
     clippy::cast_sign_loss,
     clippy::cast_possible_truncation

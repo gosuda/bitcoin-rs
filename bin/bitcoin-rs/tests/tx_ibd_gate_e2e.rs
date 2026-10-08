@@ -15,31 +15,26 @@
 
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
-use std::fs::File;
-use std::io::{Read as _, Write as _};
-use std::net::TcpStream;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bitcoin::absolute::LockTime;
 use bitcoin::block::Header as BlockHeader;
-use bitcoin::consensus::serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::p2p::address::Address;
-use bitcoin::p2p::message::{NetworkMessage, RawNetworkMessage};
+use bitcoin::p2p::message::NetworkMessage;
 use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin::p2p::message_network::VersionMessage;
-use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
-use bitcoin_rs_e2e::node::workspace;
-use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::helpers::coinbase_script_sig;
+use bitcoin_rs_e2e::process_peer::is_soft_recv_error;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
+#[path = "support/wire_peer.rs"]
+mod wire_peer;
+use wire_peer::Peer;
+
 use serde_json::{Value, json};
 
 const REGTEST_BITS: u32 = 0x207f_ffff;
-const HEADER_BYTES: usize = 24;
-const MAX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bounded window during which an absence must persist: admission and relay
@@ -51,107 +46,26 @@ const ABSENCE_WINDOW: Duration = Duration::from_millis(1_500);
 // ---------------------------------------------------------------------------
 
 struct GatePeer {
-    stream: TcpStream,
-    journal: File,
-    t0: Instant,
+    wire: Peer,
     /// Every decoded getdata frame, flattened to `(inv_type, hash)` pairs.
     getdata_seen: Vec<Vec<(u32, String)>>,
     /// Transaction ids announced to us by the node (relay reachability).
     relayed_seen: Vec<String>,
-    dropped: bool,
 }
 
 impl GatePeer {
     fn connect(node: &ProcessNode, name: &str) -> Result<Self, Error> {
-        let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
-        let stream = connect_loopback(node.p2p_addr, deadline)?;
-        stream.set_nodelay(true)?;
-        let journal = File::create(evidence_dir().join(format!("{name}-peer.jsonl")))?;
-        let mut peer = Self {
-            stream,
-            journal,
-            t0: Instant::now(),
+        Ok(Self {
+            wire: Peer::connect(
+                node.p2p_addr,
+                "tx-ibd-gate-e2e",
+                name,
+                0,
+                Instant::now() + HANDSHAKE_TIMEOUT,
+            )?,
             getdata_seen: Vec::new(),
             relayed_seen: Vec::new(),
-            dropped: false,
-        };
-        let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
-        let now = i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|error| Error::Protocol(error.to_string()))?
-                .as_secs(),
-        )
-        .map_err(|error| Error::Protocol(error.to_string()))?;
-        let local = peer.stream.local_addr().map_err(Error::Io)?;
-        let mut version = VersionMessage::new(
-            services,
-            now,
-            Address::new(&node.p2p_addr, ServiceFlags::NONE),
-            Address::new(&local, services),
-            0,
-            "/tx-ibd-gate-e2e:0.1/".to_owned(),
-            0,
-        );
-        version.version = 70016;
-        peer.send(NetworkMessage::Version(version), deadline)?;
-        let mut received_version = false;
-        for _ in 0..64 {
-            match peer.recv(deadline)? {
-                NetworkMessage::Version(_) if !received_version => {
-                    received_version = true;
-                    peer.send(NetworkMessage::WtxidRelay, deadline)?;
-                    peer.send(NetworkMessage::Verack, deadline)?;
-                }
-                NetworkMessage::Verack if received_version => return Ok(peer),
-                NetworkMessage::Verack | NetworkMessage::Version(_) => {
-                    return Err(Error::Protocol("out-of-order P2P handshake".to_owned()));
-                }
-                NetworkMessage::Ping(nonce) => {
-                    peer.send(NetworkMessage::Pong(nonce), deadline)?;
-                }
-                _ => {}
-            }
-        }
-        Err(Error::Protocol("P2P handshake message limit".to_owned()))
-    }
-
-    fn send(&mut self, message: NetworkMessage, deadline: Instant) -> Result<(), Error> {
-        let cmd = message.cmd().to_owned();
-        let frame = serialize(&RawNetworkMessage::new(Magic::REGTEST, message));
-        self.stream
-            .set_write_timeout(Some(
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::from_secs(1)),
-            ))
-            .map_err(Error::Io)?;
-        self.stream.write_all(&frame).map_err(Error::Io)?;
-        self.log("send", &cmd);
-        Ok(())
-    }
-
-    fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage, Error> {
-        match read_frame(&mut self.stream, deadline) {
-            Ok(frame) => {
-                let message = decode_frame(&frame)?;
-                self.log("recv", message.cmd());
-                Ok(message)
-            }
-            Err(error) => {
-                if !is_soft_recv_error(&error) {
-                    self.dropped = true;
-                }
-                Err(error)
-            }
-        }
-    }
-
-    fn log(&mut self, direction: &str, detail: &str) {
-        let at_ms = u64::try_from(self.t0.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let line = json!({"at_ms": at_ms, "dir": direction, "detail": detail});
-        let _ = writeln!(self.journal, "{line}");
-        let _ = self.journal.flush();
+        })
     }
 
     /// Sends `inv` followed by a ping barrier and pumps until the pong
@@ -160,33 +74,35 @@ impl GatePeer {
     /// fully handled.
     fn announce_with_barrier(&mut self, items: Vec<Inventory>, nonce: u64) -> Result<(), Error> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
-        self.send(NetworkMessage::Inv(items), deadline)?;
-        self.send(NetworkMessage::Ping(nonce), deadline)?;
+        self.wire.send(NetworkMessage::Inv(items), deadline)?;
+        self.wire.send(NetworkMessage::Ping(nonce), deadline)?;
         self.pump_until_pong(nonce, deadline)
     }
 
     /// Ping barrier without an announcement.
     fn bar(&mut self, nonce: u64) -> Result<(), Error> {
         let deadline = Instant::now() + REQUEST_TIMEOUT;
-        self.send(NetworkMessage::Ping(nonce), deadline)?;
+        self.wire.send(NetworkMessage::Ping(nonce), deadline)?;
         self.pump_until_pong(nonce, deadline)
     }
 
     fn pump_until_pong(&mut self, nonce: u64, deadline: Instant) -> Result<(), Error> {
-        while !self.dropped {
+        while !self.wire.dropped {
             if Instant::now() >= deadline {
                 return Err(Error::Protocol("pong barrier deadline".to_owned()));
             }
-            match self.recv(deadline) {
+            match self.wire.recv(deadline) {
                 Ok(NetworkMessage::Pong(reply)) if reply == nonce => return Ok(()),
                 Ok(NetworkMessage::GetData(items)) => self.record_getdata(&items),
                 Ok(NetworkMessage::GetHeaders(_)) => {
                     // Keep the wire quiet: an empty headers reply is always a
                     // valid answer and never advances header sync.
-                    let _ = self.send(NetworkMessage::Headers(Vec::new()), deadline);
+                    let _ = self
+                        .wire
+                        .send(NetworkMessage::Headers(Vec::new()), deadline);
                 }
                 Ok(NetworkMessage::Ping(reply)) => {
-                    let _ = self.send(NetworkMessage::Pong(reply), deadline);
+                    let _ = self.wire.send(NetworkMessage::Pong(reply), deadline);
                 }
                 Ok(_) => {}
                 Err(error) if is_soft_recv_error(&error) => {}
@@ -200,8 +116,8 @@ impl GatePeer {
     /// relayed inv announcements.
     fn pump(&mut self, dur: Duration) {
         let end = Instant::now() + dur;
-        while Instant::now() < end && !self.dropped {
-            match self.recv(end) {
+        while Instant::now() < end && !self.wire.dropped {
+            match self.wire.recv(end) {
                 Ok(NetworkMessage::GetData(items)) => {
                     self.record_getdata(&items);
                 }
@@ -219,15 +135,15 @@ impl GatePeer {
                         };
                         if let Some(hash) = announced {
                             self.relayed_seen.push(hash.clone());
-                            self.log("relayed_inv", &hash);
+                            self.wire.log("relayed_inv", &hash);
                         }
                     }
                 }
                 Ok(NetworkMessage::GetHeaders(_)) => {
-                    let _ = self.send(NetworkMessage::Headers(Vec::new()), end);
+                    let _ = self.wire.send(NetworkMessage::Headers(Vec::new()), end);
                 }
                 Ok(NetworkMessage::Ping(nonce)) => {
-                    let _ = self.send(NetworkMessage::Pong(nonce), end);
+                    let _ = self.wire.send(NetworkMessage::Pong(nonce), end);
                 }
                 Ok(_) => {}
                 Err(error) if is_soft_recv_error(&error) => {}
@@ -253,7 +169,7 @@ impl GatePeer {
                 Inventory::Error => (0, "error".to_owned()),
             })
             .collect();
-        self.log("getdata", &format!("{flat:?}"));
+        self.wire.log("getdata", &format!("{flat:?}"));
         self.getdata_seen.push(flat);
     }
 
@@ -275,76 +191,6 @@ impl GatePeer {
     }
 }
 
-fn is_soft_recv_error(error: &Error) -> bool {
-    match error {
-        Error::Io(io) => matches!(
-            io.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ),
-        Error::Protocol(detail) => detail.contains("deadline"),
-        _ => false,
-    }
-}
-
-fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Error> {
-    fn read_exact(
-        stream: &mut TcpStream,
-        mut bytes: &mut [u8],
-        deadline: Instant,
-    ) -> Result<(), Error> {
-        let total = bytes.len();
-        while !bytes.is_empty() {
-            // The deadline bounds the wait for the first byte only: a frame
-            // that is already partially consumed must run to completion or
-            // the wire stream desynchronizes for every later read.
-            let wait = if bytes.len() == total {
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::from_millis(1))
-            } else {
-                REQUEST_TIMEOUT
-            };
-            stream.set_read_timeout(Some(wait))?;
-            let count = stream.read(bytes)?;
-            if count == 0 {
-                return Err(Error::Protocol("truncated P2P frame".to_owned()));
-            }
-            bytes = &mut bytes[count..];
-        }
-        Ok(())
-    }
-    let mut header = [0; HEADER_BYTES];
-    read_exact(stream, &mut header, deadline)?;
-    let length = usize::try_from(u32::from_le_bytes(
-        header[16..20]
-            .try_into()
-            .map_err(|_| Error::Protocol("truncated P2P header".to_owned()))?,
-    ))
-    .map_err(|error| Error::Protocol(error.to_string()))?;
-    if length > MAX_PAYLOAD_BYTES {
-        return Err(Error::Protocol("P2P payload byte limit".to_owned()));
-    }
-    let mut frame = header.to_vec();
-    frame.resize(HEADER_BYTES + length, 0);
-    read_exact(stream, &mut frame[HEADER_BYTES..], deadline)?;
-    Ok(frame)
-}
-
-fn decode_frame(frame: &[u8]) -> Result<NetworkMessage, Error> {
-    let envelope: RawNetworkMessage = bitcoin::consensus::deserialize(frame)
-        .map_err(|error| Error::Protocol(format!("invalid P2P envelope: {error}")))?;
-    if *envelope.magic() != Magic::REGTEST {
-        return Err(Error::Protocol("P2P network mismatch".to_owned()));
-    }
-    Ok(envelope.into_payload())
-}
-
-fn evidence_dir() -> std::path::PathBuf {
-    let dir = workspace().join("target/tx-ibd-gate-e2e");
-    std::fs::create_dir_all(&dir).expect("evidence dir");
-    dir
-}
-
 // ---------------------------------------------------------------------------
 // Fixtures: the relayed transaction and the mature funding chain
 // ---------------------------------------------------------------------------
@@ -359,23 +205,6 @@ fn now_unix() -> u32 {
     .unwrap_or(u32::MAX)
 }
 
-/// Minimal `CScriptNum` push, the BIP34 height encoding.
-fn script_num_push(value: u32) -> Vec<u8> {
-    let low = u8::try_from(value & 0xff).unwrap_or(0xff);
-    if value < 0x80 {
-        vec![0x01, low]
-    } else if value < 0x80_00 {
-        vec![0x02, low, u8::try_from(value >> 8).unwrap_or(0)]
-    } else {
-        vec![
-            0x03,
-            low,
-            u8::try_from((value >> 8) & 0xff).unwrap_or(0),
-            u8::try_from(value >> 16).unwrap_or(0),
-        ]
-    }
-}
-
 /// Coinbase paying `value` sats to `OP_TRUE`, with the BIP34 height push.
 fn op_true_coinbase(height: u32, value: u64) -> Transaction {
     Transaction {
@@ -383,7 +212,7 @@ fn op_true_coinbase(height: u32, value: u64) -> Transaction {
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(script_num_push(height)),
+            script_sig: coinbase_script_sig(height),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
@@ -534,7 +363,7 @@ fn wait_with_pump(
         if check(node) {
             return true;
         }
-        if Instant::now() >= deadline || peer.dropped {
+        if Instant::now() >= deadline || peer.wire.dropped {
             return false;
         }
     }
@@ -569,7 +398,8 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
 
     // Phase 1c: the delivered body is not admitted and not relayed.
     let deadline = Instant::now() + REQUEST_TIMEOUT;
-    peer.send(NetworkMessage::Tx(relayed.clone()), deadline)?;
+    peer.wire
+        .send(NetworkMessage::Tx(relayed.clone()), deadline)?;
     peer.bar(7_002)?;
     let end = Instant::now() + ABSENCE_WINDOW;
     while Instant::now() < end {
@@ -611,8 +441,8 @@ fn ibd_node_ignores_then_requests_relay_transactions() -> Result<(), Error> {
         "after initial block download the announced transaction must be requested"
     );
     let body_deadline = Instant::now() + REQUEST_TIMEOUT;
-    peer.log("serve", "relayed tx body");
-    peer.send(NetworkMessage::Tx(relayed), body_deadline)?;
+    peer.wire.log("serve", "relayed tx body");
+    peer.wire.send(NetworkMessage::Tx(relayed), body_deadline)?;
     let admitted = wait_with_pump(&mut node, &mut peer, Duration::from_secs(15), &mut |node| {
         mempool_size(node) == Some(1)
     });

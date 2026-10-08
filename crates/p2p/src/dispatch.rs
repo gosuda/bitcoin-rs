@@ -16,7 +16,7 @@ use crate::wire::{Message, PeerError};
 /// Maximum headers returned by one `headers` response.
 pub const MAX_HEADERS_RESPONSE: usize = 2_000;
 /// Maximum block locator hashes accepted in one locator-based request.
-pub use crate::wire::MAX_LOCATOR_HASHES;
+pub(crate) use crate::wire::MAX_LOCATOR_HASHES;
 
 /// Outcome of streamed inventory serving. Bodies pass through the serving
 /// sink as they load and are never materialized as a whole.
@@ -156,38 +156,20 @@ pub fn dispatch_inbound<S>(
     message: &Message,
 ) -> Result<Vec<Message>, PeerError> {
     let responses = RefCell::new(Vec::new());
-    dispatch_inbound_with_chain(peer, message, None, &|| true, &mut |response| {
-        responses.borrow_mut().push(response);
-        Ok(())
-    })?;
-    Ok(responses.into_inner())
-}
-
-/// Dispatch with an active-chain view but no transaction-inventory filter.
-///
-/// Equivalent to [`dispatch_inbound_full`] with `tx_inventory: None` and a
-/// no-op block-announcement sink: every announced tx is requested, and
-/// tx-typed `getdata` items are reported missing. Production listeners pass
-/// a [`TxInventory`] and an announcement sink through
-/// [`dispatch_inbound_full`]; this wrapper remains for call sites that only
-/// have a chain view.
-pub fn dispatch_inbound_with_chain<S>(
-    peer: &mut Peer<S>,
-    message: &Message,
-    chain: Option<&dyn ChainQuery>,
-    headroom: &dyn Fn() -> bool,
-    send: &mut dyn FnMut(Message) -> Result<(), PeerError>,
-) -> Result<(), PeerError> {
     dispatch_inbound_full(
         peer,
         message,
-        chain,
+        None,
         None,
         &|| true,
-        headroom,
-        send,
+        &|| true,
+        &mut |response| {
+            responses.borrow_mut().push(response);
+            Ok(())
+        },
         &mut |_| {},
-    )
+    )?;
+    Ok(responses.into_inner())
 }
 
 /// Dispatch with an active-chain view and a transaction-inventory filter.
@@ -214,7 +196,6 @@ pub fn dispatch_inbound_with_chain<S>(
 /// POST: block inventory reaches `announce_block` and never a `getdata`.
 /// INVARIANT: block bodies are requested only by header sync and the
 /// download window (Core 31.1 `net_processing.cpp:4370-4410`).
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_inbound_full<S>(
     peer: &mut Peer<S>,
     message: &Message,
@@ -517,12 +498,12 @@ mod tests {
     use bitcoin::p2p::message_compact_blocks::BlockTxn;
     use bitcoin_rs_primitives::{
         Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Sequence, Tx, Txid,
-        Witness, Wtxid,
+        Witness, Wtxid, deserialize,
     };
 
     use super::{
         ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, MAX_LOCATOR_HASHES, TxInventory,
-        dispatch_inbound, dispatch_inbound_full, dispatch_inbound_with_chain,
+        dispatch_inbound, dispatch_inbound_full,
     };
     use crate::connection::{OutboundBudget, PeerLease};
     use crate::inv::MAX_INV_PER_MSG;
@@ -665,10 +646,19 @@ mod tests {
         chain: Option<&dyn ChainQuery>,
     ) -> Result<Vec<Message>, PeerError> {
         let collected = RefCell::new(Vec::new());
-        dispatch_inbound_with_chain(peer, message, chain, &|| true, &mut |response| {
-            collected.borrow_mut().push(response);
-            Ok(())
-        })?;
+        dispatch_inbound_full(
+            peer,
+            message,
+            chain,
+            None,
+            &|| true,
+            &|| true,
+            &mut |response| {
+                collected.borrow_mut().push(response);
+                Ok(())
+            },
+            &mut |_| {},
+        )?;
         Ok(collected.into_inner())
     }
 
@@ -761,7 +751,7 @@ mod tests {
 
         let responses = dispatch_inbound(&mut peer, &message)?;
 
-        assert!(responses.is_empty());
+        assert_eq!(responses, []);
         assert_eq!(peer.state, PeerState::Ready);
         Ok(())
     }
@@ -789,7 +779,7 @@ mod tests {
         else {
             panic!("expected block payload plus notfound, got {responses:?}");
         };
-        let found = Block::consensus_decode(found)
+        let found = deserialize::<Block>(found)
             .unwrap_or_else(|error| panic!("served payload must decode: {error}"));
         assert_eq!(found.block_hash(), chain.headers[0].compute_hash());
         assert_eq!(not_found, &vec![missing]);
@@ -1118,15 +1108,18 @@ mod tests {
         let mut peer = ready_peer();
         let emitted = RefCell::new(Vec::new());
 
-        let result = dispatch_inbound_with_chain(
+        let result = dispatch_inbound_full(
             &mut peer,
             &Message::GetData(vec![known]),
             Some(&chain),
+            None,
+            &|| true,
             &|| false,
             &mut |response| {
                 emitted.borrow_mut().push(response);
                 Ok(())
             },
+            &mut |_| {},
         );
 
         assert!(matches!(
@@ -1175,16 +1168,19 @@ mod tests {
         };
         let mut peer = ready_peer();
 
-        let result = dispatch_inbound_with_chain(
+        let result = dispatch_inbound_full(
             &mut peer,
             &Message::GetData(vec![known; MAX_INV_PER_MSG]),
             Some(&chain),
+            None,
+            &|| true,
             &|| budget.has_block_production_headroom(),
             &mut |message| {
                 lease
                     .send(message)
                     .map_err(|_| PeerError::Protocol("outbound queue closed or saturated"))
             },
+            &mut |_| {},
         );
 
         assert!(matches!(
@@ -1220,16 +1216,19 @@ mod tests {
         };
         let mut peer = ready_peer();
 
-        let result = dispatch_inbound_with_chain(
+        let result = dispatch_inbound_full(
             &mut peer,
             &Message::GetData(vec![known; 4]),
             Some(&chain),
+            None,
+            &|| true,
             &|| true,
             &mut |message| {
                 lease
                     .send(message)
                     .map_err(|_| PeerError::Protocol("outbound queue closed or saturated"))
             },
+            &mut |_| {},
         );
 
         assert!(matches!(
@@ -1532,9 +1531,9 @@ mod tests {
             if wtxid_relay {
                 peer.wtxid_relay.mark_peer_supported();
             }
-            assert!(
-                dispatch_collect_full(&mut peer, &Message::Inv(vec![item]), None, Some(&gateway),)
-                    .is_empty()
+            assert_eq!(
+                dispatch_collect_full(&mut peer, &Message::Inv(vec![item]), None, Some(&gateway),),
+                []
             );
         }
 
@@ -1565,7 +1564,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn one_sided_wtxid_negotiation_does_not_rerequest_pool_or_orphan_bodies() {
         use bitcoin_rs_primitives::Script;
         use std::sync::Arc;
@@ -1634,15 +1633,12 @@ mod tests {
                         .is_ok()
                 );
             }
-            for (local_requested, remote_requested, item) in [
-                (true, false, Inventory::WTx(wtxid)),
-                (false, true, Inventory::Transaction(txid)),
-                (false, true, Inventory::WitnessTransaction(txid)),
+            for (remote_requested, item) in [
+                (false, Inventory::WTx(wtxid)),
+                (true, Inventory::Transaction(txid)),
+                (true, Inventory::WitnessTransaction(txid)),
             ] {
                 let mut peer = ready_peer();
-                if local_requested {
-                    peer.wtxid_relay.mark_local_advertised();
-                }
                 if remote_requested {
                     peer.wtxid_relay.mark_peer_supported();
                 }
@@ -1822,7 +1818,6 @@ mod tests {
         Hash256::from_le_bytes(block_hash.as_byte_array())
     }
 
-    #[allow(clippy::expect_used)]
     fn dispatch_collect_full<S>(
         peer: &mut Peer<S>,
         message: &Message,
@@ -1833,7 +1828,6 @@ mod tests {
     }
 
     /// Same helper with the transaction-relay gate under test control.
-    #[allow(clippy::expect_used)]
     fn dispatch_collect_gated<S>(
         peer: &mut Peer<S>,
         message: &Message,
@@ -1846,7 +1840,7 @@ mod tests {
 
     /// Same helper, additionally returning the block-inventory hashes that
     /// dispatch routed to header sync instead of requesting their bodies.
-    #[allow(clippy::expect_used)]
+    #[expect(clippy::expect_used)]
     fn dispatch_collect_announcements<S>(
         peer: &mut Peer<S>,
         message: &Message,

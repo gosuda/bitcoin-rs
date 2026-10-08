@@ -3,8 +3,8 @@
 use crate::NodeConfig;
 use anyhow::Context as _;
 use anyhow::Result;
-use bitcoin_rs_chain::BlockBodyMetadata;
 use bitcoin_rs_chain::BlockBodySource;
+use bitcoin_rs_primitives::BlockBodyMetadata;
 use bitcoin_rs_rpc::context::{PruneResult, PruneService, PruneServiceError, PruneStatus};
 use bitcoin_rs_storage::DurableHeadStore as _;
 use bitcoin_rs_storage::FlatFileBlockStore;
@@ -95,7 +95,8 @@ impl NodeStorage {
             .with_context(|| format!("create chainstate_dir {}", chainstate_dir.display()))?;
 
         let backend = config.storage.backend;
-        crate::storage_backend::open_chainstate(
+        crate::storage_backend::open_generic(
+            "chainstate",
             backend,
             &chainstate_dir,
             Some(chainstate_cache_bytes),
@@ -198,14 +199,14 @@ impl<S: KvStore> DeferredChainstateServices for ChainstateStoreServices<S> {
         dir: cap_std::fs::Dir,
         bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
     ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter> {
-        build_journal_writer(dir, Arc::clone(&self.store), bootstrap)
+        build_journal_writer(dir, Arc::clone(&self.store), &bootstrap)
     }
 }
 
 fn build_journal_writer<S: KvStore + 'static>(
     dir: cap_std::fs::Dir,
     store: Arc<S>,
-    bootstrap: bitcoin_rs_chainstate::JournalBootstrap,
+    bootstrap: &bitcoin_rs_chainstate::JournalBootstrap,
 ) -> Result<bitcoin_rs_storage::chainstate_journal::SharedJournalWriter> {
     let mut writer = if bootstrap.open_existing {
         bitcoin_rs_storage::chainstate_journal::JournalWriter::open(dir, store)?
@@ -312,7 +313,7 @@ pub(super) struct NodePruneService<S: KvStore> {
 
 impl<S: KvStore> NodePruneService<S> {
     /// Creates a manual pruning service over the chainstate store and RPC block cache.
-    pub(crate) fn new(
+    pub(super) fn new(
         store: Arc<S>,
         block_files: Arc<FlatFileBlockStore>,
         authority: bitcoin_rs_chainstate::PruneAuthority,
@@ -348,7 +349,7 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
             .lock()
             .map_or(requested_height, |height| height.max(requested_height));
         let durable_tip_height = self.durable_tip_height.load(Ordering::Acquire);
-        let staged = bitcoin_rs_storage::pruning::prune_to_height(
+        bitcoin_rs_storage::pruning::prune_to_height(
             &*self.store,
             &self.block_files,
             &self.retention,
@@ -373,14 +374,7 @@ impl<S: KvStore> PruneService for NodePruneService<S> {
         }
 
         Ok(PruneResult {
-            requested_height,
             pruneheight: updated_pruneheight,
-            block_rows_removed: staged.blocks.blocks_removed,
-            undo_rows_removed: staged.undo.blocks_removed,
-            bytes_freed: staged
-                .blocks
-                .bytes_freed
-                .saturating_add(staged.undo.bytes_freed),
         })
     }
 

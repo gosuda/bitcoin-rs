@@ -33,7 +33,6 @@ impl<S: KvStore> JournalWriter<S> {
         Self::restore(dir, store, head)
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// Creates a journal with a new checkpoint base and durable head.
     pub fn initialize(
         dir: cap_std::fs::Dir,
@@ -104,7 +103,9 @@ impl<S: KvStore> JournalWriter<S> {
             last_boundary: Instant::now(),
             append_gap_height: None,
             durability_retry_required: false,
+            generation_invalidated: false,
             state: WriterState::Open,
+            #[cfg(any(test, feature = "test-seam"))]
             failpoint: None,
         };
         writer.recover_active_segment()?;
@@ -121,15 +122,12 @@ impl<S: KvStore> JournalWriter<S> {
         ) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // No active segment: the head is the last boundary; a fresh
-                // segment is created lazily on the first append.
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
         };
         let length = file.metadata()?.len();
         if length > self.durable.offset {
-            // Torn tail beyond the durable head: truncate to the cursor.
             file.set_len(self.durable.offset)?;
             file.sync_all()?;
         }

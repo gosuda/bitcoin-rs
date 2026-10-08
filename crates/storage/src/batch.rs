@@ -109,6 +109,19 @@ impl BufferedWriteBatch {
     }
 }
 
+/// Half of `ops` (rounded up; the whole batch for a single op, empty when
+/// `ops` is empty) for the partial-apply fault.
+#[cfg(all(
+    any(feature = "fjall", feature = "redb"),
+    any(test, feature = "test-seam")
+))]
+pub(crate) fn prefix_ops(ops: Vec<BatchOp>) -> std::vec::IntoIter<BatchOp> {
+    let mut ops = ops;
+    let split = ops.len().div_ceil(2).max(1).min(ops.len());
+    ops.truncate(split);
+    ops.into_iter()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

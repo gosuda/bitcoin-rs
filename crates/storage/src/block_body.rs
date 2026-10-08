@@ -1,10 +1,11 @@
 //! Indexed authoritative block bodies, read sessions, and durability.
 
 use crate::durable_head::BodyExtent;
-use bitcoin_rs_primitives::{Hash256, varint};
+use bitcoin_rs_primitives::{BlockBodyMetadata, Hash256, varint};
 
+use crate::block_file::FlatFileBlockReader;
 use crate::{
-    BlockFilePosition, FlatFileBlockReader, FlatFileBlockStore, KvSnapshot, KvStore, StorageError,
+    BlockFilePosition, FlatFileBlockStore, KvSnapshot, KvStore, StorageError,
     block_file_max_height_key, decode_block_file_max_height, encode_block_file_max_height,
 };
 
@@ -12,15 +13,6 @@ use std::sync::Arc;
 
 const SERIALIZED_BLOCK_HEADER_LEN: usize = 80;
 const SERIALIZED_BLOCK_METADATA_PREFIX_LEN: usize = SERIALIZED_BLOCK_HEADER_LEN + 9;
-
-/// Block payload facts available without materializing a full block body.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BlockBodyMetadata {
-    /// Serialized block byte length.
-    pub body_size: usize,
-    /// Number of transactions encoded in the block.
-    pub tx_count: usize,
-}
 
 fn decode_block_tx_count(bytes: &[u8]) -> Option<usize> {
     let cursor = bytes.get(SERIALIZED_BLOCK_HEADER_LEN..)?;
@@ -66,6 +58,27 @@ impl<S: BlockBodyStore + ?Sized> BlockBodyReader for DirectBlockBodyReader<'_, S
 
 /// Authoritative body bytes and the storage durability boundary.
 pub trait BlockBodyStore: Send + Sync {
+    /// Reads a root-owned pending validation body without publishing its locator.
+    fn load_staged_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        _position: Option<BlockFilePosition>,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.load_block_body(height, hash)
+    }
+    /// Stages bytes without publishing a new locator. The caller must sync
+    /// and commit the returned row. Stores without isolated staging refuse.
+    fn stage_block_body(
+        &self,
+        _height: u32,
+        _hash: Hash256,
+        _body: &[u8],
+    ) -> Result<Option<BlockFilePosition>, StorageError> {
+        Err(StorageError::InvalidOperation(
+            "isolated body staging is unsupported",
+        ))
+    }
     /// Persists an exact block body.
     fn persist_block_body(
         &self,
@@ -313,6 +326,29 @@ impl<S: KvStore> IndexedBlockBodyStore<S> {
 }
 
 impl<S: KvStore> BlockBodyStore for IndexedBlockBodyStore<S> {
+    fn load_staged_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        position: Option<BlockFilePosition>,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        match position {
+            Some(position) => self.files.load(position, height, *hash.as_byte_array()),
+            None => self.load_block_body(height, hash),
+        }
+    }
+    fn stage_block_body(
+        &self,
+        height: u32,
+        hash: Hash256,
+        body: &[u8],
+    ) -> Result<Option<BlockFilePosition>, StorageError> {
+        let existing = self.body_position(height, hash)?;
+        self.files
+            .persist(existing, height, *hash.as_byte_array(), body)
+            .map(Some)
+    }
+
     fn undo_record(
         &self,
         height: u32,
@@ -524,8 +560,6 @@ mod body_position_prefetch_tests {
         let store = IndexedBlockBodyStore::new(index.clone(), files);
         let hash = Hash256::from_le_bytes(&[9_u8; 32]);
         store.persist_block_body(7, hash, b"body")?;
-        // Overwrite the position row with a legacy inline body: same key, not
-        // a decodable flat-file position.
         let key = crate::pruning::block_body_key(7, hash);
         let mut batch = index.new_batch();
         batch.put(crate::pruning::BLOCK_DATA_CF, &key, b"legacy-inline-body");

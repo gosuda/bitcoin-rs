@@ -48,15 +48,7 @@ pub struct MempoolEntry {
     /// Chain height at acceptance.
     pub height: u32,
     /// BIP141 sigop cost, counted against the resolved prevouts.
-    ///
-    /// P2SH sigops cannot be counted from the transaction alone — the spent
-    /// `scriptPubKey` is what says how many there are — so this is computed
-    /// by shared admission preparation after resolving prevouts, and carried
-    /// through the gateway. Bitcoin Core does the same, storing
-    /// `sigOpCost` on `CTxMemPoolEntry` at acceptance rather than recounting
-    /// per block template. The entry is complete at construction: admission
-    /// supplies the prevout-resolved cost, and a builder with no resolved
-    /// prevout context supplies `0`.
+    /// Admission supplies the resolved cost; callers without prevout facts use 0.
     pub sigop_cost: u32,
 }
 
@@ -66,15 +58,6 @@ impl MempoolEntry {
     }
 
     /// Builds a complete entry from the transaction and admission facts.
-    ///
-    /// PRE: `vsize` and `fee` come from the caller's resolved policy facts;
-    /// `sigop_cost` is the caller's best value (0 when no prevout context
-    /// exists).
-    /// POST: `size`, `weight`, `bip141_vsize` derive from `tx` alone, so
-    /// `Tx::default()` yields (10, 40, 10); `wtxid` equals `txid` when the
-    /// transaction has no witness; `sigop_cost` equals the argument.
-    /// INVARIANT: the committed entry's `sigop_cost` always reflects resolved
-    /// prevouts on the admission path, never a transaction-only legacy count.
     #[must_use]
     pub fn new(tx: Arc<Tx>, vsize: u32, fee: u64, time: u64, height: u32, sigop_cost: u32) -> Self {
         let own_size = u64::from(vsize);
@@ -86,8 +69,6 @@ impl MempoolEntry {
         } else {
             Wtxid(txid.0)
         };
-        // Tx owns weight calculation. Reuse its result instead of calling
-        // tx.vsize(), which computes the same weight and walks the tx again.
         let weight = tx.weight();
         let bip141_vsize = u32::try_from(Tx::vsize_from_weight(weight)).unwrap_or(u32::MAX);
         let size = u32::try_from(tx.total_size()).unwrap_or(u32::MAX);
@@ -126,12 +107,6 @@ impl MempoolEntry {
         signed_fee_rate(self.modified_fee(), u64::from(self.vsize))
     }
 
-    /// Actual ancestor package fee rate in sat/kvB.
-    #[must_use]
-    pub const fn ancestor_fee_rate(&self) -> u64 {
-        fee_rate(self.ancestor_fee, self.ancestor_size)
-    }
-
     /// Modified ancestor package fee rate in sat/kvB.
     #[must_use]
     pub(crate) fn modified_ancestor_fee_rate(&self) -> i128 {
@@ -139,12 +114,6 @@ impl MempoolEntry {
             i128::from(self.ancestor_fee) + self.ancestor_fee_delta,
             self.ancestor_size,
         )
-    }
-
-    /// Actual descendant package fee rate in sat/kvB.
-    #[must_use]
-    pub const fn descendant_fee_rate(&self) -> u64 {
-        fee_rate(self.descendant_fee, self.descendant_size)
     }
 
     /// Returns whether this transaction signals BIP-125 replaceability.
@@ -177,6 +146,34 @@ mod is_replaceable_tests {
     use bitcoin_rs_primitives::{OutPoint, Sequence, Tx, TxIn};
     use std::sync::Arc;
 
+    #[test]
+    fn replaceability_follows_the_bip125_sequence_threshold() {
+        for (sequence, replaceable) in [
+            (0xFFFF_FFFD_u32, true),
+            (0xFFFF_FFFE, false),
+            (0xFFFF_FFFF, false),
+        ] {
+            assert_eq!(
+                entry_with_sequence(sequence).is_replaceable(),
+                replaceable,
+                "sequence {sequence:#x}"
+            );
+        }
+    }
+
+    /// No inputs means no signal, and the `any()` over an empty iterator must
+    /// not report one.
+    #[test]
+    fn is_replaceable_false_for_no_inputs() {
+        let tx = Tx {
+            version: 2,
+            lock_time: LockTime::ZERO,
+            inputs: vec![],
+            outputs: vec![],
+        };
+        assert!(!MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0).is_replaceable());
+    }
+
     fn entry_with_sequence(sequence: u32) -> MempoolEntry {
         let tx = Tx {
             version: 2,
@@ -190,36 +187,6 @@ mod is_replaceable_tests {
             outputs: vec![],
         };
         MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0)
-    }
-
-    #[test]
-    fn is_replaceable_true_for_rbf_signal() {
-        let entry = entry_with_sequence(0xFFFF_FFFD);
-        assert!(entry.is_replaceable());
-    }
-
-    #[test]
-    fn is_replaceable_false_for_max_sequence() {
-        let entry = entry_with_sequence(0xFFFF_FFFE);
-        assert!(!entry.is_replaceable());
-    }
-
-    #[test]
-    fn is_replaceable_false_for_disabled_sequence() {
-        let entry = entry_with_sequence(0xFFFF_FFFF);
-        assert!(!entry.is_replaceable());
-    }
-
-    #[test]
-    fn is_replaceable_false_for_no_inputs() {
-        let tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: vec![],
-            outputs: vec![],
-        };
-        let entry = MempoolEntry::new(Arc::new(tx), 100, 10_000, 1, 7, 0);
-        assert!(!entry.is_replaceable());
     }
 }
 
@@ -280,7 +247,7 @@ mod wire_metadata_tests {
                 TxIn {
                     previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[0x22; 32])), 7),
                     script_sig: Script::new(),
-                    sequence: Sequence::from_consensus(u32::MAX),
+                    sequence: Sequence::MAX,
                     witness: Witness::new(),
                 },
             ],
@@ -398,7 +365,6 @@ mod wire_metadata_tests {
         }
     }
 
-    // Regression for the raw trusted-insertion constructor's empty input.
     #[test]
     fn raw_empty_entry_keeps_zero_input_behavior() {
         let entry = MempoolEntry::new(Arc::new(Tx::default()), 0, 0, 0, 0, 0);

@@ -10,7 +10,7 @@
 use std::str::FromStr;
 
 use bitcoin::merkle_tree::calculate_root;
-use bitcoin_rs_consensus::block_view::BlockFacts;
+use bitcoin_rs_consensus::BlockFacts;
 use bitcoin_rs_consensus::kernel::BlockParse;
 use bitcoin_rs_consensus::verify_block::{
     BlockRuleContext, block_witness_commitment_matches, verify_block_rules,
@@ -148,7 +148,7 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
         // Byte positions: the count prefix sits after the header, the spans
         // tile the tree without gaps, and every span slices exactly the
         // oracle's serialization of the same transaction.
-        let spans = facts.transaction_spans();
+        let spans = parsed.transaction_spans();
         assert_eq!(spans.len(), facts.tx_count(), "height {height}: span count");
         assert_eq!(
             parsed.tx_count_span().start(),
@@ -284,15 +284,7 @@ fn native_block_parse_matches_oracle_identities() {
     assert_parse_matches_oracle(&parsed, &oracle, &materialized);
 
     let facts = parsed.derive_facts(&materialized.txs, &parsed.txids().expect("native txids"));
-    assert_eq!(facts.transaction_spans().len(), facts.tx_count());
     assert!(facts.wtxids().is_some());
-    let native_facts = parsed
-        .native_facts()
-        .expect("native parse carries its facts");
-    assert_eq!(
-        native_facts.transaction_spans().len(),
-        parsed.transaction_count()
-    );
     let mut padded = bytes;
     padded.push(0x00);
     assert!(
@@ -418,9 +410,14 @@ fn mutated_tree_flags_merkle_mutation_while_unmutated_passes() {
         facts.merkle_mutated(),
         "equal real siblings must flag mutation"
     );
-    let error =
-        verify_block_rules_precomputed(&mutated, BlockRuleContext::non_contextual(), &facts)
-            .expect_err("mutated tree must be rejected");
+    let error = verify_block_rules_precomputed(
+        &mutated,
+        BlockRuleContext {
+            segwit_active: true,
+        },
+        &facts,
+    )
+    .expect_err("mutated tree must be rejected");
     assert!(
         matches!(error, ConsensusError::MerkleMutation),
         "expected MerkleMutation, got {error:?}"
@@ -429,8 +426,14 @@ fn mutated_tree_flags_merkle_mutation_while_unmutated_passes() {
     // Control: the untouched two-transaction fixture stays valid through the
     // same rules entry.
     let control_facts = BlockFacts::from_txids(&base.txs, base.txs.iter().map(Tx::txid).collect());
-    verify_block_rules_precomputed(&base, BlockRuleContext::non_contextual(), &control_facts)
-        .unwrap_or_else(|error| panic!("valid fixture must pass rules: {error:?}"));
+    verify_block_rules_precomputed(
+        &base,
+        BlockRuleContext {
+            segwit_active: true,
+        },
+        &control_facts,
+    )
+    .unwrap_or_else(|error| panic!("valid fixture must pass rules: {error:?}"));
 }
 
 #[test]

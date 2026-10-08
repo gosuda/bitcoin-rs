@@ -1,29 +1,18 @@
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
-/// RPC authentication policy.
-#[derive(Clone, Debug)]
-pub enum Auth {
-    /// HTTP Basic auth with a cleartext username and SHA256 password digest.
-    Basic {
-        /// Expected username.
-        user: String,
-        /// SHA256 of the expected password.
-        password_hash: [u8; 32],
-    },
-    /// Bitcoin Core cookie auth loaded from `path` during construction.
-    Cookie {
-        /// Cookie file path retained for diagnostics and reload decisions.
-        path: PathBuf,
-        /// Username read from the cookie file.
-        user: String,
-        /// SHA256 of the cookie password.
-        password_hash: [u8; 32],
-    },
+/// RPC authentication policy: one expected `(user, password)` pair hashed at
+/// construction, regardless of how the password was sourced.
+#[derive(Debug)]
+pub struct Auth {
+    /// Expected username.
+    user: String,
+    /// SHA256 of the expected password.
+    password_hash: [u8; 32],
 }
 
 /// Authentication construction errors.
@@ -41,7 +30,7 @@ impl Auth {
     /// Builds Basic auth by hashing `password` once at startup.
     #[must_use]
     pub fn basic(user: impl Into<String>, password: &str) -> Self {
-        Self::Basic {
+        Self {
             user: user.into(),
             password_hash: hash_password(password),
         }
@@ -55,8 +44,7 @@ impl Auth {
         let Some((user, password)) = trimmed.split_once(':') else {
             return Err(AuthError::InvalidCookie);
         };
-        Ok(Self::Cookie {
-            path,
+        Ok(Self {
             user: user.to_owned(),
             password_hash: hash_password(password),
         })
@@ -64,7 +52,7 @@ impl Auth {
 
     /// Returns true when `Authorization` contains valid HTTP Basic credentials.
     #[must_use]
-    pub fn validate_header(&self, header: Option<&str>) -> bool {
+    pub(crate) fn validate_header(&self, header: Option<&str>) -> bool {
         let Some(header) = header else {
             return false;
         };
@@ -81,20 +69,8 @@ impl Auth {
             return false;
         };
         let candidate_hash = hash_password(candidate_password);
-        match self {
-            Self::Basic {
-                user,
-                password_hash,
-            }
-            | Self::Cookie {
-                user,
-                password_hash,
-                ..
-            } => {
-                constant_time_eq(candidate_user.as_bytes(), user.as_bytes())
-                    && constant_time_eq(&candidate_hash, password_hash)
-            }
-        }
+        constant_time_eq(candidate_user.as_bytes(), self.user.as_bytes())
+            && constant_time_eq(&candidate_hash, &self.password_hash)
     }
 }
 

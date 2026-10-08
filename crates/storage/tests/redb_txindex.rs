@@ -424,7 +424,7 @@ fn txindex_bounded_scan_empty_values() -> TestResult<()> {
 
     // Every fixed-table value is synthesized as empty.
     for (_key, value) in exact.rows {
-        assert!(value.is_empty());
+        assert_eq!(value, Vec::<u8>::new());
     }
 
     Ok(())

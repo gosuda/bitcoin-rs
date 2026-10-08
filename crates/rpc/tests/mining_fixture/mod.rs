@@ -12,7 +12,7 @@ use bitcoin_rs_mining::{
     BlockTemplate, Candidate, MiningCapability, MiningInfo, TemplateId, TemplateMutation,
 };
 use bitcoin_rs_primitives::{
-    CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Txid, Witness,
+    CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, Witness,
 };
 
 /// Canned template; callers pin `capabilities` and `mutable` to the contract
@@ -41,7 +41,7 @@ pub(crate) fn canned_template(
                 version: 1,
                 lock_time: LockTime::ZERO,
                 inputs: vec![TxIn {
-                    previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                    previous_output: OutPoint::null(),
                     script_sig: Script::new(),
                     sequence: Sequence::MAX,
                     witness: Witness::new(),
@@ -49,13 +49,8 @@ pub(crate) fn canned_template(
                 outputs: Vec::new(),
             },
             coinbase_value: 0,
-            fees: 0,
             weight: 0,
-            size: 0,
-            sigop_cost: 0,
             transactions: Vec::new(),
-            witness_merkle_root: None,
-            witness_reserved_value: None,
             witness_commitment: None,
         }),
         rules: Vec::new(),
@@ -65,7 +60,6 @@ pub(crate) fn canned_template(
         mutable,
         submit_old: None,
         signet: None,
-        work_id: None,
     }
 }
 

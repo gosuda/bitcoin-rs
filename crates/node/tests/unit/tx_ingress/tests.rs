@@ -21,7 +21,7 @@ fn coinbase_tx(value: u64) -> Tx {
     Tx {
         version: 1,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: Script::from_bytes(vec![0x51]),
             sequence: Sequence::from_consensus(0xFFFF_FFFF),
             witness: Witness::new(),
@@ -30,7 +30,7 @@ fn coinbase_tx(value: u64) -> Tx {
             value: Amount::from_sat(value),
             script_pubkey: Script::from_bytes(vec![0x6A]),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -53,19 +53,19 @@ fn spending_tx() -> Tx {
             value: Amount::from_sat(49_000),
             script_pubkey: Script::from_bytes(vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD]),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     }
 }
 
 fn zero_fee_gateway() -> Arc<MempoolGateway> {
-    MempoolGateway::shared(
+    Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits {
             min_relay_fee_sat_per_kvb: 0,
             ..MempoolLimits::default()
         }))),
+        None,
         ValidationEngine::Native,
-    )
-    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"))
+    ))
 }
 
 fn make_consumer(
@@ -137,14 +137,13 @@ fn consumer_preserves_exact_connection_id() {
     })));
 
     let recorded_origin = Arc::new(Mutex::new(None));
-    let gateway = MempoolGateway::shared_with(
+    let gateway = Arc::new(MempoolGateway::new(
         Arc::clone(&pool),
-        Arc::new(OriginRecorder {
+        Some(Arc::new(OriginRecorder {
             captured: Arc::clone(&recorded_origin),
-        }),
+        })),
         ValidationEngine::Native,
-    )
-    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+    ));
 
     let source = test_source();
     let expected_conn_id = source.connection_id();
@@ -172,8 +171,11 @@ fn rejected_tx_does_not_relay_or_wake_mining() {
         min_relay_fee_sat_per_kvb: 1_000_000,
         ..MempoolLimits::default()
     })));
-    let gateway = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+    let gateway = Arc::new(MempoolGateway::new(
+        Arc::clone(&pool),
+        None,
+        ValidationEngine::Native,
+    ));
 
     let source = test_source();
     let tx = coinbase_tx(50_000);
@@ -226,11 +228,11 @@ fn accepted_tx_relays_and_wakes_mining() {
 
 #[test]
 fn coinbase_is_rejected_not_orphaned() {
-    let gateway = MempoolGateway::shared(
+    let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        None,
         ValidationEngine::Native,
-    )
-    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+    ));
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
     let coinbase = coinbase_tx(50_000);
@@ -256,11 +258,11 @@ fn non_final_tx_is_rejected_not_admitted() {
 
 #[test]
 fn oversized_missing_input_tx_is_rejected_not_orphaned() {
-    let gateway = MempoolGateway::shared(
+    let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        None,
         ValidationEngine::Native,
-    )
-    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+    ));
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
     let parent = Txid::from(Hash256::from_le_bytes(&[0xCC; 32]));
@@ -279,7 +281,7 @@ fn oversized_missing_input_tx_is_rejected_not_orphaned() {
             value: Amount::from_sat(1_000),
             script_pubkey: Script::from_bytes(vec![0x6A, 0x04, 0xAA, 0xBB, 0xCC, 0xDD]),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     };
     assert!(
         tx.weight() > 400_000,
@@ -295,11 +297,11 @@ fn oversized_missing_input_tx_is_rejected_not_orphaned() {
 
 #[test]
 fn retry_poll_evicts_an_orphan_after_its_connection_is_gone() {
-    let gateway = MempoolGateway::shared(
+    let gateway = Arc::new(MempoolGateway::new(
         Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+        None,
         ValidationEngine::Native,
-    )
-    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+    ));
     let mining = FakeMiningControl::unavailable("not implemented");
     let consumer = make_consumer(&gateway, &mining);
     // Spend an unfunded parent so the tx lands in the orphan pool.

@@ -6,8 +6,6 @@ use super::JournalWriterFailpoint;
 use crate::KvStore;
 
 impl<S: KvStore> JournalWriter<S> {
-    // --- failpoint plumbing (mirrors checkpoint.rs) ---
-
     pub(super) fn fail_segment_append(&self) -> Result<(), JournalWriterError> {
         self.failpoint(JournalWriterFailpoint::SegmentAppend)
     }

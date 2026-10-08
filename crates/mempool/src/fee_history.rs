@@ -84,21 +84,15 @@ pub fn load(data_dir: &Path, mempool: &RwLock<Mempool>) {
 /// warning, never a failed shutdown. A live file this build cannot adopt is
 /// preserved until an explicitly authorized rebuild, including after shutdown.
 /// Stale staging files are removed even when the live history is rejected.
-pub fn save(data_dir: &Path, mempool: &RwLock<Mempool>) {
+pub fn save(data_dir: &Path, history_bytes: &[u8]) {
     let temp_path = data_dir.join(HISTORY_TEMP);
     let live_path = data_dir.join(HISTORY_FILE);
     let result = (|| -> std::io::Result<Option<usize>> {
         match std::fs::remove_file(&temp_path) {
             Ok(()) => {}
-            // No stale temp staged: nothing to remove.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            // A real IO failure on the temp path aborts the publish.
             Err(error) => return Err(error),
         }
-        // Recheck the live file, not a remembered startup result: it may have
-        // changed since load. Disk I/O and decoding occur outside the pool lock
-        // and before staging a replacement. Publication retains the existing
-        // assumption that no external writer changes this datadir.
         match read_history(&live_path) {
             Ok(Some(bytes)) => {
                 if let Err(reject) = FeeEstimator::from_history_bytes(&bytes) {
@@ -120,18 +114,17 @@ pub fn save(data_dir: &Path, mempool: &RwLock<Mempool>) {
                 return Ok(None);
             }
         }
-        let bytes = mempool.read().estimator_history();
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp_path)?;
-        std::io::Write::write_all(&mut file, &bytes)?;
+        std::io::Write::write_all(&mut file, history_bytes)?;
         file.sync_all()?;
         std::fs::rename(&temp_path, &live_path)?;
         if let Ok(dir) = std::fs::File::open(data_dir) {
             let _ = dir.sync_all();
         }
-        Ok(Some(bytes.len()))
+        Ok(Some(history_bytes.len()))
     })();
     match result {
         Ok(Some(bytes)) => tracing::info!(
@@ -149,7 +142,7 @@ pub fn save(data_dir: &Path, mempool: &RwLock<Mempool>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::{MempoolEntry, MempoolLimits};
@@ -190,8 +183,6 @@ mod tests {
                 .insert_entry(MempoolEntry::new(Arc::clone(tx), 100, 10_000, 1, 100, 0))
                 .expect("the seeded entries must be admissible");
         }
-        // Two confirmations: a single one decays to 0.998 within its own
-        // block, under the estimator's one-decayed-observation minimum.
         let txids: Vec<Txid> = txs.iter().map(|tx| tx.txid()).collect();
         let refs: Vec<&Tx> = txs.iter().map(AsRef::as_ref).collect();
         let _ = guard.remove_for_block(&refs, &txids, 101);
@@ -199,11 +190,15 @@ mod tests {
         mempool
     }
 
+    fn save_pool(data_dir: &Path, mempool: &RwLock<Mempool>) {
+        save(data_dir, &mempool.read().estimator_history());
+    }
+
     #[test]
     fn load_after_save_restores_the_estimated_history() {
         let dir = tempfile::tempdir().expect("tempdir");
         let seeded = seeded_pool();
-        save(dir.path(), &seeded);
+        save_pool(dir.path(), &seeded);
 
         let fresh = open_pool();
         assert_eq!(fresh.read().estimate_fee_rate(1), None);
@@ -222,13 +217,13 @@ mod tests {
     fn save_updates_supported_history() {
         let dir = tempfile::tempdir().expect("tempdir");
         let fresh = open_pool();
-        save(dir.path(), &fresh);
+        save_pool(dir.path(), &fresh);
         let empty_history = std::fs::read(dir.path().join(HISTORY_FILE)).expect("empty history");
         std::fs::write(dir.path().join(HISTORY_TEMP), b"interrupted save")
             .expect("stale staging fixture");
 
         let seeded = seeded_pool();
-        save(dir.path(), &seeded);
+        save_pool(dir.path(), &seeded);
         assert_ne!(
             std::fs::read(dir.path().join(HISTORY_FILE)).expect("updated history"),
             empty_history,
@@ -252,8 +247,6 @@ mod tests {
 
     #[test]
     fn rejected_history_survives_load_save_and_reopen() {
-        // RCV-09 preserves rejected live bytes. The disposable staging file
-        // never acquires that status, including for an unknown owner version.
         let valid = seeded_pool().read().estimator_history();
         let mut bad_magic = valid.clone();
         bad_magic[3] ^= 0xff;
@@ -277,12 +270,10 @@ mod tests {
             let fresh = open_pool();
             load(dir.path(), &fresh);
             assert_eq!(fresh.read().estimate_fee_rate(1), None);
-            save(dir.path(), &fresh);
+            save_pool(dir.path(), &fresh);
             assert!(!temp_path.exists());
-            // Even learned observations do not authorize replacing a file
-            // the owner could not adopt.
             std::fs::write(&temp_path, b"another interrupted save").expect("stale staging fixture");
-            save(dir.path(), &seeded_pool());
+            save_pool(dir.path(), &seeded_pool());
             let reopened = open_pool();
             load(dir.path(), &reopened);
             assert_eq!(reopened.read().estimate_fee_rate(1), None);
@@ -311,7 +302,7 @@ mod tests {
         let fresh = open_pool();
         load(dir.path(), &fresh);
         assert_eq!(fresh.read().estimate_fee_rate(1), None);
-        save(dir.path(), &fresh);
+        save_pool(dir.path(), &fresh);
         let reopened = open_pool();
         load(dir.path(), &reopened);
         assert_eq!(reopened.read().estimate_fee_rate(1), None);
@@ -339,7 +330,7 @@ mod tests {
     fn save_rechecks_a_history_replaced_after_load() {
         let dir = tempfile::tempdir().expect("tempdir");
         let seeded = seeded_pool();
-        save(dir.path(), &seeded);
+        save_pool(dir.path(), &seeded);
         let path = dir.path().join(HISTORY_FILE);
         let fresh = open_pool();
         load(dir.path(), &fresh);
@@ -347,7 +338,7 @@ mod tests {
 
         let replacement = [0xff; 128];
         std::fs::write(&path, replacement).expect("replacement after successful load");
-        save(dir.path(), &fresh);
+        save_pool(dir.path(), &fresh);
         assert_eq!(
             std::fs::read(&path).expect("file must survive"),
             replacement
@@ -368,7 +359,7 @@ mod tests {
         let fresh = open_pool();
         load(dir.path(), &fresh);
         assert_eq!(fresh.read().estimate_fee_rate(1), None);
-        save(dir.path(), &fresh);
+        save_pool(dir.path(), &fresh);
         assert_eq!(
             std::fs::read(marker_path).expect("marker survives"),
             b"preserve me"
@@ -381,14 +372,12 @@ mod tests {
     fn metadata_failure_is_not_treated_as_missing_history() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join(HISTORY_FILE);
-        // Following this self-referential symlink fails regardless of the
-        // test process's permissions, unlike a mode-000 permission fixture.
         std::os::unix::fs::symlink(HISTORY_FILE, &path).expect("unreadable history link");
         std::fs::write(dir.path().join(HISTORY_TEMP), b"interrupted save")
             .expect("stale staging fixture");
         let fresh = open_pool();
         load(dir.path(), &fresh);
-        save(dir.path(), &fresh);
+        save_pool(dir.path(), &fresh);
         assert_eq!(
             std::fs::read_link(&path).expect("link survives"),
             Path::new(HISTORY_FILE)
@@ -409,7 +398,7 @@ mod tests {
 
         // Cleanup is best effort at shutdown; it must neither recursively
         // delete a directory nor replace the RCV-09 rejected live file.
-        save(dir.path(), &seeded_pool());
+        save_pool(dir.path(), &seeded_pool());
         assert_eq!(std::fs::read(&path).expect("history survives"), rejected);
         assert_eq!(
             std::fs::read(marker_path).expect("marker survives"),
@@ -430,7 +419,7 @@ mod tests {
         std::fs::write(&marker_path, b"preserve me").expect("operator marker");
         std::os::unix::fs::symlink(&marker_path, &temp_path).expect("staging symlink");
 
-        save(dir.path(), &seeded_pool());
+        save_pool(dir.path(), &seeded_pool());
         assert_eq!(std::fs::read(&path).expect("history survives"), rejected);
         assert_eq!(
             std::fs::read(marker_path).expect("marker survives"),
@@ -447,13 +436,13 @@ mod tests {
     #[test]
     fn staging_failure_keeps_supported_live_history() {
         let dir = tempfile::tempdir().expect("tempdir");
-        save(dir.path(), &open_pool());
+        save_pool(dir.path(), &open_pool());
         let path = dir.path().join(HISTORY_FILE);
         let before = std::fs::read(&path).expect("supported history");
         let temp_path = dir.path().join(HISTORY_TEMP);
         std::fs::create_dir(&temp_path).expect("blocked staging path");
 
-        save(dir.path(), &seeded_pool());
+        save_pool(dir.path(), &seeded_pool());
         assert_eq!(std::fs::read(&path).expect("history survives"), before);
         assert!(temp_path.is_dir());
     }

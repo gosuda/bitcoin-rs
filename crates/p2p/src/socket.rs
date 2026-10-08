@@ -21,7 +21,7 @@ pub(crate) const STREAM_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// [`crate::wire::write_message`] is not delayed by Nagle after a short
 /// first segment. Timeouts are the same on inbound and outbound so a stalled
 /// peer cannot park a connection thread past the handshake ceiling.
-pub fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
+pub(crate) fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(STREAM_POLL_INTERVAL))?;
@@ -30,7 +30,7 @@ pub fn configure_peer_stream(stream: &TcpStream) -> io::Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 

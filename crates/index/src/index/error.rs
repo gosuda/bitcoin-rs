@@ -17,13 +17,6 @@ pub enum IndexError {
     /// INVARIANT: No rows from a failed parse are committed.
     #[error("invalid serialized block: {0:?}")]
     BlockParse(bitcoin_rs_primitives::DecodeError),
-    /// This indexer cannot undo a block, so a reorg cannot be made consistent.
-    #[error("this indexer does not support block disconnect")]
-    UnsupportedRollback,
-    /// The writer does not implement stamping a durable watermark anchor, so
-    /// a rebuild after pruning cannot be placed on it.
-    #[error("this indexer does not support watermark anchoring")]
-    UnsupportedAnchor,
     /// `anchor_watermark` covers only capabilities derived from block
     /// history: `ScriptLive` is reseeded from the authoritative UTXO view
     /// rather than anchored, and an empty selection stamps nothing.

@@ -15,18 +15,8 @@ pub struct MempoolLimits {
     /// not relayed. Selected default: 1000 sat/kvB = 1 sat/vB.
     pub min_relay_fee_sat_per_kvb: u64,
     /// Maximum number of transactions in one cluster, including the candidate.
-    ///
-    /// A cluster is the set of mempool transactions directly or indirectly
-    /// connected to a transaction through spends -- a connected component of
-    /// the spend graph, not an ancestor package. Two children of one parent
-    /// share a cluster although neither is an ancestor of the other.
-    ///
-    /// Core's `-limitclustercount`, `DEFAULT_CLUSTER_LIMIT` (`policy.h`).
     pub cluster_count: u32,
     /// Maximum virtual size of one cluster in vbytes, including the candidate.
-    ///
-    /// Core's `-limitclustersize`, `DEFAULT_CLUSTER_SIZE_LIMIT_KVB * 1000`
-    /// (`policy.h`, `kernel/mempool_limits.h`).
     pub cluster_size_vbytes: u64,
 }
 
@@ -69,16 +59,10 @@ pub enum PolicyError {
 
 /// Fee-rate increment the eviction-floor projection and BIP125 rule 4 quote,
 /// in sat/kvB. The selected rate is 1,000 sat/kvB; Core 31.1's default is 100.
-pub(crate) const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
+const DEFAULT_INCREMENTAL_RELAY_FEE_SAT_PER_KVB: u64 = 1_000;
 
-/// Typed snapshot of the mempool relay-policy surface the RPC
-/// `getmempoolinfo` response projects, built from the policy the pool
-/// actually enforces.
-///
-/// Every field traces to an enforcement site or is a recorded deviation (the
-/// `getmempoolinfo` manifest row carries the ledger). The RPC layer consumes
-/// this record verbatim and holds no policy literals of its own, so the
-/// response cannot disagree with the running pool.
+/// Typed snapshot of the mempool relay-policy surface the RPC `getmempoolinfo`
+/// response projects, built from the policy the pool actually enforces.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MempoolPolicySnapshot {
     /// Standardness settings admission enforces through `is_standard_tx`:
@@ -89,8 +73,6 @@ pub struct MempoolPolicySnapshot {
     /// `permitbaremultisig` field reports the enforced `true`.
     pub permit_bare_multisig: bool,
     /// Enforced cluster count bound (`PolicyError::ClusterCountLimit`).
-    /// The v31 `limitclustercount` field projects this — the limit admission
-    /// actually applies, not the ancestor-package cap.
     pub cluster_count: u32,
     /// Enforced cluster virtual-size bound in vbytes
     /// (`PolicyError::ClusterSizeLimit`). The v31 `limitclustersize` field
@@ -103,8 +85,6 @@ pub struct MempoolPolicySnapshot {
     /// `true`. Other replacement policy differences remain under #639.
     pub full_rbf: bool,
     /// The graph owner computes exact optimal chunks for immutable snapshots.
-    /// This reports true rather than emulating Core's background SFL state;
-    /// that work-budget difference remains in the compatibility manifest.
     pub optimal: bool,
 }
 

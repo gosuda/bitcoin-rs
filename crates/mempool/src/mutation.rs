@@ -50,8 +50,6 @@ pub enum RemovalReason {
     Descendant,
     /// Size or fee-rate policy evicted the entry.
     PolicyEviction,
-    /// The entry outlived its expiry.
-    Expiry,
     /// A wholesale clear emptied the pool.
     Clear,
     /// A reorg disconnected the entry's containing state.
@@ -93,9 +91,6 @@ pub struct MutationResult {
     pub changes: Vec<MutationChange>,
     /// Mempool sequence assigned to `changes[0]`; each later change took the
     /// next value. `0` when `changes` is empty.
-    ///
-    /// The pool advances its sequence exactly once per emitted change under
-    /// the write lock, so a batch's sequences are contiguous.
     pub sequence_base: u64,
 }
 
@@ -131,11 +126,6 @@ impl MutationResult {
     }
 
     /// The txid of every change that left the pool, in commit order.
-    ///
-    /// Converts each record's native txid back to the pool's `Txid` at
-    /// this seam — the inverse of the `change` helper — so callers
-    /// comparing against entry or wire txids need no conversion of their
-    /// own.
     #[must_use]
     pub fn removed_txids(&self) -> Vec<Txid> {
         self.changes
@@ -147,9 +137,6 @@ impl MutationResult {
 }
 
 /// Identifies the network peer a transaction arrived from.
-///
-/// Plain data by contract: the mempool crate never depends on the p2p
-/// stack, so the node passes a token it minted at connection time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PeerToken {
     /// The peer's wire address.
@@ -159,14 +146,13 @@ pub struct PeerToken {
 }
 
 /// How the transaction behind a committed mutation entered the node.
-///
-/// [`AdmissionOrigin::Peer`] is emitted by P2P ingress
-/// (`crates/node/src/tx_ingress.rs`). [`AdmissionOrigin::Block`] is emitted
-/// by the apply-path sweep (`crates/node/src/apply.rs`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionOrigin {
-    /// Submitted through RPC (`sendrawtransaction`).
+    /// Submitted through RPC `sendrawtransaction` or the embedded
+    /// `Node::broadcast`.
     Rpc,
+    /// Submitted through an Esplora raw-transaction broadcast route.
+    Esplora,
     /// Relayed in from a network peer.
     Peer(PeerToken),
     /// Re-admitted by a reorg's disconnect walk.
@@ -175,10 +161,32 @@ pub enum AdmissionOrigin {
     Block,
 }
 
+/// The [`AdmissionOrigin`]s a local submission may carry.
+///
+/// [`MempoolGateway::submit_local_transaction`](crate::MempoolGateway::submit_local_transaction)
+/// takes this type, so a peer, reorg, or block origin cannot reach the local
+/// path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalOrigin {
+    /// Recorded as [`AdmissionOrigin::Rpc`].
+    Rpc,
+    /// Recorded as [`AdmissionOrigin::Esplora`].
+    Esplora,
+}
+
+impl From<LocalOrigin> for AdmissionOrigin {
+    fn from(origin: LocalOrigin) -> Self {
+        match origin {
+            LocalOrigin::Rpc => Self::Rpc,
+            LocalOrigin::Esplora => Self::Esplora,
+        }
+    }
+}
+
 /// What the gateway hands its observers: the committed result plus how the
 /// mutating transaction entered the node.
 ///
-/// [`MempoolGateway`] clones one [`MutationResult`] into the envelope for
+/// [`MempoolGateway`](crate::MempoolGateway) clones one [`MutationResult`] into the envelope for
 /// each committed non-empty batch that has an observer attached, enqueues
 /// that envelope, then returns the original result to the caller. Observers
 /// receive `&MutationEnvelope` after the publish mutex is released.

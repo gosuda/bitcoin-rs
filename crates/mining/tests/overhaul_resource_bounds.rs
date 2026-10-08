@@ -7,7 +7,7 @@
 //! bytes are the pool's capacity-based estimates at operation endpoints. A vsize limit is not an RSS
 //! limit. These samples do not certify unrelated resources or performance.
 
-use bitcoin_rs_consensus::ValidationEngine;
+use bitcoin_rs_consensus::{ValidationEngine, transaction_sigop_cost};
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,11 +19,12 @@ use bitcoin_rs_mempool::{
     AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolEntry, MempoolGateway,
     MempoolLimits, PolicyError, ReplacementCandidate, SubmitError, SubmitOutcome,
 };
-use bitcoin_rs_mining::{CandidateContext, assemble_candidate};
+use bitcoin_rs_mining::{Candidate, CandidateContext, assemble_candidate};
 use bitcoin_rs_primitives::{
     Amount, CompactTarget, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness,
 };
+use bitcoin_rs_script::VerifyFlags;
 use parking_lot::RwLock;
 use serde_json::{Value, json};
 
@@ -76,7 +77,7 @@ fn fixture(members: u32) -> TestResult<Fixture> {
     }
     assert_eq!(pool.limits.cluster_count, MEMBERS);
     assert_eq!(pool.limits.max_replacement_clusters, CLUSTERS);
-    assert_eq!(pool.tx_count(), usize::try_from(CLUSTERS * members)?);
+    assert_eq!(pool.len(), usize::try_from(CLUSTERS * members)?);
     Ok(Fixture {
         gateway: MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native),
         roots,
@@ -105,7 +106,7 @@ fn sample(gateway: &MempoolGateway) -> TestResult<Value> {
     let pool = gateway.read();
     assert!(pool.total_vsize() <= pool.limits.max_total_bytes);
     Ok(json!({
-        "entries": pool.tx_count(), "vsize": pool.total_vsize(),
+        "entries": pool.len(), "vsize": pool.total_vsize(),
         "vsize_limit": pool.limits.max_total_bytes,
         "retained_estimate_bytes": pool.dynamic_memory_usage(),
         "rss_kib": rss_kib("VmRSS:")?, "process_rss_high_water_kib": rss_kib("VmHWM:")?,
@@ -165,7 +166,7 @@ fn exercise(stage: &str, fixture: &Fixture) -> TestResult<Value> {
                 1,
             )?;
             assert_eq!(changes.len(), usize::try_from(CLUSTERS * MEMBERS + 1)?);
-            assert_eq!(gateway.read().tx_count(), 1);
+            assert_eq!(gateway.read().len(), 1);
             Ok(json!({"mutation_changes": changes.len(), "change_bound": CLUSTERS * MEMBERS + 1}))
         }
         "package-preview" => {
@@ -194,13 +195,11 @@ fn exercise(stage: &str, fixture: &Fixture) -> TestResult<Value> {
             let context = context();
             let candidate = assemble_candidate(&context, &snapshot, &[0x51])?;
             assert_eq!(candidate.transactions.len(), snapshot.entries.len());
-            assert!(
-                candidate.weight <= context.max_weight
-                    && candidate.sigop_cost <= context.max_sigops
-            );
+            let sigops = total_sigop_cost(&candidate);
+            assert!(candidate.weight <= context.max_weight && sigops <= context.max_sigops);
             Ok(
                 json!({"selected": candidate.transactions.len(), "weight": candidate.weight,
-                "weight_limit": context.max_weight, "sigops": candidate.sigop_cost, "sigop_limit": context.max_sigops}),
+                "weight_limit": context.max_weight, "sigops": sigops, "sigop_limit": context.max_sigops}),
             )
         }
         "eviction" => {
@@ -427,4 +426,16 @@ fn mempool_policy_resource_capture_at_resolved_graph_bounds() -> TestResult {
     println!("RESOURCE_EVIDENCE {report}");
     println!("resource evidence: {}", path.display());
     Ok(())
+}
+
+fn total_sigop_cost(candidate: &Candidate) -> u64 {
+    u64::from(transaction_sigop_cost(
+        &candidate.coinbase,
+        &[],
+        VerifyFlags::NONE,
+    )) + candidate
+        .transactions
+        .iter()
+        .map(|tx| u64::from(tx.sigop_cost))
+        .sum::<u64>()
 }

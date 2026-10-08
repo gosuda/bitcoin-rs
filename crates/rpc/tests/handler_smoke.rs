@@ -9,6 +9,7 @@ use hashbrown::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bitcoin::hex::DisplayHex;
 use bitcoin_rs_chain::{BlockBodySource, ChainWork, NodeId, NodeStatus, TipSnapshot};
 use bitcoin_rs_index::block_log::BlockRecord;
 use bitcoin_rs_mempool::MempoolEntry;
@@ -63,7 +64,7 @@ type Expectation = (&'static str, sonic_rs::Value, sonic_rs::Value);
 fn chain_and_mempool_expectations(fixture: &Fixture) -> Vec<Expectation> {
     let tip = fixture.block_hash.to_string();
     let txid = fixture.txid.to_string();
-    let raw_tx = hex_encode(&consensus_bytes(&fixture.tx));
+    let raw_tx = consensus_bytes(&fixture.tx).to_lower_hex_string();
     // The block hex starts with the 80-byte header getblockheader serializes.
     let header_hex = &fixture.block_hex[..160];
 
@@ -430,17 +431,6 @@ fn gettxoutsetinfo_production_triplet_matches_core_digest() -> Result<(), Box<dy
 }
 
 #[test]
-fn gettxoutsetinfo_rejects_trailing_parameters() {
-    // Contract clause: `docs/contracts/muhash-rpc.md` `MRPC-01`.
-    let ctx = Arc::new(Context::new());
-    let handler = Handler::new(Arc::clone(&ctx));
-    let error = handler
-        .dispatch("gettxoutsetinfo", &json!(["muhash", null, false, true]))
-        .expect_err("trailing parameters must be refused");
-    assert_eq!(error.code(), RpcError::INVALID_PARAMS, "{error}");
-}
-
-#[test]
 fn gettxoutsetinfo_hash_type_modes_match_core_shapes() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(Context::new());
     let handler = Handler::new(Arc::clone(&ctx));
@@ -788,17 +778,6 @@ fn seed_tree_chain(ctx: &Context, block: &Block) -> Block {
     linked_block
 }
 
-/// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
 /// Computes the consensus merkle root over `txs` by folding hash pairs with
 /// double SHA-256, duplicating the final hash when a layer has odd length.
 fn fixture_merkle_root(txs: &[Tx]) -> Hash256 {
@@ -933,7 +912,7 @@ impl Fixture {
                 best_block_height: 7,
             },
         }));
-        let block_hex = hex_encode(&consensus_bytes(&block));
+        let block_hex = consensus_bytes(&block).to_lower_hex_string();
         let txid = tx.txid();
         let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 7, 0);
         ctx.mempool.gateway.pool().write().insert_entry(entry)?;

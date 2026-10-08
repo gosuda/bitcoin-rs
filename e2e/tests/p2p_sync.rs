@@ -10,16 +10,65 @@ use bitcoin_rs_e2e::helpers::spawn_synced_pair;
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode, Result, ValueExt};
 use serde_json::{Value, json};
 
-/// A fresh node syncs a Core-mined regtest chain to the same tip.
+/// Wait until `getconnectioncount` reports `want` peers.
+fn wait_for_peers(node: &mut ProcessNode, label: &'static str, want: u64) -> Result<()> {
+    node.wait_for(label, Duration::from_secs(20), |node| {
+        let count = node
+            .rpc("getconnectioncount", &json!([]))?
+            .as_u64()
+            .unwrap_or(u64::MAX);
+        Ok((count == want || (want > 0 && count > want)).then_some(()))
+    })
+}
+
+/// A fresh node answers its peerless surfaces with the empty/null values
+/// Core uses, and the ban list round-trips.
 #[test]
-fn node_syncs_core_chain_to_tip() -> Result<()> {
+fn fresh_node_surfaces_and_ban_list() -> Result<()> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+
+    // `ping` answering null is a documented deviation from Core's scheduled
+    // pong measurement; the rest are the empty address manager, peer table,
+    // and added-node list of a node that has never connected.
+    for (method, expected) in [
+        ("ping", Value::Null),
+        ("getnodeaddresses", json!([])),
+        ("getpeerinfo", json!([])),
+        ("getaddednodeinfo", json!([])),
+        ("getconnectioncount", json!(0)),
+        ("listbanned", json!([])),
+    ] {
+        assert_eq!(node.rpc(method, &json!([]))?, expected, "{method}");
+    }
+
+    assert_eq!(
+        node.rpc("setban", &json!(["192.0.2.1", "add", 3600]))?,
+        Value::Null
+    );
+    let banned = node.rpc("listbanned", &json!([]))?;
+    let list = banned
+        .as_array()
+        .ok_or_else(|| Error::Assertion("listbanned not array".into()))?;
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].str_field("address")?, "192.0.2.1/32");
+    assert_eq!(list[0].u64_field("ban_duration")?, 3600);
+
+    assert_eq!(node.rpc("clearbanned", &json!([]))?, Value::Null);
+    assert_eq!(node.rpc("listbanned", &json!([]))?, json!([]));
+    node.stop()
+}
+
+/// A fresh node syncs a Core-mined regtest chain to the same tip and keeps
+/// following the peer past startup.
+#[test]
+fn node_syncs_and_follows_core_chain() -> Result<()> {
     let (mut core, mut node) = spawn_synced_pair(12)?;
 
     assert_eq!(node.rpc("getblockcount", &json!([]))?, json!(12));
-    let node_tip = node.rpc("getbestblockhash", &json!([]))?;
-    let core_tip = core.rpc("getbestblockhash", &json!([]))?;
-    assert_eq!(node_tip, core_tip);
-
+    assert_eq!(
+        node.rpc("getbestblockhash", &json!([]))?,
+        core.rpc("getbestblockhash", &json!([]))?
+    );
     // Hash-by-hash agreement over the synced range.
     for height in [1_u64, 6, 12] {
         assert_eq!(
@@ -28,48 +77,52 @@ fn node_syncs_core_chain_to_tip() -> Result<()> {
             "height {height} diverged"
         );
     }
+
+    // Blocks mined after the initial sync must still arrive.
+    core.rpc(
+        "generatetoaddress",
+        &json!([6, bitcoin_rs_e2e::helpers::funding_address()?.to_string()]),
+    )?;
+    node.wait_block_count(18, Duration::from_secs(90))?;
+    assert_eq!(
+        node.rpc("getbestblockhash", &json!([]))?,
+        core.rpc("getbestblockhash", &json!([]))?
+    );
     node.stop()?;
     core.stop()
 }
 
-/// `getpeerinfo` and `getconnectioncount` reflect the live Core peer.
+/// `getpeerinfo`/`getnetworkinfo`/`getnettotals` describe the live Core peer
+/// and the transport it runs over.
 #[test]
-fn peer_info_and_connection_count() -> Result<()> {
+fn peer_and_network_introspection() -> Result<()> {
     let (core, mut node) = spawn_synced_pair(5)?;
 
-    assert!(
-        node.rpc("getconnectioncount", &json!([]))?
-            .as_u64()
-            .is_some_and(|c| c >= 1)
-    );
     let peers = node.rpc("getpeerinfo", &json!([]))?;
     let peers = peers
         .as_array()
         .ok_or_else(|| Error::Assertion("getpeerinfo not array".into()))?;
-    assert!(!peers.is_empty());
-    let peer = &peers[0];
+    let peer = peers
+        .first()
+        .ok_or_else(|| Error::Assertion("no peer recorded".into()))?;
     assert_eq!(
         peer.str_field("addr")?,
         format!("127.0.0.1:{}", core.p2p_addr.port())
     );
-    assert!(peer.get("conntime").is_some(), "peer lacks conntime");
-    assert!(peer.get("subver").is_some(), "peer lacks subver");
+    assert!(peer.u64_field("conntime")? > 0, "peer conntime: {peer}");
+    assert!(
+        peer.str_field("subver")?.starts_with("/Satoshi:"),
+        "peer subver must echo the connected Core build: {peer}"
+    );
     // `synced_blocks`/`synced_headers` are honest "not measured" (-1) in this
-    // node rather than a guessed height; assert the fields exist and are ints.
+    // node rather than a guessed height.
     for field in ["synced_blocks", "synced_headers", "presynced_headers"] {
-        assert!(
-            peer.get(field).is_some_and(serde_json::Value::is_i64),
-            "peer lacks int {field}: {peer}"
+        assert_eq!(
+            peer.field(field)?.as_i64(),
+            Some(-1),
+            "{field} must report unmeasured, not a guess: {peer}"
         );
     }
-    node.stop()?;
-    core.stop()
-}
-
-/// `getnetworkinfo`/`getnettotals` describe the connected transport.
-#[test]
-fn network_info_and_totals() -> Result<()> {
-    let (core, mut node) = spawn_synced_pair(3)?;
 
     let info = node.rpc("getnetworkinfo", &json!([]))?;
     assert!(info.u64_field("connections")? >= 1, "connections: {info}");
@@ -92,86 +145,26 @@ fn network_info_and_totals() -> Result<()> {
     core.stop()
 }
 
-/// `ping` answers immediately (documented deviation from Core's
-/// scheduled pong measurement).
+/// Connectivity control: `disconnectnode` drops the live peer, `addnode`
+/// restores it, and `setnetworkactive` gates the whole transport.
 #[test]
-fn ping_answers_immediately() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    assert_eq!(node.rpc("ping", &json!([]))?, Value::Null);
-    node.stop()
-}
-
-/// `addnode`/`getaddednodeinfo`/`disconnectnode` manage outbound peers.
-#[test]
-fn addnode_disconnect_flow() -> Result<()> {
+fn connectivity_control_drops_and_restores_the_peer() -> Result<()> {
     let (core, mut node) = spawn_synced_pair(2)?;
     let core_addr = format!("127.0.0.1:{}", core.p2p_addr.port());
 
-    let added = node.rpc("getaddednodeinfo", &json!([]))?;
-    assert!(added.as_array().is_some());
-
-    // Disconnect the live peer by address, then wait for the drop.
     assert_eq!(
         node.rpc("disconnectnode", &json!([core_addr]))?,
         Value::Null
     );
-    node.wait_for("peer disconnect", Duration::from_secs(15), |node| {
-        Ok(node
-            .rpc("getconnectioncount", &json!([]))?
-            .as_u64()
-            .map(|c| c == 0))
-    })?;
-
-    // Reconnect through addnode and wait for the handshake.
+    wait_for_peers(&mut node, "peer disconnect", 0)?;
     assert_eq!(
-        node.rpc("addnode", &json!([core.p2p_addr.to_string(), "add"]))?,
+        node.rpc("addnode", &json!([core_addr, "add"]))?,
         Value::Null
     );
-    node.wait_for("reconnect", Duration::from_secs(20), |node| {
-        Ok(node
-            .rpc("getconnectioncount", &json!([]))?
-            .as_u64()
-            .map(|c| c >= 1))
-    })?;
-    node.stop()?;
-    core.stop()
-}
-
-/// `setban`/`listbanned`/`clearbanned` maintain the ban list.
-#[test]
-fn ban_list_round_trip() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-
-    assert_eq!(
-        node.rpc("setban", &json!(["192.0.2.1", "add", 3600]))?,
-        Value::Null
-    );
-    let banned = node.rpc("listbanned", &json!([]))?;
-    let list = banned
-        .as_array()
-        .ok_or_else(|| Error::Assertion("listbanned not array".into()))?;
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].str_field("address")?, "192.0.2.1/32");
-    assert_eq!(list[0].u64_field("ban_duration")?, 3600);
-
-    assert_eq!(node.rpc("clearbanned", &json!([]))?, Value::Null);
-    assert_eq!(node.rpc("listbanned", &json!([]))?, json!([]));
-    node.stop()
-}
-
-/// `setnetworkactive` drops and restores connectivity.
-#[test]
-fn setnetworkactive_toggles_peers() -> Result<()> {
-    let (core, mut node) = spawn_synced_pair(2)?;
-    let core_addr = format!("127.0.0.1:{}", core.p2p_addr.port());
+    wait_for_peers(&mut node, "reconnect", 1)?;
 
     assert_eq!(node.rpc("setnetworkactive", &json!([false]))?, json!(false));
-    node.wait_for("network off", Duration::from_secs(15), |node| {
-        Ok(node
-            .rpc("getconnectioncount", &json!([]))?
-            .as_u64()
-            .map(|c| c == 0))
-    })?;
+    wait_for_peers(&mut node, "network off", 0)?;
     assert_eq!(
         node.rpc("getnetworkinfo", &json!([]))?
             .get("networkactive")
@@ -184,38 +177,7 @@ fn setnetworkactive_toggles_peers() -> Result<()> {
         node.rpc("addnode", &json!([core_addr, "add"]))?,
         Value::Null
     );
-    node.wait_for("network on", Duration::from_secs(20), |node| {
-        Ok(node
-            .rpc("getconnectioncount", &json!([]))?
-            .as_u64()
-            .map(|c| c >= 1))
-    })?;
-    node.stop()?;
-    core.stop()
-}
-
-/// `getnodeaddresses` reports the empty address manager on a fresh node.
-#[test]
-fn node_addresses_empty() -> Result<()> {
-    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
-    assert_eq!(node.rpc("getnodeaddresses", &json!([]))?, json!([]));
-    node.stop()
-}
-
-/// The node keeps syncing while the peer mines more blocks — not only
-/// at startup.
-#[test]
-fn node_follows_extended_core_chain() -> Result<()> {
-    let (mut core, mut node) = spawn_synced_pair(4)?;
-    core.rpc(
-        "generatetoaddress",
-        &json!([6, bitcoin_rs_e2e::helpers::funding_address()?.to_string()]),
-    )?;
-    node.wait_block_count(10, Duration::from_secs(90))?;
-    assert_eq!(
-        node.rpc("getbestblockhash", &json!([]))?,
-        core.rpc("getbestblockhash", &json!([]))?
-    );
+    wait_for_peers(&mut node, "network on", 1)?;
     node.stop()?;
     core.stop()
 }

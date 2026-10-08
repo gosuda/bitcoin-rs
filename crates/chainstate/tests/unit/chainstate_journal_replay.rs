@@ -89,7 +89,7 @@ fn replayed_frontier_must_match_the_durable_head_identity() -> TestResult {
         raw_header: raw_header(&next_header),
         mutations: Vec::new(),
     };
-    let replayed = replay_records(vec![record], tree, utxo, coin_stats, base_tip, 1)?;
+    let replayed = replay_records(vec![record], tree, utxo, coin_stats, base_tip)?;
 
     validate_replayed_head(
         &replayed,
@@ -128,11 +128,11 @@ fn replay_extends_checkpoint_state_and_returns_valid_tip() -> TestResult {
         }],
     };
 
-    let replayed = replay_records(vec![record], tree, utxo, coin_stats, base_tip, 1)?;
+    let replayed = replay_records(vec![record], tree, utxo, coin_stats, base_tip)?;
 
     assert!(replayed.utxo.get_entry(&base_coin.outpoint).is_some());
     assert!(replayed.utxo.get_entry(&new_coin.outpoint).is_some());
-    assert_eq!(replayed.chain_tx_count, 3);
+    assert_eq!(replayed.applied_tip.chain_tx_count.to_wire(), 3);
     assert_eq!(replayed.coin_stats.height, 1);
     assert_eq!(replayed.coin_stats.tx_count, 3);
     assert_eq!(replayed.applied_tip.height, 1);
@@ -184,9 +184,9 @@ fn replay_preserves_an_unknown_checkpoint_count() -> TestResult {
             coin: new_coin.clone(),
         }],
     };
-    let replayed = replay_records(vec![record], tree, utxo, coin_stats, base_tip, 0)?;
+    let replayed = replay_records(vec![record], tree, utxo, coin_stats, base_tip)?;
 
-    assert_eq!(replayed.chain_tx_count, 0);
+    assert_eq!(replayed.applied_tip.chain_tx_count.to_wire(), 0);
     assert_eq!(replayed.applied_tip.height, 2);
     assert_eq!(replayed.applied_tip.hash, next_hash.0);
     assert!(replayed.utxo.get_entry(&new_coin.outpoint).is_some());
@@ -220,7 +220,7 @@ fn replay_requires_each_record_to_extend_the_replayed_tip() -> TestResult {
             })
             .collect();
 
-        let result = replay_records(records, tree, utxo, coin_stats, base_tip, 1);
+        let result = replay_records(records, tree, utxo, coin_stats, base_tip);
         if stale_parent {
             assert!(matches!(
                 result,
@@ -231,9 +231,48 @@ fn replay_requires_each_record_to_extend_the_replayed_tip() -> TestResult {
             let replayed = result?;
             assert_eq!(replayed.applied_tip.hash, expected_hash);
             assert_eq!(replayed.applied_tip.height, 2);
-            assert_eq!(replayed.chain_tx_count, 5);
+            assert_eq!(replayed.applied_tip.chain_tx_count.to_wire(), 5);
             assert_eq!(replayed.coin_stats.height, 2);
             assert_eq!(replayed.coin_stats.tx_count, 5);
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn replay_counts_from_an_empty_genesis_and_rejects_overflow() -> TestResult {
+    for base_count in [0, u64::MAX] {
+        let (mut tree, utxo, coin_stats, mut base_tip, _) = base_state()?;
+        base_tip.chain_tx_count = ChainTxCount::from_wire(base_count);
+        tree.restore_chain_tx_count(base_tip.tip_id, base_tip.chain_tx_count)?;
+        let next = header(BlockHash(base_tip.hash), 2, 2);
+        let record = JournalRecord {
+            height: 1,
+            block_hash: next.compute_hash().0.to_le_bytes(),
+            prev_hash: base_tip.hash.to_le_bytes(),
+            block_tx_count: 2,
+            coin_stats_height_delta: 1,
+            raw_header: raw_header(&next),
+            mutations: Vec::new(),
+        };
+        let result = replay_records(vec![record], tree, utxo, coin_stats, base_tip);
+        if base_count == 0 {
+            let replayed = result?;
+            assert_eq!(replayed.applied_tip.hash, next.compute_hash().0);
+            assert_eq!(replayed.applied_tip.chain_tx_count.get(), Some(2));
+            assert_eq!(
+                replayed
+                    .tree
+                    .node(replayed.applied_tip.tip_id)?
+                    .chain_tx_count,
+                replayed.applied_tip.chain_tx_count
+            );
+        } else {
+            assert!(matches!(
+                result,
+                Err(JournalReplayError::CommittedRangeInvalid(reason))
+                    if reason == "chain transaction count overflow"
+            ));
         }
     }
     Ok(())

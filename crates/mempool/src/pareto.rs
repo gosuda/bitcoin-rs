@@ -4,21 +4,11 @@ use crate::{EntryId, MempoolEntry};
 
 /// Priority index ordered by signed modified fee rate, modified ancestor fee
 /// rate, then age.
-///
-/// Ordering lives in [`ParetoKey`]'s [`Ord`], and the set is kept in that order
-/// rather than re-sorted. Insertion and removal are both `O(log n)`.
-///
-/// Insertion and removal stay logarithmic so peer-driven mempool growth does
-/// not re-sort the complete priority set.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ParetoFront {
     /// Keys in priority order.
     order: BTreeSet<ParetoKey>,
     /// The key currently indexed for each entry.
-    ///
-    /// A removal is given an id, and the ordered set is keyed by priority, so
-    /// without this a removal would have to search the set to find what to
-    /// remove — which is the linear scan this type exists to avoid.
     keys: BTreeMap<EntryId, ParetoKey>,
 }
 
@@ -33,17 +23,6 @@ struct ParetoKey {
 impl Ord for ParetoKey {
     /// Highest modified fee rate first, then highest modified ancestor fee
     /// rate, then oldest.
-    ///
-    /// The rates are the actual fee rate plus the signed mining-only overlay
-    /// ([`MempoolEntry::modified_fee_rate`]), so `prioritisetransaction`
-    /// moves entries without touching their actual fees. The rates are signed
-    /// because a negative overlay can push a modified fee below zero.
-    ///
-    /// The final tiebreak on `id` is what makes this a *total* order, and that
-    /// is load-bearing rather than cosmetic: the ordered set stores keys, so two
-    /// entries whose keys compared `Equal` would collapse into one and an entry
-    /// would silently vanish from the mempool's priority index. Entry ids are
-    /// unique, so no two distinct entries can compare equal.
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         other
             .modified_fee_rate
@@ -77,10 +56,6 @@ impl ParetoKey {
 
 impl ParetoFront {
     /// Inserts or replaces an entry in priority order.
-    ///
-    /// Replacement is not a special case for the caller but is one here: an
-    /// entry whose ancestor fee rate changed has a different key, so the stale
-    /// key must leave the ordered set or the entry would be indexed twice.
     pub(crate) fn insert(&mut self, id: EntryId, entry: &MempoolEntry) {
         let key = ParetoKey::new(id, entry);
         if let Some(previous) = self.keys.insert(id, key) {
@@ -116,21 +91,6 @@ impl ParetoFront {
     }
 
     /// Estimates the heap this index occupies, in bytes.
-    ///
-    /// **Every entry is stored twice.** `order` is keyed by priority so the
-    /// front can be read in order, and `keys` is keyed by id so a removal does
-    /// not have to search the set for what to remove -- the linear scan this
-    /// type exists to avoid. Charging one `EntryId` per transaction, as
-    /// `dynamic_memory_usage` did, misses both key copies and reports a small
-    /// fraction of what the index actually holds.
-    ///
-    /// A lower bound rather than a measurement, and deliberately so: a B-tree
-    /// allocates nodes of a fixed arity and leaves them partly filled, so its
-    /// real footprint is above this and depends on insertion order. Bitcoin
-    /// Core's own `DynamicMemoryUsage` is an estimate for the same reason --
-    /// "no exact formula for `boost::multi_index_container` is implemented".
-    /// What matters is that the term scales with what is stored, which one
-    /// `EntryId` per entry did not.
     #[must_use]
     pub(crate) fn dynamic_memory_usage(&self) -> u64 {
         use core::mem::size_of;
@@ -175,18 +135,6 @@ mod memory_usage_tests {
     }
 
     /// Every entry is stored twice, and the estimate says so.
-    ///
-    /// `order` is keyed by priority so the front can be read in order; `keys`
-    /// is keyed by id so a removal need not search the set for what to remove.
-    /// An estimate that counted only one of them -- or, as the pool's term
-    /// did, one `EntryId` per transaction -- reports a small fraction of what
-    /// the index holds, and the shortfall grows with the pool.
-    ///
-    /// The floor is two key copies per entry: deliberately below what the
-    /// implementation computes, which also carries the id the map keys on, so
-    /// this is a claim rather than a restatement of the formula. It is a lower
-    /// bound in the other direction too -- a B-tree leaves its nodes partly
-    /// filled, so the real footprint is above this.
     #[test]
     fn the_estimate_counts_both_key_collections() {
         const COUNT: u32 = 64;
@@ -214,12 +162,6 @@ mod memory_usage_tests {
     }
 
     /// An empty index reports nothing, and a removal gives its memory back.
-    ///
-    /// Unlike the pool's arena, the priority index has nothing that retains an
-    /// allocation this estimate can see: both collections are B-trees keyed by
-    /// value, and neither exposes a capacity. So `len`-based terms are right
-    /// here for the same reason they were wrong there, and the two cases are
-    /// pinned together so the distinction is not lost.
     #[test]
     fn the_estimate_follows_what_is_indexed() {
         let mut front = ParetoFront::default();

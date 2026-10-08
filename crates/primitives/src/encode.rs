@@ -21,15 +21,6 @@ impl Sink for Vec<u8> {
     }
 }
 
-/// Sink that only accumulates the byte count.
-pub(crate) struct CountSink<'a>(pub(crate) &'a mut usize);
-
-impl Sink for CountSink<'_> {
-    fn write_all(&mut self, bytes: &[u8]) {
-        *self.0 = self.0.saturating_add(bytes.len());
-    }
-}
-
 /// Sink that streams bytes into a SHA-256 engine without allocating.
 pub(crate) struct Sha256Sink<'a>(pub(crate) &'a mut Sha256);
 
@@ -42,11 +33,7 @@ impl Sink for Sha256Sink<'_> {
 /// Computes Bitcoin's double-SHA256 hash and returns the digest bytes as a little-endian hash.
 #[must_use]
 pub fn double_sha256(bytes: &[u8]) -> Hash256 {
-    let first = Sha256::new().chain_update(bytes).finalize();
-    let second = Sha256::new().chain_update(first).finalize();
-    let mut out = [0_u8; 32];
-    out.copy_from_slice(&second);
-    Hash256::from_le_bytes(&out)
+    finalize_double_sha256(Sha256::new().chain_update(bytes))
 }
 
 /// Finishes a streamed double-SHA256 over everything written to the engine.
@@ -102,14 +89,7 @@ pub trait ConsensusEncode {
     fn consensus_encode(&self, sink: &mut impl Sink);
 
     /// Consensus serialization length without allocating the encoded bytes.
-    ///
-    /// The default walks [`Self::consensus_encode`] into a counting sink.
-    /// Fixed-layout types override this with an analytic size.
-    fn consensus_size(&self) -> usize {
-        let mut total = 0_usize;
-        self.consensus_encode(&mut CountSink(&mut total));
-        total
-    }
+    fn consensus_size(&self) -> usize;
 }
 
 /// Bitcoin consensus decoding for native protocol types.
@@ -124,12 +104,6 @@ pub fn consensus_bytes<T: ConsensusEncode + ?Sized>(value: &T) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(value.consensus_size());
     value.consensus_encode(&mut bytes);
     bytes
-}
-
-/// Consensus serialization length without allocating the encoded bytes.
-#[must_use]
-pub fn consensus_len<T: ConsensusEncode + ?Sized>(value: &T) -> usize {
-    value.consensus_size()
 }
 
 /// Decodes a complete value from `bytes`, rejecting any trailing bytes.
@@ -285,10 +259,6 @@ impl ConsensusDecode for TxIn {
     }
 }
 
-fn tx_has_witness(tx: &Tx) -> bool {
-    tx.inputs.iter().any(|input| !input.witness.is_empty())
-}
-
 fn witness_stack_size(witness: &[Vec<u8>]) -> usize {
     varint::encoded_len(compact_len(witness.len())).saturating_add(
         witness
@@ -302,7 +272,7 @@ fn witness_stack_size(witness: &[Vec<u8>]) -> usize {
 /// sections (emitted only when some input carries witness data).
 pub(crate) fn encode_tx(tx: &Tx, sink: &mut impl Sink, with_witness: bool) {
     sink.write_all(&tx.version.to_le_bytes());
-    let has_witness = with_witness && tx_has_witness(tx);
+    let has_witness = with_witness && tx.has_witness();
     if has_witness {
         sink.write_all(&[0x00, 0x01]);
     }
@@ -346,7 +316,7 @@ pub(crate) fn tx_base_size(tx: &Tx) -> usize {
 }
 
 fn tx_witness_size(tx: &Tx) -> usize {
-    if !tx_has_witness(tx) {
+    if !tx.has_witness() {
         return 0;
     }
     2_usize.saturating_add(
@@ -425,7 +395,7 @@ mod tests {
     #[test]
     fn header_roundtrips_through_consensus_bytes() -> Result<()> {
         let bytes = sample_header_bytes();
-        let header = crate::Header::consensus_decode(&bytes[..])?;
+        let header = crate::deserialize::<crate::Header>(&bytes[..])?;
         assert_eq!(header.version, 1);
         assert_eq!(header.prev_blockhash.as_bytes(), &[0x11_u8; 32]);
         assert_eq!(header.merkle_root.as_byte_array(), &[0x22_u8; 32]);
@@ -439,7 +409,7 @@ mod tests {
     fn truncated_header_reports_end_of_data() {
         let bytes = sample_header_bytes();
         for len in 0..bytes.len() {
-            let error = crate::Header::consensus_decode(&bytes[..len])
+            let error = crate::deserialize::<crate::Header>(&bytes[..len])
                 .expect_err("truncated header must fail");
             assert!(matches!(
                 error,
@@ -454,7 +424,7 @@ mod tests {
         let mut bytes = 1_i32.to_le_bytes().to_vec();
         bytes.extend_from_slice(&[0xfd, 0x01, 0x00]);
         let error =
-            crate::Tx::consensus_decode(&bytes).expect_err("non-canonical varint must fail");
+            crate::deserialize::<crate::Tx>(&bytes).expect_err("non-canonical varint must fail");
         assert!(matches!(
             error,
             DecodeError::Varint(varint::VarintError::NonCanonical { .. })

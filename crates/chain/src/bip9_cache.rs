@@ -15,38 +15,30 @@ use parking_lot::RwLock;
 
 use crate::node::NodeId;
 
-/// Cached BIP9 deployment-state lookup, `Send + Sync` through interior
-/// mutability.
-#[derive(Debug, Default)]
-pub(crate) struct Bip9Cache {
-    entries: RwLock<HashMap<(NodeId, u32), CachedState>>,
-}
-
-/// Cached deployment-state record.
+/// Cached BIP9 deployment-state lookup.
 ///
-/// The `tag` is an opaque stable u8 supplied by the deployment-state encoder;
+/// Wraps an interior `RwLock<HashMap>` so the cache is `Send + Sync` and the
+/// reader/writer paths are non-blocking under contention. State is stored as
+/// a stable `u8` tag supplied by the deployment-state encoder in consensus;
 /// the chain crate does not interpret it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CachedState {
-    /// Caller-defined state discriminant.
-    pub tag: u8,
+///
+/// PRE: a tag is the deployment state's encoded discriminant.
+/// POST: cache readers obtain the same tag for a live `(node_id, deployment_id)`.
+/// INVARIANT: Branch invalidation discards entries by node, not by height.
+#[derive(Default)]
+pub(crate) struct Bip9Cache {
+    entries: RwLock<HashMap<(NodeId, u32), u8>>,
 }
 
 impl Bip9Cache {
-    /// Builds an empty cache.
-    #[must_use]
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
     /// Inserts or updates the cached state for `(node_id, deployment_id)`.
-    pub(crate) fn insert(&self, node_id: NodeId, deployment_id: u32, state: CachedState) {
-        self.entries.write().insert((node_id, deployment_id), state);
+    pub(crate) fn insert(&self, node_id: NodeId, deployment_id: u32, tag: u8) {
+        self.entries.write().insert((node_id, deployment_id), tag);
     }
 
-    /// Returns the cached state for `(node_id, deployment_id)`, if any.
+    /// Returns the cached state tag for `(node_id, deployment_id)`, if any.
     #[must_use]
-    pub(crate) fn get(&self, node_id: NodeId, deployment_id: u32) -> Option<CachedState> {
+    pub(crate) fn get(&self, node_id: NodeId, deployment_id: u32) -> Option<u8> {
         self.entries.read().get(&(node_id, deployment_id)).copied()
     }
 

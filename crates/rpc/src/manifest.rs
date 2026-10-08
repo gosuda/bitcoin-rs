@@ -63,7 +63,7 @@ impl SurfaceKind {
 
     /// Section heading used in the generated reference.
     #[must_use]
-    pub const fn heading(self) -> &'static str {
+    const fn heading(self) -> &'static str {
         match self {
             Self::Rpc => "JSON-RPC methods",
             Self::Rest => "REST endpoints",
@@ -118,7 +118,7 @@ impl Status {
     /// table contents: a "no row claims this" clause would rot silently the
     /// day a row does.
     #[must_use]
-    pub const fn legend(self) -> &'static str {
+    const fn legend(self) -> &'static str {
         match self {
             Self::Supported => {
                 "differentially verified against the pinned Bitcoin Core reference; requires `reference.differential_harness` in `crates/rpc/core-compat.toml`."
@@ -151,7 +151,7 @@ impl Status {
 pub const MANIFEST_TOML: &str = include_str!("../core-compat.toml");
 
 /// One declared surface.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Entry {
     /// JSON-RPC method name, REST route prefix (`/rest/...`), or ZMQ topic.
     pub name: &'static str,
@@ -184,7 +184,7 @@ impl Entry {
 }
 
 /// Core contract version every row is declared against.
-pub const CORE_VERSION: &str = "31.x";
+pub(crate) const CORE_VERSION: &str = "31.x";
 
 /// No-wallet policy note shared by every wallet-class row; the crate refuses
 /// to hold private key material (see `crates/rpc/src/lib.rs`).
@@ -198,17 +198,6 @@ pub(crate) const NO_WALLET: &str =
 /// truth; this const exists so existing consumers that take `&[Entry]`
 /// compile unmodified.
 pub use crate::registry::MANIFEST;
-
-/// True when `name` answers a dispatch for `kind` in this build.
-///
-/// Projects from [`crate::registry::REGISTRY`], so a row and its dispatch
-/// arm cannot disagree about registrability.
-#[must_use]
-pub fn is_registered(kind: SurfaceKind, name: &str) -> bool {
-    crate::registry::REGISTRY
-        .iter()
-        .any(|row| row.entry.kind == kind && row.entry.name == name && row.entry.shipped())
-}
 
 /// Rows of one transport kind, in table order.
 ///

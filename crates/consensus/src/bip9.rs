@@ -1,7 +1,7 @@
 use bitcoin_rs_primitives::Network;
 
 /// BIP9 signalling period length in blocks.
-pub const BIP9_PERIOD: u32 = 2016;
+const BIP9_PERIOD: u32 = 2016;
 /// Deployment id for CSV (BIP68/112/113).
 pub const CSV_DEPLOYMENT_ID: u32 = 0;
 /// Deployment id for Segwit (BIP141/143).
@@ -72,7 +72,7 @@ pub struct DeploymentParams {
 }
 
 /// CSV/Segwit activation at one connect height.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct SoftforkState {
     /// Whether CSV (BIP68/112/113) is active.
     pub csv_active: bool,
@@ -86,40 +86,33 @@ pub struct SoftforkState {
 /// (height-gated networks, or an unknown id).
 #[must_use]
 pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<DeploymentParams> {
-    let threshold = match network {
-        Network::Mainnet => MAINNET_THRESHOLD,
-        Network::Testnet3 => TESTNET3_THRESHOLD,
+    let (threshold, csv_start_time, segwit_start_time, segwit_timeout) = match network {
+        Network::Mainnet => (
+            MAINNET_THRESHOLD,
+            1_462_060_800,
+            1_479_168_000,
+            1_510_704_000,
+        ),
+        Network::Testnet3 => (
+            TESTNET3_THRESHOLD,
+            1_456_790_400,
+            1_462_060_800,
+            1_493_596_800,
+        ),
         Network::Testnet4 | Network::Signet | Network::Regtest => return None,
     };
-    match deployment_id {
-        CSV_DEPLOYMENT_ID => Some(DeploymentParams {
-            bit: 0,
-            start_time: match network {
-                Network::Mainnet => 1_462_060_800,
-                Network::Testnet3 => 1_456_790_400,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            timeout: 1_493_596_800,
-            period: BIP9_PERIOD,
-            threshold,
-        }),
-        SEGWIT_DEPLOYMENT_ID => Some(DeploymentParams {
-            bit: 1,
-            start_time: match network {
-                Network::Mainnet => 1_479_168_000,
-                Network::Testnet3 => 1_462_060_800,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            timeout: match network {
-                Network::Mainnet => 1_510_704_000,
-                Network::Testnet3 => 1_493_596_800,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            period: BIP9_PERIOD,
-            threshold,
-        }),
-        _ => None,
-    }
+    let (bit, start_time, timeout) = match deployment_id {
+        CSV_DEPLOYMENT_ID => (0, csv_start_time, 1_493_596_800),
+        SEGWIT_DEPLOYMENT_ID => (1, segwit_start_time, segwit_timeout),
+        _ => return None,
+    };
+    Some(DeploymentParams {
+        bit,
+        start_time,
+        timeout,
+        period: BIP9_PERIOD,
+        threshold,
+    })
 }
 
 /// Read-only chain context the state machine queries.
@@ -130,8 +123,12 @@ pub trait DeploymentContext {
     /// Returns the block version field at `height`, or `None` if unknown.
     fn block_version(&self, height: u32) -> Option<i32>;
 
-    /// Returns the median-time-past at `height` over `window` blocks, or `None` if unknown.
-    fn median_time_past(&self, height: u32, window: usize) -> Option<u32>;
+    /// Returns the median-time-past at `height` over the 11-block
+    /// [`crate::MEDIAN_TIME_PAST_WINDOW`], or `None` if unknown.
+    ///
+    /// Implementations must use exactly that window: BIP9 transitions are
+    /// consensus-critical, and a different window yields different states.
+    fn median_time_past(&self, height: u32) -> Option<u32>;
 }
 
 /// Computes the BIP9 deployment state at `height`.
@@ -140,8 +137,6 @@ pub trait DeploymentContext {
 /// recursively computes the state at the parent boundary, applying
 /// transition rules.
 ///
-/// `mtp_window` is the BIP113 MTP window, typically 11.
-///
 /// Returns `Defined` when `height` is below the first period boundary
 /// or when context can't supply the needed data.
 #[must_use]
@@ -149,31 +144,29 @@ pub fn compute_state(
     ctx: &impl DeploymentContext,
     height: u32,
     params: DeploymentParams,
-    mtp_window: usize,
 ) -> DeploymentState {
     if params.period == 0 {
         return DeploymentState::Defined;
     }
 
     let boundary = (height / params.period).saturating_mul(params.period);
-    compute_state_at_boundary(ctx, boundary, params, mtp_window)
+    compute_state_at_boundary(ctx, boundary, params)
 }
 
 fn compute_state_at_boundary(
     ctx: &impl DeploymentContext,
     boundary: u32,
     params: DeploymentParams,
-    mtp_window: usize,
 ) -> DeploymentState {
     if boundary == 0 {
         return DeploymentState::Defined;
     }
 
     let prior_boundary = boundary.saturating_sub(params.period);
-    let prior_state = compute_state_at_boundary(ctx, prior_boundary, params, mtp_window);
+    let prior_state = compute_state_at_boundary(ctx, prior_boundary, params);
     match prior_state {
         DeploymentState::Defined => {
-            let Some(mtp) = ctx.median_time_past(boundary.saturating_sub(1), mtp_window) else {
+            let Some(mtp) = ctx.median_time_past(boundary.saturating_sub(1)) else {
                 return DeploymentState::Defined;
             };
 
@@ -186,7 +179,7 @@ fn compute_state_at_boundary(
             }
         }
         DeploymentState::Started => {
-            let Some(mtp) = ctx.median_time_past(boundary.saturating_sub(1), mtp_window) else {
+            let Some(mtp) = ctx.median_time_past(boundary.saturating_sub(1)) else {
                 return DeploymentState::Started;
             };
 
@@ -272,7 +265,7 @@ mod tests {
             self.versions.get(&height).copied()
         }
 
-        fn median_time_past(&self, height: u32, _window: usize) -> Option<u32> {
+        fn median_time_past(&self, height: u32) -> Option<u32> {
             self.mtps.get(&height).copied()
         }
     }
@@ -289,16 +282,10 @@ mod tests {
         let mut ctx = SyntheticCtx::new();
 
         ctx.mtps.insert(9, 50);
-        assert_eq!(
-            compute_state(&ctx, 10, params, 11),
-            DeploymentState::Defined
-        );
+        assert_eq!(compute_state(&ctx, 10, params), DeploymentState::Defined);
 
         ctx.mtps.insert(9, 150);
-        assert_eq!(
-            compute_state(&ctx, 10, params, 11),
-            DeploymentState::Started
-        );
+        assert_eq!(compute_state(&ctx, 10, params), DeploymentState::Started);
     }
 
     #[test]
@@ -319,13 +306,10 @@ mod tests {
             ctx.versions.insert(height, version);
         }
 
-        assert_eq!(
-            compute_state(&ctx, 20, params, 11),
-            DeploymentState::LockedIn
-        );
+        assert_eq!(compute_state(&ctx, 20, params), DeploymentState::LockedIn);
 
         ctx.mtps.insert(29, 300);
-        assert_eq!(compute_state(&ctx, 30, params, 11), DeploymentState::Active);
+        assert_eq!(compute_state(&ctx, 30, params), DeploymentState::Active);
     }
 
     #[test]
@@ -345,10 +329,7 @@ mod tests {
             ctx.versions.insert(height, 1);
         }
 
-        assert_eq!(
-            compute_state(&ctx, 20, params, 11),
-            DeploymentState::Started
-        );
+        assert_eq!(compute_state(&ctx, 20, params), DeploymentState::Started);
     }
 
     #[test]
@@ -405,6 +386,6 @@ mod tests {
             ctx.versions.insert(height, 0);
         }
 
-        assert_eq!(compute_state(&ctx, 20, params, 11), DeploymentState::Failed);
+        assert_eq!(compute_state(&ctx, 20, params), DeploymentState::Failed);
     }
 }

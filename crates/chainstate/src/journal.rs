@@ -1,24 +1,12 @@
 //! Maps block changes into journal records and replays authenticated records at boot.
-//!
-//! Creates and BIP30 overwrites precede spends, matching the UTXO commit order.
-//! Same-block spends are already netted out by the UTXO owner. Each remaining
-//! spend requires its full undo preimage; duplicate and unmatched restores fail.
-//! Replay validates header identity and live-coin preimages before committing.
 
-use bitcoin_rs_chain::BlockTree;
-use bitcoin_rs_chain::ChainTxCount;
-use bitcoin_rs_chain::NodeStatus;
-use bitcoin_rs_primitives::Hash256;
-use bitcoin_rs_primitives::Header;
-use bitcoin_rs_storage::chainstate_journal::Coin;
-use bitcoin_rs_storage::chainstate_journal::JournalRecord;
-use bitcoin_rs_storage::chainstate_journal::JournalReplayBase;
-use bitcoin_rs_storage::chainstate_journal::JournalReplayError;
-use bitcoin_rs_storage::chainstate_journal::Mutation;
-use bitcoin_rs_storage::chainstate_journal::replay_committed_range;
+use bitcoin_rs_chain::{BlockTree, ChainTxCount, NodeStatus};
+use bitcoin_rs_primitives::{Hash256, Header, deserialize};
+use bitcoin_rs_storage::chainstate_journal::{
+    Coin, JournalRecord, JournalReplayBase, JournalReplayError, Mutation, replay_committed_range,
+};
 use bitcoin_rs_utxo::UtxoSet;
-use bitcoin_rs_utxo::contract::BlockChanges;
-use bitcoin_rs_utxo::contract::UtxoAdd;
+use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use hashbrown::HashMap;
 use thiserror::Error;
 
@@ -36,10 +24,6 @@ pub(crate) enum JournalDeltaError {
 }
 
 /// Extracts the ordered journal mutations for one fully applied block.
-///
-/// `undo_coins` supplies the full preimage of each spent or overwritten
-/// outpoint. Records are matched by outpoint, not by input order. Creates and
-/// overwrites precede spends; same-block spends are already netted out.
 pub(crate) fn mutations_for_block(
     changes: &BlockChanges<&'_ bitcoin_rs_primitives::TxOut>,
     undo_coins: impl IntoIterator<Item = Coin>,
@@ -82,10 +66,8 @@ pub(crate) struct ReplayedState {
     pub utxo: UtxoSet,
     pub coin_stats: bitcoin_rs_utxo::stats::CoinStats,
     pub applied_tip: bitcoin_rs_chain::TipSnapshot,
-    pub chain_tx_count: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn replay_from_journal(
     dir: &cap_std::fs::Dir,
     base_generation: u64,
@@ -93,24 +75,18 @@ pub(crate) fn replay_from_journal(
     utxo: UtxoSet,
     coin_stats: bitcoin_rs_utxo::stats::CoinStats,
     base_tip: bitcoin_rs_chain::TipSnapshot,
-    base_chain_tx_count: u64,
 ) -> Result<Box<ReplayedState>, JournalReplayError> {
-    let base_tip_hash = base_tip.hash.to_le_bytes();
-    let base_tip_height = base_tip.height;
-    let mut replay = ReplayAccumulator::new(tree, utxo, coin_stats, base_tip, base_chain_tx_count)?;
-    let head = replay_committed_range(
-        dir,
-        JournalReplayBase {
-            generation: base_generation,
-            height: base_tip_height,
-            block_hash: base_tip_hash,
-            chain_tx_count: base_chain_tx_count,
-        },
-        |record| replay.apply(record),
-    )?;
+    let base = JournalReplayBase {
+        generation: base_generation,
+        height: base_tip.height,
+        block_hash: base_tip.hash.to_le_bytes(),
+        chain_tx_count: base_tip.chain_tx_count.to_wire(),
+    };
+    let mut replay = ReplayAccumulator::new(tree, utxo, coin_stats, base_tip)?;
+    let head = replay_committed_range(dir, base, |record| replay.apply(record))?;
     let state = replay.finish();
     validate_replayed_head(&state, head.height, head.block_hash)?;
-    if state.chain_tx_count != head.chain_tx_count {
+    if state.applied_tip.chain_tx_count.to_wire() != head.chain_tx_count {
         return Err(JournalReplayError::CommittedRangeInvalid(
             "chain transaction count does not match head marker".to_owned(),
         ));
@@ -132,35 +108,21 @@ fn validate_replayed_head(
 }
 
 /// Applies ordered records above a restored checkpoint state.
-///
-/// Headers first regenerate valid `NodeId`s and chainwork. Mutations then pass
-/// through the same `UtxoSet` commit surface as live apply, with a listener
-/// seeded from the checkpoint `CoinStats`.
 struct ReplayAccumulator {
     tree: BlockTree,
     utxo: UtxoSet,
     coin_stats: bitcoin_rs_utxo::stats::CoinStatsListener,
     applied_tip: bitcoin_rs_chain::TipSnapshot,
-    chain_tx_count: u64,
     /// The base carries an unknown count: zero at a non-genesis height.
-    /// A genesis-empty base (height 0, nothing below it to total) still
-    /// counts its records, matching the journal writer.
     unknown_base: bool,
 }
 
 impl ReplayAccumulator {
-    /// Replays records above `base_tip`, whose cumulative transaction count
-    /// is `base_chain_tx_count` — or zero when the checkpoint never learned
-    /// it. Zero means unknown (the checkpoint convention the loader already
-    /// accepts): rejecting it would discard the committed journal suffix and
-    /// reprocess it from the checkpoint, so replay carries the unknown
-    /// through and preserves it per record instead.
     fn new(
         tree: BlockTree,
         mut utxo: UtxoSet,
         initial_coin_stats: bitcoin_rs_utxo::stats::CoinStats,
         base_tip: bitcoin_rs_chain::TipSnapshot,
-        base_chain_tx_count: u64,
     ) -> Result<Self, JournalReplayError> {
         let base_node = tree.node(base_tip.tip_id).map_err(|error| {
             JournalReplayError::HeaderRebuildRejected(format!(
@@ -177,13 +139,12 @@ impl ReplayAccumulator {
         }
         let coin_stats = bitcoin_rs_utxo::stats::CoinStatsListener::new(initial_coin_stats);
         utxo.track_coin_stats(coin_stats.clone());
-        let unknown_base = base_chain_tx_count == 0 && base_tip.height != 0;
+        let unknown_base = base_tip.chain_tx_count.to_wire() == 0 && base_tip.height != 0;
         Ok(Self {
             tree,
             utxo,
             coin_stats,
             applied_tip: base_tip,
-            chain_tx_count: base_chain_tx_count,
             unknown_base,
         })
     }
@@ -192,9 +153,9 @@ impl ReplayAccumulator {
         // An unknown base stays unknown: adding the suffix would fabricate
         // a chain total, while the tip, UTXO set, and coin stats still
         // advance per record.
+        let mut chain_tx_count = self.applied_tip.chain_tx_count.to_wire();
         if !self.unknown_base {
-            self.chain_tx_count = self
-                .chain_tx_count
+            chain_tx_count = chain_tx_count
                 .checked_add(record.block_tx_count)
                 .ok_or_else(|| {
                     JournalReplayError::CommittedRangeInvalid(
@@ -206,7 +167,7 @@ impl ReplayAccumulator {
             &mut self.tree,
             record,
             self.applied_tip.hash.to_le_bytes(),
-            self.chain_tx_count,
+            chain_tx_count,
         )?;
         apply_record_mutations(&self.utxo, record)?;
         advance_coin_stats(&self.coin_stats, record)?;
@@ -219,28 +180,20 @@ impl ReplayAccumulator {
             utxo: self.utxo,
             coin_stats: self.coin_stats.snapshot(),
             applied_tip: self.applied_tip,
-            chain_tx_count: self.chain_tx_count,
         }
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 fn replay_records(
     records: Vec<JournalRecord>,
     tree: BlockTree,
     utxo: UtxoSet,
     initial_coin_stats: bitcoin_rs_utxo::stats::CoinStats,
     base_tip: bitcoin_rs_chain::TipSnapshot,
-    base_chain_tx_count: u64,
 ) -> Result<ReplayedState, JournalReplayError> {
-    let mut replay = ReplayAccumulator::new(
-        tree,
-        utxo,
-        initial_coin_stats,
-        base_tip,
-        base_chain_tx_count,
-    )?;
+    let mut replay = ReplayAccumulator::new(tree, utxo, initial_coin_stats, base_tip)?;
     for record in &records {
         replay.apply(record)?;
     }
@@ -253,7 +206,7 @@ fn insert_replayed_header(
     expected_prev: [u8; 32],
     chain_tx_count: u64,
 ) -> Result<bitcoin_rs_chain::TipSnapshot, JournalReplayError> {
-    let header = Header::consensus_decode(&record.raw_header[..]).map_err(|error| {
+    let header = deserialize::<Header>(&record.raw_header[..]).map_err(|error| {
         JournalReplayError::HeaderRebuildRejected(format!("height {}: {error}", record.height))
     })?;
     if expected_prev != record.prev_hash

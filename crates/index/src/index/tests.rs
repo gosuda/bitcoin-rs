@@ -109,10 +109,9 @@ fn iter_live_outpoints_reports_malformed_row_key_length() -> Result<(), Box<dyn 
     batch.put(ColumnFamily::ScriptLive, &malformed, &[]);
     store.write(batch)?;
 
-    let error = writer
-        .indexer()
-        .iter_live_outpoints(scripthash)
-        .unwrap_err();
+    let Err(error) = writer.indexer().iter_live_outpoints(scripthash) else {
+        return Err(std::io::Error::other("malformed live-row key must fail").into());
+    };
     assert!(
         matches!(error, IndexError::InvalidPrefixRowLength { len: 40 }),
         "malformed live-row key must report its length: {error:?}"
@@ -379,7 +378,7 @@ impl BlockSource for FakeSource {
 /// spend, so funding and spending rows both exist alongside txid and header
 /// rows.
 fn rollback_fixture_block() -> Block {
-    let funded = tx(OutPoint::new(Txid::default(), u32::MAX), vec![0x51]);
+    let funded = tx(OutPoint::null(), vec![0x51]);
     let spender = tx(OutPoint::new(funded.txid(), 0), vec![0x52]);
     block(vec![funded, spender])
 }
@@ -575,7 +574,7 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
     writer.commit_block(0, &old_body)?;
     commit_rollback_one(&mut writer, None, &old_body)?;
     writer.commit_block(0, &consensus_bytes(&replacement))?;
-    writer.flush()?;
+    writer.indexer.store.flush()?;
     let after_replacement = stored_rows(writer.indexer())?;
     assert!(
         !after_replacement.is_empty(),
@@ -586,7 +585,7 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
         commit_rollback_one(&mut writer, None, &old_body).is_err(),
         "rolling back the old body against the replacement watermark must fail"
     );
-    writer.flush()?;
+    writer.indexer.store.flush()?;
 
     assert_eq!(
         stored_rows(writer.indexer())?,
@@ -603,7 +602,7 @@ fn a_stale_rollback_body_leaves_a_replacement_blocks_rows_alone()
 #[test]
 fn anchor_watermark_stamps_a_coverage_floor_that_reset_clears()
 -> Result<(), Box<dyn std::error::Error>> {
-    use super::{IndexCapability, IndexReader, IndexWatermark, TxIndexSnapshot};
+    use super::{IndexCapability, IndexReader, IndexWatermark};
 
     let (_dir, writer) = writer()?;
     let anchor = IndexWatermark {
@@ -668,13 +667,13 @@ fn stored_rows(indexer: &Indexer<RocksDbStore>) -> Result<StoredRows, Box<dyn st
         ColumnFamily::Spending,
         ColumnFamily::BlockHeaders,
     ] {
-        for row in indexer.store().iter_prefix(cf, &[])? {
+        for row in indexer.store.iter_prefix(cf, &[])? {
             let (key, _value) = row?;
             rows.push((cf, key));
         }
     }
     rows.sort_by(|left, right| {
-        (left.0.as_str(), left.1.as_slice()).cmp(&(right.0.as_str(), right.1.as_slice()))
+        (left.0.name(), left.1.as_slice()).cmp(&(right.0.name(), right.1.as_slice()))
     });
     Ok(rows)
 }

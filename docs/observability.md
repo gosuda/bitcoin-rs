@@ -2,7 +2,7 @@
 
 The normative rule for where instrumentation lands in bitcoin-rs. The
 observability surface has three layers — `metrics::` counters/histograms/
-gauges, `tracing::` logs, and USDT probes (`bitcoin-rs-trace`) — and this page
+gauges, `tracing::` logs, and USDT probes (`bitcoin_rs_consensus::trace`) — and this page
 is what keeps new instrumentation in the right one. Raised by issue #1195 as a
 follow-up to the USDT work of #1187/#1194.
 
@@ -10,7 +10,7 @@ Owners:
 
 - Boundary rule and audit: this page (`OBS-01`..`OBS-06`)
 - USDT probe ABI and compatibility table: [`tracing.md`](tracing.md)
-  (`crates/trace/`, `crates/trace/probes.d`)
+  (`crates/consensus/probes.d`, `crates/consensus/src/trace.rs`)
 - Hot-path attribution of measured product stages:
   [`contracts/hot-path-attribution.md`](contracts/hot-path-attribution.md)
   (HPA-01..HPA-13), inventory in [`benchmarks/hot-path-ledger.toml`](benchmarks/hot-path-ledger.toml)
@@ -49,7 +49,7 @@ event names, and levels may change without notice. Operator runbooks
 ### `OBS-03`: USDT probes carry the detailed payloads
 
 Core-compatible per-event payloads — block hashes, txids, raw message bytes,
-per-event durations — belong in the USDT probes of `crates/trace`
+per-event durations — belong in the USDT probes of `bitcoin_rs_consensus::trace`
 (see [`tracing.md`](tracing.md), issues #1121/#1194). Probe payloads are the
 layer that must not pollute metrics cardinality. If a detailed per-event datum
 is worth keeping in production but is not operator-facing, it is a probe

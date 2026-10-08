@@ -31,20 +31,23 @@ use metrics::Unit;
 use parking_lot::Mutex;
 use parking_lot::RwLock;
 
+mod historical;
+
 use super::chain::{
-    BranchSwitchError, HeaderAdmission, SyncChain, SyncChainError, WindowCommitDisposition,
-    WindowCommitError,
+    HeaderAdmission, HistoricalAdvance, ReorgError, SyncChain, SyncChainError,
+    WindowApplyDisposition, WindowCommitError,
 };
 use super::receive::unrequested_body_admissible;
 use super::{BlockSync, Inventory};
-use crate::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable, StagedBlock};
+use crate::block_stager::StagedBlock;
+use crate::{InboundHeaders, Message, PeerInfo, PeerLease, PeerSource, PeerTable};
 
 /// One-shot scripted branch switch: `connected` hashes are reported as
 /// committed (applied tip advanced, `connected_body` fired) before `error`
 /// is returned, mirroring a connect walk that stopped partway.
 struct ScriptedBranchSwitch {
     connected: Vec<Hash256>,
-    error: BranchSwitchError,
+    error: ReorgError,
 }
 
 /// Applied-chain stub for executor tests: real [`BlockTree`] header admission
@@ -59,8 +62,11 @@ pub(crate) struct TestChain {
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
     minimum_chain_work: ChainWork,
-    scripted_commit_failure: Mutex<Option<(Hash256, WindowCommitDisposition)>>,
+    scripted_commit_failure: Mutex<Option<(Hash256, WindowApplyDisposition)>>,
     scripted_branch_switch: Mutex<Option<ScriptedBranchSwitch>>,
+    historical: Mutex<std::collections::VecDeque<(u32, Hash256)>>,
+    historical_connected: Mutex<Vec<Hash256>>,
+    historical_replay_pending: Mutex<bool>,
 }
 
 impl TestChain {
@@ -77,6 +83,9 @@ impl TestChain {
             minimum_chain_work: ChainWork::from_be_bytes(Network::Regtest.minimum_chain_work()),
             scripted_commit_failure: Mutex::new(None),
             scripted_branch_switch: Mutex::new(None),
+            historical: Mutex::new(std::collections::VecDeque::new()),
+            historical_connected: Mutex::new(Vec::new()),
+            historical_replay_pending: Mutex::new(false),
         }
     }
 }
@@ -108,6 +117,37 @@ impl TestChain {
 }
 
 impl SyncChain for TestChain {
+    fn historical_base(&self) -> Option<Hash256> {
+        self.historical.lock().back().map(|(_, hash)| *hash)
+    }
+
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
+        if std::mem::take(&mut *self.historical_replay_pending.lock()) {
+            return Ok(HistoricalAdvance::ReplayPending);
+        }
+        Ok(self
+            .historical
+            .lock()
+            .front()
+            .copied()
+            .map_or(HistoricalAdvance::Complete, |(height, hash)| {
+                HistoricalAdvance::MissingBody { height, hash }
+            }))
+    }
+
+    fn connect_historical(
+        &self,
+        block: &Block,
+        _serialized: bytes::Bytes,
+    ) -> Result<(), SyncChainError> {
+        let hash = block.block_hash().0;
+        assert_eq!(
+            self.historical.lock().pop_front().map(|(_, hash)| hash),
+            Some(hash)
+        );
+        self.historical_connected.lock().push(hash);
+        Ok(())
+    }
     fn network(&self) -> Network {
         self.network
     }
@@ -122,15 +162,6 @@ impl SyncChain for TestChain {
 
     fn applied_tip(&self) -> Option<Arc<TipSnapshot>> {
         self.applied_tip.load_full()
-    }
-
-    fn block_tree_mut(&self) -> parking_lot::RwLockWriteGuard<'_, BlockTree> {
-        self.block_tree.write()
-    }
-
-    fn set_tips(&self, applied: TipSnapshot, header: TipSnapshot) {
-        self.applied_tip.store(Some(Arc::new(applied)));
-        self.chain_tip.store(Some(Arc::new(header)));
     }
 
     fn bootstrap_genesis(&self) {
@@ -248,7 +279,7 @@ impl SyncChain for TestChain {
                 // The staged body has no corresponding header-tree node.
                 return Err(WindowCommitError {
                     applied,
-                    disposition: WindowCommitDisposition::Operational,
+                    disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                     source: Box::new(std::io::Error::other("commit block not in tree")),
                 });
@@ -269,7 +300,7 @@ impl SyncChain for TestChain {
                     .unwrap_or_default();
                 return Err(WindowCommitError {
                     applied,
-                    disposition: WindowCommitDisposition::Permanent,
+                    disposition: WindowApplyDisposition::Permanent,
                     invalidated,
                     source: Box::new(std::io::Error::other("extra coinbase")),
                 });
@@ -281,7 +312,7 @@ impl SyncChain for TestChain {
                 if let Err(source) = self.body_binding(&tree, block) {
                     return Err(WindowCommitError {
                         applied,
-                        disposition: WindowCommitDisposition::BodyMutated,
+                        disposition: WindowApplyDisposition::BodyMutated,
                         invalidated: Box::default(),
                         source,
                     });
@@ -291,7 +322,7 @@ impl SyncChain for TestChain {
                 // The looked-up header node disappeared during the fixture run.
                 return Err(WindowCommitError {
                     applied,
-                    disposition: WindowCommitDisposition::Operational,
+                    disposition: WindowApplyDisposition::Operational,
                     invalidated: Box::default(),
                     source: Box::new(std::io::Error::other("commit node missing")),
                 });
@@ -313,7 +344,7 @@ impl SyncChain for TestChain {
         _target: NodeId,
         _staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
         connected_body: &mut dyn FnMut(Hash256),
-    ) -> Result<(), BranchSwitchError> {
+    ) -> Result<(), ReorgError> {
         let scripted = self.scripted_branch_switch.lock().take();
         if let Some(scripted) = scripted {
             for hash in &scripted.connected {
@@ -339,9 +370,9 @@ impl SyncChain for TestChain {
                 }
                 connected_body(*hash);
             }
-            if let BranchSwitchError::ConnectFailed {
+            if let ReorgError::ConnectFailed {
                 hash,
-                disposition: WindowCommitDisposition::Permanent,
+                disposition: WindowApplyDisposition::Permanent,
                 ..
             } = &scripted.error
             {
@@ -355,9 +386,7 @@ impl SyncChain for TestChain {
             return Err(scripted.error);
         }
         // Branch-switch behavior is covered by node-only reorg tests.
-        Err(BranchSwitchError::Other(Box::new(std::io::Error::other(
-            "test chain does not switch branches",
-        ))))
+        Err(ReorgError::NoAppliedTip)
     }
 }
 
@@ -382,14 +411,6 @@ impl SyncChain for RefusingChain {
 
     fn applied_tip(&self) -> Option<Arc<TipSnapshot>> {
         self.0.applied_tip()
-    }
-
-    fn block_tree_mut(&self) -> parking_lot::RwLockWriteGuard<'_, BlockTree> {
-        self.0.block_tree_mut()
-    }
-
-    fn set_tips(&self, applied: TipSnapshot, header: TipSnapshot) {
-        self.0.set_tips(applied, header);
     }
 
     fn bootstrap_genesis(&self) {
@@ -427,60 +448,9 @@ impl SyncChain for RefusingChain {
         target: NodeId,
         staged_body: &mut dyn FnMut(Hash256) -> Option<(Block, bytes::Bytes)>,
         connected_body: &mut dyn FnMut(Hash256),
-    ) -> Result<(), BranchSwitchError> {
+    ) -> Result<(), ReorgError> {
         self.0.switch_to_branch(target, staged_body, connected_body)
     }
-}
-
-fn check_sync_frontier_pair(
-    sync: &BlockSync,
-    rx: &crossbeam_channel::Receiver<Message>,
-    addr: SocketAddr,
-    applied: &TipSnapshot,
-    target: &TipSnapshot,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let expected =
-        bitcoin_rs_chain::plan_reorg(&sync.chain.block_tree(), applied.tip_id, target.tip_id).ok();
-    sync.chain.set_tips(applied.clone(), target.clone());
-    assert_eq!(
-        sync.outweighed_branch_target(),
-        expected
-            .as_ref()
-            .filter(|plan| !plan.disconnect.is_empty())
-            .map(|_| target.tip_id),
-        "branch gate differs: {applied:?} -> {target:?}; indexed or parent-walk fixture"
-    );
-    sync.install_budget(super::default_sync_budget(Network::Regtest));
-    let outcome = sync.send_getdata_for_pending_blocks(
-        current_source(&sync.peer_table, addr),
-        true,
-        100,
-        &test_frontier(sync),
-    );
-    let expected_ids = expected
-        .as_ref()
-        .map(|plan| plan.connect.as_slice())
-        .unwrap_or_default();
-    if expected_ids.is_empty() {
-        assert!(!outcome.sent);
-        assert!(rx.try_recv().is_err());
-        return Ok(());
-    }
-    assert!(outcome.sent);
-    let Message::GetData(inventory) = rx.try_recv()? else {
-        return Err("expected witness getdata".into());
-    };
-    let requested = witness_block_inventory(inventory)?;
-    let tree = sync.chain.block_tree();
-    let expected_hashes = expected_ids
-        .iter()
-        .take(requested.len())
-        .map(|id| tree.node(*id).map(|node| BlockHash(node.hash)))
-        .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(requested, expected_hashes);
-    assert!(!requested.is_empty());
-    assert!(rx.try_recv().is_err());
-    Ok(())
 }
 
 /// A batch forwarded out of a delivered body (`wire_response = false`) is
@@ -704,7 +674,7 @@ fn purge_of_one_invalidated_batch_keeps_the_owner_queue_start_at_one_instant()
 fn getdata_uses_compact_flavor_only_for_relaying_peers_near_tip()
 -> Result<(), Box<dyn std::error::Error>> {
     let assert_flavor = |inventory: &[Inventory], compact: bool| {
-        assert!(!inventory.is_empty());
+        assert_ne!(inventory, []);
         for item in inventory {
             if compact {
                 assert!(matches!(item, Inventory::CompactBlock(_)), "got {item:?}");
@@ -1822,8 +1792,8 @@ impl SyncHarness {
         let sync = BlockSync::new(
             chain,
             Arc::clone(&peers),
-            Arc::new(Mutex::new(inbound_headers_rx)),
-            Arc::new(Mutex::new(inbound_blocks_rx)),
+            inbound_headers_rx,
+            inbound_blocks_rx,
             ibd,
         );
         Self {
@@ -1980,6 +1950,156 @@ fn sync_with_mined_chain(count: u32) -> Result<MinedChainFixture, Box<dyn std::e
     } = SyncHarness::new(tree);
 
     Ok((sync, peers, applied_tip, blocks, inbound_blocks_tx))
+}
+
+#[test]
+fn historical_delivery_retries_corruption_and_does_not_rewind_foreground()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (tree, blocks) = mined_chain(3, 0)?;
+    let mut harness = SyncHarness::new(tree);
+    let chain = Arc::new(TestChain::new(
+        harness.block_tree.write().tip_handle(),
+        harness.applied_tip.clone(),
+        harness.block_tree.clone(),
+    ));
+    // Model an active snapshot at height two, with ordinary work above it.
+    chain.bootstrap_genesis();
+    for block in &blocks[..2] {
+        chain
+            .commit_window(&[block], &[])
+            .map_err(|error| format!("fixture commit: {error:?}"))?;
+    }
+    chain
+        .historical
+        .lock()
+        .push_back((1, blocks[0].block_hash().0));
+    harness.sync.chain = chain.clone();
+    let addr = test_addr(28000, 0)?;
+    let rx = connect_peer(&harness.peers, synthetic_peer(addr, 3));
+    harness.sync.tick();
+    let source = current_source(&harness.peers, addr);
+    assert!(
+        harness
+            .sync
+            .owns_body_fetch(source, blocks[0].block_hash().0)
+    );
+    assert!(rx.try_iter().any(|message| matches!(message, Message::GetData(ref items) if items.contains(&Inventory::WitnessBlock(bitcoin::BlockHash::from_byte_array(blocks[0].block_hash().0.to_le_bytes()))))));
+    let mut corrupt = blocks[0].clone();
+    corrupt.txs[0].outputs[0].value = bitcoin_rs_primitives::Amount::from_sat(1);
+    for block in [corrupt, blocks[2].clone()] {
+        harness.inbound_blocks_tx.send(crate::InboundBlock {
+            serialized: bytes::Bytes::from(consensus_bytes(&block)),
+            block,
+            source: Some(source),
+            forward_credit: None,
+        })?;
+    }
+    harness.sync.tick();
+    assert!(chain.historical_connected.lock().is_empty());
+    assert_eq!(
+        harness
+            .applied_tip
+            .load_full()
+            .ok_or("missing active tip")?
+            .height,
+        3
+    );
+    assert!(
+        !harness
+            .sync
+            .owns_body_fetch(source, blocks[0].block_hash().0)
+    );
+    assert!(
+        harness
+            .sync
+            .historical
+            .lock()
+            .window
+            .peer_in_staller_cooldown(addr, Instant::now())
+    );
+    let retry_addr = test_addr(28001, 0)?;
+    let retry_rx = connect_peer(&harness.peers, synthetic_peer(retry_addr, 3));
+    harness.sync.advance_historical();
+    let retry_source = current_source(&harness.peers, retry_addr);
+    assert!(
+        harness
+            .sync
+            .owns_body_fetch(retry_source, blocks[0].block_hash().0)
+    );
+    assert!(
+        retry_rx
+            .try_iter()
+            .any(|message| matches!(message, Message::GetData(_)))
+    );
+    harness.inbound_blocks_tx.send(crate::InboundBlock {
+        block: blocks[0].clone(),
+        serialized: bytes::Bytes::from(consensus_bytes(&blocks[0])),
+        source: Some(retry_source),
+        forward_credit: None,
+    })?;
+    harness.sync.tick();
+    assert_eq!(
+        *chain.historical_connected.lock(),
+        vec![blocks[0].block_hash().0]
+    );
+    assert_eq!(
+        harness
+            .applied_tip
+            .load_full()
+            .ok_or("missing active tip")?
+            .height,
+        3
+    );
+    assert_eq!(harness.sync.historical.lock().window.pending_len(), 0);
+    Ok(())
+}
+
+#[test]
+fn historical_requests_use_archive_peers_and_replace_disconnected_leases()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (tree, blocks) = mined_chain(1, 0)?;
+    let mut harness = SyncHarness::new(tree);
+    let chain = Arc::new(TestChain::new(
+        harness.block_tree.write().tip_handle(),
+        harness.applied_tip.clone(),
+        harness.block_tree.clone(),
+    ));
+    chain
+        .historical
+        .lock()
+        .push_back((1, blocks[0].block_hash().0));
+    harness.sync.chain = chain;
+    let limited_addr = test_addr(28100, 0)?;
+    let mut limited = synthetic_peer(limited_addr, 1000);
+    limited.services = (bitcoin::p2p::ServiceFlags::NETWORK_LIMITED
+        | bitcoin::p2p::ServiceFlags::WITNESS)
+        .to_u64();
+    let limited_rx = connect_peer(&harness.peers, limited);
+    harness.sync.advance_historical();
+    assert!(limited_rx.try_recv().is_err());
+    assert_eq!(harness.sync.historical.lock().window.pending_len(), 0);
+    let addr = test_addr(28100, 1)?;
+    let old_rx = connect_peer(&harness.peers, synthetic_peer(addr, 1000));
+    harness.sync.advance_historical();
+    let old = current_source(&harness.peers, addr);
+    assert!(harness.sync.owns_body_fetch(old, blocks[0].block_hash().0));
+    assert!(matches!(old_rx.try_recv()?, Message::GetData(_)));
+    harness.sync.advance_historical();
+    assert!(
+        old_rx.try_recv().is_err(),
+        "one outstanding historical request"
+    );
+    let replacement_rx = connect_peer(&harness.peers, synthetic_peer(addr, 1000));
+    harness.sync.advance_historical();
+    let replacement = current_source(&harness.peers, addr);
+    assert!(!harness.sync.owns_body_fetch(old, blocks[0].block_hash().0));
+    assert!(
+        harness
+            .sync
+            .owns_body_fetch(replacement, blocks[0].block_hash().0)
+    );
+    assert!(matches!(replacement_rx.try_recv()?, Message::GetData(_)));
+    Ok(())
 }
 
 type WedgeFixture = (
@@ -2353,8 +2473,8 @@ fn header_sync_with_refusing_chain() -> Result<HeaderSyncFixture, Box<dyn std::e
             Arc::clone(&block_tree),
         )))),
         Arc::clone(&peers),
-        Arc::new(Mutex::new(inbound_headers_rx)),
-        Arc::new(Mutex::new(inbound_blocks_rx)),
+        inbound_headers_rx,
+        inbound_blocks_rx,
         crate::sync::syncing_ibd_latch(),
     );
     // Dropping the sender mirrors the header-only fixture: an inbound-blocks
@@ -2385,14 +2505,14 @@ fn transaction(seed: u8) -> Tx {
                 u32::from(seed),
             ),
             script_sig: Script::new(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(1),
             script_pubkey: Script::new(),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -2482,7 +2602,6 @@ pub(crate) fn connect_peer(
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn service_and_range_gate_both_request_paths() -> Result<(), Box<dyn std::error::Error>> {
     use super::frontier::{BodyState, ChainFrontier, RequiredBody, SyncFrontier, UsablePeer};
 
@@ -2675,8 +2794,8 @@ fn punishment_fixture() -> Result<PunishmentFixture, Box<dyn std::error::Error>>
     let sync = Arc::new(BlockSync::new(
         chain_ref,
         Arc::clone(&peers),
-        Arc::new(Mutex::new(headers_rx)),
-        Arc::new(Mutex::new(blocks_rx)),
+        headers_rx,
+        blocks_rx,
         crate::sync::syncing_ibd_latch(),
     ));
     // Apply block 1 so the apply frontier needs block 2's body.
@@ -2728,8 +2847,7 @@ fn permanent_consensus_body_disconnects_delivering_source() -> Result<(), Box<dy
 {
     let fixture = punishment_fixture()?;
     let hash = Hash256::from(fixture.block2.block_hash());
-    *fixture.chain.scripted_commit_failure.lock() =
-        Some((hash, WindowCommitDisposition::Permanent));
+    *fixture.chain.scripted_commit_failure.lock() = Some((hash, WindowApplyDisposition::Permanent));
 
     deliver_attributed_body(&fixture)?;
 
@@ -2746,8 +2864,8 @@ fn permanent_consensus_body_disconnects_delivering_source() -> Result<(), Box<dy
 #[test]
 fn binding_and_operational_failures_do_not_disconnect() -> Result<(), Box<dyn std::error::Error>> {
     for disposition in [
-        WindowCommitDisposition::BodyMutated,
-        WindowCommitDisposition::Operational,
+        WindowApplyDisposition::BodyMutated,
+        WindowApplyDisposition::Operational,
     ] {
         let fixture = punishment_fixture()?;
         let hash = Hash256::from(fixture.block2.block_hash());

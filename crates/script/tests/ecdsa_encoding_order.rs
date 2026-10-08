@@ -13,7 +13,6 @@
 #![expect(clippy::expect_used, reason = "fixed regression fixtures")]
 
 use bitcoin_rs_primitives::{Amount, Script, Tx, TxOut, deserialize};
-use bitcoin_rs_script::checker::{SigVersion, TxSignatureChecker};
 use bitcoin_rs_script::{Interpreter, ScriptErrCode, ScriptError, VerifyFlags};
 use secp256k1::{PublicKey, SECP256K1, SecretKey};
 use sha2::{Digest, Sha256};
@@ -26,7 +25,6 @@ const TX_HEX: &str = concat!(
     "f0167faa815988ac11000000",
 );
 const TEST_KEY: &str = "619c335025c7f4012e556c2a58b2506e30b8511b53ade95ea316fd8c3286feb9";
-const PROGRAM: &str = "00141d0f172a0ecb48aee1be1f2687d2963ae33f71a1";
 const VALUE: u64 = 600_000_000;
 const INPUT: usize = 1;
 
@@ -49,13 +47,6 @@ fn test_key() -> SecretKey {
     SecretKey::from_slice(&hex(TEST_KEY)).expect("public BIP143 test key")
 }
 
-fn p2wpkh_prevout() -> TxOut {
-    TxOut {
-        value: Amount::from_sat(VALUE),
-        script_pubkey: Script::from_bytes(hex(PROGRAM)),
-    }
-}
-
 fn verify_witness(
     tx: &Tx,
     prevout: &TxOut,
@@ -69,6 +60,65 @@ fn verify_witness(
         &[],
         witness,
         flags,
+        &prevouts,
+        tx,
+        INPUT,
+    )
+}
+
+/// The script context a signature check runs under: a bare `scriptPubKey`
+/// exercises the base lane; the same script wrapped in a P2WSH program
+/// exercises the witness-v0 lane.
+#[derive(Clone, Copy, Debug)]
+enum Lane {
+    Base,
+    WitnessV0,
+}
+
+/// Runs `key OP_CHECKSIG OP_NOT` so a clean false becomes script success and
+/// an encoding failure surfaces as the checker's `ScriptError` unchanged.
+fn check_via_script(
+    tx: &Tx,
+    key: &[u8],
+    sig: &[u8],
+    lane: Lane,
+    flags: VerifyFlags,
+) -> Result<bool, ScriptError> {
+    assert!(key.len() <= 75);
+    let mut script = Vec::with_capacity(key.len() + 3);
+    script.push(u8::try_from(key.len()).expect("short test pubkey"));
+    script.extend_from_slice(key);
+    script.push(0xac); // CHECKSIG
+    script.push(0x91); // NOT: a clean signature failure succeeds; an encoding error cannot.
+    let (script_pubkey, script_sig, witness, effective_flags) = match lane {
+        Lane::Base => {
+            let mut script_sig = Vec::with_capacity(sig.len() + 1);
+            script_sig.push(u8::try_from(sig.len()).expect("short test signature"));
+            script_sig.extend_from_slice(sig);
+            (script, script_sig, Vec::new(), flags)
+        }
+        Lane::WitnessV0 => {
+            let mut program = vec![0x00, 0x20];
+            program.extend_from_slice(&Sha256::digest(&script));
+            (
+                program,
+                Vec::new(),
+                vec![sig.to_vec(), script],
+                flags.union(VerifyFlags::WITNESS),
+            )
+        }
+    };
+    let prevout = TxOut {
+        value: Amount::from_sat(VALUE),
+        script_pubkey: Script::from_bytes(script_pubkey),
+    };
+    // These checks read only the selected input's prevout.
+    let prevouts = vec![prevout.clone(); tx.inputs.len()];
+    Interpreter.execute_with_prevouts(
+        &prevout.script_pubkey,
+        &script_sig,
+        &witness,
+        effective_flags,
         &prevouts,
         tx,
         INPUT,
@@ -174,21 +224,19 @@ fn empty_signature_cannot_bypass_witness_compressed_key_policy() {
 #[test]
 fn encoding_error_precedence_matches_core() {
     let tx = fixture();
-    let prevouts = vec![p2wpkh_prevout(); tx.inputs.len()];
-    let mut checker = TxSignatureChecker::new(&tx, INPUT, Amount::from_sat(VALUE), &prevouts);
-    for version in [SigVersion::Base, SigVersion::WitnessV0] {
+    for lane in [Lane::Base, Lane::WitnessV0] {
         assert_eq!(
-            checker.check_ecdsa_signature(&[], &[], &[], version, VerifyFlags::DERSIG),
-            Ok(false),
+            check_via_script(&tx, &[], &[], lane, VerifyFlags::DERSIG),
+            Ok(true),
         );
         assert_eq!(
-            checker.check_ecdsa_signature(&[], &[], &[], version, VerifyFlags::STRICTENC),
+            check_via_script(&tx, &[], &[], lane, VerifyFlags::STRICTENC),
             Err(ScriptError::Invalid {
                 code: ScriptErrCode::PubkeyType,
             }),
         );
         assert_eq!(
-            checker.check_ecdsa_signature(&[0], &[], &[], version, VerifyFlags::STRICTENC),
+            check_via_script(&tx, &[], &[0], lane, VerifyFlags::STRICTENC),
             Err(ScriptError::Invalid {
                 code: ScriptErrCode::SigDer,
             }),
@@ -196,7 +244,7 @@ fn encoding_error_precedence_matches_core() {
     }
     let flags = VerifyFlags::STRICTENC.union(VerifyFlags::WITNESS_PUBKEYTYPE);
     assert_eq!(
-        checker.check_ecdsa_signature(&[], &[], &[], SigVersion::WitnessV0, flags),
+        check_via_script(&tx, &[], &[], Lane::WitnessV0, flags),
         Err(ScriptError::Invalid {
             code: ScriptErrCode::PubkeyType,
         }),
@@ -206,8 +254,6 @@ fn encoding_error_precedence_matches_core() {
 #[test]
 fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
     let tx = fixture();
-    let prevouts = vec![p2wpkh_prevout(); tx.inputs.len()];
-    let mut checker = TxSignatureChecker::new(&tx, INPUT, Amount::from_sat(VALUE), &prevouts);
     let public = PublicKey::from_secret_key(SECP256K1, &test_key());
     // The last entry is deliberately off-curve but correctly encoded. Empty
     // signatures must not require cryptographic parsing of an unused key.
@@ -237,13 +283,13 @@ fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
                 flags = flags.union(*policy);
             }
         }
-        for version in [SigVersion::Base, SigVersion::WitnessV0] {
+        for lane in [Lane::Base, Lane::WitnessV0] {
             for (key, strict_valid, compressed) in &keys {
                 let expected = if flags.contains(VerifyFlags::STRICTENC) && !strict_valid {
                     Err(ScriptError::Invalid {
                         code: ScriptErrCode::PubkeyType,
                     })
-                } else if version == SigVersion::WitnessV0
+                } else if matches!(lane, Lane::WitnessV0)
                     && flags.contains(VerifyFlags::WITNESS_PUBKEYTYPE)
                     && !compressed
                 {
@@ -251,12 +297,12 @@ fn empty_signature_policy_matrix_preserves_error_order_and_clean_false() {
                         code: ScriptErrCode::WitnessPubkeyType,
                     })
                 } else {
-                    Ok(false)
+                    Ok(true)
                 };
                 assert_eq!(
-                    checker.check_ecdsa_signature(&[], key, &[], version, flags),
+                    check_via_script(&tx, key, &[], lane, flags),
                     expected,
-                    "mask={mask:#x}, version={version:?}, key={key:?}",
+                    "mask={mask:#x}, lane={lane:?}, key={key:?}",
                 );
             }
         }

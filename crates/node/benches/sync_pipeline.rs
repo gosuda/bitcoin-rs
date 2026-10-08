@@ -46,7 +46,7 @@ use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
     Tx, TxIn, TxOut, Txid, Witness,
 };
-use bitcoin_rs_script::script::push_int;
+use bitcoin_rs_script::push_int;
 // seam: getdata inventory items stay rust-bitcoin at the p2p wire boundary.
 use bitcoin::hashes::Hash as _;
 use bitcoin::p2p::message_blockdata::Inventory;
@@ -77,7 +77,7 @@ use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use crossbeam_channel::unbounded;
 use evidence::{Cell, Interval, IntervalKind, LEDGER_SCHEMA, Ledger, Sample};
 use parking_lot::Mutex as ParkingMutex;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use tempfile::TempDir;
 
 const PROXY_BLOCKS: u32 = 32;
@@ -629,21 +629,18 @@ impl SyncFixture {
         let block_tree = Arc::new(RwLock::new(tree));
         let applied_tip = Arc::new(ArcSwapOption::empty());
         let peer_table = Arc::new(bitcoin_rs_p2p::PeerTable::new());
-        let (_inbound_headers_tx, inbound_headers_rx_raw) =
+        let (_inbound_headers_tx, inbound_headers_rx) =
             unbounded::<bitcoin_rs_p2p::InboundHeaders>();
-        let inbound_headers_rx = Arc::new(Mutex::new(inbound_headers_rx_raw));
-        let (inbound_blocks_tx, inbound_blocks_rx_raw) =
-            unbounded::<bitcoin_rs_p2p::InboundBlock>();
-        let inbound_blocks_rx = Arc::new(Mutex::new(inbound_blocks_rx_raw));
+        let (inbound_blocks_tx, inbound_blocks_rx) = unbounded::<bitcoin_rs_p2p::InboundBlock>();
         let derived_index_runtime = tx_index_for_mode(tx_index_mode);
         let followers =
             bitcoin_rs_node::ChainFollowers::noop().with_tx_index(derived_index_runtime);
-        let handles = apply_handles(
+        let mut handles = apply_handles(
             Arc::clone(&chain_tip),
             Arc::clone(&applied_tip),
             Arc::clone(&block_tree),
-        )
-        .capturing(followers.needs_rawtx(), followers.needs_block_bytes());
+        );
+        handles.set_capture_flags(followers.needs_rawtx(), followers.needs_block_bytes());
         let ibd = handles.ibd_latch();
         let sync = bitcoin_rs_node::sync::block_sync(
             Arc::new(handles),
@@ -652,6 +649,7 @@ impl SyncFixture {
             inbound_headers_rx,
             inbound_blocks_rx,
             Arc::clone(&ibd),
+            None,
         );
 
         let outbound_rxs = install_synthetic_peers(&peer_table, peer_count);
@@ -1227,7 +1225,6 @@ fn install_synthetic_peers(
     outbound_rxs
 }
 
-#[allow(clippy::arc_with_non_send_sync)]
 fn apply_handles(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,
     applied_tip: Arc<ArcSwapOption<TipSnapshot>>,
@@ -1387,7 +1384,7 @@ fn coinbase_transaction(height: u32) -> Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: coinbase_script_sig(height).into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -1410,7 +1407,7 @@ fn fanout_coinbase_transaction(height: u32) -> Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: coinbase_script_sig(height).into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -1596,7 +1593,7 @@ fn signed_fanout_coinbase_transaction(height: u32, keys: &SigningKeys) -> Tx {
         version: 2,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: coinbase_script_sig(height).into(),
             sequence: Sequence::MAX,
             witness: vec![WITNESS_RESERVED_VALUE.to_vec()].into(),

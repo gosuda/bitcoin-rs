@@ -31,10 +31,13 @@ The gateway registers these Core REST prefixes:
 
 ## Coherent views
 
-Every REST request reads one `ReadStamp` (process epoch, chain generation,
-chain tip, mempool sequence, policy epoch) at entry and assembles its whole
-response from that view. A response never mixes a tip loaded from one commit
-with coins, mempool contents, or index rows from another.
+Handlers that read chain state capture the applied-tip publication
+(`ChainHandles::applied_view`, one `TipSnapshot` load) and assemble their
+responses from that view: `route_block` in its `json` arm, `route_getutxos`
+after its mempool pool read, plus headers, chaininfo, and deploymentinfo.
+`/rest/tx/<hash>.hex` and `/rest/blockpart` return without it. A response
+never mixes a tip loaded from one commit with coins, mempool contents, or
+index rows from another.
 
 - If the chain generation is odd when the request arrives, or moves before the
   response is assembled, the gateway returns HTTP 503 with a short retry
@@ -93,12 +96,6 @@ an unknown suffix returns HTTP 400. Malformed hashes and header `count` values
 return HTTP 400. Probe a known supported endpoint such as
 `/rest/chaininfo.json` to distinguish a disabled REST gateway from an invalid
 request.
-
-The checked-in Compose stack (`tools/bip300301-enforcer/docker-compose.yaml`)
-supplies the REST, `pubsequence`, version-check bypass, and drynet4 network
-settings required to run the unmodified enforcer. Because `pubsequence`
-carries transaction `A`/`R` events, the stack enables `--enable-mempool` so
-the enforcer tracks the mempool too.
 
 See also [docs/contracts/external-api.md](contracts/external-api.md) for the
 API manifest contract and precedence rule, and [rpc-reference.md](rpc-reference.md)

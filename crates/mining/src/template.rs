@@ -12,13 +12,13 @@ use hashbrown::HashMap;
 
 use crate::MiningError;
 use crate::coinbase::{WITNESS_RESERVED_VALUE, build_coinbase};
-use crate::policy::{modified_fee, select_packages};
+use crate::policy::select_packages;
 
 /// Chain and limit facts required to assemble one candidate.
 ///
 /// Callers derive these from the C1 mining context plus configured block limits.
 /// The mining crate never takes node locks or re-derives consensus state.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CandidateContext {
     /// Parent tip hash in consensus little-endian storage order.
     pub previous_block_hash: Hash256,
@@ -74,20 +74,8 @@ impl TemplateId {
     }
 }
 
-impl AsRef<str> for TemplateId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl core::fmt::Display for TemplateId {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
 /// One non-coinbase transaction selected into a candidate.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CandidateTransaction {
     /// Transaction payload shared with the mempool snapshot.
     pub tx: Arc<Tx>,
@@ -97,22 +85,16 @@ pub struct CandidateTransaction {
     pub wtxid: Wtxid,
     /// Actual fee in satoshis.
     pub fee: u64,
-    /// Signed mining-only fee overlay.
-    pub fee_delta: i64,
-    /// Modified fee (`fee + fee_delta`) used for ranking overlays.
-    pub modified_fee: i128,
     /// Consensus sigop cost.
     pub sigop_cost: u32,
     /// Consensus transaction weight.
     pub weight: u64,
-    /// Consensus serialization size including witness.
-    pub size: u32,
     /// One-based indexes of in-candidate ancestors.
     pub depends: Vec<u32>,
 }
 
 /// Transport-neutral assembled block candidate.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Candidate {
     /// Generation identity for this tip and mempool sequence.
     pub template_id: TemplateId,
@@ -144,20 +126,10 @@ pub struct Candidate {
     pub coinbase: Tx,
     /// Coinbase output value: subsidy plus actual selected fees.
     pub coinbase_value: u64,
-    /// Sum of actual fees from selected non-coinbase transactions.
-    pub fees: u64,
     /// Total block weight including the header, transaction count, and coinbase.
     pub weight: u64,
-    /// Total serialized size including the header, transaction count, and coinbase.
-    pub size: u64,
-    /// Total sigop cost including the coinbase.
-    pub sigop_cost: u64,
     /// Selected non-coinbase transactions in topological order.
     pub transactions: Vec<CandidateTransaction>,
-    /// Witness merkle root over `[0, wtxid_1, …]` when `SegWit` is active.
-    pub witness_merkle_root: Option<Hash256>,
-    /// Reserved value committed in the coinbase witness.
-    pub witness_reserved_value: Option<[u8; 32]>,
     /// `SHA256D(witness_merkle_root || witness_reserved_value)` commitment hash.
     pub witness_commitment: Option<Hash256>,
 }
@@ -176,10 +148,11 @@ impl Candidate {
         let mut txs = Vec::with_capacity(self.transactions.len().saturating_add(1));
         txs.push(self.coinbase.clone());
         txs.extend(self.transactions.iter().map(|tx| (*tx.tx).clone()));
-        let merkle_root = merkle_root_from_txids(
-            core::iter::once(self.coinbase.txid())
-                .chain(self.transactions.iter().map(|tx| tx.tx.txid())),
-        )?;
+        let mut leaves = core::iter::once(self.coinbase.txid())
+            .chain(self.transactions.iter().map(|tx| tx.tx.txid()))
+            .map(|txid| *txid.as_bytes())
+            .collect::<Vec<_>>();
+        let merkle_root = merkle_root_from_leaves(&mut leaves)?;
         Ok(Block {
             header: Header {
                 version: self.version,
@@ -217,20 +190,7 @@ pub fn assemble_candidate(
     payout: &[u8],
 ) -> Result<Candidate, MiningError> {
     let reservation = fixed_reservation(context, payout)?;
-    let (ordered, fees, weight, size, sigops) = select_packages(
-        context,
-        snapshot,
-        reservation.weight,
-        reservation.size,
-        reservation.sigops,
-    )?;
-    let body = SelectedBody {
-        ordered,
-        fees,
-        weight,
-        size,
-        sigops,
-    };
+    let body = select_packages(context, snapshot, reservation)?;
     finish_candidate(context, snapshot, payout, &body, reservation)
 }
 
@@ -250,19 +210,27 @@ pub fn assemble_ordered_candidate(
 
 // The fixed block header and coinbase are reserved before selecting the body.
 #[derive(Clone, Copy)]
-struct FixedReservation {
-    weight: u64,
-    size: u64,
-    sigops: u64,
+pub(crate) struct FixedReservation {
+    pub(crate) weight: u64,
+    pub(crate) size: u64,
+    pub(crate) sigops: u64,
 }
 
-struct SelectedBody {
-    ordered: Vec<usize>,
-    fees: u64,
+#[cfg(test)]
+impl FixedReservation {
+    /// Zero reservation for callers that select without a header or coinbase.
+    pub(crate) const EMPTY: Self = Self {
+        weight: 0,
+        size: 0,
+        sigops: 0,
+    };
+}
+
+pub(crate) struct SelectedBody {
+    pub(crate) ordered: Vec<usize>,
+    pub(crate) fees: u64,
     // Include the exact CompactSize transaction count as well as body transactions.
-    weight: u64,
-    size: u64,
-    sigops: u64,
+    pub(crate) weight: u64,
 }
 
 /// Size of the block transaction count, including its reserved coinbase.
@@ -326,7 +294,6 @@ fn exact_order(
     }
 
     // Core's generateblock does not claim fees from explicitly ordered transactions.
-    let fees = 0_u64;
     let mut size = transaction_count_size(snapshot.entries.len())?;
     let mut weight = size * 4;
     let mut sigops = 0_u64;
@@ -362,10 +329,8 @@ fn exact_order(
     }
     Ok(SelectedBody {
         ordered: (0..snapshot.entries.len()).collect(),
-        fees,
+        fees: 0,
         weight,
-        size,
-        sigops,
     })
 }
 
@@ -377,13 +342,11 @@ fn finish_candidate(
     body: &SelectedBody,
     reservation: FixedReservation,
 ) -> Result<Candidate, MiningError> {
-    let (witness_merkle_root, witness_reserved_value, witness_commitment) = if context.segwit_active
-    {
+    let witness_commitment = if context.segwit_active {
         let root = witness_merkle_root(snapshot, &body.ordered)?;
-        let commitment = witness_commitment_hash(&root, &WITNESS_RESERVED_VALUE);
-        (Some(root), Some(WITNESS_RESERVED_VALUE), Some(commitment))
+        Some(witness_commitment_hash(&root, &WITNESS_RESERVED_VALUE))
     } else {
-        (None, None, None)
+        None
     };
 
     let coinbase = build_coinbase(
@@ -393,11 +356,7 @@ fn finish_candidate(
         payout,
         witness_commitment.as_ref(),
     )?;
-    let coinbase_value = coinbase
-        .outputs
-        .first()
-        .map(|output| output.value.to_sat())
-        .ok_or(MiningError::CoinbaseValueOverflow)?;
+    let coinbase_value = coinbase.outputs[0].value.to_sat();
     // Fees change a fixed-width amount and the witness commitment replaces a
     // fixed-width hash, so the reserved and final coinbase have the same
     // weight, serialized size, and sigop cost.
@@ -408,15 +367,6 @@ fn finish_candidate(
         .weight
         .checked_add(body.weight)
         .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
-    let size = reservation
-        .size
-        .checked_add(body.size)
-        .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?;
-    let sigop_cost = reservation.sigops.checked_add(body.sigops).ok_or(
-        MiningError::CandidateScalarOverflow {
-            field: "sigop cost",
-        },
-    )?;
 
     Ok(Candidate {
         template_id: TemplateId::new(&context.previous_block_hash, snapshot.sequence),
@@ -434,13 +384,8 @@ fn finish_candidate(
         mempool_sequence: snapshot.sequence,
         coinbase,
         coinbase_value,
-        fees: body.fees,
         weight,
-        size,
-        sigop_cost,
         transactions,
-        witness_merkle_root,
-        witness_reserved_value,
         witness_commitment,
     })
 }
@@ -467,11 +412,8 @@ fn candidate_transactions(
             txid: entry.txid,
             wtxid: entry.wtxid,
             fee: entry.fee,
-            fee_delta: entry.fee_delta,
-            modified_fee: modified_fee(entry),
             sigop_cost: entry.sigop_cost,
             weight: entry.weight,
-            size: entry.size,
             depends: depends(&entry.tx, &tx_positions),
         });
     }
@@ -500,14 +442,6 @@ fn witness_merkle_root(
     for &index in ordered {
         leaves.push(*snapshot.entries[index].wtxid.as_bytes());
     }
-    merkle_root_from_leaves(&mut leaves)
-}
-
-fn merkle_root_from_txids(txids: impl IntoIterator<Item = Txid>) -> Result<Hash256, MiningError> {
-    let mut leaves = txids
-        .into_iter()
-        .map(|txid| *txid.as_bytes())
-        .collect::<Vec<_>>();
     merkle_root_from_leaves(&mut leaves)
 }
 

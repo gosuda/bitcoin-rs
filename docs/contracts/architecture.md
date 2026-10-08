@@ -3,6 +3,12 @@
 The normative contract for workspace crate layering, one-way dependency
 direction, storage engine confinement, and composition boundaries.
 
+These boundaries are internal architecture, not a compatibility promise:
+they are the replaceable side of the project's external-contracts
+boundary. A demonstrated better internal design may redraw them — the
+`ARCH-06` change process governs layer assignments and workspace
+dependency boundaries.
+
 Owners:
 - `Cargo.toml`, `crates/*/Cargo.toml`, `bin/bitcoin-rs/Cargo.toml`
 - Workspace dependency gate in `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`
@@ -11,7 +17,7 @@ Owners:
 
 | Layer | Crates | Responsibility |
 | --- | --- | --- |
-| 4: Compose | `node`, `bitcoin-rs`, `e2e` | Runtime assembly and lifecycle |
+| 4: Compose | `node`, `bitcoin-rs`, `e2e`, `storage-footprint` | Runtime assembly, lifecycle, and offline tooling |
 | 3: Surface | `rpc` | External protocol boundaries |
 | 2: Services | `chain`, `chainstate`, `utxo`, `p2p`, `mempool`, `index`, `mining` | Domain state and services |
 | 1: Storage | `storage` | Storage contracts and engine drivers |
@@ -29,35 +35,33 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   `g17_dependency_direction` gate.
 - The resolved workspace dependency graph is a directed acyclic graph. Any
   cycle among workspace crates, even within the same layer, fails the gate.
-- Crate layer assignments:
-  - **Layer 0 (Core)**: `bitcoin-rs-primitives`, `bitcoin-rs-script`,
-    `bitcoin-rs-consensus`. Pure protocol types, consensus verification, and
-    script interpreter logic. Layer 0 crates have zero dependencies on storage,
-    network, or filesystem I/O.
-  - **Layer 1 (Storage)**: `bitcoin-rs-storage`. Key-value storage abstractions,
-    batching primitives, and backend engine drivers.
-  - **Layer 2 (Services)**: `bitcoin-rs-chain`, `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`,
-    `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, `bitcoin-rs-index`,
-    `bitcoin-rs-mining`. Domain services and capability runtimes.
+- The [layer model](#layer-model) assigns every crate. Additional boundaries:
+  - Layer 0 crates have zero dependencies on storage, network, or filesystem I/O.
+  - In Layer 2,
     `chainstate` is the authoritative applied-chain owner. It composes only
     lower/same-layer protocol, chain, UTXO, and storage capabilities; it must
     not depend on mempool, P2P, index, mining, RPC, node, or the binary.
-    `chain` and `utxo` sit in Layer 2 because they depend on `storage` for
-    block index records, undo storage, and UTXO snapshots. `chain` also
-    depends on `consensus` for BIP9 parameters and the BIP113 locktime
-    cutoff. `mining` sits in Layer 2 because it depends on `mempool` for
-    candidate selection and `chain` for candidate header/work/time context.
+    `utxo` sits in Layer 2 because it depends on `storage` for undo records
+    and persisted coin statistics. `chain` depends on `consensus` for BIP9
+    parameters and the BIP113 locktime cutoff. It does not read block bodies;
+    it defines the `BlockBodySource` capability through which P2P, index,
+    and RPC read persisted bodies. `mining` sits in Layer 2 because it
+    depends on `mempool` for candidate selection and `chain` for candidate
+    header/work/time context.
     `p2p` depends on `mempool` for the transaction inventory view and
     committed-mutation relay consumer. This same-layer edge keeps peer
     protocol mechanics with their consumer; `mempool` must not depend on
     `p2p`, `rpc`, `node`, or the binary. Admission retains peer attribution
     as data without owning connections or runtime assembly. The
     `g17_dependency_direction` gate checks this boundary explicitly.
-  - **Layer 3 (Surface)**: `bitcoin-rs-rpc`. External wire protocols and RPC
-    handlers, including the Bitcoin Core-compatible ZMQ protocol and transport.
-  - **Layer 4 (Compose)**: `bitcoin-rs-node`, `bitcoin-rs`, `bitcoin-rs-e2e`.
-    Daemon assembly, subsystem lifecycle coordination, and CLI binary entry
-    points. `bitcoin-rs-e2e` is the process-level test harness that drives
+    `p2p` also consumes chainstate-owned historical progress, window-failure
+    dispositions and reorg outcomes, without enabling backend features. Node
+    retains transition settlement and follower dispatch; P2P consumes these
+    outcomes for scheduling, retry and peer policy through `SyncChain`.
+  - In Layer 4, the footprint package is an offline Linux
+    filesystem utility with no node/runtime-workspace or storage-engine
+    dependencies.
+    `bitcoin-rs-e2e` is the process-level test harness that drives
     the composed daemon and the pinned reference node over their public
     surfaces only; it declares no internal dependencies and no workspace
     crate may depend on it.
@@ -74,6 +78,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   `[dependencies]`, `[build-dependencies]`, or `[dev-dependencies]`.
 - All higher layers interact with persistent state through the `KvStore` facade
   and storage abstractions exported by `bitcoin-rs-storage`.
+- Storage owns generic journal/checkpoint formats, filesystem operations and
+  durability primitives. Its bounded `HistoryAccess` supplies optional consumers.
 
 ### `ARCH-03`: Storage backend feature forwarding confinement
 
@@ -81,20 +87,20 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   confined to:
   1. Operator-facing entry points (`bitcoin-rs-node`, `bitcoin-rs`) that expose
      backend selection to operators and packaging scripts.
-  2. Services-tier adapter crates (`bitcoin-rs-chain`, `bitcoin-rs-chainstate`,
-     `bitcoin-rs-utxo`, `bitcoin-rs-p2p`, `bitcoin-rs-index`) whose features exist solely so `-p`
-     package builds propagate backend selection into `bitcoin-rs-storage`.
+  2. Services-tier adapter crates (`bitcoin-rs-chainstate`, `bitcoin-rs-utxo`,
+     `bitcoin-rs-index`) whose features exist solely so `-p` package builds
+     propagate backend selection into `bitcoin-rs-storage`.
   3. `bitcoin-rs-storage` itself, which owns the concrete backend engine
      dependencies and exposes them through the `KvStore` facade.
 - Crates in Layer 0 (Core) and Layer 3 (Surface / RPC) must never define or
   forward storage backend features.
-- `bitcoin-rs-mempool` and `bitcoin-rs-mining` do not own storage and must not
-  define or forward backend feature names; an empty `rocksdb = []` marker
-  counts as defining a backend feature and is forbidden.
+- `bitcoin-rs-chain`, `bitcoin-rs-p2p`, `bitcoin-rs-mempool`, and
+  `bitcoin-rs-mining` do not own storage and must not define or forward
+  backend feature names; an empty `rocksdb = []` marker counts as defining a
+  backend feature and is forbidden.
 - `bitcoin-rs-node` and `bitcoin-rs` may forward backend selection only into
-  engine-selecting crates (`bitcoin-rs-storage`, `bitcoin-rs-chain`,
-  `bitcoin-rs-chainstate`, `bitcoin-rs-utxo`, `bitcoin-rs-p2p`,
-  `bitcoin-rs-index`).
+  engine-selecting crates (`bitcoin-rs-storage`, `bitcoin-rs-chainstate`,
+  `bitcoin-rs-utxo`, `bitcoin-rs-index`).
 - `fjall` is the default shipped product backend. `redb` and `rocksdb` are
   retained shipped alternatives and independent product-matrix comparisons.
   MDBX had only a diagnostic role and no current consumer; it is removed as a
@@ -215,8 +221,8 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
 ### `ARCH-07`: Chainstate owns authoritative applied-chain mutation
 
 - `bitcoin_rs_chainstate::Chainstate` is the in-process owner of applied-tip
-  mutation, recovery, branch switching, checkpoint publication, and mandatory
-  retention consumption. `NodeState`, `BlockSync`, mining, and RPC
+  mutation, recovery, branch switching, checkpoint payload assembly/publication,
+  and mandatory retention consumption. `NodeState`, `BlockSync`, mining, and RPC
   chain-control hold or clone that service; they do not assemble a transition
   from independent locks.
   Retained-history *authority* is not chainstate's:
@@ -293,9 +299,14 @@ Crate names use the `bitcoin-rs-` prefix except for the `bitcoin-rs` binary.
   because node orchestration drains it into `MempoolGateway`. Confirmed
   transaction bodies are queried through the derived index and durable block
   storage, never through a second node/RPC transaction map. RPC network
-  answers likewise read the P2P-owned peer table, traffic counters, ban list,
-  added-node list, and network-active latch directly; there is no parallel
-  RPC-local network-state projection.
+  answers and control operations likewise read and mutate network state through
+  `P2pService` directly (querying the P2P-owned peer table, traffic counters,
+  ban list, added-node list, and network-active latch, and invoking service
+  control methods for bans, added nodes, network-active toggling, and
+  disconnections). RPC no longer receives raw handles for bans, added nodes,
+  the network-active latch, or the outbound dial channel; the peer table stays
+  as a read view, and there is no parallel RPC-local network-state projection
+  or duplicate mutation authority.
 - `MempoolGateway` owns the process mempool handle; `NodeState::mempool` is a
   read/composition capability borrowed from that gateway, not a parallel
   retained `Arc`. Gateway interning remains the public one-gateway-per-pool
@@ -355,6 +366,108 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   tests, which build fixture sets through
   `BlockChanges` + `commit_block_changes` on `fixture_set()`.
 
+### `ARCH-07b`: AssumeUTXO chainstate roles and single active authority
+
+- **Chainstate roles**:
+  `bitcoin_rs_chainstate::ChainstateRole` explicitly defines the lifecycle state
+  of every instantiated chainstate:
+  1. `Ordinary`: standard fully validated chainstate.
+  2. `AssumedActive`: snapshot-loaded chainstate actively driving the node tip,
+     retaining its snapshot base height and block hash.
+  3. `Historical`: background chainstate validating from genesis or an accepted
+     historical checkpoint up to the snapshot base height.
+- **Single active authority invariant**:
+  At all times, exactly one chainstate acts as the authoritative active chainstate
+  (`Ordinary` or `AssumedActive`). Only the active chainstate drives mempool admission,
+  mining block template assembly, RPC/ZMQ chain effects, indexer updates, and pruning
+  execution. The historical chainstate runs background validation using the consensus
+  connect path (`Chainstate::connect`), but its events are detached and never routed to
+  mempool, mining, RPC, ZMQ, or indexers.
+- **Snapshot activation and pinned metadata**:
+  Activation of an AssumeUTXO snapshot is coordinated exclusively by `AssumeUtxoManager`.
+  Snapshot height and block hash must match pinned network metadata (`AssumeUtxoData`).
+  The manager consumes the imported set and computes its `hash_serialized_3` commitment;
+  caller-supplied digests and snapshot trailers do not establish trust. This is Core's
+  `HASH_SERIALIZED` commitment, not MuHash. The pinned transaction count seeds the
+  active tip; it is independently checked during historical finalization. The base
+  header must already exist at the pinned height. Coin statistics are rebuilt from
+  the imported coins, and the resolved header supplies chainwork. Installation and
+  role changes serialize with chain transitions; failed validation publishes nothing.
+- **Background validation and convergence**:
+  The historical chainstate validates blocks up to the snapshot base height. It refuses
+  to connect blocks past the base height or blocks that diverge from the expected target
+  hash (`ApplyError::ConnectPastHistoricalTarget` and
+  `ApplyError::HistoricalTargetHashMismatch`, respectively). When validation reaches
+  the base height, the reconstructed `hash_serialized_3` and cumulative transaction
+  count must match the pinned metadata:
+  - If valid, the active chainstate transitions from `AssumedActive` to `Ordinary`, the
+    historical chainstate is retired, and disk status is marked `Finalized`.
+  - If invalid, the manager persists `AssumeUtxoDiskStatus::Failed`, marks the active
+    chainstate permanently closed for recovery (`Chainstate::fail_closed_for_recovery`), and
+    refuses subsequent restarts to protect operator data.
+  Historical replay uses its own isolated coins, transient durable-head and undo stores,
+  no body writer, and detached events. The manager archives validated body locators
+  and undo records together with lifecycle progress in the active durable-head batch.
+  These batches advance `commit_id` while preserving the active tip and transaction
+  count. They publish no active-chain notification. Transient undo is released after
+  the archive receipt, so it does not accumulate through the entire history.
+  Historical progress checkpoints reuse the chainstate checkpoint format in a
+  separate namespace. The durable head records the accepted generation, height,
+  and hash; startup restores that checkpoint and replays only its certified
+  archive suffix. Without an accepted checkpoint, startup safely falls back to
+  genesis replay. The summary exposes live progress separately.
+  Historical publication retains earlier generations until the head accepts
+  the replacement; recovery selects the head's generation independently of
+  `CURRENT`. Snapshot activation refuses an unresolved full-revalidation marker.
+  Replaying a block already covered by an archive receipt does not rewrite its
+  body or progress. Before checking a new body, the manager syncs its staged bytes and commits a
+  pending-validation reference in the same root. If a crash or terminal-status
+  write failure leaves that reference, startup reconstructs the dependencies and
+  completes the check before returning node state. A mismatch cannot be forgotten
+  by restarting after a failed `Failed` write. Finalization is durable before the
+  role becomes `Ordinary`; unresolved storage errors close both admissions.
+  Production sync pipelines bodies on the pinned base ancestry through a separate
+  instance of the existing download window and block stager: at most 32 pending
+  and staged bodies in total, 16 in flight per peer, and 64 MiB of staged wire
+  payload (plus the stager's one-front-body allowance to avoid a full-tail deadlock).
+  Decoded bodies also occupy bounded memory alongside their wire payloads.
+  Smaller configured budgets still apply. Archive-capable peers supply batches;
+  connection leases, timeouts, retry and backpressure use the shared download policy.
+  Body binding is checked before staging. Each historical pass makes at most nine
+  chain-owner calls, each replaying at most eight retained blocks, and admits at most
+  eight staged bodies in pinned ancestry order, refilling the window while later
+  bodies remain staged. A sync tick runs a pass before and
+  after draining deliveries. Replay retires overtaken downloads; completion clears
+  transient staging. Only validation publishes body locators and lifecycle progress.
+  Foreground and historical deliveries have separate owners. Mainnet throughput and
+  absolute restart-latency guarantees remain unproven follow-ups to #1288; the
+  restart contract is bounded by the historical checkpoint interval once an
+  accepted checkpoint exists.
+- **Reorg and pruning constraints**:
+  - Reorgs on the `AssumedActive` chainstate cannot disconnect blocks at or below the
+    snapshot base height (`ApplyError::DisconnectBelowSnapshotBase`).
+  - `PruneAuthority::begin` refuses prefix pruning while either chainstate has a
+    snapshot role. Even a requested height above the base would delete required
+    history. The role check shares the chain-transition lock with activation and
+    finalization, so pruning cannot race a role change.
+- **Operator observability**:
+  `AssumeUtxoManager::chainstates_summary` provides a unified read projection of both
+  active and background chainstates, reporting roles, tips, validation progress, and
+  commitments without exposing internal lock primitives.
+- **Durable activation and recovery**:
+  Immutable coin and header archives are synced before the active head commits the
+  pinned base and lifecycle status. That head is the only activation authority;
+  orphan import files do not activate a snapshot. Startup admits the current schema,
+  validates the root's network pin, and restores a compatible checkpoint or verifies
+  the snapshot archive, then replays the certified foreground suffix to the head.
+  A checkpoint remains an accelerator, including after finalized history is pruned.
+  Activation detaches the old checkpoint journal; anchored recovery does not replay
+  that journal across the snapshot jump. Node activation fences mempool admission,
+  clears old transactions, and wakes index/mining consumers. It does not manufacture
+  per-block ZMQ events for imported history. Historical undo makes below-base reorgs
+  possible after finalization; crossing below the base removes the snapshot anchor
+  in the disconnect's authoritative batch.
+
 ### `ARCH-08`: Durable pruning and reorg retention
 
 - Transaction-cache pruning must not remove transactions from a block above
@@ -363,34 +476,80 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   `CORE_REORG_SAFETY_MARGIN`; this protects reconsideration of disconnected
   transactions during reorg handling.
 
+### `ARCH-09`: Authoritative owners and read-only capability boundaries
+
+- Subsystems keep exactly one authoritative mutation owner for each piece of
+  state. External consumers and cross-subsystem adapters receive read-only
+  capabilities or single-consumer ownership rather than cloneable mutable handles:
+  - **`BlockLog`**: Exclusively owned and mutated by `ChainFollowers`. Consumers
+    (RPC handlers, derived index runtime, node queries) access block records
+    through the read-only capability `BlockLogReader`. Mutation methods
+    (`BlockLogReader::write`) and raw mutable handles (`BlockLogReader::raw_handle`)
+    are gated behind the explicit `test-seam` feature.
+  - **P2P Inbound Channels**: Single-consumer ownership is enforced for ingress
+    channels. Channel receivers (`inbound_headers_rx`, `inbound_blocks_rx`,
+    `inbound_tx_rx`) are moved by value to their respective worker loops
+    (`BlockSync`, `spawn_tx_ingress_consumer`) using single-take accessors
+    (`take_inbound_headers_receiver`, `take_inbound_blocks_receiver`,
+    `take_inbound_tx_receiver`). Exposing cloneable `Arc<Mutex<Receiver<...>>>`
+    handles in production runtime wiring is prohibited.
+  - **`Chainstate`**: Owns the block tree, applied/header tip cells, and process
+    shutdown signal. Construction via `ChainstateParts` consumes `BlockTree` by
+    value and `restored_applied_tip: Option<TipSnapshot>`, eliminating
+    construction-time mutable handle leaks. Mutation authority remains strictly
+    confined to chainstate methods; external consumers observe tip state via
+    `TipReader` and `BlockTreeReader`.
+  - **Shutdown and Ban Capabilities**: Cancellation and ban state are exposed
+    through read-only capabilities (`LatchReader`, `BannedReader`). Ordinary
+    workers and subsystems query ban status and observe shutdown through these
+    capabilities without holding mutable handles or raw atomic pointers.
+    Shutdown mutation authority remains strictly encapsulated behind
+    `request_shutdown()` and dedicated lifecycle handlers.
+- Intentional `Arc` / `Weak` shared ownership invariants:
+  - `Arc<PeerTable>`: Shared among P2P service, connection listeners, sync, and
+    RPC network handles. `PeerTable` is internally synchronized and owns peer
+    leases and address tracking.
+  - `Weak<MempoolGateway>`: Held by the P2P transaction relay observer
+    (`LocalTxRelayObserver`) to prevent cyclic reference cycles and ensure that
+    observer registration does not artificially prolong gateway lifetime.
+  - `UtxoReader`: Read-only projection of the authoritative `UtxoSet` (which is
+    mutated solely by chainstate under transition locks) to mempool and RPC.
+  - `InitialBlockDownload`: Supplies the shared IBD decision across sync and
+    header presync by observing chain progress through read-only capabilities
+    (`TipReader`, `BlockTreeReader`), while worker orchestration belongs to
+    `BlockSync`.
+
+## Test and evidence isolation
+
+Default production builds contain no storage persistence fault slots,
+checkpoint/journal injection branches, synthetic `Chainstate::new`, or RPC
+synthetic-world constructors/defaults. Explicit `test-seam` features expose
+fixtures; only dev-dependencies opt in in the production workspace graph.
+This is build isolation, not a security boundary against downstream feature
+selection. Production RPC composition remains `Context::from_handles` and
+chainstate composition remains `Chainstate::from_parts`.
+
+Offline allocation measurement and its dependencies live in
+`tools/storage-footprint`, never in node startup/storage behavior.
+
 ## Remaining composition boundary
 
-`crates/chainstate` owns authoritative applied-chain mutation, recovery,
-checkpoint payload assembly/publication, reorg, and the mandatory retention
-it takes into those transitions. Storage owns the retained-history
-authority — `RetentionRegistry`, the executed frontier, prune reserve/commit,
-and the bounded `HistoryAccess` it hands optional consumers — as well as
-generic journal/checkpoint formats, filesystem operations, backend
-drivers, and durability primitives. Node owns process configuration, concrete
-backend selection, seeding that one retention registry and distributing its
-capabilities, mempool/P2P/index/mining/RPC wiring, and post-commit
-cross-domain effects. Backend construction stays at the `ARCH-03`
-composition seam.
+Ownership is defined in [ARCH-02](#arch-02-exclusive-storage-engine-dependency-ownership)
+and [ARCH-03](#arch-03-storage-backend-feature-forwarding-confinement) (storage and
+backend construction), [ARCH-05](#arch-05-node-composition-and-orchestration-boundary)
+(node assembly) and [ARCH-07](#arch-07-chainstate-owns-authoritative-applied-chain-mutation)
+(chainstate transitions and the separate storage retention authority).
 
 ## Proven by
 
 - `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`:
-  - `workspace_dependency_direction_is_one_way`: parses `cargo metadata --no-deps`,
-    validates every internal workspace dependency edge against the approved
-    layer table, rejects any workspace dependency cycle, and verifies
-    `bitcoin-rs-mempool` does not depend on its transaction consumers (`p2p`,
-    `rpc`, `node`, or the binary). It also verifies `bitcoin-rs-storage`
-    exclusively owns storage engine dependencies, confirms `bitcoin-rs-rpc` has
-    no dependency on storage and forwards no backend features, and verifies
-    backend feature forwarding is confined to operator tiers and service
-    adapters, and rejects empty backend markers on crates that do not own an
-    engine. Normal/build dependency selections and production feature paths
-    must not enable `test-seam`; dev-only selections remain available to fixtures.
+  - `workspace_dependency_direction_is_one_way`: validates `cargo metadata --no-deps`
+    against the manifest-level portions of `ARCH-01`–`ARCH-04` and the production
+    feature isolation rule above.
+  - `fixture_owners_expose_no_production_injection_or_synthetic_constructors`:
+    compiles an isolated consumer; ordinary read/composition APIs must compile,
+    while persistence/checkpoint injection, the old footprint module, and
+    synthetic chainstate/RPC constructors must be absent.
   - `chainstate_facade_exposes_no_production_raw_mutation_handles`: compiles an
     isolated Cargo consumer without dev-feature unification. Read operations
     must compile; raw mutation handles, reader write/publication methods,
@@ -401,14 +560,10 @@ composition seam.
     `Chainstate::utxo`, and `Chainstate::utxo_handle` accessors stay deleted:
     retained-history authority, the transition domain, and the authoritative
     UTXO set are owned elsewhere and chainstate must not broker any of them.
+    The deleted `Chainstate::read_block_tree` stays deleted too: tree reads,
+    including the P2P `SyncChain` adapter's, go through `BlockTreeReader`.
     The same consumer asserts `UtxoReader::fixture_set` is unavailable, so a
     production reader cannot reach the set `utxo::contract` mutates.
-- Manifest enforcement:
-  - Root `Cargo.toml`: workspace member list and package versions.
-  - `crates/storage/Cargo.toml`: engine dependency definitions.
-  - `crates/rpc/Cargo.toml`: zero storage backend dependencies or features.
-  - `crates/node/Cargo.toml` and `bin/bitcoin-rs/Cargo.toml`: confined
-    operator-tier backend feature flags.
 - `crates/chainstate/tests/unit/apply/admission_tests.rs` and
   `crates/chainstate/tests/unit/apply/chain_tx_count_tests.rs` cover admission
   shutdown and coherent chain transaction-count publication. Checkpoint and
@@ -442,3 +597,7 @@ composition seam.
 - `bin/bitcoin-rs/src/bitcoin_conf.rs` test
   `every_table_core_key_reaches_its_slot`: each `bitcoin.conf` key the option
   table names writes the slot the table names.
+- `crates/mempool/tests/gateway_tests.rs`, `crates/chain/tests/latch_tests.rs`,
+  `crates/index/tests/block_log_tests.rs`, and `crates/p2p/tests/service_tests.rs`
+  prove single mutation ownership, capability encapsulation, and single-consumer
+  channel ownership (`ARCH-09`).

@@ -34,7 +34,7 @@ pub trait SpentCoinScripts {
 ///
 /// Used by the legacy prepare path, which refuses `ScriptLive` outright rather
 /// than producing a Live transition with unanchored deletes.
-pub struct NoSpentScripts;
+pub(crate) struct NoSpentScripts;
 
 impl SpentCoinScripts for NoSpentScripts {
     fn script_bytes(&self, _txid: &[u8; 32], _vout: u32) -> Option<&[u8]> {

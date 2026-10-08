@@ -7,9 +7,6 @@ use crate::wire::Message;
 /// Maximum inventory vectors accepted in one message.
 pub const MAX_INV_PER_MSG: usize = 50_000;
 
-/// Inventory item advertised by a peer.
-pub type InventoryVector = Inventory;
-
 /// Requests missing parents from the connection that supplied the child.
 ///
 /// Inventory identity, witness serialization, deduplication, and saturation
@@ -80,7 +77,7 @@ pub(crate) fn request_witness(items: &mut [Inventory], witness: bool) {
 /// POST: `Some` exactly for `MSG_BLOCK` and `MSG_WITNESS_BLOCK`.
 /// INVARIANT: the hash is returned unchanged; the caller routes it to
 /// header sync and never requests the body from the announcement.
-pub fn inventory_block_hash(item: &InventoryVector) -> Option<Hash256> {
+pub(crate) fn inventory_block_hash(item: &Inventory) -> Option<Hash256> {
     use bitcoin::hashes::Hash as _;
     match item {
         Inventory::Block(hash) | Inventory::WitnessBlock(hash) => {
@@ -96,7 +93,7 @@ pub fn inventory_block_hash(item: &InventoryVector) -> Option<Hash256> {
 /// For `Transaction` and `WitnessTransaction` the hash is the txid; for
 /// `WTx` (BIP339) it is the wtxid. The caller interprets the hash according
 /// to this inventory type, independently of either relay direction's preference.
-pub fn inventory_tx_hash(item: &InventoryVector) -> Option<Hash256> {
+pub(crate) fn inventory_tx_hash(item: &Inventory) -> Option<Hash256> {
     use bitcoin::hashes::Hash as _;
     match item {
         Inventory::Transaction(txid) | Inventory::WitnessTransaction(txid) => {
@@ -108,7 +105,7 @@ pub fn inventory_tx_hash(item: &InventoryVector) -> Option<Hash256> {
 }
 
 /// Return true when the inventory list is within the protocol bound.
-pub const fn is_within_inventory_bound(items: &[InventoryVector]) -> bool {
+pub(crate) const fn is_within_inventory_bound(items: &[Inventory]) -> bool {
     items.len() <= MAX_INV_PER_MSG
 }
 

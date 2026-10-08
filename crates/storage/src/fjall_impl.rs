@@ -1,3 +1,5 @@
+#[cfg(any(test, feature = "test-seam"))]
+use crate::batch::prefix_ops;
 use crate::batch::{BatchOp, BufferedWriteBatch};
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -16,7 +18,8 @@ pub struct FjallStore {
     keyspaces: Vec<Keyspace>,
     // Non-reentrant: public mutators hold this lock while calling the lock-free batch helper.
     write_lock: parking_lot::Mutex<()>,
-    faults: crate::PersistFaultSlot,
+    #[cfg(any(test, feature = "test-seam"))]
+    faults: crate::trait_::PersistFaultSlot,
 }
 
 impl FjallStore {
@@ -44,12 +47,6 @@ impl FjallStore {
             .map_err(StorageError::backend)?;
         let mut keyspaces = Vec::with_capacity(ColumnFamily::ALL.len());
         for cf in ColumnFamily::ALL.iter().copied() {
-            // Fjall's default compression policy is [None, None, Lz4] — LZ4 only
-            // on the last level. L0 and L1 data blocks are uncompressed, which
-            // means data that has not yet compacted to the final level is stored
-            // raw. For a node whose working set lives in L0 (small chain, or
-            // recently written data), this wastes disk. Apply LZ4 on every
-            // level, matching RocksDB's configuration.
             let opts = KeyspaceCreateOptions::default()
                 .data_block_compression_policy(CompressionPolicy::all(CompressionType::Lz4));
             keyspaces.push(
@@ -61,23 +58,9 @@ impl FjallStore {
             db,
             keyspaces,
             write_lock: parking_lot::Mutex::new(()),
-            faults: crate::PersistFaultSlot::default(),
+            #[cfg(any(test, feature = "test-seam"))]
+            faults: crate::trait_::PersistFaultSlot::default(),
         })
-    }
-
-    /// Forces all memtables to flush to SST files and waits for completion.
-    ///
-    /// This rotates every keyspace's active memtable and blocks until the
-    /// flush worker has written the sealed memtables to disk. It is the
-    /// correct way to ensure all written data is in durable SST files rather
-    /// than only in the journal, and is used by clean-shutdown and footprint
-    /// measurement.
-    pub fn force_flush_memtables(&self) -> Result<(), StorageError> {
-        for ks in &self.keyspaces {
-            ks.rotate_memtable_and_wait()
-                .map_err(StorageError::backend)?;
-        }
-        Ok(())
     }
 
     fn keyspace(&self, cf: ColumnFamily) -> Result<&Keyspace, StorageError> {
@@ -101,26 +84,29 @@ impl FjallStore {
         metrics::histogram!("storage.write_bytes", "backend" => "fjall")
             .record(crate::metric_f64_from_usize(batch.encoded_bytes));
 
-        // Apply boundary: the engine commit that lands the batch atomically.
-        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Apply) {
-            if fault == crate::PersistFault::PartialApply {
-                // A strict prefix is staged into the engine batch and the
-                // boundary then faults: the never-committed batch leaves
-                // no family with a partial view.
-                let mut fjall_batch = self.db.batch();
-                self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops).collect())?;
-            }
-            return Err(fault.injected_error());
-        }
-
-        if durability == Some(PersistMode::SyncAll) {
-            if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Sync) {
-                // The batch applies without the durability mode; completion
-                // faults or is lost after that.
-                let mut fjall_batch = self.db.batch();
-                self.stage_ops(&mut fjall_batch, batch.ops)?;
-                fjall_batch.commit().map_err(StorageError::backend)?;
+        #[cfg(any(test, feature = "test-seam"))]
+        {
+            // Apply boundary: the engine commit that lands the batch atomically.
+            if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Apply) {
+                if fault == crate::PersistFault::PartialApply {
+                    // A strict prefix is staged into the engine batch and the
+                    // boundary then faults: the never-committed batch leaves
+                    // no family with a partial view.
+                    let mut fjall_batch = self.db.batch();
+                    self.stage_ops(&mut fjall_batch, prefix_ops(batch.ops).collect())?;
+                }
                 return Err(fault.injected_error());
+            }
+
+            if durability == Some(PersistMode::SyncAll) {
+                if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Sync) {
+                    // The batch applies without the durability mode; completion
+                    // faults or is lost after that.
+                    let mut fjall_batch = self.db.batch();
+                    self.stage_ops(&mut fjall_batch, batch.ops)?;
+                    fjall_batch.commit().map_err(StorageError::backend)?;
+                    return Err(fault.injected_error());
+                }
             }
         }
 
@@ -150,8 +136,6 @@ impl FjallStore {
         for (index, op) in ops.into_iter().enumerate() {
             match op {
                 BatchOp::Put { cf, key, value } => {
-                    // Only retain keys that a later range in this family may
-                    // need: point-only batches require no tracking allocation.
                     if last_range[cf.index()].is_some_and(|last| index < last) {
                         staged_puts[cf.index()].insert(key.clone());
                     }
@@ -179,9 +163,6 @@ impl FjallStore {
                     for key in keys {
                         fjall_batch.remove(keyspace, key);
                     }
-                    // The keyspace iterator sees committed rows only. Remove
-                    // earlier staged puts too, at this position in the batch,
-                    // so a subsequent put can still replace the tombstone.
                     staged_puts[cf.index()].retain(|key| {
                         if start <= *key && *key < end {
                             fjall_batch.remove(keyspace, key.as_slice());
@@ -261,10 +242,10 @@ impl KvStore for FjallStore {
 
     fn flush(&self) -> Result<(), StorageError> {
         metrics::counter!("storage.flushes_total", "backend" => "fjall").increment(1);
-        if let Some(fault) = self.faults.take_at(crate::PersistBoundary::Flush) {
+        #[cfg(any(test, feature = "test-seam"))]
+        if let Some(fault) = self.faults.take_at(crate::trait_::PersistBoundary::Flush) {
             return Err(fault.injected_error());
         }
-        // Fjall journals are crash-consistent before fsync; SyncAll requests full durability.
         self.db
             .persist(PersistMode::SyncAll)
             .map_err(StorageError::backend)
@@ -277,6 +258,7 @@ impl KvStore for FjallStore {
         }))
     }
 
+    #[cfg(any(test, feature = "test-seam"))]
     fn arm_persist_fault(&self, fault: crate::PersistFault) {
         self.faults.arm(fault);
     }
@@ -294,12 +276,6 @@ fn cached_keyspace<'store>(
         *slot = Some(store.keyspace(cf)?);
     }
     slot.ok_or(StorageError::UnknownColumnFamily(cf))
-}
-
-/// A strict non-empty prefix of `ops` for the partial-apply fault.
-fn prefix_ops(ops: Vec<BatchOp>) -> impl Iterator<Item = BatchOp> {
-    let split = ops.len().div_ceil(2).max(1).min(ops.len());
-    ops.into_iter().take(split)
 }
 
 struct FjallSnapshot<'a> {

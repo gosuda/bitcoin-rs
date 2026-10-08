@@ -21,13 +21,13 @@ use crate::node::{Kind, ProcessNode, SpawnOptions};
 
 /// Regtest block subsidy in satoshis (50 BTC).
 pub const REGTEST_SUBSIDY_SATS: u64 = 50 * 100_000_000;
-/// Blocks until a coinbase is spendable on regtest.
-pub const COINBASE_MATURITY: u32 = 100;
+/// Blocks until a coinbase is spendable.
+pub use bitcoin::constants::COINBASE_MATURITY;
 /// Fixed regtest funding key: deterministic, unrelated to any wallet.
 const FUNDING_SECRET: [u8; 32] = [1_u8; 32];
 
 /// The deterministic funding key used across scenarios.
-pub fn funding_key() -> Result<PrivateKey> {
+fn funding_key() -> Result<PrivateKey> {
     let secret = bitcoin::secp256k1::SecretKey::from_slice(&FUNDING_SECRET)
         .map_err(|e| Error::Assertion(e.to_string()))?;
     Ok(PrivateKey::new(secret, Network::Regtest))
@@ -42,9 +42,8 @@ pub fn funding_address() -> Result<Address> {
     ))
 }
 
-/// A fresh bech32 address owned by nobody in particular — used as a sink.
-#[must_use]
-pub fn sink_script() -> ScriptBuf {
+/// The sink every unsigned test spend pays: owned by nobody in particular.
+fn sink_script() -> ScriptBuf {
     ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([2; 20]))
 }
 
@@ -166,22 +165,10 @@ pub fn raw_spend_to(
     }
 }
 
-/// Build an unsigned spend of `outpoint`/`prevout` paying `sink_script()`
-/// minus `fee_sats`. Works for both `OP_TRUE` and signed prevouts.
-#[must_use]
-pub fn raw_spend(
-    outpoint: OutPoint,
-    prevout: &TxOut,
-    fee_sats: u64,
-    sequence: Sequence,
-) -> Transaction {
-    raw_spend_to(outpoint, prevout, fee_sats, sequence, &sink_script())
-}
-
 /// An unsigned spend of an `OP_TRUE` coinbase: valid with an empty scriptSig.
 #[must_use]
 pub fn spend_anyone(outpoint: OutPoint, prevout: &TxOut, fee_sats: u64) -> Transaction {
-    raw_spend(outpoint, prevout, fee_sats, Sequence::MAX)
+    raw_spend_to(outpoint, prevout, fee_sats, Sequence::MAX, &sink_script())
 }
 
 /// A signed P2PKH spend of `outpoint`/`prevout` under the funding key.
@@ -191,7 +178,7 @@ pub fn signed_spend(
     fee_sats: u64,
     sequence: Sequence,
 ) -> Result<Transaction> {
-    let mut tx = raw_spend(outpoint, prevout, fee_sats, sequence);
+    let mut tx = raw_spend_to(outpoint, prevout, fee_sats, sequence, &sink_script());
     sign_p2pkh_inputs(&mut tx, std::slice::from_ref(prevout))?;
     Ok(tx)
 }
@@ -332,7 +319,10 @@ pub fn assemble_block_from_template(template: &Value, coinbase_script: &Script) 
     Ok(block)
 }
 
-fn coinbase_script_sig(height: u32) -> ScriptBuf {
+/// BIP34 coinbase `script_sig` for `height`, padded to the two-byte minimum
+/// the consensus coinbase-size rule requires.
+#[must_use]
+pub fn coinbase_script_sig(height: u32) -> ScriptBuf {
     let mut builder = Builder::new().push_int(i64::from(height));
     if builder.as_bytes().len() < 2 {
         builder = builder.push_int(0);
@@ -395,4 +385,151 @@ pub fn wait_for_mempool_tx(node: &mut ProcessNode, txid: &str, timeout: Duration
             .any(|id| id == txid)
             .then_some(()))
     })
+}
+
+/// The coinbase `script_sig`: `height` in little-endian significant bytes,
+/// then a single-byte `tag` push that separates competing branches.
+fn bip34_script_sig(height: u32, tag: u8) -> Vec<u8> {
+    let le = height.to_le_bytes();
+    let used = le
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .map_or(1, |last| last + 1);
+    let mut script = Vec::with_capacity(used + 3);
+    script.push(u8::try_from(used).unwrap_or(1));
+    script.extend_from_slice(&le[..used]);
+    script.extend_from_slice(&[0x01, tag]);
+    script
+}
+
+/// Builds a BIP141 segwit coinbase-only block on `parent`.
+///
+/// The coinbase carries the 32-byte reserved nonce in its input witness and an
+/// `OP_RETURN` commitment output (`aa21a9ed`), so the body binds to the header
+/// only when witness data is intact. `tag` separates competing branches so
+/// coinbases (and therefore txids and headers) differ across forks at equal
+/// heights.
+#[must_use]
+pub fn segwit_coinbase_block(parent: &Block, height: u32, tag: u8) -> Block {
+    let reserved = [tag; 32];
+    // Coinbase-only tree: witness leaf 0 is zeroed out, so the wtxid merkle
+    // root is exactly [0;32]; commitment = sha256d(root || reserved).
+    let mut buffer = [0_u8; 64];
+    buffer[32..].copy_from_slice(&reserved);
+    let commitment = bitcoin::hashes::sha256d::Hash::hash(&buffer).to_byte_array();
+    let mut commit_script = vec![0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
+    commit_script.extend_from_slice(&commitment);
+    let coinbase = Transaction {
+        version: TxVersion::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(bip34_script_sig(height, tag)),
+            sequence: Sequence::MAX,
+            witness: Witness::from_slice(&[&reserved[..]]),
+        }],
+        output: vec![
+            TxOut {
+                value: Amount::from_sat(REGTEST_SUBSIDY_SATS),
+                script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+            },
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::from_bytes(commit_script),
+            },
+        ],
+    };
+    let mut block = Block {
+        header: Header {
+            version: parent.header.version,
+            prev_blockhash: parent.block_hash(),
+            merkle_root: parent.header.merkle_root,
+            time: parent.header.time.saturating_add(1),
+            bits: parent.header.bits,
+            nonce: 0,
+        },
+        txdata: vec![coinbase],
+    };
+    if let Some(root) = block.compute_merkle_root() {
+        block.header.merkle_root = root;
+    }
+    assert!(
+        grind_pow(&mut block.header).is_ok(),
+        "segwit coinbase nonce space exhausted"
+    );
+    block
+}
+
+/// Builds a chain of `count` segwit coinbase blocks extending `parent`; each
+/// block carries a distinct tag so competing branches never collide.
+#[must_use]
+pub fn build_chain(parent: &Block, count: u32, tag: u8, start_height: u32) -> Vec<Block> {
+    let mut chain = Vec::with_capacity(usize::try_from(count).unwrap_or(64));
+    let mut prev = parent.clone();
+    for index in 0..count {
+        let tag = tag.wrapping_add(u8::try_from(index).unwrap_or(0));
+        let block = segwit_coinbase_block(&prev, start_height + index, tag);
+        prev = block.clone();
+        chain.push(block);
+    }
+    chain
+}
+
+/// The node's applied height.
+pub fn block_count(node: &mut ProcessNode) -> Result<u64> {
+    Ok(node
+        .rpc("getblockcount", &json!([]))?
+        .as_u64()
+        .unwrap_or(u64::MAX))
+}
+
+/// The node's applied tip hash, hex.
+pub fn best_hash(node: &mut ProcessNode) -> Result<String> {
+    Ok(node
+        .rpc("getbestblockhash", &json!([]))?
+        .as_str()
+        .unwrap_or("")
+        .to_owned())
+}
+
+/// The node's live peer count.
+pub fn connection_count(node: &mut ProcessNode) -> Result<u64> {
+    Ok(node
+        .rpc("getconnectioncount", &json!([]))?
+        .as_u64()
+        .unwrap_or(u64::MAX))
+}
+
+/// Polls `check` every 200ms until it holds or `dur` elapses.
+pub fn wait_for(dur: Duration, check: &mut dyn FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + dur;
+    while std::time::Instant::now() < deadline {
+        if check() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    false
+}
+
+/// The node's stderr evidence so far.
+#[must_use]
+pub fn node_stderr(node: &ProcessNode) -> String {
+    std::fs::read_to_string(node.evidence.join("stderr.log")).unwrap_or_default()
+}
+
+/// Asserts the node's stderr shows no panic and no `PrevHashMismatch` —
+/// `context` names where a mismatch would indicate commit churn.
+pub fn assert_clean_stderr(node: &ProcessNode, context: &str) {
+    let stderr = node_stderr(node);
+    assert_eq!(
+        stderr.matches("panic").count(),
+        0,
+        "node stderr contains a panic"
+    );
+    assert_eq!(
+        stderr.matches("PrevHashMismatch").count(),
+        0,
+        "node stderr shows PrevHashMismatch: {context}"
+    );
 }

@@ -54,13 +54,13 @@ pub struct CompactBlockNegotiation {
 
 impl CompactBlockNegotiation {
     /// Record the latest remote `sendcmpct` preference.
-    pub const fn record_remote_preference(&mut self, preference: &SendCmpct) {
+    pub(crate) const fn record_remote_preference(&mut self, preference: &SendCmpct) {
         self.remote_send_compact = Some(preference.send_compact);
         self.remote_version = Some(preference.version);
     }
 
     /// Record the version this node sent in its handshake `sendcmpct`.
-    pub const fn record_local_advertised(&mut self, version: u64) {
+    pub(crate) const fn record_local_advertised(&mut self, version: u64) {
         self.local_version = Some(version);
     }
 
@@ -72,7 +72,7 @@ impl CompactBlockNegotiation {
     /// the base v1 profile: short IDs are hints, so a wrong guess only costs
     /// round trips, never a wrong block.
     #[must_use]
-    pub const fn negotiated_version(&self) -> u64 {
+    const fn negotiated_version(&self) -> u64 {
         match self.remote_version {
             Some(2) => 2,
             _ => 1,
@@ -84,7 +84,7 @@ impl CompactBlockNegotiation {
     /// profile is the peer's recorded `sendcmpct` version; short IDs are
     /// hints, so an unknown recorded version degrades to the v1 profile.
     #[must_use]
-    pub const fn servable_version(&self) -> Option<u64> {
+    pub(crate) const fn servable_version(&self) -> Option<u64> {
         match self.remote_send_compact {
             Some(_) => Some(self.negotiated_version()),
             None => None,
@@ -146,7 +146,7 @@ impl<S> Peer<S> {
     }
 
     /// Mark the peer ready once both version and verack have arrived.
-    pub const fn refresh_ready_state(&mut self) {
+    pub(crate) const fn refresh_ready_state(&mut self) {
         if self.remote_version.is_some() && self.received_verack {
             self.state = PeerState::Ready;
         }
@@ -188,51 +188,21 @@ impl<S: Read> Peer<S> {
 }
 
 /// DNS resolver injection point for peer discovery.
-pub trait DnsResolver: Send + Sync {
+pub(crate) trait DnsResolver: Send + Sync {
     /// Resolve a DNS seed name into socket addresses.
     fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError>;
 }
 
-/// Peer manager skeleton with injectable DNS resolution.
-pub struct PeerManager {
-    dns_resolver: Box<dyn DnsResolver>,
-    seeds: Vec<String>,
-}
-
-impl PeerManager {
-    /// Create a peer manager from a resolver implementation.
-    pub fn new(dns_resolver: Box<dyn DnsResolver>) -> Self {
-        Self {
-            dns_resolver,
-            seeds: Vec::new(),
-        }
-    }
-
-    /// Add a DNS seed name.
-    pub fn add_seed(&mut self, seed: impl Into<String>) {
-        self.seeds.push(seed.into());
-    }
-
-    /// Resolve every configured seed.
-    pub fn bootstrap_addresses(&self) -> Result<Vec<SocketAddr>, PeerError> {
-        let mut addresses = Vec::new();
-        for seed in &self.seeds {
-            addresses.extend(self.dns_resolver.resolve(seed)?);
-        }
-        Ok(addresses)
-    }
-}
-
 /// DNS resolver backed by the operating system resolver.
 #[derive(Debug, Clone, Copy)]
-pub struct SystemDnsResolver {
+pub(crate) struct SystemDnsResolver {
     port: u16,
 }
 
 impl SystemDnsResolver {
     /// Create a DNS resolver that attaches `port` to each resolved seed host.
     #[must_use]
-    pub const fn new(port: u16) -> Self {
+    pub(crate) const fn new(port: u16) -> Self {
         Self { port }
     }
 }
@@ -258,11 +228,11 @@ pub struct NetworkActivity {
 }
 
 impl NetworkActivity {
-    /// Shares the node-owned activity flag.
-    /// PRE: `active` is the flag the RPC `setnetworkactive` handler stores.
+    /// Shares the service-owned activity flag.
+    /// PRE: `active` is the flag owned by [`crate::P2pService`].
     /// POST: Return a switch reading exactly that flag.
-    /// INVARIANT: Flag changes happen only through
-    /// [`crate::apply_network_active`]; this type never writes the flag.
+    /// INVARIANT: The service owns activity transitions; this type never
+    /// writes the flag.
     #[must_use]
     pub const fn from_shared(active: Arc<AtomicBool>) -> Self {
         Self { active }
@@ -277,40 +247,11 @@ impl NetworkActivity {
 
 /// Consensus maximum serialized block size in bytes, in `usize` form for
 /// wire-buffer arithmetic. `peer` is the single p2p authority for this limit.
-pub const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
+pub(crate) const MAX_BLOCK_SERIALIZED_SIZE_USIZE: usize = 4_000_000;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn peer_manager_resolves_configured_seeds() -> Result<(), PeerError> {
-        struct StaticResolver;
-
-        impl DnsResolver for StaticResolver {
-            fn resolve(&self, seed: &str) -> Result<Vec<SocketAddr>, PeerError> {
-                let port = match seed {
-                    "seed-one.example" => 8333,
-                    "seed-two.example" => 18333,
-                    _ => return Err(PeerError::Protocol("unexpected test seed")),
-                };
-                Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
-            }
-        }
-
-        let mut manager = PeerManager::new(Box::new(StaticResolver));
-        manager.add_seed("seed-one.example");
-        manager.add_seed("seed-two.example");
-
-        assert_eq!(
-            manager.bootstrap_addresses()?,
-            vec![
-                SocketAddr::from(([127, 0, 0, 1], 8333)),
-                SocketAddr::from(([127, 0, 0, 1], 18333)),
-            ]
-        );
-        Ok(())
-    }
 
     #[test]
     fn system_dns_resolver_uses_configured_port_for_literal_hosts() -> Result<(), PeerError> {

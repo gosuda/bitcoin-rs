@@ -19,11 +19,10 @@ use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use parking_lot::RwLock;
 
-use crate::ChainstateJournalConfig;
-use crate::checkpoint;
 use crate::checkpoint::headers::HeaderCheckpointConfig;
 use crate::checkpoint::{CHECKPOINT_ROOT, CURRENT_FILE, MANIFEST_FILE};
 use crate::recovery::{ResumeSource, prepare_initial_chainstate};
+use crate::{ChainstateJournalConfig, checkpoint};
 
 const NETWORK: Network = Network::Regtest;
 
@@ -69,6 +68,7 @@ fn checkpoint_config() -> HeaderCheckpointConfig {
 fn corrupt_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path();
+    crate::events::initialize_data_dir(data_dir)?;
 
     // A checkpoint directory whose CURRENT file points at a generation with a
     // manifest that fails authenticated parsing: `load_checkpoint_from_dir`
@@ -99,7 +99,7 @@ fn corrupt_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn st
     arm_full_revalidation_marker(data_dir);
 
     let config = ChainstateJournalConfig::default();
-    let state = prepare_initial_chainstate(data_dir, NETWORK, config)?;
+    let state = prepare_initial_chainstate(data_dir, NETWORK, config, None)?;
 
     assert!(
         matches!(state.resume_source, ResumeSource::Cold),
@@ -113,6 +113,7 @@ fn corrupt_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn st
 fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let data_dir = dir.path();
+    crate::events::initialize_data_dir(data_dir)?;
 
     // Build a real, loadable checkpoint so the marker path must prove it
     // bypasses the checkpoint entirely rather than just skipping an absent one.
@@ -131,7 +132,7 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std:
     // Precondition: without the marker the same fixture restores from the
     // checkpoint (proves the fixture really is a loadable checkpoint).
     let no_marker =
-        prepare_initial_chainstate(data_dir, NETWORK, ChainstateJournalConfig::default())?;
+        prepare_initial_chainstate(data_dir, NETWORK, ChainstateJournalConfig::default(), None)?;
     assert!(
         matches!(no_marker.resume_source, ResumeSource::Checkpoint),
         "a valid checkpoint without a marker must restore to Checkpoint, got {:?}",
@@ -145,7 +146,7 @@ fn valid_checkpoint_with_marker_selects_cold_replay() -> Result<(), Box<dyn std:
     arm_full_revalidation_marker(data_dir);
 
     let config = ChainstateJournalConfig::default();
-    let state = prepare_initial_chainstate(data_dir, NETWORK, config)?;
+    let state = prepare_initial_chainstate(data_dir, NETWORK, config, None)?;
 
     assert!(
         matches!(state.resume_source, ResumeSource::Cold),

@@ -8,7 +8,8 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::contract::{BlockChanges, UndoBatch, UtxoAdd};
-use crate::listener::{UtxoChangeEvents, UtxoChangeListener};
+use crate::listener::UtxoChangeEvents;
+use crate::stats::CoinStatsListener;
 use crate::{UtxoKey, record::OwnedUtxoOut, shard::Shard};
 
 /// Below this many combined add+remove operations, a multi-shard no-listener
@@ -39,6 +40,14 @@ pub enum UtxoError {
     /// Encoded UTXO record bytes are truncated, trailing, or noncanonical.
     #[error("invalid encoded UTXO record")]
     CorruptRecord,
+    /// A snapshot coin must have been created no later than its base height.
+    #[error("snapshot coin height {height} exceeds snapshot base {snapshot_height}")]
+    SnapshotCoinHeightOutOfRange {
+        /// Invalid creation height.
+        height: u32,
+        /// Pinned snapshot base height.
+        snapshot_height: u32,
+    },
     /// Snapshot I/O failed.
     #[error("snapshot I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -120,7 +129,7 @@ pub struct UtxoCoin {
 }
 
 /// Result of scanning a stable UTXO-set view.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 pub struct UtxoScan {
     /// Number of live coins visited during the scan.
     pub txouts: usize,
@@ -149,17 +158,18 @@ pub(crate) struct SpendPayload<'a> {
 pub struct UtxoSet {
     pub(crate) shards: [Shard; UtxoKey::SHARD_COUNT],
     stable_view_lock: RwLock<()>,
-    listener: Option<Box<dyn UtxoChangeListener + Send + Sync>>,
+    listener: Option<CoinStatsListener>,
 }
 
 /// Byte-level accounting of what a UTXO set holds in memory.
 ///
 /// Every field is what the set can account for itself: the exact requested
 /// bytes of every boxed record payload and the estimated hash-table backing.
-/// What it cannot see — allocator size-class rounding, fragmentation, and
-/// allocator metadata — is exactly the residual against process RSS, which is
-/// the point.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// It does not measure allocator size-class rounding, fragmentation, or
+/// metadata. Process RSS also includes storage backends, runtime, indexes,
+/// and other owners: subtracting this accounting from RSS leaves an
+/// unattributed residual, not a measurement of allocator overhead.
+#[derive(Debug, Default)]
 pub struct UtxoMemoryReport {
     /// Transaction-level records held.
     pub records: usize,
@@ -207,12 +217,9 @@ impl UtxoSetView<'_> {
 
     /// Accounts for what this set holds in memory, shard by shard.
     ///
-    /// Exists to attribute process RSS rather than to guess at it. The set is
-    /// fully memory-resident with no eviction tier, and the published
-    /// 13.83 GiB at height 645,804 is far above what the record encoding alone
-    /// predicts, so the gap between `record_payload_bytes + table_bytes` and
-    /// actual RSS is the number that decides whether an encoding change is worth
-    /// making at all.
+    /// The set is fully memory-resident with no eviction tier. Pair this report
+    /// with external RSS samples at the same chain state for attribution; the
+    /// returned bytes are not process RSS or a backing-store cache budget.
     ///
     /// Walks every record in every shard: O(records), for measurement only.
     #[must_use]
@@ -232,13 +239,21 @@ impl UtxoSetView<'_> {
         crate::snapshot::hash_serialized_3_stable(self)
     }
 
+    /// Computes the snapshot commitment while rejecting impossible coin heights.
+    ///
+    /// Keeping this validation in the commitment traversal prevents a high-bit
+    /// height alias from passing the pinned hash with different spend metadata.
+    pub fn hash_serialized_3_at_height(&self, snapshot_height: u32) -> Result<Hash256, UtxoError> {
+        crate::snapshot::hash_serialized_3_stable_at_height(self, snapshot_height)
+    }
+
     /// Scans every live output for exact scriptPubKey matches.
-    pub fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoError> {
+    pub(crate) fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> UtxoScan {
         let mut scan = UtxoScan::default();
         for shard in &self.set.shards {
             shard.scan_script_pubkeys(scripts, &mut scan);
         }
-        Ok(scan)
+        scan
     }
 
     /// Visits every live output without materializing the complete set.
@@ -262,19 +277,12 @@ impl UtxoSetView<'_> {
     pub(crate) fn listener_muhash3072(&self) -> Option<[u8; 384]> {
         self.set
             .listener
-            .as_deref()
-            .and_then(UtxoChangeListener::muhash3072)
+            .as_ref()
+            .map(CoinStatsListener::muhash3072)
     }
 }
 
 impl UtxoSet {
-    /// Byte-level memory report over a stable view (measurement only).
-    #[must_use]
-    pub fn memory_report(&self) -> UtxoMemoryReport {
-        #[expect(clippy::redundant_closure_for_method_calls, reason = "HRTB lifetime")]
-        self.with_stable_view(|view| view.memory_report())
-    }
-
     /// Creates an empty UTXO set.
     #[must_use]
     pub fn new() -> Self {
@@ -285,13 +293,28 @@ impl UtxoSet {
         }
     }
 
+    /// Installs an owned snapshot under the stable-view lock.
+    ///
+    /// Consuming the source excludes aliases, self-swaps, and concurrent source
+    /// mutation between verification and installation. The chainstate owner must
+    /// install the matching coin statistics before publishing its new tip.
+    pub fn replace_from(&self, other: Self) {
+        {
+            let _guard = self.stable_view_lock.write();
+            for (my_shard, other_shard) in self.shards.iter().zip(other.shards.iter()) {
+                my_shard.swap_table(other_shard);
+            }
+        }
+        drop(other);
+    }
+
     /// Attaches the coinstats listener for subsequently committed UTXO changes.
     ///
     /// The set keeps one listener slot and the node keeps one listener: the
     /// [`CoinStatsListener`](crate::stats::CoinStatsListener) whose `MuHash` and
     /// accounting track every commit. Replay and recovery attach the same one.
-    pub fn track_coin_stats(&mut self, listener: crate::stats::CoinStatsListener) {
-        self.listener = Some(Box::new(listener));
+    pub fn track_coin_stats(&mut self, listener: CoinStatsListener) {
+        self.listener = Some(listener);
     }
 
     /// Runs `read` while commits are blocked, yielding a stable whole-set view.
@@ -327,7 +350,7 @@ impl UtxoSet {
             removes = changes.remove_count(),
             "commit utxo block"
         );
-        self.commit_adds_and_removes(changes.adds_slice(), changes.removes_slice())
+        self.commit_adds_and_removes(changes.adds(), changes.spent_outpoints())
     }
 
     /// Returns an owned transaction output if the outpoint is live.
@@ -347,7 +370,7 @@ impl UtxoSet {
 
     /// Scans a stable whole-set view for exact scriptPubKey matches.
     pub fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> Result<UtxoScan, UtxoError> {
-        self.with_stable_view(|view| view.scan_script_pubkeys(scripts))
+        Ok(self.with_stable_view(|view| view.scan_script_pubkeys(scripts)))
     }
 
     /// Returns true when any output of `txid` is live in the set.
@@ -374,7 +397,8 @@ impl UtxoSet {
     /// Returns the number of live outpoint entries.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.with_stable_view(stable_view_len)
+        #[expect(clippy::redundant_closure_for_method_calls, reason = "HRTB lifetime")]
+        self.with_stable_view(|view| view.len())
     }
 
     /// Returns true when the set has no live outpoint entries.
@@ -386,7 +410,8 @@ impl UtxoSet {
     /// Returns the number of transaction-level records.
     #[must_use]
     pub fn record_count(&self) -> usize {
-        self.with_stable_view(stable_view_record_count)
+        #[expect(clippy::redundant_closure_for_method_calls, reason = "HRTB lifetime")]
+        self.with_stable_view(|view| view.record_count())
     }
 
     pub(crate) fn insert_snapshot_record(
@@ -425,7 +450,7 @@ impl UtxoSet {
             return self.commit_single_shard(adds, removes, active_shards[0]);
         }
 
-        let listener = self.listener.as_deref();
+        let listener = self.listener.as_ref();
         let group_txid_runs =
             listener.is_none() && active_shard_count <= TXID_RUN_GROUPING_MAX_SHARDS;
         let buckets =
@@ -486,7 +511,7 @@ impl UtxoSet {
         active_shards: &[usize; UtxoKey::SHARD_COUNT],
         active_shard_count: usize,
         buckets: &ShardCommitBuckets<'_>,
-        listener: &(dyn UtxoChangeListener + Send + Sync),
+        listener: &CoinStatsListener,
     ) -> Result<(), UtxoError> {
         if active_shard_count < PARALLEL_LISTENER_SHARD_THRESHOLD {
             return self.commit_serial_event_batches(
@@ -534,7 +559,7 @@ impl UtxoSet {
         active_shards: &[usize; UtxoKey::SHARD_COUNT],
         active_shard_count: usize,
         buckets: &ShardCommitBuckets<'_>,
-        listener: &(dyn UtxoChangeListener + Send + Sync),
+        listener: &CoinStatsListener,
     ) -> Result<(), UtxoError> {
         let mut error = None;
         let mut shard_events =
@@ -571,7 +596,7 @@ impl UtxoSet {
         shard_idx: usize,
     ) -> Result<(), UtxoError> {
         let _stable_commit = self.stable_view_lock.write();
-        let Some(listener) = self.listener.as_deref() else {
+        let Some(listener) = self.listener.as_ref() else {
             return self.shards[shard_idx].commit_single_shard_batch(adds, removes, shard_idx);
         };
 
@@ -602,12 +627,6 @@ impl UtxoReader {
     #[must_use]
     pub fn new(set: Arc<UtxoSet>) -> Self {
         Self { set }
-    }
-
-    /// Looks up one live output.
-    #[must_use]
-    pub fn get(&self, op: &OutPoint) -> Option<TxOut> {
-        self.set.get(op)
     }
 
     /// Looks up one live output with its confirmation metadata.
@@ -962,14 +981,6 @@ fn active_shards(
     (active, len)
 }
 
-fn stable_view_len(view: &UtxoSetView<'_>) -> usize {
-    view.len()
-}
-
-fn stable_view_record_count(view: &UtxoSetView<'_>) -> usize {
-    view.record_count()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -996,7 +1007,7 @@ mod tests {
         }
         set.commit_block(&changes, &Hash256::from_le_bytes(&[0x22; 32]))?;
 
-        let report = set.memory_report();
+        let report = set.lock_stable_view().memory_report();
         assert_eq!(report.records, 1);
         assert_eq!(report.outputs, 3);
         assert!(report.record_payload_bytes > 0);

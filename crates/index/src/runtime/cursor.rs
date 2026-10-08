@@ -6,7 +6,6 @@ use super::PendingForward;
 use super::Worker;
 use crate::ConsumerCursorUpdate;
 use crate::IndexCapabilities;
-use crate::IndexCapability;
 use crate::IndexError;
 use crate::IndexWatermark;
 use crate::IndexWatermarks;
@@ -39,12 +38,10 @@ impl Worker {
             height: snapshot.height,
             hash: snapshot.hash.to_le_bytes(),
         };
-        if (self.enabled.contains(IndexCapability::TxLookup)
-            && watermarks.tx_lookup != Some(expected))
-            || (self.enabled.contains(IndexCapability::ScriptHistory)
-                && watermarks.script_history != Some(expected))
-            || (self.enabled.contains(IndexCapability::ScriptLive)
-                && watermarks.script_live != Some(expected))
+        if self
+            .enabled
+            .iter()
+            .any(|capability| watermarks.get(capability) != Some(expected))
         {
             return Ok(CursorCommit::NotAligned);
         }
@@ -124,21 +121,13 @@ impl Worker {
         if result.height != snapshot.height || result.hash != snapshot.hash.to_le_bytes() {
             return None;
         }
-        if capabilities.contains(IndexCapability::TxLookup) {
-            watermarks.tx_lookup = Some(result);
+        for capability in capabilities.iter() {
+            watermarks.set(capability, Some(result));
         }
-        if capabilities.contains(IndexCapability::ScriptHistory) {
-            watermarks.script_history = Some(result);
-        }
-        if capabilities.contains(IndexCapability::ScriptLive) {
-            watermarks.script_live = Some(result);
-        }
-        let aligned = (!self.enabled.contains(IndexCapability::TxLookup)
-            || watermarks.tx_lookup == Some(result))
-            && (!self.enabled.contains(IndexCapability::ScriptHistory)
-                || watermarks.script_history == Some(result))
-            && (!self.enabled.contains(IndexCapability::ScriptLive)
-                || watermarks.script_live == Some(result));
+        let aligned = self
+            .enabled
+            .iter()
+            .all(|capability| watermarks.get(capability) == Some(result));
         aligned.then(|| snapshot.to_bytes())
     }
 

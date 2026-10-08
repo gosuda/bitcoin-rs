@@ -151,9 +151,6 @@ fn compare_coin(
     Ok(reference)
 }
 
-/// A one-block losing branch stays selected while the rival has equal work,
-/// then both paths converge on Core's two-block winner, including the full
-/// UTXO digest and disappearance of the disconnected coinbase.
 #[test]
 fn equal_work_then_one_block_reorg_matches_clean_sync() -> Result<()> {
     let mut core = ProcessNode::spawn(Kind::Core)?;
@@ -192,8 +189,8 @@ fn equal_work_then_one_block_reorg_matches_clean_sync() -> Result<()> {
     );
     let rival_coinbase = rival.txdata[0].compute_txid().to_string();
     assert!(!compare_coin(&mut core, &mut reorg, &mut clean, &rival_coinbase, false)?.is_null());
-    assert!(sorted_mempool(&mut reorg)?.is_empty());
-    assert!(sorted_mempool(&mut clean)?.is_empty());
+    assert_eq!(sorted_mempool(&mut reorg)?, Vec::<String>::new());
+    assert_eq!(sorted_mempool(&mut clean)?, Vec::<String>::new());
     reorg.stop()?;
     clean.stop()?;
     core.stop()
@@ -357,7 +354,7 @@ fn deep_reorg_mempool_matches_clean_sync() -> Result<()> {
         json!(3),
         "survivor must first be confirmed on the losing branch"
     );
-    assert!(sorted_mempool(&mut reorg)?.is_empty());
+    assert_eq!(sorted_mempool(&mut reorg)?, Vec::<String>::new());
 
     // Core mines only the specified conflicting transaction. Its independent
     // spend stays out of the winning branch and remains eligible for mempool.
@@ -459,7 +456,7 @@ fn invalid_higher_work_body_cannot_change_active_chain() -> Result<()> {
         &chain_view(&mut node)?,
     )?;
     assert!(!coin(&mut node, &old_coinbase, false)?.is_null());
-    assert!(sorted_mempool(&mut node)?.is_empty());
+    assert_eq!(sorted_mempool(&mut node)?, Vec::<String>::new());
     assert_eq!(node.rpc("getblockhash", &json!([1]))?, json!(old_tip));
 
     // Invalid-branch recovery reconnects the old branch through durable

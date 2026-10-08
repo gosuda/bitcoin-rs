@@ -7,7 +7,7 @@ use std::sync::Arc;
 ///
 /// Composition must share one domain per opened node: a separately
 /// constructed domain excludes nothing on the live chain.
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct TransitionDomain {
     inner: Arc<Mutex<()>>,
 }
@@ -54,7 +54,12 @@ impl TransitionAuthority {
     }
 }
 
-/// Read-side capability for RPC, index, and mining; excludes transitions while held.
+/// Read-side role: excludes authoritative transitions for as long as a stable read runs.
+///
+/// This is the capability RPC, index, and mining receive. It offers `lock`
+/// and nothing else in production builds: no access to the shared cell and no path to a
+/// [`TransitionAuthority`]. A caller with access to [`TransitionDomain::new`]
+/// can still mint an unrelated read role.
 #[derive(Clone)]
 pub struct StableRead {
     inner: Arc<Mutex<()>>,
@@ -70,6 +75,8 @@ impl StableRead {
 
     /// Attempts the same exclusion without blocking, so a caller can fail fast
     /// instead of queueing behind a transition it cannot help finish.
+    /// Only exercised by test fixtures. Not present in production builds.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn try_lock(&self) -> Option<StableReadGuard<'_>> {
         self.inner
             .try_lock()

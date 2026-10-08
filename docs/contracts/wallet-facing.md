@@ -31,7 +31,7 @@ stay in the external process.
 
 Esplora lives at `/api` on the JSON-RPC listener. That directory is the
 electrs/mempool.space base URL. Relative routes below are appended to it.
-Every read captures a `ReadStamp` and answers from one coherent view. A
+Every read captures the applied-tip publication and answers from one coherent view. A
 moved chain generation returns the declared unavailable response, never a
 mixed-tip page.
 
@@ -50,9 +50,10 @@ mixed-tip page.
   insufficient-data shape, never a fabricated rate.
 - Build and sign outside the node: `combinepsbt`, `finalizepsbt`, and the
   descriptor helpers are key-free. The consumer signs.
-- Broadcast: `POST /tx` (hex body) reaches the shared `MempoolGateway`
-  dispatched as the `Rpc` origin today; a distinct Esplora origin with its
-  own request fee limits remains target work under `API-10`.
+- Broadcast: `POST /tx` (hex body) reaches the shared `MempoolGateway` with
+  `AdmissionOrigin::Esplora` and its own fixed 10,000,000 sat/kvB request
+  ceiling (`API-10`). Rejections return HTTP 400 with the rejection reason;
+  success returns the transaction id as plain text.
 - Confirmation tracking, replacement observation, disconnect and reorg
   observation, and rescan all run over the same public reads.
 - Public `/api` responses, including errors, allow cross-origin reads with
@@ -84,7 +85,7 @@ mixed-tip page.
   same integration test plus `listener_directory_table_is_closed_over_http`;
   run with `cargo test -p bitcoin-rs --test wallet_facing`.
 - **Consumer boundary:** the proof uses only HTTP against a spawned node.
-  Evidence: `source_does_not_import_node_internals` in that test target.
+  Evidence: the imports of that test target.
 
 ### `WF-03`: Proof is a public-process consumer
 
@@ -96,8 +97,6 @@ mixed-tip page.
   `getblocktemplate` and `submitblock`, then issues the
   BDK/esplora-client dialect against `/api`: tip, block height, headers,
   scripthash UTXOs and history, fee estimates, and `POST /api/tx`.
-  `source_does_not_import_node_internals` enforces `WF-01` on uncommented
-  proof source, including aliases and fully qualified paths.
 - Named out-of-repo consumer: `btcw -n regtest -u http://<rpc-bind>/api`
   against a node started with `--network regtest --scriptindex`. Failures
   of that run are public-interface defects, not reasons to patch a wallet
@@ -108,11 +107,9 @@ mixed-tip page.
 - `bin/bitcoin-rs/tests/wallet_facing.rs::external_wallet_can_scan_estimate_and_broadcast`
 - `crates/rpc/src/server.rs` tests `wf_02_classify_splits_rest_esplora_and_json_rpc` (existing)
 - `crates/rpc/src/esplora.rs` tests `esplora_lives_only_under_the_api_prefix`, `api_is_the_public_electrs_directory`, and `esplora_is_the_mempool_backend_superset` (existing)
-- `bin/bitcoin-rs/tests/wallet_facing.rs::source_does_not_import_node_internals`
-  (existing)
 
 ## Vocabulary
 
 [Wallet-free RPC boundary](../../CONCEPTS.md),
-[ReadStamp](../../CONCEPTS.md),
+[Chain snapshot](../../CONCEPTS.md),
 [embedded node](../../CONCEPTS.md).

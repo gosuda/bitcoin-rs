@@ -61,7 +61,7 @@ impl IndexCapability {
     /// POST: distinct entries, ordered `TxLookup`, `ScriptHistory`, `ScriptLive`.
     /// INVARIANT: this order is load-bearing; the query-refusal text and the
     /// index-ahead capability label follow it.
-    pub const ALL: [Self; 3] = [Self::TxLookup, Self::ScriptHistory, Self::ScriptLive];
+    pub(crate) const ALL: [Self; 3] = [Self::TxLookup, Self::ScriptHistory, Self::ScriptLive];
 
     /// PRE: none.
     /// POST: the single mask bit this capability owns, matching the persisted
@@ -76,7 +76,7 @@ impl IndexCapability {
 
     /// PRE: none.
     /// POST: the position of this capability in [`Self::ALL`], 0 to 2.
-    pub const fn index(self) -> usize {
+    pub(crate) const fn index(self) -> usize {
         match self {
             Self::TxLookup => 0,
             Self::ScriptHistory => 1,
@@ -167,7 +167,7 @@ impl IndexCapabilities {
     /// PRE: none.
     /// POST: whether `capability` is selected.
     #[must_use]
-    pub const fn contains(self, capability: IndexCapability) -> bool {
+    pub(crate) const fn contains(self, capability: IndexCapability) -> bool {
         self.0 & capability.bit() != 0
     }
 
@@ -182,7 +182,7 @@ impl IndexCapabilities {
     /// POST: `capability` is selected in the result; every other selection
     /// bit is unchanged.
     #[must_use]
-    pub const fn insert(self, capability: IndexCapability) -> Self {
+    pub(crate) const fn insert(self, capability: IndexCapability) -> Self {
         Self(self.0 | capability.bit())
     }
 
@@ -190,13 +190,13 @@ impl IndexCapabilities {
     /// POST: `capability` is unselected in the result; every other selection
     /// bit is unchanged.
     #[must_use]
-    pub const fn without(self, capability: IndexCapability) -> Self {
+    pub(crate) const fn without(self, capability: IndexCapability) -> Self {
         Self(self.0 & !capability.bit())
     }
 
     /// PRE: none.
     /// POST: the selected capabilities in [`IndexCapability::ALL`] order.
-    pub fn iter(self) -> impl Iterator<Item = IndexCapability> {
+    pub(crate) fn iter(self) -> impl Iterator<Item = IndexCapability> {
         IndexCapability::ALL
             .into_iter()
             .filter(move |&capability| self.contains(capability))
@@ -255,11 +255,24 @@ pub struct IndexWatermarks {
 
 impl IndexWatermarks {
     /// Returns one capability's durable cursor.
-    pub const fn get(self, capability: IndexCapability) -> Option<IndexWatermark> {
+    pub(crate) const fn get(self, capability: IndexCapability) -> Option<IndexWatermark> {
         match capability {
             IndexCapability::TxLookup => self.tx_lookup,
             IndexCapability::ScriptHistory => self.script_history,
             IndexCapability::ScriptLive => self.script_live,
+        }
+    }
+
+    /// Sets one capability's durable cursor, leaving the others unchanged.
+    pub(crate) const fn set(
+        &mut self,
+        capability: IndexCapability,
+        cursor: Option<IndexWatermark>,
+    ) {
+        match capability {
+            IndexCapability::TxLookup => self.tx_lookup = cursor,
+            IndexCapability::ScriptHistory => self.script_history = cursor,
+            IndexCapability::ScriptLive => self.script_live = cursor,
         }
     }
 }
@@ -292,7 +305,7 @@ impl IndexWatermark {
     }
 
     /// Reads the durable watermark from a snapshot without requiring a writer handle.
-    pub fn read_from_snapshot(
+    pub(crate) fn read_from_snapshot(
         snapshot: &dyn KvSnapshot,
         capability: IndexCapability,
     ) -> Result<Option<Self>, IndexError> {

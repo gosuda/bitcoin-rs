@@ -11,9 +11,9 @@ use super::{GateResult, fail};
 use bitcoin_rs_chain::regtest_fixture;
 use bitcoin_rs_node::{Network, NodeConfig, state::NodeState};
 use bitcoin_rs_primitives::{
-    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Txid,
-    Witness,
+    Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Sequence, Tx, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_script::push_int;
 
 /// Block the seed chain starts from; one minute after the genesis stamp, so
 /// mediantime arithmetic matches Core's regtest spacing.
@@ -53,12 +53,10 @@ pub(crate) fn seed_chain(state: &NodeState, count: u32) -> GateResult<SeedChain>
         let coinbase = Tx {
             version: 2,
             inputs: vec![TxIn {
-                previous_output: null_prevout(),
+                previous_output: OutPoint::null(),
                 // BIP34 height push plus one pad byte: consensus requires a
                 // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-                script_sig: [script_push_int(i64::from(height)), script_push_int(0)]
-                    .concat()
-                    .into(),
+                script_sig: [push_int(i64::from(height)), push_int(0)].concat().into(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
@@ -114,34 +112,4 @@ pub(crate) fn regtest_config(dir: &std::path::Path) -> NodeConfig {
     config.data_dir = dir.to_path_buf();
     config.p2p.listen.clear();
     config
-}
-
-/// The one-input null-prevout coinbase outpoint (Core `COINBASE_OUTPOINT`).
-fn null_prevout() -> OutPoint {
-    OutPoint::new(Txid::default(), u32::MAX)
-}
-
-/// Minimal script push of a small integer, mirroring rust-bitcoin
-/// `Builder::push_int`: `OP_0` for zero, `OP_N` for 1..=16, otherwise a
-/// length-prefixed little-endian payload (BIP34 heights).
-fn script_push_int(value: i64) -> Vec<u8> {
-    match value {
-        0 => vec![0x00],
-        // `value` is pinned to 1..=16 by the match arm.
-        1..=16 => vec![0x50 + u8::try_from(value).unwrap_or_default()],
-        _ => {
-            let mut payload = Vec::new();
-            let mut magnitude = value.unsigned_abs();
-            while magnitude > 0 {
-                // Low byte only; the shift below consumes it fully.
-                payload.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
-                magnitude >>= 8;
-            }
-            let mut out = Vec::with_capacity(payload.len() + 1);
-            // A small-int push never exceeds 8 payload bytes.
-            out.push(u8::try_from(payload.len()).unwrap_or_default());
-            out.extend(payload);
-            out
-        }
-    }
 }

@@ -3,103 +3,32 @@
 //! Starts the configured `bitcoin-rs` node with crash recovery, signal handling,
 //! metrics/tracing setup, and graceful shutdown.
 
-#![allow(missing_docs)]
-#![allow(unreachable_pub)]
 #![allow(clippy::print_stdout)]
 #![allow(clippy::print_stderr)]
 
 use std::process::ExitCode;
 
-use anyhow::Context;
-use bitcoin_rs_node::{
-    MeasureStorageRequest, Network, UserConfig, measure_storage_footprint, storage_footprint_json,
-};
-
-mod bitcoin_conf;
-mod cli;
-mod env;
-mod toml;
+mod config;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
-fn config_from(
-    cli: cli::CliArgs,
-    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
-) -> anyhow::Result<bitcoin_rs_node::NodeConfig> {
-    let mut layers = Vec::new();
-    if let Some(path) = &cli.config {
-        layers.push(toml::user_config_from_path(path)?);
-    }
-    let env_layer = env::user_config_from_env(vars)?;
-    let bitcoin_conf_path = cli.bitcoin_conf.clone();
-    let cli_layer = cli.into_user_config();
-    if let Some(path) = bitcoin_conf_path {
-        let network = network_from_layers(layers.iter().chain([&env_layer, &cli_layer]));
-        layers.extend(bitcoin_conf::load_file(&path, network)?);
-    }
-    layers.push(env_layer);
-    layers.push(cli_layer);
-    let layer_refs: Vec<_> = layers.iter().collect();
-    bitcoin_rs_node::resolve(&layer_refs)
-}
 
 #[cfg(test)]
 fn load(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
     vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
 ) -> anyhow::Result<bitcoin_rs_node::NodeConfig> {
-    let cli = match <cli::CliArgs as clap::Parser>::try_parse_from(args) {
-        Ok(cli) => cli,
-        Err(error) => error.exit(),
-    };
-    config_from(cli, vars)
-}
-
-fn measure_storage(cli: cli::CliArgs) -> anyhow::Result<()> {
-    let output = cli.measure_storage_output.clone();
-    let request = MeasureStorageRequest {
-        high_water_allocated_bytes: cli.storage_high_water_bytes,
-        stop_height: cli.measure_storage_stop_height,
-        stop_hash: cli.measure_storage_stop_hash.clone(),
-    };
-    let config = config_from(cli, std::env::vars_os())?;
-    let evidence = measure_storage_footprint(&config, &request)?;
-    let json = storage_footprint_json(&evidence)?;
-    if let Some(path) = output {
-        std::fs::write(&path, json).with_context(|| format!("write {}", path.display()))?;
-    } else {
-        println!("{json}");
-    }
-    Ok(())
-}
-
-/// Network used to select `[regtest]` / `[main]` sections in bitcoin.conf.
-///
-/// Resolved from TOML, environment, and CLI only. bitcoin.conf never chooses
-/// the network that selects its own sections.
-fn network_from_layers<'a>(layers: impl IntoIterator<Item = &'a UserConfig>) -> Network {
-    let mut network = Network::Mainnet;
-    for layer in layers {
-        if let Some(selection) = layer.network {
-            network = selection.consensus_network();
-        }
-    }
-    network
+    let cli = <config::CliArgs as clap::Parser>::try_parse_from(args)?;
+    config::resolve(cli, vars)
 }
 
 fn main() -> ExitCode {
-    let cli = match <cli::CliArgs as clap::Parser>::try_parse() {
+    let cli = match <config::CliArgs as clap::Parser>::try_parse() {
         Ok(cli) => cli,
         Err(error) => error.exit(),
     };
-    let result = if cli.measure_storage {
-        measure_storage(cli)
-    } else {
-        config_from(cli, std::env::vars_os()).and_then(|config| {
-            bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default())
-        })
-    };
+    let result = config::resolve(cli, std::env::vars_os())
+        .and_then(|config| bitcoin_rs_node::run(config, bitcoin_rs_node::RuntimeInputs::default()));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -111,6 +40,22 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn measurement_options_are_not_node_options() {
+        use clap::Parser as _;
+        for option in [
+            "--measure-storage",
+            "--measure-storage-output",
+            "--measure-storage-stop-height",
+            "--measure-storage-stop-hash",
+            "--storage-high-water-bytes",
+        ] {
+            let error = super::config::CliArgs::try_parse_from(["bitcoin-rs", option])
+                .err()
+                .unwrap_or_else(|| panic!("measurement option accepted: {option}"));
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
+    }
     use std::ffi::OsString;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
@@ -118,39 +63,47 @@ mod tests {
     use bitcoin_rs_chainstate::ValidationMode;
     use bitcoin_rs_node::{Auth, Network, ScriptIndexMode};
 
+    fn resolved(args: &[&str], vars: &[(&str, &str)]) -> bitcoin_rs_node::NodeConfig {
+        super::load(
+            args.iter().copied(),
+            vars.iter()
+                .map(|(key, value)| (OsString::from(*key), OsString::from(*value))),
+        )
+        .unwrap_or_else(|error| panic!("valid configuration: {error}"))
+    }
+
+    fn load_file(
+        flag: &str,
+        text: &str,
+        args: &[&str],
+        vars: impl Iterator<Item = (OsString, OsString)>,
+    ) -> anyhow::Result<bitcoin_rs_node::NodeConfig> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("config");
+        std::fs::write(&path, text)?;
+        let mut argv = vec![
+            OsString::from("bitcoin-rs"),
+            OsString::from(flag),
+            path.into_os_string(),
+        ];
+        argv.extend(args.iter().map(OsString::from));
+        super::load(argv, vars)
+    }
+
     #[test]
     fn bitcoin_conf_is_applied_before_environment_and_cli() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("bitcoin.conf");
-        std::fs::write(&path, "prune=777\n").unwrap_or_else(|error| panic!("write conf: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--bitcoin-conf",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid bitcoin.conf configuration: {error}"));
+        let config = load_file("--bitcoin-conf", "prune=777\n", &[], std::iter::empty())
+            .unwrap_or_else(|error| panic!("valid bitcoin.conf configuration: {error}"));
 
         assert_eq!(config.storage.prune_target_mb, 777);
     }
 
     #[test]
     fn bitcoin_conf_is_overridden_by_cli() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("bitcoin.conf");
-        std::fs::write(&path, "prune=777\n").unwrap_or_else(|error| panic!("write conf: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--bitcoin-conf",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-                "--prune-target-mb",
-                "100",
-            ],
+        let config = load_file(
+            "--bitcoin-conf",
+            "prune=777\n",
+            &["--prune-target-mb", "100"],
             std::iter::empty(),
         )
         .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
@@ -160,19 +113,10 @@ mod tests {
 
     #[test]
     fn earlier_toml_connect_survives_later_cli_network() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(&path, "connect = [\"10.0.0.5:8333\"]\n")
-            .unwrap_or_else(|error| panic!("write toml: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-                "--network",
-                "regtest",
-            ],
+        let config = load_file(
+            "--config",
+            "connect = [\"10.0.0.5:8333\"]\n",
+            &["--network", "regtest"],
             std::iter::empty(),
         )
         .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
@@ -187,8 +131,8 @@ mod tests {
 
     #[test]
     fn environment_is_overridden_by_cli() {
-        let config = super::load(
-            [
+        let config = resolved(
+            &[
                 "bitcoin-rs",
                 "--network",
                 "regtest",
@@ -197,15 +141,12 @@ mod tests {
                 "--rpc-user",
                 "cli-user",
             ],
-            [
+            &[
                 ("BITCOIN_RS_NETWORK", "testnet4"),
                 ("BITCOIN_RS_DATA_DIR", "/tmp/env-node"),
                 ("BITCOIN_RS_RPC_USER", "env-user"),
-            ]
-            .into_iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+            ],
+        );
 
         assert_eq!(config.network, Network::Regtest);
         assert_eq!(config.data_dir, std::path::PathBuf::from("/tmp/cli-node"));
@@ -220,47 +161,30 @@ mod tests {
 
     #[test]
     fn environment_parses_script_index() {
-        let config = super::load(
-            ["bitcoin-rs"],
-            std::iter::once(("BITCOIN_RS_SCRIPTINDEX", "full"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid environment configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_SCRIPTINDEX", "full")]);
 
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
     }
 
     #[test]
     fn environment_parses_script_index_utxo() {
-        let config = super::load(
-            ["bitcoin-rs"],
-            std::iter::once(("BITCOIN_RS_SCRIPTINDEX", "utxo"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid environment configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[("BITCOIN_RS_SCRIPTINDEX", "utxo")]);
 
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
     }
 
     #[test]
     fn fast_sync_defaults_off_and_enables_from_flag_or_environment() {
-        let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())
-            .unwrap_or_else(|error| panic!("valid default configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[]);
         assert!(!config.p2p.fast_sync);
 
-        let config = super::load(
-            ["bitcoin-rs", "--fast-sync"],
-            std::iter::empty::<(OsString, OsString)>(),
-        )
-        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+        let config = resolved(&["bitcoin-rs", "--fast-sync"], &[]);
         assert!(config.p2p.fast_sync);
 
-        let config = super::load(
-            ["bitcoin-rs", "--fast-sync=false"],
-            std::iter::once(("BITCOIN_RS_FAST_SYNC", "true"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs", "--fast-sync=false"],
+            &[("BITCOIN_RS_FAST_SYNC", "true")],
+        );
         assert!(!config.p2p.fast_sync);
     }
 
@@ -296,16 +220,10 @@ mod tests {
             "unsupported-build error must say so, got {error:#}"
         );
 
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(&path, "validation_engine = \"kernel\"\n")
-            .unwrap_or_else(|error| panic!("write toml: {error}"));
-        let error = match super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
+        let error = match load_file(
+            "--config",
+            "validation_engine = \"kernel\"\n",
+            &[],
             std::iter::empty::<(OsString, OsString)>(),
         ) {
             Ok(_) => panic!("unsupported engine must fail startup from TOML too"),
@@ -321,41 +239,33 @@ mod tests {
     fn validation_engine_defaults_to_native_and_layers_flag_over_environment() {
         use bitcoin_rs_node::ValidationEngine;
 
-        let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())
-            .unwrap_or_else(|error| panic!("valid default configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[]);
         assert_eq!(config.validation.engine, ValidationEngine::Native);
 
-        let config = super::load(
-            ["bitcoin-rs", "--validation-engine", "native"],
-            std::iter::once(("BITCOIN_RS_VALIDATION_ENGINE", "kernel"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs", "--validation-engine", "native"],
+            &[("BITCOIN_RS_VALIDATION_ENGINE", "kernel")],
+        );
         assert_eq!(config.validation.engine, ValidationEngine::Native);
     }
 
     #[test]
     fn validation_mode_defaults_to_assume_valid_and_layers_flag_over_environment() {
-        let config = super::load(["bitcoin-rs"], std::iter::empty::<(OsString, OsString)>())
-            .unwrap_or_else(|error| panic!("valid default configuration: {error}"));
+        let config = resolved(&["bitcoin-rs"], &[]);
         assert_eq!(config.validation.mode, ValidationMode::AssumeValid);
 
-        let config = super::load(
-            ["bitcoin-rs", "--validation-mode", "full"],
-            std::iter::once(("BITCOIN_RS_VALIDATION_MODE", "fast"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs", "--validation-mode", "full"],
+            &[("BITCOIN_RS_VALIDATION_MODE", "fast")],
+        );
         assert_eq!(config.validation.mode, ValidationMode::Full);
         assert_eq!(ValidationMode::parse("lenient"), None);
     }
 
     #[test]
     fn toml_groups_zmq_topics_by_endpoint() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(
-            &path,
+        let config = load_file(
+            "--config",
             r#"
 [[notifications.zmq]]
 endpoint = "tcp://127.0.0.1:28332"
@@ -366,20 +276,12 @@ endpoint = "tcp://127.0.0.1:28333"
 topics = ["hashtx", "rawtx"]
 hwm = 5000
 "#,
-        )
-        .unwrap_or_else(|error| panic!("write toml: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
+            &[],
             std::iter::empty(),
         )
         .unwrap_or_else(|error| panic!("valid toml configuration: {error}"));
 
-        let endpoints = config.zmq_endpoints();
+        let endpoints = &config.notifications.zmq;
         assert_eq!(endpoints.len(), 2);
         assert_eq!(endpoints[0].endpoint, "tcp://127.0.0.1:28332");
         assert_eq!(endpoints[0].effective_hwm(), 1_000);
@@ -388,17 +290,10 @@ hwm = 5000
 
     #[test]
     fn legacy_flat_zmq_toml_is_rejected() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(&path, r#"zmqpubhashblock = ["tcp://127.0.0.1:28332"]"#)
-            .unwrap_or_else(|error| panic!("write toml: {error}"));
-
-        let error = match super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
+        let error = match load_file(
+            "--config",
+            r#"zmqpubhashblock = ["tcp://127.0.0.1:28332"]"#,
+            &[],
             std::iter::empty(),
         ) {
             Ok(_) => panic!("legacy flat ZMQ keys must not be silently accepted"),
@@ -409,8 +304,8 @@ hwm = 5000
 
     #[test]
     fn cli_network_profile_precedes_cli_explicit_p2p_overrides() {
-        let config = super::load(
-            [
+        let config = resolved(
+            &[
                 "bitcoin-rs",
                 "--network",
                 "drynet4",
@@ -421,9 +316,8 @@ hwm = 5000
                 "--dns-seeds-enabled",
                 "false",
             ],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid layered configuration: {error}"));
+            &[],
+        );
 
         assert_eq!(config.network, Network::Mainnet);
         assert_eq!(config.p2p.magic, [1, 2, 3, 4]);
@@ -434,11 +328,7 @@ hwm = 5000
     /// IDX-01: `--scriptindex` without a value means `full`.
     #[test]
     fn cli_scriptindex_flag_enables_full_index() {
-        let config = super::load(
-            ["bitcoin-rs", "--txindex=false", "--scriptindex"],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+        let config = resolved(&["bitcoin-rs", "--txindex=false", "--scriptindex"], &[]);
 
         assert!(!config.indexes.txindex);
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Full);
@@ -447,11 +337,10 @@ hwm = 5000
     /// IDX-01: `--scriptindex=utxo` enables `ScriptLive` only.
     #[test]
     fn cli_scriptindex_utxo_enables_live_only_index() {
-        let config = super::load(
-            ["bitcoin-rs", "--txindex=false", "--scriptindex=utxo"],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs", "--txindex=false", "--scriptindex=utxo"],
+            &[],
+        );
 
         assert!(!config.indexes.txindex);
         assert_eq!(config.indexes.script_index, ScriptIndexMode::Utxo);
@@ -459,8 +348,8 @@ hwm = 5000
 
     #[test]
     fn cli_parses_socket_and_peer_lists() {
-        let config = super::load(
-            [
+        let config = resolved(
+            &[
                 "bitcoin-rs",
                 "--network",
                 "regtest",
@@ -472,9 +361,8 @@ hwm = 5000
                 "--connect",
                 "localhost:18444,10.0.0.2:8333",
             ],
-            std::iter::empty(),
-        )
-        .unwrap_or_else(|error| panic!("valid CLI configuration: {error}"));
+            &[],
+        );
 
         assert_eq!(
             config.p2p.listen,
@@ -498,12 +386,10 @@ hwm = 5000
 
     #[test]
     fn environment_cookie_auth_is_resolved_and_redacted() {
-        let config = super::load(
-            ["bitcoin-rs"],
-            std::iter::once(("BITCOIN_RS_RPC_COOKIE", "/secret/.cookie"))
-                .map(|(key, value)| (OsString::from(key), OsString::from(value))),
-        )
-        .unwrap_or_else(|error| panic!("valid environment configuration: {error}"));
+        let config = resolved(
+            &["bitcoin-rs"],
+            &[("BITCOIN_RS_RPC_COOKIE", "/secret/.cookie")],
+        );
 
         assert_eq!(
             config.rpc.auth,
@@ -529,24 +415,14 @@ hwm = 5000
 
     #[test]
     fn toml_chainstate_journal_is_overridden_by_environment() {
-        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
-        let path = dir.path().join("node.toml");
-        std::fs::write(
-            &path,
+        let config = load_file(
+            "--config",
             r"
 [chainstate_journal]
 enabled = true
 blocks = 100
 ",
-        )
-        .unwrap_or_else(|error| panic!("write toml: {error}"));
-
-        let config = super::load(
-            [
-                "bitcoin-rs",
-                "--config",
-                path.to_str().unwrap_or_else(|| panic!("utf-8 path")),
-            ],
+            &[],
             std::iter::once(("BITCOIN_RS_CHAINSTATE_JOURNAL_BLOCKS", "200"))
                 .map(|(key, value)| (OsString::from(key), OsString::from(value))),
         )

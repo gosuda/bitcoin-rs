@@ -1,7 +1,6 @@
 use super::*;
 use std::io::Write;
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-BOOT-1.
 #[test]
 fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     let writer = open_fresh("config-defaults", Arc::new(CountingStore::new()))?;
@@ -20,7 +19,6 @@ fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-REC-1.
 #[test]
 fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -30,20 +28,17 @@ fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
         writer.append(&sample_record(1))?;
         writer.flush_to(1)?;
         dir = writer.dir.try_clone()?;
-        // Simulate a torn append after the head: raw bytes past the cursor.
         let mut options = cap_std::fs::OpenOptions::new();
         options.append(true).create(true);
         let mut file = dir.open_with(segment_name(writer.segment_gen), &options)?;
         file.write_all(&[0xde, 0xad, 0xbe, 0xef])?;
         file.sync_all()?;
     }
-    // Reopen: the torn tail must be truncated away without error.
     let writer = JournalWriter::open(dir, store)?;
     assert_eq!(writer.head().height, 1);
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-REC-1.
 #[test]
 fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -51,13 +46,9 @@ fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     let record = sample_record(1);
     {
         let mut writer = open_fresh("idempotent", Arc::clone(&store))?;
-        // Buffer record 1 but crash before any boundary (drop = crash).
         writer.append(&record)?;
         dir = writer.dir.try_clone()?;
     }
-    // After the crash, record 1 may have reached the page cache but was
-    // never covered by a durable head. Reopening truncates to the head
-    // cursor; the caller replays record 1 into the same place.
     let mut writer = JournalWriter::open(dir, Arc::clone(&store))?;
     writer.append(&record)?;
     writer.flush_to(1)?;
@@ -66,7 +57,6 @@ fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-ORDER-1.
 #[test]
 fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -88,7 +78,6 @@ fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> Test
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-ORDER-1.
 #[test]
 fn out_of_order_append_blocks_the_next_apply() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -172,22 +161,18 @@ fn failed_rewind_truncation_blocks_appends_until_restart() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-ROT-1.
 #[test]
 fn rotation_keeps_cursor_invariants() -> TestResult {
     let store = Arc::new(CountingStore::new());
     let mut writer = open_fresh("rotation", Arc::clone(&store))?;
-    // Rotate exactly once, before the second append.
     let first = sample_record(1);
     writer.rotate_bytes = u64::try_from(encode_record(&first)?.len())?;
     writer.append(&first)?;
     writer.append(&sample_record(2))?;
     assert_eq!(writer.segment_gen, 1, "rotation bumped the generation");
-    // head must stay valid across the rotation.
     writer.flush_to(2)?;
     assert_eq!(writer.head().height, 2);
     assert_eq!(writer.head().journal_gen, 1);
-    // Zero-padded naming: lexicographic == numeric.
     let names: Vec<String> = (0..3).map(segment_name).collect();
     let mut sorted = names.clone();
     sorted.sort();
@@ -195,7 +180,6 @@ fn rotation_keeps_cursor_invariants() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-FAIL-1.
 #[test]
 fn failpoints_fire_documented_errors() -> TestResult {
     for boundary in [
@@ -211,8 +195,6 @@ fn failpoints_fire_documented_errors() -> TestResult {
         let store = Arc::new(CountingStore::new());
         let mut writer = open_fresh("failpoints", Arc::clone(&store))?;
         writer.inject_failpoint(boundary);
-        // Append failpoints fire immediately; durability failures fire only
-        // when the explicit batch boundary is advanced.
         let append_result = writer.append(&sample_record(1));
         let result = if matches!(
             boundary,
@@ -224,13 +206,11 @@ fn failpoints_fire_documented_errors() -> TestResult {
             writer.flush_to(1)
         };
         assert!(result.is_err(), "{boundary:?} did not fire");
-        // ...and head.json must still reflect height 0 (no advancement).
         assert_eq!(writer.head().height, 0, "{boundary:?} advanced the head");
     }
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-LIFE-1.
 #[test]
 fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -242,10 +222,176 @@ fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
         return Err("frozen writer accepted an append".into());
     };
     assert!(matches!(error, JournalWriterError::NotOpen { .. }));
-    writer.compact_to_checkpoint(1, 1, [1; 32], [0; 32], 3)?;
+    writer.compact_to_checkpoint(1, 1, [1; 32], [0; 32], 3, true)?;
     writer.resume()?;
     assert_eq!(writer.state(), WriterState::Open);
     writer.append(&sample_record(2))?;
+    Ok(())
+}
+
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-MARK-2.
+#[test]
+fn recovery_progress_compaction_preserves_full_revalidation_marker() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let mut writer = open_fresh("progress-marker", store)?;
+    writer.dir.write(
+        FULL_REVALIDATION_MARKER,
+        b"journal fork crossed below checkpoint base\n",
+    )?;
+
+    writer.freeze()?;
+    writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false)?;
+    writer.resume()?;
+
+    assert!(writer.dir.open(FULL_REVALIDATION_MARKER).is_ok());
+    Ok(())
+}
+
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-ORDER-1.
+#[test]
+fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let mut writer = open_fresh("progress-append-gap", store)?;
+    writer.mark_append_gap(1);
+
+    assert!(matches!(
+        writer.freeze(),
+        Err(JournalWriterError::AppendGap { height: 1 })
+    ));
+    assert_eq!(writer.state(), WriterState::Open);
+    assert!(matches!(
+        writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false),
+        Err(JournalWriterError::NotOpen {
+            state: "not frozen"
+        })
+    ));
+    assert!(matches!(
+        writer.prepare_for_apply(),
+        Err(JournalWriterError::AppendGap { height: 1 })
+    ));
+
+    // Compaction itself also owns the guard. Even if an internal caller
+    // poisons an already-frozen writer, it cannot commit a new base that a
+    // restart would reopen without the in-memory append-gap latch.
+    let store = Arc::new(CountingStore::new());
+    let mut frozen = open_fresh("frozen-progress-append-gap", store)?;
+    frozen.freeze()?;
+    frozen.mark_append_gap(1);
+    assert!(matches!(
+        frozen.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, false),
+        Err(JournalWriterError::AppendGap { height: 1 })
+    ));
+    Ok(())
+}
+
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-LIFE-1, JW-MARK-2.
+// A fork below the checkpoint base invalidates the generation; the disconnect
+// debt settles through the same freeze-compact-resume publication instead of
+// leaving the writer frozen until restart.
+#[test]
+fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let dir = temp_dir("below-base-settle")?;
+    let mut writer = JournalWriter::initialize(
+        dir,
+        Arc::clone(&store),
+        1,
+        (0, 0),
+        10,
+        [10; 32],
+        [9; 32],
+        30,
+    )?;
+    assert!(matches!(
+        writer.rewind_to(5, [5; 32], [4; 32], 15),
+        Err(JournalWriterError::ForkBelowBase {
+            fork_height: 5,
+            base_height: 10
+        })
+    ));
+    assert_eq!(writer.state(), WriterState::Frozen);
+    assert!(writer.dir.open(FULL_REVALIDATION_MARKER).is_ok());
+    assert!(matches!(
+        writer.append(&sample_record(11)),
+        Err(JournalWriterError::NotOpen { .. })
+    ));
+    // Publication must not resume before compaction installs the new base:
+    // the only head still in memory is the destroyed generation's stale cursor.
+    assert!(matches!(
+        writer.resume(),
+        Err(JournalWriterError::NotOpen {
+            state: "invalidated"
+        })
+    ));
+    writer.freeze()?;
+    writer.compact_to_checkpoint(7, 5, [5; 32], [4; 32], 15, true)?;
+    assert_eq!(
+        writer
+            .dir
+            .open(FULL_REVALIDATION_MARKER)
+            .err()
+            .map(|error| error.kind()),
+        Some(std::io::ErrorKind::NotFound)
+    );
+    writer.resume()?;
+    assert_eq!(writer.state(), WriterState::Open);
+    writer.append(&sample_record(6))?;
+    writer.flush_to(6)?;
+    assert_eq!(writer.head().height, 6);
+    Ok(())
+}
+
+// Contract: docs/contracts/recovery.md, RCV-02; chainstate-journal-v1.md, JW-MARK-2.
+#[test]
+fn cold_retention_removes_all_invalidated_generations_and_preserves_recovery() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let mut writer = open_fresh("cold-retention-generations", Arc::clone(&store))?;
+    writer.max_journal_bytes = 1024 * 1024;
+    let marker = b"force full validation\n";
+    writer.dir.write(FULL_REVALIDATION_MARKER, marker)?;
+    writer.dir.write(segment_name(0), [])?;
+    writer.dir.write("operator-note", b"preserve")?;
+    writer.dir.write("segment-invalid.log", b"not a segment")?;
+    let head_before = writer.dir.read("head.json")?;
+
+    // Span directory iterator buffers and sparse generation numbers. Cleanup
+    // must enumerate the existing names, not walk up to the largest generation.
+    for generation in (1..=2048).chain(std::iter::once(u64::MAX)) {
+        writer.dir.write(segment_name(generation), [0; 512])?;
+    }
+    assert!(writer.requires_compaction()?);
+
+    writer.prepare_for_apply()?;
+
+    for generation in (1..=2048).chain(std::iter::once(u64::MAX)) {
+        assert_eq!(
+            writer
+                .dir
+                .metadata(segment_name(generation))
+                .err()
+                .map(|error| error.kind()),
+            Some(std::io::ErrorKind::NotFound),
+            "invalidated generation {generation} survived retention relief"
+        );
+    }
+    assert_eq!(writer.dir.read(FULL_REVALIDATION_MARKER)?, marker);
+    assert_eq!(writer.dir.read("head.json")?, head_before);
+    assert_eq!(writer.dir.read(segment_name(0))?, Vec::<u8>::new());
+    assert_eq!(writer.dir.read("operator-note")?, b"preserve");
+    assert_eq!(writer.dir.read("segment-invalid.log")?, b"not a segment");
+    assert!(!writer.requires_compaction()?);
+
+    // Relief leaves the active append cursor usable and its next durable
+    // record recoverable, without retiring the cold-revalidation marker.
+    writer.append(&sample_record(1))?;
+    writer.flush_to(1)?;
+    let dir = writer.dir.try_clone()?;
+    drop(writer);
+    let reopened = JournalWriter::open(dir, store)?;
+    assert_eq!(reopened.head().height, 1);
+    assert_eq!(reopened.head().journal_gen, 0);
+    assert_eq!(reopened.head().record_count, 1);
+    assert_eq!(reopened.dir.read(FULL_REVALIDATION_MARKER)?, marker);
     Ok(())
 }
 

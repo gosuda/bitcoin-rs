@@ -12,8 +12,6 @@ description = "bitcoin-rs :: authoritative chainstate"
 workspace = true
 
 [features]
-# USDT tracepoints (Bitcoin Core-compatible probe ABI); empty unless enabled.
-usdt = ["bitcoin-rs-trace/usdt"]
 
 # `kernel` is capability ("bitcoinkernel support is compiled in"), not
 # selection; the engine a run uses is `validation.engine` at runtime. The
@@ -24,20 +22,17 @@ default = []
 # follower-free mutation. Any downstream can enable this feature; the
 # production-build guarantee is in-workspace, where only dev-dependencies
 # select it and the g17 gate fails if it leaks into a shipped target.
-test-seam = []
+test-seam = ["bitcoin-rs-storage/test-seam"]
 kernel = ["bitcoin-rs-consensus/kernel"]
 rocksdb = [
-    "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-storage/rocksdb",
     "bitcoin-rs-utxo/rocksdb",
 ]
 fjall = [
-    "bitcoin-rs-chain/fjall",
     "bitcoin-rs-storage/fjall",
     "bitcoin-rs-utxo/fjall",
 ]
 redb = [
-    "bitcoin-rs-chain/redb",
     "bitcoin-rs-storage/redb",
     "bitcoin-rs-utxo/redb",
 ]
@@ -60,12 +55,13 @@ metrics.workspace = true
 parking_lot.workspace = true
 quanta.workspace = true
 rayon.workspace = true
-rustix.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-bitcoin-rs-trace.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
-tempfile = ">=3.20.0, <4"
+bitcoin-rs-chainstate = { workspace = true, default-features = false, features = ["test-seam"] }
+bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
+tempfile.workspace = true

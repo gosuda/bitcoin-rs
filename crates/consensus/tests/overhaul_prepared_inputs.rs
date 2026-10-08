@@ -32,7 +32,7 @@ fn plain_input(byte: u8) -> TxIn {
     TxIn {
         previous_output: outpoint(byte),
         script_sig: Script::new(),
-        sequence: Sequence::from_consensus(u32::MAX),
+        sequence: Sequence::MAX,
         witness: Witness::new(),
     }
 }
@@ -51,7 +51,7 @@ fn two_input_tx() -> (Tx, Coins) {
     }
     let tx = Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![plain_input(1), plain_input(2)],
         outputs: vec![TxOut {
             value: Amount::from_sat(100),

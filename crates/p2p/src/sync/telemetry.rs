@@ -18,16 +18,7 @@ impl BlockSync {
         let chain = self.observe_chain_frontier();
         let frontier = self.observe_frontier(chain, now);
         let plan = frontier.plan();
-        let applied_height = frontier
-            .chain
-            .applied_tip
-            .as_ref()
-            .map_or(0, |tip| tip.height);
-        let header_height = frontier
-            .chain
-            .chain_tip
-            .as_ref()
-            .map_or(applied_height, |tip| tip.height);
+        let (applied_height, header_height) = frontier.heights();
         let live_peers = frontier.usable_peers.len();
         let in_ibd = self.in_initial_block_download();
         let gap = header_height.saturating_sub(applied_height);
