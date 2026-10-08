@@ -310,13 +310,17 @@ fn load_corpus_from(
     // replacement of the directory name after this point cannot redirect
     // any child open, because no child is ever resolved by full pathname.
     let corpus_dir = corpus_io::open(dir)?;
-    let entries = corpus_io::entry_names(&corpus_dir, dir)?;
+    // Enumeration streams: the entry-count ceiling below stops the walk at
+    // the first over-limit item instead of materializing a directory of
+    // unbounded size.
+    let entries = corpus_io::entries(&corpus_dir, dir)?;
     let mut fixture_count = 0_usize;
     let mut corpus_bytes = 0_u64;
     let mut fixtures = BTreeMap::new();
     // One custody walk does both custody accounting and reading: there is no
     // second pathname-based pass whose view could disagree with this one.
     for name in entries {
+        let name = name?;
         // Every entry counts against the ceiling BEFORE any name-shape
         // filtering: unlimited non-JSON junk can no longer bypass the cap.
         fixture_count += 1;
@@ -396,27 +400,27 @@ mod corpus_io {
         })
     }
 
-    /// Enumerates the corpus root's entry names through the open descriptor.
-    pub(super) fn entry_names(dir: &CorpusDir, path: &Path) -> Result<Vec<String>, LoadError> {
-        rustix::fs::Dir::read_from(dir)
-            .map_err(|error| {
-                LoadError::Violation(format!(
-                    "{}: corpus directory could not be enumerated: {error}",
-                    path.display()
-                ))
-            })?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .map_err(|error| {
-                        LoadError::Violation(format!(
-                            "{}: corpus directory entry could not be read: {error}",
-                            path.display()
-                        ))
-                    })
-            })
-            .filter(|name| !matches!(name.as_deref(), Ok("." | "..")))
-            .collect()
+    /// Streams the corpus root's entry names through the open descriptor.
+    pub(super) fn entries<'a>(
+        dir: &'a CorpusDir,
+        path: &'a Path,
+    ) -> Result<Box<dyn Iterator<Item = Result<String, LoadError>> + 'a>, LoadError> {
+        let inner = rustix::fs::Dir::read_from(dir).map_err(|error| {
+            LoadError::Violation(format!(
+                "{}: corpus directory could not be enumerated: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(Box::new(inner.filter_map(move |entry| match entry {
+            Err(error) => Some(Err(LoadError::Violation(format!(
+                "{}: corpus directory entry could not be read: {error}",
+                path.display()
+            )))),
+            Ok(entry) => {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (!matches!(name.as_str(), "." | "..")).then_some(Ok(name))
+            }
+        })))
     }
 
     /// Reads one fixture from the corpus directory descriptor with no window
@@ -540,26 +544,27 @@ mod corpus_io {
         Ok(Dir::from_std_file(file))
     }
 
-    /// Enumerates the corpus root's entry names through the open handle.
-    pub(super) fn entry_names(dir: &CorpusDir, path: &Path) -> Result<Vec<String>, LoadError> {
-        dir.entries()
-            .map_err(|error| {
-                LoadError::Violation(format!(
-                    "{}: corpus directory could not be enumerated: {error}",
-                    path.display()
-                ))
-            })?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .map_err(|error| {
-                        LoadError::Violation(format!(
-                            "{}: corpus directory entry could not be read: {error}",
-                            path.display()
-                        ))
-                    })
-            })
-            .collect()
+    /// Streams the corpus root's entry names through the open handle.
+    pub(super) fn entries<'a>(
+        dir: &'a CorpusDir,
+        path: &'a Path,
+    ) -> Result<Box<dyn Iterator<Item = Result<String, LoadError>> + 'a>, LoadError> {
+        let inner = dir.entries().map_err(|error| {
+            LoadError::Violation(format!(
+                "{}: corpus directory could not be enumerated: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(Box::new(inner.map(move |entry| {
+            entry
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .map_err(|error| {
+                    LoadError::Violation(format!(
+                        "{}: corpus directory entry could not be read: {error}",
+                        path.display()
+                    ))
+                })
+        })))
     }
 
     /// Reads one fixture from the corpus directory handle. The verdict

@@ -127,6 +127,17 @@ class InstallBitcoindPs1Test(unittest.TestCase):
                     self.assertEqual(result.returncode, 97, result.stderr)
                     self.assertTrue(sentinel.exists())
 
+    def test_empty_stamp_rejects_cache(self):
+        """A zero-byte stamp is a cache miss, not a crash."""
+        with tempfile.TemporaryDirectory() as temporary:
+            prefix, shims, sentinel = self._workspace(Path(temporary))
+            (prefix / ".bitcoin-rs-core-tarball-sha256").write_text("")
+            binary = prefix / "bin" / "bitcoind.exe"
+            compile_stub(binary, BITCOIND_BODY, 0)
+            result = self._run(prefix, shims, sentinel)
+            self.assertEqual(result.returncode, 97, result.stderr)
+            self.assertTrue(sentinel.exists())
+
     def test_unlaunchable_cached_binary_rejects_cache(self):
         """A stamped bitcoind.exe that cannot exec must be replaced, not fatal."""
         with tempfile.TemporaryDirectory() as temporary:

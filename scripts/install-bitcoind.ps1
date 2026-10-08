@@ -94,8 +94,11 @@ function VersionMatchesPin {
     return $true
 }
 
+# `Get-Content -Raw` yields $null on an empty stamp and a [string] cast
+# preserves $null; interpolating expands it to '' so an unreadable or
+# empty stamp is a cache miss, not a method-on-null error.
 $cached = (Test-Path $BITCOIND) -and (Test-Path $STAMP) -and
-          ((Get-Content -Raw $STAMP).Trim() -eq $TARBALL_SHA256) -and
+          (("$(Get-Content -Raw $STAMP)").Trim() -eq $TARBALL_SHA256) -and
           (VersionMatchesPin)
 
 if ($cached) {

@@ -954,7 +954,13 @@ fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), 
 fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Error> {
     let deadline = readiness_deadline();
     let mined = loop {
-        match node.rpc("generatetoaddress", &json!([blocks, MINING_ADDRESS])) {
+        // The transport shares the readiness deadline: a bulk mine
+        // legitimately exceeds the per-request budget on slow hosts.
+        match node.rpc_until(
+            "generatetoaddress",
+            &json!([blocks, MINING_ADDRESS]),
+            deadline,
+        ) {
             Ok(mined) => break mined,
             Err(Error::Rpc { message, .. }) if message.contains("applied tip is not available") => {
                 assert!(
