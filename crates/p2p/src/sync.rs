@@ -196,7 +196,8 @@ pub struct BlockSync {
     inbound_headers_rx: Receiver<InboundHeaders>,
     inbound_blocks_rx: Receiver<crate::InboundBlock>,
     /// One lock owns the coupled download, staged-body, header-request, and
-    /// session-reconciliation state.
+    /// session-reconciliation state. Consensus and chain I/O stay outside
+    /// this lock.
     scheduler: Mutex<SchedulerState>,
     /// Last time a `Refused` admission replayed a `getheaders` re-request;
     /// paces retries to the request timeout so a paused admission cannot

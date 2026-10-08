@@ -3,6 +3,7 @@
 use core::fmt::Display;
 
 pub(crate) trait OrFail<T> {
+    #[track_caller]
     fn or_fail(self, context: &str) -> T;
 }
 

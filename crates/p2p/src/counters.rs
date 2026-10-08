@@ -101,6 +101,8 @@ pub struct CountingStream<S> {
 }
 
 /// Matches `std::io::BufReader`'s default.
+/// Unauthenticated inbound peers allocate this on their first small read;
+/// keep it small to bound the memory pinned by half-open handshakes.
 const INBOUND_READ_BUFFER: usize = 8 * 1024;
 
 impl<S> CountingStream<S> {

@@ -71,6 +71,8 @@ pub struct ListenerExtras {
     pub ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
     /// Block-download orchestrator, used to route block inventory announcements
     /// and to ask whether an inbound body was requested.
+    /// When `None`, announcements are ignored and inbound bodies are treated
+    /// as unsolicited.
     pub block_sync: Option<Arc<crate::sync::BlockSync>>,
 }
 

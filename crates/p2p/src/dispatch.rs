@@ -105,6 +105,8 @@ pub trait ChainQuery: Send + Sync {
 pub trait TxInventory: Send + Sync {
     /// Returns `true` when the node already holds the transaction identified by
     /// `hash` — in the mempool, the orphan map, or the recent-rejects cache.
+    /// `hash_is_wtxid` is true for `WTx` (wtxid) and false for
+    /// `Transaction`/`WitnessTransaction` (txid).
     fn have_tx(&self, hash: Hash256, hash_is_wtxid: bool) -> bool;
 
     /// Returns the witness transaction body for `txid`, or `None` when the

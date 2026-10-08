@@ -43,7 +43,9 @@ pub enum WindowCommitDisposition {
     /// `Permanent` failures poisoned the failed block's header subtree while
     /// the chain transition was still held.
     Permanent,
-    /// The delivered body is mutated or not bound to its header.
+    /// The delivered body is mutated or not bound to its header. Discard
+    /// this body and retry the same header/hash from another source; do not
+    /// poison the header or its descendants.
     BodyMutated,
     /// `Operational` failures poisoned nothing; the failed block stays
     /// retryable.
