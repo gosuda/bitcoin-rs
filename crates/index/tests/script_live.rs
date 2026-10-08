@@ -251,11 +251,13 @@ fn live_rows_follow_connect_spend_and_disconnect() -> Result<(), Box<dyn std::er
         &body2,
         &anchor2,
     )?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 10_000,
-        max_bytes: 10_000_000,
-    });
-    assert!(batch.try_push(prepared).is_ok());
+    let batch = common::batch_with_limits(
+        prepared,
+        PreparedBatchLimits {
+            max_rows: 10_000,
+            max_bytes: 10_000_000,
+        },
+    );
     chain.writer.commit_forward(batch)?;
     assert_eq!(chain.live(&wallet), vec![o1]);
 
@@ -310,11 +312,13 @@ fn live_rows_restore_a_replaced_outpoint() -> Result<(), Box<dyn std::error::Err
         &body,
         &anchor,
     )?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 10_000,
-        max_bytes: 10_000_000,
-    });
-    assert!(batch.try_push(prepared).is_ok());
+    let batch = common::batch_with_limits(
+        prepared,
+        PreparedBatchLimits {
+            max_rows: 10_000,
+            max_bytes: 10_000_000,
+        },
+    );
     chain.writer.commit_forward(batch)?;
 
     assert_eq!(chain.live(&old_script), Vec::<OutPoint>::new());
@@ -507,11 +511,13 @@ fn live_and_history_watermarks_advance_independently() -> Result<(), Box<dyn std
     let prepared = chain
         .writer
         .prepare_block_for(IndexCapabilities::HISTORICAL, 0, hash, &body)?;
-    let mut batch = PreparedBatch::new(PreparedBatchLimits {
-        max_rows: 10_000,
-        max_bytes: 10_000_000,
-    });
-    assert!(batch.try_push(prepared).is_ok());
+    let batch = common::batch_with_limits(
+        prepared,
+        PreparedBatchLimits {
+            max_rows: 10_000,
+            max_bytes: 10_000_000,
+        },
+    );
     chain.writer.commit_forward(batch)?;
 
     let watermarks = chain.writer.watermarks()?;
