@@ -662,7 +662,7 @@ mod addnode_validation_tests {
                 outbound_queue_limit: 1,
                 ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bitcoin_rs_chain::LatchReader::fixture_never(),
         ));
         p2p.add_node(SocketAddr::from(([127, 0, 0, 1], 8333)), false)
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));
@@ -685,7 +685,7 @@ mod addnode_validation_tests {
                 outbound_queue_limit: 1,
                 ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
-            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            bitcoin_rs_chain::LatchReader::fixture_never(),
         ));
         p2p.add_node(SocketAddr::from(([127, 0, 0, 1], 8333)), false)
             .unwrap_or_else(|err| panic!("failed to fill outbound queue: {err}"));

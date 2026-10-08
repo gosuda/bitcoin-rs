@@ -302,7 +302,7 @@ impl NodeState {
                 },
                 ..bitcoin_rs_p2p::P2pServiceConfig::default()
             },
-            chainstate.shutdown_handle(),
+            chainstate.shutdown_reader(),
         ));
         let peer_table = p2p.table();
         let inbound_headers_rx = p2p

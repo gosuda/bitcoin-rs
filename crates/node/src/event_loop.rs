@@ -1,4 +1,3 @@
-use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,18 +45,22 @@ impl EventLoop {
     }
 
     /// Runs the event loop until a shutdown notification arrives.
-    pub(crate) fn spin(self, shutdown: &AtomicBool) {
+    pub(crate) fn spin(
+        self,
+        shutdown: &bitcoin_rs_chain::LatchReader,
+        request_shutdown: impl Fn(),
+    ) {
         let mut iterations: u64 = 0;
         let mut sync_ticks: u64 = 0;
         let mut last_progress = Instant::now();
-        while !shutdown.load(Ordering::Acquire) {
+        while !shutdown.is_triggered() {
             iterations += 1;
             if iterations.is_multiple_of(STATS_INTERVAL) {
                 tracing::debug!(iterations, sync_ticks, "event loop heartbeat");
             }
             select! {
                 recv(self.shutdown_signal) -> _ => {
-                    shutdown.store(true, Ordering::Release);
+                    request_shutdown();
                     metrics::gauge!("node.shutdown.requested").set(1.0);
                     break;
                 }

@@ -36,6 +36,7 @@ use parking_lot::Mutex;
 use parking_lot::RwLock;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-seam"))]
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use storage::NodeStorage;
@@ -305,6 +306,7 @@ impl NodeState {
     }
 
     /// Returns the process-wide shutdown signal shared by all runtime workers.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn shutdown(&self) -> Arc<AtomicBool> {
         self.chainstate.shutdown_handle()
@@ -318,9 +320,7 @@ impl NodeState {
 
     /// Requests process shutdown across all runtime workers.
     pub fn request_shutdown(&self) {
-        self.chainstate
-            .shutdown_handle()
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.chainstate.request_shutdown();
     }
 
     /// Clone of the chainstate facade used by apply, reorg, and sync.

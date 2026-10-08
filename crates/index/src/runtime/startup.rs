@@ -55,7 +55,7 @@ pub(super) fn run_worker_with_open(
     body_source: Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
-    shutdown: &Arc<AtomicBool>,
+    shutdown: &bitcoin_rs_chain::LatchReader,
     wake_rx: &Receiver<()>,
     open_abandoned: &Arc<AtomicBool>,
 ) {
@@ -191,7 +191,7 @@ pub(super) fn open_and_run(
     body_source: &Option<Arc<dyn BlockBodySource>>,
     chain_events: &Arc<dyn crate::reconcile::ChainCursorSource>,
     reporter: Arc<dyn crate::runtime::IndexAheadSink>,
-    shutdown: &Arc<AtomicBool>,
+    shutdown: &bitcoin_rs_chain::LatchReader,
     wake_rx: &Receiver<()>,
 ) -> Result<(), DerivedIndexWorkerError> {
     let txindex_dir = spec.data_dir.join(spec.namespace);
@@ -200,11 +200,11 @@ pub(super) fn open_and_run(
 
     let open: OpenDerivedIndex =
         open_derived_index_with_timeout(spec, &txindex_dir, TXINDEX_OPEN_TIMEOUT, || {
-            shutdown.load(Ordering::Acquire) || generation.is_revoked() || runtime.should_stop()
+            shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop()
         })?;
 
     // Check shutdown and generation immediately after backend open returns.
-    if shutdown.load(Ordering::Acquire) || generation.is_revoked() || runtime.should_stop() {
+    if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
         // Drop all store values (open.writer, open.reader) and exit without
         // publication or reconciliation.
         return Ok(());
@@ -232,7 +232,7 @@ pub(super) fn open_and_run(
     );
 
     // Check shutdown immediately after publication.
-    if shutdown.load(Ordering::Acquire) || generation.is_revoked() || runtime.should_stop() {
+    if shutdown.is_triggered() || generation.is_revoked() || runtime.should_stop() {
         return Ok(());
     }
 

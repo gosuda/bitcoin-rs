@@ -394,9 +394,11 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
     confined to chainstate methods; external consumers observe tip state via
     `TipReader` and `BlockTreeReader`.
   - **Shutdown and Ban Capabilities**: Cancellation and ban state are exposed
-    through read-only capabilities (`LatchReader`, `BannedReader`). Connection
-    listeners and peer workers query ban status and shutdown signals through
-    these capabilities without holding mutable handles or raw atomic pointers.
+    through read-only capabilities (`LatchReader`, `BannedReader`). Ordinary
+    workers and subsystems query ban status and observe shutdown through these
+    capabilities without holding mutable handles or raw atomic pointers.
+    Shutdown mutation authority remains strictly encapsulated behind
+    `request_shutdown()` and dedicated lifecycle handlers.
 - Intentional `Arc` / `Weak` shared ownership invariants:
   - `Arc<PeerTable>`: Shared among P2P service, connection listeners, sync, and
     RPC network handles. `PeerTable` is internally synchronized and owns peer
@@ -406,9 +408,10 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
     observer registration does not artificially prolong gateway lifetime.
   - `UtxoReader`: Read-only projection of the authoritative `UtxoSet` (which is
     mutated solely by chainstate under transition locks) to mempool and RPC.
-  - `InitialBlockDownload`: Coordinates chain sync and headers presync by
-    observing chain progress through read-only capabilities (`TipReader`,
-    `BlockTreeReader`).
+  - `InitialBlockDownload`: Supplies the shared IBD decision across sync and
+    header presync by observing chain progress through read-only capabilities
+    (`TipReader`, `BlockTreeReader`), while worker orchestration belongs to
+    `BlockSync`.
 
 ## Test and evidence isolation
 
@@ -488,3 +491,7 @@ backend construction), [ARCH-05](#arch-05-node-composition-and-orchestration-bou
 - `bin/bitcoin-rs/src/bitcoin_conf.rs` test
   `every_table_core_key_reaches_its_slot`: each `bitcoin.conf` key the option
   table names writes the slot the table names.
+- `crates/mempool/tests/gateway_tests.rs`, `crates/chain/tests/latch_tests.rs`,
+  `crates/index/tests/block_log_tests.rs`, and `crates/p2p/tests/service_tests.rs`
+  prove single mutation ownership, capability encapsulation, and single-consumer
+  channel ownership (`ARCH-09`).

@@ -281,7 +281,7 @@ impl From<Arc<RwLock<Vec<crate::BannedSubnet>>>> for BannedReader {
 /// The sole runtime owner of P2P control state and workers.
 pub struct P2pService {
     config: P2pServiceConfig,
-    shutdown: Arc<AtomicBool>,
+    shutdown: bitcoin_rs_chain::LatchReader,
     worker_shutdown: Arc<AtomicBool>,
     network_active: Arc<AtomicBool>,
     peer_table: Arc<crate::PeerTable>,
@@ -312,14 +312,17 @@ impl std::fmt::Debug for P2pService {
 impl P2pService {
     /// Creates an unstarted P2P service and allocates all P2P-owned state.
     #[must_use]
-    pub fn new(config: P2pServiceConfig, shutdown: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        config: P2pServiceConfig,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
+    ) -> Self {
         let (outbound_tx, outbound_rx) = crossbeam_channel::bounded(config.outbound_queue_limit);
         let (inbound_headers_tx, inbound_headers_rx) = crossbeam_channel::unbounded();
         let (inbound_blocks_tx, inbound_blocks_rx) =
             crossbeam_channel::bounded(config.inbound_block_queue_limit);
         Self {
             config,
-            shutdown,
+            shutdown: shutdown.into(),
             worker_shutdown: Arc::new(AtomicBool::new(false)),
             network_active: Arc::new(AtomicBool::new(true)),
             peer_table: Arc::new(crate::PeerTable::new()),
@@ -448,6 +451,7 @@ impl P2pService {
         let outbound_rx = Arc::clone(&self.outbound_rx);
         let peer_table = Arc::clone(&self.peer_table);
         let shutdown = Arc::clone(&self.worker_shutdown);
+        let process_shutdown = self.shutdown.clone();
         let full_relay_slots = self.config.outbound_full_relay_slots;
         let block_relay_slots = self.config.outbound_block_relay_slots;
         let active_limit = self.config.total_outbound_active_limit();
@@ -462,6 +466,7 @@ impl P2pService {
                 let mut next_extra_peer_check = Instant::now() + EXTRA_PEER_CHECK_INTERVAL;
                 while !shutdown.load(Ordering::Acquire)
                     && !shared.session_cancel.load()
+                    && !process_shutdown.is_triggered()
                 {
                     reap_finished_outbound_connections(&mut active, &mut handles);
                     let now = Instant::now();
@@ -601,9 +606,14 @@ impl P2pService {
     /// Stops P2P workers and asks all current connection owners to tear down.
     pub fn shutdown(&self) {
         self.session_cancel.lock().store(true, Ordering::Release);
-        self.shutdown.store(true, Ordering::Release);
         self.worker_shutdown.store(true, Ordering::Release);
         apply_network_active(&self.network_active, &self.peer_table, false);
+    }
+
+    /// Returns a reference to the process-wide shutdown reader.
+    #[must_use]
+    pub fn shutdown_reader(&self) -> &bitcoin_rs_chain::LatchReader {
+        &self.shutdown
     }
 
     /// Joins listener and outbound workers. Bootstrap is joined separately so

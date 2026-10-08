@@ -73,16 +73,14 @@ impl RpcServer {
     /// shutdown without parking on an open socket. Each accepted connection
     /// is restored to blocking mode and handed to a bounded worker thread,
     /// preserving the configured `idle_timeout` per connection.
-    #[expect(clippy::needless_pass_by_value)]
     pub fn serve_with_shutdown(
         self,
-        shutdown: alloc::sync::Arc<core::sync::atomic::AtomicBool>,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
     ) -> io::Result<()> {
-        use core::sync::atomic::Ordering;
-
+        let shutdown = shutdown.into();
         self.listener.set_nonblocking(true)?;
         let active = Arc::new(Mutex::new(0_usize));
-        while !shutdown.load(Ordering::Acquire) {
+        while !shutdown.is_triggered() {
             match self.listener.accept() {
                 Ok((stream, _addr)) => {
                     stream.set_nonblocking(false)?;

@@ -516,7 +516,7 @@ impl Default for NetworkHandles {
     fn default() -> Self {
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
             bitcoin_rs_p2p::P2pServiceConfig::default(),
-            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            LatchReader::fixture_never(),
         ));
         Self {
             peer_table: p2p.table(),
@@ -1435,7 +1435,7 @@ mod tests {
         );
         let p2p = Arc::new(bitcoin_rs_p2p::P2pService::new(
             bitcoin_rs_p2p::P2pServiceConfig::default(),
-            Arc::new(core::sync::atomic::AtomicBool::new(false)),
+            LatchReader::fixture_never(),
         ));
         let chain_transition = bitcoin_rs_chain::TransitionDomain::new().stable_read();
         let ctx = Context::from_handles(ContextHandles {

@@ -498,7 +498,7 @@ pub(crate) fn start_node(
     tracing::info!(config = ?state.config(), "bitcoin-rs node booting");
     guard.services.metrics = if let Some(bind) = state.config().observability.metrics_bind {
         let identity = crate::metrics::EvidenceIdentity::of_process(state.config())?;
-        crate::metrics::start_metrics(Some(bind), state.shutdown(), &identity)?
+        crate::metrics::start_metrics(Some(bind), state.shutdown_reader(), &identity)?
     } else {
         None
     };
@@ -508,20 +508,20 @@ pub(crate) fn start_node(
     guard.services.readiness_sampler = if guard.services.metrics.is_some() {
         Some(crate::metrics::spawn_readiness_sampler(
             state.derived_index_status(),
-            state.shutdown(),
+            state.shutdown_reader(),
         )?)
     } else {
         None
     };
 
-    let shutdown = state.shutdown();
     let (shutdown_rx, event_loop_signal) = if let Some(rx) = injected_shutdown {
         (rx, None)
     } else {
         let (tx, rx) = bounded(1);
         if install_signals {
+            let chainstate_for_signal = state.chainstate();
             guard.services.signal_handler = Some(crate::signal::ShutdownHandler::install(
-                Arc::clone(&shutdown),
+                move || chainstate_for_signal.request_shutdown(),
                 tx.clone(),
             )?);
         }
@@ -609,7 +609,7 @@ pub(crate) fn start_node(
     let (context, rpc_server) = bind_rpc(state, &mining_control, block_body_source)?;
     let rpc_local_addr = rpc_server.local_addr()?;
     tracing::info!(addr = %rpc_local_addr, "rpc listener bound");
-    let rpc_shutdown = Arc::clone(&shutdown);
+    let rpc_shutdown = state.shutdown_reader();
     guard.services.rpc_thread = Some(
         std::thread::Builder::new()
             .name("bitcoin-rs-rpc".into())
@@ -629,10 +629,14 @@ pub(crate) fn start_node(
         )
         .map_err(anyhow::Error::from)?;
     guard.services.maintenance_worker = Some(state.start_chainstate_maintenance()?);
+    let loop_shutdown = state.shutdown_reader();
+    let loop_chainstate = state.chainstate();
     guard.services.event_loop = Some(
         std::thread::Builder::new()
             .name("bitcoin-rs-event-loop".into())
-            .spawn(move || loop_handle.spin(&shutdown))?,
+            .spawn(move || {
+                loop_handle.spin(&loop_shutdown, move || loop_chainstate.request_shutdown());
+            })?,
     );
     Ok(guard.finish(context))
 }

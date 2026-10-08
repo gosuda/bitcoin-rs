@@ -15,7 +15,7 @@ When code and a contract disagree, fix the drift in the same change. Do not dupl
 
 | Contract | Clauses | Scope | Primary proof |
 | --- | --- | --- | --- |
-| [architecture.md](architecture.md) | `ARCH-01`–`ARCH-08` | Layering, storage confinement, composition, chainstate authority, single mutation owners | `g17_dependency_direction`; node apply/effects tests |
+| [architecture.md](architecture.md) | `ARCH-01`–`ARCH-09` | Layering, storage confinement, composition, chainstate authority, single mutation owners, capability boundaries | `g17_dependency_direction`; node apply/effects tests; capability suites |
 | [validation-default.md](validation-default.md) | `VAL-01`–`VAL-03` | Kernel/native default decision and portable validation | feature-matrix builds; Core vectors; measured promotion evidence |
 | [consensus-difficulty.md](consensus-difficulty.md) | `DAA-01` | Core 31.1 difficulty adjustment: clamped retarget timespan and testnet minimum-difficulty exception | `crates/chain/tests/header_sync_roundtrip.rs` retarget and minimum-difficulty tests |
 | [indexing.md](indexing.md) | `IDX-01`–`IDX-10` | Capability gating, coherent reads, reset/rebuild, reorg reconciliation, worker scheduling, canonical row cardinality, atomic commit durability | `index_roundtrip.rs` row occupancy; txindex worker recovery/query/lifecycle/scheduling suites; RPC capability tests |

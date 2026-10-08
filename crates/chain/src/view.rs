@@ -65,6 +65,18 @@ impl LatchReader {
         self.inner.load(Ordering::Acquire)
     }
 
+    /// Whether the latch has been triggered.
+    #[must_use]
+    pub fn is_triggered(&self) -> bool {
+        self.load()
+    }
+
+    /// Creates an untriggered latch fixture for tests or defaults.
+    #[must_use]
+    pub fn fixture_never() -> Self {
+        Self::new(Arc::new(AtomicBool::new(false)))
+    }
+
     /// Sets a fixture latch. Not present in production builds.
     #[cfg(any(test, feature = "test-seam"))]
     pub fn store(&self, value: bool) {

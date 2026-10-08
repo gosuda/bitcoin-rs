@@ -23,14 +23,16 @@ pub(crate) struct ShutdownHandler {
 
 impl ShutdownHandler {
     /// Installs SIGINT/SIGTERM handling on a dedicated forwarding thread.
-    pub(crate) fn install(shutdown: Arc<AtomicBool>, shutdown_tx: Sender<()>) -> Result<Self> {
+    pub(crate) fn install(
+        request_shutdown: impl Fn() + Send + 'static,
+        shutdown_tx: Sender<()>,
+    ) -> Result<Self> {
         let mut signals = Signals::new([SIGTERM, SIGINT])?;
         let handle = signals.handle();
         let thread = thread::spawn(move || {
             for _signal in signals.forever() {
                 // First signal flips the flag; later ones only re-wake.
-                let _ =
-                    shutdown.compare_exchange(false, true, Ordering::Release, Ordering::Acquire);
+                request_shutdown();
                 if shutdown_tx.try_send(()).is_err() {
                     break;
                 }
@@ -85,7 +87,7 @@ mod tests {
     #[test]
     fn close_and_join_releases_the_forwarding_thread() -> Result<()> {
         let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded::<()>(1);
-        let mut handler = ShutdownHandler::install(Arc::new(AtomicBool::new(false)), shutdown_tx)?;
+        let mut handler = ShutdownHandler::install(|| {}, shutdown_tx)?;
         assert!(handler.thread.is_some(), "the forwarding thread is running");
 
         handler.close_and_join()?;
@@ -108,8 +110,7 @@ mod tests {
 
         for _ in 0..2 {
             let (shutdown_tx, _shutdown_rx) = crossbeam_channel::bounded::<()>(1);
-            let mut handler =
-                ShutdownHandler::install(Arc::new(AtomicBool::new(false)), shutdown_tx)?;
+            let mut handler = ShutdownHandler::install(|| {}, shutdown_tx)?;
             handler.close_and_join()?;
         }
 

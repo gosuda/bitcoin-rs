@@ -46,9 +46,10 @@ impl DerivedIndexWorker {
         body_source: Option<Arc<dyn BlockBodySource>>,
         chain_events: Arc<dyn crate::reconcile::ChainCursorSource>,
         reporter: Arc<dyn crate::runtime::IndexAheadSink>,
-        shutdown: Arc<AtomicBool>,
+        shutdown: impl Into<bitcoin_rs_chain::LatchReader>,
         wake_rx: Receiver<()>,
     ) -> std::io::Result<Self> {
+        let shutdown = shutdown.into();
         // Compute the namespace key before moving `spec` into the thread.
         let namespace_key =
             NamespaceRegistry::validate_child(&spec.canonical_data_root, spec.namespace).ok();

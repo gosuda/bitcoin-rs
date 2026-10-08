@@ -608,6 +608,11 @@ impl Chainstate {
         bitcoin_rs_chain::LatchReader::new(Arc::clone(&self.shutdown))
     }
 
+    /// Requests process shutdown across the node.
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+    }
+
     /// Permanently closes chain mutation and asks the process to shut down.
     pub fn fail_closed_for_recovery(&self) {
         self.admission.close_permanently();
@@ -775,7 +780,8 @@ impl Chainstate {
         self.block_body_store.clone()
     }
 
-    /// Clones the process shutdown signal.
+    /// Clones the process shutdown signal for testing.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.shutdown)
