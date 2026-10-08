@@ -13,7 +13,7 @@ const REQUIRED_CORPORA: [&str; 2] = ["C150", "Cmodern"];
 /// manifest remains their value owner; changing any value requires reviewing
 /// the external artifact evidence and deliberately updating its fingerprint.
 const RELEASE_CUSTODY_SHA256: &str =
-    "19c4f540d597ff5482cb39fdeccba654b26dda24a601115cd0db6bc3f10d4eaf";
+    "55517009bc1f8e0ae610c2ff346ec8ecd434c3d82c7944ac4a3a8a0491704aa5";
 const KERNEL_CUSTODY_SHA256: &str =
     "567455b412b76af4b394b371defc42f7e01c2a4e1dd2cdd1b891ca549c775f3b";
 
@@ -130,6 +130,7 @@ pub(crate) fn current_platform_target() -> Option<&'static str> {
         ("linux", "aarch64") => Some("aarch64-linux-gnu"),
         ("macos", "aarch64") => Some("arm64-apple-darwin"),
         ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("windows", "x86_64") => Some("win64"),
         _ => None,
     }
 }

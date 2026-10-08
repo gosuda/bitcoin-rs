@@ -30,6 +30,8 @@ TARGETS = {
     ("linux", "aarch64"): "aarch64-linux-gnu",
     ("darwin", "arm64"): "arm64-apple-darwin",
     ("darwin", "x86_64"): "x86_64-apple-darwin",
+    ("win32", "AMD64"): "win64",
+    ("msys", "x86_64"): "win64",
 }
 
 # Tables whose key/value lines the fixed-shape reader must parse; every other

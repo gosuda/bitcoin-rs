@@ -8,3 +8,19 @@
 # never sees any of it, so the failure looks like a broken checkout rather
 # than a missing attribute -- and the message points nowhere near the cause.
 *.sh text eol=lf
+
+# PowerShell reads LF natively on both 5.1 and 7+; pinning keeps the blob
+# canonical instead of letting autocrlf churn it on Windows checkouts.
+*.ps1 text eol=lf
+
+# Generated file compared byte-identically by manifest_coverage; same CRLF
+# checkout hazard as the scripts above.
+docs/rpc-reference.md text eol=lf
+
+# Corpus seeds are binary fuzz inputs; even byte-identical
+# text-looking seeds must survive checkout unconverted.
+fuzz/corpus/** -text
+
+# The corpus manifest is generated JSON — text that must stay LF even
+# though the directory above it is pinned binary.
+fuzz/corpus/manifest.json text eol=lf

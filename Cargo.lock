@@ -236,6 +236,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml 1.1.6+spec-1.1.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -312,6 +313,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 1.1.6+spec-1.1.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -480,6 +482,8 @@ dependencies = [
  "bitcoin-rs-rpc",
  "bitcoin-rs-script",
  "bitcoin-rs-utxo",
+ "cap-fs-ext",
+ "cap-std",
  "compact_str",
  "corepc-types",
  "crossbeam-channel",

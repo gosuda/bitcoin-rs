@@ -103,6 +103,7 @@ impl<S: KvStore> JournalWriter<S> {
             last_boundary: Instant::now(),
             append_gap_height: None,
             durability_retry_required: false,
+            generation_invalidated: false,
             state: WriterState::Open,
             #[cfg(any(test, feature = "test-seam"))]
             failpoint: None,

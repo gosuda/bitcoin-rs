@@ -8,7 +8,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
-use signal_hook::consts::signal::{SIGINT, SIGTERM};
+use signal_hook::consts::signal::{SIGBREAK, SIGINT, SIGTERM};
+
+// signal-hook names `SIGBREAK` (21) under cfg(windows): the CRT dispatches
+// it to `CTRL_BREAK_EVENT`, the only console event another process can aim
+// at a specific process group — how a harness or the console asks a
+// spawned node for a graceful stop.
 
 pub(crate) struct ShutdownHandler {
     registrations: Vec<signal_hook::SigId>,
@@ -20,7 +25,7 @@ impl ShutdownHandler {
     pub(crate) fn install(shutdown: Arc<AtomicBool>, shutdown_tx: Sender<()>) -> Result<Self> {
         let received = Arc::new(AtomicBool::new(false));
         let mut registrations = Vec::new();
-        for signal in [SIGINT, SIGTERM] {
+        for signal in [SIGINT, SIGTERM, SIGBREAK] {
             match signal_hook::flag::register(signal, Arc::clone(&received)) {
                 Ok(id) => registrations.push(id),
                 Err(error) => {
@@ -122,7 +127,7 @@ mod tests {
             handler.close_and_join()?;
             handler.close_and_join()?;
             assert!(handler.thread.is_none());
-            assert!(handler.registrations.is_empty());
+            assert_eq!(handler.registrations, Vec::new());
         }
         Ok(())
     }

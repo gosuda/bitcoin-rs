@@ -163,9 +163,10 @@ pub fn bitcoin_rs_binary() -> Result<PathBuf> {
                 }
             },
         );
+    let binary_name = format!("bitcoin-rs{}", std::env::consts::EXE_SUFFIX);
     let newest = ["debug", "release"]
         .iter()
-        .map(|profile| target_dir.join(profile).join("bitcoin-rs"))
+        .map(|profile| target_dir.join(profile).join(&binary_name))
         .filter(|path| path.is_file())
         .max_by_key(|path| {
             path.metadata()
@@ -187,13 +188,21 @@ fn core_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("BITCOIN_RS_REFERENCE_BITCOIND") {
         return PathBuf::from(path);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let path = Path::new(&home).join("bitcoin-core-31.1/bin/bitcoind");
+    let binary_name = format!("bitcoind{}", std::env::consts::EXE_SUFFIX);
+    for home in [std::env::var_os("HOME"), std::env::var_os("USERPROFILE")]
+        .into_iter()
+        .flatten()
+    {
+        let path = Path::new(&home)
+            .join("bitcoin-core-31.1/bin")
+            .join(&binary_name);
         if path.is_file() {
             return path;
         }
     }
-    workspace().join("target/reference-core-31.1/bitcoin-31.1/bin/bitcoind")
+    workspace()
+        .join("target/reference-core-31.1/bitcoin-31.1/bin")
+        .join(&binary_name)
 }
 
 /// Verify the resolved bitcoind matches the pinned digest in the compiled
@@ -206,7 +215,7 @@ fn verified_core_binary() -> Result<PathBuf> {
     let expected = manifest_reference_sha256()?;
     let actual = file_sha256(&path).map_err(|e| {
         Error::Assertion(format!(
-            "pinned bitcoind {} not readable (install via scripts/install-bitcoind.sh): {e}",
+            "pinned bitcoind {} not readable (install via scripts/install-bitcoind.sh, or install-bitcoind.ps1 on Windows): {e}",
             path.display()
         ))
     })?;
@@ -228,6 +237,7 @@ fn current_platform_target() -> Option<&'static str> {
         ("linux", "aarch64") => Some("aarch64-linux-gnu"),
         ("macos", "aarch64") => Some("arm64-apple-darwin"),
         ("macos", "x86_64") => Some("x86_64-apple-darwin"),
+        ("windows", "x86_64") => Some("win64"),
         _ => None,
     }
 }
@@ -362,6 +372,15 @@ fn launch_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        // Give the child its own console process group so
+        // GenerateConsoleCtrlEvent can deliver a graceful stop to it
+        // specifically; group 0 delivery would hit every test process
+        // sharing this console.
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
+    }
     Ok((command, clock))
 }
 
@@ -376,6 +395,11 @@ fn exited_on_busy_port(evidence: &Path) -> bool {
         || stderr.contains("os error 98")
         || stderr.contains("Unable to bind")
         || stderr.contains("Failed to bind")
+        // Windows: WSAEADDRINUSE and WSAEACCES (excluded/blocked port).
+        || stderr.contains("Only one usage of each socket address")
+        || stderr.contains("os error 10048")
+        || stderr.contains("An attempt was made to access a socket")
+        || stderr.contains("os error 10013")
 }
 
 impl ProcessNode {
@@ -777,15 +801,53 @@ impl ProcessNode {
     }
 
     /// Send SIGTERM to the child.
+    #[cfg(unix)]
     fn send_sigterm(&self) {
         let pid = self.pid().to_string();
         let _ = Command::new("kill").args(["-TERM", pid.as_str()]).status();
     }
 
+    /// Deliver the Windows equivalent of a graceful stop: `CTRL_BREAK_EVENT`
+    /// is the only console event another process can aim at a specific
+    /// process group, and the node maps it through its CRT SIGBREAK
+    /// registration onto the shared shutdown flag. The child was spawned
+    /// with `CREATE_NEW_PROCESS_GROUP` so the group id is its pid.
+    ///
+    /// The event only reaches a child sharing this console; when the
+    /// harness has none (a service or a windowless parent) delivery fails
+    /// and there is no graceful stop to wait for, so the failure escalates
+    /// to a forced terminate immediately rather than stalling the stop
+    /// timeout.
+    #[cfg(windows)]
+    fn send_sigterm(&mut self) {
+        use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+        // SAFETY: GenerateConsoleCtrlEvent is safe to call for any process
+        // group id; a stale pid simply makes the call a no-op.
+        let delivered = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid()) };
+        if delivered == 0 {
+            eprintln!(
+                "CTRL_BREAK delivery failed for pid {} ({}); forcing terminate",
+                self.pid(),
+                std::io::Error::last_os_error()
+            );
+            self.send_sigkill();
+        }
+    }
+
     /// Send SIGKILL to the child.
+    #[cfg(unix)]
     pub fn send_sigkill(&self) {
         let pid = self.pid().to_string();
         let _ = Command::new("kill").args(["-KILL", pid.as_str()]).status();
+    }
+
+    /// Forcibly terminate the child, the Windows counterpart of SIGKILL.
+    /// `Child::kill` acts on the process handle owned by `self.child`, so
+    /// a pid recycled after the child exits can never redirect the kill at
+    /// an unrelated process the way an `OpenProcess(pid)` lookup could.
+    #[cfg(windows)]
+    pub fn send_sigkill(&mut self) {
+        let _ = self.child.kill();
     }
 
     fn finish_output(&mut self) {
