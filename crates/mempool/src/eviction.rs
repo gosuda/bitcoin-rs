@@ -110,6 +110,9 @@ pub(crate) fn evict_lowest_fee_packages(
 }
 
 /// Local pressure-floor heuristic projected by `getmempoolinfo`.
+///
+/// With a nonzero byte limit, at least half full uses the lowest live rate plus
+/// incremental relay fee, floored at min-relay. Otherwise it returns min-relay.
 #[must_use]
 pub fn mempool_min_fee_sat_per_kvb(pool: &Mempool, incremental_relay_fee_sat_per_kvb: u64) -> u64 {
     let maxmempool = pool.limits.max_total_bytes;

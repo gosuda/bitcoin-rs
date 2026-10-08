@@ -8,6 +8,8 @@ fn values(rows: &[(i128, u32)]) -> Vec<FeeWeight> {
 
 #[test]
 fn core_311_diagram_vectors() -> Result<(), FeeDiagramError> {
+    // Independent vectors: bitcoin/bitcoin 9be056a8a72b624dae9623b2f7bded92c2a21c91,
+    // src/test/rbf_tests.cpp::feerate_chunks_utilities.
     let old = values(&[(950, 300), (100, 100)]);
     for (new, expected) in [
         (values(&[(1000, 300), (50, 100)]), Some(Ordering::Greater)),

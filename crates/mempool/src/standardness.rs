@@ -241,6 +241,8 @@ pub(crate) fn exceeds_max_feerate(fee: u64, vsize: u32, maximum: Option<u64>) ->
 }
 /// Returns true when `tx`'s BIP68 sequence locks are satisfied at the next
 /// block.
+///
+/// Callers must reject missing inputs first; this check skips unresolved inputs.
 pub(crate) fn bip68_final(pool: &Mempool, tx: &Tx, finality: &Bip68Admission<'_>) -> bool {
     if !finality.csv_active || tx.version < 2 {
         return true;

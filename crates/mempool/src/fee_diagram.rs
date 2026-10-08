@@ -44,6 +44,7 @@ impl FeeWeight {
             .fee
             .checked_add(other.fee)
             .ok_or(FeeDiagramError::Arithmetic)?;
+        // Bound cross-products so rate sorting can multiply infallibly.
         fee.checked_mul(i128::from(i32::MAX))
             .ok_or(FeeDiagramError::Arithmetic)?;
         Ok(Self { fee, weight })

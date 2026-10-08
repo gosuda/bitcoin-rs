@@ -145,7 +145,7 @@ pub struct Mempool {
     /// Token for metadata-only fee changes, separate from the public
     /// membership sequence. Prepared policy work captures both tokens.
     fee_delta_sequence: u64,
-    /// Fee-rate history this pool owns and feeds from its own mutations:
+    /// Fee-rate history this pool owns and feeds from its own mutations.
     estimator: FeeEstimator,
     /// Mempool sequence: advanced once per emitted mutation change while the
     /// write lock is held. Reported by [`Mempool::sequence_number`], carried
