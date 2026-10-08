@@ -220,7 +220,6 @@ fn replacements_accept_mixed_signaling_conflicts() -> Result<(), Box<dyn Error>>
         let other = tx_from_inputs(21, &[(second_input, second_sequence)], 1);
         pool.insert_entry(MempoolEntry::new(Arc::new(other), 100, 1_000, 2, 1, 0))?;
 
-        // One replacement, conflicting with both of them.
         let replacement = tx_from_inputs(
             40,
             &[
@@ -411,7 +410,6 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         assert_eq!(pool_fingerprint(&pool), before);
     }
 
-    // (b) C' spends P while P sits inside the eviction set → EvictedParent.
     {
         let mut pool = Mempool::new(MempoolLimits::default());
         let conflict1 = tx_from_inputs(10, &[(outpoint(1, 0), 0xFFFF_FFFD)], 1);
@@ -422,7 +420,6 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         pool.insert_entry(MempoolEntry::new(Arc::new(parent), 100, 500, 2, 1, 0))?;
         let conflict2 = tx_from_inputs(12, &[(OutPoint::new(parent_txid, 0), 0xFFFF_FFFD)], 1);
         pool.insert_entry(MempoolEntry::new(Arc::new(conflict2), 100, 500, 3, 1, 0))?;
-        // Conflicts with conflict1 on U1 and with conflict2 on P's output.
         let replacement = tx_from_inputs(
             40,
             &[
@@ -443,7 +440,6 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
         assert_eq!(pool_fingerprint(&pool), before);
     }
 
-    // (c) Policy rejections leave the pool fingerprint untouched.
     for case in CASES.iter().filter(|case| case.expected.is_err()) {
         let (mut pool, replacement_tx) =
             pool_with_conflict(case.original, case.replacement, false)?;
@@ -469,8 +465,6 @@ fn replace_transaction_rejection_preserves_pool_state() -> Result<(), Box<dyn Er
 
 #[test]
 fn replace_transaction_cluster_limits_use_post_eviction_projection() -> Result<(), Box<dyn Error>> {
-    // P + 23 retained children + conflict C = 25 inclusive. Excluding C leaves
-    // room for the replacement that re-spends P; counting C would over-reject.
     let mut pool = Mempool::new(MempoolLimits {
         cluster_count: 25,
         ..MempoolLimits::default()

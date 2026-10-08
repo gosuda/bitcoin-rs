@@ -17,8 +17,6 @@ use bitcoin_rs_primitives::{
 fn cluster_weight_preserves_fractional_vbytes_at_the_exact_boundary() -> Result<(), Box<dyn Error>>
 {
     fn weighted(mut tx: Tx, target: u64) -> Tx {
-        // One short witness item adds two marker/flag bytes, one stack count
-        // and one item length. The independent codec checks the final weight.
         let padding = usize::try_from(target - tx.weight() - 4).expect("small padding");
         assert!(padding < 253);
         tx.inputs[0].witness = Witness::from_stack(vec![vec![0; padding]]);
@@ -157,7 +155,6 @@ fn rpc_graph_facts_are_transitive_and_aggregates_are_inclusive() -> Result<(), B
 
 #[test]
 fn cluster_limit_rejects_the_sixty_fifth_fanout_member() -> Result<(), Box<dyn Error>> {
-    // Parent plus 63 children = 64; the next sibling exceeds the cluster limit.
     let mut pool = Mempool::new(MempoolLimits::default());
     let parent_tx = multi_output_tx(70, 64);
     let parent_txid = parent_tx.txid();

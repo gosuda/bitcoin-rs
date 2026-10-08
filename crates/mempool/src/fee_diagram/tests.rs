@@ -8,8 +8,6 @@ fn values(rows: &[(i128, u32)]) -> Vec<FeeWeight> {
 
 #[test]
 fn core_311_diagram_vectors() -> Result<(), FeeDiagramError> {
-    // Independent vectors: bitcoin/bitcoin 9be056a8a72b624dae9623b2f7bded92c2a21c91,
-    // src/test/rbf_tests.cpp::feerate_chunks_utilities.
     let old = values(&[(950, 300), (100, 100)]);
     for (new, expected) in [
         (values(&[(1000, 300), (50, 100)]), Some(Ordering::Greater)),
@@ -44,7 +42,6 @@ fn core_311_diagram_vectors() -> Result<(), FeeDiagramError> {
 
 #[test]
 fn exact_weights_negative_fees_and_horizontal_tails() -> Result<(), FeeDiagramError> {
-    // Both sizes round to 101 vbytes; the weight-based curves are different.
     assert_eq!(
         compare(&values(&[(1000, 401)]), &values(&[(1000, 404)]))?,
         Some(Ordering::Greater)
@@ -72,8 +69,6 @@ fn shared_parent_requires_a_joint_chunk() -> Result<(), FeeDiagramError> {
             }
         }]
     );
-    // Each child's ancestor package is only 90/200. Considering those
-    // packages alone misses the valid 180/300 joint package.
     Ok(())
 }
 
@@ -168,8 +163,6 @@ fn maximum_default_cluster_shared_parent() -> Result<(), FeeDiagramError> {
     let mut parents = vec![vec![0]; 64];
     parents[0].clear();
     let chunks = linearize(&fees, &parents)?;
-    // k children with their zero-fee parent have rate k/(k+1), which
-    // increases strictly through k=63: the only optimal chunk is the whole set.
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].members, (0..64).collect::<Vec<_>>());
     assert_eq!(
@@ -219,8 +212,6 @@ fn chunks_match_exhaustive_closed_subsets() -> Result<(), FeeDiagramError> {
                     selected |= 1 << member;
                 }
                 assert_eq!(sum_members(&fees, &chunk.members)?, chunk.total);
-                // Independent exponential reference: enumerate every remaining
-                // ancestor-closed subset and compare exact integer ratios.
                 for subset in 1..(1 << nodes) {
                     if subset & done != 0 {
                         continue;

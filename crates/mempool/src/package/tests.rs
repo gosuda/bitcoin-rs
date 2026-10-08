@@ -268,7 +268,6 @@ fn package_children_cannot_jointly_cross_a_cluster_or_truc_limit() -> TestResult
     ));
     assert!(facts.results.iter().all(|fact| fact.allowed.is_none()));
     let mut txs = [parent, child, sibling];
-    // Rebuild the spend links after changing each transaction's version.
     txs[0].version = 2;
     txs[1].version = 2;
     txs[1].inputs[0].previous_output.txid = txs[0].txid();

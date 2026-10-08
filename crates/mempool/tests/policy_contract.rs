@@ -105,14 +105,9 @@ fn entry(tx: Tx, vsize: u32, fee: u64) -> MempoolEntry {
     MempoolEntry::new(Arc::new(tx), vsize, fee, 0, 1, 0)
 }
 
-// ---------------------------------------------------------------------------
-// Min relay fee
-// ---------------------------------------------------------------------------
-
 #[test]
 fn below_min_relay_fee_rejects_on_both_surfaces_at_the_same_floor() -> Result<(), Box<dyn Error>> {
     let mut pool = Mempool::new(MempoolLimits::default());
-    // rate = fee * 1000 / vsize = 3999 * 1000 / 4000 = 999 sat/kvB.
     let low = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
     let err = pool
         .insert_entry(entry(low, 4_000, 3_999))
@@ -126,7 +121,6 @@ fn below_min_relay_fee_rejects_on_both_surfaces_at_the_same_floor() -> Result<()
         })
     );
 
-    // Boundary: exactly 1000 sat/kvB is admitted.
     let boundary = tx(outpoint(2, 0), 1_000, 0xFF_FF_FF_FF);
     pool.insert_entry(entry(boundary, 4_000, 4_000))?;
     assert_eq!(pool.len(), 1);
@@ -192,9 +186,6 @@ fn conflict_pool(signaling: bool) -> Result<ConflictFixture, Box<dyn Error>> {
 fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(), Box<dyn Error>> {
     let fixture = conflict_pool(false)?;
     let mut pool = fixture.pool;
-    // Pays the 12 000 sat evicted package (rule 3), at least its own vsize
-    // more (rule 4: 16 000 - 12 000 >= 4 000), and outranks the originals'
-    // 2000 sat/kvB (rule 6).
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
 
     let result = pool.replace_transaction(
@@ -230,7 +221,6 @@ fn rbf_replacement_sweeps_nonsignaling_conflicts_and_descendants() -> Result<(),
 fn rbf_rule3_replacement_must_pay_evicted_fees() -> Result<(), Box<dyn Error>> {
     let fixture = conflict_pool(true)?;
     let mut pool = fixture.pool;
-    // 4 000 sat < the 8 000 sat direct conflict alone.
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
     let err = pool
         .replace_transaction(
@@ -248,9 +238,6 @@ fn rbf_rule3_replacement_must_pay_evicted_fees() -> Result<(), Box<dyn Error>> {
 fn replacement_with_equal_direct_rate_can_improve_the_full_diagram() -> Result<(), Box<dyn Error>> {
     let fixture = conflict_pool(true)?;
     let mut pool = fixture.pool;
-    // Absolute fee 32 000 pays the 12 000 sat evicted package (rule 3) and
-    // its own 16 000 vB of incremental fee (rule 4), but lands at exactly the
-    // originals' 2000 sat/kvB. The complete diagram still improves.
     let replacement = tx(outpoint(1, 0), 2_000, 0xFF_FF_FF_FF);
     pool.replace_transaction(
         &ReplacementCandidate::new(Arc::new(replacement), 16_000, 32_000, 1_000),
@@ -289,8 +276,6 @@ fn replacement_may_add_an_unconfirmed_input() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// Cluster-limit boundaries are covered in graph_limits.rs.
-
 /// Builds a root with `output_count` outputs so siblings can share a cluster
 /// without being in each other's ancestor or descendant packages.
 fn fanout_root(label: u8, output_count: usize) -> Tx {
@@ -317,9 +302,6 @@ fn fanout_root(label: u8, output_count: usize) -> Tx {
 #[test]
 fn cluster_count_limit_rejects_a_sibling_that_ancestors_would_admit() -> Result<(), Box<dyn Error>>
 {
-    // Root plus two siblings is three; a limit of two must refuse the second
-    // sibling. Ancestor and descendant packages stay size two, so only the
-    // cluster walk can refuse.
     let limits = MempoolLimits {
         cluster_count: 2,
         ..MempoolLimits::default()
@@ -381,13 +363,8 @@ fn replacement_into_a_full_cluster_is_allowed_on_both_surfaces() -> Result<(), B
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Standardness
-// ---------------------------------------------------------------------------
-
 #[test]
 fn oversized_weight_is_not_standard_on_both_surfaces() {
-    // 3400 P2WPKH outputs ≈ 435 000 weight units > 400 000.
     let mut oversized = tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF);
     oversized.outputs = (0..3_400)
         .map(|_| TxOut {
@@ -482,51 +459,148 @@ fn meta_chain(
     }
 }
 
-#[test]
-fn bip68_height_lock_boundary_enforces_at_admission() -> Result<(), Box<dyn Error>> {
-    let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
-    // The coin was created at height 10; the next block is 13. A relative
-    // lock of 5 needs height 15 (non-final); a lock of 2 is satisfied.
-    let spendable = TxOut {
-        value: Amount::from_sat(10_000),
-        script_pubkey: Script::from_bytes(op_true_script()),
-    };
-    let meta = PrevoutMeta {
+struct Case {
+    label: &'static str,
+    tag: u8,
+    sequence: u32,
+    meta: PrevoutMeta,
+    chain_height: u32,
+    chain_mtp: u32,
+    csv_active: bool,
+    reject: Option<AcceptanceRejectReason>,
+}
+
+fn relative_lock_cases() -> [Case; 7] {
+    let height_meta = PrevoutMeta {
         height: 10,
         mtp: 0,
         coinbase: false,
     };
-    let locked = tx(outpoint(41, 0), 9_000, 5);
-    let chain = meta_chain(12, 0, true, outpoint(41, 0), spendable, meta);
-    let facts = gateway.preview_transactions(&[locked], None, &chain)?;
-    assert_eq!(
-        facts
-            .results
-            .first()
-            .ok_or("expected one fact row")?
-            .reject_reason,
-        Some(AcceptanceRejectReason::NonBip68Final)
-    );
+    let time_meta = PrevoutMeta {
+        height: 10,
+        mtp: 1_000,
+        coinbase: false,
+    };
+    let coinbase_meta = PrevoutMeta {
+        height: 20,
+        mtp: 0,
+        coinbase: true,
+    };
+    [
+        Case {
+            label: "height lock two blocks short",
+            tag: 41,
+            sequence: 5,
+            meta: height_meta,
+            chain_height: 12,
+            chain_mtp: 0,
+            csv_active: true,
+            reject: Some(AcceptanceRejectReason::NonBip68Final),
+        },
+        Case {
+            label: "height lock satisfied",
+            tag: 41,
+            sequence: 2,
+            meta: height_meta,
+            chain_height: 12,
+            chain_mtp: 0,
+            csv_active: true,
+            reject: None,
+        },
+        Case {
+            label: "time lock short of the confirmed mtp",
+            tag: 44,
+            sequence: 0x0040_0001,
+            meta: time_meta,
+            chain_height: 12,
+            chain_mtp: 1_400,
+            csv_active: true,
+            reject: Some(AcceptanceRejectReason::NonBip68Final),
+        },
+        Case {
+            label: "time lock cleared by the confirmed mtp",
+            tag: 44,
+            sequence: 0x0040_0001,
+            meta: time_meta,
+            chain_height: 12,
+            chain_mtp: 1_600,
+            csv_active: true,
+            reject: None,
+        },
+        Case {
+            label: "height lock ignored before csv activation",
+            tag: 45,
+            sequence: 5,
+            meta: height_meta,
+            chain_height: 12,
+            chain_mtp: 0,
+            csv_active: false,
+            reject: None,
+        },
+        Case {
+            label: "coinbase one short of maturity",
+            tag: 46,
+            sequence: 0xFF_FF_FF_FF,
+            meta: coinbase_meta,
+            chain_height: 118,
+            chain_mtp: 0,
+            csv_active: true,
+            reject: Some(AcceptanceRejectReason::ScriptVerify),
+        },
+        Case {
+            label: "coinbase at maturity",
+            tag: 46,
+            sequence: 0xFF_FF_FF_FF,
+            meta: coinbase_meta,
+            chain_height: 119,
+            chain_mtp: 0,
+            csv_active: true,
+            reject: None,
+        },
+    ]
+}
 
-    let unlocked = tx(outpoint(41, 0), 9_000, 2);
-    let facts = gateway.preview_transactions(&[unlocked], None, &chain)?;
-    assert_eq!(
-        facts
-            .results
-            .first()
-            .ok_or("expected one fact row")?
-            .reject_reason,
-        None
-    );
+/// Relative locks and coinbase maturity are reported from the confirmed
+/// prevout metadata: a height lock clears once enough blocks passed, a time
+/// lock is measured against the confirmed median-time-past, the BIP68 check is
+/// inert before CSV activation, and a coinbase is spendable at 100
+/// confirmations.
+#[test]
+fn preview_reports_relative_locks_and_coinbase_maturity() -> Result<(), Box<dyn Error>> {
+    let pool = Mempool::new(MempoolLimits::default());
+    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
+    for case in relative_lock_cases() {
+        let spendable = TxOut {
+            value: Amount::from_sat(10_000),
+            script_pubkey: Script::from_bytes(op_true_script()),
+        };
+        let chain = meta_chain(
+            case.chain_height,
+            case.chain_mtp,
+            case.csv_active,
+            outpoint(case.tag, 0),
+            spendable,
+            case.meta,
+        );
+        let spend = tx(outpoint(case.tag, 0), 9_000, case.sequence);
+        let facts = gateway.preview_transactions(&[spend], None, &chain)?;
+        assert_eq!(
+            facts
+                .results
+                .first()
+                .ok_or("expected one fact row")?
+                .reject_reason,
+            case.reject,
+            "{}",
+            case.label
+        );
+    }
     Ok(())
 }
 
 #[test]
 fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn Error>> {
     let mut pool = Mempool::new(MempoolLimits::default());
-    // A pool parent whose output anyone can spend, so only the sequence
-    // lock is under test.
     let parent = tx_multi(
         &[(outpoint(48, 0), 0xFF_FF_FF_FF)],
         10_000,
@@ -535,9 +609,6 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
     let parent_outpoint = OutPoint::new(parent.txid(), 0);
     pool.insert_entry(entry(parent, 250, 3_000))?;
     let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
-    // The parent sits in the pool: the gateway layers it under the chain
-    // facts, and any positive relative lock against an unconfirmed prevout
-    // fails because it is encoded as the next block.
     let child = tx_multi(
         &[(parent_outpoint, 1), (outpoint(47, 0), 0xFF_FF_FF_FF)],
         9_000,
@@ -570,117 +641,6 @@ fn bip68_unconfirmed_parent_positive_relative_lock_fails() -> Result<(), Box<dyn
     );
     Ok(())
 }
-
-#[test]
-fn bip68_time_lock_uses_the_confirmed_median_time_past() -> Result<(), Box<dyn Error>> {
-    let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
-    let spendable = TxOut {
-        value: Amount::from_sat(10_000),
-        script_pubkey: Script::from_bytes(op_true_script()),
-    };
-    let meta = PrevoutMeta {
-        height: 10,
-        mtp: 1_000,
-        coinbase: false,
-    };
-    let locked = tx(outpoint(44, 0), 9_000, 0x0040_0001);
-    // One 512-second interval after MTP 1 000 needs MTP >= 1 512; the tip
-    // MTP 1 400 falls short and 1 600 clears it.
-    let short = meta_chain(12, 1_400, true, outpoint(44, 0), spendable.clone(), meta);
-    let facts = gateway.preview_transactions(std::slice::from_ref(&locked), None, &short)?;
-    assert_eq!(
-        facts
-            .results
-            .first()
-            .ok_or("expected one fact row")?
-            .reject_reason,
-        Some(AcceptanceRejectReason::NonBip68Final)
-    );
-    let cleared = meta_chain(12, 1_600, true, outpoint(44, 0), spendable, meta);
-    let facts = gateway.preview_transactions(&[locked], None, &cleared)?;
-    assert_eq!(
-        facts
-            .results
-            .first()
-            .ok_or("expected one fact row")?
-            .reject_reason,
-        None
-    );
-    Ok(())
-}
-
-#[test]
-fn bip68_check_is_inert_before_csv_activation() -> Result<(), Box<dyn Error>> {
-    let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
-    let spendable = TxOut {
-        value: Amount::from_sat(10_000),
-        script_pubkey: Script::from_bytes(op_true_script()),
-    };
-    let meta = PrevoutMeta {
-        height: 10,
-        mtp: 0,
-        coinbase: false,
-    };
-    // The exact transaction the height-lock fixture rejects passes once CSV
-    // is inactive: the gate itself is under test, not one sequence value.
-    let locked = tx(outpoint(45, 0), 9_000, 5);
-    let chain = meta_chain(12, 0, false, outpoint(45, 0), spendable, meta);
-    let facts = gateway.preview_transactions(&[locked], None, &chain)?;
-    assert_eq!(
-        facts
-            .results
-            .first()
-            .ok_or("expected one fact row")?
-            .reject_reason,
-        None
-    );
-    Ok(())
-}
-
-#[test]
-fn immature_coinbase_spend_rejects_before_100_confirmations() -> Result<(), Box<dyn Error>> {
-    let pool = Mempool::new(MempoolLimits::default());
-    let gateway = MempoolGateway::new(Arc::new(RwLock::new(pool)), None, ValidationEngine::Native);
-    let spendable = TxOut {
-        value: Amount::from_sat(10_000),
-        script_pubkey: Script::from_bytes(op_true_script()),
-    };
-    let meta = PrevoutMeta {
-        height: 20,
-        mtp: 0,
-        coinbase: true,
-    };
-    let spend = tx(outpoint(46, 0), 9_000, 0xFF_FF_FF_FF);
-    // Depth 99 (119 - 20): Core's `bad-txns-premature-spend-of-coinbase`.
-    let immature = meta_chain(118, 0, true, outpoint(46, 0), spendable.clone(), meta);
-    let facts = gateway.preview_transactions(std::slice::from_ref(&spend), None, &immature)?;
-    assert_eq!(
-        facts
-            .results
-            .first()
-            .ok_or("expected one fact row")?
-            .reject_reason,
-        Some(AcceptanceRejectReason::ScriptVerify)
-    );
-    // Depth 100 admits.
-    let mature = meta_chain(119, 0, true, outpoint(46, 0), spendable, meta);
-    let facts = gateway.preview_transactions(&[spend], None, &mature)?;
-    assert_eq!(
-        facts
-            .results
-            .first()
-            .ok_or("expected one fact row")?
-            .reject_reason,
-        None
-    );
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Size-limit eviction and the pressure mempool-min fee
-// ---------------------------------------------------------------------------
 
 #[test]
 fn size_limit_eviction_removes_the_lowest_fee_package_first() -> Result<(), Box<dyn Error>> {
@@ -726,7 +686,6 @@ fn mempool_min_fee_rises_under_size_pressure_and_the_preview_enforces_it()
         ..MempoolLimits::default()
     };
     let mut pool = Mempool::new(limits);
-    // Fill to exactly half of maxmempool: the pressure threshold.
     pool.insert_entry(entry(
         tx(outpoint(1, 0), 1_000, 0xFF_FF_FF_FF),
         1_000,
@@ -738,18 +697,13 @@ fn mempool_min_fee_rises_under_size_pressure_and_the_preview_enforces_it()
         2_000,
     ))?;
 
-    // Floor = cheapest evictable (1000) + incremental (1000).
     assert_eq!(
         mempool_min_fee_sat_per_kvb(&pool, INCREMENTAL_RELAY_FEE_SAT_PER_KVB),
         2_000
     );
 
-    // rate 1200 sat/kvB: above the configured floor, below the pressure floor.
     let lukewarm = tx(outpoint(3, 0), 1_000, 0xFF_FF_FF_FF);
 
-    // What IS: the raw insert gate checks only the configured floor, so the
-    // same tx admits through the pool API (deviation ledger, "pressure floor
-    // surface").
     pool.insert_entry(entry(lukewarm, 1_000, 1_200))?;
     assert_eq!(pool.len(), 3);
 
