@@ -1,10 +1,8 @@
 use crate::{ChainError, node::NodeId, tree::BlockTree};
 
 /// Parent-walk plan for switching from one tip to another.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ReorgPlan {
-    /// Common ancestor shared by both tips.
-    pub ancestor: NodeId,
     /// Nodes to disconnect from old tip down toward the ancestor.
     pub disconnect: Vec<NodeId>,
     /// Nodes to connect from ancestor child toward the new tip.
@@ -45,7 +43,6 @@ pub fn plan_reorg(
 
     connect.reverse();
     Ok(ReorgPlan {
-        ancestor: old_cursor,
         disconnect,
         connect,
     })

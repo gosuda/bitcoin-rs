@@ -29,11 +29,17 @@ fn plans_deep_reorg_to_common_fork() -> Result<(), Box<dyn std::error::Error>> {
 
     let plan = plan_reorg(&tree, trunk[100], branch_parent)?;
 
-    assert_eq!(plan.ancestor, fork);
     assert_eq!(plan.disconnect.len(), 50);
     assert_eq!(plan.connect.len(), 50);
     assert_eq!(plan.disconnect.first().copied(), Some(trunk[100]));
     assert_eq!(plan.disconnect.last().copied(), Some(trunk[51]));
+    // Both sides of the plan terminate at the common fork ancestor.
+    assert_eq!(
+        tree.node(*plan.disconnect.last().ok_or("empty disconnect")?)?
+            .parent,
+        Some(fork)
+    );
+    assert_eq!(tree.node(plan.connect[0])?.parent, Some(fork));
     assert_eq!(tree.node(plan.connect[0])?.height, 51);
     assert_eq!(
         tree.node(*plan.connect.last().ok_or("empty connect")?)?

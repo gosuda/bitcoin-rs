@@ -4,9 +4,7 @@
 //! trait is the one lookup both P2P inventory serving and index/RPC readers
 //! use; it is not an RPC type.
 
-use bitcoin_rs_primitives::BlockHash;
-
-pub use bitcoin_rs_storage::block_body::BlockBodyMetadata;
+use bitcoin_rs_primitives::{BlockBodyMetadata, BlockHash};
 
 /// Storage-backed block body reader used when headers and bodies are stored
 /// separately.

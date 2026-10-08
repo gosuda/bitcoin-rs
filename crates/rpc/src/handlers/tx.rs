@@ -4,22 +4,22 @@ use hashbrown::HashSet;
 
 use bitcoin::consensus::encode::serialize as bitcoin_serialize;
 use bitcoin::hashes::Hash as _;
-use bitcoin::hex::FromHex as _;
+use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin::merkle_tree::MerkleBlock;
-use bitcoin_rs_mempool::SubmitError;
 use bitcoin_rs_mempool::standardness::AcceptanceRejectReason;
+use bitcoin_rs_mempool::{LocalOrigin, SubmitError};
 use bitcoin_rs_primitives::{
     Amount, Block as NativeBlock, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
-    Txid, Witness, consensus_bytes, deserialize as native_deserialize,
+    Txid, Witness, consensus_bytes, deserialize as native_deserialize, unix_time_secs,
 };
 use bitcoin_rs_script::{opcode, push_data};
 use miniscript::psbt::PsbtExt as _;
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, Value, json};
 
 use crate::compat::convert::{
-    self, VerboseTxChain, hex_encode, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
+    self, VerboseTxChain, sat_to_btc, typed_to_sonic, typed_to_sonic_omitting_nulls,
 };
-use crate::context::{self, AdmissionFailure, Context};
+use crate::context::Context;
 use crate::error::RpcError;
 use crate::handlers::{optional_bool, params_array, parse_txid, required_str, required_u64};
 use bitcoin_rs_index::block_log::BlockRecord;
@@ -146,7 +146,9 @@ fn render_raw_transaction(
     explicit_block: bool,
 ) -> Result<Value, RpcError> {
     if !verbose {
-        return typed_to_sonic(&v31::GetRawTransaction(hex_encode(&consensus_bytes(tx))));
+        return typed_to_sonic(&v31::GetRawTransaction(
+            consensus_bytes(tx).to_lower_hex_string(),
+        ));
     }
     let chain = record.map(|record| {
         let confirmations = super::chain::confirmations(
@@ -412,7 +414,9 @@ fn proof_from_body(bytes: &[u8], wanted: &hashbrown::HashSet<Txid>) -> Option<Va
     let merkle_block = MerkleBlock::from_block_with_predicate(&bitcoin_block, |txid| {
         bitcoin_wanted.contains(txid)
     });
-    Some(json!(hex_encode(&bitcoin_serialize(&merkle_block))))
+    Some(json!(
+        bitcoin_serialize(&merkle_block).to_lower_hex_string()
+    ))
 }
 
 pub(crate) fn verifytxoutproof(_ctx: &Arc<Context>, params: &Value) -> Result<Value, RpcError> {
@@ -455,16 +459,17 @@ pub(crate) fn sendrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result<V
     )?;
     let txid = tx.txid();
 
-    match context::admit_transaction(&ctx.mempool.gateway, &ctx.chain, &tx, max_feerate) {
-        Ok(_) => typed_to_sonic(&v31::SendRawTransaction(txid.to_string())),
-        Err(AdmissionFailure::Policy(reason)) => Err(reject_reason_to_rpc_error(reason)),
-        Err(AdmissionFailure::Consensus) => Err(RpcError::TxRejected(
-            "consensus-verification-failed".to_owned(),
-        )),
-        Err(AdmissionFailure::RetryExhausted) => Err(RpcError::Internal(
-            AdmissionFailure::RETRY_EXHAUSTED.to_owned(),
-        )),
-    }
+    ctx.mempool
+        .gateway
+        .submit_local_transaction(
+            Arc::new(tx),
+            LocalOrigin::Rpc,
+            max_feerate,
+            unix_time_secs(),
+            &ctx.chain.admission_chain(),
+        )
+        .map_err(submit_error_to_rpc_error)?;
+    typed_to_sonic(&v31::SendRawTransaction(txid.to_string()))
 }
 
 // corepc-types 0.15's v31 alias only describes completed rows. Core 31.1
@@ -511,15 +516,7 @@ pub(crate) fn testmempoolaccept(ctx: &Arc<Context>, params: &Value) -> Result<Va
         .mempool
         .gateway
         .preview_transactions(&txs, max_feerate, &ctx.chain.admission_chain())
-        .map_err(|error| match error {
-            SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
-            SubmitError::Consensus => {
-                RpcError::TxRejected("consensus-verification-failed".to_owned())
-            }
-            SubmitError::RetryExhausted => {
-                RpcError::Internal(AdmissionFailure::RETRY_EXHAUSTED.to_owned())
-            }
-        })?;
+        .map_err(submit_error_to_rpc_error)?;
 
     let mut rows = Vec::with_capacity(facts.results.len());
     for fact in &facts.results {
@@ -664,9 +661,9 @@ pub(crate) fn createrawtransaction(ctx: &Arc<Context>, params: &Value) -> Result
         inputs: tx_inputs,
         outputs: tx_outputs,
     };
-    typed_to_sonic(&v31::CreateRawTransaction(hex_encode(&consensus_bytes(
-        &tx,
-    ))))
+    typed_to_sonic(&v31::CreateRawTransaction(
+        consensus_bytes(&tx).to_lower_hex_string(),
+    ))
 }
 
 /// Deserialize a raw transaction hex string, reporting failures as Core's
@@ -692,9 +689,9 @@ fn sats_from_btc(btc: f64, message: &'static str) -> Result<u64, RpcError> {
     if !raw.is_finite() || !(0.0..U64_MAX_F64).contains(&raw) {
         return Err(RpcError::InvalidParams(message));
     }
-    #[allow(clippy::as_conversions)] // see fn doc: no TryFrom<f64> for u64 in std
-    #[allow(clippy::cast_possible_truncation)] // fractional dust, per fn doc
-    #[allow(clippy::cast_sign_loss)] // raw >= 0.0 checked above
+    #[expect(clippy::as_conversions)] // see fn doc: no TryFrom<f64> for u64 in std
+    #[expect(clippy::cast_possible_truncation)] // fractional dust, per fn doc
+    #[expect(clippy::cast_sign_loss)] // raw >= 0.0 checked above
     Ok(raw as u64)
 }
 
@@ -758,7 +755,7 @@ fn parse_btc_amount(value: &Value) -> Result<u64, RpcError> {
 /// transaction rejections (`-26`), matching Bitcoin Core's
 /// `RPC_VERIFY_REJECTED` code. Both typed cluster-limit failures map to
 /// Core's public `too-large-cluster` reason.
-fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
+pub(crate) fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
     match reason {
         AcceptanceRejectReason::MaxFeeExceeded => RpcError::InvalidParams("max-fee-exceeded"),
         // Core reports spent/unknown inputs as RPC_VERIFY_ERROR (-25), not
@@ -767,6 +764,16 @@ fn reject_reason_to_rpc_error(reason: AcceptanceRejectReason) -> RpcError {
             RpcError::TxVerifyError("bad-txns-inputs-missingorspent".to_owned())
         }
         other => RpcError::TxRejected(reject_reason_to_frozen_string(other)),
+    }
+}
+
+/// Maps a gateway [`SubmitError`] to the Core-compatible RPC error for
+/// `sendrawtransaction` and `testmempoolaccept`.
+fn submit_error_to_rpc_error(error: SubmitError) -> RpcError {
+    match error {
+        SubmitError::Policy(reason) => reject_reason_to_rpc_error(reason),
+        SubmitError::Consensus => RpcError::TxRejected(error.to_string()),
+        SubmitError::RetryExhausted => RpcError::Internal(error.to_string()),
     }
 }
 
@@ -802,7 +809,7 @@ pub(crate) fn finalizepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value,
     };
     let complete = finalized_tx.is_some();
     if extract && let Some(tx) = finalized_tx {
-        let hex = hex_encode(&bitcoin_serialize(&tx));
+        let hex = bitcoin_serialize(&tx).to_lower_hex_string();
         typed_to_sonic(&v31::FinalizePsbt {
             psbt: None,
             hex: Some(hex),
@@ -861,7 +868,7 @@ pub(crate) fn combinepsbt(_ctx: &Arc<Context>, params: &Value) -> Result<Value, 
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use alloc::sync::Arc;
 
@@ -878,10 +885,10 @@ mod tests {
     use std::thread;
 
     use super::getrawtransaction;
-    use super::hex_encode;
     use crate::Handler;
     use crate::context::{Context, DerivedIndexQuery, TxQueryError};
     use crate::error::RpcError;
+    use bitcoin::hex::DisplayHex as _;
     use bitcoin_rs_index::block_log::BlockRecord;
 
     /// Minimal one-coinbase-tx fixture block standing in for the chain genesis.
@@ -892,11 +899,11 @@ mod tests {
         use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
         let coinbase = Tx {
             version: 1,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                previous_output: OutPoint::null(),
                 script_sig: Script::from_bytes(vec![0x51; 4]),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
@@ -941,7 +948,7 @@ mod tests {
 
         let result = getrawtransaction(&ctx, &json!([txid.to_string()]))?;
 
-        let expected = hex_encode(&consensus_bytes(&coinbase));
+        let expected = consensus_bytes(&coinbase).to_lower_hex_string();
         assert_eq!(result.as_str(), Some(expected.as_str()));
         Ok(())
     }
@@ -988,7 +995,7 @@ mod tests {
 
         let result = getrawtransaction(&ctx, &json!([txid.to_string()]))?;
 
-        let expected = hex_encode(&consensus_bytes(&coinbase));
+        let expected = consensus_bytes(&coinbase).to_lower_hex_string();
         assert_eq!(result.as_str(), Some(expected.as_str()));
         Ok(())
     }
@@ -1035,7 +1042,7 @@ mod tests {
         higher.header.prev_blockhash = sibling.block_hash();
         let mut ctx = Context::new();
         let blocks = [(&genesis, 0), (&sibling, 1), (&active, 1), (&higher, 2)];
-        ctx.chain.block_body_source = Some(Arc::new(SeededBodySource {
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
             bodies: blocks
                 .iter()
                 .map(|(block, height)| (*height, block.block_hash(), consensus_bytes(*block)))
@@ -1103,7 +1110,7 @@ mod tests {
             .expect("raw lookup");
             assert_eq!(
                 raw.as_str(),
-                Some(hex_encode(&consensus_bytes(tx)).as_str())
+                Some(consensus_bytes(tx).to_lower_hex_string().as_str())
             );
         }
         let missing = getrawtransaction(
@@ -1169,7 +1176,7 @@ mod tests {
         let result = getrawtransaction(&ctx, &json!([txid.to_string()]))
             .unwrap_or_else(|err| panic!("txindex lookup failed: {err}"));
 
-        let expected = hex_encode(&consensus_bytes(&coinbase));
+        let expected = consensus_bytes(&coinbase).to_lower_hex_string();
         assert_eq!(result.as_str(), Some(expected.as_str()));
         let verbose = getrawtransaction(&ctx, &json!([txid.to_string(), true]))
             .expect("verbose txindex lookup");
@@ -1417,11 +1424,11 @@ mod tests {
         // MerkleBlock seam, whose decoder rejects input-less transactions.
         let extra = Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[marker; 32])), 0),
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
@@ -1495,18 +1502,7 @@ mod tests {
         }
     }
 
-    struct SeededBodySource {
-        bodies: Vec<(u32, BlockHash, Vec<u8>)>,
-    }
-
-    impl bitcoin_rs_chain::BlockBodySource for SeededBodySource {
-        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-            self.bodies
-                .iter()
-                .find(|(h, k, _)| *h == height && *k == hash)
-                .map(|(_, _, body)| body.clone())
-        }
-    }
+    use crate::test_support::BlockBodies;
 
     #[derive(Default)]
     struct ScriptedBodySource {
@@ -1530,7 +1526,7 @@ mod tests {
             bodies.push((record.height, record.hash, consensus_bytes(block)));
             records.push(record);
         }
-        ctx.chain.block_body_source = Some(Arc::new(SeededBodySource { bodies }));
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies { bodies }));
         for record in records {
             ctx.chain.add_block(record);
         }
@@ -1544,7 +1540,7 @@ mod tests {
 
     fn attach_body_for_block(ctx: &mut Context, block: &Block, height: u32) {
         let record = BlockRecord::from_block(height, block);
-        ctx.chain.block_body_source = Some(Arc::new(SeededBodySource {
+        ctx.chain.block_body_source = Some(Arc::new(BlockBodies {
             bodies: vec![(record.height, record.hash, consensus_bytes(block))],
         }));
     }
@@ -1887,14 +1883,14 @@ mod tests {
     #[test]
     fn scan_does_not_hold_the_block_log_lock_across_a_body_load() {
         struct LockProbeSource {
-            blocks: Arc<parking_lot::RwLock<bitcoin_rs_index::block_log::BlockLog>>,
+            blocks: bitcoin_rs_index::BlockLogReader,
             bodies: Vec<(u32, Vec<u8>)>,
         }
 
         impl bitcoin_rs_chain::BlockBodySource for LockProbeSource {
             fn block_body(&self, height: u32, _hash: BlockHash) -> Option<Vec<u8>> {
                 assert!(
-                    self.blocks.try_write().is_some(),
+                    self.blocks.raw_handle().try_write().is_some(),
                     "the block-record lock must not be held across a body load"
                 );
                 self.bodies
@@ -1910,7 +1906,7 @@ mod tests {
         };
 
         let mut ctx = Context::new();
-        let log = Arc::clone(&ctx.chain.blocks);
+        let log = ctx.chain.blocks.clone();
         let bodies = blocks
             .iter()
             .enumerate()
@@ -1981,11 +1977,11 @@ mod tests {
         use bitcoin_rs_primitives::{Amount, LockTime, Script, Sequence, Witness};
         Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: prevout,
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0xffff_ffff),
+                sequence: Sequence::MAX,
                 witness: Witness::from_stack(vec![vec![0x51]]),
             }],
             outputs: vec![TxOut {
@@ -1997,7 +1993,7 @@ mod tests {
 
     /// Consensus hex for RPC submission.
     fn retry_raw_hex(tx: &Tx) -> String {
-        hex_encode(&consensus_bytes(tx))
+        consensus_bytes(tx).to_lower_hex_string()
     }
 
     /// Proves `sendrawtransaction` rebuilds admission context on retry: the
@@ -2127,7 +2123,7 @@ mod gettxout_via_utxo_tests {
         let ctx = Arc::new(Context::new());
         let tx = Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
                 value: Amount::from_sat(50_000),
@@ -2145,7 +2141,7 @@ mod gettxout_via_utxo_tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod acceptance_tests {
     use alloc::sync::Arc;
 
@@ -2193,11 +2189,11 @@ mod acceptance_tests {
     fn spending_tx(tag: u8, output_value: u64) -> Tx {
         Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: spent_outpoint(tag),
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0xffff_ffff),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
@@ -2366,18 +2362,18 @@ mod acceptance_tests {
         let prev = spent_outpoint(1);
         let tx = Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![
                 TxIn {
                     previous_output: prev,
                     script_sig: Script::new(),
-                    sequence: Sequence::from_consensus(0xffff_ffff),
+                    sequence: Sequence::MAX,
                     witness: Witness::new(),
                 },
                 TxIn {
                     previous_output: prev,
                     script_sig: Script::new(),
-                    sequence: Sequence::from_consensus(0xffff_ffff),
+                    sequence: Sequence::MAX,
                     witness: Witness::new(),
                 },
             ],

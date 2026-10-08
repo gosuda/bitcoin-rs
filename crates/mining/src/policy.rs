@@ -1,32 +1,24 @@
-#[cfg(test)]
-use std::cell::Cell;
 use std::collections::HashSet;
 
 use bitcoin_rs_consensus::is_final_tx;
-use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
+use bitcoin_rs_mempool::MempoolMiningSnapshot;
 use bitcoin_rs_primitives::{Tx, Txid};
 
 use crate::MiningError;
-use crate::template::{CandidateContext, transaction_count_size};
-
-#[cfg(test)]
-thread_local! {
-    static CHUNK_PACKAGE_CONSTRUCTIONS: Cell<usize> = const { Cell::new(0) };
-}
+use crate::template::{CandidateContext, FixedReservation, SelectedBody, transaction_count_size};
 
 /// One dependency-closed package selected for a candidate.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SelectedPackage {
+struct SelectedPackage {
     /// Snapshot positions in topological order.
-    pub indices: Vec<usize>,
+    indices: Vec<usize>,
     /// Sum of actual fees for the residual package.
-    pub fee: u64,
+    fee: u64,
     /// Sum of weights for the residual package.
-    pub weight: u64,
+    weight: u64,
     /// Sum of serialized sizes for the residual package.
-    pub size: u64,
+    size: u64,
     /// Sum of sigop costs for the residual package.
-    pub sigop_cost: u64,
+    sigop_cost: u64,
 }
 
 /// Selects dependency-closed packages under the candidate's resource limits.
@@ -39,15 +31,15 @@ pub(crate) struct SelectedPackage {
 pub(crate) fn select_packages(
     context: &CandidateContext,
     snapshot: &MempoolMiningSnapshot,
-    reserved_weight: u64,
-    reserved_size: u64,
-    reserved_sigops: u64,
-) -> Result<(Vec<usize>, u64, u64, u64, u64), MiningError> {
+    reservation: FixedReservation,
+) -> Result<SelectedBody, MiningError> {
     let count_size = transaction_count_size(0)?;
-    let mut used_weight = reserved_weight
+    let mut used_weight = reservation
+        .weight
         .checked_add(count_size * 4)
         .ok_or(MiningError::CandidateScalarOverflow { field: "weight" })?;
-    let mut used_size = reserved_size
+    let mut used_size = reservation
+        .size
         .checked_add(count_size)
         .ok_or(MiningError::CandidateScalarOverflow { field: "size" })?;
     if used_weight > context.max_weight {
@@ -56,13 +48,13 @@ pub(crate) fn select_packages(
     if used_size > context.max_size {
         return Err(MiningError::CapacityExhausted { field: "size" });
     }
-    if reserved_sigops > context.max_sigops {
+    if reservation.sigops > context.max_sigops {
         return Err(MiningError::CapacityExhausted { field: "sigops" });
     }
 
     let mut selected = vec![false; snapshot.entries.len()];
     let mut ordered = Vec::new();
-    let mut used_sigops = reserved_sigops;
+    let mut used_sigops = reservation.sigops;
     let mut fees = 0_u64;
     let pooled: HashSet<Txid> = snapshot.entries.iter().map(|entry| entry.txid).collect();
 
@@ -136,25 +128,17 @@ pub(crate) fn select_packages(
         fees = next_fees;
     }
 
-    Ok((
+    Ok(SelectedBody {
         ordered,
         fees,
-        used_weight.saturating_sub(reserved_weight),
-        used_size.saturating_sub(reserved_size),
-        used_sigops.saturating_sub(reserved_sigops),
-    ))
+        weight: used_weight.saturating_sub(reservation.weight),
+    })
 }
 
 fn chunk_package(
     snapshot: &MempoolMiningSnapshot,
     indices: Vec<usize>,
 ) -> Result<SelectedPackage, MiningError> {
-    #[cfg(test)]
-    CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(count.get() + 1));
-    if indices.len() == 1 {
-        let index = indices[0];
-        return Ok(single_entry_package(&snapshot.entries[index], index));
-    }
     let mut fee = 0_u64;
     let mut weight = 0_u64;
     let mut size = 0_u64;
@@ -182,16 +166,6 @@ fn chunk_package(
         size,
         sigop_cost,
     })
-}
-
-fn single_entry_package(entry: &SnapshotEntry, index: usize) -> SelectedPackage {
-    SelectedPackage {
-        indices: vec![index],
-        fee: entry.fee,
-        weight: entry.weight,
-        size: u64::from(entry.size),
-        sigop_cost: u64::from(entry.sigop_cost),
-    }
 }
 
 fn package_is_final(
@@ -233,16 +207,9 @@ fn next_block_sequence_locks_final(
     })
 }
 
-/// Modified fee used for ranking overlays: actual fee plus the signed delta.
-#[must_use]
-pub(crate) fn modified_fee(entry: &SnapshotEntry) -> i128 {
-    i128::from(entry.fee).saturating_add(i128::from(entry.fee_delta))
-}
-
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
-    use std::cell::Cell;
     use std::sync::Arc;
 
     use bitcoin_rs_mempool::{MempoolMiningSnapshot, SnapshotEntry};
@@ -251,8 +218,8 @@ mod tests {
         Txid, Witness,
     };
 
-    use super::{CHUNK_PACKAGE_CONSTRUCTIONS, select_packages};
-    use crate::template::CandidateContext;
+    use super::select_packages;
+    use crate::template::{CandidateContext, FixedReservation};
 
     #[test]
     fn stops_candidate_package_construction_once_a_positive_dimension_is_full() {
@@ -263,17 +230,21 @@ mod tests {
             entries: vec![filler, leftover],
         };
 
-        CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
-        let weight_full = select_packages(&context(1_004, 4_000_000, 80_000), &snapshot, 0, 0, 0)
-            .expect("weight-full selection");
-        assert_eq!(weight_full.0, vec![0]);
-        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
+        let weight_full = select_packages(
+            &context(1_004, 4_000_000, 80_000),
+            &snapshot,
+            FixedReservation::EMPTY,
+        )
+        .expect("weight-full selection");
+        assert_eq!(weight_full.ordered, vec![0]);
 
-        CHUNK_PACKAGE_CONSTRUCTIONS.with(|count| count.set(0));
-        let size_full = select_packages(&context(4_000_000, 1_001, 80_000), &snapshot, 0, 0, 0)
-            .expect("size-full selection");
-        assert_eq!(size_full.0, vec![0]);
-        assert_eq!(CHUNK_PACKAGE_CONSTRUCTIONS.with(Cell::get), 1);
+        let size_full = select_packages(
+            &context(4_000_000, 1_001, 80_000),
+            &snapshot,
+            FixedReservation::EMPTY,
+        )
+        .expect("size-full selection");
+        assert_eq!(size_full.ordered, vec![0]);
     }
 
     /// Even an empty body needs one byte to encode its reserved coinbase count.
@@ -286,7 +257,11 @@ mod tests {
         };
 
         assert!(matches!(
-            select_packages(&context(4_000_000, 0, 80_000), &snapshot, 0, 0, 0),
+            select_packages(
+                &context(4_000_000, 0, 80_000),
+                &snapshot,
+                FixedReservation::EMPTY
+            ),
             Err(crate::MiningError::CapacityExhausted { field: "size" })
         ));
     }

@@ -29,7 +29,7 @@ use bitcoin::p2p::Magic;
 use bitcoin::p2p::message_compact_blocks::{BlockTxn, CmpctBlock};
 use bitcoin_rs_primitives::{
     Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Sequence, Tx,
-    TxIn, TxOut, Txid, Witness, Wtxid, consensus_bytes,
+    TxIn, TxOut, Txid, Witness, Wtxid, consensus_bytes, deserialize,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 
@@ -67,7 +67,7 @@ fn bench_write_message(c: &mut Criterion) {
     // exercises the same consensus-encode path as real block relay.
     let genesis = genesis_block(Network::Regtest);
     let genesis_bytes = serialize(&genesis);
-    let native_block = Block::consensus_decode(&genesis_bytes).expect("decode genesis block");
+    let native_block = deserialize::<Block>(&genesis_bytes).expect("decode genesis block");
     let block = Message::Block(native_block);
 
     group.bench_function("ping_8B_payload", |b| {

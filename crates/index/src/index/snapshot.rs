@@ -44,16 +44,11 @@ pub struct ScriptLiveScan {
 
 /// Point-in-time, typed view of durable `TxIndex` rows.
 pub trait TxIndexSnapshot: Send + Sync {
-    /// Loads the transaction lookup watermark from this snapshot.
-    fn watermark(&self) -> Result<Option<IndexWatermark>, IndexError>;
     /// Loads one capability's exact durable watermark from this snapshot.
     fn capability_watermark(
         &self,
         capability: IndexCapability,
-    ) -> Result<Option<IndexWatermark>, IndexError> {
-        let _ = capability;
-        self.watermark()
-    }
+    ) -> Result<Option<IndexWatermark>, IndexError>;
     /// Loads one capability's coverage floor: the first height its committed
     /// rows cover. `0` means complete coverage from genesis.
     fn capability_floor(&self, capability: IndexCapability) -> Result<u32, IndexError> {
@@ -83,10 +78,7 @@ pub trait TxIndexSnapshot: Send + Sync {
         &self,
         scripthash: ScriptHash,
         limit: PrefixScanLimit,
-    ) -> Result<ScriptLiveScan, IndexError> {
-        let _ = (scripthash, limit);
-        Err(IndexError::UnsupportedRollback)
-    }
+    ) -> Result<ScriptLiveScan, IndexError>;
 }
 
 struct StoreTxIndexSnapshot<'a> {
@@ -122,10 +114,6 @@ impl StoreTxIndexSnapshot<'_> {
 }
 
 impl TxIndexSnapshot for StoreTxIndexSnapshot<'_> {
-    fn watermark(&self) -> Result<Option<IndexWatermark>, IndexError> {
-        self.capability_watermark(IndexCapability::TxLookup)
-    }
-
     fn capability_watermark(
         &self,
         capability: IndexCapability,

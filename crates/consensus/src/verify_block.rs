@@ -58,20 +58,10 @@ pub fn verify_flags(
 }
 
 /// Context needed for block rules whose activation is height-dependent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct BlockRuleContext {
     /// Whether BIP141 segwit block rules are active for the candidate block.
     pub segwit_active: bool,
-}
-
-impl BlockRuleContext {
-    /// Conservative non-contextual mode: enforce checks from active softforks.
-    #[must_use]
-    pub const fn non_contextual() -> Self {
-        Self {
-            segwit_active: true,
-        }
-    }
 }
 
 /// Verifies non-contextual block rules that do not require a UTXO set.
@@ -81,7 +71,11 @@ pub fn verify_block_rules(block: &Block) -> Result<(), ConsensusError> {
     if facts.has_witness() {
         facts.or_insert_wtxids_from(&block.txs);
     }
-    verify_block_rules_precomputed(block, BlockRuleContext::non_contextual(), &facts)
+    // Conservative non-contextual mode: enforce checks from active softforks.
+    let context = BlockRuleContext {
+        segwit_active: true,
+    };
+    verify_block_rules_precomputed(block, context, &facts)
 }
 
 /// Verifies block rules from facts derived once for the supplied block.
@@ -157,15 +151,6 @@ pub fn block_merkle_root_matches_txids(block: &Block, txids: &[Txid]) -> bool {
         Some((root, _)) => block.header.merkle_root == root.into(),
         None => false,
     }
-}
-
-/// Returns `true` when any transaction input carries witness data (Core's
-/// `CBlock::HasWitness`).
-fn block_has_witness(block: &Block) -> bool {
-    block
-        .txs
-        .iter()
-        .any(|tx| tx.inputs.iter().any(|input| !input.witness.is_empty()))
 }
 
 /// Double-SHA256 over `left || right`, the Merkle parent of two nodes.
@@ -311,7 +296,7 @@ fn hash_avx2_parent_batches<T: Copy>(
 }
 
 /// The last coinbase output carrying the BIP141 commitment prefix.
-pub(crate) fn witness_commitment(block: &Block) -> Option<&[u8]> {
+fn witness_commitment(block: &Block) -> Option<&[u8]> {
     block
         .txs
         .first()?
@@ -345,7 +330,7 @@ fn check_witness_malleation(
             return Ok(());
         }
     }
-    if block_has_witness(block) {
+    if block.txs.iter().any(Tx::has_witness) {
         return Err(ConsensusError::UnexpectedWitness);
     }
     Ok(())
@@ -362,7 +347,7 @@ pub fn check_block_body_binding(block: &Block, segwit_active: bool) -> Result<()
     verify_merkle_root_with_txids(block, &txids)?;
 
     let commitment = witness_commitment(block);
-    if commitment.is_none() && !block_has_witness(block) {
+    if commitment.is_none() && !block.txs.iter().any(Tx::has_witness) {
         return Ok(());
     }
     // Reject malformed nonces before deriving witness IDs.
@@ -429,8 +414,8 @@ pub fn compute_merkle_root(leaves: &mut Vec<[u8; 32]>) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{
-        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, Network, OutPoint,
-        Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
+        Amount, Block, BlockHash, Hash256, Header, LockTime, Network, OutPoint, Script, Sequence,
+        Tx, TxIn, TxOut, Txid, Witness,
     };
 
     use super::{
@@ -450,34 +435,26 @@ mod tests {
         Tx {
             version: 1,
             inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                previous_output: OutPoint::null(),
                 script_sig: Script::from_bytes(vec![1, 1]),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(50),
                 script_pubkey: Script::new(),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         }
     }
 
     fn spend_tx(seed: u8, witness: Vec<Vec<u8>>) -> Tx {
-        Tx {
-            version: 1,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), 0),
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
-                witness: Witness::from_stack(witness),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1),
-                script_pubkey: Script::new(),
-            }],
-            lock_time: LockTime::from_consensus(0),
-        }
+        let mut tx = coinbase_tx();
+        tx.inputs[0].previous_output = OutPoint::new(Txid(Hash256::from_le_bytes(&[seed; 32])), 0);
+        tx.inputs[0].script_sig = Script::new();
+        tx.inputs[0].witness = Witness::from_stack(witness);
+        tx.outputs[0].value = Amount::from_sat(1);
+        tx
     }
 
     fn witness_spend_tx() -> Tx {
@@ -498,11 +475,8 @@ mod tests {
     fn header_with(merkle_root: Hash256) -> Header {
         Header {
             version: 1,
-            prev_blockhash: BlockHash::default(),
             merkle_root,
-            time: 0,
-            bits: CompactTarget::from_consensus(0),
-            nonce: 0,
+            ..Header::default()
         }
     }
 

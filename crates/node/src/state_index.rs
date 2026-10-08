@@ -19,7 +19,7 @@ use super::TxIndexSpawn;
 ///
 /// A disabled config keeps `enabled: None`; the status source still answers
 /// a concrete `Disabled` row in every phase.
-pub(crate) struct DerivedIndexHost {
+pub(super) struct DerivedIndexHost {
     status: Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>,
     enabled: Option<EnabledDerivedIndex>,
     /// Workers this host has spawned; the idempotence contract needs a
@@ -65,7 +65,7 @@ impl DerivedIndexHost {
     /// PRE: `NodeState::open` has completed construction; `enabled` is `Some`
     /// only if an index capability is configured.
     /// POST: the host is in phase `Ready`, or disabled.
-    pub(crate) fn from_parts(
+    pub(super) fn from_parts(
         enabled: Option<DerivedIndexParts>,
         status: Arc<bitcoin_rs_index::runtime::DerivedIndexCapability>,
     ) -> Self {
@@ -90,7 +90,7 @@ impl DerivedIndexHost {
     /// `Stopped` host does not change.
     /// INVARIANT: `start` is idempotent; a second call does not spawn a
     /// second worker.
-    pub(crate) fn start(
+    pub(super) fn start(
         &mut self,
         chainstate: &bitcoin_rs_chainstate::Chainstate,
         history: bitcoin_rs_storage::pruning::HistoryAccess,
@@ -124,7 +124,7 @@ impl DerivedIndexHost {
                 chainstate.chain_events_handle(),
             )),
             spawn.recovery_reporter,
-            chainstate.shutdown_handle(),
+            chainstate.shutdown_reader(),
             spawn.wake_rx,
         )
         .context("spawn txindex worker")?;
@@ -146,7 +146,7 @@ impl DerivedIndexHost {
     /// error: the supervisor exits while the open thread may still write.
     /// INVARIANT: `shutdown` is idempotent; `request_shutdown` runs on every
     /// call.
-    pub(crate) fn shutdown(&mut self, deadline: Duration) -> Result<()> {
+    pub(super) fn shutdown(&mut self, deadline: Duration) -> Result<()> {
         let start = Instant::now();
         let Some(enabled) = self.enabled.as_mut() else {
             return Ok(());
@@ -181,9 +181,7 @@ impl DerivedIndexHost {
         }
         tracing::warn!("txindex worker still blocked; abandoning join");
         // Revoke the generation token so late publication is a no-op.
-        if let Some(generation_token) = &worker.generation {
-            generation_token.revoke();
-        }
+        worker.generation.revoke();
         enabled.lifecycle.store(Arc::new(
             bitcoin_rs_index::runtime::DerivedIndexLifecycle::ShutdownAbandoned,
         ));
@@ -200,11 +198,11 @@ impl DerivedIndexHost {
 
     /// POST: returns a concrete answer in every phase, including disabled.
     /// INVARIANT: callers never see no status for a live node.
-    pub(crate) fn status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
+    pub(super) fn status(&self) -> Arc<dyn bitcoin_rs_index::DerivedIndexCapabilitySource> {
         self.status.clone()
     }
 
-    pub(crate) fn adapter(
+    pub(super) fn adapter(
         &self,
     ) -> Option<&Arc<bitcoin_rs_index::runtime::DerivedIndexQueryAdapter>> {
         self.enabled.as_ref().map(|enabled| &enabled.adapter)
@@ -212,7 +210,7 @@ impl DerivedIndexHost {
 
     /// Observation accessor for the unit tests.
     #[cfg(test)]
-    pub(crate) fn is_running(&self) -> bool {
+    pub(super) fn is_running(&self) -> bool {
         self.enabled
             .as_ref()
             .is_some_and(|enabled| matches!(enabled.phase, DerivedIndexPhase::Running(_)))
@@ -220,20 +218,20 @@ impl DerivedIndexHost {
 
     /// Workers this host has spawned; a correct `start` never exceeds one.
     #[cfg(test)]
-    pub(crate) fn spawn_count(&self) -> usize {
+    pub(super) fn spawn_count(&self) -> usize {
         self.spawned_workers
     }
 
     /// `true` once the owned worker's join returned; stays `false` when the
     /// bounded join was abandoned.
     #[cfg(test)]
-    pub(crate) fn worker_joined(&self) -> Arc<AtomicBool> {
+    pub(super) fn worker_joined(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.worker_joined)
     }
 
     /// Observation accessor for the unit tests.
     #[cfg(test)]
-    pub(crate) fn lifecycle_is_opening(&self) -> bool {
+    pub(super) fn lifecycle_is_opening(&self) -> bool {
         self.enabled.as_ref().is_some_and(|enabled| {
             matches!(
                 &**enabled.lifecycle.load(),
@@ -248,7 +246,7 @@ impl DerivedIndexHost {
     /// touching the lifecycle slot, so this distinguishes real open
     /// failures from raced status reads.
     #[cfg(test)]
-    pub(crate) fn lifecycle_is_failed(&self) -> bool {
+    pub(super) fn lifecycle_is_failed(&self) -> bool {
         self.enabled.as_ref().is_some_and(|enabled| {
             matches!(
                 &**enabled.lifecycle.load(),

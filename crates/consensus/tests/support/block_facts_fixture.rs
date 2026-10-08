@@ -1,10 +1,10 @@
 //! Deterministic wire fixtures shared by borrowed-fact tests and benchmarks.
 //! These are parse/identity workloads, not signed consensus-valid blocks.
 
-use bitcoin_rs_consensus::block_view::BlockFacts;
+use bitcoin_rs_consensus::BlockFacts;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
 };
 
 /// A zero witness modulus selects legacy transactions; otherwise the last
@@ -57,11 +57,7 @@ pub(crate) fn fixture(
     Block {
         header: Header {
             version: 1,
-            prev_blockhash: BlockHash::default(),
-            merkle_root: Hash256::default(),
-            time: 0,
-            bits: CompactTarget::from_consensus(0),
-            nonce: 0,
+            ..Header::default()
         },
         txs,
     }
@@ -98,12 +94,4 @@ pub(crate) fn assert_oracle(bytes: &[u8], facts: &BlockFacts) {
         facts.merkle_root().map(|root| root.to_string()),
         root.map(|root| root.to_string()),
     );
-    assert_eq!(facts.transaction_spans().len(), oracle.txdata.len());
-    for (span, tx) in facts.transaction_spans().iter().zip(&oracle.txdata) {
-        let start = usize::try_from(span.start())
-            .unwrap_or_else(|error| panic!("fixture span start: {error}"));
-        let end =
-            usize::try_from(span.end()).unwrap_or_else(|error| panic!("fixture span end: {error}"));
-        assert_eq!(&bytes[start..end], bitcoin::consensus::serialize(tx));
-    }
 }

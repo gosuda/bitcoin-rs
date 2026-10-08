@@ -1,4 +1,4 @@
-//! Eight-way SHA256d for fixed 64-byte Merkle parent inputs.
+//! Eight-way `SHA256d` for fixed 64-byte Merkle parent inputs.
 
 /// Number of independent 64-byte messages one [`Avx2Sha256d64`] transform
 /// hashes.

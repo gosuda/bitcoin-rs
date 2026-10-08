@@ -3,10 +3,8 @@
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Amount, DecodeError, LockTime, OutPoint, Script, Sequence, Txid, Witness, Wtxid,
-    encode::{
-        ConsensusEncode, Sha256Sink, deserialize, encode_tx, finalize_double_sha256, tx_base_size,
-    },
+    Amount, LockTime, OutPoint, Script, Sequence, Txid, Witness, Wtxid,
+    encode::{ConsensusEncode, Sha256Sink, encode_tx, finalize_double_sha256, tx_base_size},
 };
 
 /// A Bitcoin transaction input in native owned form.
@@ -69,11 +67,6 @@ impl Tx {
         Wtxid(finalize_double_sha256(engine))
     }
 
-    /// Decodes a complete transaction from its consensus serialization, rejecting any
-    /// trailing bytes (the exact-consume path shared with [`crate::encode::deserialize`]).
-    pub fn consensus_decode(bytes: &[u8]) -> Result<Self, DecodeError> {
-        deserialize(bytes)
-    }
     /// Consensus serialization length without BIP144 witness sections (the txid layout).
     #[must_use]
     pub fn base_size(&self) -> usize {
@@ -83,7 +76,7 @@ impl Tx {
     /// Full consensus serialization length, including BIP144 witness sections.
     #[must_use]
     pub fn total_size(&self) -> usize {
-        crate::encode::consensus_len(self)
+        self.consensus_size()
     }
 
     /// BIP141 transaction weight: `base_size * 3 + total_size` weight units.
@@ -114,6 +107,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::Tx;
+    use crate::deserialize;
     use crate::{DecodeError, Hash256, OutPoint, TxIn, TxOut, Txid, encode::consensus_bytes};
 
     type Result<T, E = Box<dyn std::error::Error>> = std::result::Result<T, E>;
@@ -138,7 +132,7 @@ mod tests {
     #[test]
     fn fixture_txids_match_golden_list_and_reencode() -> Result<()> {
         let bytes = std::fs::read("tests/testdata/363731.bin")?;
-        let block = crate::Block::consensus_decode(&bytes)?;
+        let block = crate::deserialize::<crate::Block>(&bytes)?;
         let golden = std::fs::read_to_string("tests/testdata/363731.txids.txt")?;
         let expected: Vec<Txid> = golden
             .lines()
@@ -149,7 +143,7 @@ mod tests {
         assert_eq!(block.txs.len(), expected.len());
         for (tx, expected_txid) in block.txs.iter().take(10).zip(expected.iter()) {
             assert_eq!(tx.txid(), *expected_txid);
-            assert_eq!(Tx::consensus_decode(&consensus_bytes(tx))?, *tx);
+            assert_eq!(deserialize::<Tx>(&consensus_bytes(tx))?, *tx);
         }
         Ok(())
     }
@@ -171,7 +165,7 @@ mod tests {
         // version || marker 0x00 || flag 0x01
         assert_eq!(&bytes[4..6], &[0x00, 0x01]);
 
-        let decoded = Tx::consensus_decode(&bytes).expect("roundtrip");
+        let decoded = deserialize::<Tx>(&bytes).expect("roundtrip");
         assert_eq!(decoded, tx);
         assert_ne!(tx.txid(), Txid::from(tx.wtxid().0));
     }
@@ -182,10 +176,10 @@ mod tests {
         let mut bytes = consensus_bytes(&tx);
         bytes.extend_from_slice(&[0xde, 0xad]);
 
-        let error = Tx::consensus_decode(&bytes).expect_err("trailing garbage must fail");
+        let error = deserialize::<Tx>(&bytes).expect_err("trailing garbage must fail");
         assert_eq!(error, DecodeError::TrailingBytes { remaining: 2 });
 
         // Without the garbage the same bytes decode cleanly.
-        assert_eq!(Tx::consensus_decode(&consensus_bytes(&tx)), Ok(tx));
+        assert_eq!(deserialize::<Tx>(&consensus_bytes(&tx)), Ok(tx));
     }
 }

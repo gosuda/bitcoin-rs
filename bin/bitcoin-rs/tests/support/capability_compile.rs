@@ -12,6 +12,22 @@ pub(super) struct ProductionConsumer {
 }
 
 impl ProductionConsumer {
+    /// Adds node without its workspace dev-dependencies or fixture feature.
+    pub(super) fn with_node(root: &Path) -> Result<Self> {
+        use std::io::Write as _;
+
+        let consumer = Self::new(root)?;
+        let node = serde_json::to_string(&root.join("crates/node"))?;
+        let mut manifest = std::fs::OpenOptions::new()
+            .append(true)
+            .open(consumer.directory.path().join("Cargo.toml"))?;
+        writeln!(
+            manifest,
+            "bitcoin-rs-node = {{ path = {node}, default-features = false, features = [\"fjall\"] }}"
+        )?;
+        Ok(consumer)
+    }
+
     /// Copies the repository lock to retain its pinned dependency versions.
     pub(super) fn new(root: &Path) -> Result<Self> {
         let directory = tempfile::tempdir()?;
@@ -44,6 +60,21 @@ bitcoin-rs-utxo = {{ path = {utxo}, default-features = false }}
         )?;
         std::fs::copy(root.join("Cargo.lock"), directory.path().join("Cargo.lock"))?;
         Ok(Self { directory })
+    }
+
+    /// Adds the storage and RPC fixture owners without enabling test features.
+    pub(super) fn with_fixture_owners(root: &Path) -> Result<Self> {
+        let consumer = Self::new(root)?;
+        let storage = serde_json::to_string(&root.join("crates/storage"))?;
+        let rpc = serde_json::to_string(&root.join("crates/rpc"))?;
+        let path = consumer.directory.path().join("Cargo.toml");
+        let mut manifest = std::fs::read_to_string(&path)?;
+        manifest.push_str(&format!(
+            "bitcoin-rs-storage = {{ path = {storage}, default-features = false }}\n\
+             bitcoin-rs-rpc = {{ path = {rpc}, default-features = false }}\n"
+        ));
+        std::fs::write(path, manifest)?;
+        Ok(consumer)
     }
 
     fn check(&self, source: &str, locked: bool) -> Result<Output> {

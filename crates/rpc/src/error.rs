@@ -1,7 +1,3 @@
-use core::fmt;
-use std::io;
-
-use bitcoin_rs_primitives::{DecodeError, HashError};
 use thiserror::Error;
 
 /// JSON-RPC 2.0 and Bitcoin Core-compatible RPC errors.
@@ -60,6 +56,9 @@ pub enum RpcError {
     /// Bitcoin Core `RPC_CLIENT_IN_INITIAL_DOWNLOAD` (-10).
     #[error("{0}")]
     ClientInInitialDownload(String),
+    /// Bitcoin Core `RPC_MISC_ERROR` (-1), including unavailable optional indexes.
+    #[error("{0}")]
+    Misc(String),
     /// Internal server failure.
     #[error("internal error: {0}")]
     Internal(String),
@@ -67,9 +66,9 @@ pub enum RpcError {
 
 impl RpcError {
     /// Standard JSON-RPC parse error code.
-    pub(crate) const PARSE_ERROR: i64 = -32_700;
+    const PARSE_ERROR: i64 = -32_700;
     /// Standard JSON-RPC invalid request code.
-    pub(crate) const INVALID_REQUEST: i64 = -32_600;
+    const INVALID_REQUEST: i64 = -32_600;
     /// Standard JSON-RPC unknown method code.
     pub const METHOD_NOT_FOUND: i64 = -32_601;
     /// Standard JSON-RPC invalid params code.
@@ -98,6 +97,7 @@ impl RpcError {
     pub const fn code(&self) -> i64 {
         match self {
             Self::Parse(_) => Self::PARSE_ERROR,
+            Self::Misc(_) => -1,
             Self::InvalidRequest(_) => Self::INVALID_REQUEST,
             Self::MethodNotFound(_) => Self::METHOD_NOT_FOUND,
             Self::InvalidParams(_) => Self::INVALID_PARAMS,
@@ -114,45 +114,15 @@ impl RpcError {
     }
 }
 
-impl From<sonic_rs::Error> for RpcError {
-    fn from(error: sonic_rs::Error) -> Self {
-        Self::Parse(error.to_string())
-    }
-}
-
-impl From<serde_json::Error> for RpcError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Internal(error.to_string())
-    }
-}
-
-impl From<io::Error> for RpcError {
-    fn from(error: io::Error) -> Self {
-        Self::Internal(error.to_string())
-    }
-}
-
-impl From<DecodeError> for RpcError {
-    fn from(_error: DecodeError) -> Self {
-        Self::InvalidParams("consensus decoding failed")
-    }
-}
-
-impl From<HashError> for RpcError {
-    fn from(_error: HashError) -> Self {
-        Self::InvalidParams("hex string is invalid")
-    }
-}
-
 impl From<core::str::Utf8Error> for RpcError {
     fn from(error: core::str::Utf8Error) -> Self {
         Self::Parse(error.to_string())
     }
 }
 
-impl From<fmt::Error> for RpcError {
-    fn from(error: fmt::Error) -> Self {
-        Self::Internal(error.to_string())
+impl From<sonic_rs::Error> for RpcError {
+    fn from(error: sonic_rs::Error) -> Self {
+        Self::Parse(error.to_string())
     }
 }
 

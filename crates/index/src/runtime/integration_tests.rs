@@ -124,9 +124,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
         "worker must still be blocked past deadline"
     );
 
-    if let Some(token) = &worker.generation {
-        token.revoke();
-    }
+    worker.generation.revoke();
     inputs
         .lifecycle
         .store(Arc::new(DerivedIndexLifecycle::ShutdownAbandoned));
@@ -137,12 +135,7 @@ fn blocked_open_abandonment_detaches_and_poisons() {
         start.elapsed() < deadline + std::time::Duration::from_secs(5),
         "abandonment must be bounded"
     );
-    assert!(
-        worker
-            .generation
-            .as_ref()
-            .is_some_and(Generation::is_revoked)
-    );
+    assert!(worker.generation.is_revoked());
     assert!(matches!(
         **inputs.lifecycle.load(),
         DerivedIndexLifecycle::ShutdownAbandoned

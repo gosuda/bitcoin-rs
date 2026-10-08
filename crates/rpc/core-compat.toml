@@ -77,10 +77,31 @@ differential_harness = false
 core_version = "31.1"
 git_tag = "v31.1"
 source_commit = "9be056a8a72b624dae9623b2f7bded92c2a21c91"
+version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"
+# The canonical artifact: the platform whose bitcoind captured the checked-in
+# fixtures and corpora. `target` is the bitcoincore.org archive suffix; every
+# artifact pinning repeats the (target, archive, digests) shape so
+# `artifact_for` can select a runnable binary without reinterpreting fields.
+target = "x86_64-linux-gnu"
 archive = "bitcoin-31.1-x86_64-linux-gnu.tar.gz"
 archive_sha256 = "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e"
 bitcoind_sha256 = "986e63b3c8770f08d0059820ad3dd085d1ab9e1bea23946c243f858a06888a08"
-version_output = "Bitcoin Core daemon version v31.1.0 bitcoind"
+
+# Additional runnable artifacts for the same released product, one row per
+# developer platform a lane may execute on. The canonical artifact above
+# remains the fixture-capture identity; a row repeating its target (or a
+# sibling's) is rejected by the reference-set parser.
+[[reference.release.platforms]]
+target = "arm64-apple-darwin"
+archive = "bitcoin-31.1-arm64-apple-darwin.tar.gz"
+archive_sha256 = "16a097c09fbd7eb78b240ce1dae123663ea2e5e377cfd6a951e71e227e23cf2f"
+bitcoind_sha256 = "d55c12b0b02001cc16b1481c4075361dcba193100a8143924abda911174c09ec"
+
+[[reference.release.platforms]]
+target = "win64"
+archive = "bitcoin-31.1-win64.zip"
+archive_sha256 = "c99ef173471c58e6766d9eebd12e6c35349082eeed3939bc99eed58ef57db587"
+bitcoind_sha256 = "f79eeb94e1379986df9f7be4c78c8fc8e18dc9be64a31cbaa8acad249d3db77a"
 
 # Replay corpora, pinned by stop identity. `manifest_sha256` is produced when
 # the corpus archive is exported; until then it stays ABSENT (a placeholder

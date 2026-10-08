@@ -39,23 +39,6 @@ pub enum ConnectMutationError {
     },
 }
 
-/// Failure of a node-owned single-block disconnect.
-#[derive(Debug, thiserror::Error)]
-pub enum DisconnectMutationError {
-    /// No complete authoritative commit was returned.
-    #[error("disconnect did not produce a committed outcome: {0}")]
-    NotCommitted(#[source] bitcoin_rs_chainstate::DisconnectError),
-    /// Chainstate committed, but node-owned post-commit work did not settle.
-    #[error("authoritative disconnect committed, but node settlement failed: {source}")]
-    CommittedButSettlementFailed {
-        /// The authoritative outcome retained across settlement failure.
-        outcome: Box<DisconnectOutcome>,
-        /// Failure that forced the node into recovery-required shutdown.
-        #[source]
-        source: bitcoin_rs_chainstate::ApplyError,
-    },
-}
-
 /// Node-owned derived work that follows a committed chain event.
 ///
 /// `Chainstate` does not hold this. The composition root dispatches after
@@ -87,7 +70,7 @@ impl ChainFollowers {
     /// consumer; effects run only through [`Self::on_connect`] and
     /// [`Self::on_disconnect`].
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         blocks: Arc<RwLock<BlockLog>>,
         zmq: Arc<dyn ZmqPublisher>,
         derived_index: Option<Arc<DerivedIndexRuntime>>,
@@ -118,6 +101,7 @@ impl ChainFollowers {
     }
 
     /// Returns `self` with `zmq` swapped to `publisher`.
+    #[cfg(test)]
     #[must_use]
     pub fn with_zmq_publisher(mut self, publisher: Arc<dyn ZmqPublisher>) -> Self {
         self.zmq = publisher;
@@ -143,19 +127,27 @@ impl ChainFollowers {
         self.derived_index.is_some() || self.zmq.wants_rawblock()
     }
 
-    /// Shared RPC block log owned by this committed-effect dispatcher.
+    /// Returns a read-only capability to observe the applied-block log.
     #[must_use]
-    pub fn block_log(&self) -> &Arc<RwLock<BlockLog>> {
+    pub fn block_log_reader(&self) -> bitcoin_rs_index::BlockLogReader {
+        bitcoin_rs_index::BlockLogReader::new(Arc::clone(&self.blocks))
+    }
+
+    /// Shared RPC block log owned by this committed-effect dispatcher.
+    #[cfg(any(test, feature = "test-seam"))]
+    #[must_use]
+    pub(crate) fn block_log(&self) -> &Arc<RwLock<BlockLog>> {
         &self.blocks
     }
 
     /// Publisher used by committed chain effects and RPC notifier discovery.
     #[must_use]
-    pub fn zmq_publisher(&self) -> Arc<dyn ZmqPublisher> {
+    pub(crate) fn zmq_publisher(&self) -> Arc<dyn ZmqPublisher> {
         Arc::clone(&self.zmq)
     }
 
     /// `TxIndex` runtime, when one is wired.
+    #[cfg(test)]
     #[must_use]
     pub fn derived_index(&self) -> Option<&Arc<DerivedIndexRuntime>> {
         self.derived_index.as_ref()
@@ -163,7 +155,7 @@ impl ChainFollowers {
 
     /// Mining generation signal.
     #[must_use]
-    pub fn mining(&self) -> &Arc<crate::mining::MiningGenerationSignal> {
+    pub(crate) fn mining(&self) -> &Arc<crate::mining::MiningGenerationSignal> {
         &self.mining
     }
 
@@ -220,7 +212,7 @@ impl ChainFollowers {
     /// block event already covers the departures.
     ///
     /// INVARIANT: consumer failure cannot invalidate chainstate.
-    pub fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
+    pub(crate) fn on_connect(&self, block: &Block, outcome: &ConnectOutcome) {
         if let Some(gateway) = &self.mempool {
             let block_txs: Vec<&bitcoin_rs_primitives::Tx> = block.txs.iter().collect();
             gateway.remove_for_block(
@@ -256,7 +248,7 @@ impl ChainFollowers {
     ///
     /// INVARIANT: a non-matching tail is not popped, and no consumer
     /// failure changes the chainstate result.
-    pub fn on_disconnect(&self, outcome: &DisconnectOutcome) {
+    pub(crate) fn on_disconnect(&self, outcome: &DisconnectOutcome) {
         self.pop_matching_tail(outcome.hash);
         self.wake_index();
         if self.zmq.wants_notifications() {
@@ -305,6 +297,22 @@ impl ChainFollowers {
         }
     }
 
+    /// Reconciles derived consumers after an atomic snapshot-tip replacement.
+    /// No per-block notifications are fabricated for the skipped history.
+    pub(crate) fn on_snapshot(
+        &self,
+        change: Option<&ChainChangeGuard>,
+    ) -> Result<(), bitcoin_rs_mempool::ChainChangeError> {
+        if let Some(gateway) = &self.mempool {
+            let change = change.ok_or(bitcoin_rs_mempool::ChainChangeError::ForeignGuard)?;
+            gateway.clear_for_snapshot(change)?;
+        }
+        self.blocks.write().clear();
+        self.wake_index();
+        self.mining.publish_generation();
+        Ok(())
+    }
+
     fn wake_index(&self) {
         if let Some(runtime) = &self.derived_index {
             runtime.wake();
@@ -326,7 +334,7 @@ impl ChainFollowers {
     ///
     /// INVARIANT: fatal errors drop guards without settlement; operational
     /// refusal attempts settlement.
-    pub fn apply_connect(
+    pub(crate) fn apply_connect(
         &self,
         handles: &bitcoin_rs_chainstate::Chainstate,
         block: &Block,
@@ -381,93 +389,47 @@ impl ChainFollowers {
             }
         }
     }
+}
 
-    /// Disconnects `block` and dispatches this set before the transition ends.
-    ///
-    /// See `ARCH-07`. [`DisconnectMutationError::NotCommitted`] contains an
-    /// authoritative refusal/failure; a later node settlement failure retains
-    /// the committed [`DisconnectOutcome`] in the other variant.
-    pub fn apply_disconnect(
-        &self,
-        handles: &bitcoin_rs_chainstate::Chainstate,
-        block: &Block,
-    ) -> core::result::Result<DisconnectOutcome, DisconnectMutationError> {
-        let transition = handles.begin_transition().map_err(|error| {
-            DisconnectMutationError::NotCommitted(bitcoin_rs_chainstate::DisconnectError::Refused(
-                Box::new(error),
-            ))
-        })?;
-        let mut mempool_change = self.begin_mempool_change().map_err(|error| {
-            DisconnectMutationError::NotCommitted(bitcoin_rs_chainstate::DisconnectError::Refused(
-                Box::new(error),
-            ))
-        })?;
-        match transition.disconnect(block) {
-            Ok(outcome) => {
-                self.on_disconnect(&outcome);
-                // Resident entries the lower tip no longer supports leave
-                // before the fence finishes, through the same shared view.
-                if let (Some(change), Some(gateway)) =
-                    (mempool_change.as_ref(), self.mempool_gateway())
-                {
-                    let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
-                        handles.utxo_reader(),
-                        handles.applied_tip_reader(),
-                        handles.block_tree_reader(),
-                        handles.network(),
-                    );
-                    if gateway.remove_for_reorg(change, &chain).is_err() {
-                        handles.fail_closed_for_recovery();
-                        drop(mempool_change.take());
-                        drop(transition);
-                        return Err(DisconnectMutationError::CommittedButSettlementFailed {
-                            outcome: Box::new(outcome),
-                            source: bitcoin_rs_chainstate::ApplyError::Shutdown,
-                        });
-                    }
-                }
-                match Self::finish_transition(handles, transition, mempool_change) {
-                    Ok(()) => Ok(outcome),
-                    Err(source) => Err(DisconnectMutationError::CommittedButSettlementFailed {
-                        outcome: Box::new(outcome),
-                        source,
-                    }),
-                }
+/// Applies genesis when the applied-tip slot is still empty and publishes
+/// the header tip from its outcome.
+///
+/// A fresh chainstate has no applied tip until genesis commits; every
+/// caller that can outrun the sync loop's first tick (startup before the
+/// RPC listener binds, the sync tick itself) funnels through this one
+/// owner. Idempotent — a populated applied tip returns immediately.
+///
+/// Either connect failure is returned so startup can abort instead of
+/// binding RPC onto a chainstate that cannot serve an applied tip. Only a
+/// refused connect leaves the slot empty for the sync tick to retry; a
+/// failed settlement publishes its tip but has already closed chain
+/// admission and requested shutdown, so there is nothing to retry.
+pub(crate) fn bootstrap_genesis(
+    handles: &bitcoin_rs_chainstate::Chainstate,
+    followers: &ChainFollowers,
+) -> Result<(), ConnectMutationError> {
+    if handles.applied_tip_snapshot().is_some() {
+        return Ok(());
+    }
+    let genesis = handles.network().genesis_block();
+    match followers.apply_connect(handles, &genesis) {
+        // The header-tip cell is the chainstate's to publish — including on
+        // a committed-but-unsettled connect, which owns its outcome.
+        Ok(outcome) => handles.publish_genesis_tip(outcome.tip),
+        Err(error) => {
+            if let ConnectMutationError::CommittedButSettlementFailed { outcome, .. } = &error {
+                handles.publish_genesis_tip(outcome.tip.clone());
             }
-            Err(error @ bitcoin_rs_chainstate::DisconnectError::Refused(_)) => {
-                let hash = Hash256::from(block.block_hash());
-                let height = handles.applied_tip_snapshot().map_or(0, |tip| tip.height);
-                if let Err(settlement) =
-                    Self::finish_transition(handles, transition, mempool_change)
-                {
-                    tracing::error!(
-                        original = %error,
-                        finish = %settlement,
-                        "chain transition could not be settled after disconnect refusal"
-                    );
-                    return Err(DisconnectMutationError::NotCommitted(
-                        bitcoin_rs_chainstate::DisconnectError::Fatal {
-                            hash,
-                            height,
-                            source: Box::new(settlement),
-                        },
-                    ));
-                }
-                Err(DisconnectMutationError::NotCommitted(error))
-            }
-            Err(error) => {
-                drop(mempool_change);
-                drop(transition);
-                Err(DisconnectMutationError::NotCommitted(error))
-            }
+            return Err(error);
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot, regtest_fixture};
+    use bitcoin_rs_chain::{BlockTree, NodeStatus, TipSnapshot};
     use bitcoin_rs_consensus::ValidationEngine;
     use bitcoin_rs_mempool::{
         AdmissionChain, AdmissionOrigin, ChainAdmissionSnapshot, Mempool, MempoolLimits,
@@ -619,7 +581,6 @@ mod tests {
         );
 
         followers.on_disconnect(&DisconnectOutcome {
-            parent_tip: tip,
             hash,
             restored_parents: Vec::new(),
         });
@@ -640,7 +601,6 @@ mod tests {
         let followers = ChainFollowers::noop();
         followers.on_connect(&genesis, &connect_outcome(&tip, &genesis));
         followers.on_disconnect(&DisconnectOutcome {
-            parent_tip: tip,
             hash: Hash256::from_le_bytes(&[0xAB; 32]),
             restored_parents: Vec::new(),
         });
@@ -672,14 +632,14 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: outpoint,
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(49_000),
                 script_pubkey: Script::from_bytes(vec![0x6a, 0x04, 0xaa, 0xbb, 0xcc, 0xdd]),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         })
     }
 
@@ -706,18 +666,56 @@ mod tests {
         )
     }
 
+    #[test]
+    fn snapshot_reconciles_pool_and_index_without_fabricating_block_events() -> anyhow::Result<()> {
+        let gateway = Arc::new(MempoolGateway::new(
+            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
+            ValidationEngine::Native,
+        ));
+        let publisher = Arc::new(RecordingPublisher::default());
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+        let followers = followers_with_gateway(&gateway)
+            .with_zmq_publisher(publisher.clone())
+            .with_tx_index(Some(Arc::new(DerivedIndexRuntime::new(wake_tx))));
+        let genesis = Network::Regtest.genesis_block();
+        let outpoint = OutPoint::new(genesis.txs[0].txid(), 0);
+        let tx = orphan_child(outpoint);
+        let chain = AdmissionCoins::default();
+        *chain.prevouts.write() = vec![(
+            outpoint,
+            TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: Script::from_bytes(vec![0x51]),
+            },
+        )];
+        gateway.submit_transaction(tx.clone(), AdmissionOrigin::Rpc, None, 0, &chain)?;
+        assert!(gateway.read().contains_txid(&tx.txid()));
+        let fence = followers
+            .begin_mempool_change()?
+            .ok_or_else(|| anyhow::anyhow!("missing fence"))?;
+        followers.on_snapshot(Some(&fence))?;
+        assert!(!gateway.read().contains_txid(&tx.txid()));
+        assert!(gateway.stable_generation().is_none());
+        assert!(wake_rx.try_recv().is_ok());
+        assert_eq!(publisher.events(), Vec::<String>::new());
+        assert!(followers.block_log().read().is_empty());
+        fence.finish()?;
+        assert!(gateway.stable_generation().is_some());
+        Ok(())
+    }
+
     /// Exercise committed-outcome dispatch with a real gateway, without any
     /// mempool mutation or observer that could independently wake the child.
     /// Full chain application and transition ownership have separate tests in
     /// `crates/chainstate`; this checks the follower's lifecycle notification
     /// boundary.
-    #[allow(clippy::too_many_lines)]
     fn assert_admission_followers_after_chain_change(connect: bool) -> anyhow::Result<()> {
-        let gateway = MempoolGateway::shared(
+        let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
             ValidationEngine::Native,
-        )
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        ));
         let followers = followers_with_gateway(&gateway);
         let block = Network::Regtest.genesis_block();
         let parent = block.txs[0].txid();
@@ -765,7 +763,6 @@ mod tests {
             followers.on_connect(&block, &connect_outcome(&tip, &block));
         } else {
             followers.on_disconnect(&DisconnectOutcome {
-                parent_tip: tip,
                 hash,
                 restored_parents: vec![parent],
             });
@@ -782,7 +779,7 @@ mod tests {
             },
         )];
         assert!(gateway.stable_generation().is_none());
-        assert!(gateway.retry_orphans(&chain, 1).is_empty());
+        assert_eq!(gateway.retry_orphans(&chain, 1), []);
         assert_eq!(
             gateway.get_tx_by_wtxid(child.wtxid()).as_ref(),
             Some(child.as_ref())
@@ -805,7 +802,7 @@ mod tests {
         assert!(gateway.read().contains_txid(&child.txid()));
         assert_eq!(gateway.orphan_count(), 0);
         assert_eq!(gateway.read().sequence_number(), 1);
-        assert!(gateway.retry_orphans(&chain, 3).is_empty());
+        assert_eq!(gateway.retry_orphans(&chain, 3), []);
         Ok(())
     }
 
@@ -823,11 +820,11 @@ mod tests {
 
     #[test]
     fn active_chain_change_is_retryable_not_shutdown() -> anyhow::Result<()> {
-        let gateway = MempoolGateway::shared(
+        let gateway = Arc::new(MempoolGateway::new(
             Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+            None,
             ValidationEngine::Native,
-        )
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+        ));
         let followers = followers_with_gateway(&gateway);
         let active = gateway.begin_chain_change()?;
 
@@ -883,44 +880,6 @@ mod tests {
     }
 
     #[test]
-    fn committed_disconnect_settlement_failure_retains_outcome() -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
-        config.data_dir = dir.path().join("node");
-        config.p2p.listen.clear();
-        let state = crate::state::NodeState::open(config, None)?;
-        let genesis = Network::Regtest.genesis_block();
-        state.apply_block(&genesis)?;
-        let child = regtest_fixture::mined_regtest_child_at(genesis.block_hash(), 1)?;
-        state.apply_block(&child)?;
-        let child_hash = Hash256::from(child.block_hash());
-        let followers = settlement_breaking_followers(state.mempool_gateway(), 7);
-
-        let error = match followers.apply_disconnect(&state.chainstate(), &child) {
-            Ok(outcome) => panic!("forced generation move settled disconnect {outcome:?}"),
-            Err(error) => error,
-        };
-        let (outcome, source) = match error {
-            DisconnectMutationError::CommittedButSettlementFailed { outcome, source } => {
-                (outcome, source)
-            }
-            other @ DisconnectMutationError::NotCommitted(_) => {
-                panic!("committed disconnect must retain its outcome: {other}")
-            }
-        };
-        assert_eq!(outcome.hash, child_hash);
-        assert!(matches!(
-            source,
-            bitcoin_rs_chainstate::ApplyError::Shutdown
-        ));
-        let Some(parent_tip) = state.chainstate().applied_tip_snapshot() else {
-            panic!("parent tip missing");
-        };
-        assert_eq!(parent_tip.hash, Hash256::from(genesis.block_hash()));
-        Ok(())
-    }
-
-    #[test]
     fn mining_reports_a_committed_settlement_failure_as_accepted() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
@@ -929,7 +888,7 @@ mod tests {
         let state = crate::state::NodeState::open(config, None)?;
         let followers = settlement_breaking_followers(state.mempool_gateway(), 3);
         let mining = crate::MiningCoordinator::new(
-            state.mempool(),
+            state.mempool_reader(),
             state.chainstate(),
             state.stable_read(),
             followers,

@@ -2,23 +2,25 @@ use super::*;
 
 #[test]
 fn round_trip_replays_consensus_validated_active_chain() -> Result<(), Box<dyn std::error::Error>> {
-    let (tree, best_tip_id, applied) = chain_with_applied_height(3, 1)?;
-    let written = write_checkpoint(&tree, best_tip_id, applied)?;
-    let mut reader = Cursor::new(written.0);
+    for (best_height, applied_height) in [(3, 1), (500, 499), (1_351, 1_350)] {
+        let (tree, best_tip_id, applied) = chain_with_applied_height(best_height, applied_height)?;
+        let written = write_checkpoint(&tree, best_tip_id, applied)?;
+        let mut reader = Cursor::new(written.0);
 
-    let restored = headers::read_headers(&mut reader, config(), written.1.metadata)?;
+        let restored = headers::read_headers(&mut reader, config(), written.1.metadata)?;
 
-    assert_eq!(restored.tree.len(), 4);
-    assert_eq!(
-        restored.tree.tip().map(|tip| tip.hash),
-        Some(tree.node(best_tip_id)?.hash),
-        "the restored best tip identifies the same chain across distinct trees"
-    );
-    assert_eq!(
-        restored.tree.node(restored.applied_tip_id)?.hash,
-        applied.hash,
-        "the applied checkpoint tip is reconstructed from the accepted prefix"
-    );
+        assert_eq!(restored.tree.len(), usize::try_from(best_height)? + 1);
+        assert_eq!(
+            restored.tree.tip().map(|tip| tip.hash),
+            Some(tree.node(best_tip_id)?.hash),
+            "the restored best tip identifies the same chain across distinct trees"
+        );
+        assert_eq!(
+            restored.tree.node(restored.applied_tip_id)?.hash,
+            applied.hash,
+            "the applied checkpoint tip is reconstructed from the accepted prefix"
+        );
+    }
     Ok(())
 }
 
@@ -65,7 +67,7 @@ fn reader_rejects_wrong_network_and_genesis() -> Result<(), Box<dyn std::error::
 }
 
 /// Regression coverage for the headers-v1 wire contract in
-/// `crates/node/src/checkpoint/headers.rs`: `prefix`/`parse_prefix` define the
+/// `crates/chainstate/src/checkpoint_headers.rs`: `prefix`/`parse_prefix` define the
 /// magic at bytes 0..8, version at 8..12, and count at 48..56; `checkpoint_size`
 /// and `read_headers` require the encoded length to contain exactly the prefix
 /// plus 80-byte headers. Keep these offsets tied to that authoritative codec
@@ -107,7 +109,7 @@ fn publication_selects_applied_ancestry_and_forgets_competing_fork()
     let mut prev = BlockHash(genesis_hash);
     let mut fork_best_id = NodeId::new(0);
     for height in 1..=4 {
-        let mut header = next_header(prev, height);
+        let mut header = mined_regtest_header(prev, height)?;
         header.time = header.time.saturating_add(100);
         mine_header_to_declared_target(&mut header)?;
         fork_best_id = accept_headers(
@@ -213,9 +215,7 @@ fn unsupported_utxo_snapshot_version_requires_explicit_resync()
         manifest.utxo.version = 3;
     })?;
 
-    let Err(CheckpointLoadError::Corrupt(CheckpointCorruption::Invalid { reason })) =
-        load_checkpoint(dir.path(), config())
-    else {
+    let Err(CheckpointLoadError::Corrupt(reason)) = load_checkpoint(dir.path(), config()) else {
         return Err("unsupported UTXO snapshot unexpectedly loaded".into());
     };
     assert!(reason.contains("UTXO checkpoint version 3 is not current"));
@@ -284,9 +284,7 @@ fn authenticated_inner_header_version_is_fatal() -> Result<(), Box<dyn std::erro
 
     assert!(matches!(
         load_checkpoint(dir.path(), config()),
-        Err(super::super::CheckpointLoadError::Corrupt(
-            super::super::CheckpointCorruption::Invalid { .. }
-        ))
+        Err(super::super::CheckpointLoadError::Corrupt(_))
     ));
     Ok(())
 }

@@ -1,7 +1,7 @@
 use bitcoin_rs_primitives::Network;
 
 /// BIP9 signalling period length in blocks.
-pub const BIP9_PERIOD: u32 = 2016;
+const BIP9_PERIOD: u32 = 2016;
 /// Deployment id for CSV (BIP68/112/113).
 pub const CSV_DEPLOYMENT_ID: u32 = 0;
 /// Deployment id for Segwit (BIP141/143).
@@ -69,7 +69,7 @@ pub struct DeploymentParams {
 }
 
 /// CSV/Segwit activation at one connect height.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct SoftforkState {
     /// Whether CSV (BIP68/112/113) is active.
     pub csv_active: bool,
@@ -80,40 +80,33 @@ pub struct SoftforkState {
 /// Versionbits parameters for a named deployment on `network`.
 #[must_use]
 pub const fn deployment_params(network: Network, deployment_id: u32) -> Option<DeploymentParams> {
-    let threshold = match network {
-        Network::Mainnet => MAINNET_THRESHOLD,
-        Network::Testnet3 => TESTNET3_THRESHOLD,
+    let (threshold, csv_start_time, segwit_start_time, segwit_timeout) = match network {
+        Network::Mainnet => (
+            MAINNET_THRESHOLD,
+            1_462_060_800,
+            1_479_168_000,
+            1_510_704_000,
+        ),
+        Network::Testnet3 => (
+            TESTNET3_THRESHOLD,
+            1_456_790_400,
+            1_462_060_800,
+            1_493_596_800,
+        ),
         Network::Testnet4 | Network::Signet | Network::Regtest => return None,
     };
-    match deployment_id {
-        CSV_DEPLOYMENT_ID => Some(DeploymentParams {
-            bit: 0,
-            start_time: match network {
-                Network::Mainnet => 1_462_060_800,
-                Network::Testnet3 => 1_456_790_400,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            timeout: 1_493_596_800,
-            period: BIP9_PERIOD,
-            threshold,
-        }),
-        SEGWIT_DEPLOYMENT_ID => Some(DeploymentParams {
-            bit: 1,
-            start_time: match network {
-                Network::Mainnet => 1_479_168_000,
-                Network::Testnet3 => 1_462_060_800,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            timeout: match network {
-                Network::Mainnet => 1_510_704_000,
-                Network::Testnet3 => 1_493_596_800,
-                Network::Testnet4 | Network::Signet | Network::Regtest => return None,
-            },
-            period: BIP9_PERIOD,
-            threshold,
-        }),
-        _ => None,
-    }
+    let (bit, start_time, timeout) = match deployment_id {
+        CSV_DEPLOYMENT_ID => (0, csv_start_time, 1_493_596_800),
+        SEGWIT_DEPLOYMENT_ID => (1, segwit_start_time, segwit_timeout),
+        _ => return None,
+    };
+    Some(DeploymentParams {
+        bit,
+        start_time,
+        timeout,
+        period: BIP9_PERIOD,
+        threshold,
+    })
 }
 
 /// Read-only chain context the state machine queries.
@@ -121,9 +114,9 @@ pub trait DeploymentContext {
     /// Returns the block version field at `height`, or `None` if unknown.
     fn block_version(&self, height: u32) -> Option<i32>;
 
-    /// Returns the median-time-past at `height` over `window` blocks, or `None` if
-    /// unknown.
-    fn median_time_past(&self, height: u32, window: usize) -> Option<u32>;
+    /// Median at `height` over exactly [`crate::MEDIAN_TIME_PAST_WINDOW`]
+    /// (11 blocks), or `None` if unknown.
+    fn median_time_past(&self, height: u32) -> Option<u32>;
 }
 
 /// Computes the BIP9 deployment state at `height`.
@@ -132,31 +125,29 @@ pub fn compute_state(
     ctx: &impl DeploymentContext,
     height: u32,
     params: DeploymentParams,
-    mtp_window: usize,
 ) -> DeploymentState {
     if params.period == 0 {
         return DeploymentState::Defined;
     }
 
     let boundary = (height / params.period).saturating_mul(params.period);
-    compute_state_at_boundary(ctx, boundary, params, mtp_window)
+    compute_state_at_boundary(ctx, boundary, params)
 }
 
 fn compute_state_at_boundary(
     ctx: &impl DeploymentContext,
     boundary: u32,
     params: DeploymentParams,
-    mtp_window: usize,
 ) -> DeploymentState {
     if boundary == 0 {
         return DeploymentState::Defined;
     }
 
     let prior_boundary = boundary.saturating_sub(params.period);
-    let prior_state = compute_state_at_boundary(ctx, prior_boundary, params, mtp_window);
+    let prior_state = compute_state_at_boundary(ctx, prior_boundary, params);
     match prior_state {
         DeploymentState::Defined => {
-            let Some(mtp) = ctx.median_time_past(boundary.saturating_sub(1), mtp_window) else {
+            let Some(mtp) = ctx.median_time_past(boundary.saturating_sub(1)) else {
                 return DeploymentState::Defined;
             };
 
@@ -169,7 +160,7 @@ fn compute_state_at_boundary(
             }
         }
         DeploymentState::Started => {
-            let Some(mtp) = ctx.median_time_past(boundary.saturating_sub(1), mtp_window) else {
+            let Some(mtp) = ctx.median_time_past(boundary.saturating_sub(1)) else {
                 return DeploymentState::Started;
             };
 
@@ -227,6 +218,7 @@ pub fn versionbits_block_version(
 
 #[cfg(test)]
 mod tests {
+    use super::DeploymentState::{Active, Defined, Failed, LockedIn, Started};
     use super::{
         DeploymentContext, DeploymentParams, DeploymentState, compute_state,
         versionbits_block_version,
@@ -243,7 +235,7 @@ mod tests {
             self.versions.get(&height).copied()
         }
 
-        fn median_time_past(&self, height: u32, _window: usize) -> Option<u32> {
+        fn median_time_past(&self, height: u32) -> Option<u32> {
             self.mtps.get(&height).copied()
         }
     }
@@ -271,49 +263,18 @@ mod tests {
         let no_top_bits: Vec<(u32, i32)> = (10..20).map(|height| (height, 1)).collect();
         let silent: Vec<(u32, i32)> = (10..20).map(|height| (height, 0)).collect();
 
+        let waiting = params(100, 1000);
+        let running = params(0, 1_000_000);
+        let expiry = params(100, 500);
+        let windows = [(9, 100), (19, 200), (29, 300)];
+        let expired = [(9, 200), (19, 600)];
         let cases: [StateCase<'_>; 6] = [
-            (
-                params(100, 1000),
-                &[(9, 50)],
-                &[],
-                10,
-                DeploymentState::Defined,
-            ),
-            (
-                params(100, 1000),
-                &[(9, 150)],
-                &[],
-                10,
-                DeploymentState::Started,
-            ),
-            (
-                params(0, 1_000_000),
-                &[(9, 100), (19, 200)],
-                &signalling,
-                20,
-                DeploymentState::LockedIn,
-            ),
-            (
-                params(0, 1_000_000),
-                &[(9, 100), (19, 200), (29, 300)],
-                &signalling,
-                30,
-                DeploymentState::Active,
-            ),
-            (
-                params(0, 1_000_000),
-                &[(9, 100), (19, 200)],
-                &no_top_bits,
-                20,
-                DeploymentState::Started,
-            ),
-            (
-                params(100, 500),
-                &[(9, 200), (19, 600)],
-                &silent,
-                20,
-                DeploymentState::Failed,
-            ),
+            (waiting, &[(9, 50)], &[], 10, Defined),
+            (waiting, &[(9, 150)], &[], 10, Started),
+            (running, &windows[..2], &signalling, 20, LockedIn),
+            (running, &windows, &signalling, 30, Active),
+            (running, &windows[..2], &no_top_bits, 20, Started),
+            (expiry, &expired, &silent, 20, Failed),
         ];
 
         for (params, mtps, versions, height, expected) in cases {
@@ -322,7 +283,7 @@ mod tests {
                 mtps: mtps.iter().copied().collect(),
             };
             assert_eq!(
-                compute_state(&ctx, height, params, 11),
+                compute_state(&ctx, height, params),
                 expected,
                 "{params:?} at {height}"
             );

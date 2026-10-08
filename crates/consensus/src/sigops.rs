@@ -1,11 +1,10 @@
 //! Consensus transaction sigop-cost accounting.
 
+use crate::verify_tx::is_coinbase;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut};
 use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_script::script::{
-    Instruction, instructions, is_p2sh, is_push_only, is_witness_program,
-};
 use bitcoin_rs_script::sigops::{count_accurate, count_segwit, count_tx_legacy};
+use bitcoin_rs_script::{Instruction, instructions, is_p2sh, is_push_only, is_witness_program};
 use hashbrown::HashMap;
 
 /// Counts transaction sigop cost against resolved previous outputs.
@@ -14,7 +13,7 @@ pub fn transaction_sigop_cost(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: Ve
     let flags = flags.filled();
     let mut cost = count_tx_legacy(tx).saturating_mul(4);
     // Core's coinbase cost never includes previous-output or witness sigops.
-    if tx.inputs.len() == 1 && tx.inputs[0].previous_output.is_null() {
+    if is_coinbase(tx) {
         return cost;
     }
     let mut cursor = 0;
@@ -74,14 +73,14 @@ fn last_push(script: &[u8]) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use bitcoin_rs_primitives::{Amount, Hash256, LockTime, Script, Sequence, TxIn, Txid, Witness};
-    use bitcoin_rs_script::script::{opcode, push_data};
+    use bitcoin_rs_script::{opcode, push_data};
 
     use super::*;
 
     fn single_input_tx(script_sig: Vec<u8>, witness: Vec<Vec<u8>>) -> Tx {
         Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
                 previous_output: OutPoint::new(Txid::from(Hash256::from_le_bytes(&[1; 32])), 0),
                 script_sig: Script::from_bytes(script_sig),
@@ -131,7 +130,7 @@ mod tests {
                 4,
             ),
             (
-                vec![bitcoin_rs_script::eval::OP_DROP, opcode::OP_PUSHNUM_1],
+                vec![bitcoin_rs_script::opcode::OP_DROP, opcode::OP_PUSHNUM_1],
                 push_data(&p2wpkh),
                 Vec::new(),
                 4,

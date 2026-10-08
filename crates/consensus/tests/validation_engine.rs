@@ -1,15 +1,13 @@
-//! Capability is not selection: `engine = native` must reach the Rust
-//! interpreter in every build, including builds where bitcoinkernel support is
-//! compiled in, and a build without the `kernel` feature must fail closed on
-//! `engine = kernel` instead of silently substituting another engine.
+//! Native selection always uses the Rust interpreter; kernel selection fails
+//! closed when the kernel backend is not compiled.
 
 use bitcoin_rs_consensus::kernel::BlockParse;
 #[cfg(feature = "kernel")]
-use bitcoin_rs_consensus::{BlockView, ScriptStageTimings, verify_block_input_scripts};
+use bitcoin_rs_consensus::{BlockFacts, BlockView, ScriptStageTimings, verify_block_input_scripts};
 use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+    Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
+    TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_script::opcode::OP_EQUAL;
 use bitcoin_rs_script::{VerifyFlags, push_int};
@@ -53,11 +51,8 @@ fn single_tx_block(tx: &Tx) -> Block {
     Block {
         header: Header {
             version: 1,
-            prev_blockhash: BlockHash::default(),
-            merkle_root: Hash256::default(),
-            time: 0,
             bits: CompactTarget::from_consensus(0x2000_ffff),
-            nonce: 0,
+            ..Header::default()
         },
         txs: vec![tx.clone()],
     }
@@ -107,7 +102,10 @@ fn native_engine_remains_available_when_kernel_is_compiled() {
     let block = single_tx_block(&tx);
     let parsed = BlockParse::parse(&consensus_bytes(&block), ValidationEngine::Native)
         .unwrap_or_else(|error| panic!("native parse: {error}"));
-    let mut view = BlockView::new(&block.txs, vec![tx.txid()]);
+    let mut view = BlockView::from_facts(
+        &block.txs,
+        BlockFacts::from_txids(&block.txs, vec![tx.txid()]),
+    );
     view.set_resolved(vec![vec![coins.lookup(&tx.inputs[0].previous_output)]]);
     let native_block = verify_block_input_scripts(
         &mut view,
@@ -149,7 +147,7 @@ fn kernel_engine_fails_closed_without_the_kernel_feature() {
         version: 1,
         lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: vec![1, 1].into(),
             sequence: Sequence::MAX,
             witness: Witness::new(),
@@ -206,9 +204,8 @@ fn prevout_count_mismatch_is_rejected_under_every_engine() {
                         txid: Txid(Hash256::from_le_bytes(&[9; 32])),
                         vout: 0,
                     },
-                    script_sig: Script::new(),
                     sequence: Sequence::MAX,
-                    witness: Witness::new(),
+                    ..TxIn::default()
                 },
             ],
             outputs: tx.outputs.clone(),

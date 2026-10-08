@@ -5,12 +5,6 @@ use crate::ColumnFamily;
 /// Errors returned by storage backends.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
-    /// The requested backend feature was not enabled for this build.
-    #[error("backend `{backend}` not enabled at build time")]
-    BackendNotEnabled {
-        /// Backend feature name.
-        backend: &'static str,
-    },
     /// A column family is unknown to the selected backend.
     #[error("unknown column family {0:?}")]
     UnknownColumnFamily(ColumnFamily),

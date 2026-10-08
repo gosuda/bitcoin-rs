@@ -10,6 +10,7 @@ extern crate alloc;
 
 use alloc::sync::Arc;
 
+use bitcoin::hex::{DisplayHex, FromHex};
 use bitcoin_rs_mempool::{AdmissionOrigin, MempoolEntry};
 use bitcoin_rs_primitives::{
     Amount, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid, Witness,
@@ -23,38 +24,9 @@ use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 /// A standard P2WPKH script paid to a known key.
 const P2WPKH_SCRIPT_HEX: &str = "00141111111111111111111111111111111111111111";
 
-/// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
-}
-
 /// Decodes hexadecimal into bytes, rejecting odd length and invalid digits.
 fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
-    fn nibble(byte: u8) -> Result<u8, String> {
-        match byte {
-            b'0'..=b'9' => Ok(byte - b'0'),
-            b'a'..=b'f' => Ok(byte - b'a' + 10),
-            b'A'..=b'F' => Ok(byte - b'A' + 10),
-            _ => Err(format!("invalid hex digit: {}", char::from(byte))),
-        }
-    }
-    let bytes = hex.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return Err(format!("odd-length hex input: {hex}"));
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.as_chunks::<2>().0 {
-        let high = nibble(pair[0])?;
-        let low = nibble(pair[1])?;
-        out.push(high << 4 | low);
-    }
-    Ok(out)
+    Vec::from_hex(hex).map_err(|error| error.to_string())
 }
 
 /// Returns `true` when the script starts with `OP_RETURN` (0x6a).
@@ -114,7 +86,7 @@ fn sendrawtransaction_admits_standard_tx_to_mempool() -> Result<(), Box<dyn std:
     let prevout = fund_utxo(&ctx, 0x42, 10_000);
     // Spend 10 000 sats, send 9 000 → fee 1 000 sats.
     let tx = make_tx(prevout, 9_000, script);
-    let raw = hex_encode(&consensus_bytes(&tx));
+    let raw = consensus_bytes(&tx).to_lower_hex_string();
     let handler = Handler::new(Arc::clone(&ctx));
 
     let result = handler.dispatch("sendrawtransaction", &json!([raw.as_str()]))?;
@@ -136,7 +108,7 @@ fn sendrawtransaction_rejects_missing_inputs() {
     // Reference an outpoint that does not exist anywhere.
     let prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x99; 32])), 0);
     let tx = make_tx(prevout, 9_000, script);
-    let raw = hex_encode(&consensus_bytes(&tx));
+    let raw = consensus_bytes(&tx).to_lower_hex_string();
     let handler = Handler::new(Arc::clone(&ctx));
 
     let err = handler
@@ -162,7 +134,7 @@ fn sendrawtransaction_idempotent_for_already_in_mempool() -> Result<(), Box<dyn 
     let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 1, 0);
     ctx.mempool.gateway.pool().write().insert_entry(entry)?;
 
-    let raw = hex_encode(&consensus_bytes(&tx));
+    let raw = consensus_bytes(&tx).to_lower_hex_string();
     let handler = Handler::new(Arc::clone(&ctx));
 
     // Second submission should succeed without error.
@@ -184,7 +156,7 @@ fn sendrawtransaction_readmits_a_transaction_evicted_from_the_mempool()
     let prevout = fund_utxo(&ctx, 0x44, 10_000);
     let tx = make_tx(prevout, 9_000, script);
     let txid = tx.txid();
-    let raw = hex_encode(&consensus_bytes(&tx));
+    let raw = consensus_bytes(&tx).to_lower_hex_string();
     let handler = Handler::new(Arc::clone(&ctx));
 
     handler.dispatch("sendrawtransaction", &json!([raw.as_str()]))?;
@@ -224,7 +196,7 @@ fn testmempoolaccept_reports_allowed_for_valid_tx() -> Result<(), Box<dyn std::e
     let script = hex_decode(P2WPKH_SCRIPT_HEX)?;
     let prevout = fund_utxo(&ctx, 0x44, 10_000);
     let tx = make_tx(prevout, 9_000, script);
-    let raw = hex_encode(&consensus_bytes(&tx));
+    let raw = consensus_bytes(&tx).to_lower_hex_string();
     let handler = Handler::new(Arc::clone(&ctx));
 
     let result = handler.dispatch("testmempoolaccept", &json!([[raw.as_str()]]))?;
@@ -250,7 +222,7 @@ fn testmempoolaccept_reports_reject_for_already_in_mempool()
     let entry = MempoolEntry::new(Arc::new(tx.clone()), 100, 1_000, 1, 1, 0);
     ctx.mempool.gateway.pool().write().insert_entry(entry)?;
 
-    let raw = hex_encode(&consensus_bytes(&tx));
+    let raw = consensus_bytes(&tx).to_lower_hex_string();
     let handler = Handler::new(Arc::clone(&ctx));
 
     let result = handler.dispatch("testmempoolaccept", &json!([[raw.as_str()]]))?;
@@ -279,7 +251,7 @@ fn testmempoolaccept_reports_reject_for_missing_inputs() -> Result<(), Box<dyn s
     let script = hex_decode(P2WPKH_SCRIPT_HEX).expect("script hex");
     let prevout = OutPoint::new(Txid(Hash256::from_le_bytes(&[0x77; 32])), 0);
     let tx = make_tx(prevout, 9_000, script);
-    let raw = hex_encode(&consensus_bytes(&tx));
+    let raw = consensus_bytes(&tx).to_lower_hex_string();
     let handler = Handler::new(Arc::clone(&ctx));
 
     let result = handler.dispatch("testmempoolaccept", &json!([[raw.as_str()]]))?;

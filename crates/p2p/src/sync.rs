@@ -20,6 +20,7 @@ mod commit;
 mod frontier;
 mod headers;
 mod headers_presync;
+mod historical;
 mod peers;
 mod receive;
 mod requests;
@@ -61,10 +62,7 @@ use crate::download_window::RECEIVED_BLOCK_TIMEOUT;
 #[cfg(test)]
 use commit::restore_split;
 
-pub use chain::{
-    BranchSwitchError, HeaderAdmission, SyncChain, SyncChainError, WindowCommitDisposition,
-    WindowCommitError,
-};
+pub use chain::SyncChain;
 
 pub use headers_presync::{
     HeaderAnchor, HeaderSyncError, HeaderSyncResult, HeadersSyncPhase, HeadersSyncState,
@@ -75,7 +73,8 @@ pub(crate) use frontier::{
     UsablePeer, header_request_live,
 };
 
-pub use crate::download_window::{SyncBudget, default_sync_budget};
+pub(crate) use crate::download_window::SyncBudget;
+pub use crate::download_window::default_sync_budget;
 
 #[cfg(test)]
 pub(crate) use crate::download_window::MIN_PEERS_FOR_FANOUT;
@@ -180,18 +179,22 @@ type ExpectedBlockHashes = SmallVec<[Hash256; RECEIVED_BLOCK_BUDGET]>;
 /// applied-chain seam. See `docs/contracts/architecture.md` for the
 /// download-window ownership contract.
 pub struct BlockSync {
+    /// Bounded historical downloads, independent of the foreground
+    /// download window. This short-held lock is also read by peer ingress.
+    historical: Mutex<historical::HistoricalDownload>,
+    /// Serializes historical replay and delivery without holding the ingress lock.
+    historical_work: Mutex<()>,
     /// Applied-chain seam: header admission, window commit, branch switch,
     /// and genesis bootstrap live behind it (node owns them, ARCH-07).
-    #[doc(hidden)]
-    pub chain: Arc<dyn SyncChain>,
+    pub(crate) chain: Arc<dyn SyncChain>,
     peer_table: Arc<PeerTable>,
     /// The node's one chain-owned initial-block-download latch, shared with
     /// RPC and the listener. Block-body peer choice reads it through
     /// [`crate::download_window::BlockDownloadPolicy`]; nothing else decides
     /// whether this node is still syncing.
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
-    inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
-    inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+    inbound_headers_rx: Receiver<InboundHeaders>,
+    inbound_blocks_rx: Receiver<crate::InboundBlock>,
     /// One lock owns the coupled download, staged-body, header-request, and
     /// session-reconciliation state. Consensus and chain I/O stay outside
     /// this lock; each component's policy remains in the P2P crate.
@@ -206,7 +209,7 @@ pub struct BlockSync {
     /// per `inv` message.
     block_announcements: Mutex<hashbrown::HashMap<PeerSource, Hash256>>,
     expected_apply_cache: Arc<Mutex<Option<ExpectedApplyCache>>>,
-    /// Latched by the first [`WindowCommitDisposition::Fatal`] settlement.
+    /// Latched by the first [`WindowApplyDisposition::Fatal`] settlement.
     /// While set, [`apply_buffered_blocks`] stages inbound blocks but starts
     /// no chain transition: the failed settlement left the implementation's
     /// admission closed, so every further attempt would churn staged state.
@@ -378,12 +381,14 @@ impl BlockSync {
     pub fn new(
         chain: Arc<dyn SyncChain>,
         peer_table: Arc<PeerTable>,
-        inbound_headers_rx: Arc<Mutex<Receiver<InboundHeaders>>>,
-        inbound_blocks_rx: Arc<Mutex<Receiver<crate::InboundBlock>>>,
+        inbound_headers_rx: Receiver<InboundHeaders>,
+        inbound_blocks_rx: Receiver<crate::InboundBlock>,
         ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
     ) -> Self {
         let budget = default_sync_budget(chain.network());
         Self {
+            historical: Mutex::new(historical::HistoricalDownload::new(budget)),
+            historical_work: Mutex::new(()),
             chain,
             peer_table,
             ibd,
@@ -409,6 +414,7 @@ impl BlockSync {
     /// the fast-sync opt-in at node open, and tests and benchmarks that
     /// exercise non-default capacity limits.
     pub fn install_budget(&self, budget: SyncBudget) {
+        *self.historical.lock() = historical::HistoricalDownload::new(budget);
         *self.scheduler.lock() = SchedulerState {
             window: DownloadWindow::new(budget),
             stager: BlockStager::new(budget),
@@ -431,7 +437,7 @@ impl BlockSync {
     /// announcement wins, so a later vector cannot replace an unknown tip
     /// before header sync drains it — and a flooding peer cannot grow the
     /// queue past the live session set.
-    pub fn announce_block(&self, source: PeerSource, hash: Hash256) {
+    pub(crate) fn announce_block(&self, source: PeerSource, hash: Hash256) {
         self.block_announcements
             .lock()
             .entry(source)
@@ -448,7 +454,7 @@ impl BlockSync {
     /// POST: [`Self::owns_body_fetch`] answers `true` for the pair.
     /// INVARIANT: bounded by `MAX_DEFERRED_OWNED_FETCHES`; a stale source's
     /// mark is dropped at resolve time, never attributed to a replacement.
-    pub fn record_owned_body_fetch(&self, source: PeerSource, hash: Hash256) {
+    pub(crate) fn record_owned_body_fetch(&self, source: PeerSource, hash: Hash256) {
         if !self.peer_table.is_current(source) {
             return;
         }
@@ -466,7 +472,10 @@ impl BlockSync {
     ///   address alone, so a same-address replacement cannot claim its
     ///   predecessor's request.
     #[must_use]
-    pub fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
+    pub(crate) fn owns_body_fetch(&self, source: PeerSource, hash: Hash256) -> bool {
+        if self.historical.lock().window.pending_owner(&hash) == Some(source) {
+            return true;
+        }
         let scheduler = self.scheduler.lock();
         scheduler.window.pending_owner(&hash) == Some(source)
             || scheduler
@@ -483,7 +492,9 @@ impl BlockSync {
         self.chain.bootstrap_genesis();
         // Remove dead racers before queued blocks can affect peer election.
         self.reconcile_peer_sessions();
+        self.advance_historical();
         self.drain_inbound_blocks();
+        self.advance_historical();
 
         let now = Instant::now();
         // One frontier observation feeds recovery, selection, and planning;
@@ -579,7 +590,7 @@ impl BlockSync {
     /// INVARIANT: the connection manager is the only reader, because it is the
     ///   only part of the node that can dial.
     #[must_use]
-    pub fn allow_extra_full_relay_dial(&self) -> bool {
+    pub(crate) fn allow_extra_full_relay_dial(&self) -> bool {
         self.scheduler.lock().stale_tip.extra_dial_allowed
     }
 
@@ -591,7 +602,7 @@ impl BlockSync {
     /// INVARIANT: the answer comes from the same window the fetch budget
     ///   reads, so a peer never both downloads and is retired as idle.
     #[must_use]
-    pub fn is_downloading_bodies(&self, source: PeerSource) -> bool {
+    pub(crate) fn is_downloading_bodies(&self, source: PeerSource) -> bool {
         self.scheduler.lock().window.is_downloading(source)
     }
 
@@ -723,16 +734,7 @@ impl BlockSync {
             return;
         }
         metrics::counter!("node.sync.no_progress_ticks", "reason" => reason.as_str()).increment(1);
-        let applied_height = frontier
-            .chain
-            .applied_tip
-            .as_ref()
-            .map_or(0, |tip| tip.height);
-        let header_height = frontier
-            .chain
-            .chain_tip
-            .as_ref()
-            .map_or(applied_height, |tip| tip.height);
+        let (applied_height, header_height) = frontier.heights();
         tracing::debug!(
             applied_height,
             header_height,

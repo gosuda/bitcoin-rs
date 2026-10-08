@@ -15,18 +15,7 @@ use std::sync::Arc;
 
 #[test]
 fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
-    use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script};
-
-    let mut state = CoordinatorState::new();
-    let coinbase = Tx {
-        version: 2,
-        lock_time: LockTime::from_consensus(0),
-        inputs: Vec::new(),
-        outputs: vec![TxOut {
-            value: Amount::from_sat(50),
-            script_pubkey: Script::new(),
-        }],
-    };
+    let mut state = CoordinatorState::default();
     let mut first_id = None;
     for seq in 0..=CANDIDATE_CACHE_LIMIT {
         let seq = u64::try_from(seq).unwrap_or(u64::MAX);
@@ -37,28 +26,8 @@ fn candidate_cache_evicts_the_oldest_entry_at_the_bound() {
         }
         let candidate = Arc::new(Candidate {
             template_id: id.clone(),
-            previous_block_hash: hash,
-            height: 1,
-            version: 1,
-            bits: CompactTarget::from_consensus(0x207f_ffff),
-            min_time: 1,
-            current_time: 1,
-            csv_active: false,
-            segwit_active: false,
-            max_weight: 4_000_000,
-            max_size: 4_000_000,
-            max_sigops: 80_000,
             mempool_sequence: seq,
-            coinbase: coinbase.clone(),
-            coinbase_value: 50,
-            fees: 0,
-            weight: 800,
-            size: 200,
-            sigop_cost: 0,
-            transactions: Vec::new(),
-            witness_merkle_root: None,
-            witness_reserved_value: None,
-            witness_commitment: None,
+            ..sample_candidate(hash, false, false)
         });
         state.cache_insert(id, candidate);
     }
@@ -89,7 +58,7 @@ fn sample_candidate(previous: Hash256, csv_active: bool, segwit_active: bool) ->
         mempool_sequence: 1,
         coinbase: Tx {
             version: 2,
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
             inputs: Vec::new(),
             outputs: vec![TxOut {
                 value: Amount::from_sat(50),
@@ -97,13 +66,8 @@ fn sample_candidate(previous: Hash256, csv_active: bool, segwit_active: bool) ->
             }],
         },
         coinbase_value: 50,
-        fees: 0,
         weight: 800,
-        size: 200,
-        sigop_cost: 0,
         transactions: Vec::new(),
-        witness_merkle_root: None,
-        witness_reserved_value: None,
         witness_commitment: None,
     }
 }
@@ -117,7 +81,6 @@ fn template_for(
         Arc::new(candidate),
         submit_old,
         Vec::new(),
-        0,
     )
 }
 
@@ -170,7 +133,6 @@ fn signet_template_carries_challenge_and_mandatory_rule() {
         )),
         None,
         Vec::new(),
-        0,
     );
     assert!(
         template

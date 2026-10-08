@@ -6,7 +6,7 @@ use bitcoin::hashes::Hash as _;
 use bitcoin_rs_consensus::{ConsensusError, UtxoView, ValidationEngine, verify_transaction};
 use bitcoin_rs_primitives::{
     Amount, Block, Hash256, LockTime, Network, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
-    Witness, consensus_bytes,
+    consensus_bytes,
 };
 use bitcoin_rs_script::VerifyFlags;
 
@@ -29,9 +29,8 @@ fn two_input_tx() -> (Tx, Coins) {
         inputs: [1, 2]
             .map(|byte| TxIn {
                 previous_output: outpoint(byte),
-                script_sig: Script::new(),
                 sequence: Sequence::MAX,
-                witness: Witness::new(),
+                ..TxIn::default()
             })
             .to_vec(),
         outputs: vec![TxOut {

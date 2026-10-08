@@ -5,30 +5,30 @@ use secp256k1::{Message, Parity, Scalar, XOnlyPublicKey, schnorr::Signature};
 use sha2::{Digest, Sha256};
 
 /// BIP341 annex tag prefix (Core `ANNEX_TAG`).
-pub const ANNEX_TAG: u8 = 0x50;
+pub(crate) const ANNEX_TAG: u8 = 0x50;
 
 /// Control block base size: 1 leaf-version/parity byte + 32-byte x-only internal key.
-pub const TAPROOT_CONTROL_BASE_SIZE: usize = 33;
+pub(crate) const TAPROOT_CONTROL_BASE_SIZE: usize = 33;
 
 /// Each merkle-path node is 32 bytes.
-pub const TAPROOT_CONTROL_NODE_SIZE: usize = 32;
+pub(crate) const TAPROOT_CONTROL_NODE_SIZE: usize = 32;
 
 /// Maximum number of merkle-path nodes in a control block (BIP341).
-pub const TAPROOT_CONTROL_MAX_NODE_COUNT: usize = 128;
+pub(crate) const TAPROOT_CONTROL_MAX_NODE_COUNT: usize = 128;
 
 /// Maximum control block size: base + up to 128 nodes.
-pub const TAPROOT_CONTROL_MAX_SIZE: usize =
+pub(crate) const TAPROOT_CONTROL_MAX_SIZE: usize =
     TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT;
 
 /// Mask isolating the leaf version from the control block's first byte.
-pub const TAPROOT_LEAF_MASK: u8 = 0xfe;
+pub(crate) const TAPROOT_LEAF_MASK: u8 = 0xfe;
 
 /// Leaf version for BIP342 tapscript.
-pub const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
+pub(crate) const TAPROOT_LEAF_TAPSCRIPT: u8 = 0xc0;
 
 /// Verifies a taproot key-path Schnorr signature.
 #[must_use]
-pub fn verify_taproot_keypath(
+pub(crate) fn verify_taproot_keypath(
     signature: &Signature,
     message: &Message,
     public_key: &XOnlyPublicKey,
@@ -67,7 +67,7 @@ fn compute_tapbranch_hash(prefix: &Sha256, a: &[u8; 32], b: &[u8; 32]) -> [u8; 3
 /// Mirrors Core's `ComputeTaprootMerkleRoot`. The caller must have already
 /// validated the control block size.
 #[must_use]
-pub fn compute_taproot_merkle_root(control: &[u8], tapleaf_hash: &Hash256) -> Hash256 {
+pub(crate) fn compute_taproot_merkle_root(control: &[u8], tapleaf_hash: &Hash256) -> Hash256 {
     let mut k = *tapleaf_hash.as_byte_array();
     let path = control.get(TAPROOT_CONTROL_BASE_SIZE..).unwrap_or(&[]);
     let nodes = path.as_chunks::<TAPROOT_CONTROL_NODE_SIZE>().0;
@@ -89,7 +89,11 @@ pub fn compute_taproot_merkle_root(control: &[u8], tapleaf_hash: &Hash256) -> Ha
 /// Returns `false` (not an error) when the internal pubkey is invalid or the
 /// tweak check fails, matching Core's behavior.
 #[must_use]
-pub fn verify_taproot_commitment(control: &[u8], program: &[u8], tapleaf_hash: &Hash256) -> bool {
+pub(crate) fn verify_taproot_commitment(
+    control: &[u8],
+    program: &[u8],
+    tapleaf_hash: &Hash256,
+) -> bool {
     // Internal x-only pubkey: bytes 1..33 of the control block.
     let Some(internal_bytes) = control.get(1..TAPROOT_CONTROL_BASE_SIZE) else {
         return false;
@@ -124,6 +128,7 @@ pub fn verify_taproot_commitment(control: &[u8], program: &[u8], tapleaf_hash: &
 
 #[cfg(test)]
 mod tests {
+    use bitcoin::hex::FromHex;
     use bitcoin_rs_primitives::Hash256;
     use secp256k1::{Keypair, Message, Parity, Scalar, Secp256k1, SecretKey, XOnlyPublicKey};
     use sha2::{Digest, Sha256};
@@ -309,12 +314,8 @@ mod tests {
         assert_eq!(merkle.as_byte_array(), fixture.tapleaf.as_byte_array());
     }
 
-    fn fixture_hex(text: &str) -> Result<Vec<u8>, std::num::ParseIntError> {
-        assert!(text.len().is_multiple_of(2));
-        (0..text.len())
-            .step_by(2)
-            .map(|offset| u8::from_str_radix(&text[offset..offset + 2], 16))
-            .collect()
+    fn fixture_hex(text: &str) -> Vec<u8> {
+        Vec::from_hex(text).unwrap_or_else(|error| panic!("bad fixture hex: {error}"))
     }
 
     struct CommitmentVector {
@@ -408,17 +409,17 @@ mod tests {
             output,
         } in BIP341_VECTORS
         {
-            let mut control = fixture_hex(control)?;
-            let leaf: [u8; 32] = fixture_hex(leaf)?.try_into().map_err(|_| "leaf width")?;
+            let mut control = fixture_hex(control);
+            let leaf: [u8; 32] = fixture_hex(leaf).try_into().map_err(|_| "leaf width")?;
             let leaf = Hash256::from_le_bytes(&leaf);
-            let expected_root = fixture_hex(root)?;
+            let expected_root = fixture_hex(root);
             let actual = compute_taproot_merkle_root(&control, &leaf);
             assert_eq!(actual.as_byte_array().as_slice(), expected_root);
             let mut engine = std::sync::LazyLock::force(&super::TAPTWEAK_ENGINE).clone();
             Digest::update(&mut engine, &control[1..33]);
             Digest::update(&mut engine, actual.as_byte_array());
-            assert_eq!(engine.finalize().as_slice(), fixture_hex(tweak)?);
-            let output = fixture_hex(output)?;
+            assert_eq!(engine.finalize().as_slice(), fixture_hex(tweak));
+            let output = fixture_hex(output);
             assert!(verify_taproot_commitment(&control, &output, &leaf));
             control[0] ^= 1;
             assert!(!verify_taproot_commitment(&control, &output, &leaf));

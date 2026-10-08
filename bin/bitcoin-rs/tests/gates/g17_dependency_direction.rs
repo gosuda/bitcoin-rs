@@ -12,6 +12,15 @@ use std::sync::Arc;
 use bitcoin_rs_chain::{BlockTreeReader, TipReader, TipSnapshot};
 use bitcoin_rs_chainstate::{Chainstate, ChainstateSnapshot};
 use bitcoin_rs_p2p::sync::SyncChain;
+use bitcoin_rs_p2p::sync::chain::{ReorgError, HistoricalAdvance, WindowApplyDisposition};
+
+pub fn sync_outcomes(
+    branch: bitcoin_rs_chainstate::reorg::ReorgError,
+    historical: bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance,
+    disposition: bitcoin_rs_chainstate::WindowApplyDisposition,
+) -> (ReorgError, HistoricalAdvance, WindowApplyDisposition) {
+    (branch, historical, disposition)
+}
 
 pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
     let header: TipReader = state.header_tip_reader();
@@ -23,7 +32,6 @@ pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
     let _: ChainstateSnapshot = state.snapshot();
     let _ = state.chain_snapshot();
     let _ = tree.read().tip();
-    let _ = state.read_block_tree().tip_height();
     // The read-only UTXO capability is what production consumers receive;
     // it must compile without the fixture seam.
     let _ = state.utxo_reader();
@@ -65,6 +73,92 @@ fn workspace_dependency_direction_is_one_way() {
             );
         }
     }
+}
+
+/// EMB-03: a real production embedder must not inherit fixture visibility
+/// through Cargo's workspace dev-feature unification.
+#[test]
+fn node_composition_root_is_not_a_production_embedding_api() -> anyhow::Result<()> {
+    let manifest = dependency_graph::workspace_root_manifest();
+    let root = manifest
+        .parent()
+        .ok_or_else(|| std::io::Error::other("workspace root"))?
+        .canonicalize()?;
+    let consumer = capability_compile::ProductionConsumer::with_node(&root)?;
+    let control = r"
+use bitcoin_rs_node::Node;
+pub fn observe(node: &Node) {
+    let _ = node.snapshot();
+    let _ = node.sync_progress();
+    let _ = node.mempool_info();
+}
+";
+    consumer.allow_reads(control)?;
+    consumer.deny(
+        &format!("{control}\nuse bitcoin_rs_node::state::NodeState;"),
+        &["E0603"],
+        "state",
+    )?;
+    consumer.deny(
+        &format!("{control}\nuse bitcoin_rs_node::tx_ingress::spawn_tx_ingress_consumer;"),
+        &["E0603"],
+        "tx_ingress",
+    )?;
+    Ok(())
+}
+/// Compile a consumer in a separate workspace: dev feature unification must
+/// not make persistence injection or synthetic worlds into production APIs.
+#[test]
+fn fixture_owners_expose_no_production_injection_or_synthetic_constructors() -> anyhow::Result<()> {
+    let manifest = dependency_graph::workspace_root_manifest();
+    let root = manifest
+        .parent()
+        .ok_or_else(|| std::io::Error::other("workspace root"))?
+        .canonicalize()?;
+    let consumer = capability_compile::ProductionConsumer::with_fixture_owners(&root)?;
+    consumer.allow_reads(&format!(
+        "{READ_CONTROL}\npub fn compose(handles: bitcoin_rs_rpc::context::ContextHandles) -> bitcoin_rs_rpc::context::Context {{ bitcoin_rs_rpc::context::Context::from_handles(handles) }}"
+    ))?;
+    for (source, codes, member) in [
+        (
+            "use bitcoin_rs_storage::PersistFault;",
+            &["E0432"][..],
+            "PersistFault",
+        ),
+        (
+            "use bitcoin_rs_storage::checkpoint::CheckpointFailpoint;",
+            &["E0432"][..],
+            "CheckpointFailpoint",
+        ),
+        (
+            "use bitcoin_rs_storage::footprint;",
+            &["E0432"][..],
+            "footprint",
+        ),
+        (
+            "pub fn denied(store: &dyn bitcoin_rs_storage::KvStore) { let _ = store.arm_persist_fault; }",
+            &["E0609", "E0599"][..],
+            "arm_persist_fault",
+        ),
+        (
+            "pub fn denied() { let _ = bitcoin_rs_chainstate::Chainstate::new; }",
+            &["E0599"][..],
+            "new",
+        ),
+        (
+            "pub fn denied() { let _ = bitcoin_rs_rpc::context::Context::new; }",
+            &["E0599"][..],
+            "new",
+        ),
+        (
+            "pub fn denied() { let _ = bitcoin_rs_rpc::context::ContextHandles::default; }",
+            &["E0599"][..],
+            "default",
+        ),
+    ] {
+        consumer.deny(source, codes, member)?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -124,6 +218,9 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
         "applied_tip_handle",
         "block_tree",
         "block_tree_handle",
+        // Tree reads go through `BlockTreeReader`; a facade read guard would
+        // be a second route to the same lock.
+        "read_block_tree",
         "transition_barrier",
         // Retained-history authority lives in storage/pruning; chainstate
         // keeps only `MandatoryRetention` and must not broker the registry.
@@ -142,13 +239,6 @@ fn chainstate_facade_exposes_no_production_raw_mutation_handles() -> anyhow::Res
     ] {
         consumer.deny(
             &format!("{READ_CONTROL}\npub fn denied() {{ let _ = Chainstate::{method}; }}"),
-            &["E0599"],
-            method,
-        )?;
-    }
-    for method in ["block_tree_mut", "set_tips"] {
-        consumer.deny(
-            &format!("{READ_CONTROL}\npub fn denied() {{ let _ = <dyn SyncChain>::{method}; }}"),
             &["E0599"],
             method,
         )?;

@@ -1,23 +1,14 @@
 //! Coherent chain-event publication and durable process epoch allocation.
 
 use anyhow::Context as _;
-use anyhow::Result;
-use anyhow::bail;
+use anyhow::{Result, bail};
 use bitcoin_rs_primitives::Hash256;
 use parking_lot::RwLock;
 use std::io;
 use std::io::Write as _;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A coherent, non-torn view of the applied chain tip.
-///
-/// The only writer replaces the whole cell under one `RwLock`, so a reader
-/// never observes a torn mix of two commit points. This is a live value: it is
-/// never persisted per-event. `epoch` changes only across process restarts,
-/// `sequence` advances once per committed connect/disconnect (`0` means no
-/// committed event yet this run), and the tip fields name the block that
-/// sequence was advanced for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChainSnapshot {
     /// Persisted process epoch, strictly monotonic per data dir.
@@ -31,7 +22,7 @@ pub struct ChainSnapshot {
 }
 
 /// Which committed chain event a [`ChainEventHint`] describes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum HintKind {
     /// A block was committed onto the tip.
     Connected,
@@ -41,10 +32,7 @@ pub enum HintKind {
 
 /// One committed chain event as sequenced by
 /// [`ChainEventPublisher::record`].
-///
-/// A connect or disconnect of one block. The `epoch` field is what makes a
-/// persisted consumer cursor `(epoch, sequence)` stale on restart.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ChainEventHint {
     /// Whether the block was added to or removed from the tip.
     pub kind: HintKind,
@@ -59,11 +47,6 @@ pub struct ChainEventHint {
 }
 
 /// Single write path for chain events.
-///
-/// [`Self::record`] advances the commit sequence, replaces the snapshot
-/// cell, and returns the committed event, in that order. Production wiring
-/// goes through `NodeState::open`; [`Self::detached`] exists for
-/// `Chainstate` composition in tests.
 pub struct ChainEventPublisher {
     epoch: u64,
     sequence: AtomicU64,
@@ -81,7 +64,6 @@ impl ChainEventPublisher {
     }
 
     /// Publisher detached from any node, for test handle composition only.
-    /// Anchors at an empty tip; records still sequence and publish normally.
     #[must_use]
     pub fn detached(epoch: u64) -> Self {
         Self::new(ChainSnapshot {
@@ -105,10 +87,6 @@ impl ChainEventPublisher {
     }
 
     /// Records one committed connect or disconnect.
-    ///
-    /// Publication order is fixed: advance the sequence, replace the snapshot
-    /// cell, then return the committed event. Sequence values start at `1`; a
-    /// snapshot with sequence `0` means no committed event yet.
     pub fn record(&self, kind: HintKind, height: u32, hash: Hash256) -> ChainEventHint {
         let sequence = self.sequence.fetch_add(1, Ordering::SeqCst) + 1;
         *self.snapshot.write() = ChainSnapshot {
@@ -137,9 +115,6 @@ const PROCESS_EPOCH_TEMP: &str = ".process-epoch.tmp";
 const PROCESS_EPOCH_MAX_BYTES: u64 = 32;
 
 /// Reads the persisted process epoch; `0` when the data dir has none yet.
-///
-/// A corrupt file is an error, not a reset: silently restarting the counter
-/// would let a new run reuse an epoch old consumer cursors live in.
 fn load_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     let bytes = match bitcoin_rs_storage::checkpoint::fs::read_file(
         dir,
@@ -160,14 +135,6 @@ fn load_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
 }
 
 /// Allocates the next process epoch, durably, before first use.
-///
-/// The persistent lock serializes the complete load → increment → temporary
-/// file sync → rename → data-directory sync transaction across processes.
-/// Keeping its descriptor alive through the final directory sync matters:
-/// opening the data directory does not freeze its namespace or mount topology.
-/// The epoch itself lives outside the re-writable checkpoint tree, so a
-/// checkpoint wipe or resync can never regress it. A crash before the rename
-/// may leave a temporary file; gaps are fine, but reuse is not.
 pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     use cap_fs_ext::FollowSymlinks;
     use cap_fs_ext::OpenOptionsFollowExt as _;
@@ -210,7 +177,8 @@ pub fn allocate_process_epoch(dir: &cap_std::fs::Dir) -> Result<u64> {
     if !lock_metadata.is_file() {
         bail!("process epoch lock {PROCESS_EPOCH_LOCK_FILE} is not a regular file");
     }
-    rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+    let lock = lock.into_std();
+    lock.lock()
         .with_context(|| format!("lock process epoch file {PROCESS_EPOCH_LOCK_FILE}"))?;
 
     let epoch = load_process_epoch(dir)?

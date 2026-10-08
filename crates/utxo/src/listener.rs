@@ -4,55 +4,35 @@
 //! machinery internal to this crate: the only listener the node attaches is
 //! [`CoinStatsListener`](crate::stats::CoinStatsListener), through
 //! [`UtxoSet::track_coin_stats`](crate::UtxoSet::track_coin_stats).
+//!
+//! A commit that touches exactly one shard delivers its same-transaction runs
+//! directly through [`CoinStatsListener::on_insert_coins`] and
+//! [`CoinStatsListener::on_remove_coins`]; a commit that touches two or more
+//! shards collects every shard's events and delivers them once after all
+//! shard attempts complete, through
+//! [`CoinStatsListener::on_committed_event_batches`]. The batch callback
+//! delivers every event for a mutation that landed, even when a shard fails,
+//! before that shard error is returned.
+//!
+//! [`CoinStatsListener::on_insert_coins`]: crate::stats::CoinStatsListener::on_insert_coins
+//! [`CoinStatsListener::on_remove_coins`]: crate::stats::CoinStatsListener::on_remove_coins
+//! [`CoinStatsListener::on_committed_event_batches`]: crate::stats::CoinStatsListener::on_committed_event_batches
+//!
+//! Multi-shard batch order and chunking are not semantic. Batches arrive in
+//! shard order and each groups one shard's same-transaction runs, but they may
+//! be chunked, merged, or split without changing the mutations they
+//! represent. A listener must derive the same final state from direct
+//! single-shard batches and collected multi-shard batches. The one ordering
+//! guarantee that always holds within a commit: the removal of an outpoint is
+//! delivered before the insertion that replaces it — overwrite removals
+//! arrive as one-element `RemoveBatch` events ahead of their replacement
+//! `InsertBatch`.
 
 use bitcoin_rs_primitives::{OutPoint, TxOut};
 use smallvec::SmallVec;
 
-/// Receives UTXO mutations committed to durable shard state.
-///
-/// The notification interface is batch-only and order-independent. A commit
-/// that touches exactly one shard delivers its same-transaction runs directly
-/// through [`Self::on_insert_coins`] and [`Self::on_remove_coins`]; a commit
-/// that touches two or more shards collects every shard's events and delivers
-/// them once, after all shard mutations have landed, through
-/// [`Self::on_committed_event_batches`].
-///
-/// Multi-shard batch order and chunking are not semantic. Batches arrive in
-/// shard order and each groups one shard's same-transaction runs, but they may
-/// be chunked, merged, or split without changing the mutations they
-/// represent. A listener must derive the same final state from direct
-/// single-shard batches and collected multi-shard batches. The one ordering
-/// guarantee that always holds within a commit: the removal of an outpoint is
-/// delivered before the insertion that replaces it — overwrite removals
-/// arrive as one-element `RemoveBatch` events ahead of their replacement
-/// `InsertBatch`.
-pub(crate) trait UtxoChangeListener {
-    /// Called after a run of same-transaction outputs has been inserted into
-    /// its shard.
-    fn on_insert_coins(&self, insertions: &[UtxoInserted<'_>]);
-
-    /// Called after a run of same-transaction outputs has been removed from
-    /// its shard. Overwrite removals arrive as one-element batches ordered
-    /// ahead of their replacement insertions.
-    fn on_remove_coins(&self, removals: &[UtxoRemoved]);
-
-    /// Called once with every collected shard event batch for a multi-shard
-    /// commit, synchronously, after the shard mutations have landed and
-    /// before any shard error is returned.
-    ///
-    /// Every event for a mutation that landed is delivered here even when a
-    /// later shard failed: a partial commit stays fatal and never rolls back,
-    /// so the listener must observe exactly what the shards now hold.
-    fn on_committed_event_batches(&self, batches: &[UtxoChangeEvents<'_>]);
-
-    /// Returns the current `MuHash3072` snapshot trailer, when this listener tracks one.
-    fn muhash3072(&self) -> Option<[u8; 384]> {
-        None
-    }
-}
-
 /// One inserted UTXO event delivered to a change listener.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct UtxoInserted<'a> {
     /// Outpoint that was inserted.
     pub op: &'a OutPoint,
@@ -83,7 +63,7 @@ impl<'a> UtxoInserted<'a> {
 }
 
 /// One removed UTXO event delivered to a change listener.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct UtxoRemoved {
     /// Outpoint that was removed.
     pub op: OutPoint,
@@ -115,7 +95,7 @@ enum UtxoChangeEvent<'a> {
 
 /// Events collected from the shards one multi-shard commit touched.
 ///
-/// Handed to [`UtxoChangeListener::on_committed_event_batches`] after every
+/// Handed to [`CoinStatsListener`](crate::stats::CoinStatsListener) after every
 /// shard mutation has landed. Batch order and chunking are not semantic:
 /// batches arrive in shard order and each groups one shard's
 /// same-transaction runs, but a listener must derive the same final state
@@ -142,9 +122,9 @@ pub(crate) enum UtxoCommittedEvent<'batch, 'coin> {
 }
 
 impl<'a> UtxoChangeEvents<'a> {
-    pub(crate) fn with_capacity_hint(insertions: usize, removals: usize) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            events: Vec::with_capacity(usize::from(insertions > 0) + usize::from(removals > 0)),
+            events: Vec::new(),
             operation_count: 0,
         }
     }

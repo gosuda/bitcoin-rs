@@ -5,10 +5,10 @@ use super::chain::HeaderAdmission;
 use super::chain::SyncChainError;
 use super::peers::is_peer_fault;
 use crate::InboundBlock;
-use crate::RejectDelivery;
-use crate::StagedBlock;
+use crate::block_stager::StagedBlock;
 use crate::connection::PeerSource;
 use crate::download_window::INBOUND_BLOCK_STAGE_CHUNK;
+use crate::download_window::RejectDelivery;
 use bitcoin_rs_chain::BlockTree;
 use bitcoin_rs_chain::ChainError;
 use bitcoin_rs_chain::NodeId;
@@ -94,12 +94,12 @@ impl BlockSync {
                 let tree = self.chain.block_tree();
                 dropped
                     .iter()
-                    .map(|dropped| {
+                    .map(|hash| {
                         let height = tree
-                            .lookup(dropped.hash)
+                            .lookup(*hash)
                             .and_then(|node_id| tree.node(node_id).ok())
                             .map(|node| node.height);
-                        (dropped.hash, height)
+                        (*hash, height)
                     })
                     .collect()
             };
@@ -129,17 +129,19 @@ impl BlockSync {
         }
     }
 
-    pub(super) fn fill_inbound_block_chunk(
+    fn fill_inbound_block_chunk(
         &self,
         blocks: &mut Vec<InboundBlock>,
         saw_block: &mut bool,
         next_expected_hash: &mut Option<Hash256>,
         apply_head_check: &mut Option<Hash256>,
     ) -> bool {
-        let receiver = self.inbound_blocks_rx.lock();
         while blocks.len() < INBOUND_BLOCK_STAGE_CHUNK {
-            let Ok(inbound) = receiver.try_recv() else {
+            let Ok(inbound) = self.inbound_blocks_rx.try_recv() else {
                 return true;
+            };
+            let Some(inbound) = self.receive_historical(inbound) else {
+                continue;
             };
             if !*saw_block {
                 *next_expected_hash = self.next_expected_block_hash();
@@ -392,7 +394,7 @@ impl BlockSync {
     ///   discarded with no retry and is not counted.
     /// INVARIANT: an unrequested body whose tree-resolved node fails an
     ///   admission clause is never staged.
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     pub(super) fn buffer_received_block_chunk(
         &self,
         blocks: &mut Vec<InboundBlock>,
@@ -634,7 +636,7 @@ impl BlockSync {
                     };
                     let dropped_heights = match &staged {
                         StagedBlock::Memory { dropped, .. } => {
-                            dropped.iter().map(|entry| resolve(entry.hash)).collect()
+                            dropped.iter().map(|entry| resolve(*entry)).collect()
                         }
                         _ => Vec::new(),
                     };
@@ -666,12 +668,12 @@ impl BlockSync {
                                 DeliveryCredit::Delivery(pending_height),
                             ));
                         }
-                        for (entry, height) in dropped.into_iter().zip(dropped_heights) {
-                            window.requeue_for_retry(&entry.hash, height, now);
+                        for (dropped_hash, height) in dropped.into_iter().zip(dropped_heights) {
+                            window.requeue_for_retry(&dropped_hash, height, now);
                             retry_count = retry_count.saturating_add(1);
                         }
                     }
-                    StagedBlock::DroppedForRetry { dropped } => {
+                    StagedBlock::DroppedForRetry { hash } => {
                         // Count-evicted before staging: release what the
                         // window holds without a cursor rewind. Unlike the
                         // `Memory` arm's evictions — staged victims whose
@@ -680,7 +682,7 @@ impl BlockSync {
                         // staged, so a live pending still carries its
                         // request height and an unrequested body must not
                         // move the cursor at all.
-                        window.requeue_for_retry(&dropped.hash, None, now);
+                        window.requeue_for_retry(&hash, None, now);
                         retry_count = retry_count.saturating_add(1);
                         tracing::warn!(%hash, "block sync: received block buffer full; dropping block for retry");
                     }

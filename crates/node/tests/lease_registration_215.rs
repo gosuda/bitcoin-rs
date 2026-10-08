@@ -15,7 +15,7 @@ use bitcoin_rs_p2p::{Message, PeerInfo, PeerLease, PeerTable};
 use bitcoin_rs_utxo::UtxoSet;
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
 use crossbeam_channel::unbounded;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
     let block_tree = Arc::new(RwLock::new(BlockTree::new()));
@@ -40,9 +40,10 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         Arc::new(handles),
         bitcoin_rs_node::ChainFollowers::noop(),
         peer_table,
-        Arc::new(Mutex::new(headers_rx)),
-        Arc::new(Mutex::new(blocks_rx)),
+        headers_rx,
+        blocks_rx,
         ibd,
+        None,
     )
 }
 

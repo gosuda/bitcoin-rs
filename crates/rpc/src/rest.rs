@@ -9,7 +9,7 @@
 use alloc::sync::Arc;
 use std::str::FromStr;
 
-use bitcoin::hex::FromHex as _;
+use bitcoin::hex::{DisplayHex as _, FromHex as _};
 use bitcoin_rs_primitives::{
     Block, BlockHash, Hash256, Header, TxOut, Txid, consensus_bytes, deserialize,
 };
@@ -18,7 +18,6 @@ use bitcoin_rs_primitives::{
 use bitcoin_rs_primitives::{Amount, CompactTarget, LockTime, Script, Sequence, Witness};
 use sonic_rs::{JsonValueTrait as _, Value, json};
 
-use crate::compat::convert::hex_encode;
 use crate::context::{AppliedView, Context};
 use crate::error::RpcError;
 use crate::handlers::chain::getblockchaininfo;
@@ -53,7 +52,7 @@ pub const REGISTRATIONS: [&str; 12] = [
 ];
 
 /// HTTP response produced by a REST route.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct Response {
     /// HTTP status code.
     pub status: u16,
@@ -65,7 +64,6 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
-#[derive(Clone)]
 struct HeaderRecord {
     hash: Hash256,
     height: u32,
@@ -131,7 +129,7 @@ pub fn route(ctx: &Arc<Context>, path: &str, query: &str, enabled: bool) -> Resp
 fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
     let (hash_text, format) = split_format(suffix);
     let Ok(txid) = Txid::from_str(hash_text) else {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+        return bad_request(format!("Invalid hash: {hash_text}"));
     };
     let Some(format) = format else {
         return format_not_found(available_formats());
@@ -140,7 +138,7 @@ fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
     match format {
         "json" => match getrawtransaction(ctx, &json!([txid_text, true])) {
             Ok(value) => text_response("application/json", sonic_bytes(&value)),
-            Err(RpcError::NotFound(_)) => not_found_owned(format!("{txid_text} not found")),
+            Err(RpcError::NotFound(_)) => not_found_with(format!("{txid_text} not found")),
             Err(error) => json_response(Err(error)),
         },
         "hex" | "bin" => match getrawtransaction(ctx, &json!([txid_text, false])) {
@@ -153,7 +151,7 @@ fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
                     binary_response("application/octet-stream", &bytes)
                 }
             }
-            Err(RpcError::NotFound(_)) => not_found_owned(format!("{txid_text} not found")),
+            Err(RpcError::NotFound(_)) => not_found_with(format!("{txid_text} not found")),
             Err(error) => json_response(Err(error)),
         },
         _ => format_not_found(available_formats()),
@@ -165,13 +163,13 @@ fn route_tx(ctx: &Arc<Context>, suffix: &str) -> Response {
 fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response {
     let (hash_text, format) = split_format(suffix);
     let Ok(hash) = Hash256::from_str(hash_text) else {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+        return bad_request(format!("Invalid hash: {hash_text}"));
     };
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
     let Some(record) = ctx.chain.record_for_hash(hash) else {
-        return not_found_owned(format!("{hash_text} not found"));
+        return not_found_with(format!("{hash_text} not found"));
     };
     let Some(_render) = ctx.try_acquire_rest_render() else {
         return service_unavailable("too many concurrent full-block REST requests");
@@ -184,12 +182,12 @@ fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response
         "bin" => binary_response("application/octet-stream", &body),
         "hex" => text_response(
             "text/plain",
-            format!("{}\n", hex_encode(&body)).into_bytes(),
+            format!("{}\n", body.to_lower_hex_string()).into_bytes(),
         ),
         "json" => {
             let block = match deserialize::<Block>(&body) {
                 Ok(block) => block,
-                Err(_) => return not_found_owned(format!("{hash_text} not found")),
+                Err(_) => return not_found_with(format!("{hash_text} not found")),
             };
             let view = ctx.chain.applied_view();
             let context = build_chain_context(ctx, &view, &record, &block.header);
@@ -211,13 +209,13 @@ fn route_block(ctx: &Arc<Context>, suffix: &str, with_details: bool) -> Response
 fn route_block_part(ctx: &Arc<Context>, suffix: &str) -> Response {
     let (hash_text, format) = split_format(suffix);
     let Ok(hash) = Hash256::from_str(hash_text) else {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+        return bad_request(format!("Invalid hash: {hash_text}"));
     };
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
     let Some(record) = ctx.chain.record_for_hash(hash) else {
-        return not_found_owned(format!("{hash_text} not found"));
+        return not_found_with(format!("{hash_text} not found"));
     };
     let Some(_render) = ctx.try_acquire_rest_render() else {
         return service_unavailable("too many concurrent full-block REST requests");
@@ -230,7 +228,7 @@ fn route_block_part(ctx: &Arc<Context>, suffix: &str) -> Response {
         "bin" => binary_response("application/octet-stream", &body),
         "hex" => text_response(
             "text/plain",
-            format!("{}\n", hex_encode(&body)).into_bytes(),
+            format!("{}\n", body.to_lower_hex_string()).into_bytes(),
         ),
         _ => format_not_found(available_formats()),
     }
@@ -243,7 +241,7 @@ fn bounded_block_body(ctx: &Context, record: &BlockRecord) -> Result<Vec<u8>, Re
         ));
     }
     let Some(body) = ctx.chain.block_body_bytes(record) else {
-        return Err(not_found_owned(format!(
+        return Err(not_found_with(format!(
             "{} not available (pruned data)",
             record.hash
         )));
@@ -316,7 +314,7 @@ fn route_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
         Err(response) => return response,
     };
     let Ok(hash) = Hash256::from_str(hash_text) else {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+        return bad_request(format!("Invalid hash: {hash_text}"));
     };
     let Some(format) = format else {
         return not_found_with("output format not found");
@@ -342,7 +340,7 @@ fn route_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
         "hex" => {
             let body = records
                 .iter()
-                .map(|record| hex_encode(&consensus_bytes(&record.header)))
+                .map(|record| consensus_bytes(&record.header).to_lower_hex_string())
                 .collect::<String>();
             text_response("text/plain", body.into_bytes())
         }
@@ -353,7 +351,7 @@ fn route_headers(ctx: &Arc<Context>, suffix: &str, query: &str) -> Response {
                 body
             }),
         ),
-        _ => bad_request_owned(format!("Invalid hash: {hash_text}")),
+        _ => bad_request(format!("Invalid hash: {hash_text}")),
     }
 }
 
@@ -378,7 +376,7 @@ fn release_applied_capture() {
 
 /// Arms a one-shot closure that runs immediately after the next route capture.
 #[cfg(test)]
-pub(crate) fn arm_capture_hook(hook: impl FnOnce() + 'static) {
+fn arm_capture_hook(hook: impl FnOnce() + 'static) {
     AFTER_APPLIED_CAPTURE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
@@ -486,12 +484,8 @@ fn route_getutxos(ctx: &Arc<Context>, suffix: &str) -> Response {
             "text/plain",
             format!(
                 "{}\n",
-                hex_encode(&serialize_getutxos_bin(
-                    active_height,
-                    active_hash,
-                    &bitmap,
-                    &outs
-                ))
+                serialize_getutxos_bin(active_height, active_hash, &bitmap, &outs)
+                    .to_lower_hex_string()
             )
             .into_bytes(),
         ),
@@ -525,10 +519,10 @@ fn route_deploymentinfo(ctx: &Arc<Context>, suffix: &str) -> Response {
     } else {
         let hash_text = hash_text.strip_prefix('/').unwrap_or(hash_text);
         let Ok(hash) = Hash256::from_str(hash_text) else {
-            return bad_request_owned(format!("Invalid hash: {hash_text}"));
+            return bad_request(format!("Invalid hash: {hash_text}"));
         };
         let Some(record) = ctx.chain.record_for_hash(hash) else {
-            return bad_request_owned("Block not found".to_owned());
+            return bad_request("Block not found");
         };
         json!({
             "hash": hash.to_string_be(),
@@ -543,13 +537,13 @@ fn route_deploymentinfo(ctx: &Arc<Context>, suffix: &str) -> Response {
 fn route_blockhash_by_height(ctx: &Arc<Context>, suffix: &str) -> Response {
     let (height_text, format) = split_format(suffix);
     let Ok(height) = height_text.parse::<u32>() else {
-        return bad_request_owned(format!("Invalid height: {height_text}"));
+        return bad_request(format!("Invalid height: {height_text}"));
     };
     let Some(format) = format else {
         return format_not_found(available_formats());
     };
     let Some(hash) = ctx.chain.block_hash_at_height(height) else {
-        return not_found_owned("Block height out of range".to_owned());
+        return not_found_with("Block height out of range");
     };
     match format {
         "bin" => binary_response("application/octet-stream", hash.to_le_bytes().as_slice()),
@@ -572,12 +566,12 @@ fn route_blockhash_by_height(ctx: &Arc<Context>, suffix: &str) -> Response {
 fn route_spent_txouts(suffix: &str) -> Response {
     let (hash_text, format) = split_format(suffix);
     if Hash256::from_str(hash_text).is_err() {
-        return bad_request_owned(format!("Invalid hash: {hash_text}"));
+        return bad_request(format!("Invalid hash: {hash_text}"));
     }
     if format.is_none() {
         return format_not_found(available_formats());
     }
-    not_found_owned(format!("{hash_text} undo not available"))
+    not_found_with(format!("{hash_text} undo not available"))
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +681,7 @@ fn parse_count(query: &str) -> Result<u32, Response> {
 }
 
 fn invalid_count(value: &str) -> Response {
-    bad_request_owned(format!(
+    bad_request(format!(
         "Header count is invalid or out of acceptable range (1-2000): {value}"
     ))
 }
@@ -721,7 +715,7 @@ fn parse_getutxos_outpoints(path: &str) -> Result<(bool, Vec<(Txid, u32)>), Resp
         return Err(bad_request("Error: empty request"));
     }
     if outpoints.len() > MAX_GETUTXOS_OUTPOINTS {
-        return Err(bad_request_owned(format!(
+        return Err(bad_request(format!(
             "Error: max outpoints exceeded (max: {MAX_GETUTXOS_OUTPOINTS}, tried: {})",
             outpoints.len()
         )));
@@ -875,7 +869,7 @@ fn available_formats() -> &'static str {
 }
 
 fn format_not_found(available: &str) -> Response {
-    not_found_owned(format!("output format not found (available: {available})"))
+    not_found_with(format!("output format not found (available: {available})"))
 }
 
 fn query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
@@ -923,7 +917,7 @@ pub(crate) fn json_ok<T: serde::Serialize>(value: T) -> Response {
     }
 }
 
-pub(crate) fn json_response(result: Result<Value, RpcError>) -> Response {
+fn json_response(result: Result<Value, RpcError>) -> Response {
     match result {
         Ok(value) => text_response("application/json", sonic_bytes(&value)),
         Err(error) => match error {
@@ -948,62 +942,34 @@ pub(crate) fn text_response(content_type: &'static str, body: Vec<u8>) -> Respon
     }
 }
 
-pub(crate) fn binary_response(content_type: &'static str, body: &[u8]) -> Response {
+fn binary_response(content_type: &'static str, body: &[u8]) -> Response {
     text_response(content_type, body.to_vec())
 }
 
-pub(crate) fn service_unavailable(message: &'static str) -> Response {
+pub(crate) fn service_unavailable(message: impl Into<String>) -> Response {
     Response {
         status: 503,
         reason: "Service Unavailable",
         content_type: "text/plain",
-        body: message.as_bytes().to_vec(),
+        body: message.into().into_bytes(),
     }
 }
 
-/// Answers 503 with a message built at the failure site.
-pub(crate) fn service_unavailable_owned(message: String) -> Response {
-    Response {
-        status: 503,
-        reason: "Service Unavailable",
-        content_type: "text/plain",
-        body: message.into_bytes(),
-    }
-}
-
-pub(crate) fn internal_error(message: &'static str) -> Response {
+pub(crate) fn internal_error(message: impl Into<String>) -> Response {
     Response {
         status: 500,
         reason: "Internal Server Error",
         content_type: "text/plain",
-        body: message.as_bytes().to_vec(),
+        body: message.into().into_bytes(),
     }
 }
 
-/// Answers 500 with a message built at the failure site.
-pub(crate) fn internal_error_owned(message: String) -> Response {
-    Response {
-        status: 500,
-        reason: "Internal Server Error",
-        content_type: "text/plain",
-        body: message.into_bytes(),
-    }
-}
-pub(crate) fn bad_request(message: &'static str) -> Response {
+pub(crate) fn bad_request(message: impl Into<String>) -> Response {
     Response {
         status: 400,
         reason: "Bad Request",
         content_type: "text/plain",
-        body: message.as_bytes().to_vec(),
-    }
-}
-
-pub(crate) fn bad_request_owned(message: String) -> Response {
-    Response {
-        status: 400,
-        reason: "Bad Request",
-        content_type: "text/plain",
-        body: message.into_bytes(),
+        body: message.into().into_bytes(),
     }
 }
 
@@ -1011,21 +977,17 @@ pub(crate) fn not_found() -> Response {
     not_found_with("not found")
 }
 
-pub(crate) fn not_found_with(message: &'static str) -> Response {
-    not_found_owned(message.to_owned())
-}
-
-pub(crate) fn not_found_owned(message: String) -> Response {
+fn not_found_with(message: impl Into<String>) -> Response {
     Response {
         status: 404,
         reason: "Not Found",
         content_type: "text/plain",
-        body: message.into_bytes(),
+        body: message.into().into_bytes(),
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::*;
     use bitcoin_rs_chain::{NodeStatus, TipSnapshot};
@@ -1319,7 +1281,7 @@ mod tests {
             true,
         );
         let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
-        assert!(values.is_empty());
+        assert_eq!(values, Vec::<sonic_rs::Value>::new());
     }
 
     #[test]
@@ -1423,7 +1385,7 @@ mod tests {
             true,
         );
         let values: Vec<Value> = sonic_rs::from_slice(&response.body).expect("headers JSON");
-        assert!(values.is_empty());
+        assert_eq!(values, Vec::<sonic_rs::Value>::new());
     }
 
     #[test]
@@ -1566,7 +1528,7 @@ mod tests {
         let coinbase = Tx {
             version: 1,
             inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::default(), 0xffff_ffff),
+                previous_output: OutPoint::null(),
                 script_sig: vec![0x51].into(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
@@ -1615,7 +1577,7 @@ mod tests {
         let path = format!("/rest/headers/{}.hex", genesis.block_hash());
         let response = route(&ctx, &path, "count=1", true);
         assert_eq!(response.status, 200);
-        assert_eq!(response.body, hex_encode(&expected).into_bytes());
+        assert_eq!(response.body, expected.to_lower_hex_string().into_bytes());
     }
 
     /// A log-only hash remains an empty success in every REST format.

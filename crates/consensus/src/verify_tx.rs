@@ -6,7 +6,7 @@ use bitcoin_rs_primitives::{Amount, OutPoint, Sequence, Tx, TxOut};
 
 use crate::block_view::BlockView;
 use crate::sigops::transaction_sigop_cost;
-use bitcoin_rs_script::Interpreter;
+use bitcoin_rs_script::PreparedTransaction;
 use bitcoin_rs_script::VerifyFlags;
 use rayon::prelude::*;
 
@@ -19,8 +19,7 @@ const SEQUENCE_FINAL: u32 = 0xffff_ffff;
 const MIN_COINBASE_SCRIPT_SIG_SIZE: usize = 2;
 const MAX_COINBASE_SCRIPT_SIG_SIZE: usize = 100;
 
-/// Number of blocks after a coinbase that its outputs become spendable.
-pub const COINBASE_MATURITY: u32 = 100;
+pub(crate) const COINBASE_MATURITY: u32 = 100;
 
 // Width of the script-verification pool. 16 was chosen on the belief that SMT
 // siblings slow secp256k1 down past that width. A full-verification replay of
@@ -74,8 +73,7 @@ static SCRIPT_VERIFY_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
         .unwrap_or_else(|error| panic!("failed to build script verification pool: {error}"))
 });
 
-/// Returns `true` iff the transaction is locktime-final at `block_height` and
-/// the timestamp cutoff.
+/// Tests finality against the block height or caller's timestamp cutoff.
 #[must_use]
 pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
     let lock_time = tx.lock_time.to_consensus();
@@ -97,8 +95,7 @@ pub fn is_final_tx(tx: &Tx, block_height: u32, locktime_cutoff: u32) -> bool {
         .all(|input| input.sequence == Sequence::from_consensus(SEQUENCE_FINAL))
 }
 
-/// Verifies that a coinbase transaction's scriptSig length is within consensus
-/// bounds.
+/// Checks coinbase scriptSig consensus bounds.
 pub fn verify_coinbase_script_sig_size(tx: &Tx) -> Result<(), ConsensusError> {
     if let Some(input) = tx.inputs.first().filter(|_| is_coinbase(tx)) {
         let len = input.script_sig.len();
@@ -132,8 +129,7 @@ pub fn check_coinbase_maturity(
     Ok(())
 }
 
-/// Verifies non-contextual and input-script transaction rules for a
-/// transaction.
+/// Verifies structural, contextual and script transaction rules.
 pub fn verify_transaction(
     tx: &Tx,
     prevouts: &impl UtxoView,
@@ -153,8 +149,7 @@ pub fn verify_transaction(
     )
 }
 
-/// Verifies non-script transaction rules for a transaction with a caller-
-/// selected timestamp cutoff.
+/// Verifies non-script rules with the caller's timestamp cutoff.
 pub fn verify_transaction_non_script(
     tx: &Tx,
     prevouts: &impl UtxoView,
@@ -296,23 +291,12 @@ fn finalize_tx_value_and_sigops(
 }
 
 pub(crate) fn verify_input_script_native(
+    prepared: &PreparedTransaction<'_>,
     input_index: usize,
-    spent_outputs: &[TxOut],
-    tx: &Tx,
     flags: VerifyFlags,
 ) -> Result<(), ConsensusError> {
-    let input = &tx.inputs[input_index];
-    let prevout = &spent_outputs[input_index];
-    Interpreter
-        .execute_with_prevouts(
-            &prevout.script_pubkey,
-            &input.script_sig,
-            &input.witness,
-            flags,
-            spent_outputs,
-            tx,
-            input_index,
-        )
+    prepared
+        .verify_input(input_index, flags)
         .map_err(|error| ConsensusError::Script {
             input_index,
             reason: error.to_string(),
@@ -322,8 +306,6 @@ pub(crate) fn verify_input_script_native(
 }
 
 struct PreparedTx<'b> {
-    tx: &'b Tx,
-    spent_outputs: Vec<TxOut>,
     pre_error: Option<ConsensusError>,
     post_error: Option<ConsensusError>,
     checks_start: usize,
@@ -336,15 +318,12 @@ struct InputCheck {
     input_index: usize,
 }
 
-/// Sub-stage durations of [`verify_block_input_scripts`], reported to the
-/// caller.
+/// Preparation and execution durations, in seconds.
 #[derive(Clone, Copy, Default)]
 pub struct ScriptStageTimings {
-    /// Serial per-transaction preparation (`prepare_block_input_checks`), in
-    /// seconds.
+    /// Serial preparation.
     pub prepare_seconds: f64,
-    /// Input-check fan-out (rayon pool install plus join, or the serial fallback
-    /// for small blocks), excluding the ordered error scan, in seconds.
+    /// Script execution, excluding the ordered error scan.
     pub parallel_seconds: f64,
 }
 
@@ -361,17 +340,12 @@ pub fn verify_block_input_scripts(
     let unit = prepare_block_script_checks(view, height, locktime_cutoff, flags, parsed)?;
     timings.prepare_seconds = prepare_started.elapsed().as_secs_f64();
 
+    // Exclude the ordered error scan from script execution timing.
+    let unit_slice = core::slice::from_ref(&unit);
     let parallel_started = Instant::now();
-    let mut set_parallel_seconds = || {
-        timings.parallel_seconds = parallel_started.elapsed().as_secs_f64();
-    };
-    let mut before_serial_scan = || {};
-    let verdict = verify_prepared_units_with_hooks(
-        core::slice::from_ref(&unit),
-        &mut set_parallel_seconds,
-        &mut before_serial_scan,
-    );
-    verdict.map_err(|failure| failure.error)
+    let results = run_prepared_checks(unit_slice);
+    timings.parallel_seconds = parallel_started.elapsed().as_secs_f64();
+    first_unit_failure(unit_slice, &results).map_err(|failure| failure.error)
 }
 
 /// One block's script checks, prepared but not executed.
@@ -381,12 +355,12 @@ pub struct BlockScriptChecks<'b> {
     flags: VerifyFlags,
 }
 
-/// Which unit failed, and how.
+/// Unit index and transaction verdict of the first batch failure.
 #[derive(Debug)]
 pub struct BatchScriptFailure {
     /// Position of the failing unit.
     pub unit: usize,
-    /// The failure, identical to what the single-block path would report.
+    /// Same verdict as the single-block path.
     pub error: ConsensusError,
 }
 
@@ -418,16 +392,26 @@ where
     })
 }
 
-fn verify_prepared_units_with_hooks<AfterParallel, BeforeSerialScan>(
+/// Returns checks in flattened unit order, using the pool above the threshold.
+fn run_prepared_checks(units: &[BlockScriptChecks<'_>]) -> Vec<Result<(), ConsensusError>> {
+    let run = |(unit_index, check): &(usize, &InputCheck)| check_input(&units[*unit_index], check);
+    let flat: Vec<(usize, &InputCheck)> = units
+        .iter()
+        .enumerate()
+        .flat_map(|(index, unit)| unit.checks.iter().map(move |check| (index, check)))
+        .collect();
+    if flat.len() < MIN_PARALLEL_SCRIPT_CHECKS {
+        flat.iter().map(run).collect()
+    } else {
+        SCRIPT_VERIFY_POOL.install(|| flat.par_iter().map(run).collect())
+    }
+}
+
+/// Scans fixed-offset result slices in unit order, failing closed on malformed layouts.
+fn first_unit_failure(
     units: &[BlockScriptChecks<'_>],
-    after_parallel: &mut AfterParallel,
-    before_serial_scan: &mut BeforeSerialScan,
-) -> Result<(), BatchScriptFailure>
-where
-    AfterParallel: FnMut(),
-    BeforeSerialScan: FnMut(),
-{
-    // Fixed offsets keep result slices independent of scan order.
+    results: &[Result<(), ConsensusError>],
+) -> Result<(), BatchScriptFailure> {
     let mut offsets = Vec::with_capacity(units.len());
     let mut total = 0_usize;
     for unit in units {
@@ -437,26 +421,6 @@ where
         };
         total = next;
     }
-
-    let run = |(unit_index, check): &(usize, &InputCheck)| {
-        let unit = &units[*unit_index];
-        check_input(&unit.prepared, check, unit.flags)
-    };
-    let flat: Vec<(usize, &InputCheck)> = units
-        .iter()
-        .enumerate()
-        .flat_map(|(index, unit)| unit.checks.iter().map(move |check| (index, check)))
-        .collect();
-    let results: Vec<Result<(), ConsensusError>> = if total < MIN_PARALLEL_SCRIPT_CHECKS {
-        flat.iter().map(run).collect()
-    } else {
-        SCRIPT_VERIFY_POOL.install(|| flat.par_iter().map(run).collect())
-    };
-
-    // Timing must stop here: the ordered scan below is serial attribution work,
-    // not parallel script execution.
-    after_parallel();
-    before_serial_scan();
 
     for (unit_index, unit) in units.iter().enumerate() {
         let from = offsets[unit_index];
@@ -482,9 +446,8 @@ where
 
 /// Executes prepared script checks and reports the first failure in unit order.
 pub fn verify_prepared_units(units: &[BlockScriptChecks<'_>]) -> Result<(), BatchScriptFailure> {
-    let mut after = || {};
-    let mut before = || {};
-    verify_prepared_units_with_hooks(units, &mut after, &mut before)
+    let results = run_prepared_checks(units);
+    first_unit_failure(units, &results)
 }
 
 /// Reports an internal prepared-check layout mismatch.
@@ -497,8 +460,7 @@ fn layout_failure(unit: usize) -> BatchScriptFailure {
     }
 }
 
-/// First failure within one prepared block, in transaction order with phase
-/// `pre < script < post`.
+/// First transaction failure, with `pre < script < post` precedence.
 fn first_prepared_error(
     prepared: &[PreparedTx<'_>],
     results: &[Result<(), ConsensusError>],
@@ -544,8 +506,6 @@ fn prepare_block_input_checks<'b>(
             Ok(Some(prep)) => prep,
             Ok(None) => {
                 prepared.push(PreparedTx {
-                    tx,
-                    spent_outputs: Vec::new(),
                     pre_error: None,
                     post_error: None,
                     checks_start: checks.len(),
@@ -556,8 +516,6 @@ fn prepare_block_input_checks<'b>(
             }
             Err(pre_error) => {
                 prepared.push(PreparedTx {
-                    tx,
-                    spent_outputs: Vec::new(),
                     pre_error: Some(pre_error),
                     post_error: None,
                     checks_start: checks.len(),
@@ -568,19 +526,11 @@ fn prepare_block_input_checks<'b>(
             }
         };
 
-        // Every input needs the complete spent-output set for BIP341.
-        let spent_outputs: Vec<TxOut> = prep
-            .prevouts
-            .iter()
-            .map(|(_, spent)| spent.clone())
-            .collect();
-
-        let script_state = match parsed.prepare_tx(tx_index, tx.inputs.len(), &prep.prevouts) {
+        // Retain backend state before publishing its input checks.
+        let script_state = match parsed.prepare_tx(tx_index, tx, &prep.prevouts) {
             Ok(state) => state,
             Err(setup_error) => {
                 prepared.push(PreparedTx {
-                    tx,
-                    spent_outputs,
                     pre_error: Some(setup_error),
                     post_error: None,
                     checks_start: checks.len(),
@@ -604,16 +554,13 @@ fn prepare_block_input_checks<'b>(
         let post_error = finalize_tx_value_and_sigops(tx, &prep, flags).err();
         let stop_after_tx = post_error.is_some();
         prepared.push(PreparedTx {
-            tx,
-            spent_outputs,
             pre_error: None,
             post_error,
             checks_start,
             checks_len,
             script_state: Some(script_state),
         });
-        // This tx's scripts still outrank its post error; that post error makes
-        // every later transaction irrelevant to the ordered verdict.
+        // Its scripts outrank this post-error, which outranks all later transactions.
         if stop_after_tx {
             break;
         }
@@ -621,22 +568,13 @@ fn prepare_block_input_checks<'b>(
     (prepared, checks)
 }
 
-fn check_input(
-    prepared: &[PreparedTx<'_>],
-    check: &InputCheck,
-    flags: VerifyFlags,
-) -> Result<(), ConsensusError> {
-    let prep = &prepared[check.prepared_index];
+/// Dispatches an input to its retained backend state.
+fn check_input(unit: &BlockScriptChecks<'_>, check: &InputCheck) -> Result<(), ConsensusError> {
+    let prep = &unit.prepared[check.prepared_index];
     let script_state = prep.script_state.as_ref().ok_or_else(|| {
         ConsensusError::Kernel("clean non-coinbase tx lost prepared script state".to_owned())
     })?;
-    crate::kernel::verify_prepared_input(
-        script_state,
-        &prep.spent_outputs,
-        prep.tx,
-        check.input_index,
-        flags,
-    )
+    crate::kernel::verify_prepared_input(script_state, check.input_index, unit.flags)
 }
 
 fn total_output_value(tx: &Tx) -> Result<u64, ConsensusError> {
@@ -657,8 +595,8 @@ mod tests {
 
     use bitcoin::hashes::Hash as _;
     use bitcoin_rs_primitives::{
-        Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script,
-        Sequence, Tx, TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
+        Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx,
+        TxIn, TxOut, Txid, Witness, consensus_bytes, deserialize,
     };
     #[cfg(not(feature = "kernel"))]
     use bitcoin_rs_primitives::{Sighash, SighashCache};
@@ -675,11 +613,8 @@ mod tests {
         let block = Block {
             header: Header {
                 version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: Hash256::default(),
-                time: 0,
                 bits: CompactTarget::from_consensus(0x2000_ffff),
-                nonce: 0,
+                ..Header::default()
             },
             txs: txs.to_vec(),
         };
@@ -700,7 +635,10 @@ mod tests {
         txs: &[Tx],
         resolved: Vec<Vec<Option<TxOut>>>,
     ) -> crate::block_view::BlockView<'_> {
-        let mut view = crate::block_view::BlockView::new(txs, txs.iter().map(Tx::txid).collect());
+        let mut view = crate::block_view::BlockView::from_facts(
+            txs,
+            crate::block_view::BlockFacts::from_txids(txs, txs.iter().map(Tx::txid).collect()),
+        );
         view.set_resolved(resolved);
         view
     }
@@ -725,14 +663,14 @@ mod tests {
             inputs: vec![TxIn {
                 previous_output: outpoint,
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(u32::MAX),
+                sequence: Sequence::MAX,
                 witness: Witness::from_stack(vec![vec![0xac; usize::try_from(cost)?]]),
             }],
             outputs: vec![TxOut {
                 value: Amount::from_sat(9_000),
                 script_pubkey: Script::new(),
             }],
-            lock_time: LockTime::from_consensus(0),
+            lock_time: LockTime::ZERO,
         };
         let prevouts = hashbrown::HashMap::from([(
             outpoint,
@@ -741,8 +679,7 @@ mod tests {
                 script_pubkey: Script::from_bytes([vec![0x00, 0x20], vec![1; 32]].concat()),
             },
         )]);
-        // The assume-valid path skips script execution, not sigop accounting.
-        // Active flags remain explicit even though script execution is skipped.
+        // Skipping execution still accounts sigops with the active flags.
         assert_eq!(
             super::verify_transaction_non_script(&tx, &prevouts, 0, 0, VerifyFlags::P2SH),
             Ok(()),
@@ -754,8 +691,7 @@ mod tests {
                 max: crate::MAX_BLOCK_SIGOPS_COST
             }),
         );
-        // Batched preparation binds the same flags used by execution, so its
-        // cached post-error cannot come from a different activation context.
+        // Preparation binds the execution flags for its cached post-error.
         let txs = vec![tx];
         let block = test_block_parse(&txs);
         let resolved = vec![vec![prevouts.get(&outpoint).cloned()]];
@@ -785,6 +721,7 @@ mod tests {
         Ok(())
     }
 
+    /// Both entries enforce 2..=100 bytes without looking up coinbase prevouts.
     #[test]
     fn coinbase_script_sig_size_bounds_are_enforced_without_prevout_lookup() {
         let utxos = hashbrown::HashMap::new();
@@ -909,9 +846,8 @@ mod tests {
                 .copied()
                 .map(|previous_output| TxIn {
                     previous_output,
-                    script_sig: Script::new(),
                     sequence: Sequence::MAX,
-                    witness: Witness::new(),
+                    ..TxIn::default()
                 })
                 .collect(),
             outputs: vec![TxOut {
@@ -921,7 +857,7 @@ mod tests {
         };
 
         for (input_idx, keypair) in keypairs.iter().enumerate() {
-            let mut cache = SighashCache::new(&tx);
+            let cache = SighashCache::new(&tx);
             let sighash = cache
                 .taproot_signature_hash(input_idx, &prevouts, None, None, Sighash::Default)
                 .unwrap_or_else(|_| panic!("taproot sighash"));
@@ -943,130 +879,42 @@ mod tests {
 
     #[test]
     #[cfg(feature = "kernel")]
-    fn kernel_accepts_non_taproot_spend_with_script_sig_data() {
-        let outpoint = OutPoint {
-            txid: Txid(Hash256::from_le_bytes(&[7; 32])),
-            vout: 0,
-        };
-        let tx = Tx {
-            version: 1,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: outpoint,
-                script_sig: [push_int(7), push_int(7)].concat().into(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(50),
-                script_pubkey: Script::new(),
-            }],
-        };
-        let mut utxos = hashbrown::HashMap::new();
-        utxos.insert(
-            outpoint,
-            TxOut {
-                value: Amount::from_sat(100),
-                script_pubkey: vec![OP_EQUAL].into(),
-            },
-        );
-
-        assert_eq!(
-            verify_transaction(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY, TEST_ENGINE),
-            Ok(())
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "kernel")]
-    fn kernel_rejects_script_sig_mismatch_with_kernel_verdict() {
-        let outpoint = OutPoint {
-            txid: Txid(Hash256::from_le_bytes(&[8; 32])),
-            vout: 0,
-        };
-        let tx = Tx {
-            version: 1,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: outpoint,
-                script_sig: [push_int(7), push_int(8)].concat().into(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(50),
-                script_pubkey: Script::new(),
-            }],
-        };
-        let mut utxos = hashbrown::HashMap::new();
-        utxos.insert(
-            outpoint,
-            TxOut {
-                value: Amount::from_sat(100),
-                script_pubkey: vec![OP_EQUAL].into(),
-            },
-        );
-
-        let result = verify_transaction(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY, TEST_ENGINE);
-
-        // Pins the client-facing bytes: the kernel verdict still arrives
-        // behind the unchanged prefix. Classification uses the engine field.
-        let Err(ConsensusError::Script {
-            input_index,
-            reason,
-            engine,
-        }) = result
-        else {
-            panic!("a kernel script rejection is expected");
-        };
-        assert_eq!(input_index, 0);
-        assert_eq!(engine, ScriptEngine::Kernel);
-        assert!(
-            reason
-                .strip_prefix(crate::kernel::KERNEL_SCRIPT_REJECT_PREFIX)
-                .is_some_and(|verdict| !verdict.is_empty()),
-            "the reject reason lost its kernel prefix: {reason}"
-        );
-    }
-
-    #[test]
-    #[cfg(feature = "kernel")]
-    fn kernel_skip_scripts_entry_accepts_invalid_script() {
-        let outpoint = OutPoint {
-            txid: Txid(Hash256::from_le_bytes(&[9; 32])),
-            vout: 0,
-        };
-        let tx = Tx {
-            version: 1,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: outpoint,
-                script_sig: [push_int(7), push_int(8)].concat().into(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(50),
-                script_pubkey: Script::new(),
-            }],
-        };
-        let mut utxos = hashbrown::HashMap::new();
-        utxos.insert(
-            outpoint,
-            TxOut {
-                value: Amount::from_sat(100),
-                script_pubkey: vec![OP_EQUAL].into(),
-            },
-        );
-
-        assert_eq!(
-            super::verify_transaction_non_script(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY),
-            Ok(())
-        );
-        assert!(matches!(
-            verify_transaction(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY, TEST_ENGINE),
-            Err(ConsensusError::Script { input_index: 0, .. })
-        ));
+    fn kernel_scripts_preserve_verdicts_and_non_script_bypass() {
+        for (seed, rhs, accepted) in [(7, 7, true), (8, 8, false), (9, 8, false)] {
+            let outpoint = outpoint(seed);
+            let mut input = spending_input(outpoint);
+            input.script_sig = [push_int(7), push_int(rhs)].concat().into();
+            let mut tx = spend_tx(vec![input], 50);
+            tx.version = 1;
+            let utxos = utxo_set([(outpoint, op_equal_txout(100))]);
+            assert_eq!(
+                super::verify_transaction_non_script(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY),
+                Ok(()),
+                "non-script seed {seed}"
+            );
+            let verdict =
+                verify_transaction(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY, TEST_ENGINE);
+            if accepted {
+                assert_eq!(verdict, Ok(()), "seed {seed}");
+            } else {
+                let Err(ConsensusError::Script {
+                    input_index,
+                    reason,
+                    engine,
+                }) = verdict
+                else {
+                    panic!("seed {seed}: expected a kernel script rejection");
+                };
+                assert_eq!(input_index, 0, "seed {seed}");
+                assert_eq!(engine, ScriptEngine::Kernel, "seed {seed}");
+                assert!(
+                    reason
+                        .strip_prefix("kernel script verification failed: ")
+                        .is_some_and(|verdict| !verdict.is_empty()),
+                    "seed {seed}: {reason}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1278,9 +1126,8 @@ mod tests {
     fn true_spending_input(outpoint: OutPoint) -> TxIn {
         TxIn {
             previous_output: outpoint,
-            script_sig: Script::new(),
             sequence: Sequence::MAX,
-            witness: Witness::new(),
+            ..TxIn::default()
         }
     }
 
@@ -1295,7 +1142,7 @@ mod tests {
             version: 1,
             lock_time: LockTime::ZERO,
             inputs: vec![TxIn {
-                previous_output: OutPoint::new(Txid::default(), u32::MAX),
+                previous_output: OutPoint::null(),
                 script_sig: vec![1; len].into(),
                 sequence: Sequence::MAX,
                 witness: Witness::new(),
@@ -1519,16 +1366,7 @@ mod tests {
     }
 
     fn decode_hex(hex: &str) -> Vec<u8> {
-        assert!(hex.len().is_multiple_of(2), "hex string has odd length");
-        hex.as_bytes()
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|pair| {
-                let digits = std::str::from_utf8(pair).unwrap_or_else(|_| panic!("hex ascii"));
-                u8::from_str_radix(digits, 16).unwrap_or_else(|_| panic!("hex digit"))
-            })
-            .collect()
+        bitcoin::hex::FromHex::from_hex(hex).unwrap_or_else(|error| panic!("bad hex: {error}"))
     }
 
     fn load_taproot_scriptpath_fixture() -> TaprootScriptPathFixture {
@@ -1578,49 +1416,6 @@ mod tests {
             ),
             Ok(())
         );
-    }
-
-    #[test]
-    fn parallel_timing_is_captured_before_ordered_error_scan() {
-        use std::cell::Cell;
-
-        let shared_tx = Tx {
-            version: 2,
-            lock_time: LockTime::ZERO,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-        };
-        let prepared: Vec<super::PreparedTx<'_>> = (0..10)
-            .map(|_| super::PreparedTx {
-                tx: &shared_tx,
-                spent_outputs: Vec::new(),
-                pre_error: None,
-                post_error: None,
-                checks_start: 0,
-                checks_len: 0,
-                script_state: None,
-            })
-            .collect();
-        let unit = super::BlockScriptChecks {
-            prepared,
-            checks: Vec::new(),
-            flags: VerifyFlags::MANDATORY,
-        };
-        let scan_started = Cell::new(false);
-        let mut before_serial_scan = || scan_started.set(true);
-        let mut after_parallel = || {
-            assert!(
-                !scan_started.get(),
-                "parallel timing hook must run before the serial error scan"
-            );
-        };
-        let result = super::verify_prepared_units_with_hooks(
-            core::slice::from_ref(&unit),
-            &mut after_parallel,
-            &mut before_serial_scan,
-        );
-        assert!(result.is_ok());
-        assert!(scan_started.get(), "the serial error scan must have run");
     }
 
     #[test]

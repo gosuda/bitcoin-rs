@@ -48,7 +48,7 @@ fn native_genesis_matches_published_hash_and_compiled_bytes() {
         );
         let bytes = consensus_bytes(&native);
         assert_eq!(
-            bitcoin_rs_primitives::Block::consensus_decode(&bytes)
+            bitcoin_rs_primitives::deserialize::<bitcoin_rs_primitives::Block>(&bytes)
                 .unwrap_or_else(|error| panic!("{network:?} genesis must re-decode: {error}")),
             native,
             "{network:?} genesis must round-trip"

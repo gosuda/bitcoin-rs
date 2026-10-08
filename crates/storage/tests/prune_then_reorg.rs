@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::chain_constants::CORE_REORG_SAFETY_MARGIN;
 use bitcoin_rs_storage::pruning::{
-    BLOCK_DATA_CF, BlockPruner, ExecutedFrontier, HistoryAccess, HistoryUnavailable, PrunePolicy,
+    BLOCK_DATA_CF, ExecutedFrontier, HistoryAccess, HistoryUnavailable, PrunePolicy,
     RetentionBudget, RetentionRegistry, block_body_key, block_undo_key, load_executed_frontier,
     load_pruneheight, prune_to_height, reclaim_staged_flat_block_files, stage_block_and_undo_prune,
 };
@@ -312,7 +312,7 @@ fn target_pruning_deletes_old_indexes_in_the_current_flat_file()
         AGGRESSIVE,
         &reservation,
     )?;
-    assert!(staged.file_numbers.is_empty());
+    assert_eq!(staged.file_numbers, Vec::<u32>::new());
     assert_eq!(staged.blocks.blocks_removed, 1);
     assert_eq!(staged.blocks.bytes_freed, 16);
 
@@ -397,7 +397,7 @@ fn retention_lease_stops_the_prune_line_at_its_floor() -> Result<(), Box<dyn std
     released_pass.commit(staged.pruned_below);
     assert!(matches!(
         retention.acquire(2),
-        Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow { .. })
+        Err(bitcoin_rs_storage::pruning::RetentionError { .. })
     ));
     Ok(())
 }
@@ -441,7 +441,7 @@ fn history_request_between_planning_and_commit_is_refused() -> Result<(), Box<dy
             assert_eq!(retention.pruned_below(), 0);
             assert!(matches!(
                 retention.acquire(pruned_below - 1),
-                Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow {
+                Err(bitcoin_rs_storage::pruning::RetentionError {
                     requested: 10,
                     pruned_below: 11,
                 })
@@ -523,7 +523,7 @@ fn executed_frontier_survives_restart_and_refuses_deleted_heights()
     let restarted = Arc::new(RetentionRegistry::seeded(frontier));
     assert!(matches!(
         restarted.acquire(10),
-        Err(bitcoin_rs_storage::pruning::RetentionError::PrunedBelow {
+        Err(bitcoin_rs_storage::pruning::RetentionError {
             requested: 10,
             pruned_below: 11,
         })
@@ -1002,78 +1002,10 @@ fn optional_consumer_budget_exhaustion_unblocks_pruning() -> Result<(), Box<dyn 
     Ok(())
 }
 
-#[test]
-fn pruning_keeps_core_reorg_floor_and_shallow_reorg_succeeds()
--> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::default());
-    write_fake_blocks(&store, 500)?;
-
-    let mut pruner = BlockPruner::new(
-        Arc::clone(&store),
-        PrunePolicy {
-            target_size_mb: 0,
-            keep_below_tip: 100,
-        },
-    );
-
-    let outcome = pruner.prune_step(500)?;
-
-    assert_eq!(outcome.blocks_removed, 211);
-    assert_eq!(outcome.bytes_freed, 211 * 32);
-
-    for height in 1_u32..=211 {
-        assert!(
-            store
-                .get(BLOCK_DATA_CF, &block_body_key(height, fake_hash(height)))?
-                .is_none(),
-            "height {height} should be pruned"
-        );
-    }
-
-    for height in 212_u32..=500 {
-        assert!(
-            store
-                .get(BLOCK_DATA_CF, &block_body_key(height, fake_hash(height)))?
-                .is_some(),
-            "height {height} should be retained"
-        );
-    }
-
-    let fork_point = 450_u32;
-    for height in (fork_point + 1)..=500 {
-        let key = block_body_key(height, fake_hash(height));
-        assert!(
-            store.get(BLOCK_DATA_CF, &key)?.is_some(),
-            "50-block reorg needs retained body at height {height}"
-        );
-    }
-
-    Ok(())
-}
-
-fn write_fake_blocks(store: &MemoryStore, count: u32) -> Result<(), StorageError> {
-    let mut batch = store.new_batch();
-    for height in 1_u32..=count {
-        let hash = fake_hash(height);
-        batch.put(
-            BLOCK_DATA_CF,
-            &block_body_key(height, hash),
-            &fake_body(height),
-        );
-    }
-    store.write(batch)
-}
-
 fn fake_hash(height: u32) -> Hash256 {
     let mut bytes = [0_u8; 32];
     bytes[..4].copy_from_slice(&height.to_le_bytes());
     Hash256::from_le_bytes(&bytes)
-}
-
-fn fake_body(height: u32) -> [u8; 32] {
-    let mut body = [0_u8; 32];
-    body[..4].copy_from_slice(&height.to_be_bytes());
-    body
 }
 
 /// One-shot outcomes for the next `write_durable`, simulating the ambiguous
@@ -1092,7 +1024,7 @@ enum WriteDurableOutcome {
 const EXECUTED_FRONTIER_KEY: &[u8] = b"node:prune_executed";
 
 struct MemoryStore {
-    cfs: RwLock<[BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()]>,
+    cfs: RwLock<Families>,
     /// Armed outcome for the next `write_durable`.
     write_durable_outcome: Mutex<Option<WriteDurableOutcome>>,
     /// Reads of `node:prune_executed` fail once this many have succeeded,
@@ -1127,15 +1059,22 @@ impl MemoryStore {
 impl KvStore for MemoryStore {
     fn get(&self, cf: ColumnFamily, key: &[u8]) -> Result<Option<Vec<u8>>, StorageError> {
         if cf == ColumnFamily::UtxoMeta && key == EXECUTED_FRONTIER_KEY {
-            let remaining = self
-                .executed_reads_allowed
-                .fetch_update(
+            let mut remaining = self.executed_reads_allowed.load(AtomicOrdering::Relaxed);
+            let exhausted = loop {
+                let Some(next) = remaining.checked_sub(1) else {
+                    break true;
+                };
+                match self.executed_reads_allowed.compare_exchange_weak(
+                    remaining,
+                    next,
                     AtomicOrdering::Relaxed,
                     AtomicOrdering::Relaxed,
-                    |remaining| remaining.checked_sub(1),
-                )
-                .is_err();
-            if remaining {
+                ) {
+                    Ok(_) => break false,
+                    Err(actual) => remaining = actual,
+                }
+            };
+            if exhausted {
                 return Err(StorageError::InvalidOperation(
                     "injected executed-frontier read failure",
                 ));
@@ -1146,7 +1085,7 @@ impl KvStore for MemoryStore {
     }
 
     // RATIONALE: `KvIter` outlives the lock guard, so test rows are cloned before returning.
-    #[allow(clippy::needless_collect)]
+    #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,
@@ -1172,26 +1111,7 @@ impl KvStore for MemoryStore {
     }
 
     fn write(&self, batch: BufferedWriteBatch) -> Result<(), StorageError> {
-        let mut guard = self.cfs.write();
-        for op in batch.into_ops() {
-            match op {
-                BatchOp::Put { cf, key, value } => {
-                    guard[cf.index()].insert(key, value.into());
-                }
-                BatchOp::Delete { cf, key } => {
-                    guard[cf.index()].remove(&key);
-                }
-                BatchOp::DeleteRange { cf, start, end } => {
-                    let keys = guard[cf.index()]
-                        .range(start..end)
-                        .map(|(key, _value)| key.clone())
-                        .collect::<Vec<_>>();
-                    for key in keys {
-                        guard[cf.index()].remove(&key);
-                    }
-                }
-            }
-        }
+        apply_ops(&mut self.cfs.write(), batch);
         Ok(())
     }
 
@@ -1226,25 +1146,7 @@ impl KvStore for MemoryStore {
                 return Ok(false);
             }
         }
-        for op in batch.into_ops() {
-            match op {
-                BatchOp::Put { cf, key, value } => {
-                    guard[cf.index()].insert(key, value.into());
-                }
-                BatchOp::Delete { cf, key } => {
-                    guard[cf.index()].remove(&key);
-                }
-                BatchOp::DeleteRange { cf, start, end } => {
-                    let keys = guard[cf.index()]
-                        .range(start..end)
-                        .map(|(key, _value)| key.clone())
-                        .collect::<Vec<_>>();
-                    for key in keys {
-                        guard[cf.index()].remove(&key);
-                    }
-                }
-            }
-        }
+        apply_ops(&mut guard, batch);
         Ok(true)
     }
 
@@ -1262,8 +1164,32 @@ impl KvStore for MemoryStore {
     }
 }
 
+type Families = [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()];
+
+fn apply_ops(families: &mut Families, batch: BufferedWriteBatch) {
+    for op in batch.into_ops() {
+        match op {
+            BatchOp::Put { cf, key, value } => {
+                families[cf.index()].insert(key, value.into());
+            }
+            BatchOp::Delete { cf, key } => {
+                families[cf.index()].remove(&key);
+            }
+            BatchOp::DeleteRange { cf, start, end } => {
+                let keys = families[cf.index()]
+                    .range(start..end)
+                    .map(|(key, _value)| key.clone())
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    families[cf.index()].remove(&key);
+                }
+            }
+        }
+    }
+}
+
 struct MemorySnapshot {
-    cfs: [BTreeMap<Vec<u8>, Vec<u8>>; ColumnFamily::ALL.len()],
+    cfs: Families,
 }
 
 impl KvSnapshot for MemorySnapshot {
@@ -1272,7 +1198,7 @@ impl KvSnapshot for MemorySnapshot {
     }
 
     // RATIONALE: the returned `KvIter` must not borrow the caller-owned prefix slice.
-    #[allow(clippy::needless_collect)]
+    #[expect(clippy::needless_collect)]
     fn iter_prefix<'a>(
         &'a self,
         cf: ColumnFamily,

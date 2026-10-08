@@ -18,14 +18,14 @@ use std::time::{Duration, Instant};
 use bitcoin::bip152::BlockTransactionsRequest;
 use bitcoin::consensus::encode as bitcoin_encode;
 use bitcoin::hashes::Hash as _;
+use bitcoin::hex::FromHex;
 use bitcoin::p2p::message::{CommandString, NetworkMessage, RawNetworkMessage};
 use bitcoin::p2p::message_blockdata::{GetBlocksMessage, GetHeadersMessage, Inventory};
 use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{BlockHash, Txid};
 use bitcoin_rs_p2p::PeerRole;
 use bitcoin_rs_p2p::dispatch::{
-    ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, dispatch_inbound,
-    dispatch_inbound_with_chain,
+    ChainQuery, InventoryServing, MAX_HEADERS_RESPONSE, dispatch_inbound, dispatch_inbound_full,
 };
 use bitcoin_rs_p2p::handshake::{feature_messages, start, version_message};
 use bitcoin_rs_p2p::inv::MAX_INV_PER_MSG;
@@ -40,6 +40,7 @@ use bitcoin_rs_p2p::{
 };
 use bitcoin_rs_primitives::{
     Block, BlockHash as NativeBlockHash, CompactTarget, Hash256, Header, consensus_bytes,
+    deserialize,
 };
 use bitcoin_rs_primitives::{Network, USER_AGENT};
 use hashbrown::HashMap;
@@ -70,30 +71,8 @@ const NETWORK_TABLE: [(Network, Magic, u16); 5] = [
 ];
 
 fn genesis_block() -> Result<Block, Box<dyn Error>> {
-    let bytes = hex_decode(REGTEST_GENESIS_HEX)?;
-    Ok(Block::consensus_decode(&bytes)?)
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, Box<dyn Error>> {
-    let (chunks, remainder) = hex.as_bytes().as_chunks::<2>();
-    if !remainder.is_empty() {
-        return Err("odd hex length".into());
-    }
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    for pair in chunks {
-        let high = hex_nibble(pair[0])?;
-        let low = hex_nibble(pair[1])?;
-        bytes.push((high << 4) | low);
-    }
-    Ok(bytes)
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, Box<dyn Error>> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err("invalid hex digit".into()),
-    }
+    let bytes = Vec::<u8>::from_hex(REGTEST_GENESIS_HEX)?;
+    Ok(deserialize::<Block>(&bytes)?)
 }
 
 /// Chains `count` synthetic headers onto `parent`, deterministically.
@@ -266,10 +245,19 @@ fn dispatch_collect(
     chain: Option<&dyn ChainQuery>,
 ) -> Result<Vec<Message>, PeerError> {
     let collected = std::cell::RefCell::new(Vec::new());
-    dispatch_inbound_with_chain(peer, message, chain, &|| true, &mut |response| {
-        collected.borrow_mut().push(response);
-        Ok(())
-    })?;
+    dispatch_inbound_full(
+        peer,
+        message,
+        chain,
+        None,
+        &|| true,
+        &|| true,
+        &mut |response| {
+            collected.borrow_mut().push(response);
+            Ok(())
+        },
+        &mut |_| {},
+    )?;
     Ok(collected.into_inner())
 }
 
@@ -283,7 +271,7 @@ fn serve_collect(
         let Message::BlockPayload(payload) = message else {
             return Ok(());
         };
-        blocks.borrow_mut().push(Block::consensus_decode(&payload)?);
+        blocks.borrow_mut().push(deserialize::<Block>(&payload)?);
         Ok(())
     })?;
     Ok((blocks.into_inner(), outcome.not_found))
@@ -390,14 +378,12 @@ fn our_frame(message: &Message) -> Result<Vec<u8>, Box<dyn Error>> {
 fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), Box<dyn Error>> {
     let magic = Magic::REGTEST;
     for spec in COMMANDS {
-        let frame = raw_frame(magic, &command_field(spec.name)?, &[]);
+        let frame = raw_frame(magic, &command_field(spec)?, &[]);
         match read_message(&mut Cursor::new(frame), magic) {
             Ok((Message::Unknown { command, .. }, _)) => {
-                return Err(format!(
-                    "{} is in COMMANDS but decoded as Unknown ({command})",
-                    spec.name
-                )
-                .into());
+                return Err(
+                    format!("{spec} is in COMMANDS but decoded as Unknown ({command})").into(),
+                );
             }
             Ok(_)
             | Err(
@@ -407,7 +393,7 @@ fn listed_commands_type_and_core_untyped_commands_stay_unknown() -> Result<(), B
                 | PeerError::Varint(_),
             ) => {}
             Err(error) => {
-                return Err(format!("{}: unexpected decode error {error}", spec.name).into());
+                return Err(format!("{spec}: unexpected decode error {error}").into());
             }
         }
     }
@@ -663,7 +649,7 @@ fn getheaders_serves_active_chain_with_stop_hash_and_limit() -> Result<(), Box<d
     let Some(Message::Headers(served)) = response.first() else {
         return Err("expected headers response".into());
     };
-    assert!(served.is_empty());
+    assert_eq!(served.as_slice(), []);
     Ok(())
 }
 
@@ -751,7 +737,7 @@ fn inv_getdata_relay_round_trip_serves_blocks_and_notfounds_misses() -> Result<(
     )?;
     let (served, not_found) = match response.as_slice() {
         [Message::BlockPayload(payload), Message::NotFound(items)] => {
-            (Block::consensus_decode(payload)?, items)
+            (deserialize::<Block>(payload)?, items)
         }
         other => return Err(format!("unexpected relay response {other:?}").into()),
     };
@@ -802,7 +788,7 @@ fn inbound_block_and_tx_messages_decode_and_leave_no_response() -> Result<(), Bo
     let mut peer = ready_peer(Magic::REGTEST)?;
 
     let responses = dispatch_inbound(&mut peer, &Message::Block(genesis.clone()))?;
-    assert!(responses.is_empty());
+    assert_eq!(responses, []);
 
     let coinbase = genesis
         .txs
@@ -1022,7 +1008,7 @@ fn unknown_commands_are_ignored_once_ready_like_core() -> Result<(), Box<dyn Err
             payload: vec![0u8; 8],
         },
     )?;
-    assert!(responses.is_empty());
+    assert_eq!(responses, []);
     assert_eq!(
         peer.state,
         PeerState::Ready,
@@ -1047,19 +1033,19 @@ fn decode_only_messages_are_accepted_silently_per_policy() -> Result<(), Box<dyn
         )),
         Some(&chain),
     )?;
-    assert!(responses.is_empty());
+    assert_eq!(responses, []);
 
     // BIP35 mempool snapshot request: accepted, unanswered (documented deviation).
     let responses = dispatch_inbound(&mut peer, &Message::MemPool)?;
-    assert!(responses.is_empty());
+    assert_eq!(responses, []);
 
     // getaddr: accepted, unanswered (no address gossip).
     let responses = dispatch_inbound(&mut peer, &Message::GetAddr)?;
-    assert!(responses.is_empty());
+    assert_eq!(responses, []);
 
     // BIP133 feefilter: accepted, never enforced or echoed.
     let responses = dispatch_inbound(&mut peer, &Message::FeeFilter(1_000))?;
-    assert!(responses.is_empty());
+    assert_eq!(responses, []);
 
     assert_eq!(peer.state, PeerState::Ready);
     Ok(())
@@ -1153,7 +1139,7 @@ fn reorg_switches_which_chain_a_peer_sees() -> Result<(), Box<dyn Error>> {
     )?;
     match response.as_slice() {
         [Message::BlockPayload(payload), Message::NotFound(items)] => {
-            let block = Block::consensus_decode(payload)?;
+            let block = deserialize::<Block>(payload)?;
             assert_eq!(block.block_hash(), branch_b[0].compute_hash());
             assert_eq!(
                 items,

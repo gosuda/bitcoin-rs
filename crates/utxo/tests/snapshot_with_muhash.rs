@@ -2,7 +2,7 @@
 use bitcoin_rs_primitives::{Amount, Hash256, OutPoint, TxOut};
 use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
 use bitcoin_rs_utxo::stats::{CoinStats, CoinStatsListener};
-use bitcoin_rs_utxo::{UtxoSet, write_snapshot};
+use bitcoin_rs_utxo::{UtxoSet, write_snapshot_observed};
 
 #[test]
 fn snapshot_trailer_uses_listener_muhash() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,7 +19,7 @@ fn snapshot_trailer_uses_listener_muhash() -> Result<(), Box<dyn std::error::Err
     bitcoin_rs_utxo::contract::commit_block_changes(&set, &changes, &txid(999))?;
 
     let mut snapshot = Vec::new();
-    let trailer = write_snapshot(&set, &txid(999), 7, &mut snapshot)?;
+    let (trailer, ()) = write_snapshot_observed(&set, &txid(999), 7, &mut snapshot, ())?;
     let expected = listener.snapshot().muhash.finalize();
 
     assert_eq!(trailer, expected);
@@ -69,7 +69,7 @@ fn snapshot_trailer_tracks_listener_after_removal() -> Result<(), Box<dyn std::e
     assert_eq!(after_removal.total_amount, kept_txout.value.to_sat());
 
     let mut snapshot = Vec::new();
-    let trailer = write_snapshot(&set, &txid(101), 8, &mut snapshot)?;
+    let (trailer, ()) = write_snapshot_observed(&set, &txid(101), 8, &mut snapshot, ())?;
     let expected_trailer = after_removal.muhash.finalize();
 
     assert_eq!(trailer, expected_trailer);
@@ -206,7 +206,7 @@ fn listener_parallel_shard_delta_matches_serial_stats() -> Result<(), Box<dyn st
     }
 
     let mut snapshot = Vec::new();
-    let trailer = write_snapshot(&set, &txid(1_701), 71, &mut snapshot)?;
+    let (trailer, ()) = write_snapshot_observed(&set, &txid(1_701), 71, &mut snapshot, ())?;
     assert_eq!(trailer, expected.muhash.finalize());
     assert_eq!(
         &snapshot[snapshot.len() - 384..],

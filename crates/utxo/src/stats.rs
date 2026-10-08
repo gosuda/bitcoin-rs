@@ -19,8 +19,7 @@
 //! insert-only partial `MuHash` values, while `without_muhash` skips hashing
 //! entirely. [`scan_coin_stats`] recomputes stats on demand from a
 //! [`crate::UtxoSetView`] (Core's on-demand model, no rolling listener
-//! required), and [`store_coin_stats`]/[`load_coin_stats`] persist rows keyed
-//! by little-endian height.
+//! required).
 //!
 //! The checkpoint manifest records this component under the current codec
 //! identifier `"bitcoin-rs-coinstats-v1"`. It is an on-disk value and changes
@@ -29,13 +28,10 @@
 /// Running UTXO statistics.
 pub mod coin_stats;
 /// `MuHash3072` accumulator.
-pub mod muhash3072;
-/// Persistent coinstats rows.
-pub mod persist;
+mod muhash3072;
 
 pub use coin_stats::{
     CoinStats, CoinStatsAccumulator, CoinStatsDecodeError, CoinStatsListener, CoinStatsRewindError,
     scan_coin_stats,
 };
 pub use muhash3072::MuHash3072;
-pub use persist::{CoinStatsPersistError, load_coin_stats, store_coin_stats};

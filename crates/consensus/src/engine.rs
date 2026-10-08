@@ -19,7 +19,7 @@ impl ValidationEngine {
 
     /// Returns the stable configuration spelling.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
             Self::Kernel => "kernel",
@@ -51,16 +51,6 @@ impl fmt::Display for ValidationEngine {
         f.write_str(self.as_str())
     }
 }
-
-impl FromStr for ValidationEngine {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::parse(value).ok_or_else(|| format!("unknown validation engine {value}"))
-    }
-}
-
-use std::str::FromStr;
 
 #[cfg(test)]
 mod tests {

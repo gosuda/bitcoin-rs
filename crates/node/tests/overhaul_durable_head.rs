@@ -132,6 +132,7 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             .block_position(1, hash_of(1))?
             .ok_or_else(|| anyhow::anyhow!("family lost its own locator"))?;
         let old_head = DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 1,
             tip: hash_of(1),
@@ -159,6 +160,7 @@ fn connect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             .block_position(2, hash_of(2))?
             .ok_or_else(|| anyhow::anyhow!("family lost its own locator"))?;
         let new_head = DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 2,
             height: 2,
             tip: hash_of(2),
@@ -226,6 +228,7 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
             .persist_block_body(1, hash_of(1), b"committed-body")?;
         family.bodies.sync()?;
         let committed = DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: 1,
             height: 1,
             tip: hash_of(1),
@@ -240,6 +243,7 @@ fn disconnect_batch_faults_leave_old_or_new_across_families() -> Result<()> {
         // Disconnect: the head advances onto the parent tip with the next
         // commit id and no new records.
         let parent = DurableHead {
+            assumeutxo: bitcoin_rs_storage::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id: committed.commit_id + 1,
             height: 0,
             tip: Hash256::from_le_bytes(&[0_u8; 32]),

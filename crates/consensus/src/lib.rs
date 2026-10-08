@@ -20,26 +20,28 @@ pub mod bip68;
 /// BIP9 versionbits checks.
 pub mod bip9;
 /// Parse-once block state shared by the native apply path.
-pub mod block_view;
+mod block_view;
 /// The one runtime validation-engine selector.
-pub mod engine;
+mod engine;
 /// Feature-gated bitcoinkernel wrapper.
 pub mod kernel;
 /// Private AVX2 SHA256d64 kernel for Merkle hashing.
 mod sha256d64;
 /// Shared transaction-level BIP141 sigop accounting.
 mod sigops;
+/// Optional Bitcoin Core-compatible USDT tracepoints (`usdt` feature).
+pub mod trace;
 /// Block rule checks.
 pub mod verify_block;
 /// Transaction rule checks.
 pub mod verify_tx;
 
 pub use bip9::{
-    BIP9_PERIOD, CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState,
-    SEGWIT_DEPLOYMENT_ID, SoftforkState, compute_state, deployment_params,
+    CSV_DEPLOYMENT_ID, DeploymentContext, DeploymentParams, DeploymentState, SEGWIT_DEPLOYMENT_ID,
+    SoftforkState, compute_state, deployment_params,
 };
 pub use bip113::{MEDIAN_TIME_PAST_WINDOW, locktime_cutoff};
-pub use block_view::BlockView;
+pub use block_view::{BlockFacts, BlockView};
 pub use engine::ValidationEngine;
 pub use sigops::transaction_sigop_cost;
 pub use verify_block::{
@@ -48,9 +50,8 @@ pub use verify_block::{
     verify_merkle_root_with_txids,
 };
 pub use verify_tx::{
-    COINBASE_MATURITY, ScriptStageTimings, check_coinbase_maturity, is_final_tx,
-    verify_block_input_scripts, verify_coinbase_script_sig_size, verify_transaction,
-    verify_transaction_non_script,
+    ScriptStageTimings, check_coinbase_maturity, is_final_tx, verify_block_input_scripts,
+    verify_coinbase_script_sig_size, verify_transaction, verify_transaction_non_script,
 };
 
 use bitcoin_rs_primitives::{OutPoint, TxOut};
@@ -60,15 +61,6 @@ use thiserror::Error;
 pub trait UtxoView {
     /// Looks up a previous output by outpoint.
     fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut>;
-}
-
-impl<T> UtxoView for &T
-where
-    T: UtxoView + ?Sized,
-{
-    fn lookup(&self, outpoint: &OutPoint) -> Option<TxOut> {
-        (*self).lookup(outpoint)
-    }
 }
 
 /// The engine that rejected a script.
@@ -213,6 +205,13 @@ pub enum ConsensusError {
         input_count: usize,
         /// Number of supplied prevout rows.
         prevout_count: usize,
+    },
+    /// Resolved prevouts identify the wrong transaction input: a caller wiring
+    /// error, not a script verdict or proof that a block is invalid.
+    #[error("prevout does not match transaction input {input_index}")]
+    PrevoutMismatch {
+        /// First input whose supplied prevout identity differs.
+        input_index: usize,
     },
     /// The requested [`ValidationEngine`] is not compiled into this build.
     #[error("unsupported validation engine: {engine}")]

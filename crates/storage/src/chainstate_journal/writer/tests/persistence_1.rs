@@ -138,7 +138,7 @@ fn retention_limit_blocks_until_checkpoint_compaction() -> TestResult {
     ));
 
     writer.freeze()?;
-    writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0)?;
+    writer.compact_to_checkpoint(1, 0, [1; 32], [0; 32], 0, true)?;
     writer.resume()?;
     assert!(!writer.requires_compaction()?);
     writer.prepare_for_apply()?;

@@ -107,7 +107,7 @@ fn assert_matches_core(
             .unwrap_or_else(|| panic!("missing height {height}"))
     };
     let expected = core_getnetworkhashps(tree, start_id, lookup, network);
-    let got = estimate_network_hashps(tree, Some(start_id), lookup, network);
+    let got = estimate_network_hashps(tree, start_id, lookup, network);
     assert!(
         (got - expected).abs() < 1e-9,
         "lookup={lookup} height={height}: got {got}, Core oracle {expected}"
@@ -142,15 +142,15 @@ fn estimate_network_hashps_matches_core_getnetworkhashps() {
     let genesis_id = tree
         .node_at_height_from(tip.tip_id, 0)
         .unwrap_or_else(|| panic!("genesis height is on the tip"));
-    let genesis = estimate_network_hashps(&tree, Some(genesis_id), 120, network);
+    let genesis = estimate_network_hashps(&tree, genesis_id, 120, network);
     assert!(
         genesis.abs() < f64::EPSILON,
         "Core returns 0 at genesis, got {genesis}"
     );
 
     let retarget_lookup = i64::from(tip.height) % i64::from(network.retarget_interval()) + 1;
-    let via_minus_one = estimate_network_hashps(&tree, Some(tip.tip_id), -1, network);
-    let via_explicit = estimate_network_hashps(&tree, Some(tip.tip_id), retarget_lookup, network);
+    let via_minus_one = estimate_network_hashps(&tree, tip.tip_id, -1, network);
+    let via_explicit = estimate_network_hashps(&tree, tip.tip_id, retarget_lookup, network);
     assert!(
         (via_minus_one - via_explicit).abs() < 1e-9,
         "-1 lookback must equal height % interval + 1 ({retarget_lookup})"

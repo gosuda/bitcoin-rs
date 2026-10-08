@@ -28,7 +28,7 @@ fn validate_block(data: &[u8]) {
         return;
     };
     let encoded = serialize(&parsed);
-    let Ok(block) = Block::consensus_decode(&encoded) else {
+    let Ok(block) = bitcoin_rs_primitives::deserialize::<Block>(&encoded) else {
         return;
     };
     let _ = verify_block_rules(&block);

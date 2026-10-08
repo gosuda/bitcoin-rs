@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use bitcoin::hex::FromHex;
 use bitcoin_rs_primitives::{ConsensusDecode, Hash256, SighashCache, Tx, deserialize};
 use serde_json::Value;
 
@@ -144,24 +145,7 @@ fn deserialize_hex<T: ConsensusDecode>(hex: &str) -> T {
 }
 
 fn decode_hex(hex: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(hex.len() / 2);
-    let mut chars = hex.chars();
-    while let Some(high) = chars.next() {
-        let low = chars
-            .next()
-            .unwrap_or_else(|| panic!("hex string has odd length"));
-        let high = hex_nibble(high);
-        let low = hex_nibble(low);
-        bytes.push((high << 4) | low);
-    }
-    bytes
-}
-
-fn hex_nibble(ch: char) -> u8 {
-    let Some(value) = ch.to_digit(16) else {
-        panic!("invalid hex digit {ch}");
-    };
-    u8::try_from(value).unwrap_or_else(|error| panic!("hex digit should fit in u8: {error}"))
+    Vec::from_hex(hex).unwrap_or_else(|error| panic!("bad hex: {error}"))
 }
 
 fn string_at(row: &[Value], index: usize) -> &str {

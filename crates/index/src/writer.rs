@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Object-safe `ScriptLive` seed producer used by [`TxIndexWriter`].
-pub type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>) -> Result<(), IndexError>
+pub(crate) type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHash) -> Result<(), IndexError>) -> Result<(), IndexError>
     + 'a;
 
 /// Erased prepared-index writer used by derived-index reconciliation.
@@ -25,7 +25,7 @@ pub type ScriptLiveSeedProduce<'a> = dyn FnMut(&mut dyn FnMut(OutPoint, ScriptHa
 /// Durability, crash visibility, and failure classification for rollback are
 /// owned by [`IndexWriter::commit_rollback_one_for_with_cursor_with_spent_scripts`]
 /// (`IDX-06` / `IDX-07`).
-pub trait TxIndexWriter: Send + Sync {
+pub(crate) trait TxIndexWriter: Send + Sync {
     /// Captures the exact write fence and all capability watermarks together.
     fn fenced_watermarks(&self) -> Result<(IndexWriteFence, IndexWatermarks), IndexError>;
     /// Prepares rows using the supplied spent-coin script authority.
@@ -42,10 +42,7 @@ pub trait TxIndexWriter: Send + Sync {
         &self,
         produce: &mut ScriptLiveSeedProduce<'_>,
         tip: IndexWatermark,
-    ) -> Result<usize, IndexError> {
-        let _ = (produce, tip);
-        Err(IndexError::UnsupportedRollback)
-    }
+    ) -> Result<usize, IndexError>;
     /// Commits prepared rows and the consumer cursor under one exact fence.
     fn commit_forward_with_cursor(
         &self,
@@ -65,10 +62,7 @@ pub trait TxIndexWriter: Send + Sync {
     ) -> Result<(), IndexError>;
 
     /// Resets only the selected derived row families through the durable reset protocol.
-    fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError> {
-        let _ = capabilities;
-        Err(IndexError::UnsupportedRollback)
-    }
+    fn reset_capabilities(&self, capabilities: IndexCapabilities) -> Result<(), IndexError>;
     /// Stamps `watermark` on the selected capabilities so a rebuild starts at
     /// the first surviving height after a prune, without re-deriving deleted
     /// rows. `floor` is the first covered height.
@@ -77,10 +71,7 @@ pub trait TxIndexWriter: Send + Sync {
         capabilities: IndexCapabilities,
         watermark: IndexWatermark,
         floor: u32,
-    ) -> Result<(), IndexError> {
-        let _ = (capabilities, watermark, floor);
-        Err(IndexError::UnsupportedAnchor)
-    }
+    ) -> Result<(), IndexError>;
     /// Reads the opaque durable reconciliation cursor.
     fn consumer_cursor(&self) -> Result<Option<Vec<u8>>, IndexError>;
     /// Commits an opaque cursor without changing rows, subject to the write fence.

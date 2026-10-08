@@ -155,6 +155,7 @@ impl<S: KvStore> JournalWriter<S> {
     }
 
     pub(super) fn truncate_after(&self, cursor: ForkCursor) -> Result<(), JournalWriterError> {
+        #[cfg(any(test, feature = "test-seam"))]
         self.fail_rewind_truncate()?;
         let name = segment_name(cursor.generation);
         match self
@@ -202,12 +203,16 @@ impl<S: KvStore> JournalWriter<S> {
             b"journal fork crossed below checkpoint base\n",
         )?;
         crate::checkpoint::fs::sync_dir(&self.dir)?;
+        // Pending cursors name deleted segments and no boundary remains to
+        // retry; compaction rebuilds both from the replacement checkpoint.
+        self.pending_records.clear();
+        self.durability_retry_required = false;
+        self.generation_invalidated = true;
         self.state = WriterState::Frozen;
         Ok(())
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) fn scan_fork_cursor(
     bytes: &[u8],
     generation: u64,

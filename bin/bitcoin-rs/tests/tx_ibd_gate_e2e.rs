@@ -16,7 +16,7 @@
 #![expect(clippy::expect_used, reason = "process test assertions")]
 
 use std::fs::File;
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::net::TcpStream;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -32,14 +32,15 @@ use bitcoin::p2p::{Magic, ServiceFlags};
 use bitcoin::{
     Amount, Block, CompactTarget, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Witness,
 };
+use bitcoin_rs_e2e::helpers::coinbase_script_sig;
 use bitcoin_rs_e2e::node::workspace;
-use bitcoin_rs_e2e::process_peer::connect_loopback;
+use bitcoin_rs_e2e::process_peer::{
+    FrameBuffer, connect_loopback, decode_frame, is_soft_recv_error, read_frame,
+};
 use bitcoin_rs_e2e::{Error, Kind, ProcessNode};
 use serde_json::{Value, json};
 
 const REGTEST_BITS: u32 = 0x207f_ffff;
-const HEADER_BYTES: usize = 24;
-const MAX_PAYLOAD_BYTES: usize = 32 * 1024 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bounded window during which an absence must persist: admission and relay
@@ -59,6 +60,8 @@ struct GatePeer {
     /// Transaction ids announced to us by the node (relay reachability).
     relayed_seen: Vec<String>,
     dropped: bool,
+    /// Partial bytes of an in-flight frame carried between reads.
+    pending: FrameBuffer,
 }
 
 impl GatePeer {
@@ -74,6 +77,7 @@ impl GatePeer {
             getdata_seen: Vec::new(),
             relayed_seen: Vec::new(),
             dropped: false,
+            pending: FrameBuffer::default(),
         };
         let services = ServiceFlags::NETWORK | ServiceFlags::WITNESS;
         let now = i64::try_from(
@@ -132,7 +136,7 @@ impl GatePeer {
     }
 
     fn recv(&mut self, deadline: Instant) -> Result<NetworkMessage, Error> {
-        match read_frame(&mut self.stream, deadline) {
+        match read_frame(&mut self.stream, deadline, &mut self.pending) {
             Ok(frame) => {
                 let message = decode_frame(&frame)?;
                 self.log("recv", message.cmd());
@@ -275,70 +279,6 @@ impl GatePeer {
     }
 }
 
-fn is_soft_recv_error(error: &Error) -> bool {
-    match error {
-        Error::Io(io) => matches!(
-            io.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ),
-        Error::Protocol(detail) => detail.contains("deadline"),
-        _ => false,
-    }
-}
-
-fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>, Error> {
-    fn read_exact(
-        stream: &mut TcpStream,
-        mut bytes: &mut [u8],
-        deadline: Instant,
-    ) -> Result<(), Error> {
-        let total = bytes.len();
-        while !bytes.is_empty() {
-            // The deadline bounds the wait for the first byte only: a frame
-            // that is already partially consumed must run to completion or
-            // the wire stream desynchronizes for every later read.
-            let wait = if bytes.len() == total {
-                deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::from_millis(1))
-            } else {
-                REQUEST_TIMEOUT
-            };
-            stream.set_read_timeout(Some(wait))?;
-            let count = stream.read(bytes)?;
-            if count == 0 {
-                return Err(Error::Protocol("truncated P2P frame".to_owned()));
-            }
-            bytes = &mut bytes[count..];
-        }
-        Ok(())
-    }
-    let mut header = [0; HEADER_BYTES];
-    read_exact(stream, &mut header, deadline)?;
-    let length = usize::try_from(u32::from_le_bytes(
-        header[16..20]
-            .try_into()
-            .map_err(|_| Error::Protocol("truncated P2P header".to_owned()))?,
-    ))
-    .map_err(|error| Error::Protocol(error.to_string()))?;
-    if length > MAX_PAYLOAD_BYTES {
-        return Err(Error::Protocol("P2P payload byte limit".to_owned()));
-    }
-    let mut frame = header.to_vec();
-    frame.resize(HEADER_BYTES + length, 0);
-    read_exact(stream, &mut frame[HEADER_BYTES..], deadline)?;
-    Ok(frame)
-}
-
-fn decode_frame(frame: &[u8]) -> Result<NetworkMessage, Error> {
-    let envelope: RawNetworkMessage = bitcoin::consensus::deserialize(frame)
-        .map_err(|error| Error::Protocol(format!("invalid P2P envelope: {error}")))?;
-    if *envelope.magic() != Magic::REGTEST {
-        return Err(Error::Protocol("P2P network mismatch".to_owned()));
-    }
-    Ok(envelope.into_payload())
-}
-
 fn evidence_dir() -> std::path::PathBuf {
     let dir = workspace().join("target/tx-ibd-gate-e2e");
     std::fs::create_dir_all(&dir).expect("evidence dir");
@@ -359,23 +299,6 @@ fn now_unix() -> u32 {
     .unwrap_or(u32::MAX)
 }
 
-/// Minimal `CScriptNum` push, the BIP34 height encoding.
-fn script_num_push(value: u32) -> Vec<u8> {
-    let low = u8::try_from(value & 0xff).unwrap_or(0xff);
-    if value < 0x80 {
-        vec![0x01, low]
-    } else if value < 0x80_00 {
-        vec![0x02, low, u8::try_from(value >> 8).unwrap_or(0)]
-    } else {
-        vec![
-            0x03,
-            low,
-            u8::try_from((value >> 8) & 0xff).unwrap_or(0),
-            u8::try_from(value >> 16).unwrap_or(0),
-        ]
-    }
-}
-
 /// Coinbase paying `value` sats to `OP_TRUE`, with the BIP34 height push.
 fn op_true_coinbase(height: u32, value: u64) -> Transaction {
     Transaction {
@@ -383,7 +306,7 @@ fn op_true_coinbase(height: u32, value: u64) -> Transaction {
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(script_num_push(height)),
+            script_sig: coinbase_script_sig(height),
             sequence: Sequence::MAX,
             witness: Witness::new(),
         }],

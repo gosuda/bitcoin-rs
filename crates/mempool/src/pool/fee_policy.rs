@@ -39,12 +39,6 @@ pub(crate) struct PolicyGraph {
     pub(crate) parents: Vec<Vec<usize>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PolicyChunk {
-    pub(crate) members: Vec<usize>,
-    pub(crate) value: FeeWeight,
-}
-
 impl PolicyGraph {
     pub(crate) fn removal_order(&self, priority: &[EntryId]) -> Result<Vec<EntryId>, RbfError> {
         let positions: HashMap<_, _> = self
@@ -68,11 +62,11 @@ impl PolicyGraph {
             .collect()
     }
 
-    pub(crate) fn affected_diagram(&self, chunks: &[PolicyChunk]) -> Vec<FeeWeight> {
+    pub(crate) fn affected_diagram(&self, chunks: &[fee_diagram::Chunk]) -> Vec<FeeWeight> {
         chunks
             .iter()
             .filter(|chunk| chunk.members.iter().any(|&i| self.nodes[i].affected))
-            .map(|chunk| chunk.value)
+            .map(|chunk| chunk.total)
             .collect()
     }
     pub(crate) fn check_limits(&self, limits: MempoolLimits) -> Result<(), RbfError> {
@@ -87,15 +81,9 @@ impl PolicyGraph {
         Ok(())
     }
 
-    pub(crate) fn chunks(&self) -> Result<Vec<PolicyChunk>, RbfError> {
+    pub(crate) fn chunks(&self) -> Result<Vec<fee_diagram::Chunk>, RbfError> {
         let fees: Vec<_> = self.nodes.iter().map(|node| node.value).collect();
-        Ok(fee_diagram::ordered_chunks(&fees, &self.parents)?
-            .into_iter()
-            .map(|chunk| PolicyChunk {
-                members: chunk.members,
-                value: chunk.total,
-            })
-            .collect())
+        Ok(fee_diagram::ordered_chunks(&fees, &self.parents)?)
     }
 }
 

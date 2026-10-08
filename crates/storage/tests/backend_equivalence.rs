@@ -1,5 +1,7 @@
 //! Cross-backend equivalence tests for the storage abstraction.
 
+#![cfg(any(feature = "fjall", feature = "redb", feature = "rocksdb"))]
+
 use bitcoin_rs_storage::{ColumnFamily, KvIter, KvPair, KvStore, StorageError, WriteCondition};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};

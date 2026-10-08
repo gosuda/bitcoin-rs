@@ -13,6 +13,8 @@ workspace = true
 
 [features]
 default = []
+# Synthetic capability worlds for tests, not production composition.
+test-seam = ["bitcoin-rs-index/test-seam"]
 zmq = ["dep:zmq"]
 
 [dependencies]
@@ -43,13 +45,20 @@ anyhow.workspace = true
 zmq = { workspace = true, optional = true }
 
 [dev-dependencies]
+bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
 toml.workspace = true
 bitcoin-rs-e2e.workspace = true
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-node = { workspace = true, default-features = false, features = ["fjall"] }
+bitcoin-rs-node = { workspace = true, default-features = false, features = ["fjall", "test-seam"] }
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-utxo = { workspace = true, features = ["test-seam"] }
-tempfile = ">=3.20.0, <4"
+tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
 rustix.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+cap-std.workspace = true
+cap-fs-ext.workspace = true

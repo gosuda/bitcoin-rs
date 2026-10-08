@@ -14,8 +14,10 @@ autobenches = false
 workspace = true
 
 [features]
-# USDT tracepoints (Bitcoin Core-compatible probe ABI); empty unless enabled.
-usdt = ["bitcoin-rs-trace/usdt", "bitcoin-rs-chainstate/usdt", "bitcoin-rs-mempool/usdt", "bitcoin-rs-p2p/usdt"]
+
+# Exposes the internal `NodeState` composition root to integration tests and
+# benchmarks. Production embedders use the typed `Node` surface instead.
+test-seam = ["bitcoin-rs-mempool/test-seam", "bitcoin-rs-index/test-seam"]
 
 # A node is non-functional without a storage backend, and its `NodeStorage` /
 # `TxIndexStorage` enums are entirely backend-cfg-gated — with zero backends the
@@ -32,31 +34,24 @@ usdt = ["bitcoin-rs-trace/usdt", "bitcoin-rs-chainstate/usdt", "bitcoin-rs-mempo
 # selection: the engine a run uses is `validation.engine` at runtime. The
 # default is kernel-free so the C++ toolchain is opt-in.
 default = ["fjall", "zmq"]
+# Component crates own the storage-backend fan-out: each of chainstate's and
+# index's backend features already forwards to storage + utxo under the same
+# feature name, so listing storage/utxo here duplicates those edges.
 rocksdb = [
     "bitcoin-rs-chainstate/rocksdb",
-    "bitcoin-rs-chain/rocksdb",
     "bitcoin-rs-index/rocksdb",
-    "bitcoin-rs-p2p/rocksdb",
-    "bitcoin-rs-storage/rocksdb",
-    "bitcoin-rs-utxo/rocksdb",
 ]
 fjall = [
     "bitcoin-rs-chainstate/fjall",
-    "bitcoin-rs-chain/fjall",
     "bitcoin-rs-index/fjall",
-    "bitcoin-rs-p2p/fjall",
-    "bitcoin-rs-storage/fjall",
-    "bitcoin-rs-utxo/fjall",
 ]
 redb = [
     "bitcoin-rs-chainstate/redb",
-    "bitcoin-rs-chain/redb",
     "bitcoin-rs-index/redb",
-    "bitcoin-rs-p2p/redb",
-    "bitcoin-rs-storage/redb",
-    "bitcoin-rs-utxo/redb",
 ]
-kernel = ["bitcoin-rs-chainstate/kernel", "bitcoin-rs-consensus/kernel"]
+# chainstate's kernel feature is the kernel-capability propagator for the
+# chain stack and already forwards to `bitcoin-rs-consensus/kernel`.
+kernel = ["bitcoin-rs-chainstate/kernel"]
 zmq = ["bitcoin-rs-rpc/zmq"]
 
 [dependencies]
@@ -92,14 +87,17 @@ anyhow.workspace = true
 rayon.workspace = true
 sha2.workspace = true
 cap-std.workspace = true
-bitcoin-rs-trace.workspace = true
 
 [dev-dependencies]
-tempfile = ">=3.20.0, <4"
+bitcoin-rs-storage = { workspace = true, features = ["test-seam"] }
+bitcoin-rs-rpc = { workspace = true, features = ["test-seam"] }
+tempfile.workspace = true
+# Own integration tests and benchmarks are separate crates, so they opt into
+# the same explicit seam used by the subsystem crates below.
+bitcoin-rs-node = { workspace = true, default-features = false, features = ["test-seam"] }
 bitcoin-rs-chain = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-p2p = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-chainstate = { workspace = true, features = ["test-seam"] }
-proptest.workspace = true
 criterion.workspace = true
 sonic-rs.workspace = true
 serde_json.workspace = true
@@ -108,7 +106,6 @@ rustix.workspace = true
 bitcoin-rs-script.workspace = true
 bitcoin-rs-mempool = { workspace = true, features = ["test-seam"] }
 bitcoin-rs-mining = { workspace = true, features = ["test-seam"] }
-bitcoin-rs-index = { workspace = true, features = ["test-seam"] }
 
 [[bench]]
 name = "sync_pipeline"

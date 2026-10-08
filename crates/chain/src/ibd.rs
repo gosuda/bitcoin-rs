@@ -8,8 +8,8 @@
 
 use std::sync::atomic::AtomicBool;
 
-use crate::Network;
 use crate::view::{BlockTreeReader, TipReader};
+use bitcoin_rs_primitives::Network;
 
 /// How stale the applied tip may be while the node still counts as synced.
 ///
@@ -137,7 +137,6 @@ impl InitialBlockDownload {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod initial_block_download_tests {
     use std::sync::Arc;
 

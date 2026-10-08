@@ -35,30 +35,23 @@ pub struct HeadersSyncParams {
     pub redownload_buffer_size: usize,
 }
 
-/// Parses 64 hex characters into 32 big-endian bytes at compile time.
+/// Pinned assumeutxo parameters for a specific block height.
 ///
-/// The `nMinimumChainWork` values below are copied from Bitcoin Core as the hex
-/// strings Core writes them as. Transcribing those into a byte array by hand is
-/// exactly the kind of edit that goes wrong silently, so it is done here instead.
-const fn hex_be_32(hex: &str) -> [u8; 32] {
-    const fn nibble(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            b'A'..=b'F' => byte - b'A' + 10,
-            _ => panic!("chain-work constants must be hex"),
-        }
-    }
-
-    let bytes = hex.as_bytes();
-    assert!(bytes.len() == 64, "chain work must be 64 hex characters");
-    let mut out = [0_u8; 32];
-    let mut index = 0;
-    while index < 32 {
-        out[index] = (nibble(bytes[index * 2]) << 4) | nibble(bytes[index * 2 + 1]);
-        index += 1;
-    }
-    out
+/// Mirrors Bitcoin Core's `AssumeutxoData` structure:
+/// - `height`: Block height of the snapshot base.
+/// - `block_hash`: Block hash of the snapshot base.
+/// - `hash_serialized`: Expected serialized UTXO commitment (`hash_serialized_3`) at `height`.
+/// - `chain_tx_count`: Cumulative transaction count through `height`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssumeUtxoData {
+    /// Block height of the snapshot base.
+    pub height: u32,
+    /// Block hash of the snapshot base.
+    pub block_hash: Hash256,
+    /// Expected serialized UTXO commitment (`hash_serialized_3`) at `height`.
+    pub hash_serialized: Hash256,
+    /// Cumulative transaction count through `height`.
+    pub chain_tx_count: u64,
 }
 
 // `nMinimumChainWork` and `chainTxData`, copied from `src/kernel/chainparams.cpp`
@@ -71,16 +64,16 @@ const fn hex_be_32(hex: &str) -> [u8; 32] {
 // per-release tuning, not consensus rules, and they need re-copying whenever the
 // pinned Core revision moves — the assume-valid anchor is the tell that it has.
 const MAINNET_MINIMUM_CHAIN_WORK: [u8; 32] =
-    hex_be_32("0000000000000000000000000000000000000001128750f82f4c366153a3a030");
+    decode_compiled_hex("0000000000000000000000000000000000000001128750f82f4c366153a3a030");
 
 const TESTNET3_MINIMUM_CHAIN_WORK: [u8; 32] =
-    hex_be_32("0000000000000000000000000000000000000000000017dde1c649f3708d14b6");
+    decode_compiled_hex("0000000000000000000000000000000000000000000017dde1c649f3708d14b6");
 
 const TESTNET4_MINIMUM_CHAIN_WORK: [u8; 32] =
-    hex_be_32("0000000000000000000000000000000000000000000009a0fe15d0177d086304");
+    decode_compiled_hex("0000000000000000000000000000000000000000000009a0fe15d0177d086304");
 
 const SIGNET_MINIMUM_CHAIN_WORK: [u8; 32] =
-    hex_be_32("00000000000000000000000000000000000000000000000000000b463ea0a4b8");
+    decode_compiled_hex("00000000000000000000000000000000000000000000000000000b463ea0a4b8");
 
 /// Bitcoin Core's mainnet `consensus.BIP16Exception` — block 170060, whose display
 /// hash is `00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22`. Stored
@@ -114,7 +107,7 @@ const MAINNET_ASSUME_VALID_HASH: Hash256 = Hash256::from_le_bytes(&[
 ]);
 
 /// A supported Bitcoin network.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Network {
     /// Bitcoin mainnet.
     Mainnet,
@@ -303,6 +296,31 @@ impl Network {
             Self::Mainnet => Some((MAINNET_ASSUME_VALID_HEIGHT, MAINNET_ASSUME_VALID_HASH)),
             Self::Testnet3 | Self::Testnet4 | Self::Signet | Self::Regtest => None,
         }
+    }
+
+    /// Returns the pinned assumeutxo parameters for this network.
+    #[must_use]
+    pub const fn assume_utxo_data(self) -> &'static [AssumeUtxoData] {
+        match self {
+            Self::Mainnet => &MAINNET_ASSUME_UTXO,
+            Self::Testnet4 => &TESTNET4_ASSUME_UTXO,
+            Self::Regtest => &REGTEST_ASSUME_UTXO,
+            Self::Testnet3 | Self::Signet => &[],
+        }
+    }
+
+    /// Finds pinned assumeutxo data matching `height`.
+    #[must_use]
+    pub fn assume_utxo_for_height(self, height: u32) -> Option<&'static AssumeUtxoData> {
+        self.assume_utxo_data().iter().find(|d| d.height == height)
+    }
+
+    /// Finds pinned assumeutxo data matching `block_hash`.
+    #[must_use]
+    pub fn assume_utxo_for_hash(self, block_hash: Hash256) -> Option<&'static AssumeUtxoData> {
+        self.assume_utxo_data()
+            .iter()
+            .find(|d| d.block_hash == block_hash)
     }
 
     /// Returns the default JSON-RPC port used by Bitcoin Core.
@@ -552,7 +570,7 @@ impl Network {
             Self::Signet => &SIGNET_GENESIS,
             Self::Regtest => &REGTEST_GENESIS,
         };
-        let block = crate::Block::consensus_decode(bytes)
+        let block = crate::deserialize::<crate::Block>(bytes)
             .unwrap_or_else(|error| panic!("compiled-in genesis must decode: {error}"));
         debug_assert_eq!(
             crate::Hash256::from_le_bytes(block.block_hash().as_bytes()),
@@ -603,52 +621,120 @@ const TESTNET4_GENESIS: [u8; 261] = decode_compiled_hex(TESTNET4_GENESIS_HEX);
 const SIGNET_GENESIS: [u8; 285] = decode_compiled_hex(SIGNET_GENESIS_HEX);
 const REGTEST_GENESIS: [u8; 285] = decode_compiled_hex(REGTEST_GENESIS_HEX);
 
+const fn decode_compiled_hash_be(hex: &str) -> Hash256 {
+    let bytes = hex.as_bytes();
+    assert!(
+        bytes.len() == 64,
+        "compiled-in hash hex must be 64 characters"
+    );
+    let mut out = [0_u8; 32];
+    let mut index = 0;
+    while index < 32 {
+        let hi = hex_nibble(bytes[index * 2]);
+        let lo = hex_nibble(bytes[index * 2 + 1]);
+        out[31 - index] = (hi << 4) | lo;
+        index += 1;
+    }
+    Hash256::from_le_bytes(&out)
+}
+
+const MAINNET_ASSUME_UTXO: [AssumeUtxoData; 2] = [
+    AssumeUtxoData {
+        height: 840_000,
+        block_hash: decode_compiled_hash_be(
+            "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "a2a5521b1b5ab65f67818e5e8eccabb7171a517f9e2382208f77687310768f96",
+        ),
+        chain_tx_count: 991_032_194,
+    },
+    AssumeUtxoData {
+        height: 880_000,
+        block_hash: decode_compiled_hash_be(
+            "000000000000000000010b17283c3c400507969a9c2afd1dcf2082ec5cca2880",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9",
+        ),
+        chain_tx_count: 1_145_604_538,
+    },
+];
+
+const TESTNET4_ASSUME_UTXO: [AssumeUtxoData; 1] = [AssumeUtxoData {
+    height: 90_000,
+    block_hash: decode_compiled_hash_be(
+        "0000000002ebe8bcda020e0dd6ccfbdfac531d2f6a81457191b99fc2df2dbe3b",
+    ),
+    hash_serialized: decode_compiled_hash_be(
+        "784fb5e98241de66fdd429f4392155c9e7db5c017148e66e8fdbc95746f8b9b5",
+    ),
+    chain_tx_count: 11_347_043,
+}];
+
+const REGTEST_ASSUME_UTXO: [AssumeUtxoData; 2] = [
+    AssumeUtxoData {
+        height: 110,
+        block_hash: decode_compiled_hash_be(
+            "135eec25a6fb277884e5824e7aa7d052c4868161c99a5122170b5266f86c273d",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "86e9a1205b418b16dde3a18a78c730e30137e28466bda5dbf6b33ab8fc05447c",
+        ),
+        chain_tx_count: 111,
+    },
+    AssumeUtxoData {
+        height: 200,
+        block_hash: decode_compiled_hash_be(
+            "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9",
+        ),
+        hash_serialized: decode_compiled_hash_be(
+            "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a",
+        ),
+        chain_tx_count: 201,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::{ChainTxData, Network};
     use crate::Hash256;
 
-    #[test]
-    fn bip16_p2sh_exception_matches_core_block_170060() -> Result<(), Box<dyn std::error::Error>> {
-        let exception = Hash256::from_str_be(
-            "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22",
-        )?;
-
-        assert!(Network::Mainnet.is_bip16_p2sh_exception(exception));
-
-        // Only mainnet has this grandfathered block.
-        assert!(!Network::Testnet3.is_bip16_p2sh_exception(exception));
-        assert!(!Network::Regtest.is_bip16_p2sh_exception(exception));
-
-        // A different hash is not the exception, even on mainnet.
-        assert!(!Network::Mainnet.is_bip16_p2sh_exception(Network::Mainnet.genesis_block_hash()));
-        assert!(!Network::Mainnet.is_bip16_p2sh_exception(Hash256::from_le_bytes(&[0u8; 32])));
-
-        Ok(())
-    }
+    const NETWORKS: [Network; 5] = [
+        Network::Mainnet,
+        Network::Testnet3,
+        Network::Testnet4,
+        Network::Signet,
+        Network::Regtest,
+    ];
 
     #[test]
-    fn bip16_p2sh_exception_matches_core_testnet3_block_394()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let exception = Hash256::from_str_be(
-            "00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105",
-        )?;
-
-        assert!(Network::Testnet3.is_bip16_p2sh_exception(exception));
-
-        // The testnet3 grandfathered block is not the mainnet exception, and other
-        // networks have no such block.
-        assert!(!Network::Mainnet.is_bip16_p2sh_exception(exception));
-        assert!(!Network::Testnet4.is_bip16_p2sh_exception(exception));
-        assert!(!Network::Regtest.is_bip16_p2sh_exception(exception));
-
-        // Cross-network isolation: the mainnet 170060 exception hash must NOT be excepted
-        // on testnet3.
-        let mainnet_exception = Hash256::from_str_be(
-            "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22",
-        )?;
-        assert!(!Network::Testnet3.is_bip16_p2sh_exception(mainnet_exception));
-
+    fn bip16_p2sh_exceptions_are_isolated_to_their_core_networks() -> Result<(), crate::HashError> {
+        for (owner, hex) in [
+            (
+                Network::Mainnet,
+                "00000000000002dc756eebf4f49723ed8d30cc28a5f108eb94b1ba88ac4f9c22",
+            ),
+            (
+                Network::Testnet3,
+                "00000000dd30457c001f4095d208cc1296b0eed002427aa599874af7a432b105",
+            ),
+        ] {
+            let exception = Hash256::from_str_be(hex)?;
+            for network in NETWORKS {
+                assert_eq!(
+                    network.is_bip16_p2sh_exception(exception),
+                    network == owner,
+                    "{network:?}: {hex}"
+                );
+                for ordinary in [network.genesis_block_hash(), Hash256::default()] {
+                    assert!(
+                        !network.is_bip16_p2sh_exception(ordinary),
+                        "{network:?}: {ordinary}"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 
@@ -691,48 +777,23 @@ mod tests {
 
     #[test]
     fn pow_difficulty_parameters_match_core_chainparams() {
-        for network in [
-            Network::Mainnet,
-            Network::Testnet3,
-            Network::Testnet4,
-            Network::Signet,
-            Network::Regtest,
+        for (network, timespan, min_difficulty, no_retarget, bip94) in [
+            (Network::Mainnet, 14 * 24 * 60 * 60, false, false, false),
+            (Network::Testnet3, 14 * 24 * 60 * 60, true, false, false),
+            (Network::Testnet4, 14 * 24 * 60 * 60, true, false, true),
+            (Network::Signet, 14 * 24 * 60 * 60, false, false, false),
+            (Network::Regtest, 24 * 60 * 60, true, true, false),
         ] {
-            assert_eq!(network.target_spacing_seconds(), 600);
+            assert_eq!(network.target_spacing_seconds(), 600, "{network:?}");
+            assert_eq!(network.target_timespan_seconds(), timespan, "{network:?}");
+            assert_eq!(
+                network.allow_min_difficulty_blocks(),
+                min_difficulty,
+                "{network:?}"
+            );
+            assert_eq!(network.pow_no_retargeting(), no_retarget, "{network:?}");
+            assert_eq!(network.enforce_bip94(), bip94, "{network:?}");
         }
-
-        assert_eq!(
-            Network::Mainnet.target_timespan_seconds(),
-            14 * 24 * 60 * 60
-        );
-        assert_eq!(
-            Network::Testnet3.target_timespan_seconds(),
-            14 * 24 * 60 * 60
-        );
-        assert_eq!(
-            Network::Testnet4.target_timespan_seconds(),
-            14 * 24 * 60 * 60
-        );
-        assert_eq!(Network::Signet.target_timespan_seconds(), 14 * 24 * 60 * 60);
-        assert_eq!(Network::Regtest.target_timespan_seconds(), 24 * 60 * 60);
-
-        assert!(!Network::Mainnet.allow_min_difficulty_blocks());
-        assert!(Network::Testnet3.allow_min_difficulty_blocks());
-        assert!(Network::Testnet4.allow_min_difficulty_blocks());
-        assert!(!Network::Signet.allow_min_difficulty_blocks());
-        assert!(Network::Regtest.allow_min_difficulty_blocks());
-
-        assert!(!Network::Mainnet.pow_no_retargeting());
-        assert!(!Network::Testnet3.pow_no_retargeting());
-        assert!(!Network::Testnet4.pow_no_retargeting());
-        assert!(!Network::Signet.pow_no_retargeting());
-        assert!(Network::Regtest.pow_no_retargeting());
-
-        assert!(!Network::Mainnet.enforce_bip94());
-        assert!(!Network::Testnet3.enforce_bip94());
-        assert!(Network::Testnet4.enforce_bip94());
-        assert!(!Network::Signet.enforce_bip94());
-        assert!(!Network::Regtest.enforce_bip94());
     }
 
     #[test]
@@ -760,53 +821,38 @@ mod tests {
 
     #[test]
     fn softfork_activations_match_core_chainparams() {
-        fn assert_activation(
-            is_active: impl Fn(Network, u32) -> bool,
-            network: Network,
-            activation: u32,
-        ) {
-            if activation == 0 {
-                assert!(is_active(network, 0));
-            } else {
-                assert!(!is_active(network, activation - 1));
-                assert!(is_active(network, activation));
+        type Activation = fn(Network, u32) -> bool;
+        let activations: [(&str, Activation, [u32; 5]); 5] = [
+            (
+                "BIP65",
+                Network::is_bip65_active,
+                [388_381, 581_885, 1, 1, 1_351],
+            ),
+            (
+                "BIP66",
+                Network::is_bip66_active,
+                [363_725, 330_776, 1, 1, 1_251],
+            ),
+            ("CSV", Network::is_csv_active, [419_328, 770_112, 1, 1, 432]),
+            (
+                "Segwit",
+                Network::is_segwit_active,
+                [481_824, 834_624, 0, 0, 0],
+            ),
+            (
+                "Taproot",
+                Network::is_taproot_active,
+                [709_632, 2_017_256, 0, 0, 0],
+            ),
+        ];
+        for (rule, is_active, heights) in activations {
+            for (network, activation) in NETWORKS.into_iter().zip(heights) {
+                if activation > 0 {
+                    assert!(!is_active(network, activation - 1), "{network:?}: {rule}");
+                }
+                assert!(is_active(network, activation), "{network:?}: {rule}");
             }
         }
-
-        // BIP65
-        assert_activation(Network::is_bip65_active, Network::Mainnet, 388_381);
-        assert_activation(Network::is_bip65_active, Network::Testnet3, 581_885);
-        assert_activation(Network::is_bip65_active, Network::Testnet4, 1);
-        assert_activation(Network::is_bip65_active, Network::Signet, 1);
-        assert_activation(Network::is_bip65_active, Network::Regtest, 1_351);
-
-        // BIP66
-        assert_activation(Network::is_bip66_active, Network::Mainnet, 363_725);
-        assert_activation(Network::is_bip66_active, Network::Testnet3, 330_776);
-        assert_activation(Network::is_bip66_active, Network::Testnet4, 1);
-        assert_activation(Network::is_bip66_active, Network::Signet, 1);
-        assert_activation(Network::is_bip66_active, Network::Regtest, 1_251);
-
-        // CSV
-        assert_activation(Network::is_csv_active, Network::Mainnet, 419_328);
-        assert_activation(Network::is_csv_active, Network::Testnet3, 770_112);
-        assert_activation(Network::is_csv_active, Network::Testnet4, 1);
-        assert_activation(Network::is_csv_active, Network::Signet, 1);
-        assert_activation(Network::is_csv_active, Network::Regtest, 432);
-
-        // Segwit
-        assert_activation(Network::is_segwit_active, Network::Mainnet, 481_824);
-        assert_activation(Network::is_segwit_active, Network::Testnet3, 834_624);
-        assert_activation(Network::is_segwit_active, Network::Testnet4, 0);
-        assert_activation(Network::is_segwit_active, Network::Signet, 0);
-        assert_activation(Network::is_segwit_active, Network::Regtest, 0);
-
-        // Taproot
-        assert_activation(Network::is_taproot_active, Network::Mainnet, 709_632);
-        assert_activation(Network::is_taproot_active, Network::Testnet3, 2_017_256);
-        assert_activation(Network::is_taproot_active, Network::Testnet4, 0);
-        assert_activation(Network::is_taproot_active, Network::Signet, 0);
-        assert_activation(Network::is_taproot_active, Network::Regtest, 0);
     }
     #[test]
     fn every_network_carries_chain_tx_data() {
@@ -832,11 +878,87 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn assume_utxo_data_round_trips_expected_values() {
+        let Some(mainnet_840k) = Network::Mainnet.assume_utxo_for_height(840_000) else {
+            panic!("840k missing");
+        };
+        assert_eq!(
+            mainnet_840k.block_hash.to_string(),
+            "0000000000000000000320283a032748cef8227873ff4872689bf23f1cda83a5"
+        );
+        assert_eq!(
+            mainnet_840k.hash_serialized.to_string(),
+            "a2a5521b1b5ab65f67818e5e8eccabb7171a517f9e2382208f77687310768f96"
+        );
+        assert_eq!(mainnet_840k.chain_tx_count, 991_032_194);
+        assert_eq!(
+            Network::Mainnet.assume_utxo_for_hash(mainnet_840k.block_hash),
+            Some(mainnet_840k)
+        );
+
+        let Some(mainnet_880k) = Network::Mainnet.assume_utxo_for_height(880_000) else {
+            panic!("880k missing");
+        };
+        assert_eq!(
+            mainnet_880k.block_hash.to_string(),
+            "000000000000000000010b17283c3c400507969a9c2afd1dcf2082ec5cca2880"
+        );
+        assert_eq!(
+            mainnet_880k.hash_serialized.to_string(),
+            "dbd190983eaf433ef7c15f78a278ae42c00ef52e0fd2a54953782175fbadcea9"
+        );
+        assert_eq!(mainnet_880k.chain_tx_count, 1_145_604_538);
+
+        let Some(testnet4_90k) = Network::Testnet4.assume_utxo_for_height(90_000) else {
+            panic!("90k missing");
+        };
+        assert_eq!(
+            testnet4_90k.block_hash.to_string(),
+            "0000000002ebe8bcda020e0dd6ccfbdfac531d2f6a81457191b99fc2df2dbe3b"
+        );
+        assert_eq!(
+            testnet4_90k.hash_serialized.to_string(),
+            "784fb5e98241de66fdd429f4392155c9e7db5c017148e66e8fdbc95746f8b9b5"
+        );
+        assert_eq!(testnet4_90k.chain_tx_count, 11_347_043);
+
+        let Some(regtest_110) = Network::Regtest.assume_utxo_for_height(110) else {
+            panic!("110 missing");
+        };
+        assert_eq!(
+            regtest_110.block_hash.to_string(),
+            "135eec25a6fb277884e5824e7aa7d052c4868161c99a5122170b5266f86c273d"
+        );
+        assert_eq!(
+            regtest_110.hash_serialized.to_string(),
+            "86e9a1205b418b16dde3a18a78c730e30137e28466bda5dbf6b33ab8fc05447c"
+        );
+        assert_eq!(regtest_110.chain_tx_count, 111);
+
+        let Some(regtest_200) = Network::Regtest.assume_utxo_for_height(200) else {
+            panic!("200 missing");
+        };
+        assert_eq!(
+            regtest_200.block_hash.to_string(),
+            "385901ccbd69dff6bbd00065d01fb8a9e464dede7cfe0372443884f9b1dcf6b9"
+        );
+        assert_eq!(
+            regtest_200.hash_serialized.to_string(),
+            "17dcc016d188d16068907cdeb38b75691a118d43053b8cd6a25969419381d13a"
+        );
+        assert_eq!(regtest_200.chain_tx_count, 201);
+
+        assert_eq!(Network::Testnet3.assume_utxo_data(), &[]);
+        assert_eq!(Network::Signet.assume_utxo_data(), &[]);
+        assert_eq!(Network::Mainnet.assume_utxo_for_height(12345), None);
+    }
 }
 
 #[cfg(test)]
 mod chain_params_tests {
-    use super::{Network, hex_be_32};
+    use super::{Network, decode_compiled_hex};
 
     fn to_hex(bytes: [u8; 32]) -> String {
         let mut out = String::with_capacity(64);
@@ -847,8 +969,9 @@ mod chain_params_tests {
     }
 
     #[test]
-    fn hex_be_32_places_the_first_character_in_the_high_bit_of_byte_zero() {
-        let parsed = hex_be_32("8000000000000000000000000000000000000000000000000000000000000001");
+    fn decode_compiled_hex_places_the_first_character_in_the_high_bit_of_byte_zero() {
+        let parsed: [u8; 32] =
+            decode_compiled_hex("8000000000000000000000000000000000000000000000000000000000000001");
         assert_eq!(
             parsed[0], 0x80,
             "the leading nibble is the most significant"
@@ -896,8 +1019,10 @@ mod chain_params_tests {
     fn minimum_chain_work_compares_as_a_number_when_compared_as_bytes() {
         // Big-endian, fixed width: array order is numeric order. The whole
         // chain-work check rests on this, so state it rather than assume it.
-        let smaller = hex_be_32("00000000000000000000000000000000000000000000000000000000000000ff");
-        let larger = hex_be_32("0000000000000000000000000000000000000000000000000000000000000100");
+        let smaller: [u8; 32] =
+            decode_compiled_hex("00000000000000000000000000000000000000000000000000000000000000ff");
+        let larger: [u8; 32] =
+            decode_compiled_hex("0000000000000000000000000000000000000000000000000000000000000100");
         assert!(smaller < larger);
         assert!(Network::Regtest.minimum_chain_work() < Network::Signet.minimum_chain_work());
         assert!(Network::Signet.minimum_chain_work() < Network::Mainnet.minimum_chain_work());

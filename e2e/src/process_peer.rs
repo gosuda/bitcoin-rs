@@ -1,12 +1,7 @@
 //! Bounded, recorded v1 wire peer for the public-process lane.
-//! Uses rust-bitcoin envelopes, never bitcoin-rs's listener or dispatcher.
 //!
-//! PRE: the node's P2P listener is bound on loopback.
-//! POST: every frame written or read is journaled to the node's evidence
-//! directory before the call returns.
-//! INVARIANT: the payload cap is the protocol limit (`MAX_MESSAGE_PAYLOAD`
-//! in `crates/p2p/src/wire.rs`), so a legitimate `block` frame never trips
-//! the harness.
+//! Uses rust-bitcoin envelopes, never bitcoin-rs's listener or dispatcher,
+//! and journals every frame to the node's evidence directory.
 
 use std::fs::File;
 use std::io::{Read as _, Write as _};
@@ -245,6 +240,19 @@ pub fn connect_loopback(addr: SocketAddr, deadline: Instant) -> Result<TcpStream
 
 fn remaining(deadline: Instant) -> Result<Duration> {
     remaining_time(deadline, Instant::now(), "P2P operation deadline")
+}
+
+/// True when a frame-read failure is just "no data yet" (read timeout or
+/// deadline bookkeeping) rather than a dropped connection.
+pub fn is_soft_recv_error(error: &Error) -> bool {
+    match error {
+        Error::Io(io) => matches!(
+            io.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        Error::Protocol(detail) => detail.contains("deadline"),
+        _ => false,
+    }
 }
 
 /// Partial bytes of an in-flight wire frame carried between calls.

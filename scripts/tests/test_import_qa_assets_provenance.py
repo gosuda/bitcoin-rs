@@ -45,10 +45,14 @@ class ImportFlowTests(unittest.TestCase):
         (scripts / MAPPER.name).write_bytes(MAPPER.read_bytes())
         inventory = self.root / "crates/p2p/src/compat.rs"
         inventory.parent.mkdir(parents=True)
-        inventory.write_text('pub const COMMANDS: &[Command] = &[Command { name: "ping" }];\n')
+        inventory.write_text('pub const COMMANDS: &[&str] = &["ping"];\n')
         harness = self.root / "fuzz/fuzz_targets/script_eval.rs"
         harness.parent.mkdir(parents=True)
         harness.write_bytes(OWNER_HARNESS.read_bytes())
+        # Stand-in for the gosuda/bitcoin-rs-fuzz-corpus checkout the
+        # importer now writes into (FUZZ_CORPUS_DIR points at its corpus/).
+        self.corpus_dir = self.root / "fuzz-corpus/corpus"
+        self.corpus_dir.mkdir(parents=True)
         self.provenance = self.root / "fuzz/CORPUS_PROVENANCE.md"
         self.provenance.write_text((REPO_ROOT / "fuzz" / "CORPUS_PROVENANCE.md").read_text())
         self.previous_provenance = self.provenance.read_text()
@@ -110,12 +114,16 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         environment = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
                            TEST_ROOT=str(self.root), SOURCE_FIXTURE=str(self.source),
                            EXPECTED_PIN=self.pin, TMPDIR=str(self.tmp), FAIL_STAGE=fail,
+                           FUZZ_CORPUS_DIR=str(self.corpus_dir),
                            RUSTC_WRAPPER="must-be-unset", CARGO_BUILD_BUILD_DIR="must-be-unset")
         result = subprocess.run(["bash", str(SCRIPT)], cwd=self.root, env=environment,
                                 capture_output=True, text=True, timeout=10, check=False)
         self.assertEqual(list(self.tmp.iterdir()), [], "clone leaked after importer exit")
         self.assertEqual(list((self.root / "fuzz").glob(".corpus-provenance.*")), [],
                          "provenance staging leaked after importer exit")
+        self.assertEqual(
+            [p for p in (self.root / "fuzz/corpus").rglob("*")],
+            [], "nothing may remain under the in-repo fuzz/corpus staging")
         return result
 
     def test_success_maps_then_minimizes_and_records_provenance(self):
@@ -127,14 +135,14 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         self.assertIn("2000-01-01T00:00:00Z", self.provenance.read_text())
         self.assertEqual(stat.S_IMODE(self.provenance.stat().st_mode), 0o644)
         for target in ("block_validate", "tx_validate"):
-            self.assertEqual((self.root / "fuzz/corpus" / target / "seed").read_bytes(), b"Q")
+            self.assertEqual((self.corpus_dir / target / "seed").read_bytes(), b"Q")
 
     def test_missing_source_stops_before_minimization_or_provenance(self):
         (self.corpora / "bitcoin_script_bytes_to_asm_fmt").rmdir()
         result = self.run_import()
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "cmin.log").exists())
-        self.assertFalse((self.root / "fuzz/corpus").exists())
+        self.assertFalse(any(self.corpus_dir.iterdir()))
         self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_minimization_preserves_provenance(self):
@@ -153,7 +161,7 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
         result = self.run_import("du")
         self.assertEqual(result.returncode, SIZE_STATUS, result.stderr)
         self.assertFalse((self.root / "cmin.log").exists())
-        self.assertFalse((self.root / "fuzz/corpus").exists())
+        self.assertFalse(any(self.corpus_dir.iterdir()))
         self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
     def test_failed_timestamp_preserves_provenance(self):
@@ -206,7 +214,7 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
                          "printf 'test 100000 0 unknown 0%% /\\n'\n")
         result = self.run_import()
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertFalse((self.root / "fuzz/corpus").exists())
+        self.assertFalse(any(self.corpus_dir.iterdir()))
         self.assertFalse((self.root / "cmin.log").exists())
         self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 
@@ -216,7 +224,15 @@ printf '%s\\n' "${{!#}}" >> "$TEST_ROOT/cmin.log"
                          "printf 'test 100000 0 999999999999999999999999999999999999 0%% /\\n'\n")
         result = self.run_import()
         self.assertNotEqual(result.returncode, 0, result.stdout)
-        self.assertFalse((self.root / "fuzz/corpus").exists())
+        self.assertFalse(any(self.corpus_dir.iterdir()))
+        self.assertFalse((self.root / "cmin.log").exists())
+        self.assertEqual(self.provenance.read_text(), self.previous_provenance)
+
+    def test_missing_corpus_checkout_stops_before_any_staging(self):
+        self.corpus_dir.rmdir()
+        self.corpus_dir.parent.rmdir()
+        result = self.run_import()
+        self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / "cmin.log").exists())
         self.assertEqual(self.provenance.read_text(), self.previous_provenance)
 

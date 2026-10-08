@@ -8,14 +8,13 @@
 //! elected drainer completes every queued callback exactly once, in
 //! sequence order, with no gateway lock held. After this, no production
 //! code outside the gateway takes the mempool write lock — lookups go
-//! through the [`MempoolGateway::read`] passthrough. One pool, one
-//! gateway: [`MempoolGateway::shared`] interns a single
-//! [`MempoolGateway`] per pool `Arc` identity, so every route to a pool
-//! shares one publish queue and one observer slot.
+//! through the [`MempoolGateway::read`] passthrough. The composition root
+//! constructs one gateway per pool and passes clones of that handle to every
+//! mutation route, so they share one publish queue and one observer slot.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::entry::MempoolEntry;
@@ -24,10 +23,9 @@ use bitcoin_rs_consensus::{
 };
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid};
 use bitcoin_rs_script::VerifyFlags;
-use bitcoin_rs_script::script::{is_p2sh, is_witness_program};
+use bitcoin_rs_script::{is_p2sh, is_witness_program};
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Adapter that lets the consensus verifier look up prevouts from a
@@ -64,36 +62,6 @@ pub enum ChainChangeError {
     /// The guard was issued by a different gateway.
     #[error("chain change guard belongs to another gateway")]
     ForeignGuard,
-}
-
-/// Why a [`MempoolGateway::shared`] / [`MempoolGateway::shared_with`] lookup
-/// refused to return the gateway interned for a pool.
-///
-/// The registry keeps exactly one gateway per pool, so a caller asking for an
-/// engine the interned gateway does not run is a wiring bug — silently
-/// returning the other engine would substitute a different script verifier
-/// than the resolved `validation.engine` asked for. It is refused, loudly.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum SharedGatewayError {
-    /// The pool already has an interned gateway and it verifies scripts under
-    /// another validation engine.
-    #[error(
-        "mempool gateway for this pool is already interned with validation engine \
-         `{interned}`, not `{requested}`"
-    )]
-    EngineMismatch {
-        /// Engine the interned gateway was built with.
-        interned: ValidationEngine,
-        /// Engine the caller asked for.
-        requested: ValidationEngine,
-    },
-    /// The pool already has an interned gateway, so the supplied observer
-    /// would never be installed.
-    #[error(
-        "mempool gateway for this pool is already interned, so the supplied \
-         observer was not installed"
-    )]
-    ObserverNotInstalled,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +115,7 @@ pub struct AdmissionRequest {
     /// [`MempoolGateway::stable_generation`]; requests prepared under a
     /// [`ChainChangeGuard`] carry its odd value. The token alone grants no
     /// authority — `check_admission_state` accepts it only under the
-    /// matching [`crate::admission::AdmissionFence`].
+    /// matching `AdmissionFence`.
     pub expected_generation: u64,
     /// Exact mempool sequence the caller captured before admission.
     pub expected_sequence: u64,
@@ -377,25 +345,12 @@ fn witness_strippable_failure(error: &ConsensusError, prevouts: &[(OutPoint, TxO
         })
 }
 
-/// Interns one [`MempoolGateway`] per pool `Arc` identity.
-///
-/// This is the crate's one piece of process-global state, and it exists
-/// because the apply path (`Chainstate`) is frozen in this batch and
-/// cannot carry a gateway handle: reorg and run-time composition reach the
-/// run-composed instance through the pool `Arc` they already hold. The
-/// registry holds weak references only, so it never keeps a gateway or a
-/// pool alive. Handoff note for ING-R34: once `Chainstate` gains a
-/// `mempool_gateway` field, the reorg caller can read the handle instead
-/// and `shared` shrinks to run-time composition plus tests.
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::orphan::RejectScope;
 use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
 #[cfg(any(test, feature = "test-seam"))]
 use crate::rbf::ReplacementCandidate;
 use crate::rbf::{LimitEnforcement, RbfError};
-
-static REGISTRY: LazyLock<Mutex<Vec<Weak<MempoolGateway>>>> =
-    LazyLock::new(|| Mutex::new(alloc::vec::Vec::new()));
 
 /// Receives every committed mempool mutation, exactly once, in sequence
 /// order.
@@ -426,7 +381,7 @@ pub trait MempoolObserver: Send + Sync {
 #[derive(Default)]
 pub struct CompositeObserver {
     /// Guarded because a subsystem may attach its leg after the gateway is
-    /// interned. Publication clones the list under this lock and releases it
+    /// constructed. Publication clones the list under this lock and releases it
     /// before calling any leg, so a leg re-entering the gateway cannot
     /// deadlock against an attach.
     legs: Mutex<Vec<(&'static str, Arc<dyn MempoolObserver>)>>,
@@ -515,7 +470,7 @@ struct PublishState {
 ///
 /// # Ordering invariant
 ///
-/// Every mutating method flows through exactly one path, [`Self::commit`],
+/// Every mutating method flows through exactly one path, `Self::commit`,
 /// which runs, in this exact order:
 ///
 /// 1. take the pool write lock,
@@ -551,7 +506,7 @@ pub struct MempoolGateway {
     publish: Mutex<PublishState>,
     /// Even means stable; odd means a chain change is active or a failed
     /// chain change has closed admission. Initialized to `0` (even/stable)
-    /// in [`Self::shared`]. Compare only for exact equality — never order or
+    /// in [`Self::new`]. Compare only for exact equality — never order or
     /// subtract wrapping counters.
     chain_generation: AtomicU64,
     /// The one script-verification engine this gateway's admission path runs,
@@ -571,6 +526,9 @@ impl core::fmt::Debug for MempoolGateway {
 
 impl MempoolGateway {
     /// Wraps `pool` and optionally installs `observer`.
+    ///
+    /// The composition root must construct exactly one gateway for a pool and
+    /// pass clones of that handle to every mutation route.
     ///
     /// Pass `None` — or use the node's no-op publisher behind its observer —
     /// when no `--zmq-pub-sequence` endpoint is configured.
@@ -621,107 +579,26 @@ impl MempoolGateway {
         Ok(())
     }
 
-    /// Returns the one gateway interned for `pool`.
-    ///
-    /// Two callers holding clones of the same pool `Arc` get the same
-    /// gateway — one publish queue, one observer slot. Distinct pools get
-    /// distinct gateways. Dead entries are pruned on every call. Lookup
-    /// upgrades the weak reference FIRST and only then compares pool
-    /// pointers: a live gateway pins its pool alive, so two live `Arc`s
-    /// comparing pointer-equal are the same allocation, which makes ABA
-    /// (a freed pool's address reused by a new allocation) impossible.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SharedGatewayError::EngineMismatch`] when `pool` is already
-    /// interned with a different `engine`: the registry owns one gateway per
-    /// pool, so returning it would run this admission path under an engine
-    /// other than the resolved `validation.engine`.
-    pub fn shared(
-        pool: Arc<RwLock<Mempool>>,
-        engine: ValidationEngine,
-    ) -> Result<Arc<Self>, SharedGatewayError> {
-        let mut gateways = REGISTRY.lock();
-        if let Some(candidate) = Self::interned(&mut gateways, &pool, engine)? {
-            return Ok(candidate);
-        }
-        let gateway = Arc::new(Self::new(pool, None, engine));
-        gateways.push(Arc::downgrade(&gateway));
-        Ok(gateway)
-    }
-
-    /// Returns the one gateway interned for `pool`, constructed with
-    /// `observer`.
-    ///
-    /// Like [`Self::shared`] but the newly created gateway carries the
-    /// supplied observer. The caller is expected to be the first interner —
-    /// production code constructs the gateway through [`crate::state::NodeState`]
-    /// before any `shared` call — so the observer lands on the one interned
-    /// instance. A second call can never install its observer (the interned
-    /// gateway's slot is already sealed), so silently returning the interned
-    /// gateway would silently drop the caller's observer and any mutation
-    /// mirror it was meant to receive. That wiring bug is refused.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SharedGatewayError::EngineMismatch`] exactly as [`Self::shared`]
-    /// does; the observer slot never justifies an engine substitution. Returns
-    /// [`SharedGatewayError::ObserverNotInstalled`] when a gateway is already
-    /// interned for `pool`, because the supplied observer cannot be installed
-    /// on it.
-    pub fn shared_with(
-        pool: Arc<RwLock<Mempool>>,
-        observer: Arc<dyn MempoolObserver>,
-        engine: ValidationEngine,
-    ) -> Result<Arc<Self>, SharedGatewayError> {
-        let mut gateways = REGISTRY.lock();
-        if Self::interned(&mut gateways, &pool, engine)?.is_some() {
-            // The interned gateway's observer slot is sealed at construction,
-            // and one built without an observer has no composite slot to
-            // extend (`attach_observer_leg` refuses). Either way the supplied
-            // observer would be silently dropped here, so it is refused.
-            return Err(SharedGatewayError::ObserverNotInstalled);
-        }
-        let gateway = Arc::new(Self::new(pool, Some(observer), engine));
-        gateways.push(Arc::downgrade(&gateway));
-        Ok(gateway)
-    }
-
-    /// Returns the live gateway interned for `pool`, refusing one built under
-    /// another validation engine.
-    fn interned(
-        gateways: &mut alloc::vec::Vec<Weak<Self>>,
-        pool: &Arc<RwLock<Mempool>>,
-        engine: ValidationEngine,
-    ) -> Result<Option<Arc<Self>>, SharedGatewayError> {
-        gateways.retain(|weak| weak.upgrade().is_some());
-        for weak in gateways.iter() {
-            if let Some(candidate) = weak.upgrade() {
-                if Arc::ptr_eq(&candidate.pool, pool) {
-                    let interned = candidate.engine();
-                    if interned != engine {
-                        return Err(SharedGatewayError::EngineMismatch {
-                            interned,
-                            requested: engine,
-                        });
-                    }
-                    return Ok(Some(candidate));
-                }
-            }
-        }
-        Ok(None)
-    }
-
     /// Returns `true` when the gateway was constructed with an observer.
+    ///
+    /// Test seam: lifecycle assertions only.
+    #[cfg(any(test, feature = "test-seam"))]
     #[must_use]
     pub fn has_observer(&self) -> bool {
         self.observer.is_some()
+    }
+
+    /// Returns a cloneable read-only capability over the pool.
+    #[must_use]
+    pub fn reader(&self) -> crate::MempoolReader {
+        crate::MempoolReader::new(Arc::clone(&self.pool))
     }
 
     /// Raw pool access for test fixture staging and read-side composition
     /// only. The raw-site audit's production pattern matches
     /// `.pool().write()` too; production mutations must go through the
     /// gateway so observers stay in the loop.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn pool(&self) -> &Arc<RwLock<Mempool>> {
         &self.pool
     }
@@ -807,10 +684,14 @@ impl MempoolGateway {
                 )
                 .map_err(RbfError::into_pool_error)?;
             let plan = inputs.verify().map_err(RbfError::into_pool_error)?;
-            let result = self.commit(origin, move |pool| {
-                pool.commit_pool_change(plan)
-                    .map_err(RbfError::into_pool_error)
-            });
+            let result = self.commit(
+                origin,
+                move |pool| {
+                    pool.commit_pool_change(plan)
+                        .map_err(RbfError::into_pool_error)
+                },
+                |result| Some(result),
+            );
             if !matches!(result, Err(MempoolError::StalePolicy)) {
                 return result;
             }
@@ -836,7 +717,11 @@ impl MempoolGateway {
                 crate::rbf::FeeEstimation::Estimate,
             )?;
             let plan = inputs.verify()?;
-            let result = self.commit(origin, move |pool| pool.commit_pool_change(plan));
+            let result = self.commit(
+                origin,
+                move |pool| pool.commit_pool_change(plan),
+                |result| Some(result),
+            );
             if !matches!(result, Err(RbfError::StalePlan)) {
                 return result;
             }
@@ -852,7 +737,10 @@ impl MempoolGateway {
     /// the capacity evictions verified before insertion.
     // The public atomic API consumes its prepared request; the private path
     // borrows it so the shared retry owner can recover the Arc after a mismatch.
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
+    /// Test seam: the pre-claimed single-shot door; production submissions
+    /// run through `submit_transaction`'s bounded claimed path.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn admit_transaction(&self, request: AdmissionRequest) -> Result<AdmitOutcome, AdmitError> {
         self.admit_transaction_claimed(&request, None, crate::admission::AdmissionFence::Stable)
     }
@@ -861,7 +749,6 @@ impl MempoolGateway {
     /// Evicted or refreshed retry bodies may not mutate pool or lifecycle.
     // Keep token checks, mutation, lifecycle finalization and FIFO publication
     // in one auditable write-lock interval instead of splitting the commit.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn admit_transaction_claimed(
         &self,
         request: &AdmissionRequest,
@@ -887,65 +774,53 @@ impl MempoolGateway {
         #[cfg(any(test, feature = "test-seam"))]
         ordering_gate::park_if_armed(std::ptr::from_ref(self).expose_provenance());
 
-        let mut pool = self.pool.write();
-        self.check_admission_state(
-            &pool,
-            request.expected_generation,
-            request.expected_sequence,
-            fence,
-            Some(prepared.stamp),
-        )?;
-        if claim.is_some_and(|(claim, announcer)| {
-            !self.lifecycle.lock().orphans.is_current(claim, announcer)
-        }) {
-            return Ok(AdmitOutcome::AlreadyKnown);
-        }
-        let txid = request.tx.txid();
-        if pool.contains_txid(&txid) {
-            self.lifecycle
-                .lock()
-                .orphans
-                .remove_transaction_variants(txid);
-            return Ok(AdmitOutcome::AlreadyKnown);
-        }
-        if let Some((error, scope)) = prepared.rejection {
-            self.record_peer_failure(&pool, request, error, scope);
-            return Err(error);
-        }
-        let default_reject_scope = rejection_scope(&request.tx);
+        self.commit(
+            request.origin,
+            |pool| {
+                self.check_admission_state(
+                    pool,
+                    request.expected_generation,
+                    request.expected_sequence,
+                    fence,
+                    Some(prepared.stamp),
+                )?;
+                if claim.is_some_and(|(claim, announcer)| {
+                    !self.lifecycle.lock().orphans.is_current(claim, announcer)
+                }) {
+                    return Ok(AdmitOutcome::AlreadyKnown);
+                }
+                let txid = request.tx.txid();
+                if pool.contains_txid(&txid) {
+                    self.lifecycle
+                        .lock()
+                        .orphans
+                        .remove_transaction_variants(txid);
+                    return Ok(AdmitOutcome::AlreadyKnown);
+                }
+                if let Some((error, scope)) = prepared.rejection {
+                    self.record_peer_failure(pool, request, error, scope);
+                    return Err(error);
+                }
+                let default_reject_scope = rejection_scope(&request.tx);
 
-        // The writer consumes the already verified graph plan. It checks
-        // the stamp again but never reruns the solver or script verifier.
-        let ReplacementStage::Verified(plan) = prepared.replacement else {
-            return Err(AdmitError::MempoolChanged);
-        };
-        let outcome = pool.commit_pool_change(plan).map_err(replacement_rejection);
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                self.record_peer_failure(&pool, request, error, default_reject_scope);
-                return Err(error);
-            }
-        };
-
-        // 6. Enqueue the committed mutation and elect a drainer if needed.
-        let result = outcome;
-        self.update_admission_lifecycle(&pool, &result);
-        let mut elected = false;
-        if !result.changes.is_empty() && self.observer.is_some() {
-            let mut publish = self.publish.lock();
-            publish.queue.push_back(MutationEnvelope {
-                origin: request.origin,
-                result: result.clone(),
-            });
-            elected = !publish.draining;
-            publish.draining = true;
-        }
-        drop(pool);
-        if elected {
-            self.drain();
-        }
-        Ok(AdmitOutcome::Committed(result))
+                // The writer consumes the already verified graph plan. It checks
+                // the stamp again but never reruns the solver or script verifier.
+                let ReplacementStage::Verified(plan) = prepared.replacement else {
+                    return Err(AdmitError::MempoolChanged);
+                };
+                pool.commit_pool_change(plan)
+                    .map(AdmitOutcome::Committed)
+                    .map_err(|error| {
+                        let error = replacement_rejection(error);
+                        self.record_peer_failure(pool, request, error, default_reject_scope);
+                        error
+                    })
+            },
+            |outcome| match outcome {
+                AdmitOutcome::AlreadyKnown => None,
+                AdmitOutcome::Committed(result) => Some(result),
+            },
+        )
     }
 
     /// Rejects an attempt whose captured admittance facts no longer hold.
@@ -1266,13 +1141,17 @@ impl MempoolGateway {
                 failing.push(tx.txid());
             }
         }
-        self.commit(AdmissionOrigin::Reorg, |pool| {
-            let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
-            if fence.current(self) != Some(change.odd_generation()) {
-                return Err(ChainChangeError::GenerationMoved);
-            }
-            Ok(pool.remove_for_reorg(&failing))
-        })
+        self.commit(
+            AdmissionOrigin::Reorg,
+            |pool| {
+                let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
+                if fence.current(self) != Some(change.odd_generation()) {
+                    return Err(ChainChangeError::GenerationMoved);
+                }
+                Ok(pool.remove_for_reorg(&failing))
+            },
+            |result| Some(result),
+        )
     }
 
     /// Commits `pool.remove_for_block` and publishes its result.
@@ -1289,6 +1168,10 @@ impl MempoolGateway {
     }
 
     /// Commits `pool.evict_below_fee_rate` and publishes its result.
+    ///
+    /// Test seam: fee-history fixture door; production trimming runs through
+    /// `enforce_size_limit`'s chunk-ordered eviction.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn evict_below_fee_rate(
         &self,
         origin: AdmissionOrigin,
@@ -1319,13 +1202,47 @@ impl MempoolGateway {
     ) -> Result<MutationResult, MempoolError> {
         let inputs = self.pool.read().capture_eviction(max_bytes)?;
         let plan = inputs.verify()?;
-        self.commit(origin, move |pool| {
-            pool.commit_pool_change(plan)
-                .map_err(RbfError::into_pool_error)
-        })
+        self.commit(
+            origin,
+            move |pool| {
+                pool.commit_pool_change(plan)
+                    .map_err(RbfError::into_pool_error)
+            },
+            |result| Some(result),
+        )
+    }
+
+    /// Retires entries and fee history tied to the pre-snapshot chain view.
+    /// The snapshot owner must hold this gateway's chain-change reservation.
+    pub fn clear_for_snapshot(
+        &self,
+        change: &ChainChangeGuard,
+    ) -> Result<MutationResult, ChainChangeError> {
+        if !change.owns(self) {
+            return Err(ChainChangeError::ForeignGuard);
+        }
+        self.commit(
+            AdmissionOrigin::Block,
+            |pool| {
+                let fence = crate::admission::AdmissionFence::ChainChange(change.odd_generation());
+                if fence.current(self) != Some(change.odd_generation()) {
+                    return Err(ChainChangeError::GenerationMoved);
+                }
+                let removed = pool.clear();
+                let mut lifecycle = self.lifecycle.lock();
+                lifecycle.orphans.clear();
+                lifecycle.clear_rejects();
+                Ok(removed)
+            },
+            |result| Some(result),
+        )
     }
 
     /// Commits `pool.clear` and publishes its result.
+    ///
+    /// Test seam: wholesale fixture reset without a chain-change reservation.
+    /// Production snapshot replacement uses `clear_for_snapshot`.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn clear(&self, origin: AdmissionOrigin) -> MutationResult {
         self.commit_infallible(origin, Mempool::clear)
     }
@@ -1334,11 +1251,7 @@ impl MempoolGateway {
     /// mutation change, so there is nothing to order.
     pub fn prioritise(&self, txid: Txid, fee_delta: i64) -> Result<(), PrioritiseError> {
         let mut pool = self.pool.write();
-        pool.prioritise(txid, fee_delta)?;
-        if fee_delta != 0 {
-            self.lifecycle.lock().clear_rejects();
-        }
-        Ok(())
+        self.apply_prioritise(&mut pool, txid, fee_delta)
     }
 
     /// Atomically rejects pooled dust before applying a fee overlay.
@@ -1354,11 +1267,23 @@ impl MempoolGateway {
         {
             return Ok(false);
         }
+        self.apply_prioritise(&mut pool, txid, fee_delta)?;
+        Ok(true)
+    }
+
+    /// Applies the overlay and clears peer-reject evidence the new fee
+    /// ordering may have invalidated.
+    fn apply_prioritise(
+        &self,
+        pool: &mut Mempool,
+        txid: Txid,
+        fee_delta: i64,
+    ) -> Result<(), PrioritiseError> {
         pool.prioritise(txid, fee_delta)?;
         if fee_delta != 0 {
             self.lifecycle.lock().clear_rejects();
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Reads the stored fee-delta overlay map.
@@ -1373,25 +1298,27 @@ impl MempoolGateway {
     /// every accepted/removed change from its prevalidated plan.
     /// Successful mutations acquire the publish mutex before releasing the
     /// pool guard, then call observers only after releasing the pool guard.
-    fn commit<E>(
+    fn commit<T, E>(
         &self,
         origin: AdmissionOrigin,
-        mutate: impl FnOnce(&mut Mempool) -> Result<MutationResult, E>,
-    ) -> Result<MutationResult, E> {
+        mutate: impl FnOnce(&mut Mempool) -> Result<T, E>,
+        mutation: impl FnOnce(&T) -> Option<&MutationResult>,
+    ) -> Result<T, E> {
         let mut elected = false;
         let outcome = {
             let mut pool = self.pool.write();
             let outcome = mutate(&mut pool)?;
-            let result = &outcome;
-            self.update_admission_lifecycle(&pool, result);
-            if !result.changes.is_empty() && self.observer.is_some() {
-                let mut publish = self.publish.lock();
-                publish.queue.push_back(MutationEnvelope {
-                    origin,
-                    result: result.clone(),
-                });
-                elected = !publish.draining;
-                publish.draining = true;
+            if let Some(result) = mutation(&outcome) {
+                self.update_admission_lifecycle(&pool, result);
+                if !result.changes.is_empty() && self.observer.is_some() {
+                    let mut publish = self.publish.lock();
+                    publish.queue.push_back(MutationEnvelope {
+                        origin,
+                        result: result.clone(),
+                    });
+                    elected = !publish.draining;
+                    publish.draining = true;
+                }
             }
             outcome
         };
@@ -1455,9 +1382,11 @@ impl MempoolGateway {
         origin: AdmissionOrigin,
         mutate: impl FnOnce(&mut Mempool) -> MutationResult,
     ) -> MutationResult {
-        let Ok(result) = self.commit(origin, |pool| {
-            Ok::<_, core::convert::Infallible>(mutate(pool))
-        });
+        let Ok(result) = self.commit(
+            origin,
+            |pool| Ok::<_, core::convert::Infallible>(mutate(pool)),
+            |result| Some(result),
+        );
         result
     }
 
@@ -1527,13 +1456,14 @@ pub struct ChainChangeGuard {
 impl ChainChangeGuard {
     /// Returns the exact odd generation this guard reserved.
     #[must_use]
-    pub fn odd_generation(&self) -> u64 {
+    pub(crate) fn odd_generation(&self) -> u64 {
         self.odd
     }
 
     /// Returns the reserved even value `finish` will store on success.
+    #[cfg(test)]
     #[must_use]
-    pub fn reserved_even(&self) -> u64 {
+    fn reserved_even(&self) -> u64 {
         self.even
     }
 
@@ -1630,11 +1560,11 @@ pub fn reset_admission_park() {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod tests {
     use super::{
         AdmissionMode, AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError,
-        CompositeObserver, MempoolGateway, MempoolObserver, SharedGatewayError, ValidationEngine,
+        CompositeObserver, MempoolGateway, MempoolObserver, ValidationEngine,
     };
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
     use crate::orphan::RejectScope;
@@ -2130,6 +2060,65 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_clear_requires_its_own_live_chain_change() {
+        let gateway = gateway_with(None);
+        let other = gateway_with(None);
+        let transaction = tx(14);
+        let orphan = Arc::new(tx(17));
+        let peer = crate::PeerToken {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], 18444)),
+            connection_id: 1,
+        };
+        gateway.lifecycle.lock().orphans.insert(orphan, peer, 0);
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&transaction))
+            .expect("insert");
+        let foreign = other.begin_chain_change().expect("foreign fence");
+        assert_eq!(
+            gateway.clear_for_snapshot(&foreign),
+            Err(ChainChangeError::ForeignGuard)
+        );
+        assert!(gateway.read().contains_txid(&transaction.txid()));
+        foreign.finish().expect("finish foreign");
+        let change = gateway.begin_chain_change().expect("snapshot fence");
+        let cleared = gateway.clear_for_snapshot(&change).expect("clear snapshot");
+        assert_eq!(cleared.changes.len(), 1);
+        assert_eq!(gateway.lifecycle.lock().orphans.len(), 0);
+        assert!(gateway.lifecycle.lock().orphans.take_ready().is_empty());
+        assert_eq!(
+            cleared.changes[0].outcome,
+            MutationOutcome::Removed(RemovalReason::Clear)
+        );
+        assert_eq!(gateway.stable_generation(), None);
+        change.finish().expect("settle snapshot");
+        assert!(gateway.stable_generation().is_some());
+    }
+
+    #[test]
+    fn snapshot_clear_publishes_removals_while_admission_is_fenced() {
+        let observer = Arc::new(RecordingObserver::default());
+        let gateway = gateway_with(Some(dyn_observer(&observer)));
+        let transaction = tx(14);
+        gateway
+            .insert_entry(AdmissionOrigin::Rpc, entry(&transaction))
+            .expect("insert");
+        observer.seen.lock().clear();
+        observer.origins.lock().clear();
+
+        let change = gateway.begin_chain_change().expect("snapshot fence");
+        gateway.clear_for_snapshot(&change).expect("clear snapshot");
+
+        assert_eq!(
+            *observer.seen.lock(),
+            vec![(hash(&transaction.txid()), removed(RemovalReason::Clear))]
+        );
+        assert_eq!(*observer.origins.lock(), vec![AdmissionOrigin::Block]);
+        assert!(!gateway.read().contains_txid(&transaction.txid()));
+        assert_eq!(gateway.stable_generation(), None);
+        change.finish().expect("settle snapshot");
+    }
+
+    #[test]
     fn clear_reports_every_entry_and_empty_clear_moves_nothing() {
         let gateway = gateway_with(None);
         let first = tx(15);
@@ -2207,71 +2196,92 @@ mod tests {
     /// and both mutations are in the pool.
     #[test]
     fn gated_callback_lets_concurrent_mutation_enqueue_and_return() {
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let observer = Arc::new(GatedObserver {
-            entered: Mutex::new(Some(entered_tx)),
-            release: Mutex::new(Some(release_rx)),
-            stream: Mutex::new(Vec::new()),
-        });
-        let gateway = Arc::new(MempoolGateway::new(
-            Arc::clone(&pool),
-            Some(dyn_observer(&observer)),
-            ValidationEngine::Native,
-        ));
+        for (first_admission, second_admission) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let observer = Arc::new(GatedObserver {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(Some(release_rx)),
+                stream: Mutex::new(Vec::new()),
+            });
+            let gateway = gateway_with(Some(dyn_observer(&observer)));
 
-        let first_txid = tx(20).txid();
-        let first = Arc::clone(&gateway);
-        let first_handle = std::thread::spawn(move || {
-            first
-                .insert_entry(AdmissionOrigin::Rpc, entry(&tx(20)))
-                .expect("first in")
-        });
-        entered_rx
-            .recv_timeout(core::time::Duration::from_secs(10))
-            .expect("first observer call started");
+            let first_tx = if first_admission {
+                standard_tx(20)
+            } else {
+                tx(20)
+            };
+            let first_txid = first_tx.txid();
+            let first = Arc::clone(&gateway);
+            let first_handle =
+                std::thread::spawn(move || commit_ordering_tx(&first, &first_tx, first_admission));
+            entered_rx
+                .recv_timeout(core::time::Duration::from_secs(10))
+                .expect("first observer call started");
 
-        let second_txid = tx(21).txid();
-        let second = Arc::clone(&gateway);
-        let second_handle = std::thread::spawn(move || {
-            let result = second
-                .insert_entry(AdmissionOrigin::Rpc, entry(&tx(21)))
-                .expect("second in");
-            let _ = done_tx.send(result);
-        });
+            let second_tx = if second_admission {
+                standard_tx(21)
+            } else {
+                tx(21)
+            };
+            let second_txid = second_tx.txid();
+            let second = Arc::clone(&gateway);
+            let second_handle = std::thread::spawn(move || {
+                let result = commit_ordering_tx(&second, &second_tx, second_admission);
+                let _ = done_tx.send(result);
+            });
 
-        // The concurrent mutation must enqueue and return while the first
-        // callback is still gated: its thread hands back the committed
-        // result with the next sequence even though nothing has published.
-        let queued_result = done_rx
-            .recv_timeout(core::time::Duration::from_secs(10))
-            .expect("the concurrent mutation must return while the callback is gated");
-        assert_eq!(
-            queued_result.sequence_base, 2,
-            "the enqueued batch keeps its committed sequence"
-        );
+            // The concurrent mutation must enqueue and return while the first
+            // callback is still gated: its thread hands back the committed
+            // result with the next sequence even though nothing has published.
+            let queued_result = done_rx
+                .recv_timeout(core::time::Duration::from_secs(10))
+                .expect("the concurrent mutation must return while the callback is gated");
+            assert_eq!(
+                queued_result.sequence_base, 2,
+                "the enqueued batch keeps its committed sequence"
+            );
 
-        // Nothing may publish while the gate is closed.
-        assert_eq!(
-            observer.stream.lock().len(),
-            1,
-            "only the gated first batch is published so far"
-        );
+            // Nothing may publish while the gate is closed.
+            assert_eq!(
+                observer.stream.lock().len(),
+                1,
+                "only the gated first batch is published so far"
+            );
 
-        release_tx.send(()).expect("gate thread alive");
-        first_handle.join().expect("first publisher");
-        second_handle.join().expect("second publisher");
+            release_tx.send(()).expect("gate thread alive");
+            first_handle.join().expect("first publisher");
+            second_handle.join().expect("second publisher");
 
-        assert_eq!(
-            *observer.stream.lock(),
-            vec![1, 2],
-            "publish order matches sequence order"
-        );
-        let pool_read = gateway.read();
-        assert!(pool_read.contains_txid(&first_txid));
-        assert!(pool_read.contains_txid(&second_txid));
+            assert_eq!(
+                *observer.stream.lock(),
+                vec![1, 2],
+                "publish order matches sequence order"
+            );
+            let pool_read = gateway.read();
+            assert!(pool_read.contains_txid(&first_txid));
+            assert!(pool_read.contains_txid(&second_txid));
+        }
+    }
+
+    fn commit_ordering_tx(
+        gateway: &MempoolGateway,
+        tx: &Tx,
+        admission: bool,
+    ) -> crate::mutation::MutationResult {
+        if !admission {
+            return gateway
+                .insert_entry(AdmissionOrigin::Rpc, entry(tx))
+                .expect("inserted");
+        }
+        let outcome = gateway.admit_transaction(admit_request(gateway, tx, AdmissionOrigin::Rpc));
+        let Ok(AdmitOutcome::Committed(result)) = outcome else {
+            panic!("admission did not commit: {outcome:?}");
+        };
+        result
     }
 
     /// An observer that re-enters the gateway from its first callback and
@@ -2762,8 +2772,7 @@ mod tests {
         let gateway = gateway_with(None);
         let mut tx = standard_tx(0x84);
         let redeem_script = vec![0xae; 201];
-        tx.inputs[0].script_sig =
-            Script::from_bytes(bitcoin_rs_script::script::push_data(&redeem_script));
+        tx.inputs[0].script_sig = Script::from_bytes(bitcoin_rs_script::push_data(&redeem_script));
         let mut request = admit_request(&gateway, &tx, AdmissionOrigin::Rpc);
         request.prevouts[0].1.script_pubkey =
             Script::from_bytes([vec![0xa9, 0x14], vec![1; 20], vec![0x87]].concat());
@@ -2772,9 +2781,9 @@ mod tests {
             bitcoin::consensus::deserialize(&bitcoin_rs_primitives::consensus_bytes(&tx))?;
         let previous = bitcoin::TxOut {
             value: bitcoin::Amount::from_sat(request.prevouts[0].1.value.to_sat()),
-            script_pubkey: bitcoin::ScriptBuf::from_bytes(Vec::from(
-                request.prevouts[0].1.script_pubkey.clone(),
-            )),
+            script_pubkey: bitcoin::ScriptBuf::from_bytes(
+                request.prevouts[0].1.script_pubkey.as_bytes().to_vec(),
+            ),
         };
         let cost = oracle.total_sigop_cost(|_| Some(previous.clone()));
         assert!(u32::try_from(cost)? > crate::standardness::MAX_STANDARD_TX_SIGOPS_COST);
@@ -3135,89 +3144,6 @@ mod tests {
                 .is_ok()
         );
         assert!(gateway.read().contains_txid(&committed_txid));
-    }
-
-    #[test]
-    fn shared_interns_one_gateway_per_pool() {
-        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let first = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        let second = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        assert!(
-            Arc::ptr_eq(&first, &second),
-            "one pool must intern exactly one gateway"
-        );
-
-        let other = MempoolGateway::shared(
-            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            ValidationEngine::Native,
-        )
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        assert!(
-            !Arc::ptr_eq(&first, &other),
-            "distinct pools must get distinct gateways"
-        );
-    }
-
-    /// The registry keeps one gateway per pool, so a lookup asking for an
-    /// engine the interned gateway does not run must be refused loudly: a
-    /// silent return would verify this pool's admission path under a backend
-    /// other than the resolved `validation.engine`.
-    #[test]
-    fn shared_refuses_an_engine_the_interned_gateway_does_not_run() {
-        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let interned = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        assert_eq!(interned.engine(), ValidationEngine::Native);
-
-        // Same engine, no observer requested: the read-only re-intern is
-        // still one gateway (`shared` installs nothing, so nothing can be
-        // dropped).
-        let same = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        assert!(Arc::ptr_eq(&interned, &same));
-
-        // Requesting another engine for the same pool is a wiring bug, not a
-        // value to substitute: it is refused, and the interned gateway is
-        // left exactly as it was.
-        match MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Kernel) {
-            Ok(_) => panic!("an engine mismatch must be refused, not substituted"),
-            Err(SharedGatewayError::EngineMismatch {
-                interned: have,
-                requested: want,
-            }) => {
-                assert_eq!(have, ValidationEngine::Native);
-                assert_eq!(want, ValidationEngine::Kernel);
-            }
-            Err(other) => panic!("expected EngineMismatch, got {other:?}"),
-        }
-        // An engine mismatch is refused before the observer question.
-        match MempoolGateway::shared_with(
-            Arc::clone(&pool),
-            Arc::new(CompositeObserver::new()),
-            ValidationEngine::Kernel,
-        ) {
-            Ok(_) => panic!("shared_with must refuse an engine mismatch too"),
-            Err(SharedGatewayError::EngineMismatch { .. }) => {}
-            Err(other) => panic!("engine mismatch must win over the observer check: {other:?}"),
-        }
-        // Even the matching-engine case cannot install an observer on an
-        // already interned gateway: the slot is sealed at construction and a
-        // gateway built without one has no composite slot to extend. The
-        // old shape returned the interned gateway and dropped the caller's
-        // observer silently — the exact sibling wiring bug the engine
-        // mismatch refuses loudly.
-        match MempoolGateway::shared_with(
-            Arc::clone(&pool),
-            Arc::new(CompositeObserver::new()),
-            ValidationEngine::Native,
-        ) {
-            Ok(_) => panic!("an uninstalled observer must be refused, not dropped"),
-            Err(SharedGatewayError::ObserverNotInstalled) => {}
-            Err(other) => panic!("expected ObserverNotInstalled, got {other:?}"),
-        }
-        assert_eq!(interned.engine(), ValidationEngine::Native);
     }
 
     #[test]

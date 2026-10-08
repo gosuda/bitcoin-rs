@@ -15,6 +15,7 @@
 
 use bitcoin_rs_primitives::Hash256;
 
+use crate::chainstate_journal::crc32c;
 use crate::pruning::{BLOCK_DATA_CF, block_body_key, block_undo_key};
 use crate::{ColumnFamily, KvStore, StorageError, WriteCondition};
 
@@ -29,14 +30,14 @@ pub const DURABLE_HEAD_KEY: &[u8] = b"node:durable-head";
 /// Owner-local to this row. A bump is a breaking change for every datadir
 /// that ever wrote the row, so decode treats an unknown version as corruption
 /// and refuses, rather than guessing around it.
-pub const DURABLE_HEAD_FORMAT_VERSION: u8 = 1;
+pub const DURABLE_HEAD_FORMAT_VERSION: u8 = 4;
 
 /// Magic prefix of the durable-head row bytes.
 const DURABLE_HEAD_MAGIC: [u8; 4] = *b"BRSD";
 
 /// Fixed payload width: commit id, height, tip, chain tx count, body extent,
 /// undo extent.
-const DURABLE_HEAD_PAYLOAD_LEN: usize = 8 + 4 + 32 + 8 + 1 + 4 + 8 + 1 + 4 + 32;
+const DURABLE_HEAD_PAYLOAD_LEN: usize = 102 + crate::assumeutxo::AssumeUtxoDiskStatus::ENCODED_LEN;
 
 /// Frame width: magic, version, CRC32C, payload.
 const DURABLE_HEAD_FRAME_LEN: usize = DURABLE_HEAD_MAGIC.len() + 1 + 4 + DURABLE_HEAD_PAYLOAD_LEN;
@@ -65,6 +66,8 @@ pub struct BodyExtent {
 /// which is what makes an ambiguous durable completion resolvable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DurableHead {
+    /// Snapshot anchor and lifecycle owned by this same atomic commit point.
+    pub assumeutxo: crate::assumeutxo::AssumeUtxoDiskStatus,
     /// Strictly monotonic commit counter; advances on disconnect too.
     pub commit_id: u64,
     /// Height of `tip`.
@@ -102,6 +105,7 @@ impl DurableHead {
             payload[66..70].copy_from_slice(&height.to_be_bytes());
             payload[70..102].copy_from_slice(hash.as_byte_array());
         }
+        payload[102..].copy_from_slice(&self.assumeutxo.encode());
 
         let mut frame = [0_u8; DURABLE_HEAD_FRAME_LEN];
         frame[..DURABLE_HEAD_MAGIC.len()].copy_from_slice(&DURABLE_HEAD_MAGIC);
@@ -165,6 +169,7 @@ fn parse_payload(payload: &[u8]) -> Option<DurableHead> {
         None
     };
     Some(DurableHead {
+        assumeutxo: crate::assumeutxo::AssumeUtxoDiskStatus::decode(&payload[102..])?,
         commit_id,
         height,
         tip,
@@ -224,7 +229,7 @@ pub trait DurableHeadStore: Send + Sync + 'static {
 ///
 /// The row lands in the `UtxoMeta` family beside the disconnect marker and
 /// the index watermark keys, which is where chainstate metadata already
-/// lives; no new column family and no datadir-wide schema bump.
+/// lives. Its authoritative format is admitted by the datadir schema gate.
 pub struct KvDurableHeadStore<S: KvStore> {
     store: std::sync::Arc<S>,
 }
@@ -268,11 +273,35 @@ impl<S: KvStore> DurableHeadStore for KvDurableHeadStore<S> {
                 record,
             );
         }
+        let mut file_heights = std::collections::BTreeMap::<u32, u32>::new();
         for (height, hash, position) in &records.body_rows {
             batch.put(
                 BLOCK_DATA_CF,
                 &block_body_key(*height, *hash),
                 &position.encode(),
+            );
+            file_heights
+                .entry(position.file_no)
+                .and_modify(|maximum| *maximum = (*maximum).max(*height))
+                .or_insert(*height);
+        }
+        for (file_no, maximum) in file_heights {
+            let key = crate::block_file_max_height_key(file_no);
+            let prior = self.store.get(BLOCK_DATA_CF, &key)?;
+            let maximum = match prior {
+                Some(bytes) => crate::decode_block_file_max_height(&bytes)
+                    .ok_or_else(|| {
+                        StorageError::IncompatibleData(
+                            "invalid block-file maximum height".to_owned(),
+                        )
+                    })?
+                    .max(maximum),
+                None => maximum,
+            };
+            batch.put(
+                BLOCK_DATA_CF,
+                &key,
+                &crate::encode_block_file_max_height(maximum),
             );
         }
         let condition = match expected {
@@ -338,25 +367,13 @@ impl DurableHeadStore for InMemoryDurableHeadStore {
     }
 }
 
-/// CRC32C (Castagnoli), matching the chainstate journal's framing checksum.
-fn crc32c(bytes: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = 0_u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0x82_F6_3B_78 & mask);
-        }
-    }
-    !crc
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn sample(commit_id: u64) -> DurableHead {
         DurableHead {
+            assumeutxo: crate::assumeutxo::AssumeUtxoDiskStatus::Uninitialized,
             commit_id,
             height: 41,
             tip: Hash256::from_le_bytes(&[0x5A_u8; 32]),
@@ -380,6 +397,62 @@ mod tests {
             ..sample(1)
         };
         assert_eq!(DurableHead::decode(&bare.encode()), Some(bare));
+    }
+
+    #[test]
+    fn snapshot_root_frame_covers_pending_and_terminal_states() {
+        use crate::assumeutxo::{AssumeUtxoDiskStatus, PendingHistoricalBlock};
+        let base_hash = Hash256::from_le_bytes(&[0x31; 32]);
+        let commitment = Hash256::from_le_bytes(&[0x52; 32]);
+        let statuses = [
+            AssumeUtxoDiskStatus::Validating {
+                base_height: 100,
+                base_hash,
+                expected_hash_serialized: commitment,
+                chain_tx_count: 120,
+                historical_height: 41,
+                historical_hash: sample(1).tip,
+                pending: Some(PendingHistoricalBlock {
+                    height: 42,
+                    hash: base_hash,
+                    position: Some(crate::BlockFilePosition {
+                        file_no: 7,
+                        offset: 128,
+                        len: 500,
+                    }),
+                }),
+                checkpoint: Some(crate::assumeutxo::HistoricalCheckpointRef {
+                    checkpoint: crate::checkpoint::CheckpointReference {
+                        generation: 9,
+                        manifest_sha256: [7; 32],
+                    },
+                    height: 40,
+                    hash: base_hash,
+                }),
+            },
+            AssumeUtxoDiskStatus::Finalized {
+                base_height: 100,
+                base_hash,
+                validated_hash_serialized: commitment,
+            },
+            AssumeUtxoDiskStatus::Failed {
+                base_height: 100,
+                base_hash,
+                expected_hash_serialized: commitment,
+                actual_hash_serialized: Hash256::default(),
+            },
+        ];
+        for assumeutxo in statuses {
+            let root = DurableHead {
+                assumeutxo,
+                ..sample(5)
+            };
+            assert_eq!(DurableHead::decode(&root.encode()), Some(root));
+            let mut frame = root.encode();
+            let last = frame.len() - 1;
+            frame[last] ^= 1;
+            assert!(DurableHead::decode(&frame).is_none());
+        }
     }
 
     #[test]

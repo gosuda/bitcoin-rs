@@ -7,8 +7,9 @@ use std::error::Error;
 use std::path::Path;
 use std::str::FromStr;
 
+use bitcoin::hex::FromHex;
 use bitcoin_rs_primitives::{OutPoint, Tx, TxOut, Txid, deserialize};
-use bitcoin_rs_script::VerifyFlags;
+use bitcoin_rs_script::{VerifyFlags, push_int};
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait as _, Value};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -39,8 +40,6 @@ fn kernel_verdict(tx: &Tx, prevouts: &[(OutPoint, TxOut)], flags: VerifyFlags) -
 
 /// Core ASM: literal hex bytes, named opcodes and minimally pushed integers.
 fn parse_core_asm(asm: &str) -> Result<Vec<u8>, String> {
-    use bitcoin_rs_script::push_int;
-
     let mut script = Vec::new();
     for token in asm.split_whitespace() {
         if let Some(hex) = token.strip_prefix("0x") {
@@ -69,9 +68,9 @@ fn resolve_opcode(name: &str) -> Option<u8> {
     Some(match bare {
         // Push opcodes
         "0" | "EMPTY" => OP_0,
-        "PUSHDATA1" => OP_PUSHDATA1,
-        "PUSHDATA2" => OP_PUSHDATA2,
-        "PUSHDATA4" => OP_PUSHDATA4,
+        "PUSHDATA1" => 0x4c,
+        "PUSHDATA2" => 0x4d,
+        "PUSHDATA4" => 0x4e,
         "1NEGATE" => OP_1NEGATE,
         "1" | "PUSHNUM_1" => OP_PUSHNUM_1,
         "2" | "PUSHNUM_2" => 0x52,
@@ -169,9 +168,9 @@ fn resolve_opcode(name: &str) -> Option<u8> {
         "HASH256" => 0xaa,
         "CODESEPARATOR" => 0xab,
         "CHECKSIG" => OP_CHECKSIG,
-        "CHECKSIGVERIFY" => OP_CHECKSIGVERIFY,
+        "CHECKSIGVERIFY" => 0xad,
         "CHECKMULTISIG" => OP_CHECKMULTISIG,
-        "CHECKMULTISIGVERIFY" => OP_CHECKMULTISIGVERIFY,
+        "CHECKMULTISIGVERIFY" => 0xaf,
         // Locktime/sequence
         "CHECKLOCKTIMEVERIFY" => 0xb1,
         "CHECKSEQUENCEVERIFY" => 0xb2,
@@ -182,17 +181,7 @@ fn resolve_opcode(name: &str) -> Option<u8> {
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
-    if !hex.len().is_multiple_of(2) {
-        return Err(format!("odd length: {}", hex.len()));
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            let byte = u8::from_str_radix(&hex[i..i + 2], 16)
-                .map_err(|e| format!("at offset {i}: {e}"))?;
-            Ok(byte)
-        })
-        .collect()
+    Vec::from_hex(hex).map_err(|error| error.to_string())
 }
 
 struct VectorRow {
@@ -298,80 +287,42 @@ fn load_vectors(name: &str, expected: Verdict) -> Result<Vec<VectorRow>, Box<dyn
 }
 
 #[test]
-fn kernel_verdict_matches_tx_valid_vectors() -> TestResult {
-    let rows = load_vectors("tx_valid.json", Verdict::Accept)?;
-    require_non_empty(&rows, "tx_valid")?;
-
-    let (mandatory_rows, policy_flag_rows): (Vec<&VectorRow>, Vec<&VectorRow>) =
-        rows.iter().partition(|r| flags_are_mandatory_only(r.flags));
-
-    let mut accepted = 0usize;
-    let mut mismatches = Vec::new();
-
-    for row in &mandatory_rows {
-        let actual = kernel_verdict(&row.tx, &row.prevouts, row.flags);
-        if actual == row.expected {
-            accepted += 1;
-        } else {
-            mismatches.push(format!(
-                "row {}: expected Accept, kernel rejected",
-                row.row_index,
-            ));
-        }
+fn kernel_verdict_matches_mandatory_core_catalogs() -> TestResult {
+    for (name, expected) in [
+        ("tx_valid.json", Verdict::Accept),
+        ("tx_invalid.json", Verdict::Reject),
+    ] {
+        let rows = load_vectors(name, expected)?;
+        require_non_empty(&rows, name)?;
+        let mandatory: Vec<&VectorRow> = rows
+            .iter()
+            .filter(|row| flags_are_mandatory_only(row.flags))
+            .collect();
+        assert!(!mandatory.is_empty(), "{name}: zero mandatory-flag rows");
+        let mismatches: Vec<String> = mandatory
+            .iter()
+            .filter_map(|row| {
+                let actual = kernel_verdict(&row.tx, &row.prevouts, row.flags);
+                (actual != row.expected).then(|| {
+                    format!(
+                        "{name} row {}: expected {:?}, got {actual:?}",
+                        row.row_index, row.expected
+                    )
+                })
+            })
+            .collect();
+        println!(
+            "{name}: {} mandatory rows, {} policy rows skipped",
+            mandatory.len(),
+            rows.len() - mandatory.len()
+        );
+        assert!(
+            mismatches.is_empty(),
+            "{} mismatches:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
+        );
     }
-
-    println!(
-        "kernel_vector_parity tx_valid: {accepted}/{} mandatory-flag rows accepted by kernel \
-         ({} policy-flag rows skipped — kernel enforces only mandatory rules)",
-        mandatory_rows.len(),
-        policy_flag_rows.len(),
-    );
-
-    assert!(
-        mismatches.is_empty(),
-        "kernel rejected {} tx_valid vectors that it should have accepted:\n{}",
-        mismatches.len(),
-        mismatches.join("\n")
-    );
-    Ok(())
-}
-
-#[test]
-fn kernel_verdict_matches_tx_invalid_vectors() -> TestResult {
-    let rows = load_vectors("tx_invalid.json", Verdict::Reject)?;
-    require_non_empty(&rows, "tx_invalid")?;
-
-    let (mandatory_rows, policy_only_rows): (Vec<&VectorRow>, Vec<&VectorRow>) =
-        rows.iter().partition(|r| flags_are_mandatory_only(r.flags));
-    let policy_only_skipped = policy_only_rows.len();
-
-    let mut rejected = 0usize;
-    let mut mismatches = Vec::new();
-
-    for row in &mandatory_rows {
-        let actual = kernel_verdict(&row.tx, &row.prevouts, row.flags);
-        if actual == row.expected {
-            rejected += 1;
-        } else {
-            mismatches.push(format!(
-                "row {}: expected Reject, kernel accepted",
-                row.row_index,
-            ));
-        }
-    }
-
-    println!(
-        "kernel_vector_parity tx_invalid: {rejected}/{} mandatory-flag rows rejected by kernel \
-         ({policy_only_skipped} policy-only rows skipped — kernel correctly does not enforce policy)",
-        mandatory_rows.len(),
-    );
-
-    assert!(
-        mismatches.is_empty(),
-        "kernel accepted {} tx_invalid vectors that it should have rejected:\n{}",
-        mismatches.len(),
-        mismatches.join("\n")
-    );
     Ok(())
 }
 

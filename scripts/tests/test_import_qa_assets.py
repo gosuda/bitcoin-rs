@@ -56,9 +56,9 @@ class MapperTests(unittest.TestCase):
         for path in (self.p2p, self.scripts, self.asm, self.inventory.parent, self.script_target.parent):
             path.mkdir(parents=True, exist_ok=True)
         self.inventory.write_text('''// COMMANDS documentation mentions "decoy".
-pub const COMMANDS: &[Command] = &[
-    Command { name: "ping", status: CommandStatus::Served },
-    Command { name: "pong", status: CommandStatus::Ignored },
+pub const COMMANDS: &[&str] = &[
+    "ping",
+    "pong",
 ];
 pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
 ''')
@@ -96,8 +96,8 @@ pub const CORE_UNTYPED_COMMANDS: &[&str] = &["outside"];
         self.assert_seed("p2p_message", b"\x01payload")
 
     def test_missing_or_ambiguous_inventory_fails_closed(self):
-        for inventory in ("let x = bitcoin_rs_p2p::COMMANDS;", "pub const COMMANDS: &[Command] = &[];",
-                          'pub const COMMANDS: &[Command] = &[Command { name: "ping" }, Command { name: "ping" }];'):
+        for inventory in ("let x = bitcoin_rs_p2p::COMMANDS;", "pub const COMMANDS: &[&str] = &[];",
+                          'pub const COMMANDS: &[&str] = &["ping", "ping"];'):
             with self.subTest(inventory=inventory):
                 self.inventory.write_text(inventory)
                 with self.assertRaises(ValueError):

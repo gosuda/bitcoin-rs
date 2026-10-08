@@ -346,7 +346,7 @@ fn same_address_reconnect_does_not_inherit_stalled_inflight()
     sync.tick();
 
     let rerequested = witness_block_inventory(next_getdata(&replacement_rx)?)?;
-    assert!(!rerequested.is_empty());
+    assert_ne!(rerequested, []);
     for hash in &rerequested {
         assert_eq!(pending_owner(hash), Some(replacement));
     }

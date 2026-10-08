@@ -206,18 +206,6 @@ fn peer_disconnect_mid_window_requeues_blocks_to_remaining_peers()
 }
 
 #[test]
-fn reconnecting_staller_held_out_of_window_front_by_cooldown()
--> Result<(), Box<dyn std::error::Error>> {
-    stalled_frontier_peer_disconnected_after_adaptive_timeout_and_stripe_requeued()
-}
-
-#[test]
-fn sole_peer_staller_disconnected_and_usable_again_as_last_resort()
--> Result<(), Box<dyn std::error::Error>> {
-    tick_allows_demoted_peer_when_it_is_the_only_eligible_peer()
-}
-
-#[test]
 fn same_address_registration_after_window_eviction_keeps_replacement()
 -> Result<(), Box<dyn std::error::Error>> {
     let (sync, peers, _tree, _applied, _expected) = sync_with_header_chain(3)?;

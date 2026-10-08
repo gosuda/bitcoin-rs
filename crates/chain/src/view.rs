@@ -41,9 +41,15 @@ impl TipReader {
 ///
 /// The flag cell stays private, so consumers can observe the latch but
 /// cannot set it; only the owner writes.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LatchReader {
     inner: Arc<AtomicBool>,
+}
+
+impl From<Arc<AtomicBool>> for LatchReader {
+    fn from(inner: Arc<AtomicBool>) -> Self {
+        Self::new(inner)
+    }
 }
 
 impl LatchReader {
@@ -57,6 +63,18 @@ impl LatchReader {
     #[must_use]
     pub fn load(&self) -> bool {
         self.inner.load(Ordering::Acquire)
+    }
+
+    /// Whether the latch has been triggered.
+    #[must_use]
+    pub fn is_triggered(&self) -> bool {
+        self.load()
+    }
+
+    /// Creates an untriggered latch fixture for tests or defaults.
+    #[must_use]
+    pub fn fixture_never() -> Self {
+        Self::new(Arc::new(AtomicBool::new(false)))
     }
 
     /// Sets a fixture latch. Not present in production builds.

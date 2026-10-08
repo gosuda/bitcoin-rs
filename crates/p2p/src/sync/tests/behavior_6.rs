@@ -65,17 +65,6 @@ fn tick_fans_out_getdata_across_eligible_peers() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
-fn tick_does_not_request_above_peer_advertised_height() -> Result<(), Box<dyn std::error::Error>> {
-    clean_fast_path_caps_request_at_peer_height()
-}
-
-#[test]
-fn stale_queued_block_keeps_payload_without_peer_credit() -> Result<(), Box<dyn std::error::Error>>
-{
-    unsolicited_stale_block_retries_from_resolved_header_height()
-}
-
-#[test]
 fn stale_invalid_headers_cannot_evict_or_clear_replacement()
 -> Result<(), Box<dyn std::error::Error>> {
     let table = Arc::new(PeerTable::new());
@@ -90,12 +79,6 @@ fn stale_invalid_headers_cannot_evict_or_clear_replacement()
     assert!(table.is_current(new.source(addr)));
     assert!(!new.is_cancelled());
     Ok(())
-}
-
-#[test]
-fn prefix_probe_state_does_not_survive_owner_replacement() -> Result<(), Box<dyn std::error::Error>>
-{
-    tick_fanout_deferred_for_fresh_probe_engages_at_deadline()
 }
 
 #[test]
@@ -123,14 +106,10 @@ fn mutated_forward_body_preserves_descendant_for_retry() -> Result<(), Box<dyn s
         vec![regtest_fixture::coinbase(3)],
     )
     .unwrap_or_else(|error| panic!("regtest fixture block: {error}"));
-    {
-        let mut tree = sync.chain.block_tree_mut();
-        let main_id = tree
-            .lookup(Hash256::from_le_bytes(main_hash.as_bytes()))
-            .ok_or_else(|| std::io::Error::other("missing applied main block"))?;
-        let bad_id = tree.insert_node(Some(main_id), bad.header, NodeStatus::HeaderValid)?;
-        tree.insert_node(Some(bad_id), descendant.header, NodeStatus::HeaderValid)?;
-    }
+    assert!(matches!(
+        sync.chain.admit_headers(&[bad.header, descendant.header]),
+        HeaderAdmission::Accepted { .. }
+    ));
     stage_body(&sync, &bad_body);
     stage_body(&sync, &descendant);
 

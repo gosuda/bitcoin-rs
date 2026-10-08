@@ -31,9 +31,9 @@ fn segwit_coinbase(height: u32, witness: bool) -> Tx {
     Tx {
         version: 2,
         inputs: vec![TxIn {
-            previous_output: OutPoint::new(Txid::default(), u32::MAX),
+            previous_output: OutPoint::null(),
             script_sig: Script::from_bytes(script_sig),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: if witness {
                 Witness::from_stack(vec![vec![0; 32]])
             } else {
@@ -50,7 +50,7 @@ fn segwit_coinbase(height: u32, witness: bool) -> Tx {
                 script_pubkey: Script::from_bytes(commitment_script),
             },
         ],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -64,11 +64,22 @@ fn segwit_block(prev_blockhash: BlockHash, height: u32, witness: bool) -> Block 
     .unwrap_or_else(|error| panic!("regtest fixture block: {error}"))
 }
 
+type SegwitSyncFixture = (
+    BlockSync,
+    Hash256,
+    Block,
+    Block,
+    crossbeam_channel::Sender<InboundHeaders>,
+);
+
 /// Sets up a `BlockSync` with genesis applied, a single segwit block header in
-/// the tree, and a default sync budget. Returns the sync, the block hash, and
-/// both body variants (correct and stripped).
-fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn std::error::Error>> {
-    let (sync, _peers, _applied_tip, _main, _blocks_tx) = sync_with_mined_chain(0)?;
+/// the tree, and a default sync budget. Returns the sync, the block hash, both
+/// body variants (correct and stripped), and the inbound-headers sender.
+fn segwit_sync_fixture() -> Result<SegwitSyncFixture, Box<dyn std::error::Error>> {
+    let (tree, _blocks) = mined_chain(0, 0)?;
+    let harness = SyncHarness::new(tree);
+    let sync = harness.sync;
+    let headers_tx = harness.inbound_headers_tx;
     sync.chain.bootstrap_genesis();
     install_budget(&sync, super::super::default_sync_budget(Network::Regtest));
 
@@ -79,18 +90,12 @@ fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn s
     let correct_block = segwit_block(prev_hash, 1, true);
     let block_hash = Hash256::from_le_bytes(correct_block.block_hash().as_bytes());
 
-    // Insert the header into the tree so the witness gate can derive
+    // Admit the header into the chain so the witness gate can derive
     // segwit_active from the parent (genesis) and the block height.
-    let genesis_id = sync
-        .chain
-        .block_tree()
-        .lookup(Hash256::from_le_bytes(genesis.block_hash().as_bytes()))
-        .ok_or("missing genesis node")?;
-    sync.chain.block_tree_mut().insert_node(
-        Some(genesis_id),
-        correct_block.header,
-        NodeStatus::HeaderValid,
-    )?;
+    assert!(matches!(
+        sync.chain.admit_headers(&[correct_block.header]),
+        HeaderAdmission::Accepted { .. }
+    ));
 
     // The stripped variant shares the same header/hash (witness does not
     // affect txid or block hash).
@@ -101,7 +106,7 @@ fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn s
         "stripped and correct blocks must share the same hash"
     );
 
-    Ok((sync, block_hash, correct_block, stripped_block))
+    Ok((sync, block_hash, correct_block, stripped_block, headers_tx))
 }
 
 /// (g) A malformed (witness-stripped) body arrives first and is rejected for
@@ -110,7 +115,7 @@ fn segwit_sync_fixture() -> Result<(BlockSync, Hash256, Block, Block), Box<dyn s
 /// source), but the stager must remain clean so the correct body can stage.
 #[test]
 fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, block_hash, correct_block, stripped_block) = segwit_sync_fixture()?;
+    let (sync, block_hash, correct_block, stripped_block, _) = segwit_sync_fixture()?;
 
     // Send the stripped (malformed) body first.
     let mut batch = vec![InboundBlock::from_decoded(stripped_block)];
@@ -142,7 +147,7 @@ fn malformed_body_dropped_then_correct_body_staged() -> Result<(), Box<dyn std::
 #[test]
 fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, block_hash, _correct_block, stripped_block) = segwit_sync_fixture()?;
+    let (sync, block_hash, _correct_block, stripped_block, _) = segwit_sync_fixture()?;
     let peer_a = test_addr(9750, 0)?;
     let peer_b = test_addr(9750, 1)?;
     let rx_a = connect_peer(&sync.peer_table, synthetic_peer(peer_a, 1));
@@ -182,7 +187,7 @@ fn malformed_pending_owner_is_disconnected_and_other_peer_gets_same_hash()
 #[test]
 fn altered_non_witness_body_dropped_then_correct_body_staged()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, block_hash, correct_block, _) = segwit_sync_fixture()?;
+    let (sync, block_hash, correct_block, _, _) = segwit_sync_fixture()?;
     let mut altered_block = correct_block.clone();
     altered_block.txs[0].outputs[0].value = Amount::from_sat(2);
     assert_eq!(
@@ -216,7 +221,7 @@ fn altered_non_witness_body_dropped_then_correct_body_staged()
 #[test]
 fn correct_body_staged_then_malformed_duplicate_is_ignored()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, block_hash, correct_block, stripped_block) = segwit_sync_fixture()?;
+    let (sync, block_hash, correct_block, stripped_block, _) = segwit_sync_fixture()?;
 
     // Send the correct body first.
     let mut batch = vec![InboundBlock::from_decoded(correct_block)];
@@ -257,13 +262,11 @@ fn correct_body_staged_then_malformed_duplicate_is_ignored()
 #[test]
 fn idle_frontier_relearns_stale_peer_credit_after_rejected_body()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (sync, hash, correct, stripped) = segwit_sync_fixture()?;
+    let (sync, hash, correct, stripped, headers_tx) = segwit_sync_fixture()?;
     let bad = test_addr(9765, 0)?;
     let good = test_addr(9765, 1)?;
     let bad_rx = connect_peer(&sync.peer_table, synthetic_peer(bad, 1));
     let good_rx = connect_peer(&sync.peer_table, synthetic_peer(good, 0));
-    let (headers_tx, headers_rx) = unbounded();
-    *sync.inbound_headers_rx.lock() = headers_rx;
     sync.tick();
     assert_eq!(
         witness_block_inventory(next_getdata(&bad_rx)?)?,

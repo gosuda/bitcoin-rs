@@ -12,31 +12,31 @@ mod deployment;
 /// Header acceptance and proof-of-work validation.
 pub mod header_sync;
 /// Initial block download state of the applied chain.
-pub mod ibd;
+mod ibd;
 /// Block-tree node types.
 pub mod node;
+/// Synchronization progress of the applied chain.
+mod progress;
 /// Regtest block and proof-of-work builders shared by cross-crate test
 /// harnesses. Compiled only under the `test-seam` feature.
 #[cfg(feature = "test-seam")]
 pub mod regtest_fixture;
 /// Reorganization planning.
-pub mod reorg;
+mod reorg;
 /// Best-tip snapshot type.
-pub mod tip;
+mod tip;
 /// One transition domain split into mutation and stable-read roles.
 mod transition;
 /// In-memory block tree.
-pub mod tree;
+mod tree;
 /// Read-only capabilities over chain publications and topology.
 mod view;
 
 use bitcoin_rs_primitives::Hash256;
 use thiserror::Error;
 
-pub(crate) use bip9_cache::CachedState;
 pub use bitcoin_rs_consensus::SoftforkState;
-pub use bitcoin_rs_primitives::Network;
-pub use block_body::{BlockBodyMetadata, BlockBodySource};
+pub use block_body::BlockBodySource;
 pub use count::ChainTxCount;
 pub use deployment::{
     SignallingDeployment, bip30_duplicate_scan_required, candidate_version, signalling_deployments,
@@ -49,6 +49,7 @@ pub use header_sync::{
 };
 pub use ibd::InitialBlockDownload;
 pub use node::{BlockHeader, BlockTreeNode, ChainWork, NodeId, NodeStatus};
+pub use progress::{ChainProgress, ChainProgressReader};
 pub use reorg::{ReorgPlan, plan_reorg};
 pub use tip::TipSnapshot;
 pub use transition::{

@@ -54,7 +54,9 @@ pub trait JournalEmit: Send + Sync {
     /// Freezes appends while a checkpoint publication consumes the journal.
     fn freeze(&mut self) -> Result<(), JournalWriterError>;
 
-    /// Replaces the journal base with a committed checkpoint tip.
+    /// Replaces the journal base with a committed checkpoint tip. Recovery
+    /// progress passes `false` for marker retirement until replay reaches the
+    /// durable head; completed and ordinary publications pass `true`.
     fn compact_to_checkpoint(
         &mut self,
         checkpoint_generation: u64,
@@ -62,13 +64,14 @@ pub trait JournalEmit: Send + Sync {
         tip_hash: [u8; 32],
         tip_prev_hash: [u8; 32],
         chain_tx_count: u64,
+        retire_full_revalidation_marker: bool,
     ) -> Result<(), JournalWriterError>;
 
     /// Resumes appends after checkpoint publication completes.
     fn resume(&mut self) -> Result<(), JournalWriterError>;
 }
 
-#[allow(clippy::use_self)] // inherent vs trait method disambiguation requires the type path
+#[expect(clippy::use_self)] // inherent vs trait method disambiguation requires the type path
 impl<S: KvStore> JournalEmit for JournalWriter<S> {
     fn prepare_for_apply(&mut self) -> Result<(), JournalWriterError> {
         JournalWriter::prepare_for_apply(self)
@@ -115,6 +118,7 @@ impl<S: KvStore> JournalEmit for JournalWriter<S> {
         tip_hash: [u8; 32],
         tip_prev_hash: [u8; 32],
         chain_tx_count: u64,
+        retire_full_revalidation_marker: bool,
     ) -> Result<(), JournalWriterError> {
         JournalWriter::compact_to_checkpoint(
             self,
@@ -123,6 +127,7 @@ impl<S: KvStore> JournalEmit for JournalWriter<S> {
             tip_hash,
             tip_prev_hash,
             chain_tx_count,
+            retire_full_revalidation_marker,
         )
     }
 

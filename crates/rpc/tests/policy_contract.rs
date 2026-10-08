@@ -30,6 +30,7 @@ use bitcoin_rs_primitives::{
     Amount, Block, CompactTarget, Hash256, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut,
     Txid, Witness, consensus_bytes,
 };
+use bitcoin_rs_script::push_int;
 
 use bitcoin_rs_rpc::{
     Handler, RpcError,
@@ -39,10 +40,11 @@ use bitcoin_rs_rpc::{
     },
 };
 
-use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd};
+use bitcoin_rs_utxo::contract::{BlockChanges, UtxoAdd, is_coinbase_tx};
 
 use sonic_rs::{JsonContainerTrait as _, JsonValueTrait, json};
 
+use bitcoin::hex::DisplayHex;
 use std::error::Error;
 
 fn p2wpkh_script() -> Vec<u8> {
@@ -57,7 +59,7 @@ fn op_true_script() -> Vec<u8> {
 fn tx(prevout: OutPoint, output_value: u64, sequence: u32) -> Tx {
     Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: prevout,
             script_sig: Script::new(),
@@ -78,18 +80,7 @@ fn rpc_txid(tx: &Tx) -> Txid {
 /// Native consensus hex for RPC submission: the exact wire image the node
 /// decoder consumes.
 fn raw_tx_hex(tx: &Tx) -> String {
-    hex_encode(&consensus_bytes(tx))
-}
-
-/// Encodes `bytes` as lowercase hexadecimal.
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for &byte in bytes {
-        out.push(char::from(HEX[usize::from(byte >> 4)]));
-        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    out
+    consensus_bytes(tx).to_lower_hex_string()
 }
 
 /// Commits one funded UTXO to the context's UTXO set and returns the RPC-side
@@ -1091,18 +1082,18 @@ fn chain_pool(ctx: &Context) -> Result<Vec<Tx>, Box<dyn Error>> {
 fn tx_multi_child(funded: &OutPoint, tip: &Tx) -> Tx {
     Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![
             TxIn {
                 previous_output: *funded,
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0xffff_ffff),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             },
             TxIn {
                 previous_output: OutPoint::new(tip.txid(), 0),
                 script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0xffff_ffff),
+                sequence: Sequence::MAX,
                 witness: Witness::new(),
             },
         ],
@@ -1353,7 +1344,7 @@ fn testmempoolaccept_and_sendrawtransaction_agree_on_replacement_into_a_full_clu
 fn tx_spending(inputs: &[(OutPoint, u32)], output_value: u64) -> Tx {
     Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: inputs
             .iter()
             .map(|(prevout, sequence)| TxIn {
@@ -1375,11 +1366,11 @@ fn tx_spending(inputs: &[(OutPoint, u32)], output_value: u64) -> Tx {
 fn many_output_tx(prevout: OutPoint, value_each: u64, count: usize) -> Tx {
     Tx {
         version: 2,
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
         inputs: vec![TxIn {
             previous_output: prevout,
             script_sig: Script::new(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![
@@ -1536,59 +1527,22 @@ fn open_regtest_state() -> Result<(NodeState, tempfile::TempDir), Box<dyn Error>
     Ok((state, dir))
 }
 
-/// The one-input null-prevout coinbase outpoint (Core `COINBASE_OUTPOINT`).
-fn null_prevout() -> OutPoint {
-    OutPoint::new(Txid::default(), u32::MAX)
-}
-
-/// Minimal script push of a small integer, mirroring rust-bitcoin
-/// `Builder::push_int`: `OP_0` for zero, `OP_N` for 1..=16, otherwise a
-/// length-prefixed little-endian payload (BIP34 heights).
-fn script_push_int(value: i64) -> Vec<u8> {
-    match value {
-        0 => vec![0x00],
-        // `value` is pinned to 1..=16 by the match arm.
-        1..=16 => vec![0x50 + u8::try_from(value).unwrap_or_default()],
-        _ => {
-            let mut payload = Vec::new();
-            let mut magnitude = value.unsigned_abs();
-            while magnitude > 0 {
-                // Low byte only; the shift below consumes it fully.
-                payload.push(u8::try_from(magnitude & 0xff).unwrap_or_default());
-                magnitude >>= 8;
-            }
-            let mut out = Vec::with_capacity(payload.len() + 1);
-            // A small-int push never exceeds 8 payload bytes.
-            out.push(u8::try_from(payload.len()).unwrap_or_default());
-            out.extend(payload);
-            out
-        }
-    }
-}
-
-/// Core `IsCoinBase` shape: exactly one input spending the null prevout.
-fn is_coinbase(tx: &Tx) -> bool {
-    tx.inputs.len() == 1 && tx.inputs[0].previous_output == null_prevout()
-}
-
 fn reorg_seed_coinbase(height: u32) -> Tx {
     Tx {
         version: 2,
         inputs: vec![TxIn {
-            previous_output: null_prevout(),
+            previous_output: OutPoint::null(),
             // BIP34 height push plus one pad byte: consensus requires a
             // 2..=100 byte coinbase scriptSig (Core bad-cb-length).
-            script_sig: Script::from_bytes(
-                [script_push_int(i64::from(height)), script_push_int(0)].concat(),
-            ),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            script_sig: Script::from_bytes([push_int(i64::from(height)), push_int(0)].concat()),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
             value: Amount::from_sat(REORG_SUBSIDY_SATS),
             script_pubkey: Script::from_bytes(vec![0x51]),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -1600,7 +1554,7 @@ fn reorg_seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
         inputs: vec![TxIn {
             previous_output: OutPoint::new(reorg_seed_coinbase(1).txid(), 0),
             script_sig: Script::new(),
-            sequence: Sequence::from_consensus(0xffff_ffff),
+            sequence: Sequence::MAX,
             witness: Witness::new(),
         }],
         outputs: vec![TxOut {
@@ -1611,7 +1565,7 @@ fn reorg_seed_coinbase_spend_with_fee(fee_sats: u64) -> Tx {
                 [vec![0xa9, 0x14], vec![0x22; 20], vec![0x87]].concat(),
             ),
         }],
-        lock_time: LockTime::from_consensus(0),
+        lock_time: LockTime::ZERO,
     }
 }
 
@@ -1654,16 +1608,12 @@ fn applied_tip_pair(state: &NodeState) -> Result<(Hash256, u32), Box<dyn Error>>
 
 fn invalidation_handler(state: &NodeState) -> Handler {
     let chainstate = state.chainstate();
-    let ibd = Arc::new(bitcoin_rs_chain::InitialBlockDownload::new(
-        chainstate.applied_tip_reader(),
-        bitcoin_rs_chain::BlockTreeReader::new(chainstate.block_tree_handle()),
-    ));
     Handler::new(Arc::new(Context::from_handles(ContextHandles {
         chain: ChainHandles {
             chain_tip: chainstate.header_tip_reader(),
             applied_tip: chainstate.applied_tip_reader(),
-            ibd,
-            blocks: state.blocks(),
+            progress: chainstate.chain_progress_reader(),
+            blocks: state.block_log_reader(),
             utxo: chainstate.utxo_reader(),
             coin_stats: chainstate.coin_stats_handle(),
             block_tree: chainstate.block_tree_reader(),
@@ -1678,7 +1628,7 @@ fn invalidation_handler(state: &NodeState) -> Handler {
         },
         mempool: MempoolHandles {
             // The daemon wires this handle as `state.mempool_gateway()`:
-            // the gateway interned under `config.validation.engine`.
+            // the gateway constructed with `config.validation.engine`.
             gateway: state.mempool_gateway(),
         },
         indexes: IndexHandles {
@@ -1688,11 +1638,8 @@ fn invalidation_handler(state: &NodeState) -> Handler {
             derived_index_status: None,
         },
         network: NetworkHandles {
-            network_active: state.network_active(),
             peer_table: state.peer_table(),
-            p2p_outbound_sender: Some(state.p2p_outbound_sender()),
-            banned: state.banned_subnets(),
-            added_nodes: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            p2p: state.p2p(),
             local_services: state.p2p().local_services().to_u64(),
         },
         mining: MiningHandles {
@@ -1762,13 +1709,13 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
     // admits the spend once and keeps the coinbase out. The bare gateway
     // takes the resolved config engine so it mirrors the RPC path under any
     // selection, not only the regtest default.
-    let gateway = MempoolGateway::shared(
+    let gateway = Arc::new(MempoolGateway::new(
         Arc::new(parking_lot::RwLock::new(Mempool::new(
             MempoolLimits::default(),
         ))),
+        None,
         state.config().validation.engine,
-    )
-    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+    ));
     let chainstate = state.chainstate();
     let chain = bitcoin_rs_rpc::context::ChainAdmissionView::new(
         chainstate.utxo_reader(),
@@ -1784,7 +1731,7 @@ fn invalidateblock_returns_a_mature_coinbase_spend_to_the_mempool_and_excludes_t
         mined_block
             .txs
             .iter()
-            .filter(|tx| !is_coinbase(tx))
+            .filter(|tx| !is_coinbase_tx(tx))
             .map(|tx| Arc::new(tx.clone())),
     );
     assert_eq!(committed.len(), 1, "one admitted candidate: the spend");

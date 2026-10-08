@@ -509,7 +509,7 @@ pub(crate) fn wait_for_server(address: SocketAddr) -> Result<(), HttpError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
+#[expect(clippy::expect_used)]
 mod decoder_refusal_tests {
     use std::net::TcpListener;
 

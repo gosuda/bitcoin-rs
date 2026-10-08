@@ -29,7 +29,6 @@ use crate::peer_info::PeerInfo;
 use bitcoin::hashes::Hash;
 use bitcoin::p2p::message_blockdata::GetHeadersMessage;
 use bitcoin_rs_chain::{ChainError, NodeId, NodeStatus, validate_pow};
-use bitcoin_rs_consensus::MEDIAN_TIME_PAST_WINDOW;
 use bitcoin_rs_primitives::Hash256;
 use bitcoin_rs_primitives::Header;
 use std::time::Instant;
@@ -51,9 +50,8 @@ struct PresyncOutcome {
 }
 
 impl BlockSync {
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     pub(super) fn drain_inbound_headers(&self) {
-        let receiver = self.inbound_headers_rx.lock();
         let mut total_headers = 0_usize;
         let mut credit_refresh_needed = false;
         // Near-tip batches whose body the announcing connection can serve
@@ -64,7 +62,7 @@ impl BlockSync {
             source,
             wire_response,
             body_fetch_owned,
-        }) = receiver.try_recv()
+        }) = self.inbound_headers_rx.try_recv()
         {
             let batch_len = headers.len();
             total_headers = total_headers.saturating_add(batch_len);
@@ -675,16 +673,7 @@ impl BlockSync {
         frontier: &SyncFrontier,
         exclude: Option<PeerSource>,
     ) {
-        let applied_height = frontier
-            .chain
-            .applied_tip
-            .as_ref()
-            .map_or(0, |tip| tip.height);
-        let header_height = frontier
-            .chain
-            .chain_tip
-            .as_ref()
-            .map_or(applied_height, |tip| tip.height);
+        let (applied_height, header_height) = frontier.heights();
         let mut header_peer: Option<(PeerSource, SyncPeer)> = None;
         for peer in &frontier.usable_peers {
             let Some(candidate) = sync_peer_candidate(
@@ -924,7 +913,7 @@ impl BlockSync {
     /// Whether an unexpired request with these exact parameters is already
     /// pending on this exact connection. Identity is the full `PeerSource`:
     /// a same-address replacement is a different request.
-    pub(super) fn has_pending_getheaders(
+    fn has_pending_getheaders(
         &self,
         source: PeerSource,
         locator_tip_hash: Hash256,
@@ -1218,7 +1207,7 @@ impl BlockSync {
                 return None;
             }
         }
-        let median_time_past = tree.median_time_past_at(fork_id, MEDIAN_TIME_PAST_WINDOW)?;
+        let median_time_past = tree.median_time_past_at(fork_id)?;
         Some(HeaderAnchor {
             network,
             height: fork.height,
@@ -1288,7 +1277,7 @@ impl BlockSync {
         );
     }
 
-    pub(super) fn build_locator(&self) -> Vec<Hash256> {
+    fn build_locator(&self) -> Vec<Hash256> {
         if let Some(tip) = self.chain.chain_tip() {
             return self
                 .chain

@@ -15,13 +15,25 @@ on:
 permissions:
   contents: read
 
-# Same design as ci.yml's concurrency block: one group per run, so `main`
-# pushes never queue against each other and so are never cancelled (a pending
-# run in a shared group would be cancelled by a third push and leave the
-# commit with no CI record). This workflow never sees pull_request events, so
-# there is nothing to cancel-in-progress.
+# One fixed group: deep `main` generations run one at a time, newest waiting
+# behind the current one. `cancel-in-progress: false` protects the *running*
+# generation only; the default pending behavior would still cancel an older
+# waiting run when a newer one arrives, silently dropping that merged
+# commit's CI record. `queue: max` retains up to 100 pending generations
+# (only arrivals beyond the queue cap are rejected), so evidence is bounded
+# in concurrency and dropped only when 100 generations are already pending.
+#
+# Rationale (measured 2026-09-30, issue #1349): with a per-run group, every
+# `main` push fanned out all six deep lanes at once and stacked across rapid
+# merges (14 concurrent workflow runs at deep-job start, max 30). Those
+# long-running generations consumed the GitHub-hosted runner pool and delayed
+# short, latency-sensitive PR jobs — `fmt`/`deny`/`clippy` execute in
+# 10-60 s but queued for up to ~34 minutes behind them. Serializing complete
+# `main` runs caps deep fan-out at six runners while preserving every
+# commit's evidence.
 concurrency:
-  group: ci-main-${{ github.workflow }}-${{ github.run_id }}
+  group: ci-main
+  queue: max
   cancel-in-progress: false
 
 env:
@@ -290,19 +302,41 @@ jobs:
       contents: read
     env:
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - uses: ./.github/actions/test-deps
       - name: Install pinned bitcoind 31.1
-        run: scripts/install-bitcoind.sh --print-path
+        run: |
+          mkdir -p target/core-differential
+          scripts/install-bitcoind.sh --print-path \
+            2>&1 | tee target/core-differential/install.log
       - name: Build bitcoin-rs (quickstart, portable)
         run: |
-          cargo build -p bitcoin-rs --profile quickstart \
-            --no-default-features --features fjall,zmq
+          cargo build --locked -p bitcoin-rs --profile quickstart \
+            --no-default-features --features fjall,zmq \
+            2>&1 | tee target/core-differential/build.log
       - name: Core vs bitcoin-rs P2P and chain-identity differential
         run: |
           scripts/run-p2p-core-interop.sh \
             --bitcoind-command "$(scripts/install-bitcoind.sh --print-path)" \
-            --bitcoin-rs-command target/quickstart/bitcoin-rs
+            --bitcoin-rs-command target/quickstart/bitcoin-rs \
+            --workdir "$PWD/target/core-differential/run" \
+            --evidence "$PWD/target/core-differential/evidence.json" \
+            2>&1 | tee target/core-differential/driver.log
+      - name: Preserve Core differential evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: core-differential-${{ github.run_attempt }}
+          path: |
+            target/core-differential/*.log
+            target/core-differential/evidence.json
+            target/core-differential/run/*.log
+            target/core-differential/run/core/regtest/debug.log
+          if-no-files-found: warn
+          retention-days: 7

@@ -179,190 +179,8 @@ branch-plan, attribution, timeout and bounded-staging suites remain required.
 - The staged retry carries the delivering connection
   (`ReceivedBlock::source`): a retry that admits credits that peer exactly
   as the headers drain would (`note_announced_tip`), and a peer-fault
-  rejection discards the body, releases its download-window record outright
-  (`discard_received`, never re-queued), disconnects the source, and marks
-  it unresponsive — the same outcome a rejected `headers` batch produces.
-- A `cmpctblock` outcome that fetches the body itself (`RequestMissing`'s
-  `getblocktxn`, `Fallback`'s `getdata`) is marked
-  (`InboundHeaders::body_fetch_owned`): once the tip admits, the window
-  records the hash pending under the delivering connection
-  (`DownloadWindow::mark_owned_fetch`) so normal scheduling does not issue
-  a duplicate `getdata`. The mark honours the same gates a real request
-  faces — window request capacity, the owner's per-peer inflight share,
-  and the request frontier (a below-frontier mark could never be scheduled
-  and its expiry would drag `next_request_height` back into a re-request
-  sweep of applied heights). A tip that has not attached yet is retained
-  in the bounded `SchedulerState::owned_body_fetches` set and resolved
-  once ancestry admits it; marks whose source went stale are dropped, and
-  delivery resolves the mark like any window request while expiry or
-  disconnect hands it back to scheduling — a silently dropped compact
-  fetch re-requests instead of wedging the tip.
-- Every peer-removal path releases a `getheaders` gate the peer owned —
-  wire-response consumption, send failure, and peer-fault disconnects in
-  both the headers drain and the staged-header retry
-  (`clear_header_request_for`, identity-exact), and otherwise the live-set
-  sweep (P2P-02) — so a same-address reconnect cannot inherit a dead
-  request deadline.
-
-Proof: `crates/p2p/src/sync/tests/head_sync.rs` covers body-carried header
-admission and apply, gap-fill requests for staged bodies ahead of their
-header chain, announcer-directed `getheaders` on unattached batches,
-non-response forwards preserving pending-request state, staged-retry
-credit, shared-ancestor capability, bounded fork evidence, credit for
-already-known tips, the compact-owned pending mark, and the retained
-mark resolving once its tip header attaches.
-`crates/p2p/src/sync/tests/limited_peers.rs` pins the block-body service clause
-on both paths: the `statically_fanout_eligible` rows for the
-initial-block-download exclusion, the 287/288-block retained-window boundary,
-and the below-requested-height case, plus the tick rows that show a pruned peer
-receiving `getheaders` and no `getdata` while the node syncs, receiving the deep
-batch inside its window after it, and staying out of the fan-out set during
-initial block download. `crates/p2p/src/listener.rs` test
-`inbound_admission_over_cap_drops_stream` and the `crates/p2p/src/peer_table.rs`
-reservation cases pin the admission boundary: cap-minus-one accepted, cap
-refused with no lease registered, inbound-only counting, a removal that frees
-the slot, and a same-address replacement that keeps its own identity.
-Capacity and frontier gates
-on the owned-fetch mark are covered in
-`crates/p2p/src/download_window.rs` tests; fault-path gate cleanup is
-covered in `crates/p2p/src/sync/tests/transitions_4.rs`.
-`crates/p2p/src/listener.rs` test `send_block_forwards_the_blocks_header`
-covers the delivery-path forward.
-
-## Live gaps
-
-- **Peer lifecycle boundary**: Header-request planning and getdata fan-out
-  execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided
-  `SyncChain` seam. Node retains applied-chain mutation; `P2pService` no longer
-  holds a shadow download window.
-- **Inbound eviction scoring**: Core makes room at the inbound cap by scoring
-  and disconnecting a peer (`AttemptToEvictConnection`,
-  `bitcoin-core/src/net.cpp:1695-1735`). This node refuses the new socket
-  instead; see `docs/policies/p2p-compatibility.md` section 7 item 12.
-
-## Proven by
-
-- `crates/p2p/src/chain_query.rs` tests
-  `getdata_block_encoding_matches_requested_inventory_on_wire`,
-  `getdata_block_encodings_keep_headroom_and_body_failure_rules`, and
-  `getdata_block_encodings_recheck_active_chain_after_body_load` cover BIP144
-  block encodings against the independent rust-bitcoin envelope, request
-  order, retained body immutability, headroom, corruption, and stale reads
-  (P2P-01).
-- `crates/p2p/src/inv.rs` test
-  `cancelled_missing_parent_source_does_not_enqueue_a_request` and
-  `crates/p2p/src/peer_table.rs` test
-  `with_current_rejects_stale_source_and_holds_live_identity` protect
-  cancellation and identity-checked enqueue (P2P-02).
-- `crates/p2p/tests/core_compat.rs`:
-  - `desirable_service_policy_matches_core`,
-    `outbound_peer_without_network_flag_disconnected`,
-    `outbound_peer_with_network_and_witness_is_accepted`, and
-    `outbound_near_tip_limited_peer_is_accepted` pin the outbound service gate
-    and its near-tip `NETWORK_LIMITED` exception;
-    `pruned_version_message_advertises_network_limited_only` and
-    `unpruned_version_message_advertises_network` pin the advertised set;
-  - `cargo test -p bitcoin-rs-p2p --test core_compat` pins rust-bitcoin v1
-    envelopes, handshake fields, per-network framing, relay round-trips, the
-    reject-or-ignore matrix, and peer-visible reorg/restart behavior.
-- `crates/p2p/tests/core_interop_live.rs`: live differential lane running via
-  `scripts/run-p2p-core-interop.sh` against the pinned Core 31.1 `bitcoind`
-  (`docs/contracts/core-differential.md`).
-- `crates/p2p/src/counters.rs` tests
-  `a_vectored_write_counts_every_slice_the_socket_took`,
-  `a_short_vectored_write_counts_what_the_socket_took`, and
-  `write_message_through_counting_stream_stays_vectored`: a v1 frame's header
-  and payload leave as one `write_vectored`, and the wrapper counts every byte
-  the socket took (`P2P-01`). Elapsed time is
-  `crates/p2p/benches/write_message.rs`.
-- `crates/p2p/src/peer_table.rs` tests
-  `note_announced_height_credits_only_the_delivering_connection` and
-  `note_announced_height_raises_monotonically_and_reports_actual_updates`
-  pin the identity-checked, monotonic credit mutation and retained tip
-  evidence (P2P-03).
-- `crates/p2p/src/sync/tests/transitions_1.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
-  (at-tip request eligibility after catch-up, P2P-03/#617) and
-  `tick_fetches_reorg_fork_announced_by_at_tip_peer` (reorg announcements
-  earn credit on the reselected best chain),
-  `losing_fork_credit_survives_winner_disconnect` (retained branch evidence),
-  and `cold_start_stall_hedges_front_without_reassigning_owner` (active-chain
-  hedge eligibility).
-- `crates/p2p/src/counters.rs` tests `a_vectored_write_counts_every_slice`,
-  `from_connected_disables_nagle`: the counting wrapper forwards one
-  `write_vectored` for header plus payload, and the connected-socket
-  constructor owns `TCP_NODELAY` (P2P-04).
-- `crates/p2p/src/listener.rs` test `session_sockets_disable_nagle`: inbound
-  and outbound session sockets set `TCP_NODELAY` (`P2P-04`).
-- `crates/p2p/src/handshake.rs` test
-  `inbound_handshake_reaches_ready_after_remote_version_and_verack`: inbound
-  handshake writes framed version, feature, and verack bytes once and reaches
-  Ready (`P2P-01`).
-- `crates/p2p/src/counters.rs` tests `leftover_bytes_do_not_revisit_the_socket`,
-  `two_wire_messages_decode_from_one_socket_read`, and
-  `a_timed_out_refill_does_not_replay_consumed_bytes`: one kernel delivery of
-  two v1 frames decodes both without a second socket read, and a timed-out
-  refill does not replay consumed bytes (`P2P-01`).
-
-### `P2P-05`: Canonical frontier recovery without invented peer credit
-
-- The applied chain and selected header ancestry own the next required body.
-  The download cursor is a scan hint. An unowned frontier behind that hint
-  becomes requestable again, including an applied rollback with unchanged
-  headers. Existing pending and staged bodies retain their ownership.
-- A known-header gap whose apply-frontier block is neither in flight nor
-  staged triggers a header probe from the applied chain; staged successors
-  behind an unowned frontier are stuck inventory, not progress. Beyond the
-  initial handshake capability (P2P-03), only a subsequent accepted
-  active-branch announcement grants body capability. Losing the last credited
-  peer must not require restart or an unsolicited announcement from a
-  surviving peer.
-- The existing header request and timeout pace discovery. Empty responses
-  preserve that deadline; expiry rotates among connected full witness peers.
-  Nonempty responses consume their matching request even when rejected.
-- Session validation and request publication hold the peer table before
-  download or header-request state. A cancelled ready event does not wait for
-  the download writer or modify its replacement's state.
-- Body/header binding failures reject the delivery, not the header branch.
-  Rejection logs carry source, byte/transaction counts and coinbase witness
-  shape. Compact reconstruction logs include the same block hash for joining
-  evidence. A header ahead of the applied chain is not evidence that the
-  applied-chain `getblockhash` RPC should return it.
-
-Proof: `crates/p2p/src/sync/tests/frontier_recovery.rs` covers applied
-rollback, duplicate request suppression, empty-response pacing/rotation and
-cancelled readiness under contention.
-`crates/p2p/src/sync/tests/witness_staging_gate.rs` covers bad delivery,
-peer replacement, relearned capability and eventual application. Existing
-branch-plan, attribution, timeout and bounded-staging suites remain required.
-
-### `P2P-06`: Body-carried announcements reach header admission
-
-- **Owner**: `ConnectionShared::send_block` (`crates/p2p/src/listener.rs`)
-  forwards every inbound body's embedded header through the headers sink;
-  `BlockSync::admit_staged_headers` (`crates/p2p/src/sync/receive.rs`) retries
-  admission for staged bodies still lacking a tree node.
-- A block body can never become the apply frontier's expected block while
-  the tree does not know its hash. Every delivery path — `block` messages
-  (`inv` getdata answers or unsolicited pushes), reconstructed compact
-  blocks, and `cmpctblock` announcements — routes its embedded header into
-  the same admission drain as `headers` messages, so credit (P2P-03),
-  peer-fault disconnection, and ancestry requests apply uniformly.
-- A batch that cannot attach (`MissingParent`) or cannot be admitted
-  (`Refused`) requests the header ancestry from the delivering peer — or an
-  eligible full-witness peer when no source was recorded — rather than
-  silently dropping the announcement and leaving the live tip wedged behind
-  one missed header. `Refused` re-requests are paced to the request timeout
-  (`refused_rerequest_at`): a paused admission would otherwise replay the
-  same locator at round-trip pace.
-- The forwarded header is marked as such (`InboundHeaders::wire_response =
-  false`): it is not a `getheaders` response, so it must not consume the
-  outstanding request's pending slot — otherwise every delivered body would
-  reset request pacing and emit duplicate `getheaders`.
-- The staged retry carries the delivering connection
-  (`ReceivedBlock::source`): a retry that admits credits that peer exactly
-  as the headers drain would (`note_announced_tip`), and a peer-fault
-  rejection discards the body, releases its download-window record outright
-  (`discard_received`, never re-queued), disconnects the source, and marks
+  rejection drops the staged body (`stager.discard`, never re-queued;
+  its download-window record is only released when the delivery drains), disconnects the source, and marks
   it unresponsive — the same outcome a rejected `headers` batch produces.
 - A `cmpctblock` outcome that fetches the body itself (`RequestMissing`'s
   `getblocktxn`, `Fallback`'s `getdata`) is marked
@@ -579,3 +397,78 @@ on a substituted redownload header, salted-commitment spends, the benign
 lost-continuity break, and the disconnects every other failure costs the
 connection. `crates/p2p/benches/headers_presync.rs` measures the hashing
 bound the first pass pays per page.
+
+## Live gaps
+
+- **Peer lifecycle boundary**: Header-request planning and getdata fan-out
+  execute in `crates/p2p/src/sync.rs` `BlockSync` behind the node-provided
+  `SyncChain` seam. Node retains applied-chain mutation; `P2pService` no longer
+  holds a shadow download window.
+- **Inbound eviction scoring**: Core makes room at the inbound cap by scoring
+  and disconnecting a peer (`AttemptToEvictConnection`,
+  `bitcoin-core/src/net.cpp:1695-1735`). This node refuses the new socket
+  instead; see `docs/policies/p2p-compatibility.md` section 7 item 12.
+
+## Proven by
+
+- `crates/p2p/src/chain_query.rs` tests
+  `getdata_block_encoding_matches_requested_inventory_on_wire`,
+  `getdata_block_encodings_keep_headroom_and_body_failure_rules`, and
+  `getdata_block_encodings_recheck_active_chain_after_body_load` cover BIP144
+  block encodings against the independent rust-bitcoin envelope, request
+  order, retained body immutability, headroom, corruption, and stale reads
+  (P2P-01).
+- `crates/p2p/src/inv.rs` test
+  `cancelled_missing_parent_source_does_not_enqueue_a_request` and
+  `crates/p2p/src/peer_table.rs` test
+  `with_current_rejects_stale_source_and_holds_live_identity` protect
+  cancellation and identity-checked enqueue (P2P-02).
+- `crates/p2p/tests/core_compat.rs`:
+  - `desirable_service_policy_matches_core`,
+    `outbound_peer_without_network_flag_disconnected`,
+    `outbound_peer_with_network_and_witness_is_accepted`, and
+    `outbound_near_tip_limited_peer_is_accepted` pin the outbound service gate
+    and its near-tip `NETWORK_LIMITED` exception;
+    `pruned_version_message_advertises_network_limited_only` and
+    `unpruned_version_message_advertises_network` pin the advertised set;
+  - `cargo test -p bitcoin-rs-p2p --test core_compat` pins rust-bitcoin v1
+    envelopes, handshake fields, per-network framing, relay round-trips, the
+    reject-or-ignore matrix, and peer-visible reorg/restart behavior.
+- `crates/p2p/tests/core_interop_live.rs`: live differential lane running via
+  `scripts/run-p2p-core-interop.sh` against the pinned Core 31.1 `bitcoind`
+  (`docs/contracts/core-differential.md`).
+- `crates/p2p/src/counters.rs` tests
+  `a_vectored_write_counts_every_slice_the_socket_took`,
+  `a_short_vectored_write_counts_what_the_socket_took`, and
+  `write_message_through_counting_stream_stays_vectored`: a v1 frame's header
+  and payload leave as one `write_vectored`, and the wrapper counts every byte
+  the socket took (`P2P-01`). Elapsed time is
+  `crates/p2p/benches/write_message.rs`.
+- `crates/p2p/src/peer_table.rs` tests
+  `note_announced_height_credits_only_the_delivering_connection` and
+  `note_announced_height_raises_monotonically_and_reports_actual_updates`
+  pin the identity-checked, monotonic credit mutation and retained tip
+  evidence (P2P-03).
+- `crates/p2p/src/sync/tests/transitions_1.rs` tests `tick_fetches_new_tip_headers_from_at_tip_peers`
+  (at-tip request eligibility after catch-up, P2P-03/#617) and
+  `tick_fetches_reorg_fork_announced_by_at_tip_peer` (reorg announcements
+  earn credit on the reselected best chain),
+  `losing_fork_credit_survives_winner_disconnect` (retained branch evidence),
+  and `cold_start_stall_hedges_front_without_reassigning_owner` (active-chain
+  hedge eligibility).
+- `crates/p2p/src/counters.rs` tests `a_vectored_write_counts_every_slice`,
+  `from_connected_disables_nagle`: the counting wrapper forwards one
+  `write_vectored` for header plus payload, and the connected-socket
+  constructor owns `TCP_NODELAY` (P2P-04).
+- `crates/p2p/src/listener.rs` test `session_sockets_disable_nagle`: inbound
+  and outbound session sockets set `TCP_NODELAY` (`P2P-04`).
+- `crates/p2p/src/handshake.rs` test
+  `inbound_handshake_reaches_ready_after_remote_version_and_verack`: inbound
+  handshake writes framed version, feature, and verack bytes once and reaches
+  Ready (`P2P-01`).
+- `crates/p2p/src/counters.rs` tests `leftover_bytes_do_not_revisit_the_socket`,
+  `two_wire_messages_decode_from_one_socket_read`, and
+  `a_timed_out_refill_does_not_replay_consumed_bytes`: one kernel delivery of
+  two v1 frames decodes both without a second socket read, and a timed-out
+  refill does not replay consumed bytes (`P2P-01`).
+

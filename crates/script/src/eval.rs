@@ -12,173 +12,163 @@
 use std::borrow::Cow;
 
 use bitcoin_rs_primitives::{CODESEPARATOR_POSITION, Hash256};
-use sha2::{Digest, Sha256};
+use sha2::Digest as _;
 use smallvec::SmallVec;
 
 use crate::checker::{SigVersion, TxSignatureChecker};
 use crate::interpreter::{ScriptErrCode, ScriptError, VerifyFlags};
-use crate::script::{Instruction, instructions, opcode, push_data};
+use crate::script::{Instruction, instructions, minimal_push, opcode, push_data};
 use crate::stack::{ScriptItem, Stack};
 
 use bitcoin_hashes::{Hash as _, ripemd160, sha1};
 
 /// `OP_NOP` (0x61).
-pub const OP_NOP: u8 = 0x61;
+pub(crate) const OP_NOP: u8 = 0x61;
 /// `OP_IF` (0x63).
-pub const OP_IF: u8 = 0x63;
+pub(crate) const OP_IF: u8 = crate::script::opcode::OP_IF;
 /// `OP_NOTIF` (0x64).
-pub const OP_NOTIF: u8 = 0x64;
+pub(crate) const OP_NOTIF: u8 = 0x64;
 /// `OP_ELSE` (0x67).
-pub const OP_ELSE: u8 = 0x67;
+pub(crate) const OP_ELSE: u8 = 0x67;
 /// `OP_ENDIF` (0x68).
-pub const OP_ENDIF: u8 = 0x68;
+pub(crate) const OP_ENDIF: u8 = crate::script::opcode::OP_ENDIF;
 /// `OP_VERIFY` (0x69).
-pub const OP_VERIFY: u8 = 0x69;
+pub(crate) const OP_VERIFY: u8 = 0x69;
 /// `OP_RETURN` (0x6a).
-pub const OP_RETURN: u8 = 0x6a;
+pub(crate) const OP_RETURN: u8 = crate::script::opcode::OP_RETURN;
 /// `OP_TOALTSTACK` (0x6b).
-pub const OP_TOALTSTACK: u8 = 0x6b;
+pub(crate) const OP_TOALTSTACK: u8 = 0x6b;
 /// `OP_FROMALTSTACK` (0x6c).
-pub const OP_FROMALTSTACK: u8 = 0x6c;
+pub(crate) const OP_FROMALTSTACK: u8 = 0x6c;
 /// `OP_2DROP` (0x6d).
-pub const OP_2DROP: u8 = 0x6d;
+pub(crate) const OP_2DROP: u8 = 0x6d;
 /// `OP_2DUP` (0x6e).
-pub const OP_2DUP: u8 = 0x6e;
+pub(crate) const OP_2DUP: u8 = 0x6e;
 /// `OP_3DUP` (0x6f).
-pub const OP_3DUP: u8 = 0x6f;
+pub(crate) const OP_3DUP: u8 = 0x6f;
 /// `OP_2OVER` (0x70).
-pub const OP_2OVER: u8 = 0x70;
+pub(crate) const OP_2OVER: u8 = 0x70;
 /// `OP_2ROT` (0x71).
-pub const OP_2ROT: u8 = 0x71;
+pub(crate) const OP_2ROT: u8 = 0x71;
 /// `OP_2SWAP` (0x72).
-pub const OP_2SWAP: u8 = 0x72;
+pub(crate) const OP_2SWAP: u8 = 0x72;
 /// `OP_IFDUP` (0x73).
-pub const OP_IFDUP: u8 = 0x73;
+pub(crate) const OP_IFDUP: u8 = 0x73;
 /// `OP_DEPTH` (0x74).
-pub const OP_DEPTH: u8 = 0x74;
+pub(crate) const OP_DEPTH: u8 = 0x74;
 /// `OP_DROP` (0x75).
-pub const OP_DROP: u8 = 0x75;
+pub(crate) const OP_DROP: u8 = crate::script::opcode::OP_DROP;
 /// `OP_DUP` (0x76).
-pub const OP_DUP: u8 = 0x76;
+pub(crate) const OP_DUP: u8 = crate::script::opcode::OP_DUP;
 /// `OP_NIP` (0x77).
-pub const OP_NIP: u8 = 0x77;
+pub(crate) const OP_NIP: u8 = 0x77;
 /// `OP_OVER` (0x78).
-pub const OP_OVER: u8 = 0x78;
+pub(crate) const OP_OVER: u8 = 0x78;
 /// `OP_PICK` (0x79).
-pub const OP_PICK: u8 = 0x79;
+pub(crate) const OP_PICK: u8 = 0x79;
 /// `OP_ROLL` (0x7a).
-pub const OP_ROLL: u8 = 0x7a;
+pub(crate) const OP_ROLL: u8 = 0x7a;
 /// `OP_ROT` (0x7b).
-pub const OP_ROT: u8 = 0x7b;
+pub(crate) const OP_ROT: u8 = 0x7b;
 /// `OP_SWAP` (0x7c).
-pub const OP_SWAP: u8 = 0x7c;
+pub(crate) const OP_SWAP: u8 = 0x7c;
 /// `OP_TUCK` (0x7d).
-pub const OP_TUCK: u8 = 0x7d;
+pub(crate) const OP_TUCK: u8 = 0x7d;
 /// `OP_SIZE` (0x82).
-pub const OP_SIZE: u8 = 0x82;
+pub(crate) const OP_SIZE: u8 = 0x82;
 /// `OP_EQUAL` (0x87).
-pub const OP_EQUAL: u8 = 0x87;
+pub(crate) const OP_EQUAL: u8 = crate::script::opcode::OP_EQUAL;
 /// `OP_EQUALVERIFY` (0x88).
-pub const OP_EQUALVERIFY: u8 = 0x88;
+pub(crate) const OP_EQUALVERIFY: u8 = crate::script::opcode::OP_EQUALVERIFY;
 /// `OP_1NEGATE` (0x4f).
-pub const OP_1NEGATE: u8 = 0x4f;
+pub(crate) const OP_1NEGATE: u8 = crate::script::opcode::OP_1NEGATE;
 /// `OP_1ADD` (0x8b).
-pub const OP_1ADD: u8 = 0x8b;
+pub(crate) const OP_1ADD: u8 = 0x8b;
 /// `OP_1SUB` (0x8c).
-pub const OP_1SUB: u8 = 0x8c;
+pub(crate) const OP_1SUB: u8 = 0x8c;
 /// `OP_NEGATE` (0x8f).
-pub const OP_NEGATE: u8 = 0x8f;
+pub(crate) const OP_NEGATE: u8 = 0x8f;
 /// `OP_ABS` (0x90).
-pub const OP_ABS: u8 = 0x90;
+pub(crate) const OP_ABS: u8 = 0x90;
 /// `OP_NOT` (0x91).
-pub const OP_NOT: u8 = 0x91;
+pub(crate) const OP_NOT: u8 = 0x91;
 /// `OP_0NOTEQUAL` (0x92).
-pub const OP_0NOTEQUAL: u8 = 0x92;
+pub(crate) const OP_0NOTEQUAL: u8 = 0x92;
 /// `OP_ADD` (0x93).
-pub const OP_ADD: u8 = 0x93;
+pub(crate) const OP_ADD: u8 = 0x93;
 /// `OP_SUB` (0x94).
-pub const OP_SUB: u8 = 0x94;
+pub(crate) const OP_SUB: u8 = 0x94;
 /// `OP_BOOLAND` (0x9a).
-pub const OP_BOOLAND: u8 = 0x9a;
+pub(crate) const OP_BOOLAND: u8 = 0x9a;
 /// `OP_BOOLOR` (0x9b).
-pub const OP_BOOLOR: u8 = 0x9b;
+pub(crate) const OP_BOOLOR: u8 = 0x9b;
 /// `OP_NUMEQUAL` (0x9c).
-pub const OP_NUMEQUAL: u8 = 0x9c;
+pub(crate) const OP_NUMEQUAL: u8 = 0x9c;
 /// `OP_NUMEQUALVERIFY` (0x9d).
-pub const OP_NUMEQUALVERIFY: u8 = 0x9d;
+pub(crate) const OP_NUMEQUALVERIFY: u8 = 0x9d;
 /// `OP_NUMNOTEQUAL` (0x9e).
-pub const OP_NUMNOTEQUAL: u8 = 0x9e;
+pub(crate) const OP_NUMNOTEQUAL: u8 = 0x9e;
 /// `OP_LESSTHAN` (0x9f).
-pub const OP_LESSTHAN: u8 = 0x9f;
+pub(crate) const OP_LESSTHAN: u8 = 0x9f;
 /// `OP_GREATERTHAN` (0xa0).
-pub const OP_GREATERTHAN: u8 = 0xa0;
+pub(crate) const OP_GREATERTHAN: u8 = 0xa0;
 /// `OP_LESSTHANOREQUAL` (0xa1).
-pub const OP_LESSTHANOREQUAL: u8 = 0xa1;
+pub(crate) const OP_LESSTHANOREQUAL: u8 = 0xa1;
 /// `OP_GREATERTHANOREQUAL` (0xa2).
-pub const OP_GREATERTHANOREQUAL: u8 = 0xa2;
+pub(crate) const OP_GREATERTHANOREQUAL: u8 = 0xa2;
 /// `OP_MIN` (0xa3).
-pub const OP_MIN: u8 = 0xa3;
+pub(crate) const OP_MIN: u8 = 0xa3;
 /// `OP_MAX` (0xa4).
-pub const OP_MAX: u8 = 0xa4;
+pub(crate) const OP_MAX: u8 = 0xa4;
 /// `OP_WITHIN` (0xa5).
-pub const OP_WITHIN: u8 = 0xa5;
+pub(crate) const OP_WITHIN: u8 = 0xa5;
 /// `OP_RIPEMD160` (0xa6).
-pub const OP_RIPEMD160: u8 = 0xa6;
+pub(crate) const OP_RIPEMD160: u8 = 0xa6;
 /// `OP_SHA1` (0xa7).
-pub const OP_SHA1: u8 = 0xa7;
+pub(crate) const OP_SHA1: u8 = 0xa7;
 /// `OP_SHA256` (0xa8).
-pub const OP_SHA256: u8 = 0xa8;
+pub(crate) const OP_SHA256: u8 = 0xa8;
 /// `OP_HASH160` (0xa9).
-pub const OP_HASH160: u8 = 0xa9;
+pub(crate) const OP_HASH160: u8 = crate::script::opcode::OP_HASH160;
 /// `OP_HASH256` (0xaa).
-pub const OP_HASH256: u8 = 0xaa;
+pub(crate) const OP_HASH256: u8 = 0xaa;
 /// `OP_CODESEPARATOR` (0xab).
-pub const OP_CODESEPARATOR: u8 = 0xab;
+pub(crate) const OP_CODESEPARATOR: u8 = 0xab;
 /// `OP_CHECKSIG` (0xac).
-pub const OP_CHECKSIG: u8 = 0xac;
+pub(crate) const OP_CHECKSIG: u8 = crate::script::opcode::OP_CHECKSIG;
 /// `OP_CHECKSIGVERIFY` (0xad).
-pub const OP_CHECKSIGVERIFY: u8 = 0xad;
+pub(crate) const OP_CHECKSIGVERIFY: u8 = crate::script::opcode::OP_CHECKSIGVERIFY;
 /// `OP_CHECKMULTISIG` (0xae).
-pub const OP_CHECKMULTISIG: u8 = 0xae;
+pub(crate) const OP_CHECKMULTISIG: u8 = crate::script::opcode::OP_CHECKMULTISIG;
 /// `OP_CHECKMULTISIGVERIFY` (0xaf).
-pub const OP_CHECKMULTISIGVERIFY: u8 = 0xaf;
+pub(crate) const OP_CHECKMULTISIGVERIFY: u8 = crate::script::opcode::OP_CHECKMULTISIGVERIFY;
 /// `OP_NOP1` (0xb0).
-pub const OP_NOP1: u8 = 0xb0;
+pub(crate) const OP_NOP1: u8 = 0xb0;
 /// `OP_CHECKLOCKTIMEVERIFY` (0xb1).
-pub const OP_CHECKLOCKTIMEVERIFY: u8 = 0xb1;
+pub(crate) const OP_CHECKLOCKTIMEVERIFY: u8 = 0xb1;
 /// `OP_CHECKSEQUENCEVERIFY` (0xb2).
-pub const OP_CHECKSEQUENCEVERIFY: u8 = 0xb2;
+pub(crate) const OP_CHECKSEQUENCEVERIFY: u8 = 0xb2;
 /// `OP_NOP4` (0xb3).
-pub const OP_NOP4: u8 = 0xb3;
-/// `OP_NOP5` (0xb4).
-pub const OP_NOP5: u8 = 0xb4;
-/// `OP_NOP6` (0xb5).
-pub const OP_NOP6: u8 = 0xb5;
-/// `OP_NOP7` (0xb6).
-pub const OP_NOP7: u8 = 0xb6;
-/// `OP_NOP8` (0xb7).
-pub const OP_NOP8: u8 = 0xb7;
-/// `OP_NOP9` (0xb8).
-pub const OP_NOP9: u8 = 0xb8;
-/// `OP_NOP10` (0xb9).
-pub const OP_NOP10: u8 = 0xb9;
+pub(crate) const OP_NOP4: u8 = 0xb3;
+/// `OP_NOP10` (0xb9); `OP_NOP4..=OP_NOP10` matches the NOP5..NOP9 bytes in between.
+pub(crate) const OP_NOP10: u8 = 0xb9;
 /// `OP_CHECKSIGADD` (0xba), tapscript only.
-pub const OP_CHECKSIGADD: u8 = 0xba;
+pub(crate) const OP_CHECKSIGADD: u8 = 0xba;
 
 /// Maximum serialized script size accepted for `Base`/`WitnessV0` evaluation.
-pub const MAX_SCRIPT_SIZE: usize = 10_000;
+pub(crate) const MAX_SCRIPT_SIZE: usize = 10_000;
 /// Maximum size of one pushed stack element.
-pub const MAX_SCRIPT_ELEMENT_SIZE: usize = 520;
+pub(crate) const MAX_SCRIPT_ELEMENT_SIZE: usize = 520;
 /// Maximum non-push opcodes per script.
-pub const MAX_OPS_PER_SCRIPT: usize = 201;
+pub(crate) const MAX_OPS_PER_SCRIPT: usize = 201;
 /// Maximum public keys in a bare multisig.
 pub(crate) const MAX_PUBKEYS_PER_MULTISIG: usize = 20;
 /// Maximum combined depth of the main and alt stacks.
-pub const MAX_STACK_SIZE: usize = 1000;
+pub(crate) const MAX_STACK_SIZE: usize = Stack::MAX_DEPTH;
 /// Bytes per passed signature charged against BIP342's validation weight.
 pub(crate) const VALIDATION_WEIGHT_PER_SIGOP_PASSED: i64 = 50;
 /// BIP342 validation-weight offset accounting for the witness itself.
-pub const VALIDATION_WEIGHT_OFFSET: i64 = 50;
+pub(crate) const VALIDATION_WEIGHT_OFFSET: i64 = 50;
 
 /// Byte slice view of a stack item, in script-encoding terms.
 type Bytes = SmallVec<[u8; 32]>;
@@ -186,8 +176,6 @@ type Bytes = SmallVec<[u8; 32]>;
 /// A condition stack mirroring Core's `ConditionStack`: tracks only whether
 /// every open `IF` level is executing.
 struct ConditionStack {
-    /// Levels currently open; the top is the innermost.
-    all_true: bool,
     /// Position (from the bottom) of the first `false` level, if any.
     first_false: Option<usize>,
     size: usize,
@@ -196,14 +184,13 @@ struct ConditionStack {
 impl ConditionStack {
     fn new() -> Self {
         Self {
-            all_true: true,
             first_false: None,
             size: 0,
         }
     }
 
     fn all_true(&self) -> bool {
-        self.all_true
+        self.first_false.is_none()
     }
 
     fn is_empty(&self) -> bool {
@@ -213,7 +200,6 @@ impl ConditionStack {
     fn push(&mut self, value: bool) {
         if self.first_false.is_none() && !value {
             self.first_false = Some(self.size);
-            self.all_true = false;
         }
         self.size += 1;
     }
@@ -222,20 +208,13 @@ impl ConditionStack {
         self.size -= 1;
         if self.first_false == Some(self.size) {
             self.first_false = None;
-            self.all_true = true;
         }
     }
 
     fn toggle_top(&mut self) {
         match self.first_false {
-            None => {
-                self.first_false = Some(self.size - 1);
-                self.all_true = false;
-            }
-            Some(pos) if pos == self.size - 1 => {
-                self.first_false = None;
-                self.all_true = true;
-            }
+            None => self.first_false = Some(self.size - 1),
+            Some(pos) if pos == self.size - 1 => self.first_false = None,
             Some(_) => {}
         }
     }
@@ -328,7 +307,7 @@ fn cast_to_bool(bytes: &[u8]) -> bool {
 /// Core's `CastToBool` over a stack item: the truth test every script
 /// terminator and conditional uses.
 #[must_use]
-pub fn item_is_true(item: &ScriptItem) -> bool {
+pub(crate) fn item_is_true(item: &ScriptItem) -> bool {
     cast_to_bool(&item_bytes(item))
 }
 
@@ -349,23 +328,15 @@ fn item_bytes(item: &ScriptItem) -> Cow<'_, [u8]> {
     reason = "one dispatch arm per opcode family mirrors Core's EvalScript switch; \
               splitting arms into helpers would obscure the shared state flow"
 )]
-pub fn eval_script(
+pub(crate) fn eval_script(
     stack: &mut Stack,
     script: &[u8],
     flags: VerifyFlags,
-    checker: &mut TxSignatureChecker<'_>,
+    checker: &TxSignatureChecker<'_>,
     sigversion: SigVersion,
     validation_weight_left: &mut Option<i64>,
     tapleaf_hash: Option<&Hash256>,
 ) -> Result<(), ScriptError> {
-    debug_assert!(
-        matches!(
-            sigversion,
-            SigVersion::Base | SigVersion::WitnessV0 | SigVersion::Tapscript
-        ),
-        "taproot key-path admits no script execution"
-    );
-
     // BIP342: OP_SUCCESSx opcodes make the script unconditionally valid.
     // This scan runs before any other check (including stack element size
     // limits) and overrides everything. Mirrors Core's ExecuteWitnessScript.
@@ -407,9 +378,9 @@ pub fn eval_script(
     // Byte offset of the instruction start, tracked for codeseparator
     // positioning relative to the whole script.
     let mut instruction_start: usize = 0;
-    let mut remaining = script;
+    let mut iter = instructions(script);
 
-    while let Some(parsed) = instructions(remaining).next() {
+    while let Some(parsed) = iter.next() {
         let instruction = match parsed {
             Ok(instruction) => instruction,
             // Core's GetOp returning false is a BAD_OPCODE.
@@ -421,7 +392,8 @@ pub fn eval_script(
         };
         let opcode_byte = match instruction {
             Instruction::PushBytes(data) => {
-                let opcode_byte = push_opcode_for(remaining)?;
+                // The instruction's head byte is the push opcode.
+                let opcode_byte = script[instruction_start];
                 // Core checks push size unconditionally (interpreter.cpp:457),
                 // before testing fExec — a >520-byte push in a non-executed
                 // branch is still PUSH_SIZE.
@@ -433,8 +405,7 @@ pub fn eval_script(
                 if conditions.all_true() {
                     // Core checks MINIMALDATA only in executed branches
                     // (interpreter.cpp:489, inside `if (fExec && ... <= OP_PUSHDATA4)`).
-                    if flags.contains(VerifyFlags::MINIMALDATA)
-                        && !check_minimal_push(data, opcode_byte)
+                    if flags.contains(VerifyFlags::MINIMALDATA) && !minimal_push(data, opcode_byte)
                     {
                         return Err(ScriptError::Invalid {
                             code: ScriptErrCode::MinimalData,
@@ -442,19 +413,11 @@ pub fn eval_script(
                     }
                     push_bytes(stack, data)?;
                 }
-                advance(&mut remaining, opcode_byte, data.len());
-                instruction_start = script.len() - remaining.len();
+                instruction_start = script.len() - iter.remaining.len();
                 continue;
             }
             Instruction::Op(op) => op,
         };
-
-        let executed_push = opcode_byte <= opcode::OP_PUSHDATA4;
-        if executed_push {
-            // Handled above; unreachable for Op(_) variant, kept for parity.
-            advance(&mut remaining, opcode_byte, 0);
-            continue;
-        }
 
         if sigversion == SigVersion::Base || sigversion == SigVersion::WitnessV0 {
             // OP_RESERVED does not count towards the opcode limit.
@@ -512,8 +475,7 @@ pub fn eval_script(
             });
         }
 
-        advance(&mut remaining, opcode_byte, 0);
-        instruction_start = script.len() - remaining.len();
+        instruction_start = script.len() - iter.remaining.len();
     }
 
     if !conditions.is_empty() {
@@ -522,42 +484,6 @@ pub fn eval_script(
         });
     }
     Ok(())
-}
-
-/// Advances `remaining` past the instruction that starts with `op` and, for
-/// pushes, carries `data_len` payload bytes.
-fn advance(remaining: &mut &[u8], op: u8, data_len: usize) {
-    let header = if (0x01..=0x4b).contains(&op) {
-        1
-    } else {
-        match op {
-            opcode::OP_PUSHDATA1 => 2,
-            opcode::OP_PUSHDATA2 => 3,
-            opcode::OP_PUSHDATA4 => 5,
-            _ => 1,
-        }
-    };
-    *remaining = remaining.get(header + data_len..).unwrap_or_default();
-}
-
-/// Returns the push opcode byte at the head of `remaining` for a
-/// `PushBytes` instruction, reconstructing it from the length encoding.
-fn push_opcode_for(remaining: &[u8]) -> Result<u8, ScriptError> {
-    let head = remaining.first().copied().ok_or(ScriptError::Invalid {
-        code: ScriptErrCode::BadOpcode,
-    })?;
-    if (0x01..=0x4b).contains(&head) {
-        Ok(head)
-    } else {
-        match head {
-            opcode::OP_PUSHDATA1 | opcode::OP_PUSHDATA2 | opcode::OP_PUSHDATA4 | opcode::OP_0 => {
-                Ok(head)
-            }
-            _ => Err(ScriptError::Invalid {
-                code: ScriptErrCode::BadOpcode,
-            }),
-        }
-    }
 }
 
 /// Pushes raw bytes as a stack item, bounding the stack.
@@ -604,34 +530,6 @@ const fn is_op_success(op: u8) -> bool {
         || (op >= 187 && op <= 254)
 }
 
-/// Core's `CheckMinimalPush`.
-fn check_minimal_push(data: &[u8], op: u8) -> bool {
-    if data.is_empty() {
-        // Should have used OP_0.
-        return op == opcode::OP_0;
-    }
-    let first = data.first().copied().unwrap_or(0);
-    if data.len() == 1 && (1..=16).contains(&first) {
-        // Should have used OP_1 .. OP_16.
-        return false;
-    }
-    if data.len() == 1 && first == 0x81 {
-        // Should have used OP_1NEGATE.
-        return false;
-    }
-    if data.len() <= 75 {
-        // Must have used a direct push.
-        return usize::from(op) == data.len();
-    }
-    if data.len() <= 255 {
-        return op == opcode::OP_PUSHDATA1;
-    }
-    if data.len() <= 65535 {
-        return op == opcode::OP_PUSHDATA2;
-    }
-    true
-}
-
 /// Executes one opcode. `f_exec` reports whether the enclosing conditional
 /// stack is active; most arms are skipped otherwise, but `IF`-family
 /// opcodes still drive the condition stack.
@@ -641,7 +539,7 @@ fn check_minimal_push(data: &[u8], op: u8) -> bool {
               families into helpers would fragment the shared op-count and \
               codeseparator state"
 )]
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 fn dispatch(
     op: u8,
     f_exec: bool,
@@ -651,7 +549,7 @@ fn dispatch(
     op_count: &mut usize,
     require_minimal: bool,
     flags: VerifyFlags,
-    checker: &mut TxSignatureChecker<'_>,
+    checker: &TxSignatureChecker<'_>,
     sigversion: SigVersion,
     validation_weight_left: &mut Option<i64>,
     codeseparator_pos: &mut u32,
@@ -659,13 +557,6 @@ fn dispatch(
     tapleaf_hash: Option<&Hash256>,
     script: &[u8],
 ) -> Result<(), ScriptError> {
-    if !f_exec && !(OP_IF..=OP_ENDIF).contains(&op) {
-        return Ok(());
-    }
-    let invalid_stack = || ScriptError::Invalid {
-        code: ScriptErrCode::InvalidStackOperation,
-    };
-
     // Push value: OP_1NEGATE and the OP_1..OP_16 small integers. OP_RESERVED
     // (0x50) sits between them and pushes nothing - it falls through to the
     // dispatch below, where an executed OP_RESERVED is a BAD_OPCODE.
@@ -838,10 +729,15 @@ fn dispatch(
             })?;
         }
         OP_2ROT => {
-            let top_six = stack.drain(6).map_err(|_| invalid_stack())?;
-            let x1 = top_six.first().cloned().unwrap_or_default();
-            let x2 = top_six.get(1).cloned().unwrap_or_default();
-            for item in top_six.into_iter().skip(2) {
+            // drain(6) can only succeed with a full six items.
+            let mut top_six = stack.drain(6).map_err(|_| invalid_stack())?.into_iter();
+            let x1 = top_six
+                .next()
+                .unwrap_or_else(|| unreachable!("drain(6) yields six items"));
+            let x2 = top_six
+                .next()
+                .unwrap_or_else(|| unreachable!("drain(6) yields six items"));
+            for item in top_six {
                 stack.push(item).map_err(|_| ScriptError::Invalid {
                     code: ScriptErrCode::StackSize,
                 })?;
@@ -916,10 +812,7 @@ fn dispatch(
                     code: ScriptErrCode::StackSize,
                 })?;
             } else {
-                let item = stack.remove_at(depth).map_err(|_| invalid_stack())?;
-                stack.push(item).map_err(|_| ScriptError::Invalid {
-                    code: ScriptErrCode::StackSize,
-                })?;
+                stack.roll(depth).map_err(|_| invalid_stack())?;
             }
         }
         OP_ROT => {
@@ -929,7 +822,7 @@ fn dispatch(
             })?;
         }
         OP_SWAP => {
-            stack.swap().map_err(|_| invalid_stack())?;
+            stack.swap_at(0, 1).map_err(|_| invalid_stack())?;
         }
         OP_TUCK => {
             let top = stack.peek().map_err(|_| invalid_stack())?.clone();
@@ -1131,16 +1024,19 @@ fn dispatch(
     Ok(())
 }
 
+/// Underflow/invalid-depth error for stack-op dispatch.
+fn invalid_stack() -> ScriptError {
+    ScriptError::Invalid {
+        code: ScriptErrCode::InvalidStackOperation,
+    }
+}
+
 /// Computes the digest for a hash opcode.
 fn hash_bytes(op: u8, data: &[u8]) -> SmallVec<[u8; 32]> {
     match op {
         OP_RIPEMD160 => SmallVec::from_slice(&ripemd160::Hash::hash(data)[..]),
         OP_SHA1 => SmallVec::from_slice(&sha1::Hash::hash(data)[..]),
-        OP_SHA256 => {
-            let mut engine = Sha256::new();
-            Digest::update(&mut engine, data);
-            SmallVec::from_slice(&Digest::finalize(engine))
-        }
+        OP_SHA256 => SmallVec::from_slice(&sha2::Sha256::digest(data)),
         OP_HASH160 => {
             let sha = sha2::Sha256::digest(data);
             SmallVec::from_slice(&ripemd160::Hash::hash(&sha)[..])
@@ -1167,62 +1063,30 @@ fn script_code(codeseparator_pos: u32, instruction_start: usize, script: &[u8]) 
 
 /// Removes every byte-identical occurrence of `needle` from `haystack`,
 /// returning the cleaned script and the number of removals.
-fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
+pub(crate) fn remove_all(haystack: &[u8], needle: &[u8]) -> (Vec<u8>, usize) {
     if needle.is_empty() {
         return (haystack.to_vec(), 0);
     }
     let mut out = Vec::with_capacity(haystack.len());
     let mut removed = 0_usize;
-    let mut cursor = haystack;
-    while !cursor.is_empty() {
-        let consumed = instruction_len(cursor);
-        let (instr, rest) = cursor.split_at(consumed);
-        if instr == needle {
+    let mut iter = instructions(haystack);
+    let mut start = 0_usize;
+    while let Some(item) = iter.next() {
+        // A malformed tail is one instruction: it is compared and emitted
+        // whole, the same span Core's failed GetOp leaves behind.
+        let end = if item.is_err() {
+            haystack.len()
+        } else {
+            haystack.len() - iter.remaining.len()
+        };
+        if haystack[start..end] == *needle {
             removed += 1;
         } else {
-            out.extend_from_slice(instr);
+            out.extend_from_slice(&haystack[start..end]);
         }
-        cursor = rest;
+        start = end;
     }
     (out, removed)
-}
-
-/// Returns the total byte length of the instruction at the head of `script`.
-fn instruction_len(script: &[u8]) -> usize {
-    let Some(&op) = script.first() else {
-        return 0;
-    };
-    let (header, payload) = if (0x01..=0x4b).contains(&op) {
-        (1_usize, usize::from(op))
-    } else {
-        match op {
-            opcode::OP_PUSHDATA1 => {
-                let len = usize::from(script.get(1).copied().unwrap_or(0));
-                (2, len)
-            }
-            opcode::OP_PUSHDATA2 => {
-                let len = u16::from_le_bytes([
-                    script.get(1).copied().unwrap_or(0),
-                    script.get(2).copied().unwrap_or(0),
-                ]);
-                (3, usize::from(len))
-            }
-            opcode::OP_PUSHDATA4 => {
-                let bytes = [
-                    script.get(1).copied().unwrap_or(0),
-                    script.get(2).copied().unwrap_or(0),
-                    script.get(3).copied().unwrap_or(0),
-                    script.get(4).copied().unwrap_or(0),
-                ];
-                // u32 always fits in usize (>= 32 bits) on supported targets.
-                let wide = u64::from(u32::from_le_bytes(bytes));
-                let len = usize::try_from(wide).unwrap_or(usize::MAX);
-                (5, len)
-            }
-            _ => (1, 0),
-        }
-    };
-    header.saturating_add(payload).min(script.len())
 }
 
 /// Core's `EvalChecksig`: dispatches to pre-tapscript (ECDSA) or tapscript
@@ -1238,7 +1102,7 @@ fn eval_checksig(
     codeseparator_pos: u32,
     script: &[u8],
     flags: VerifyFlags,
-    checker: &mut TxSignatureChecker<'_>,
+    checker: &TxSignatureChecker<'_>,
     sigversion: SigVersion,
     validation_weight_left: &mut Option<i64>,
     tapleaf_hash: Option<&Hash256>,
@@ -1286,7 +1150,6 @@ fn eval_checksig(
                     success = checker.check_schnorr_signature(
                         sig,
                         pubkey,
-                        sigversion,
                         tapleaf_hash,
                         codeseparator_pos,
                     )?;
@@ -1298,7 +1161,6 @@ fn eval_checksig(
             }
             Ok(success)
         }
-        SigVersion::Taproot => Ok(false),
     }
 }
 
@@ -1316,7 +1178,7 @@ fn check_multisig(
     stack: &mut Stack,
     require_minimal: bool,
     flags: VerifyFlags,
-    checker: &mut TxSignatureChecker<'_>,
+    checker: &TxSignatureChecker<'_>,
     sigversion: SigVersion,
     op_count: &mut usize,
     codeseparator_pos: u32,
@@ -1324,9 +1186,6 @@ fn check_multisig(
     script: &[u8],
     verify_only: bool,
 ) -> Result<(), ScriptError> {
-    let invalid_stack = || ScriptError::Invalid {
-        code: ScriptErrCode::InvalidStackOperation,
-    };
     if stack.is_empty() {
         return Err(invalid_stack());
     }
@@ -1414,11 +1273,12 @@ fn check_multisig(
         }
     }
 
-    // Clean up the actual arguments (keys + sigs + the two counts).
+    // Clean up the actual arguments (keys + sigs + the two counts). The last
+    // `sigs` pops are the signature operands; NULLFAIL requires them empty
+    // on failure.
     let mut args = keys + sigs + 2;
-    let mut key_scan = keys + 2;
     while args > 0 {
-        if !success && flags.contains(VerifyFlags::NULLFAIL) && key_scan == 0 {
+        if !success && flags.contains(VerifyFlags::NULLFAIL) && args <= sigs {
             let top = stack.peek().map_err(|_| invalid_stack())?;
             if !item_bytes(top).is_empty() {
                 return Err(ScriptError::Invalid {
@@ -1426,7 +1286,6 @@ fn check_multisig(
                 });
             }
         }
-        key_scan = key_scan.saturating_sub(1);
         stack.pop().map_err(|_| invalid_stack())?;
         args -= 1;
     }

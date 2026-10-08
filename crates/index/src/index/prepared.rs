@@ -125,7 +125,7 @@ impl PreparedBatch {
     }
 
     /// Returns the row families represented by the admitted blocks.
-    pub const fn capabilities(&self) -> Option<IndexCapabilities> {
+    pub(crate) const fn capabilities(&self) -> Option<IndexCapabilities> {
         self.capabilities
     }
 }
