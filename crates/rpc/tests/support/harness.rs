@@ -123,8 +123,8 @@ impl ServerHarness {
             },
             mempool: MempoolHandles {
                 // The daemon wires this handle as `state.mempool_gateway()`
-                // (lifecycle.rs): the gateway interned under the resolved
-                // `config.validation.engine`, not a re-interned Native one.
+                // (lifecycle.rs): the gateway constructed with the resolved
+                // `config.validation.engine`, not a separate Native one.
                 gateway: state.mempool_gateway(),
             },
             indexes: IndexHandles {

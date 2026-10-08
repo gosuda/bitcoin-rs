@@ -7,8 +7,7 @@
 use anyhow::{Result, bail};
 
 use bitcoin_rs_mempool::{
-    AdmissionOrigin, MempoolGateway, MempoolObserver, MutationEnvelope, MutationOutcome,
-    SubmitOutcome,
+    AdmissionOrigin, MempoolObserver, MutationEnvelope, MutationOutcome, SubmitOutcome,
 };
 
 use bitcoin_rs_chain::regtest_fixture::{self, REGTEST_BITS};
@@ -826,29 +825,22 @@ impl MempoolObserver for RecordingMempoolObserver {
     }
 }
 
-/// Reorg re-admission publishes through the run-composed shared gateway:
+/// Reorg re-admission publishes through the run-composed gateway:
 /// two Accepted changes, parent before child, origin `Reorg`, contiguous
 /// sequences. The apply path's raw sweep bypasses observers by design, so
 /// these two changes are the only publications the gateway emits here.
 #[test]
-fn invalidateblock_readmission_publishes_a_events_through_shared_gateway() -> Result<()> {
+fn invalidateblock_readmission_publishes_events_through_composed_gateway() -> Result<()> {
     let (state, _guard) = open_regtest()?;
     apply_genesis(&state)?;
     let seed_tip_hash = seed_chain(&state, SEED_BLOCKS)?;
 
-    // Interning returns the one gateway every production route reaches
-    // The gateway is constructed with the observer so publication runs
+    // The node carries the gateway built for this pool, so publication runs
     // through the same path production uses.
     let observer = Arc::new(RecordingMempoolObserver::default());
     let gateway = state.mempool_gateway();
-    assert!(
-        Arc::ptr_eq(
-            &gateway,
-            &MempoolGateway::shared(state.mempool(), state.config().validation.engine)
-                .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"))
-        ),
-        "the node's gateway must be the one interned for its pool"
-    );
+    assert!(Arc::ptr_eq(gateway.pool(), &state.mempool()));
+    assert_eq!(gateway.engine(), state.config().validation.engine);
     gateway
         .attach_observer_leg("test-recorder", observer.clone())
         .unwrap_or_else(|error| panic!("the node installs an observer slot to extend: {error}"));
