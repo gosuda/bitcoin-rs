@@ -106,10 +106,17 @@ failure whose `Failed` receipt was lost. When the durable head names a historica
 checkpoint, startup restores its UTXO, CoinStats, and applied tip, then replays
 only the validated archive suffix. Checkpoint publication and its durable-head
 reference are ordered so an unreferenced generation is ignored after a crash.
+Publication retains older historical generations until the durable-head batch
+accepts the replacement. Startup opens the generation named by that head
+directly, even when `CURRENT` leads it; cleanup runs only after head commit.
 A missing or corrupt named checkpoint fails closed rather than attaching an
 unverified height to empty coins. Without an accepted checkpoint, reconstruction
 can still delay startup by the full historical prefix. Already archived blocks
 replay without another pending/archive write.
+
+Snapshot activation refuses while the full-revalidation marker is present,
+including a recheck under transition exclusion before committing its anchor.
+The marker and pre-activation head remain intact on refusal.
 
 Snapshot recovery validates the root's network pin, restores a compatible
  checkpoint or verifies the immutable snapshot archive, and replays the

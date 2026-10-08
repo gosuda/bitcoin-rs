@@ -412,6 +412,9 @@ coherent apply/commit/disconnect contract (`crates/utxo/src/contract.rs`).
   and hash; startup restores that checkpoint and replays only its certified
   archive suffix. Without an accepted checkpoint, startup safely falls back to
   genesis replay. The summary exposes live progress separately.
+  Historical publication retains earlier generations until the head accepts
+  the replacement; recovery selects the head's generation independently of
+  `CURRENT`. Snapshot activation refuses an unresolved full-revalidation marker.
   Replaying a block already covered by an archive receipt does not rewrite its
   body or progress. Before checking a new body, the manager syncs its staged bytes and commits a
   pending-validation reference in the same root. If a crash or terminal-status

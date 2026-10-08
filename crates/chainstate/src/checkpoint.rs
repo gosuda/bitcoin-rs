@@ -154,6 +154,25 @@ pub(crate) fn load_checkpoint_from_dir_at(
     root_name: &str,
 ) -> Result<CheckpointLoad, CheckpointLoadError> {
     let opened = bitcoin_rs_storage::checkpoint::open_current_checkpoint_at(data_dir, root_name)?;
+    load_opened_checkpoint(opened, config)
+}
+
+pub(crate) fn load_checkpoint_generation_from_dir(
+    data_dir: &Dir,
+    config: headers::HeaderCheckpointConfig,
+    root_name: &str,
+    generation: u64,
+) -> Result<CheckpointLoad, CheckpointLoadError> {
+    let opened = bitcoin_rs_storage::checkpoint::open_checkpoint_generation_at(
+        data_dir, root_name, generation,
+    )?;
+    load_opened_checkpoint(opened, config)
+}
+
+fn load_opened_checkpoint(
+    opened: CheckpointOpen,
+    config: headers::HeaderCheckpointConfig,
+) -> Result<CheckpointLoad, CheckpointLoadError> {
     let CheckpointOpen::Current {
         generation_dir,
         current,

@@ -674,7 +674,10 @@ impl Chainstate {
         // All refusals precede publication. The transition stays held across the
         // lifecycle record and the whole coin/statistics/tip installation.
         persist(&tree, &tip_snapshot).inspect_err(|error| {
-            if !matches!(error, AssumeUtxoError::ActivationBehindTip) {
+            if !matches!(
+                error,
+                AssumeUtxoError::ActivationBehindTip | AssumeUtxoError::FullRevalidationRequired
+            ) {
                 self.fail_closed_for_recovery();
             }
         })?;

@@ -104,7 +104,7 @@ The `Cold` path is for a datadir with the current marker and no committed durabl
 | Epoch | Change | Status |
 | --- | --- | --- |
 | `0` | Initial baseline format. Unmarked non-empty datadirs are implicit epoch `0` and are refused. | retired |
-| `1` | The durable head carries the AssumeUTXO anchor, lifecycle, and pending-validation reference (frame version 2). Older datadirs are refused with `incompatible_schema`; explicit operator resync into a separate directory is required. | current |
+| `1` | The durable head carries the AssumeUTXO anchor, lifecycle, pending-validation reference, and historical checkpoint reference (frame version 3). Older datadirs are refused with `incompatible_schema`; explicit operator resync into a separate directory is required. | current |
 
 ## Removed settings and changed input syntax
 

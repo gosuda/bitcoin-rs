@@ -12,7 +12,15 @@ fn publish_fixture(
     data_dir: &cap_std::fs::Dir,
     failpoint: Option<CheckpointFailpoint>,
 ) -> Result<u64, CheckpointError> {
-    let stage = begin_publication_with_failpoint(data_dir, failpoint)?;
+    publish_fixture_at(data_dir, CHECKPOINT_ROOT, failpoint)
+}
+
+fn publish_fixture_at(
+    data_dir: &cap_std::fs::Dir,
+    root_name: &str,
+    failpoint: Option<CheckpointFailpoint>,
+) -> Result<u64, CheckpointError> {
+    let stage = begin_publication_at_with_failpoint(data_dir, root_name, failpoint)?;
     let headers = b"headers";
     let utxo = b"utxo";
     let coinstats = {
@@ -203,6 +211,59 @@ fn publication_failpoints_preserve_the_previous_current() -> Result<(), Box<dyn 
             let name = name.to_string_lossy();
             name.starts_with(".gen-") || name.starts_with(".CURRENT-")
         }));
+    }
+    Ok(())
+}
+
+#[test]
+fn historical_publication_retains_head_generation_until_explicit_retirement()
+-> Result<(), Box<dyn std::error::Error>> {
+    for failpoint in [
+        None,
+        Some(CheckpointFailpoint::CurrentRename),
+        Some(CheckpointFailpoint::CurrentRootSync),
+    ] {
+        let dir = tempdir()?;
+        let data = open_root(dir.path())?;
+        let accepted = publish_fixture_at(&data, HISTORICAL_CHECKPOINT_ROOT, None)?;
+        let result = publish_fixture_at(&data, HISTORICAL_CHECKPOINT_ROOT, failpoint);
+        assert_eq!(result.is_err(), failpoint.is_some());
+        let CheckpointOpen::Current {
+            generation_dir,
+            current,
+        } = open_checkpoint_generation_at(&data, HISTORICAL_CHECKPOINT_ROOT, accepted)?
+        else {
+            panic!("accepted generation missing");
+        };
+        let manifest = read_manifest(
+            &generation_dir,
+            &current,
+            CheckpointIdentity {
+                network: bitcoin_rs_primitives::Network::Regtest,
+                genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+            },
+        )?;
+        verify_artifact(
+            &generation_dir,
+            &manifest.utxo.file,
+            manifest.utxo.bytes,
+            &manifest.utxo.sha256,
+        )?;
+        drop(generation_dir);
+        let replacement = publish_fixture_at(&data, HISTORICAL_CHECKPOINT_ROOT, None)?;
+        assert!(
+            dir.path()
+                .join(HISTORICAL_CHECKPOINT_ROOT)
+                .join(generation_name(accepted))
+                .exists()
+        );
+        retire_historical_checkpoints(&data, replacement)?;
+        assert!(
+            open_checkpoint_generation_at(&data, HISTORICAL_CHECKPOINT_ROOT, accepted).is_err()
+        );
+        assert!(
+            open_checkpoint_generation_at(&data, HISTORICAL_CHECKPOINT_ROOT, replacement).is_ok()
+        );
     }
     Ok(())
 }

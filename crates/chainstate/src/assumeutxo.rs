@@ -218,6 +218,9 @@ pub enum AssumeUtxoError {
     /// Snapshot activation attempted while another `AssumeUTXO` operation is active.
     #[error("cannot activate assumeutxo snapshot: assumeutxo validation is already in progress")]
     AlreadyActive,
+    /// A sticky full-revalidation marker must be resolved before activation.
+    #[error("snapshot activation requires completion of full revalidation")]
+    FullRevalidationRequired,
     /// Background validation reached base height but the reconstructed commitment did not match.
     #[error(
         "assumeutxo commitment mismatch at base height {base_height}: expected {expected}, actual {actual}"
@@ -451,10 +454,11 @@ impl AssumeUtxoManager {
             network,
             genesis: network.genesis_block_hash(),
         };
-        let loaded = crate::checkpoint::load_checkpoint_from_dir_at(
+        let loaded = crate::checkpoint::load_checkpoint_generation_from_dir(
             &data,
             config,
             bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+            checkpoint.generation,
         )
         .map_err(|error| anyhow::anyhow!("historical checkpoint load failed: {error}"))?;
         let crate::checkpoint::CheckpointLoad::Complete(restored) = loaded else {
@@ -556,6 +560,13 @@ impl AssumeUtxoManager {
         if !matches!(self.status()?, AssumeUtxoDiskStatus::Uninitialized) {
             return Err(AssumeUtxoError::AlreadyActive);
         }
+        if self
+            .data_dir
+            .as_deref()
+            .is_some_and(crate::recovery::requires_full_revalidation)
+        {
+            return Err(AssumeUtxoError::FullRevalidationRequired);
+        }
         if pinned.block_hash != snapshot_load.tip_hash {
             return Err(AssumeUtxoError::SnapshotBlockHashMismatch {
                 expected: pinned.block_hash,
@@ -599,6 +610,15 @@ impl AssumeUtxoManager {
             stats,
             pinned,
             |tree, tip| {
+                // Recheck under transition exclusion: disconnect/recovery may
+                // arm the sticky marker while the import is being verified.
+                if self
+                    .data_dir
+                    .as_deref()
+                    .is_some_and(crate::recovery::requires_full_revalidation)
+                {
+                    return Err(AssumeUtxoError::FullRevalidationRequired);
+                }
                 if let Some(dir) = &self.data_dir {
                     crate::assumeutxo_snapshot::write_headers(dir, tree, tip)?;
                 }
@@ -1167,6 +1187,31 @@ impl AssumeUtxoManager {
             ..prior
         };
         active.durable_head.commit(Some(&prior), &next, &records)?;
+        if let AssumeUtxoDiskStatus::Validating {
+            checkpoint: Some(checkpoint),
+            ..
+        } = status
+        {
+            let previous = match prior.assumeutxo {
+                AssumeUtxoDiskStatus::Validating { checkpoint, .. } => checkpoint,
+                _ => None,
+            };
+            if previous != Some(checkpoint)
+                && let Some(data_dir) = &self.data_dir
+            {
+                let cleanup = bitcoin_rs_storage::checkpoint::fs::open_data_dir(data_dir)
+                    .map_err(bitcoin_rs_storage::checkpoint::CheckpointError::from)
+                    .and_then(|data| {
+                        bitcoin_rs_storage::checkpoint::retire_historical_checkpoints(
+                            &data,
+                            checkpoint.generation,
+                        )
+                    });
+                if let Err(error) = cleanup {
+                    tracing::warn!(%error, "historical checkpoint cleanup deferred");
+                }
+            }
+        }
         Ok(())
     }
 

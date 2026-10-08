@@ -237,6 +237,38 @@ pub enum CheckpointOpen {
         current: CurrentV1,
     },
 }
+/// Opens a generation selected by an authoritative durable-head reference.
+/// CURRENT may be ahead or absent after an interrupted publication.
+pub fn open_checkpoint_generation_at(
+    data_dir: &Dir,
+    root_name: &str,
+    generation: u64,
+) -> Result<CheckpointOpen, CheckpointLoadError> {
+    let root = CheckpointRoot::open_existing(data_dir, root_name)
+        .map_err(|error| classify_open_error("open checkpoint root", error))?
+        .ok_or_else(|| corrupt_checkpoint("referenced checkpoint root is missing"))?;
+    let directory = generation_name(generation);
+    let generation_dir = root
+        .open_dir(&directory)
+        .map_err(|error| classify_open_error("open referenced checkpoint generation", error))?;
+    let bytes = read_file(
+        &generation_dir,
+        MANIFEST_FILE,
+        MAX_CHECKPOINT_METADATA_BYTES,
+    )
+    .map_err(|error| classify_open_error("read referenced checkpoint manifest", error))?;
+    Ok(CheckpointOpen::Current {
+        generation_dir,
+        current: CurrentV1 {
+            format: CURRENT_FORMAT.to_owned(),
+            version: CURRENT_VERSION,
+            generation,
+            directory,
+            manifest_sha256: hex_encode(&Sha256::digest(&bytes)),
+        },
+    })
+}
+
 /// Opens and validates the checkpoint named by the data directory's CURRENT.
 pub fn open_current_checkpoint(data_dir: &Dir) -> Result<CheckpointOpen, CheckpointLoadError> {
     open_current_checkpoint_at(data_dir, super::CHECKPOINT_ROOT)

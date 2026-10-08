@@ -36,6 +36,7 @@ pub struct CheckpointStage {
     pub(crate) staging: Dir,
     pub(crate) generation: u64,
     pub(crate) paths: GenerationPaths,
+    retain_generations: bool,
     #[cfg(any(test, feature = "test-seam"))]
     pub(crate) failpoint: Option<CheckpointFailpoint>,
 }
@@ -156,6 +157,7 @@ fn begin_publication_inner(
         staging,
         generation,
         paths,
+        retain_generations: root_name == super::HISTORICAL_CHECKPOINT_ROOT,
         #[cfg(any(test, feature = "test-seam"))]
         failpoint,
     })
@@ -178,6 +180,7 @@ pub fn commit_publication(
         staging,
         generation,
         paths,
+        retain_generations,
         ..
     } = stage;
     // Caller built the manifest for a different generation than the stage
@@ -234,9 +237,24 @@ pub fn commit_publication(
     #[cfg(any(test, feature = "test-seam"))]
     injected_io(failpoint, CheckpointFailpoint::CurrentRootSync)?;
     sync_root(&root)?;
-    cleanup_after_publication(&root, &paths.directory);
+    if !retain_generations {
+        cleanup_after_publication(&root, &paths.directory);
+    }
     Ok(generation)
 }
+/// Retires historical generations only after the authoritative head accepts
+/// `generation`. Cleanup failure leaves recoverable extra files in place.
+pub fn retire_historical_checkpoints(
+    data_dir: &Dir,
+    generation: u64,
+) -> Result<(), CheckpointError> {
+    if let Some(root) = CheckpointRoot::open_existing(data_dir, super::HISTORICAL_CHECKPOINT_ROOT)?
+    {
+        cleanup_after_publication(&root, &generation_name(generation));
+    }
+    Ok(())
+}
+
 fn allocate_generation(
     root: &CheckpointRoot,
     current_generation: u64,

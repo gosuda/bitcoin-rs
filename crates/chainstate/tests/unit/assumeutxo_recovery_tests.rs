@@ -254,6 +254,29 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
     };
     assert_eq!(checkpoint.height, 1);
     assert_eq!(checkpoint.hash, fixture.blocks[1].block_hash().0);
+    // Simulate repeated crashes after publication but before the durable-head
+    // reference commits. CURRENT leads, while the accepted coins stay intact.
+    let historical = manager
+        .historical_chainstate()
+        .ok_or("missing historical")?;
+    let data = bitcoin_rs_storage::checkpoint::fs::open_data_dir(dir.path())?;
+    let config = crate::checkpoint::headers::HeaderCheckpointConfig {
+        network: Network::Regtest,
+        genesis: Network::Regtest.genesis_block_hash(),
+    };
+    for _ in 0..2 {
+        crate::checkpoint::write_checkpoint_from_dir_at(
+            &data,
+            config,
+            &historical.block_tree,
+            &historical.utxo,
+            &historical.coin_stats,
+            historical.applied_tip_snapshot().as_deref(),
+            bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT,
+        )?;
+    }
+    drop(historical);
+    drop(data);
     assert!(
         dir.path()
             .join(bitcoin_rs_storage::checkpoint::HISTORICAL_CHECKPOINT_ROOT)
@@ -288,6 +311,41 @@ fn historical_checkpoint_bounds_restart_replay_to_the_checkpoint_suffix() -> Tes
         manager.status()?,
         AssumeUtxoDiskStatus::Finalized { .. }
     ));
+    Ok(())
+}
+
+#[test]
+fn snapshot_activation_preserves_full_revalidation_requirement() -> TestResult {
+    let fixture = Fixture::new()?;
+    let dir = tempfile::tempdir()?;
+    let active = open_persistent(dir.path(), &fixture.pinned)?;
+    active.admit_headers(
+        &fixture
+            .blocks
+            .iter()
+            .map(|block| block.header)
+            .collect::<Vec<_>>(),
+    )?;
+    let manager = AssumeUtxoManager::open(
+        Network::Regtest,
+        active.clone(),
+        Some(dir.path().to_path_buf()),
+    )?;
+    let journal = dir.path().join(crate::recovery::CHAINSTATE_JOURNAL_DIR);
+    std::fs::create_dir_all(&journal)?;
+    let marker = journal.join(bitcoin_rs_storage::chainstate_journal::FULL_REVALIDATION_MARKER);
+    std::fs::write(&marker, b"required")?;
+    let head = active.durable_head.load()?;
+    let tip = active.applied_tip_snapshot();
+    assert!(matches!(
+        manager.activate_pinned_snapshot(fixture.load()?, &fixture.pinned),
+        Err(AssumeUtxoError::FullRevalidationRequired)
+    ));
+    assert_eq!(active.durable_head.load()?, head);
+    assert_eq!(active.applied_tip_snapshot(), tip);
+    assert_eq!(std::fs::read(marker)?, b"required");
+    assert!(active.role().is_ordinary());
+    assert!(!dir.path().join("assumeutxo").exists());
     Ok(())
 }
 

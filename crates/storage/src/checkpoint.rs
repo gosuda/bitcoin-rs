@@ -14,10 +14,12 @@ pub use fs::{
     CURRENT_SCHEMA_FILE, create_file, current_schema_bytes, ensure_current_schema, open_data_dir,
     read_file, sync_dir,
 };
+pub use load::open_checkpoint_generation_at;
 pub use load::open_current_checkpoint_at;
 pub use publish::begin_publication_at;
 #[cfg(any(test, feature = "test-seam"))]
 pub use publish::begin_publication_at_with_failpoint;
+pub use publish::retire_historical_checkpoints;
 
 use cap_std::fs::File;
 use serde::{Deserialize, Serialize};
