@@ -150,6 +150,13 @@ mod tests {
     }
 
     #[test]
+    fn rejects_noncanonical_pad_bits_and_incomplete_padding() {
+        for encoded in ["Zg=A", "Zh==", "Zm9="] {
+            assert_eq!(decode(encoded), Err(()), "{encoded}");
+        }
+    }
+
+    #[test]
     fn rejects_empty_unpadded_and_misplaced_padding() {
         assert!(decode("").is_err());
         assert!(decode("Zg").is_err());

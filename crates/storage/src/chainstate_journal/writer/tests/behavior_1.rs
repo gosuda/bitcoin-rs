@@ -304,6 +304,63 @@ fn recovery_compaction_cannot_clear_an_append_gap() -> TestResult {
     Ok(())
 }
 
+// Contract: docs/contracts/chainstate-journal-v1.md, JW-LIFE-1, JW-MARK-2.
+// A fork below the checkpoint base invalidates the generation; the disconnect
+// debt settles through the same freeze-compact-resume publication instead of
+// leaving the writer frozen until restart.
+#[test]
+fn below_base_invalidation_settles_through_checkpoint_publication() -> TestResult {
+    let store = Arc::new(CountingStore::new());
+    let dir = temp_dir("below-base-settle")?;
+    let mut writer = JournalWriter::initialize(
+        dir,
+        Arc::clone(&store),
+        1,
+        (0, 0),
+        10,
+        [10; 32],
+        [9; 32],
+        30,
+    )?;
+    assert!(matches!(
+        writer.rewind_to(5, [5; 32], [4; 32], 15),
+        Err(JournalWriterError::ForkBelowBase {
+            fork_height: 5,
+            base_height: 10
+        })
+    ));
+    assert_eq!(writer.state(), WriterState::Frozen);
+    assert!(writer.dir.open(FULL_REVALIDATION_MARKER).is_ok());
+    assert!(matches!(
+        writer.append(&sample_record(11)),
+        Err(JournalWriterError::NotOpen { .. })
+    ));
+    // Publication must not resume before compaction installs the new base:
+    // the only head still in memory is the destroyed generation's stale cursor.
+    assert!(matches!(
+        writer.resume(),
+        Err(JournalWriterError::NotOpen {
+            state: "invalidated"
+        })
+    ));
+    writer.freeze()?;
+    writer.compact_to_checkpoint(7, 5, [5; 32], [4; 32], 15, true)?;
+    assert_eq!(
+        writer
+            .dir
+            .open(FULL_REVALIDATION_MARKER)
+            .err()
+            .map(|error| error.kind()),
+        Some(std::io::ErrorKind::NotFound)
+    );
+    writer.resume()?;
+    assert_eq!(writer.state(), WriterState::Open);
+    writer.append(&sample_record(6))?;
+    writer.flush_to(6)?;
+    assert_eq!(writer.head().height, 6);
+    Ok(())
+}
+
 // Contract: docs/contracts/recovery.md, RCV-02; chainstate-journal-v1.md, JW-MARK-2.
 #[test]
 fn cold_retention_removes_all_invalidated_generations_and_preserves_recovery() -> TestResult {

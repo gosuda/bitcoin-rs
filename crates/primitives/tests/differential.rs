@@ -65,7 +65,13 @@ fn corpus_seeds(target: &str) -> Option<Vec<(String, Vec<u8>)>> {
         let path = entry.path();
         if path.is_file() {
             if let Ok(bytes) = std::fs::read(&path) {
-                seeds.push((path.display().to_string(), bytes));
+                seeds.push((
+                    path.file_name()
+                        .expect("corpus seed entry is a file")
+                        .to_string_lossy()
+                        .into_owned(),
+                    bytes,
+                ));
             }
         }
     }
@@ -154,18 +160,14 @@ fn enforce_corpus_verdicts(target: &str) {
     );
 
     let mut observed: BTreeMap<String, String> = BTreeMap::new();
-    for (path, bytes) in &seeds {
-        let name = std::path::Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(path)
-            .to_owned();
+    for (name, bytes) in &seeds {
+        let name = name.as_str();
         let verdict = match target {
             "tx_validate" => decode_verdict::<NativeTx>(bytes),
             "block_validate" => decode_verdict::<NativeBlock>(bytes),
             other => panic!("unknown corpus target {other}"),
         };
-        observed.insert(name, verdict);
+        observed.insert(name.to_owned(), verdict);
     }
 
     let manifest_path = repo_root().join("fuzz/corpus/manifest.json");
@@ -274,15 +276,15 @@ fn error_kind(error: &DecodeError) -> String {
 }
 
 // Both corpus gates enforce the QAC-05 round-trip contract
-// (docs/contracts/qa-corpus.md) through the pinned verdict manifest.
+// (docs/contracts/qa-corpus.md) through the pinned verdict manifest. One
+// test walks both targets: each enforce pass read-modify-writes the shared
+// manifest.json under CORPUS_MANIFEST_WRITE, and parallel tests doing that
+// concurrently lose each other's section.
 #[test]
-fn tx_corpus_seeds_match_expected_verdicts() {
-    enforce_corpus_verdicts("tx_validate");
-}
-
-#[test]
-fn block_corpus_seeds_match_expected_verdicts() {
-    enforce_corpus_verdicts("block_validate");
+fn corpus_seeds_match_expected_verdicts() {
+    for target in ["tx_validate", "block_validate"] {
+        enforce_corpus_verdicts(target);
+    }
 }
 
 #[test]

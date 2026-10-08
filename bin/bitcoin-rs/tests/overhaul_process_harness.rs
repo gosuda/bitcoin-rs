@@ -43,11 +43,41 @@ use serde_json::{Value, json};
 // A height-1 coinbase is mature for admission after 101 common blocks.
 const COMMON_BLOCKS: u32 = 101;
 
-/// Waits for the kernel to drop `/proc/<pid>` after the child is reaped.
+/// Whether the OS still reports a live process under `pid`. On unix the
+/// kernel drops `/proc/<pid>` once the parent reaps the child; Windows
+/// answers via the process object's exit code.
+#[cfg(unix)]
+fn pid_is_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+/// Whether the OS still reports a live process under `pid`. Windows marks
+/// a terminated object's exit code, so a present-but-dead pid is not alive.
+#[cfg(windows)]
+fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    // SAFETY: the returned handle is checked for null and closed on every
+    // path; `code` is a plain out-param the call fully overwrites.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0_u32;
+        let alive = GetExitCodeProcess(handle, std::ptr::from_mut(&mut code)) != 0
+            && i32::try_from(code) == Ok(STILL_ACTIVE);
+        let _ = CloseHandle(handle);
+        alive
+    }
+}
+
+/// Waits for the kernel to drop the child after it is reaped.
 fn assert_reaped(pid: u32) {
-    let proc_entry = format!("/proc/{pid}");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while Path::new(&proc_entry).exists() {
+    while pid_is_alive(pid) {
         assert!(Instant::now() < deadline, "child {pid} survived cleanup");
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -924,7 +954,13 @@ fn wait_txindex_synced(node: &mut ProcessNode, deadline: Instant) -> Result<(), 
 fn mine_on_node(node: &mut ProcessNode, blocks: u32) -> Result<Vec<String>, Error> {
     let deadline = readiness_deadline();
     let mined = loop {
-        match node.rpc("generatetoaddress", &json!([blocks, MINING_ADDRESS])) {
+        // The transport shares the readiness deadline: a bulk mine
+        // legitimately exceeds the per-request budget on slow hosts.
+        match node.rpc_until(
+            "generatetoaddress",
+            &json!([blocks, MINING_ADDRESS]),
+            deadline,
+        ) {
             Ok(mined) => break mined,
             Err(Error::Rpc { message, .. }) if message.contains("applied tip is not available") => {
                 assert!(

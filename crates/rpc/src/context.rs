@@ -498,11 +498,11 @@ impl ChainHandles {
 impl Default for MempoolHandles {
     fn default() -> Self {
         Self {
-            gateway: MempoolGateway::shared(
+            gateway: Arc::new(MempoolGateway::new(
                 Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+                None,
                 ValidationEngine::Native,
-            )
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}")),
+            )),
         }
     }
 }
@@ -566,12 +566,11 @@ impl Context {
     pub fn new_with_mempool_observer(observer: Arc<dyn MempoolObserver>) -> Self {
         Self::from_handles(ContextHandles {
             mempool: MempoolHandles {
-                gateway: MempoolGateway::shared_with(
+                gateway: Arc::new(MempoolGateway::new(
                     Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-                    observer,
+                    Some(observer),
                     ValidationEngine::Native,
-                )
-                .unwrap_or_else(|error| panic!("mempool gateway intern: {error}")),
+                )),
             },
             ..ContextHandles::default()
         })
@@ -1448,11 +1447,11 @@ mod tests {
                 ..ChainHandles::default()
             },
             mempool: MempoolHandles {
-                gateway: MempoolGateway::shared(
+                gateway: Arc::new(MempoolGateway::new(
                     Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+                    None,
                     ValidationEngine::Native,
-                )
-                .unwrap_or_else(|error| panic!("mempool gateway intern: {error}")),
+                )),
             },
             network: NetworkHandles {
                 peer_table: p2p.table(),
@@ -1627,25 +1626,11 @@ mod tests {
 
     #[test]
     fn context_reads_metadata_only_block_record_from_body_source() {
-        struct SingleBlockSource {
-            height: u32,
-            hash: BlockHash,
-            body: Vec<u8>,
-        }
-
-        impl BlockBodySource for SingleBlockSource {
-            fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-                (height == self.height && hash == self.hash).then(|| self.body.clone())
-            }
-        }
-
         let block = Network::Regtest.genesis_block();
         let body = consensus_bytes(&block);
         let record = BlockRecord::from_block(0, &block);
-        let source = Arc::new(SingleBlockSource {
-            height: 0,
-            hash: record.hash,
-            body: body.clone(),
+        let source = Arc::new(crate::test_support::BlockBodies {
+            bodies: vec![(0, record.hash, body.clone())],
         });
         let ctx = Context::from_handles(ContextHandles {
             chain: ChainHandles {
@@ -2025,11 +2010,11 @@ mod tests {
                 rollback_warnings: None,
             },
             mempool: MempoolHandles {
-                gateway: MempoolGateway::shared(
+                gateway: Arc::new(MempoolGateway::new(
                     Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
+                    None,
                     ValidationEngine::Native,
-                )
-                .unwrap_or_else(|error| panic!("mempool gateway intern: {error}")),
+                )),
             },
             indexes: IndexHandles {
                 derived_index: None,

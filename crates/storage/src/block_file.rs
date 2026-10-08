@@ -726,7 +726,22 @@ fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn sync_blocks_dir(blocks_dir: &Path) -> Result<(), StorageError> {
+    // FlushFileBuffers needs GENERIC_WRITE on the directory handle, and
+    // FILE_FLAG_BACKUP_SEMANTICS is what lets a directory be opened at all.
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(blocks_dir)?
+        .sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 #[expect(clippy::unnecessary_wraps)]
 fn sync_blocks_dir(_blocks_dir: &Path) -> Result<(), StorageError> {
     // std has no portable primitive for opening and syncing a directory.
@@ -853,7 +868,9 @@ fn measure_blocks_dir(blocks_dir: &Path) -> Result<u64, StorageError> {
         if parse_block_file_name(name).is_none() {
             continue;
         }
-        total = total.saturating_add(entry.metadata()?.len());
+        // `DirEntry::metadata` reuses the stale size cached by the directory
+        // enumeration on Windows; a fresh stat sees the kernel's live length.
+        total = total.saturating_add(fs::metadata(entry.path())?.len());
     }
     Ok(total)
 }

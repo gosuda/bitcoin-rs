@@ -1,6 +1,8 @@
 # Current Datadir Format Policy
 
-`bitcoin-rs` supports exactly one persistent datadir format for authoritative chainstate bytes. It does not migrate, translate, or silently recover incompatible state from an older release. Fresh replay is the migration policy: a schema change increments `CURRENT_SCHEMA` and requires an explicit operator resync into a separately named directory.
+`bitcoin-rs` supports exactly one persistent datadir format for authoritative chainstate bytes. It does not migrate, translate, or silently recover incompatible state from an older release. Fresh replay is the migration policy: a schema change increments `CURRENT_SCHEMA` and requires the operator to move to a separately named datadir — by fresh replay, or by an optional epoch-specific offline migration tool when one is offered.
+
+On-disk format is internal architecture, not a compatibility promise: a format break is a permitted redesign, not a defect — operator data safety, not format preservation, is the invariant this policy enforces. An optional, separate offline migration tool may supplement replay; it is never part of the node and never guaranteed.
 
 ## CURRENT_SCHEMA scope
 
@@ -19,7 +21,7 @@ Startup follows this contract:
 | Current marker with no durable head | Start cold; this is normal before the first committed head |
 | Durable head references missing or corrupt authoritative bytes | Refuse open with `incompatible_schema`; committed-range corruption is diagnosed, never silently accepted |
 
-The node never deletes user data automatically. Schema incompatibility fails the open with `incompatible_schema`. The operator then follows the resync procedure below into a separately named directory. Network/backend datadir ownership and multi-process locking are separate configuration and lifecycle concerns; they are not encoded in `CURRENT_SCHEMA`. A future breaking change increments the single epoch and provides no conversion path. The initial unmarked format is the epoch `0` baseline: adopting it while epoch `0` is current does not require a migration or legacy reader. Once the epoch advances, an unmarked non-empty datadir is refused as implicit epoch `0`. Datadir ownership and process locking are tracked in [issue #242](https://github.com/gosuda/bitcoin-rs/issues/242).
+The node never deletes user data automatically. Schema incompatibility fails the open with `incompatible_schema`. The operator then follows the resync procedure below into a separately named directory. Network/backend datadir ownership and multi-process locking are separate configuration and lifecycle concerns; they are not encoded in `CURRENT_SCHEMA`. A future breaking change increments the single epoch and provides no conversion path inside the node: replay is the migration route unless an optional offline tool exists for that epoch. The initial unmarked format is the epoch `0` baseline: adopting it while epoch `0` is current does not require a migration or legacy reader. Once the epoch advances, an unmarked non-empty datadir is refused as implicit epoch `0`. Datadir ownership and process locking are tracked in [issue #242](https://github.com/gosuda/bitcoin-rs/issues/242).
 
 The durable head is the only authoritative commit point. A writer appends body and undo frames, syncs those files and any required directories, then commits coins, head, and metadata in one atomic named-family batch and completes durability before publication. Until durability resolves, storage shows only the prior or the wholly proposed root, never a mix. A crash can leave append or temp residue. Recovery ignores orphan append tails: file length and discovered valid frames never promote a head. An unresolved batch resolves to the prior or the wholly proposed root.
 
@@ -52,6 +54,17 @@ A `CURRENT_SCHEMA` change has no in-place path. The operator resyncs into a sepa
 
 The node performs the identity and digest verification, the fsync, and the atomic manifest switch. It never opens the old datadir with incompatible code.
 
+## Optional offline migration tooling
+
+A schema break never puts a converter inside the node, but a full resync is not the only possible operational path. When the cost justifies it, a separate, explicit, offline migration tool may be offered — for example a dedicated binary under `tools/`. No such tool exists today, and none is guaranteed for any epoch.
+
+Any such tool follows these rules:
+
+- The production node understands and writes only the current authoritative schema. Legacy decoders live in the tool, outside the node's runtime and build-dependency path.
+- Never in place: the tool reads the source datadir without mutating it, produces a new datadir, and verifies network/chain identity and the applicable durability invariants. Cutover is an explicit operator action — confirm the tool's verification report, which covers the provenance of every reused byte, then start the node against the produced datadir. On any failure the source remains untouched and fresh replay is the fallback.
+- Migrating bytes is not proof of consensus validity. The tool reuses only state whose provenance and integrity can be verified; anything else means revalidation or resync. Derived, rebuildable indexes are not migrated.
+- Optional, not guaranteed: no converter is owed for any schema revision, perpetual old-format support is never promised, and better internal designs are never blocked on migration tooling.
+
 ## Existing datadirs are untouched
 
 - Fresh replay writes only new or disposable data. The node never deletes, rewrites, or upgrades an existing operator datadir.
@@ -82,7 +95,7 @@ For every breaking change:
 2. Keep one current writer and one current reader.
 3. Do not add an in-place converter, legacy reader, compatibility adapter, or automatic fallback for existing state. `Cold` is only the result of no committed durable head, including an unpublished first write.
 4. Keep current-format integrity and corruption tests.
-5. Document that operators must follow the resync procedure above into a separately named directory.
+5. Document the migration route operators must follow — the resync procedure above, or an offered offline tool — into a separately named directory.
 
 The `Cold` path is for a datadir with the current marker and no committed durable head. It is also the recovery result for a store containing only unpublished residue. It is not a compatibility mode for an old schema or for a head that references invalid state.
 

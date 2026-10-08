@@ -109,6 +109,9 @@ impl<S: KvStore> JournalWriter<S> {
         };
         let name = segment_name(self.segment_gen);
         let mut options = cap_std::fs::OpenOptions::new();
+        // On Windows the access mapping drops FILE_WRITE_DATA deliberately:
+        // with it granted, every write would go to the file position (zero on
+        // a fresh open) instead of the end of file.
         options.append(true).create(true);
         let mut file = match self.dir.open_with(&name, &options) {
             Ok(file) => file,
@@ -128,9 +131,19 @@ impl<S: KvStore> JournalWriter<S> {
         #[cfg(not(any(test, feature = "test-seam")))]
         let write_result = file.write_all(bytes);
         if let Err(append_error) = write_result {
-            let rollback_result = file
-                .set_len(known_good_offset)
-                .and_then(|()| file.sync_all());
+            // The append handle cannot SetEndOfFile on Windows (no
+            // FILE_WRITE_DATA), so the rollback truncates through a fresh
+            // write handle instead.
+            let mut write_options = cap_std::fs::OpenOptions::new();
+            write_options.write(true);
+            let rollback_result =
+                self.dir
+                    .open_with(&name, &write_options)
+                    .and_then(|rollback_file| {
+                        rollback_file
+                            .set_len(known_good_offset)
+                            .and_then(|()| rollback_file.sync_all())
+                    });
             if let Err(rollback_error) = rollback_result {
                 return self.fail_append(
                     height,

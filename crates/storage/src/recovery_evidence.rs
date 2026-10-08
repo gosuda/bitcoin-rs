@@ -232,14 +232,22 @@ fn write_sidecar(
                 let _ = std::fs::remove_file(&current);
             }
         }
+        // `std::fs::rename` substitutes atomically over an existing
+        // destination on both platforms — POSIX rename semantics; Windows
+        // applies MoveFileExW REPLACE_EXISTING under the hood — so a crash
+        // can never find the published evidence file gone.
         std::fs::rename(&tmp, &current)?;
-        std::fs::File::open(dir)?.sync_all()?;
+        // std cannot open a directory on Windows; the checkpoint fsync
+        // primitive carries the platform rules for flushing the entry.
+        let capability = cap_std::fs::Dir::open_ambient_dir(dir, cap_std::ambient_authority())?;
+        crate::checkpoint::fs::sync_dir(&capability)?;
         Ok(())
     })();
     if result.is_err() {
         // A returned failure must not leave the staged tmp behind (RCV-03).
         let _ = std::fs::remove_file(&tmp);
     }
+
     result
 }
 

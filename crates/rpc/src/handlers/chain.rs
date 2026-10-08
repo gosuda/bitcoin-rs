@@ -1619,18 +1619,7 @@ mod tests {
         calls: core::sync::atomic::AtomicUsize,
     }
 
-    struct MultiBlockSource {
-        bodies: Vec<(u32, BlockHash, Vec<u8>)>,
-    }
-
-    impl bitcoin_rs_chain::BlockBodySource for MultiBlockSource {
-        fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
-            self.bodies
-                .iter()
-                .find(|(h, k, _)| *h == height && *k == hash)
-                .map(|(_, _, body)| body.clone())
-        }
-    }
+    use crate::test_support::BlockBodies;
 
     impl bitcoin_rs_chain::BlockBodySource for SingleBlockSource {
         fn block_body(&self, height: u32, hash: BlockHash) -> Option<Vec<u8>> {
@@ -2625,7 +2614,7 @@ mod tests {
             Arc::get_mut(&mut ctx)
                 .expect("unique fork fixture context")
                 .chain
-                .block_body_source = Some(Arc::new(MultiBlockSource {
+                .block_body_source = Some(Arc::new(BlockBodies {
                 bodies: vec![
                     (
                         applied_record.height,

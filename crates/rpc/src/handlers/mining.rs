@@ -405,7 +405,9 @@ fn parse_generateblock_transactions(
                 .find(|entry| entry.txid == txid)
                 .cloned();
             let Some(entry) = snapshot else {
-                return Err(generateblock_unknown_txid(text));
+                return Err(RpcError::InvalidAddressOrKey(format!(
+                    "Transaction {text} not in mempool."
+                )));
             };
             transactions.push(GenerateTx::ResolvedMempool(entry));
             continue;
@@ -415,10 +417,6 @@ fn parse_generateblock_transactions(
         transactions.push(GenerateTx::Raw(tx));
     }
     Ok(transactions)
-}
-
-fn generateblock_unknown_txid(text: &str) -> RpcError {
-    RpcError::InvalidAddressOrKey(format!("Transaction {text} not in mempool."))
 }
 
 fn generateblock_tx_decode_failed(text: &str) -> RpcError {

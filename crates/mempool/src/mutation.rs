@@ -201,7 +201,7 @@ impl From<LocalOrigin> for AdmissionOrigin {
 /// What the gateway hands its observers: the committed result plus how the
 /// mutating transaction entered the node.
 ///
-/// [`MempoolGateway`] clones one [`MutationResult`] into the envelope for
+/// [`MempoolGateway`](crate::MempoolGateway) clones one [`MutationResult`] into the envelope for
 /// each committed non-empty batch that has an observer attached, enqueues
 /// that envelope, then returns the original result to the caller. Observers
 /// receive `&MutationEnvelope` after the publish mutex is released.

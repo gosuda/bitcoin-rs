@@ -246,11 +246,11 @@ fn reconsidered_prevout_cost_reaches_the_mining_sigop_budget() -> Result<(), Box
         lock_time: LockTime::ZERO,
     };
     let chain = ReorgCoins { funding, confirmed };
-    let gateway = MempoolGateway::shared(
+    let gateway = Arc::new(MempoolGateway::new(
         Arc::new(Mempool::new(MempoolLimits::default()).into()),
+        None,
         ValidationEngine::Native,
-    )
-    .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
+    ));
     let transition = gateway.begin_chain_change()?;
     assert!(gateway.stable_generation().is_none());
     let changes = gateway.reconsider_disconnected(

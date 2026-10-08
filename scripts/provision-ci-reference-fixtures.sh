@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Provision one external proof lane. Normal node tests need Core, not Java.
+# Linux-lane fixtures only: native Windows runs provision the pinned Core
+# through scripts/install-bitcoind.sh (it selects the win64 archive).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

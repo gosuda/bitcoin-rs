@@ -181,6 +181,45 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## External compatibility
 
+**Stable external contracts. Replaceable internal architecture.**
+
+bitcoin-rs preserves Bitcoin consensus and its established external interfaces
+while freely redesigning the implementation behind them. The project does not
+reproduce Bitcoin Core's internal architecture or carry forward its
+implementation constraints: when a simpler, faster, safer, or more coherent
+design is demonstrated, internal APIs, crate and module boundaries, persistence
+formats, and execution pipelines may all be replaced — even when that requires
+a full resync. Compatibility is evaluated only at externally observable
+boundaries, never by preserving implementation history.
+
+The preserved boundaries:
+
+- Bitcoin consensus: valid/invalid block and transaction decisions, chain
+  selection and reorg semantics, and the resulting canonical chainstate.
+- Bitcoin P2P and synchronization: interoperability with other Bitcoin nodes
+  and correct synchronization/recovery outcomes. The internal synchronization
+  algorithm may be replaced; the observable protocol contract may not.
+- The supported Bitcoin Core JSON-RPC methods and the supported
+  Esplora-compatible APIs, including their parameters, responses, errors, and
+  pagination/reorg semantics. *Supported* is load-bearing: it does not imply
+  every upstream method or endpoint is implemented, and it tracks the upstream
+  contract — when Core changes or removes a method, the endpoint follows in a
+  clean cutover, not behind a compatibility shim.
+- Other advertised external integrations — for example ZMQ and the typed
+  `embed::Node` in-process API — keep their documented observable contracts.
+
+Not guaranteed: internal Rust APIs and crate boundaries (the workspace semver
+policy governs how such breaks are released, not whether), object ownership,
+abstraction layers, execution pipelines, database schema and on-disk layout,
+and parity with Bitcoin Core's code organization. A schema-breaking change may require an explicit fresh resync —
+an acceptable tradeoff, not a bug — but it must never silently reinterpret
+incompatible persisted data or corrupt operator state: an incompatible
+authoritative chainstate format fails closed, and replay — or an optional
+offline migration tool, when offered — is the migration route.
+
+Internal breaking changes are acceptable with clear rationale and the evidence
+the boundary demands; breaking a supported external contract is a regression.
+
 Compatibility claims are tied to external evidence, not only to in-tree
 implementation status. The [ecosystem compatibility
 contract](docs/contracts/ecosystem-compatibility.md) states the strategy —

@@ -8,14 +8,13 @@
 //! elected drainer completes every queued callback exactly once, in
 //! sequence order, with no gateway lock held. After this, no production
 //! code outside the gateway takes the mempool write lock — lookups go
-//! through the [`MempoolGateway::read`] passthrough. One pool, one
-//! gateway: [`MempoolGateway::shared`] interns a single
-//! [`MempoolGateway`] per pool `Arc` identity, so every route to a pool
-//! shares one publish queue and one observer slot.
+//! through the [`MempoolGateway::read`] passthrough. The composition root
+//! constructs one gateway per pool and passes clones of that handle to every
+//! mutation route, so they share one publish queue and one observer slot.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::entry::MempoolEntry;
@@ -27,7 +26,6 @@ use bitcoin_rs_script::VerifyFlags;
 use bitcoin_rs_script::{is_p2sh, is_witness_program};
 use hashbrown::HashSet;
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Adapter that lets the consensus verifier look up prevouts from a
@@ -64,36 +62,6 @@ pub enum ChainChangeError {
     /// The guard was issued by a different gateway.
     #[error("chain change guard belongs to another gateway")]
     ForeignGuard,
-}
-
-/// Why a [`MempoolGateway::shared`] / [`MempoolGateway::shared_with`] lookup
-/// refused to return the gateway interned for a pool.
-///
-/// The registry keeps exactly one gateway per pool, so a caller asking for an
-/// engine the interned gateway does not run is a wiring bug — silently
-/// returning the other engine would substitute a different script verifier
-/// than the resolved `validation.engine` asked for. It is refused, loudly.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum SharedGatewayError {
-    /// The pool already has an interned gateway and it verifies scripts under
-    /// another validation engine.
-    #[error(
-        "mempool gateway for this pool is already interned with validation engine \
-         `{interned}`, not `{requested}`"
-    )]
-    EngineMismatch {
-        /// Engine the interned gateway was built with.
-        interned: ValidationEngine,
-        /// Engine the caller asked for.
-        requested: ValidationEngine,
-    },
-    /// The pool already has an interned gateway, so the supplied observer
-    /// would never be installed.
-    #[error(
-        "mempool gateway for this pool is already interned, so the supplied \
-         observer was not installed"
-    )]
-    ObserverNotInstalled,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,7 +115,7 @@ pub struct AdmissionRequest {
     /// [`MempoolGateway::stable_generation`]; requests prepared under a
     /// [`ChainChangeGuard`] carry its odd value. The token alone grants no
     /// authority — `check_admission_state` accepts it only under the
-    /// matching [`crate::admission::AdmissionFence`].
+    /// matching `AdmissionFence`.
     pub expected_generation: u64,
     /// Exact mempool sequence the caller captured before admission.
     pub expected_sequence: u64,
@@ -377,25 +345,12 @@ fn witness_strippable_failure(error: &ConsensusError, prevouts: &[(OutPoint, TxO
         })
 }
 
-/// Interns one [`MempoolGateway`] per pool `Arc` identity.
-///
-/// This is the crate's one piece of process-global state, and it exists
-/// because the apply path (`Chainstate`) is frozen in this batch and
-/// cannot carry a gateway handle: reorg and run-time composition reach the
-/// run-composed instance through the pool `Arc` they already hold. The
-/// registry holds weak references only, so it never keeps a gateway or a
-/// pool alive. Handoff note for ING-R34: once `Chainstate` gains a
-/// `mempool_gateway` field, the reorg caller can read the handle instead
-/// and `shared` shrinks to run-time composition plus tests.
 use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationResult};
 use crate::orphan::RejectScope;
 use crate::pool::{Mempool, MempoolError, PrioritiseError, PrioritisedTransaction};
 #[cfg(any(test, feature = "test-seam"))]
 use crate::rbf::ReplacementCandidate;
 use crate::rbf::{LimitEnforcement, RbfError};
-
-static REGISTRY: LazyLock<Mutex<Vec<Weak<MempoolGateway>>>> =
-    LazyLock::new(|| Mutex::new(alloc::vec::Vec::new()));
 
 /// Receives every committed mempool mutation, exactly once, in sequence
 /// order.
@@ -426,7 +381,7 @@ pub trait MempoolObserver: Send + Sync {
 #[derive(Default)]
 pub struct CompositeObserver {
     /// Guarded because a subsystem may attach its leg after the gateway is
-    /// interned. Publication clones the list under this lock and releases it
+    /// constructed. Publication clones the list under this lock and releases it
     /// before calling any leg, so a leg re-entering the gateway cannot
     /// deadlock against an attach.
     legs: Mutex<Vec<(&'static str, Arc<dyn MempoolObserver>)>>,
@@ -515,7 +470,7 @@ struct PublishState {
 ///
 /// # Ordering invariant
 ///
-/// Every mutating method flows through exactly one path, [`Self::commit`],
+/// Every mutating method flows through exactly one path, `Self::commit`,
 /// which runs, in this exact order:
 ///
 /// 1. take the pool write lock,
@@ -551,7 +506,7 @@ pub struct MempoolGateway {
     publish: Mutex<PublishState>,
     /// Even means stable; odd means a chain change is active or a failed
     /// chain change has closed admission. Initialized to `0` (even/stable)
-    /// in [`Self::shared`]. Compare only for exact equality — never order or
+    /// in [`Self::new`]. Compare only for exact equality — never order or
     /// subtract wrapping counters.
     chain_generation: AtomicU64,
     /// The one script-verification engine this gateway's admission path runs,
@@ -571,6 +526,9 @@ impl core::fmt::Debug for MempoolGateway {
 
 impl MempoolGateway {
     /// Wraps `pool` and optionally installs `observer`.
+    ///
+    /// The composition root must construct exactly one gateway for a pool and
+    /// pass clones of that handle to every mutation route.
     ///
     /// Pass `None` — or use the node's no-op publisher behind its observer —
     /// when no `--zmq-pub-sequence` endpoint is configured.
@@ -619,97 +577,6 @@ impl MempoolGateway {
         };
         composite.add_leg(name, leg);
         Ok(())
-    }
-
-    /// Returns the one gateway interned for `pool`.
-    ///
-    /// Two callers holding clones of the same pool `Arc` get the same
-    /// gateway — one publish queue, one observer slot. Distinct pools get
-    /// distinct gateways. Dead entries are pruned on every call. Lookup
-    /// upgrades the weak reference FIRST and only then compares pool
-    /// pointers: a live gateway pins its pool alive, so two live `Arc`s
-    /// comparing pointer-equal are the same allocation, which makes ABA
-    /// (a freed pool's address reused by a new allocation) impossible.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SharedGatewayError::EngineMismatch`] when `pool` is already
-    /// interned with a different `engine`: the registry owns one gateway per
-    /// pool, so returning it would run this admission path under an engine
-    /// other than the resolved `validation.engine`.
-    pub fn shared(
-        pool: Arc<RwLock<Mempool>>,
-        engine: ValidationEngine,
-    ) -> Result<Arc<Self>, SharedGatewayError> {
-        let mut gateways = REGISTRY.lock();
-        if let Some(candidate) = Self::interned(&mut gateways, &pool, engine)? {
-            return Ok(candidate);
-        }
-        let gateway = Arc::new(Self::new(pool, None, engine));
-        gateways.push(Arc::downgrade(&gateway));
-        Ok(gateway)
-    }
-
-    /// Returns the one gateway interned for `pool`, constructed with
-    /// `observer`.
-    ///
-    /// Like [`Self::shared`] but the newly created gateway carries the
-    /// supplied observer. The caller is expected to be the first interner —
-    /// production code constructs the gateway through [`crate::state::NodeState`]
-    /// before any `shared` call — so the observer lands on the one interned
-    /// instance. A second call can never install its observer (the interned
-    /// gateway's slot is already sealed), so silently returning the interned
-    /// gateway would silently drop the caller's observer and any mutation
-    /// mirror it was meant to receive. That wiring bug is refused.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SharedGatewayError::EngineMismatch`] exactly as [`Self::shared`]
-    /// does; the observer slot never justifies an engine substitution. Returns
-    /// [`SharedGatewayError::ObserverNotInstalled`] when a gateway is already
-    /// interned for `pool`, because the supplied observer cannot be installed
-    /// on it.
-    pub fn shared_with(
-        pool: Arc<RwLock<Mempool>>,
-        observer: Arc<dyn MempoolObserver>,
-        engine: ValidationEngine,
-    ) -> Result<Arc<Self>, SharedGatewayError> {
-        let mut gateways = REGISTRY.lock();
-        if Self::interned(&mut gateways, &pool, engine)?.is_some() {
-            // The interned gateway's observer slot is sealed at construction,
-            // and one built without an observer has no composite slot to
-            // extend (`attach_observer_leg` refuses). Either way the supplied
-            // observer would be silently dropped here, so it is refused.
-            return Err(SharedGatewayError::ObserverNotInstalled);
-        }
-        let gateway = Arc::new(Self::new(pool, Some(observer), engine));
-        gateways.push(Arc::downgrade(&gateway));
-        Ok(gateway)
-    }
-
-    /// Returns the live gateway interned for `pool`, refusing one built under
-    /// another validation engine.
-    fn interned(
-        gateways: &mut alloc::vec::Vec<Weak<Self>>,
-        pool: &Arc<RwLock<Mempool>>,
-        engine: ValidationEngine,
-    ) -> Result<Option<Arc<Self>>, SharedGatewayError> {
-        gateways.retain(|weak| weak.upgrade().is_some());
-        for weak in gateways.iter() {
-            if let Some(candidate) = weak.upgrade() {
-                if Arc::ptr_eq(&candidate.pool, pool) {
-                    let interned = candidate.engine();
-                    if interned != engine {
-                        return Err(SharedGatewayError::EngineMismatch {
-                            interned,
-                            requested: engine,
-                        });
-                    }
-                    return Ok(Some(candidate));
-                }
-            }
-        }
-        Ok(None)
     }
 
     /// Returns `true` when the gateway was constructed with an observer.
@@ -1678,7 +1545,7 @@ pub fn reset_admission_park() {
 mod tests {
     use super::{
         AdmissionMode, AdmissionRequest, AdmitError, AdmitOutcome, ChainChangeError,
-        CompositeObserver, MempoolGateway, MempoolObserver, SharedGatewayError, ValidationEngine,
+        CompositeObserver, MempoolGateway, MempoolObserver, ValidationEngine,
     };
     use crate::mutation::{AdmissionOrigin, MutationEnvelope, MutationOutcome, RemovalReason};
     use crate::orphan::RejectScope;
@@ -3213,89 +3080,6 @@ mod tests {
                 .is_ok()
         );
         assert!(gateway.read().contains_txid(&committed_txid));
-    }
-
-    #[test]
-    fn shared_interns_one_gateway_per_pool() {
-        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let first = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        let second = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        assert!(
-            Arc::ptr_eq(&first, &second),
-            "one pool must intern exactly one gateway"
-        );
-
-        let other = MempoolGateway::shared(
-            Arc::new(RwLock::new(Mempool::new(MempoolLimits::default()))),
-            ValidationEngine::Native,
-        )
-        .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        assert!(
-            !Arc::ptr_eq(&first, &other),
-            "distinct pools must get distinct gateways"
-        );
-    }
-
-    /// The registry keeps one gateway per pool, so a lookup asking for an
-    /// engine the interned gateway does not run must be refused loudly: a
-    /// silent return would verify this pool's admission path under a backend
-    /// other than the resolved `validation.engine`.
-    #[test]
-    fn shared_refuses_an_engine_the_interned_gateway_does_not_run() {
-        let pool = Arc::new(RwLock::new(Mempool::new(MempoolLimits::default())));
-        let interned = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        assert_eq!(interned.engine(), ValidationEngine::Native);
-
-        // Same engine, no observer requested: the read-only re-intern is
-        // still one gateway (`shared` installs nothing, so nothing can be
-        // dropped).
-        let same = MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Native)
-            .unwrap_or_else(|error| panic!("mempool gateway intern: {error}"));
-        assert!(Arc::ptr_eq(&interned, &same));
-
-        // Requesting another engine for the same pool is a wiring bug, not a
-        // value to substitute: it is refused, and the interned gateway is
-        // left exactly as it was.
-        match MempoolGateway::shared(Arc::clone(&pool), ValidationEngine::Kernel) {
-            Ok(_) => panic!("an engine mismatch must be refused, not substituted"),
-            Err(SharedGatewayError::EngineMismatch {
-                interned: have,
-                requested: want,
-            }) => {
-                assert_eq!(have, ValidationEngine::Native);
-                assert_eq!(want, ValidationEngine::Kernel);
-            }
-            Err(other) => panic!("expected EngineMismatch, got {other:?}"),
-        }
-        // An engine mismatch is refused before the observer question.
-        match MempoolGateway::shared_with(
-            Arc::clone(&pool),
-            Arc::new(CompositeObserver::new()),
-            ValidationEngine::Kernel,
-        ) {
-            Ok(_) => panic!("shared_with must refuse an engine mismatch too"),
-            Err(SharedGatewayError::EngineMismatch { .. }) => {}
-            Err(other) => panic!("engine mismatch must win over the observer check: {other:?}"),
-        }
-        // Even the matching-engine case cannot install an observer on an
-        // already interned gateway: the slot is sealed at construction and a
-        // gateway built without one has no composite slot to extend. The
-        // old shape returned the interned gateway and dropped the caller's
-        // observer silently — the exact sibling wiring bug the engine
-        // mismatch refuses loudly.
-        match MempoolGateway::shared_with(
-            Arc::clone(&pool),
-            Arc::new(CompositeObserver::new()),
-            ValidationEngine::Native,
-        ) {
-            Ok(_) => panic!("an uninstalled observer must be refused, not dropped"),
-            Err(SharedGatewayError::ObserverNotInstalled) => {}
-            Err(other) => panic!("expected ObserverNotInstalled, got {other:?}"),
-        }
-        assert_eq!(interned.engine(), ValidationEngine::Native);
     }
 
     #[test]

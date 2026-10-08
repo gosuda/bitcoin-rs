@@ -3,7 +3,6 @@
 use core::str::FromStr as _;
 use std::sync::Arc;
 
-use bitcoin::Network as BitcoinNetwork;
 use bitcoin::hex::DisplayHex;
 use bitcoin_rs_chain::TipSnapshot;
 use bitcoin_rs_index::ScriptHash;
@@ -597,18 +596,6 @@ impl<'a> Projection<'a> {
                 (MempoolScriptHash::from_script(&output.script_pubkey) == script)
                     .then_some((position, vout, output))
             })
-    }
-
-    /// The rust-bitcoin network for the selected chain, for the address and
-    /// descriptor seams.
-    ///
-    /// PRE: `self.ctx.chain.chain_network` is the network to map.
-    /// POST: returns the same rust-bitcoin network as
-    ///   `convert::bitcoin_network`.
-    /// INVARIANT: the mapping lives in `convert::bitcoin_network`; this method
-    ///   adds no local match.
-    pub(super) const fn bitcoin_network(&self) -> BitcoinNetwork {
-        convert::bitcoin_network(self.ctx.chain.chain_network)
     }
 }
 

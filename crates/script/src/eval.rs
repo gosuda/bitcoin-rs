@@ -822,7 +822,7 @@ fn dispatch(
             })?;
         }
         OP_SWAP => {
-            stack.swap().map_err(|_| invalid_stack())?;
+            stack.swap_at(0, 1).map_err(|_| invalid_stack())?;
         }
         OP_TUCK => {
             let top = stack.peek().map_err(|_| invalid_stack())?.clone();

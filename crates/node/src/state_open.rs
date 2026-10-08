@@ -330,18 +330,19 @@ impl NodeState {
         // path and the gateway can fire it before `run` builds the
         // coordinator; the coordinator attaches itself once constructed.
         let mining_generation = Arc::new(crate::mining::MiningGenerationSignal::new());
-        // One gateway per pool. Mempool owns fan-out: mining occupies the
-        // observer slot, and ZMQ sequence (or a test observer) attaches as an
-        // extra named leg. Admission/relay legs attach after construction.
+        // Construct the pool's one gateway here. Mempool owns fan-out: mining
+        // occupies the observer slot, and ZMQ sequence (or a test observer)
+        // attaches as an extra named leg. Admission/relay legs attach after
+        // construction.
         let mempool_gateway = {
             let publisher = Arc::clone(&zmq_publisher);
             let cloned_mining = Arc::clone(&mining_generation);
             let mining_leg: Arc<dyn bitcoin_rs_mempool::MempoolObserver> = cloned_mining;
-            let gateway = bitcoin_rs_mempool::MempoolGateway::shared_with(
+            let gateway = Arc::new(bitcoin_rs_mempool::MempoolGateway::new(
                 Arc::clone(&mempool),
-                mining_leg,
+                Some(mining_leg),
                 config.validation.engine,
-            )?;
+            ));
             if publisher.wants_notifications() {
                 gateway
                     .attach_observer_leg(

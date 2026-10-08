@@ -130,9 +130,12 @@ PROVENANCE_TMP="$(mktemp "${FUZZ_DIR}/.corpus-provenance.XXXXXX")"
 cat > "${PROVENANCE_TMP}" <<EOF
 # Fuzz corpus provenance
 
-Seeds under fuzz/corpus/ were imported from
-[rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets), license
-[CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)
+Seeds under fuzz/corpus/ were imported from the sources recorded in the
+run-dependent sections below: rust-bitcoin/qa-assets (this section) and the
+upstream reference corpora (\`## Reference corpora\`).
+
+Seeds from [rust-bitcoin/qa-assets](https://github.com/rust-bitcoin/qa-assets),
+license [CC0-1.0](https://github.com/rust-bitcoin/qa-assets/blob/master/LICENSE)
 (public domain; no attribution required, recorded here for provenance).
 
 | Field | Value |

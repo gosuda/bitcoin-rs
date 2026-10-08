@@ -409,8 +409,8 @@ pub fn block_witness_commitment_matches(block: &Block, wtxids: &[Wtxid]) -> bool
 /// `segwit_active` must match the apply path's contextual derivation
 /// (`BlockRuleContext.segwit_active`) so the gate reproduces exact consensus
 /// semantics: pre-activation blocks with a commitment-like output are not
-/// required to carry a witness nonce, and witness data without a commitment
-/// is `unexpected-witness` only when segwit is active.
+/// required to carry a witness nonce, but witness data without an active
+/// commitment is `unexpected-witness` at either activation state.
 ///
 /// Merkle verification runs before witness verification in this binding gate;
 /// this is not the full block-rule error precedence. The witness verdict is

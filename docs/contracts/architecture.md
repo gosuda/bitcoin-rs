@@ -3,6 +3,12 @@
 The normative contract for workspace crate layering, one-way dependency
 direction, storage engine confinement, and composition boundaries.
 
+These boundaries are internal architecture, not a compatibility promise:
+they are the replaceable side of the project's external-contracts
+boundary. A demonstrated better internal design may redraw them — the
+`ARCH-06` change process governs layer assignments and workspace
+dependency boundaries.
+
 Owners:
 - `Cargo.toml`, `crates/*/Cargo.toml`, `bin/bitcoin-rs/Cargo.toml`
 - Workspace dependency gate in `bin/bitcoin-rs/tests/gates/g17_dependency_direction.rs`

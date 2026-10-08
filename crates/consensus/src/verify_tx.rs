@@ -894,54 +894,22 @@ mod tests {
         Ok(())
     }
 
+    /// Coinbase scriptSig length is bounded to 2..=100 at both entries, and an
+    /// accepted coinbase never consults the (empty) prevout view.
     #[test]
-    fn coinbase_transaction_skips_prevout_lookup() {
-        let tx = Tx {
-            version: 1,
-            lock_time: LockTime::ZERO,
-            inputs: vec![TxIn {
-                previous_output: OutPoint::null(),
-                script_sig: vec![1, 1].into(),
-                sequence: Sequence::MAX,
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(50),
-                script_pubkey: Script::new(),
-            }],
-        };
+    fn coinbase_script_sig_size_bounds() {
         let utxos = hashbrown::HashMap::new();
-        assert_eq!(
-            verify_transaction(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY, TEST_ENGINE),
-            Ok(())
-        );
-    }
-
-    #[test]
-    fn coinbase_script_sig_size_rejects_invalid_lengths() {
-        for len in [0, 1, 101] {
+        for len in [0, 1, 2, 100, 101] {
             let tx = coinbase_transaction_with_script_sig_len(len);
-            let utxos = hashbrown::HashMap::new();
-            let expected = Err(ConsensusError::CoinbaseScriptSigSize { len });
-
+            let expected = if (2..=100).contains(&len) {
+                Ok(())
+            } else {
+                Err(ConsensusError::CoinbaseScriptSigSize { len })
+            };
             assert_eq!(verify_coinbase_script_sig_size(&tx), expected);
             assert_eq!(
                 verify_transaction(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY, TEST_ENGINE),
                 expected
-            );
-        }
-    }
-
-    #[test]
-    fn coinbase_script_sig_size_accepts_valid_boundaries() {
-        let utxos = hashbrown::HashMap::new();
-        for len in [2, 100] {
-            let tx = coinbase_transaction_with_script_sig_len(len);
-
-            assert_eq!(verify_coinbase_script_sig_size(&tx), Ok(()));
-            assert_eq!(
-                verify_transaction(&tx, &utxos, 0, 0, VerifyFlags::MANDATORY, TEST_ENGINE),
-                Ok(())
             );
         }
     }
@@ -1287,89 +1255,49 @@ mod tests {
         ));
     }
 
+    /// `IsFinalTx`: height locks compare against the block height, time
+    /// locks against the caller's cutoff, and both entries agree.
     #[test]
-    fn verify_transaction_rejects_non_final_height_lock() {
-        let tx = Tx {
-            version: 1,
-            lock_time: LockTime::from_consensus(200),
-            inputs: vec![TxIn {
-                previous_output: OutPoint::default(),
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0),
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: Script::new(),
-            }],
-        };
+    fn finality_follows_lock_kind_and_caller_cutoff() {
         let utxos = hashbrown::HashMap::new();
-
-        let result = verify_transaction(&tx, &utxos, 100, 0, VerifyFlags::MANDATORY, TEST_ENGINE);
-
-        assert!(matches!(
-            result,
-            Err(ConsensusError::Bip { bip: "BIP113", .. })
-        ));
-    }
-
-    #[test]
-    fn timestamp_locktime_uses_caller_supplied_cutoff() {
-        let tx = Tx {
-            version: 1,
-            lock_time: LockTime::from_consensus(500_000_100),
-            inputs: vec![TxIn {
-                previous_output: OutPoint::default(),
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0),
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: Script::new(),
-            }],
-        };
-
-        assert!(!is_final_tx(&tx, 1, 500_000_100));
-        assert!(is_final_tx(&tx, 1, 500_000_101));
-    }
-
-    #[test]
-    fn transaction_paths_share_locktime_and_coinbase_rules() {
-        let coinbase = coinbase_transaction_with_script_sig_len(2);
-        let utxos = hashbrown::HashMap::new();
-
-        assert_eq!(
-            verify_transaction(&coinbase, &utxos, 0, 0, VerifyFlags::MANDATORY, TEST_ENGINE),
-            Ok(())
-        );
-
-        let non_final = Tx {
-            version: 1,
-            lock_time: LockTime::from_consensus(500_000_100),
-            inputs: vec![TxIn {
-                previous_output: OutPoint::default(),
-                script_sig: Script::new(),
-                sequence: Sequence::from_consensus(0),
-                witness: Witness::new(),
-            }],
-            outputs: vec![TxOut {
-                value: Amount::from_sat(1_000),
-                script_pubkey: Script::new(),
-            }],
-        };
-
-        assert!(matches!(
-            verify_transaction(
-                &non_final,
+        // (lock_time, height, cutoff, final)
+        for (lock_time, height, cutoff, is_final) in [
+            (200, 100, 0, false),
+            (200, 201, 0, true),
+            (500_000_100, 1, 500_000_100, false),
+            (500_000_100, 1, 500_000_101, true),
+            // The threshold itself is a time lock, not a height.
+            (500_000_000, 500_000_001, 0, false),
+        ] {
+            let tx = Tx {
+                version: 1,
+                lock_time: LockTime::from_consensus(lock_time),
+                inputs: vec![TxIn {
+                    previous_output: OutPoint::default(),
+                    script_sig: Script::new(),
+                    sequence: Sequence::from_consensus(0),
+                    witness: Witness::new(),
+                }],
+                outputs: vec![TxOut {
+                    value: Amount::from_sat(1_000),
+                    script_pubkey: Script::new(),
+                }],
+            };
+            assert_eq!(is_final_tx(&tx, height, cutoff), is_final, "{lock_time}");
+            let verdict = verify_transaction(
+                &tx,
                 &utxos,
-                1,
-                500_000_100,
+                height,
+                cutoff,
                 VerifyFlags::MANDATORY,
-                TEST_ENGINE
-            ),
-            Err(ConsensusError::Bip { bip: "BIP113", .. })
-        ));
+                TEST_ENGINE,
+            );
+            assert_eq!(
+                matches!(verdict, Err(ConsensusError::Bip { bip: "BIP113", .. })),
+                !is_final,
+                "{lock_time} at {height}/{cutoff}: {verdict:?}"
+            );
+        }
     }
 
     fn spending_input(outpoint: OutPoint) -> TxIn {
