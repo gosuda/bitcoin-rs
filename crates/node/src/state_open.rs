@@ -88,6 +88,7 @@ impl NodeState {
             &config.data_dir,
             config.network,
             config.chainstate_journal,
+            durable_head.load()?.as_ref(),
         )?;
         if resume_source == ResumeSource::Checkpoint {
             tracing::info!(
@@ -125,6 +126,7 @@ impl NodeState {
             ) {
                 let witness_height = witness.height;
                 let source = match resume_source {
+                    ResumeSource::Snapshot => "snapshot",
                     ResumeSource::Cold => "cold",
                     ResumeSource::Checkpoint => "checkpoint",
                     ResumeSource::Journal => "journal",
@@ -212,6 +214,7 @@ impl NodeState {
             capture_rawtx: false,
             capture_block_bytes: false,
             retention: storage.mandatory_retention(),
+            role: bitcoin_rs_chainstate::ChainstateRole::Ordinary,
         });
         let derived_index_open_spec =
             build_derived_index_open_spec(&config, txindex_cache_bytes, epoch)?;
@@ -395,6 +398,14 @@ impl NodeState {
         // the transaction-relay gate, and block-peer eligibility can never
         // disagree.
         let ibd = chainstate.ibd_latch();
+        let assumeutxo = Arc::new(
+            bitcoin_rs_chainstate::AssumeUtxoManager::open(
+                config.network,
+                Arc::clone(&chainstate),
+                Some(config.data_dir.clone()),
+            )
+            .map_err(|err| anyhow::anyhow!("assumeutxo open failed: {err}"))?,
+        );
         let sync = Arc::new(crate::sync::block_sync(
             Arc::clone(&chainstate),
             followers.clone(),
@@ -402,6 +413,7 @@ impl NodeState {
             inbound_headers_rx,
             inbound_blocks_rx,
             Arc::clone(&ibd),
+            Some(Arc::clone(&assumeutxo)),
         ));
         if config.p2p.fast_sync {
             sync.install_budget(fast_sync_budget(config.network));
@@ -443,6 +455,7 @@ impl NodeState {
             followers,
             sync,
             recovery_reporter,
+            assumeutxo,
         })
     }
 }

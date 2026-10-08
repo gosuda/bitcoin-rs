@@ -27,7 +27,7 @@ const RECORD_HEADER_LEN_U64: u64 = 44;
 const BLOCK_READER_BUFFER_BYTES: usize = 256 << 10;
 
 /// A fixed-width pointer to a framed block body in a flat file.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockFilePosition {
     /// Number of the `blkNNNNN.dat` file.
     pub file_no: u32,

@@ -97,6 +97,7 @@ impl fmt::Display for StorageBackend {
     }
 }
 
+pub mod assumeutxo;
 /// Ordered atomic write batches shared by every backend.
 mod batch;
 /// Indexed authoritative block bodies and read sessions.

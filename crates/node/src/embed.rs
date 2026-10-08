@@ -37,6 +37,9 @@ pub enum NodeError {
     /// Mempool admission rejected the broadcast transaction.
     #[error("transaction broadcast failed: {0}")]
     Broadcast(String),
+    /// Snapshot import, trust verification, or activation failed.
+    #[error("snapshot activation failed: {0}")]
+    Snapshot(String),
 }
 
 /// A running node owning its state, service graph, and RPC context.
@@ -74,6 +77,28 @@ impl Node {
     #[must_use]
     pub fn snapshot(&self) -> ChainSnapshot {
         self.state.chainstate().chain_snapshot()
+    }
+
+    /// Returns active and historical validation progress from the chainstate owner.
+    pub fn chainstates_summary(
+        &self,
+    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, NodeError> {
+        self.state
+            .chainstates_summary()
+            .map_err(|error| NodeError::Unavailable(error.to_string()))
+    }
+
+    /// Imports a pinned snapshot through the node's fenced activation boundary.
+    /// Like startup, file reading and validation run synchronously when polled;
+    /// the caller chooses their runtime placement. Headers through the pinned
+    /// base must already have been admitted by ordinary header synchronization.
+    pub async fn activate_assumeutxo_snapshot_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<(), NodeError> {
+        self.state
+            .activate_assumeutxo_snapshot_file(path)
+            .map_err(|error| NodeError::Snapshot(error.to_string()))
     }
 
     /// Returns the live txindex capability report.

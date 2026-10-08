@@ -69,6 +69,18 @@ fn embedded_node_lifecycle_round_trip() -> Result<()> {
 
     assert_embedded_node_readiness(&node, seed_tip_hash, first_block_hash, &first_block_bytes)?;
 
+    let before_import = node.snapshot();
+    let summary = node.chainstates_summary()?;
+    assert!(summary.active_chainstate.validated);
+    assert!(summary.historical_chainstate.is_none());
+    let invalid_snapshot = dir.path().join("invalid-snapshot.dat");
+    std::fs::write(&invalid_snapshot, b"not a UTXO snapshot")?;
+    assert!(matches!(
+        block_on(node.activate_assumeutxo_snapshot_file(&invalid_snapshot)),
+        Err(NodeError::Snapshot(_))
+    ));
+    assert_eq!(node.snapshot(), before_import);
+
     assert_broadcast_and_lookups(&node)?;
 
     // Consuming shutdown: ordered drain and clean checkpoint, exactly once.

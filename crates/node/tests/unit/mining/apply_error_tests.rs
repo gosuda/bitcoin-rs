@@ -18,6 +18,20 @@ fn operational_failures_are_not_block_rejections() {
     fn failures() -> Vec<ApplyError> {
         use bitcoin_rs_storage::StorageError;
         vec![
+            ApplyError::PruneDuringHistoricalValidation { base_height: 110 },
+            ApplyError::DisconnectBelowSnapshotBase {
+                height: 110,
+                base_height: 110,
+            },
+            ApplyError::ConnectPastHistoricalTarget {
+                height: 111,
+                base_height: 110,
+            },
+            ApplyError::HistoricalTargetHashMismatch {
+                base_height: 110,
+                expected: Hash256::default(),
+                found: Hash256::from_le_bytes(&[1; 32]),
+            },
             ApplyError::UtxoCommit(bitcoin_rs_utxo::UtxoError::CorruptRecord),
             ApplyError::BlockBodyPersistence(StorageError::InvalidOperation("body write failed")),
             ApplyError::UndoPersistence(StorageError::InvalidOperation("undo write failed")),

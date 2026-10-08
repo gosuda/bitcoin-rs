@@ -12,7 +12,22 @@ fn publish_fixture(
     data_dir: &cap_std::fs::Dir,
     failpoint: Option<CheckpointFailpoint>,
 ) -> Result<u64, CheckpointError> {
-    let stage = begin_publication_with_failpoint(data_dir, failpoint)?;
+    publish_fixture_at(
+        data_dir,
+        CHECKPOINT_ROOT,
+        CheckpointRetention::Replace,
+        failpoint,
+    )
+    .map(|reference| reference.generation)
+}
+
+fn publish_fixture_at(
+    data_dir: &cap_std::fs::Dir,
+    root_name: &str,
+    retention: CheckpointRetention,
+    failpoint: Option<CheckpointFailpoint>,
+) -> Result<CheckpointReference, CheckpointError> {
+    let stage = begin_publication_at_with_failpoint(data_dir, root_name, retention, failpoint)?;
     let headers = b"headers";
     let utxo = b"utxo";
     let coinstats = {
@@ -164,8 +179,8 @@ fn publication_failpoints_preserve_the_previous_current() -> Result<(), Box<dyn 
             "{failpoint:?}"
         );
         let opened = open_current_checkpoint(&data)?;
-        let CheckpointOpen::Current {
-            current,
+        let CheckpointOpen::Selected {
+            reference: current,
             generation_dir,
         } = opened
         else {
@@ -203,6 +218,151 @@ fn publication_failpoints_preserve_the_previous_current() -> Result<(), Box<dyn 
             let name = name.to_string_lossy();
             name.starts_with(".gen-") || name.starts_with(".CURRENT-")
         }));
+    }
+    Ok(())
+}
+
+#[test]
+fn historical_publication_retains_head_generation_until_explicit_retirement()
+-> Result<(), Box<dyn std::error::Error>> {
+    for failpoint in [
+        None,
+        Some(CheckpointFailpoint::CurrentRename),
+        Some(CheckpointFailpoint::CurrentRootSync),
+    ] {
+        let dir = tempdir()?;
+        let data = open_root(dir.path())?;
+        let accepted = publish_fixture_at(
+            &data,
+            HISTORICAL_CHECKPOINT_ROOT,
+            CheckpointRetention::UntilReferenced,
+            None,
+        )?;
+        let result = publish_fixture_at(
+            &data,
+            HISTORICAL_CHECKPOINT_ROOT,
+            CheckpointRetention::UntilReferenced,
+            failpoint,
+        );
+        assert_eq!(result.is_err(), failpoint.is_some());
+        let CheckpointOpen::Selected {
+            generation_dir,
+            reference: current,
+        } = open_checkpoint_generation_at(&data, HISTORICAL_CHECKPOINT_ROOT, accepted)?
+        else {
+            panic!("accepted generation missing");
+        };
+        let manifest = read_manifest(
+            &generation_dir,
+            &current,
+            CheckpointIdentity {
+                network: bitcoin_rs_primitives::Network::Regtest,
+                genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+            },
+        )?;
+        verify_artifact(
+            &generation_dir,
+            &manifest.utxo.file,
+            manifest.utxo.bytes,
+            &manifest.utxo.sha256,
+        )?;
+        drop(generation_dir);
+        let replacement = publish_fixture_at(
+            &data,
+            HISTORICAL_CHECKPOINT_ROOT,
+            CheckpointRetention::UntilReferenced,
+            None,
+        )?;
+        assert!(
+            dir.path()
+                .join(HISTORICAL_CHECKPOINT_ROOT)
+                .join(generation_name(accepted.generation))
+                .exists()
+        );
+        retire_checkpoint_generations_at(
+            &data,
+            HISTORICAL_CHECKPOINT_ROOT,
+            replacement.generation,
+        )?;
+        assert!(
+            open_checkpoint_generation_at(&data, HISTORICAL_CHECKPOINT_ROOT, accepted).is_err()
+        );
+        assert!(
+            open_checkpoint_generation_at(&data, HISTORICAL_CHECKPOINT_ROOT, replacement).is_ok()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn clearing_checkpoint_namespace_preserves_unknown_entries_and_other_namespaces()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    clear_checkpoint_generations_at(&data, HISTORICAL_CHECKPOINT_ROOT)?;
+    publish_fixture(&data, None)?;
+    for _ in 0..2 {
+        publish_fixture_at(
+            &data,
+            HISTORICAL_CHECKPOINT_ROOT,
+            CheckpointRetention::UntilReferenced,
+            None,
+        )?;
+    }
+    let root = dir.path().join(HISTORICAL_CHECKPOINT_ROOT);
+    fs::create_dir(root.join(".gen-00000000000000000003.tmp"))?;
+    fs::write(root.join(".CURRENT-00000000000000000003.tmp"), b"partial")?;
+    fs::write(root.join("operator-notes"), b"keep")?;
+    fs::create_dir(root.join("operator-backup"))?;
+    for _ in 0..2 {
+        clear_checkpoint_generations_at(&data, HISTORICAL_CHECKPOINT_ROOT)?;
+        assert_eq!(fs::read_dir(&root)?.count(), 2);
+        assert_eq!(fs::read(root.join("operator-notes"))?, b"keep");
+        assert!(root.join("operator-backup").is_dir());
+        assert!(matches!(
+            open_current_checkpoint(&data)?,
+            CheckpointOpen::Selected { .. }
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn direct_and_current_selection_share_publication_digest_validation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = open_root(dir.path())?;
+    let reference = publish_fixture_at(&data, CHECKPOINT_ROOT, CheckpointRetention::Replace, None)?;
+    let manifest_path = dir
+        .path()
+        .join(CHECKPOINT_ROOT)
+        .join(generation_name(reference.generation))
+        .join(MANIFEST_FILE);
+    let mut bytes = fs::read(&manifest_path)?;
+    bytes.push(b' '); // Still valid JSON with unchanged manifest semantics.
+    fs::write(&manifest_path, bytes)?;
+    for selection in [
+        open_current_checkpoint(&data)?,
+        open_checkpoint_generation_at(&data, CHECKPOINT_ROOT, reference)?,
+    ] {
+        let CheckpointOpen::Selected {
+            generation_dir,
+            reference,
+        } = selection
+        else {
+            return Err("missing selection".into());
+        };
+        assert!(matches!(
+            read_manifest(
+                &generation_dir,
+                &reference,
+                CheckpointIdentity {
+                    network: bitcoin_rs_primitives::Network::Regtest,
+                    genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
+                }
+            ),
+            Err(CheckpointError::Invalid(_))
+        ));
     }
     Ok(())
 }
@@ -247,7 +407,7 @@ fn current_and_manifest_validation_reject_tampering() -> Result<(), Box<dyn std:
                 assert!(
                     read_manifest(
                         &generation,
-                        &stale,
+                        &stale.reference()?,
                         CheckpointIdentity {
                             network: bitcoin_rs_primitives::Network::Regtest,
                             genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
@@ -270,7 +430,7 @@ fn current_and_manifest_validation_reject_tampering() -> Result<(), Box<dyn std:
         assert!(matches!(
             read_manifest(
                 &generation,
-                &authenticated,
+                &authenticated.reference()?,
                 CheckpointIdentity {
                     network: bitcoin_rs_primitives::Network::Regtest,
                     genesis: bitcoin_rs_primitives::Network::Regtest.genesis_block_hash(),
@@ -396,7 +556,7 @@ fn format_and_schema_helpers_round_trip() -> Result<(), Box<dyn std::error::Erro
     let dir = tempdir()?;
     let data = open_root(dir.path())?;
     ensure_current_schema(&data)?;
-    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"0\n");
+    assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, b"2\n");
     let mut oversized = data.create("oversized")?;
     oversized.write_all(&[0_u8; 17])?;
     oversized.sync_all()?;
@@ -405,9 +565,12 @@ fn format_and_schema_helpers_round_trip() -> Result<(), Box<dyn std::error::Erro
         Err(error) if error.kind() == std::io::ErrorKind::InvalidData
     ));
     data.remove_file(CURRENT_SCHEMA_FILE)?;
-    let mut stale_schema = data.create(CURRENT_SCHEMA_FILE)?;
-    stale_schema.write_all(b"1\n")?;
-    stale_schema.sync_all()?;
-    assert!(ensure_current_schema(&data).is_err());
+    for epoch in [b"0\n", b"1\n"] {
+        let mut stale_schema = data.create(CURRENT_SCHEMA_FILE)?;
+        stale_schema.write_all(epoch)?;
+        stale_schema.sync_all()?;
+        assert!(ensure_current_schema(&data).is_err());
+        assert_eq!(read_file(&data, CURRENT_SCHEMA_FILE, 16)?, epoch);
+    }
     Ok(())
 }

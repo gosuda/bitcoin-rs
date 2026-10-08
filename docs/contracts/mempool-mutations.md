@@ -93,7 +93,7 @@ state (`crates/mempool/src/orphan.rs`).
 
 - `MempoolGateway` carries a `chain_generation` atomic counter. Even values
   mean the chain is stable and admission is open; odd values mean a chain
-  change (connect, disconnect, or reorg) is in progress and admission is
+  change (connect, disconnect, reorg, or snapshot activation) is in progress and admission is
   closed. `stable_generation()` returns `Some(even)` when stable, `None`
   when a chain change is active.
 - `begin_chain_change` takes the pool write lock, stores the next odd value,
@@ -102,6 +102,11 @@ state (`crates/mempool/src/orphan.rs`).
   explicit `finish` leaves the generation odd — admission stays closed.
   Only `finish` may compare-exchange the odd value to the reserved even value,
   reopening admission. One guard covers one externally coherent chain operation.
+- Snapshot replacement retires the old pool and fee history through
+  `clear_for_snapshot`, which also clears orphan/reject residency, verifies the gateway identity and exact odd
+  generation under the pool write lock. It publishes ordinary `Clear` removals
+  and keeps admission fenced until the node settles the new chain's consumers.
+  Ordinary reconnect/reorg recovery does not use this wholesale reset.
 - The reorg owner settles both sync branch switches and RPC invalidation.
   A clean refusal finishes at the fully committed disconnect/connect prefix,
   after reconsidering its disconnected transactions under the odd generation.

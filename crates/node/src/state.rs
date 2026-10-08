@@ -122,6 +122,8 @@ pub struct NodeState {
     sync: Arc<crate::BlockSync>,
     /// Process-wide rollback-evidence reporter (warning snapshot + marker).
     recovery_reporter: Arc<storage::RecoveryReporter>,
+    /// `AssumeUTXO` coordinator managing chainstate roles.
+    assumeutxo: Arc<bitcoin_rs_chainstate::AssumeUtxoManager>,
 }
 
 impl Drop for NodeState {
@@ -373,6 +375,67 @@ impl NodeState {
     /// Starts chainstate journal and retention maintenance.
     pub fn start_chainstate_maintenance(&self) -> Result<std::thread::JoinHandle<()>> {
         self.chainstate.start_maintenance()
+    }
+
+    /// Produces a summary of active and background chainstates for operator reporting.
+    pub fn chainstates_summary(
+        &self,
+    ) -> Result<bitcoin_rs_chainstate::ChainstatesSummary, bitcoin_rs_chainstate::AssumeUtxoError>
+    {
+        self.assumeutxo.chainstates_summary()
+    }
+
+    /// Activates a verified `AssumeUTXO` snapshot from a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if reading or parsing the snapshot fails, if the snapshot is untrusted,
+    /// or if commitment verification fails.
+    pub fn activate_assumeutxo_snapshot_file(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> anyhow::Result<()> {
+        let mut file = std::io::BufReader::new(std::fs::File::open(path)?);
+        let snapshot_load = bitcoin_rs_utxo::read_snapshot_strict_v4(&mut file)?;
+        self.activate_assumeutxo_snapshot(snapshot_load)
+    }
+
+    /// Activates a verified `AssumeUTXO` snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if the snapshot is untrusted or if commitment verification fails.
+    pub fn activate_assumeutxo_snapshot(
+        &self,
+        snapshot_load: bitcoin_rs_utxo::SnapshotLoad,
+    ) -> anyhow::Result<()> {
+        let change = self.followers.begin_mempool_change()?;
+        let result = self.assumeutxo.activate_snapshot(snapshot_load);
+        if result.is_ok()
+            && let Err(error) = self.followers.on_snapshot(change.as_ref())
+        {
+            self.chainstate.fail_closed_for_recovery();
+            return Err(anyhow::anyhow!(
+                "snapshot consumer reconciliation failed: {error}"
+            ));
+        }
+        if !self.chainstate.is_closed_for_recovery() {
+            if let Some(change) = change {
+                if let Err(error) = change.finish() {
+                    self.chainstate.fail_closed_for_recovery();
+                    if let Err(activation) = result {
+                        return Err(anyhow::anyhow!(
+                            "snapshot activation failed: {activation}; consumer settlement also failed: {error}"
+                        ));
+                    }
+                    return Err(anyhow::anyhow!(
+                        "snapshot consumer settlement failed: {error}"
+                    ));
+                }
+            }
+        }
+        result.map_err(|e| anyhow::anyhow!("failed to activate assumeutxo snapshot: {e}"))?;
+        Ok(())
     }
 
     /// Returns the node-owned complete transaction-index query adapter.

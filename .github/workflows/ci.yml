@@ -52,6 +52,10 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           cache-on-failure: true
+          # Do not restore cross-commit target metadata into the clippy
+          # matrix; stale rmeta can make dependent workspace crates appear
+          # to use an older public API.
+          cache-targets: false
       - run: ./scripts/ci-pr.sh clippy
 
   test-crates:

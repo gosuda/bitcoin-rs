@@ -234,3 +234,88 @@ fn prune_to_height_advances_published_height() -> anyhow::Result<()> {
     assert_eq!(load_pruneheight(&*store)?, Some(12));
     Ok(())
 }
+
+/// Every prefix prune includes history needed by a validating `AssumeUTXO` snapshot.
+#[cfg(feature = "fjall")]
+#[test]
+fn assumeutxo_validating_blocks_prefix_pruning_even_above_base_height() -> anyhow::Result<()> {
+    use bitcoin_rs_chainstate::AssumeUtxoManager;
+    use bitcoin_rs_primitives::Network;
+    use bitcoin_rs_rpc::context::PruneService;
+    use bitcoin_rs_storage::FlatFileBlockStore;
+    use std::sync::atomic::AtomicU32;
+
+    let dir = tempfile::tempdir()?;
+    let mut config = crate::NodeConfig::default_for_network(Network::Regtest);
+    config.data_dir = dir.path().join("node");
+    config.p2p.listen.clear();
+    let state = NodeState::open(config, None)?;
+    publish_applied_tip_height(&state, 200 + CORE_REORG_SAFETY_MARGIN);
+
+    let store = Arc::new(bitcoin_rs_storage::FjallStore::open(
+        dir.path().join("chainstate"),
+    )?);
+    let block_files = Arc::new(FlatFileBlockStore::open(dir.path())?);
+
+    // Exercise the pruning policy of a recovered validating lifecycle. Snapshot
+    // authenticity is covered at the chainstate activation boundary.
+    let pinned = Network::Regtest
+        .assume_utxo_for_height(110)
+        .ok_or_else(|| anyhow::anyhow!("pinned 110 missing"))?;
+    let status = bitcoin_rs_chainstate::AssumeUtxoDiskStatus::Validating {
+        base_height: pinned.height,
+        base_hash: pinned.block_hash,
+        expected_hash_serialized: pinned.hash_serialized,
+        chain_tx_count: pinned.chain_tx_count,
+        historical_height: 0,
+        historical_hash: Network::Regtest.genesis_block_hash(),
+        pending: None,
+        checkpoint: None,
+    };
+    let head_store = state.durable_head();
+    let prior = head_store.load()?;
+    let tip = state
+        .chainstate()
+        .applied_tip_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("missing fixture tip"))?;
+    head_store.commit(
+        prior.as_ref(),
+        &bitcoin_rs_storage::DurableHead {
+            assumeutxo: status,
+            commit_id: 1,
+            tip: tip.hash,
+            height: tip.height,
+            chain_tx_count: tip.chain_tx_count.to_wire(),
+            body_extent: None,
+            undo_extent: None,
+        },
+        &bitcoin_rs_storage::CommitRecords::default(),
+    )?;
+    let _assumeutxo = AssumeUtxoManager::open(
+        Network::Regtest,
+        state.chainstate(),
+        Some(dir.path().to_path_buf()),
+    )?;
+
+    let service = Arc::new(super::super::storage::NodePruneService::new(
+        store,
+        block_files,
+        state.chainstate().prune_authority(),
+        Arc::new(AtomicU32::new(200 + CORE_REORG_SAFETY_MARGIN)),
+        Arc::new(bitcoin_rs_storage::RetentionRegistry::new()),
+    )?);
+
+    for height in [100, 110, 111, 200] {
+        let Err(error) = service.prune_to_height(height) else {
+            anyhow::bail!("expected prune failure at height {height}");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("historical validation is required")
+        );
+        assert_eq!(service.status().pruneheight, None);
+    }
+
+    Ok(())
+}

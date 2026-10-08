@@ -1604,6 +1604,36 @@ impl DownloadWindow {
         self.retain_peer_assignments(owns);
     }
 
+    /// Retires downloads overtaken by replay from the durable archive.
+    /// The chain owner supplies the first height still needing validation.
+    pub(crate) fn retire_before(
+        &mut self,
+        stager: &mut BlockStager,
+        height: u32,
+        tree: &BlockTree,
+        now: Instant,
+    ) {
+        let retired = self
+            .pending
+            .iter()
+            .filter_map(|(hash, pending)| (pending.height < height).then_some(*hash))
+            .collect::<Vec<_>>();
+        for hash in retired {
+            self.remove_pending(&hash, now);
+        }
+        let retired = stager
+            .staged_hashes()
+            .filter(|hash| {
+                tree.lookup(*hash)
+                    .and_then(|id| tree.node(id).ok())
+                    .is_some_and(|node| node.height < height)
+            })
+            .collect::<Vec<_>>();
+        for hash in retired {
+            stager.discard(&hash);
+        }
+    }
+
     fn retain_peer_assignments(&mut self, retain_owner: impl Fn(&PeerSource) -> bool) {
         if self
             .pending_timeout_observation

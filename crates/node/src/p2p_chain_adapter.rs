@@ -11,8 +11,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bitcoin_rs_p2p::sync::chain::{
-    BranchSwitchError, HeaderAdmission, SyncChain, SyncChainError, WindowCommitDisposition,
-    WindowCommitError,
+    BranchSwitchError, HeaderAdmission, HistoricalAdvance, SyncChain, SyncChainError,
+    WindowCommitDisposition, WindowCommitError,
 };
 use bitcoin_rs_p2p::{InboundHeaders, PeerTable};
 use bitcoin_rs_primitives::{Block, Hash256, Header, Network};
@@ -24,6 +24,7 @@ pub use bitcoin_rs_p2p::sync::{BlockSync, default_sync_budget};
 /// applied-tip mutation behind the chain-transition lock plus the derived
 /// consumers that must fire inside it.
 struct NodeSyncChain {
+    assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
     handles: Arc<bitcoin_rs_chainstate::Chainstate>,
     /// The chainstate's read-only block-tree capability.
     block_tree: bitcoin_rs_chain::BlockTreeReader,
@@ -39,10 +40,12 @@ pub fn block_sync(
     inbound_headers_rx: Receiver<InboundHeaders>,
     inbound_blocks_rx: Receiver<bitcoin_rs_p2p::InboundBlock>,
     ibd: Arc<bitcoin_rs_chain::InitialBlockDownload>,
+    assumeutxo: Option<Arc<bitcoin_rs_chainstate::AssumeUtxoManager>>,
 ) -> BlockSync {
     let block_tree = handles.block_tree_reader();
     BlockSync::new(
         Arc::new(NodeSyncChain {
+            assumeutxo,
             handles,
             block_tree,
             followers,
@@ -153,6 +156,50 @@ pub(crate) fn fixture_insert_header_node(
 }
 
 impl SyncChain for NodeSyncChain {
+    fn historical_base(&self) -> Option<Hash256> {
+        match self.handles.role() {
+            bitcoin_rs_chainstate::assumeutxo::ChainstateRole::AssumedActive {
+                base_hash, ..
+            } => Some(base_hash),
+            _ => None,
+        }
+    }
+
+    fn advance_historical(&self) -> Result<HistoricalAdvance, SyncChainError> {
+        let Some(manager) = &self.assumeutxo else {
+            return Ok(HistoricalAdvance::Complete);
+        };
+        manager
+            .advance_historical()
+            .map(|progress| match progress {
+                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::Complete => {
+                    HistoricalAdvance::Complete
+                }
+                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::ReplayPending => {
+                    HistoricalAdvance::ReplayPending
+                }
+                bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance::MissingBody {
+                    height,
+                    hash,
+                } => HistoricalAdvance::MissingBody { height, hash },
+            })
+            .map_err(|error| -> SyncChainError {
+                self.handles.fail_closed_for_recovery();
+                Box::new(error)
+            })
+    }
+
+    fn connect_historical(&self, block: &Block, body: bytes::Bytes) -> Result<(), SyncChainError> {
+        let manager = self
+            .assumeutxo
+            .as_ref()
+            .ok_or("historical validation is not configured")?;
+        manager
+            .step_historical(block, Some(body))
+            .map(|_| ())
+            .map_err(|error| -> SyncChainError { Box::new(error) })
+    }
+
     fn network(&self) -> Network {
         self.handles.network()
     }

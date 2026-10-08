@@ -86,18 +86,28 @@ pub(crate) fn read_current(root: &CheckpointRoot) -> Result<Option<CurrentV1>, C
     Ok(Some(current))
 }
 
-/// Reads and authenticates the manifest against `CURRENT` and the configured identity.
+impl CurrentV1 {
+    /// Returns the immutable reference carried by this validated pointer.
+    pub fn reference(&self) -> Result<super::CheckpointReference, CheckpointError> {
+        Ok(super::CheckpointReference {
+            generation: self.generation,
+            manifest_sha256: decode_hex(&self.manifest_sha256)?,
+        })
+    }
+}
+
+/// Reads and authenticates the manifest against its owner's reference and identity.
 pub fn read_manifest(
     generation_dir: &Dir,
-    current: &CurrentV1,
+    reference: &super::CheckpointReference,
     identity: CheckpointIdentity,
 ) -> Result<CheckpointManifestV1, CheckpointError> {
     let bytes = read_file(generation_dir, MANIFEST_FILE, MAX_CHECKPOINT_METADATA_BYTES)
         .map_err(|e| checkpoint_file_error(MANIFEST_FILE, e))?;
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
-    if digest != decode_hex::<32>(&current.manifest_sha256)? {
+    if digest != reference.manifest_sha256 {
         return Err(CheckpointError::Invalid(
-            "manifest SHA256 does not match CURRENT".to_owned(),
+            "manifest SHA256 does not match checkpoint reference".to_owned(),
         ));
     }
     let manifest: CheckpointManifestV1 = serde_json::from_slice(&bytes)?;
@@ -113,9 +123,9 @@ pub fn read_manifest(
             manifest.format
         )));
     }
-    if manifest.generation != current.generation {
+    if manifest.generation != reference.generation {
         return Err(CheckpointError::Invalid(
-            "manifest generation does not match CURRENT".to_owned(),
+            "manifest generation does not match checkpoint reference".to_owned(),
         ));
     }
     if manifest.network != network_name(identity.network)
@@ -229,17 +239,45 @@ pub fn coinstats_artifact_payload(bytes: &[u8]) -> Result<&[u8], CheckpointError
 pub enum CheckpointOpen {
     /// No checkpoint has committed; the node must start cold.
     Cold,
-    /// CURRENT identifies an authenticated generation directory.
-    Current {
+    /// The owner identifies a generation directory and its expected manifest digest.
+    Selected {
         /// Open generation directory capability.
         generation_dir: Dir,
-        /// Parsed and validated CURRENT pointer.
-        current: CurrentV1,
+        /// Immutable reference supplied by CURRENT or the durable head.
+        reference: super::CheckpointReference,
     },
 }
+/// Opens a generation selected by an authoritative durable-head reference.
+/// CURRENT may be ahead or absent after an interrupted publication.
+pub fn open_checkpoint_generation_at(
+    data_dir: &Dir,
+    root_name: &str,
+    reference: super::CheckpointReference,
+) -> Result<CheckpointOpen, CheckpointLoadError> {
+    let root = CheckpointRoot::open_existing(data_dir, root_name)
+        .map_err(|error| classify_open_error("open checkpoint root", error))?
+        .ok_or_else(|| corrupt_checkpoint("referenced checkpoint root is missing"))?;
+    let directory = generation_name(reference.generation);
+    let generation_dir = root
+        .open_dir(&directory)
+        .map_err(|error| classify_open_error("open referenced checkpoint generation", error))?;
+    Ok(CheckpointOpen::Selected {
+        generation_dir,
+        reference,
+    })
+}
+
 /// Opens and validates the checkpoint named by the data directory's CURRENT.
 pub fn open_current_checkpoint(data_dir: &Dir) -> Result<CheckpointOpen, CheckpointLoadError> {
-    let root = match CheckpointRoot::open_existing(data_dir, super::CHECKPOINT_ROOT) {
+    open_current_checkpoint_at(data_dir, super::CHECKPOINT_ROOT)
+}
+
+/// Opens the published checkpoint in an explicit namespace.
+pub fn open_current_checkpoint_at(
+    data_dir: &Dir,
+    root_name: &str,
+) -> Result<CheckpointOpen, CheckpointLoadError> {
+    let root = match CheckpointRoot::open_existing(data_dir, root_name) {
         Ok(Some(root)) => root,
         Ok(None) => return Ok(CheckpointOpen::Cold),
         // Opening the checkpoint root failed before CURRENT could be read.
@@ -260,8 +298,8 @@ pub fn open_current_checkpoint(data_dir: &Dir) -> Result<CheckpointOpen, Checkpo
             e,
         )
     })?;
-    Ok(CheckpointOpen::Current {
+    Ok(CheckpointOpen::Selected {
         generation_dir,
-        current,
+        reference: current.reference().map_err(classify_checkpoint_error)?,
     })
 }

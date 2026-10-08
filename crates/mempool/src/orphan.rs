@@ -110,6 +110,14 @@ pub(crate) struct OrphanPool {
 }
 
 impl OrphanPool {
+    /// Drops all residency and retry claims while preserving admission limits.
+    pub(crate) fn clear(&mut self) {
+        let identities: Vec<_> = self.entries.keys().copied().collect();
+        for identity in identities {
+            self.remove(identity);
+        }
+    }
+
     pub(crate) fn new(quota: usize) -> Self {
         Self::with_limits(
             quota,

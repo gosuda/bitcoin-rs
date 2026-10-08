@@ -664,6 +664,13 @@ impl CoinStatsListener {
         self.state.lock().stats.clone()
     }
 
+    /// Resets the listener to new initial statistics.
+    pub fn reset(&self, stats: CoinStats) {
+        let mut guard = self.state.lock();
+        guard.stats = stats;
+        guard.scratch.clear();
+    }
+
     /// Applies a per-block delta to the wrapped stats.
     pub fn finish_block(&self, height: u32, tx_delta: u64) {
         self.state.lock().stats.finish_block(height, tx_delta);

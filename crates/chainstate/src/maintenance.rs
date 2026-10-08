@@ -39,8 +39,8 @@ fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &bitcoin_rs_chain
             prev_pressure = true;
         }
         match publisher.publish() {
-            Ok(CheckpointWrite::Published { generation }) => tracing::info!(
-                ?generation,
+            Ok(CheckpointWrite::Published { reference }) => tracing::info!(
+                generation = reference.generation,
                 "retention compaction published a chainstate checkpoint"
             ),
             Ok(CheckpointWrite::SkippedNoAppliedTip) => {
@@ -60,7 +60,7 @@ fn maintenance_loop(publisher: &CheckpointPublisher, shutdown: &bitcoin_rs_chain
 /// batch boundary has passed and reports whether segment retention
 /// requires compaction.
 fn idle_journal_maintenance(publisher: &CheckpointPublisher) -> bool {
-    let Some(journal) = publisher.journal.as_ref() else {
+    let Some(journal) = publisher.journal.read().clone() else {
         return false;
     };
     let mut journal = journal.lock();

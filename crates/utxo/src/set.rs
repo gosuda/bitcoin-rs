@@ -40,6 +40,14 @@ pub enum UtxoError {
     /// Encoded UTXO record bytes are truncated, trailing, or noncanonical.
     #[error("invalid encoded UTXO record")]
     CorruptRecord,
+    /// A snapshot coin must have been created no later than its base height.
+    #[error("snapshot coin height {height} exceeds snapshot base {snapshot_height}")]
+    SnapshotCoinHeightOutOfRange {
+        /// Invalid creation height.
+        height: u32,
+        /// Pinned snapshot base height.
+        snapshot_height: u32,
+    },
     /// Snapshot I/O failed.
     #[error("snapshot I/O failed: {0}")]
     Io(#[from] io::Error),
@@ -233,6 +241,14 @@ impl UtxoSetView<'_> {
         crate::snapshot::hash_serialized_3_stable(self)
     }
 
+    /// Computes the snapshot commitment while rejecting impossible coin heights.
+    ///
+    /// Keeping this validation in the commitment traversal prevents a high-bit
+    /// height alias from passing the pinned hash with different spend metadata.
+    pub fn hash_serialized_3_at_height(&self, snapshot_height: u32) -> Result<Hash256, UtxoError> {
+        crate::snapshot::hash_serialized_3_stable_at_height(self, snapshot_height)
+    }
+
     /// Scans every live output for exact scriptPubKey matches.
     pub(crate) fn scan_script_pubkeys(&self, scripts: &[Vec<u8>]) -> UtxoScan {
         let mut scan = UtxoScan::default();
@@ -277,6 +293,21 @@ impl UtxoSet {
             stable_view_lock: RwLock::new(()),
             listener: None,
         }
+    }
+
+    /// Installs an owned snapshot under the stable-view lock.
+    ///
+    /// Consuming the source excludes aliases, self-swaps, and concurrent source
+    /// mutation between verification and installation. The chainstate owner must
+    /// install the matching coin statistics before publishing its new tip.
+    pub fn replace_from(&self, other: Self) {
+        {
+            let _guard = self.stable_view_lock.write();
+            for (my_shard, other_shard) in self.shards.iter().zip(other.shards.iter()) {
+                my_shard.swap_table(other_shard);
+            }
+        }
+        drop(other);
     }
 
     /// Attaches the coinstats listener for subsequently committed UTXO changes.

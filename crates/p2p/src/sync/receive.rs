@@ -140,6 +140,9 @@ impl BlockSync {
             let Ok(inbound) = self.inbound_blocks_rx.try_recv() else {
                 return true;
             };
+            let Some(inbound) = self.receive_historical(inbound) else {
+                continue;
+            };
             if !*saw_block {
                 *next_expected_hash = self.next_expected_block_hash();
                 *apply_head_check = next_expected_hash

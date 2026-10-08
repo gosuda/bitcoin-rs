@@ -319,6 +319,21 @@ fn read_snapshot_output(reader: &mut impl Read) -> Result<OwnedUtxoOut, UtxoErro
 /// Computes Bitcoin Core's `hash_serialized_3` UTXO-set commitment over a
 /// stable view.
 pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256, UtxoError> {
+    hash_serialized_3_stable_inner(view, None)
+}
+
+/// Commitment with the additional creation-height rule required by `AssumeUTXO`.
+pub(crate) fn hash_serialized_3_stable_at_height(
+    view: &UtxoSetView<'_>,
+    snapshot_height: u32,
+) -> Result<Hash256, UtxoError> {
+    hash_serialized_3_stable_inner(view, Some(snapshot_height))
+}
+
+fn hash_serialized_3_stable_inner(
+    view: &UtxoSetView<'_>,
+    snapshot_height: Option<u32>,
+) -> Result<Hash256, UtxoError> {
     let mut engine = Sha256::new();
     for shard_idx in 0_u8..=u8::MAX {
         view.shard(usize::from(shard_idx)).with_table(|table| {
@@ -339,6 +354,14 @@ pub(crate) fn hash_serialized_3_stable(view: &UtxoSetView<'_>) -> Result<Hash256
             });
 
             for entry in entries {
+                if let Some(snapshot_height) = snapshot_height
+                    && entry.output.height > snapshot_height
+                {
+                    return Err(UtxoError::SnapshotCoinHeightOutOfRange {
+                        height: entry.output.height,
+                        snapshot_height,
+                    });
+                }
                 engine.update(entry.txid_le);
                 engine.update(entry.output.vout.to_le_bytes());
                 let code = (entry.output.height << 1) | u32::from(entry.output.coinbase);

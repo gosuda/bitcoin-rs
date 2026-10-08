@@ -39,7 +39,7 @@ pub use encode::{
 pub use hash::{Hash256, HashError};
 pub use header::Header;
 pub use ids::{BlockHash, Txid, Wtxid};
-pub use network::{ChainTxData, HeadersSyncParams, Network};
+pub use network::{AssumeUtxoData, ChainTxData, HeadersSyncParams, Network};
 pub use outpoint::OutPoint;
 pub use script::{Script, Witness};
 pub use sighash::{

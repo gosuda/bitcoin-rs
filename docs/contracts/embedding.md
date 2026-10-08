@@ -93,6 +93,15 @@ the first embedder — there is one lifecycle implementation, not two.
 
 ## Startup failure and cancellation
 
+`Node::activate_assumeutxo_snapshot_file` enters the node-owned snapshot
+activation boundary after ordinary header synchronization has admitted the
+pinned base. It preserves mempool fencing and consumer alignment without
+exporting `NodeState` or the historical mutation handle. Like startup, this
+async method performs synchronous work when polled; callers choose its runtime
+placement. `Node::chainstates_summary` exposes roles and validation progress.
+Import or activation refusal is `NodeError::Snapshot`; reporting-storage failure
+is `NodeError::Unavailable`. See `ARCH-07b` for the durable lifecycle contract.
+
 ### `EMB-10`: Independent runtime-stall evidence
 
 Sync telemetry cadence is elapsed monotonic time, not the number or origin of

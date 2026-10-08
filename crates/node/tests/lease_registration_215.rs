@@ -43,6 +43,7 @@ fn make_sync(peer_table: Arc<PeerTable>) -> BlockSync {
         headers_rx,
         blocks_rx,
         ibd,
+        None,
     )
 }
 
