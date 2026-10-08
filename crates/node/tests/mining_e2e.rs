@@ -605,7 +605,7 @@ fn mine_regtest_block(
 /// mining coordinator installed as the `MiningControl`.
 fn mining_handler(state: &NodeState) -> Handler {
     let coordinator = MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),

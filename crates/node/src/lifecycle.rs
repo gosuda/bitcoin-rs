@@ -270,7 +270,8 @@ impl NodeServices {
         // no further mempool mutations run and this snapshot is final.
         // docs/policies/db-migration.md — owner-local, degrade-not-fail.
         if let Some(state) = state {
-            bitcoin_rs_mempool::fee_history::save(state.data_dir(), &state.mempool());
+            let history = state.mempool_reader().read().estimator_history();
+            bitcoin_rs_mempool::fee_history::save(state.data_dir(), &history);
         }
         if let Some(error) = first_error {
             return Err(error);
@@ -543,7 +544,7 @@ pub(crate) fn start_node(
     let peer_ready_sync = Arc::clone(&sync);
     let loop_handle = EventLoop::with_sync_wake(shutdown_rx, sync, sync_wake_rx);
     let coordinator = Arc::new(crate::MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         Arc::clone(&chainstate),
         state.stable_read(),
         state.chain_followers(),

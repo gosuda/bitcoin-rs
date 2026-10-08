@@ -14,8 +14,8 @@ use bitcoin_rs_chain::{BlockTreeReader, TipReader};
 use bitcoin_rs_chainstate::ApplyError;
 use bitcoin_rs_chainstate::Chainstate;
 use bitcoin_rs_chainstate::bytes_are_block;
-use bitcoin_rs_mempool::Mempool;
 use bitcoin_rs_mempool::MempoolMiningSnapshot;
+use bitcoin_rs_mempool::MempoolReader;
 use bitcoin_rs_mining::AppliedTipSource;
 use bitcoin_rs_mining::AvailableMiningRule;
 use bitcoin_rs_mining::BlockTemplateMode;
@@ -48,7 +48,6 @@ use bitcoin_rs_primitives::Header;
 use bitcoin_rs_primitives::Network;
 use bitcoin_rs_primitives::consensus_bytes;
 use compact_str::CompactString;
-use parking_lot::RwLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -65,7 +64,7 @@ impl MiningCoordinator {
     /// Builds a coordinator over the shared applied-chain and mempool handles.
     #[must_use]
     pub fn new(
-        mempool: Arc<RwLock<Mempool>>,
+        mempool: MempoolReader,
         chainstate: Arc<Chainstate>,
         stable: StableRead,
         followers: ChainFollowers,
@@ -223,7 +222,7 @@ impl AppliedTipSource for AppliedTipAdapter {
 
 /// Serves mempool reads for candidate assembly, one read lock per call.
 struct MempoolAdapter {
-    mempool: Arc<RwLock<Mempool>>,
+    mempool: MempoolReader,
     chainstate: Arc<Chainstate>,
     /// Read role over the same domain chainstate's mutation role uses, so a
     /// candidate assembly cannot observe a tip and UTXO set mid-transition.

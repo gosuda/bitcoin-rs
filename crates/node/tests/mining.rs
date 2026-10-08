@@ -59,7 +59,7 @@ fn regtest_mining() -> anyhow::Result<(NodeState, MiningCoordinator)> {
 fn coordinator(state: &NodeState) -> MiningCoordinator {
     // Empty template coinbase script matches transport-only GBT wiring.
     MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),
@@ -957,7 +957,7 @@ fn shutdown_ends_long_poll_without_wake() -> anyhow::Result<()> {
     let state = open_at_genesis(Network::Regtest)?;
     let shutdown = state.shutdown();
     let mining = Arc::new(MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),
@@ -1551,7 +1551,7 @@ fn long_poll_returns_quickly_on_mempool_sequence_wake() -> anyhow::Result<()> {
     // Non-zero cooldown: the old code would wait up to `mempool_update_wait`
     // before returning on a mempool-only change. The fix returns immediately.
     let mining = Arc::new(MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),
@@ -1748,7 +1748,7 @@ fn generateblock_raw_p2sh_costs_use_confirmed_prevouts() -> anyhow::Result<()> {
         .to_p2sh()
         .into_bytes();
     let mining = MiningCoordinator::new(
-        state.mempool(),
+        state.mempool_reader(),
         state.chainstate(),
         state.stable_read(),
         state.chain_followers(),

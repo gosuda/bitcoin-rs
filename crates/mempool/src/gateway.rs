@@ -588,10 +588,17 @@ impl MempoolGateway {
         self.observer.is_some()
     }
 
+    /// Returns a cloneable read-only capability over the pool.
+    #[must_use]
+    pub fn reader(&self) -> crate::MempoolReader {
+        crate::MempoolReader::new(Arc::clone(&self.pool))
+    }
+
     /// Raw pool access for test fixture staging and read-side composition
     /// only. The raw-site audit's production pattern matches
     /// `.pool().write()` too; production mutations must go through the
     /// gateway so observers stay in the loop.
+    #[cfg(any(test, feature = "test-seam"))]
     pub fn pool(&self) -> &Arc<RwLock<Mempool>> {
         &self.pool
     }
