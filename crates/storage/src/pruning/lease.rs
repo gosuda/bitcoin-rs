@@ -291,8 +291,7 @@ impl RetentionRegistry {
     ///
     /// Fails when the floor is below the executed prune line or below the
     /// deletion line of an outstanding [`PruneReservation`]: those rows are
-    /// gone or already claimed for deletion, and a lease cannot resurrect
-    /// them.
+    /// gone or already claimed for deletion.
     pub fn acquire(self: &Arc<Self>, floor: u32) -> Result<RetentionLease, RetentionError> {
         let mut inner = self.inner.lock();
         let line = inner.refusal_line();
@@ -412,16 +411,11 @@ impl RetentionRegistry {
         budget: RetentionBudget,
     ) -> Result<HistoryLease, HistoryUnavailable> {
         let mut inner = self.inner.lock();
-        // The shutdown answer is serialized by the same lock that inserts the
-        // pin: once `shutdown` returns, no later grant can slip in below it.
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(HistoryUnavailable::Shutdown);
         }
         let line = inner.refusal_line();
         if floor < line {
-            // A floor below the executed frontier is gone permanently; one
-            // below only an outstanding reservation is claimed provisionally
-            // and may come back if the pass aborts.
             return Err(if floor < inner.pruned_below {
                 HistoryUnavailable::Pruned {
                     below: inner.pruned_below,
@@ -731,8 +725,6 @@ mod tests {
         let deep = held(registry.acquire(300));
         assert_eq!(registry.retention_floor(), Some(300));
 
-        // A second, shallower lease must not mask the deeper one: the union
-        // of the two constraints keeps rows at or above 300.
         let shallow = held(registry.acquire(700));
         assert_eq!(registry.retention_floor(), Some(300));
 
@@ -750,8 +742,6 @@ mod tests {
         lease.release();
         assert_eq!(registry.active_leases(), 0);
 
-        // A guard that only drops (cancelled or failed holder) releases
-        // through the same path exactly once.
         {
             let dropped = held(registry.acquire(20));
             assert_eq!(dropped.floor(), 20);
@@ -774,11 +764,8 @@ mod tests {
                 pruned_below: 500
             })
         ));
-        // The boundary itself still exists: rows at the line survive a
-        // prune, which deletes strictly below it.
         assert_eq!(held(registry.acquire(500)).floor(), 500);
 
-        // The line is monotonic; a smaller recording cannot roll it back.
         let second = registry.reserve(100);
         assert_eq!(second.commit(100), 100);
         assert_eq!(registry.pruned_below(), 500);
@@ -790,8 +777,6 @@ mod tests {
         let registry = Arc::new(RetentionRegistry::new());
         assert_eq!(held(registry.acquire(499)).floor(), 499);
 
-        // A pass planning deletions through 500 blocks every request that
-        // would cross its claim, before any deletion has committed.
         let reservation = registry.reserve(500);
         assert!(matches!(
             registry.acquire(499),
@@ -800,18 +785,12 @@ mod tests {
                 pruned_below: 500
             })
         ));
-        // The reserved line itself is still grantable: the pass deletes
-        // strictly below it.
         assert_eq!(held(registry.acquire(500)).floor(), 500);
 
-        // Committing promotes the executed line, so the refusal survives
-        // the reservation.
         assert_eq!(reservation.commit(500), 500);
         assert!(registry.acquire(499).is_err());
         assert_eq!(registry.pruned_below(), 500);
 
-        // A pass that fails hands the authority back: the same floor that
-        // the aborted claim refused is grantable again.
         let aborted = registry.reserve(700);
         assert!(registry.acquire(699).is_err());
         drop(aborted);
@@ -824,13 +803,9 @@ mod tests {
         let registry = Arc::new(RetentionRegistry::new());
         let lease = held(registry.acquire(300));
 
-        // A reader that pinned 300 before the pass planned constrains the
-        // reservation, so the pass cannot claim rows the lease holds.
         let outer = registry.reserve(500);
         assert_eq!(outer.line(), 300);
 
-        // A nested claim refuses to the deepest outstanding line, and
-        // releasing one claim keeps the other's refusal.
         let inner_reservation = registry.reserve(700);
         assert_eq!(inner_reservation.line(), 300);
         assert!(registry.acquire(299).is_err());
@@ -857,17 +832,12 @@ mod tests {
         assert_eq!(lease.floor(), Some(100));
         assert_eq!(registry.retention_floor(), Some(100));
 
-        // A pass whose line lags the pin by more than its budget expires
-        // the pin instead of clamping forever, so pruning proceeds.
         let pass = registry.reserve(200);
         assert_eq!(pass.line(), 200);
         assert_eq!(registry.active_leases(), 0);
         assert_eq!(lease.floor(), None);
         drop(pass);
 
-        // A mandatory pin is never expired, and an optional pin inside its
-        // budget still binds: chainstate correctness outranks freeing space,
-        // and the budget is a bound rather than a way to ignore consumers.
         let required = held(registry.acquire(100));
         let roomy = pinned(registry.history_from(150, RetentionBudget::Depth(200)));
         let pass = registry.reserve(200);
@@ -884,7 +854,6 @@ mod tests {
         let lease = pinned(registry.history_from(10, RetentionBudget::Unlimited));
         assert_eq!(registry.retention_floor(), Some(10));
 
-        // Durable progress raises the pin; a stale report never lowers it.
         lease.advance(20);
         assert_eq!(lease.floor(), Some(20));
         assert_eq!(registry.retention_floor(), Some(20));
@@ -900,15 +869,10 @@ mod tests {
     fn history_request_crosses_no_reservation() {
         let registry = Arc::new(RetentionRegistry::new());
         let pass = registry.reserve(500);
-        // A refusal below an outstanding reservation is provisional: the
-        // pass may abort and release the range, so the answer is `Reserved`,
-        // not the permanent `Pruned` the executed frontier gives.
         assert!(matches!(
             registry.history_from(499, RetentionBudget::Unlimited),
             Err(HistoryUnavailable::Reserved { below: 500 })
         ));
-        // The reserved line itself is grantable: the pass deletes strictly
-        // below it.
         assert_eq!(
             registry
                 .history_from(500, RetentionBudget::Unlimited)
@@ -922,14 +886,10 @@ mod tests {
     fn history_request_below_the_executed_frontier_is_permanent() {
         let registry = Arc::new(RetentionRegistry::new());
         registry.reserve(500).commit(500);
-        // Once the pass commits, a floor below the frontier is gone for
-        // good: `Pruned` is the owner's rebuild answer, not a retry.
         assert!(matches!(
             registry.history_from(499, RetentionBudget::Unlimited),
             Err(HistoryUnavailable::Pruned { below: 500 })
         ));
-        // A floor above the frontier but below a live reservation is still
-        // only provisionally refused.
         let pass = registry.reserve(600);
         assert!(matches!(
             registry.history_from(550, RetentionBudget::Unlimited),
@@ -947,22 +907,16 @@ mod tests {
             registry.history_from(0, RetentionBudget::Depth(1)),
             Err(HistoryUnavailable::Shutdown)
         ));
-        // The mandatory path is governed by chain admission, not by this
-        // boundary, so it is unchanged.
         assert_eq!(held(registry.acquire(0)).floor(), 0);
     }
 
     #[test]
     fn a_live_floor_zero_is_not_a_released_lease() {
         let registry = Arc::new(RetentionRegistry::new());
-        // A pin at genesis is a real pin: `Some(0)`, not the `None` a
-        // released or expired handle reports.
         let lease = pinned(registry.history_from(0, RetentionBudget::Depth(1)));
         assert_eq!(lease.floor(), Some(0));
         assert_eq!(registry.retention_floor(), Some(0));
 
-        // After a pass expires the pin, the same handle answers `None` —
-        // distinct from the live floor-0 it reported before.
         let pass = registry.reserve(10);
         assert_eq!(lease.floor(), None);
         drop(pass);

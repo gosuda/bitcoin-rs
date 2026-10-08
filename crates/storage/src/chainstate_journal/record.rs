@@ -390,9 +390,6 @@ mod tests {
 
     /// Builds a deterministic 80-byte header whose hash equals the given hash.
     fn header_bytes(hash: [u8; 32]) -> [u8; 80] {
-        // version | prev | merkle | time | bits | nonce — content is opaque to
-        // the codec (it only frames bytes), but keep it hash-derived so tests
-        // can assert the field survives the roundtrip positionally.
         let mut header = [0_u8; 80];
         header[0..4].copy_from_slice(&1_i32.to_le_bytes());
         header[36..68].copy_from_slice(&hash);

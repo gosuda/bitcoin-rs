@@ -560,8 +560,6 @@ mod body_position_prefetch_tests {
         let store = IndexedBlockBodyStore::new(index.clone(), files);
         let hash = Hash256::from_le_bytes(&[9_u8; 32]);
         store.persist_block_body(7, hash, b"body")?;
-        // Overwrite the position row with a legacy inline body: same key, not
-        // a decodable flat-file position.
         let key = crate::pruning::block_body_key(7, hash);
         let mut batch = index.new_batch();
         batch.put(crate::pruning::BLOCK_DATA_CF, &key, b"legacy-inline-body");

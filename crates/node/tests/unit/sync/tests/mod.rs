@@ -11,6 +11,91 @@ use hashbrown::HashMap;
 use parking_lot::RwLock;
 
 use bitcoin_rs_chainstate::Chainstate;
+use bitcoin_rs_p2p::sync::chain::{SyncChain, WindowApplyDisposition};
+
+#[test]
+fn window_failure_keeps_committed_followers_and_native_retry_policy()
+-> Result<(), Box<dyn std::error::Error>> {
+    let genesis = Network::Regtest.genesis_block();
+    let first = regtest_fixture::mined_block_with_prev_hash(
+        genesis.block_hash(),
+        1,
+        vec![regtest_fixture::coinbase(1)],
+    )?;
+    let invalid = regtest_fixture::mined_block_with_prev_hash(
+        first.block_hash(),
+        2,
+        vec![regtest_fixture::coinbase(2), regtest_fixture::coinbase(3)],
+    )?;
+    let child = regtest_fixture::mined_block_with_prev_hash(
+        invalid.block_hash(),
+        3,
+        vec![regtest_fixture::coinbase(3)],
+    )?;
+    let invalid_hashes = vec![
+        Hash256::from(invalid.block_hash()),
+        Hash256::from(child.block_hash()),
+    ];
+    let mut tree = BlockTree::new();
+    let mut parent = tree.insert_node(None, genesis.header, NodeStatus::HeaderValid)?;
+    for block in [&first, &invalid, &child] {
+        parent = tree.insert_node(Some(parent), block.header, NodeStatus::HeaderValid)?;
+    }
+    let handles = Arc::new(apply_handles(
+        tree.tip_handle(),
+        Arc::new(ArcSwapOption::empty()),
+        Arc::new(RwLock::new(tree)),
+    ));
+    let followers = crate::chain_effects::ChainFollowers::noop();
+    let adapter = super::NodeSyncChain {
+        block_tree: handles.block_tree_reader(),
+        handles: Arc::clone(&handles),
+        followers: followers.clone(),
+        assumeutxo: None,
+    };
+    adapter.bootstrap_genesis();
+    let mut mutated = invalid.clone();
+    mutated.txs.pop();
+    for (blocks, disposition, applied, invalidated) in [
+        (
+            vec![&first, &mutated, &child],
+            WindowApplyDisposition::BodyMutated,
+            1,
+            vec![],
+        ),
+        (
+            vec![&invalid, &child],
+            WindowApplyDisposition::Permanent,
+            0,
+            invalid_hashes,
+        ),
+    ] {
+        let bodies = blocks
+            .iter()
+            .map(|&block| bytes::Bytes::from(consensus_bytes(block)))
+            .collect::<Vec<_>>();
+        let error = match adapter.commit_window(&blocks, &bodies) {
+            Ok(count) => panic!("invalid window committed {count} blocks"),
+            Err(error) => error,
+        };
+        assert_eq!(error.disposition, disposition);
+        assert_eq!(error.applied, applied);
+        assert_eq!(error.invalidated.as_ref(), invalidated);
+        let tip = adapter.applied_tip().ok_or("committed tip missing")?;
+        assert_eq!(
+            (tip.height, tip.hash),
+            (1, Hash256::from(first.block_hash()))
+        );
+        let log = followers.block_log();
+        let log = log.read();
+        assert_eq!(log.len(), 2);
+        assert_eq!(
+            log.last().ok_or("committed follower missing")?.hash,
+            first.block_hash()
+        );
+    }
+    Ok(())
+}
 
 fn apply_handles(
     chain_tip: Arc<ArcSwapOption<TipSnapshot>>,

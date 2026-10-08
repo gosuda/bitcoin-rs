@@ -32,14 +32,12 @@ fn fixture(inputs: usize, script_len: usize, witness_len: Option<usize>) -> Tx {
         lock_time: LockTime::from_consensus(42),
     };
     if let Some(length) = witness_len {
-        // Witness only on the last input also exercises mixed transactions.
         let input = tx.inputs.last_mut().expect("witness fixture input");
         input.witness = Witness::from_stack(vec![vec![0x55; length]]);
     }
     tx
 }
 
-// Exact original constructor, benchmark-only; no production compatibility path.
 fn baseline_entry(tx: Arc<Tx>, vsize: u32, fee: u64, time: u64, height: u32) -> MempoolEntry {
     let own_size = u64::from(vsize);
     let txid = tx.txid();

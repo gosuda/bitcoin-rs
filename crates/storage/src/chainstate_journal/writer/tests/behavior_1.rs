@@ -1,7 +1,6 @@
 use super::*;
 use std::io::Write;
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-BOOT-1.
 #[test]
 fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     let writer = open_fresh("config-defaults", Arc::new(CountingStore::new()))?;
@@ -20,7 +19,6 @@ fn writer_bootstrap_uses_chainstate_journal_config_defaults() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-REC-1.
 #[test]
 fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -30,20 +28,17 @@ fn torn_tail_beyond_head_is_ignored_on_reopen() -> TestResult {
         writer.append(&sample_record(1))?;
         writer.flush_to(1)?;
         dir = writer.dir.try_clone()?;
-        // Simulate a torn append after the head: raw bytes past the cursor.
         let mut options = cap_std::fs::OpenOptions::new();
         options.append(true).create(true);
         let mut file = dir.open_with(segment_name(writer.segment_gen), &options)?;
         file.write_all(&[0xde, 0xad, 0xbe, 0xef])?;
         file.sync_all()?;
     }
-    // Reopen: the torn tail must be truncated away without error.
     let writer = JournalWriter::open(dir, store)?;
     assert_eq!(writer.head().height, 1);
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-REC-1.
 #[test]
 fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -51,13 +46,9 @@ fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     let record = sample_record(1);
     {
         let mut writer = open_fresh("idempotent", Arc::clone(&store))?;
-        // Buffer record 1 but crash before any boundary (drop = crash).
         writer.append(&record)?;
         dir = writer.dir.try_clone()?;
     }
-    // After the crash, record 1 may have reached the page cache but was
-    // never covered by a durable head. Reopening truncates to the head
-    // cursor; the caller replays record 1 into the same place.
     let mut writer = JournalWriter::open(dir, Arc::clone(&store))?;
     writer.append(&record)?;
     writer.flush_to(1)?;
@@ -66,7 +57,6 @@ fn partial_append_truncates_and_retries_idempotently() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-ORDER-1.
 #[test]
 fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -88,7 +78,6 @@ fn append_failure_blocks_the_next_apply_before_an_untracked_hole_grows() -> Test
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-ORDER-1.
 #[test]
 fn out_of_order_append_blocks_the_next_apply() -> TestResult {
     let store = Arc::new(CountingStore::new());
@@ -172,22 +161,18 @@ fn failed_rewind_truncation_blocks_appends_until_restart() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-ROT-1.
 #[test]
 fn rotation_keeps_cursor_invariants() -> TestResult {
     let store = Arc::new(CountingStore::new());
     let mut writer = open_fresh("rotation", Arc::clone(&store))?;
-    // Rotate exactly once, before the second append.
     let first = sample_record(1);
     writer.rotate_bytes = u64::try_from(encode_record(&first)?.len())?;
     writer.append(&first)?;
     writer.append(&sample_record(2))?;
     assert_eq!(writer.segment_gen, 1, "rotation bumped the generation");
-    // head must stay valid across the rotation.
     writer.flush_to(2)?;
     assert_eq!(writer.head().height, 2);
     assert_eq!(writer.head().journal_gen, 1);
-    // Zero-padded naming: lexicographic == numeric.
     let names: Vec<String> = (0..3).map(segment_name).collect();
     let mut sorted = names.clone();
     sorted.sort();
@@ -195,7 +180,6 @@ fn rotation_keeps_cursor_invariants() -> TestResult {
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-FAIL-1.
 #[test]
 fn failpoints_fire_documented_errors() -> TestResult {
     for boundary in [
@@ -211,8 +195,6 @@ fn failpoints_fire_documented_errors() -> TestResult {
         let store = Arc::new(CountingStore::new());
         let mut writer = open_fresh("failpoints", Arc::clone(&store))?;
         writer.inject_failpoint(boundary);
-        // Append failpoints fire immediately; durability failures fire only
-        // when the explicit batch boundary is advanced.
         let append_result = writer.append(&sample_record(1));
         let result = if matches!(
             boundary,
@@ -224,13 +206,11 @@ fn failpoints_fire_documented_errors() -> TestResult {
             writer.flush_to(1)
         };
         assert!(result.is_err(), "{boundary:?} did not fire");
-        // ...and head.json must still reflect height 0 (no advancement).
         assert_eq!(writer.head().height, 0, "{boundary:?} advanced the head");
     }
     Ok(())
 }
 
-// Contract: docs/contracts/chainstate-journal-v1.md, JW-LIFE-1.
 #[test]
 fn freeze_rejects_appends_and_compaction_flow_completes() -> TestResult {
     let store = Arc::new(CountingStore::new());

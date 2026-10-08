@@ -12,6 +12,15 @@ use std::sync::Arc;
 use bitcoin_rs_chain::{BlockTreeReader, TipReader, TipSnapshot};
 use bitcoin_rs_chainstate::{Chainstate, ChainstateSnapshot};
 use bitcoin_rs_p2p::sync::SyncChain;
+use bitcoin_rs_p2p::sync::chain::{ReorgError, HistoricalAdvance, WindowApplyDisposition};
+
+pub fn sync_outcomes(
+    branch: bitcoin_rs_chainstate::reorg::ReorgError,
+    historical: bitcoin_rs_chainstate::assumeutxo::HistoricalAdvance,
+    disposition: bitcoin_rs_chainstate::WindowApplyDisposition,
+) -> (ReorgError, HistoricalAdvance, WindowApplyDisposition) {
+    (branch, historical, disposition)
+}
 
 pub fn observe(state: &Chainstate) -> (Option<Arc<TipSnapshot>>, usize) {
     let header: TipReader = state.header_tip_reader();

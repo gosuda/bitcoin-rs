@@ -66,8 +66,7 @@ fn a_higher_direct_rate_and_total_fee_can_still_worsen_the_curve()
     pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 1_000, 1, 1, 0))?;
     let replacement = spend(3, &[coin(100)], 1);
     let before = pool.mining_snapshot();
-    // 1,400 pays the evicted 1,000 plus 300 relay satoshis. Its direct
-    // rate beats the zero-fee parent, but 1,400/300 < 1,000/200.
+    // Replacement pays the relay fee but worsens the cluster: 1,400/300 < 1,000/200.
     let error = pool
         .replace_transaction(
             &ReplacementCandidate::new(Arc::new(replacement), 300, 1_400, 1_000),
@@ -93,8 +92,7 @@ fn lower_direct_rate_can_improve_the_parent_child_curve() -> Result<(), Box<dyn 
     pool.insert_entry(MempoolEntry::new(Arc::new(child), 100, 4_000, 1, 1, 0))?;
     let replacement = spend(3, &[OutPoint::new(parent_id, 0)], 1);
     let replacement_id = replacement.txid();
-    // Direct rate drops from 40 to 22.5 sat/vB, but the complete cluster
-    // improves from 4,000/2,350 to 4,500/2,450 and pays the relay increment.
+    // Direct rate falls 40 -> 22.5, but the cluster improves: 4,000/2,350 < 4,500/2,450.
     pool.replace_transaction(
         &ReplacementCandidate::new(Arc::new(replacement), 200, 4_500, 1_000),
         2,

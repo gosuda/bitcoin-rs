@@ -244,3 +244,31 @@ fn esplora_tx_broadcast_and_projection() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn zmq_notifications_feature_gated() -> Result<()> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    let reply = node.rpc_raw(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "getzmqnotifications", "params": []
+    }))?;
+    if reply["error"]["code"] != json!(-32601) {
+        assert_eq!(reply.get("result"), Some(&json!([])), "{reply}");
+        assert!(
+            reply.get("error").is_none_or(serde_json::Value::is_null),
+            "{reply}"
+        );
+    }
+    node.stop()
+}
+
+#[test]
+fn capabilities_reports_surface() -> Result<()> {
+    let mut node = ProcessNode::spawn(Kind::BitcoinRs)?;
+    assert_eq!(
+        node.rpc("getcapabilities", &json!([]))?,
+        json!({"capabilities": [{
+            "id": "txindex", "compiled": true, "enabled": false, "state": "Disabled"
+        }]})
+    );
+    node.stop()
+}
