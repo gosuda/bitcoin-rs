@@ -15,7 +15,7 @@ use bitcoin_rs_rpc::context::{ChainAdmissionView, DEFAULT_MAX_RAW_TX_FEE_RATE_SA
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::lifecycle::{DRAIN_DEADLINE, NodeServices, TeardownMode, start_node};
+use crate::lifecycle::{NodeServices, TeardownMode, start_node};
 use crate::state::NodeState;
 use bitcoin_rs_chainstate::events::ChainSnapshot;
 
@@ -208,17 +208,11 @@ impl Node {
     }
 
     pub(crate) fn shutdown_blocking(mut self) -> Result<(), NodeError> {
-        // Explicit shutdown must release index stores, not abandon their
-        // workers at the bounded Drop deadline: stop and join the
-        // derived-index worker before teardown, so the clean checkpoint
-        // publishes and chainstate closes only after the worker is gone —
-        // the same order `Drop for Node` uses.
         let Some(services) = self.services.as_mut() else {
             return Err(NodeError::Shutdown("node was already shut down".to_owned()));
         };
-        let index_error = self.state.bounded_index_shutdown(DRAIN_DEADLINE).err();
         let result = services
-            .teardown(Some(&self.state), TeardownMode::CleanShutdown, index_error)
+            .teardown(Some(&mut self.state), TeardownMode::CleanShutdown)
             .map_err(|error| NodeError::Shutdown(error.to_string()));
         self.services = None;
         // Dropping self releases state and the RPC context's storage clones
@@ -230,9 +224,7 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         if let Some(services) = self.services.as_mut() {
-            let index_error = self.state.bounded_index_shutdown(DRAIN_DEADLINE).err();
-            if let Err(error) =
-                services.teardown(Some(&self.state), TeardownMode::StartupAbort, index_error)
+            if let Err(error) = services.teardown(Some(&mut self.state), TeardownMode::StartupAbort)
             {
                 tracing::warn!(%error, "dropped embedded node; teardown reported an error");
             }

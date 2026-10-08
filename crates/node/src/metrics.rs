@@ -301,17 +301,22 @@ impl MetricsServer {
     }
 
     /// Signals the scrape thread and waits for it to exit.
-    pub(crate) fn stop_and_join(&mut self) {
+    pub(crate) fn stop_and_join(&mut self) -> Result<()> {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            thread
+                .join()
+                .map_err(|_| anyhow::anyhow!("metrics scrape thread panicked"))?;
         }
+        Ok(())
     }
 }
 
 impl Drop for MetricsServer {
     fn drop(&mut self) {
-        self.stop_and_join();
+        if let Err(error) = self.stop_and_join() {
+            tracing::warn!(%error, "metrics shutdown failed");
+        }
     }
 }
 
