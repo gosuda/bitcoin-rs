@@ -3,8 +3,8 @@
 
 use bitcoin_rs_consensus::BlockFacts;
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness,
+    Amount, Block, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn, TxOut, Txid,
+    Witness,
 };
 
 /// A zero witness modulus selects legacy transactions; otherwise the last
@@ -57,11 +57,7 @@ pub(crate) fn fixture(
     Block {
         header: Header {
             version: 1,
-            prev_blockhash: BlockHash::default(),
-            merkle_root: Hash256::default(),
-            time: 0,
-            bits: CompactTarget::from_consensus(0),
-            nonce: 0,
+            ..Header::default()
         },
         txs,
     }

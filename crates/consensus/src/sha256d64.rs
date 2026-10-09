@@ -1,12 +1,7 @@
-//! Eight-way SHA256d for fixed 64-byte Merkle parent inputs.
-//!
-//! The algorithm and lane contract follow Bitcoin Core v31.0
-//! `src/crypto/sha256_avx2.cpp`. This module keeps runtime dispatch and the
-//! target-feature boundary private. Callers hash independent Merkle pairs
-//! through [`Avx2Sha256d64::transform_8way`] after [`detect_avx2`] succeeds;
-//! otherwise they keep the scalar walker.
+//! Eight-way `SHA256d` for fixed 64-byte Merkle parent inputs.
 
-/// Number of independent 64-byte messages one [`Avx2Sha256d64`] transform hashes.
+/// Number of independent 64-byte messages one [`Avx2Sha256d64`] transform
+/// hashes.
 pub(crate) const LANES: usize = 8;
 
 /// Proof that the current x86-64 process can execute AVX2 instructions.

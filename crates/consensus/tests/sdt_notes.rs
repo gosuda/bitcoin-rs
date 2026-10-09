@@ -1,39 +1,21 @@
-//! Asserts the built artifact's `SystemTap` SDT notes match the documented
-//! Bitcoin Core probe ABI.
-//!
-//! The crate-root `probes.d` is the single source of truth for what this
-//! module emits: this test parses it to enumerate providers, probe names,
-//! and argument types, then checks the built binary's `.note.stapsdt` notes
-//! against it. Run with `SDT_ELF=<binary>` to check an arbitrary artifact
-//! (e.g. the node binary built on Linux); by default it checks the test
-//! binary itself.
-//!
-//! On non-ELF hosts (macOS emits Mach-O/DOF instead of `.note.stapsdt`) the
-//! note assertions are skipped and only the `probes.d`-vs-Core check runs.
+//! Checks `probes.d` against Core's ABI and the artifact's embedded SDT notes.
+//! `SDT_ELF` selects another artifact; otherwise the test reads itself.
+//! Non-ELF hosts retain the declaration check but skip ELF note assertions.
 
 use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-/// One probe declared in `probes.d`.
 #[derive(Debug)]
 struct ProbeDef {
     provider: String,
     name: String,
-    /// `probes.d` argument types in emission order (`int64_t`, `char*`, …).
     args: Vec<String>,
 }
 
-/// The Bitcoin Core probe ABI this module must emit, from Core's `doc/tracing.md`
-/// and a released `bitcoind`'s own SDT notes: provider, probe, and the
-/// `size@` prefix sequence consumer scripts bind to. A leading `-` is signed.
-///
-/// Args 5 and 6 of `block_connected` are `-8@` (signed) in Core's shipped
-/// notes although `doc/tracing.md` documents `uint64`; this table matches
-/// the **binary**, which is what consumers bind to. Byte-buffer arguments are
-/// pointers by value (`8@`, not the dereferencing `8@(%reg)` the `usdt`
-/// crate's `uint8_t*` would emit) — `probes.d` declares them `uint64_t` and
-/// the call sites feed the buffer address, reproducing Core's operand form.
+/// Core's released binary ABI, in provider/probe/argument order.
+/// Block-connected arguments 5/6 are signed despite Core's doc/tracing.md.
+/// Buffers are pointers by value (`8@`), not dereferenced (`8@(%reg)`).
 const CORE_ABI: &[(&str, &str, &[&str])] = &[
     (
         "validation",
@@ -54,7 +36,6 @@ const CORE_ABI: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-/// The expected `size@` prefix of a `probes.d` argument type.
 fn layout_prefix(d_type: &str) -> &'static str {
     match d_type {
         "int8_t" => "-1@",
@@ -74,9 +55,7 @@ fn layout_prefixes(def: &ProbeDef) -> Vec<&'static str> {
     def.args.iter().map(|arg| layout_prefix(arg)).collect()
 }
 
-/// Parses the `provider`/`probe` declarations out of `text` (the crate-root
-/// `probes.d`), in declaration order. The grammar exercised here is the
-/// small subset this repository's `probes.d` uses.
+/// Parses the declaration-order subset of `DTrace` syntax used by `probes.d`.
 fn parse_probes_d(text: &str) -> Vec<ProbeDef> {
     // `probes.d` comments are all `/* */` blocks.
     let mut stripped = String::with_capacity(text.len());
@@ -119,7 +98,6 @@ fn parse_probes_d(text: &str) -> Vec<ProbeDef> {
     probes
 }
 
-/// `probes.d` as compiled into this crate (resolved at build time).
 fn probes_d() -> io::Result<Vec<ProbeDef>> {
     let text = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/probes.d"))?;
     let probes = parse_probes_d(&text);
@@ -127,7 +105,6 @@ fn probes_d() -> io::Result<Vec<ProbeDef>> {
     Ok(probes)
 }
 
-/// One parsed `SystemTap` SDT note.
 struct SdtNote {
     provider: String,
     name: String,
@@ -135,7 +112,6 @@ struct SdtNote {
     semaphore: u64,
 }
 
-/// Outcome of [`parse_sdt_notes`].
 enum SdtParse {
     /// Parsed notes and the ELF machine id for operand selection.
     Notes(u16, Vec<SdtNote>),
@@ -148,7 +124,6 @@ enum SdtParse {
     Malformed(&'static str),
 }
 
-/// Parses little-endian ELF64 `NT_STAPSDT` notes out of `bytes`.
 fn parse_sdt_notes(bytes: &[u8]) -> SdtParse {
     if bytes.len() < 64 || &bytes[..4] != b"\x7fELF" || bytes[4] != 2 || bytes[5] != 1 {
         return SdtParse::NotElf;
@@ -159,11 +134,7 @@ fn parse_sdt_notes(bytes: &[u8]) -> SdtParse {
     }
 }
 
-/// ELF64 section walk behind [`parse_sdt_notes`]; `None` means a malformed
-/// binary, never a non-ELF one (the caller has already checked the magic).
-///
-/// Returns the ELF machine id alongside the notes so the caller can select
-/// the architecture's register-operand spelling.
+/// Returns the ELF machine and notes; `None` indicates malformed ELF64.
 fn parse_elf64_sdt_notes(bytes: &[u8]) -> Option<(u16, Vec<SdtNote>)> {
     let read_u16 = |offset: usize| -> Option<u16> {
         Some(u16::from_le_bytes(
@@ -244,10 +215,8 @@ const fn align4(offset: usize) -> usize {
     offset.saturating_add(3) & !3
 }
 
-/// Separator between a layout entry's `size@` prefix and its operand.
 const ARG_SEPARATOR: char = '@';
 
-/// x86-64 register operand spelling per argument index and byte width.
 const X86_REGISTERS: [&[&str]; 4] = [
     &["%dil", "%sil", "%dl", "%cl", "%r8b", "%r9b"],
     &["%di", "%si", "%dx", "%cx", "%r8w", "%r9w"],
@@ -255,7 +224,6 @@ const X86_REGISTERS: [&[&str]; 4] = [
     &["%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"],
 ];
 
-/// Returns the register-spelling table index for a `probes.d` type's width.
 fn width_index(d_type: &str) -> usize {
     match d_type {
         "int8_t" | "uint8_t" => 0,
@@ -266,18 +234,8 @@ fn width_index(d_type: &str) -> usize {
     }
 }
 
-/// Returns the expected full `SystemTap` layout string for `def` on
-/// x86-64, `None` on other architectures.
-///
-/// The operand half is architecture- and register-allocation specific: the
-/// `usdt` generator passes arguments in the platform ABI registers, so the
-/// spelling is deterministic per architecture — but only x86-64's spellings
-/// are verified (the width-dependent `%edi`/`%rdi` table below). `AArch64`'s
-/// generator may spell narrower arguments as `w`-registers, which upstream
-/// marks untested, so other architectures compare `size@` prefixes only.
-/// A consumer binds to both halves, so the verified architecture asserts
-/// both — Core's own binaries use a different register assignment only
-/// because the compiler allocated different registers at its probe sites.
+/// Full operand spelling is verified on x86-64; other architectures check
+/// size/sign prefixes because register allocation and spelling differ.
 fn expected_layout(def: &ProbeDef, machine: u16) -> Option<String> {
     // EM_X86_64: register name depends on the argument's width.
     if machine != 0x3E {
@@ -285,8 +243,6 @@ fn expected_layout(def: &ProbeDef, machine: u16) -> Option<String> {
     }
     let mut operands = Vec::new();
     for (index, arg) in def.args.iter().enumerate() {
-        // `layout_prefix` already ends in ARG_SEPARATOR (`size@`), matching
-        // the SystemTap grammar's `Nf@OP`; only the operand is appended.
         operands.push(format!(
             "{}{}",
             layout_prefix(arg),
@@ -308,8 +264,7 @@ fn layout_prefixes_of(layout: &str) -> Vec<&str> {
         .collect()
 }
 
-/// `probes.d` itself must declare exactly the probes Core's ABI publishes:
-/// same providers, probe names, and argument layout prefixes, in order.
+/// Matches Core's providers, probes and argument prefixes in order.
 #[test]
 fn probes_d_matches_core_argument_layout() -> io::Result<()> {
     let probes = probes_d()?;
@@ -324,15 +279,8 @@ fn probes_d_matches_core_argument_layout() -> io::Result<()> {
     Ok(())
 }
 
-/// Forces monomorphisation of every probe wrapper so the test binary links
-/// each probe's `.note.stapsdt` note.
-///
-/// The wrappers are generic over their `prepare` closures and the generated
-/// note assembly is emitted per monomorphization: an artifact that never
-/// instantiates a wrapper carries no note for it, and the assertion below
-/// would fail with `missing SDT note`. The guard is opaque to the optimizer
-/// and always false, so the calls are compiled in (notes linked) but never
-/// run — no probe fires while the harness parses the binary.
+/// Link every wrapper's SDT note without firing probes: `black_box(false)`
+/// retains the monomorphizations while preventing argument preparation.
 #[cfg(feature = "usdt")]
 #[inline(never)]
 fn instantiate_probes() {
@@ -341,7 +289,7 @@ fn instantiate_probes() {
         bitcoin_rs_consensus::trace::block_connected(|| (hash.as_ptr(), 0, 0, 0, 0, 0));
         bitcoin_rs_consensus::trace::added(|| (hash.as_ptr(), 0, 0));
         bitcoin_rs_consensus::trace::removed(|| (hash.as_ptr(), "block", 0, 0, 0));
-        bitcoin_rs_consensus::trace::inbound_message(|| {
+        let message = || {
             (
                 0,
                 String::new(),
@@ -350,26 +298,14 @@ fn instantiate_probes() {
                 0,
                 hash.as_ptr(),
             )
-        });
-        bitcoin_rs_consensus::trace::outbound_message(|| {
-            (
-                0,
-                String::new(),
-                String::new(),
-                String::new(),
-                0,
-                hash.as_ptr(),
-            )
-        });
+        };
+        bitcoin_rs_consensus::trace::inbound_message(message);
+        bitcoin_rs_consensus::trace::outbound_message(message);
     }
 }
 
-/// Asserts the artifact's embedded SDT notes carry Core's provider, probe
-/// names, and argument layout prefixes.
 #[test]
 fn embedded_sdt_notes_match_core_layout() -> Result<(), Box<dyn std::error::Error>> {
-    // Instantiate every probe before the test binary is read back: the notes
-    // are link-time artifacts of these monomorphizations.
     #[cfg(feature = "usdt")]
     instantiate_probes();
     let path = match std::env::var_os("SDT_ELF") {
@@ -379,9 +315,6 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), Box<dyn std::error::Erro
     let bytes = fs::read(&path)?;
     let probes = probes_d()?;
     if !cfg!(feature = "usdt") {
-        // Feature-off artifact: the whole point of the default build is that
-        // no probe notes leak into it, so assert exactly that for whichever
-        // artifact is under test instead of skipping silently.
         let notes = match parse_sdt_notes(&bytes) {
             SdtParse::NotElf => Vec::new(),
             SdtParse::Malformed(reason) => {
@@ -398,8 +331,6 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
     let (machine, notes) = match parse_sdt_notes(&bytes) {
-        // Non-ELF artifact (Mach-O on macOS carries DOF instead of SDT
-        // notes). The `probes.d` table test above still guards the ABI.
         SdtParse::NotElf => {
             eprintln!(
                 "skipping SDT note assertion: {} is not a little-endian ELF64 binary",
@@ -418,9 +349,6 @@ fn embedded_sdt_notes_match_core_layout() -> Result<(), Box<dyn std::error::Erro
             .find(|note| note.provider == def.provider && note.name == def.name)
             .ok_or_else(|| format!("missing SDT note {}:{}", def.provider, def.name))?;
         if let Some(expected) = expected_layout(def, machine) {
-            // Full-string check: both the size/sign prefix and the operand
-            // form (register-direct like Core's `8@%reg`, never the
-            // dereferencing `8@(%reg)` that binds a different value).
             assert_eq!(
                 note.args, expected,
                 "argument layout of {}:{} must match byte-for-byte",

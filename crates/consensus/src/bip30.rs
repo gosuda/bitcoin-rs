@@ -2,22 +2,11 @@ use bitcoin_rs_primitives::Hash256;
 
 use crate::ConsensusError;
 
-/// Core's BIP34 recheck limit: at and above it BIP30 duplicate scans always run.
+/// Core's BIP34 recheck height; duplicate scans always run at or above it.
 pub const BIP34_IMPLIES_BIP30_LIMIT: u32 = 1_983_702;
 
-/// The two mainnet blocks that duplicated a still-live txid before BIP30, keyed
-/// by height AND block hash.
-///
-/// Height alone is not the exception. Bitcoin Core pins both hashes, and so
-/// must this: keyed by height only, any regtest or signet block mined at 91,842
-/// would inherit mainnet's exemption, and so would an alternate mainnet block at
-/// that height. Either one accepts a duplicate txid that Core rejects, which is
-/// a chain split.
-///
-/// Stored consensus little-endian (display hex reversed byte-wise), following
-/// the convention in `bitcoin_rs_primitives::network`. Display hashes:
-/// `00000000000a4d0a398161ffc163c503763b1f4360639393e0e4c8e300e0caec` and
-/// `00000000000743f190a18c5577a3c2d2a1f610ae9601ac046a38084ccb7cd721`.
+/// Mainnet BIP30 exceptions: height alone would exempt unrelated blocks.
+/// Hash constants store little-endian wire bytes.
 const BIP30_DUPLICATE_TXID_EXCEPTIONS: [(u32, Hash256); 2] = [
     (
         91_842,
@@ -93,10 +82,6 @@ mod tests {
     }
 
     /// The exception is the block, not the height.
-    ///
-    /// Keyed by height alone, a regtest or signet chain reaching 91,842 would
-    /// inherit mainnet's exemption, and so would any alternate mainnet block at
-    /// that height. Both accept a duplicate txid that Bitcoin Core rejects.
     #[test]
     fn a_different_block_at_an_exception_height_is_not_exempt() {
         assert!(!is_bip30_exception(91_842, other_hash()));

@@ -7,80 +7,76 @@ const MAINNET: u32 = 210_000;
 const REGTEST: u32 = 150;
 const FIFTY_BTC: u64 = 50 * 100_000_000;
 
+/// The schedule halves on the interval the *network* declares, keeps integer
+/// satoshis at the first odd halving, and saturates to zero rather than
+/// shifting a `u64` past 63 places.
 #[test]
-fn the_subsidy_halves_on_schedule() {
-    assert_eq!(block_subsidy(0, MAINNET), FIFTY_BTC);
-    assert_eq!(block_subsidy(209_999, MAINNET), FIFTY_BTC);
-    assert_eq!(block_subsidy(210_000, MAINNET), FIFTY_BTC / 2);
-    assert_eq!(block_subsidy(419_999, MAINNET), FIFTY_BTC / 2);
-    assert_eq!(block_subsidy(420_000, MAINNET), FIFTY_BTC / 4);
-    // The first halving that lands on an odd satoshi count, which is where an
-    // implementation using floating point or rounding would diverge.
-    assert_eq!(block_subsidy(630_000, MAINNET), 625_000_000);
-}
-
-/// Regtest halves every 150 blocks, and using the mainnet interval there
-/// over-states the subsidy by a factor of 2^1400.
-#[test]
-fn the_halving_interval_is_the_network_s() {
-    assert_eq!(Network::Regtest.subsidy_halving_interval(), REGTEST);
+fn the_subsidy_halves_on_the_network_s_schedule_and_saturates_to_zero() {
     assert_eq!(Network::Mainnet.subsidy_halving_interval(), MAINNET);
     assert_eq!(Network::Signet.subsidy_halving_interval(), MAINNET);
+    assert_eq!(Network::Regtest.subsidy_halving_interval(), REGTEST);
 
-    assert_eq!(block_subsidy(150, REGTEST), FIFTY_BTC / 2);
-    assert_eq!(
-        block_subsidy(150, MAINNET),
-        FIFTY_BTC,
-        "the mainnet interval must not have halved yet at height 150"
-    );
+    // (height, interval, subsidy)
+    let cases: [(u32, u32, u64); 11] = [
+        (0, MAINNET, FIFTY_BTC),
+        (209_999, MAINNET, FIFTY_BTC),
+        (210_000, MAINNET, FIFTY_BTC / 2),
+        (419_999, MAINNET, FIFTY_BTC / 2),
+        (420_000, MAINNET, FIFTY_BTC / 4),
+        // The first halving landing on an odd satoshi count, where rounding
+        // or floating point would diverge.
+        (630_000, MAINNET, 625_000_000),
+        (64 * MAINNET, MAINNET, 0),
+        (u32::MAX, MAINNET, 0),
+        // Regtest halves every 150 blocks; the mainnet interval has not.
+        (150, REGTEST, FIFTY_BTC / 2),
+        (150, MAINNET, FIFTY_BTC),
+        (u32::MAX, REGTEST, 0),
+    ];
+    for (height, interval, subsidy) in cases {
+        assert_eq!(
+            block_subsidy(height, interval),
+            subsidy,
+            "height {height} interval {interval}"
+        );
+    }
 }
 
-/// Past 64 halvings the subsidy is zero, and shifting a `u64` that far is
-/// undefined rather than merely zero.
+/// A coinbase may claim the subsidy for its height plus the block's fees, and
+/// no more. Claiming less is allowed and the difference is destroyed, as in
+/// Core; an allowance that leaves the satoshi range is refused, not wrapped.
 #[test]
-fn the_subsidy_reaches_zero_without_overflowing() {
-    assert_eq!(block_subsidy(64 * MAINNET, MAINNET), 0);
-    assert_eq!(block_subsidy(u32::MAX, MAINNET), 0);
-    assert_eq!(block_subsidy(u32::MAX, REGTEST), 0);
-}
-
-#[test]
-fn a_coinbase_may_claim_the_subsidy_plus_the_fees() {
-    let allowed = FIFTY_BTC + 999;
-
-    assert_eq!(verify_coinbase_amount(allowed, 999, 1, MAINNET), Ok(()));
-    // Claiming less is fine; the difference is destroyed, as in Core.
-    assert_eq!(verify_coinbase_amount(0, 999, 1, MAINNET), Ok(()));
-    assert_eq!(
-        verify_coinbase_amount(allowed + 1, 999, 1, MAINNET),
-        Err(ConsensusError::CoinbaseAmount {
-            paid: allowed + 1,
-            allowed,
-        })
-    );
-}
-
-/// The allowance follows the halving, so a post-halving block cannot claim the
-/// pre-halving subsidy.
-#[test]
-fn the_allowance_follows_the_halving() {
-    assert_eq!(
-        verify_coinbase_amount(FIFTY_BTC, 0, 209_999, MAINNET),
-        Ok(())
-    );
-    assert_eq!(
-        verify_coinbase_amount(FIFTY_BTC, 0, 210_000, MAINNET),
-        Err(ConsensusError::CoinbaseAmount {
-            paid: FIFTY_BTC,
-            allowed: FIFTY_BTC / 2,
-        })
-    );
-}
-
-#[test]
-fn an_overflowing_allowance_is_refused_rather_than_wrapped() {
-    assert_eq!(
-        verify_coinbase_amount(0, u64::MAX, 1, MAINNET),
-        Err(ConsensusError::BlockValueOverflow)
-    );
+fn a_coinbase_may_claim_the_halved_subsidy_plus_the_fees_and_no_more() {
+    // (claimed, fees, height, verdict)
+    let cases: [(u64, u64, u32, Result<(), ConsensusError>); 6] = [
+        (FIFTY_BTC + 999, 999, 1, Ok(())),
+        (0, 999, 1, Ok(())),
+        (
+            FIFTY_BTC + 1_000,
+            999,
+            1,
+            Err(ConsensusError::CoinbaseAmount {
+                paid: FIFTY_BTC + 1_000,
+                allowed: FIFTY_BTC + 999,
+            }),
+        ),
+        (FIFTY_BTC, 0, 209_999, Ok(())),
+        (
+            FIFTY_BTC,
+            0,
+            210_000,
+            Err(ConsensusError::CoinbaseAmount {
+                paid: FIFTY_BTC,
+                allowed: FIFTY_BTC / 2,
+            }),
+        ),
+        (0, u64::MAX, 1, Err(ConsensusError::BlockValueOverflow)),
+    ];
+    for (paid, fees, height, expected) in cases {
+        assert_eq!(
+            verify_coinbase_amount(paid, fees, height, MAINNET),
+            expected,
+            "paid {paid} fees {fees} height {height}"
+        );
+    }
 }

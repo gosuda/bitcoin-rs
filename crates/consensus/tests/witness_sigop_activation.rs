@@ -17,8 +17,8 @@ use bitcoin_rs_consensus::{
     transaction_sigop_cost, verify_transaction, verify_transaction_non_script,
 };
 use bitcoin_rs_primitives::{
-    Amount, Block, BlockHash, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence,
-    Tx, TxIn, TxOut, Txid, Witness, consensus_bytes,
+    Amount, Block, CompactTarget, Hash256, Header, LockTime, OutPoint, Script, Sequence, Tx, TxIn,
+    TxOut, Txid, Witness, consensus_bytes,
 };
 use bitcoin_rs_script::{VerifyFlags, opcode};
 
@@ -74,17 +74,12 @@ impl WitnessFixture {
         }
     }
 
-    /// Parses the fixture block under `engine`, the same selection the
-    /// verification entries below receive.
     fn block(&self, engine: ValidationEngine) -> Result<BlockParse, ConsensusError> {
         let block = Block {
             header: Header {
                 version: 1,
-                prev_blockhash: BlockHash::default(),
-                merkle_root: Hash256::default(),
-                time: 0,
                 bits: CompactTarget::from_consensus(0x2000_ffff),
-                nonce: 0,
+                ..Header::default()
             },
             txs: vec![self.tx.clone()],
         };
@@ -118,11 +113,6 @@ impl UtxoView for WitnessFixture {
     }
 }
 
-/// Every validation engine this build can execute. Activation semantics are a
-/// consensus rule, not an engine property, so each contract runs under every
-/// compiled engine: `native` in every build, `kernel` where compiled. Derived
-/// from `ValidationEngine::ALL` so this and other engine-parameterized tests
-/// cannot drift apart.
 fn engines() -> Vec<ValidationEngine> {
     ValidationEngine::ALL
         .iter()

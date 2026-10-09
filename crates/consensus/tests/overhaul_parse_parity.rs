@@ -1,11 +1,4 @@
-//! VAL-02: decoded consensus facts must
-//! agree with the independent `bitcoin`-crate oracle on txids, wtxids,
-//! weight, byte positions, and Merkle mutation flags over the golden
-//! fixtures, the BIP141 coinbase witness leaf must be zeroed for the witness
-//! commitment without changing the coinbase's actual wtxid.
-//!
-//! Fixtures come from `crates/primitives/tests/testdata` by path; a missing
-//! fixture fails the lane, it is never skipped.
+//! Consensus facts against rust-bitcoin and committed golden blocks.
 #![expect(clippy::expect_used, reason = "test assertions")]
 use std::str::FromStr;
 
@@ -20,9 +13,7 @@ use bitcoin_rs_consensus::{ConsensusError, ValidationEngine};
 use bitcoin_rs_primitives::layout::ParsedBlock;
 use bitcoin_rs_primitives::{Block, Tx, Txid, Wtxid, consensus_bytes};
 
-/// Legacy (pre-segwit) golden fixture height; also the mutation-fixture base.
 const LEGACY_HEIGHT: u32 = 170;
-/// First segwit golden fixture height; carries a BIP141 witness commitment.
 const SEGWIT_HEIGHT: u32 = 481_824;
 const WITNESS_COMMITMENT_PREFIX: [u8; 6] = [0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed];
 
@@ -54,7 +45,6 @@ fn fixture_txids(height: u32) -> Vec<Txid> {
         .collect()
 }
 
-/// Length in bytes of the canonical compact-size encoding of `value`.
 const fn compact_size_len(value: u64) -> u32 {
     match value {
         0..=0xfc => 1,
@@ -84,7 +74,6 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
         );
         let facts = BlockFacts::from_parsed(&parsed);
 
-        // Identities: one-pass txids match the fixture ledger and the oracle.
         assert_eq!(
             facts.tx_count(),
             oracle.txdata.len(),
@@ -106,9 +95,6 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
             );
         }
 
-        // Witness IDs: derived in the same pass whenever the block carries
-        // witness data; a witness-free block never materializes them, and a
-        // legacy transaction's wtxid is its txid (BIP141).
         let oracle_has_witness = oracle
             .txdata
             .iter()
@@ -138,7 +124,6 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
             ),
         }
 
-        // Weight: stripped*3+total over span-derived sizes.
         assert_eq!(
             facts.weight(),
             oracle.weight().to_wu(),
@@ -190,8 +175,6 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
             "height {height}: consumed length"
         );
 
-        // Merkle: root matches the oracle reduction and the stored header;
-        // a valid fixture is never flagged as mutated.
         let oracle_root = calculate_root(oracle.txdata.iter().map(|tx| {
             bitcoin::Txid::from_str(&tx.compute_txid().to_string()).expect("oracle txid")
         }))
@@ -207,8 +190,6 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
             "height {height}: valid tree flagged as mutated"
         );
 
-        // The owned materialization agrees with the derived facts and
-        // re-encodes to the exact fixture bytes.
         let materialized: Block = parsed.materialize();
         for (index, tx) in materialized.txs.iter().enumerate() {
             assert_eq!(
@@ -225,11 +206,7 @@ fn golden_facts_match_oracle_on_ids_weight_positions_and_merkle() {
     }
 }
 
-/// Asserts the engine-selected parse matches the independent oracle on
-/// identities and derived facts. Shared by both engine passes so one backend
-/// cannot drift out of parity behind a feature gate.
 fn assert_parse_matches_oracle(parsed: &BlockParse, oracle: &bitcoin::Block, materialized: &Block) {
-    // Every engine surfaces identities through the same `Result` shape.
     let parsed_txids: Vec<Txid> = parsed
         .txids()
         .unwrap_or_else(|error| panic!("parse txids failed: {error:?}"));
@@ -240,8 +217,6 @@ fn assert_parse_matches_oracle(parsed: &BlockParse, oracle: &bitcoin::Block, mat
         assert_eq!(ours.to_string(), oracle_tx.compute_txid().to_string());
     }
 
-    // The derived facts agree with the independent reduction regardless of
-    // which backend produced the identities.
     let facts = parsed.derive_facts(&materialized.txs, &parsed_txids);
     assert_eq!(facts.tx_count(), oracle.txdata.len());
     assert_eq!(facts.weight(), oracle.weight().to_wu());
@@ -260,9 +235,6 @@ fn assert_parse_matches_oracle(parsed: &BlockParse, oracle: &bitcoin::Block, mat
     );
 }
 
-/// One fixture, two reference passes: the independent oracle decode and the
-/// checked layout parse whose materialization re-encodes to the fixture
-/// bytes. Both engine tests share this setup so their inputs cannot drift.
 fn fixture_parts(height: u32) -> (Vec<u8>, bitcoin::Block, Block) {
     let bytes = fixture_bytes(height);
     let oracle: bitcoin::Block = bitcoin::consensus::deserialize(&bytes).expect("oracle decode");
@@ -272,10 +244,6 @@ fn fixture_parts(height: u32) -> (Vec<u8>, bitcoin::Block, Block) {
     (bytes, oracle, materialized)
 }
 
-/// `engine = native`'s parse is the single layout pass: it carries positions
-/// and pre-populated witness IDs, and rejects trailing bytes like the decoder
-/// it replaced. The native engine is compiled in every build, so this parse
-/// stays available in kernel builds too.
 #[test]
 fn native_block_parse_matches_oracle_identities() {
     let (bytes, oracle, materialized) = fixture_parts(SEGWIT_HEIGHT);
@@ -293,8 +261,6 @@ fn native_block_parse_matches_oracle_identities() {
     );
 }
 
-/// `engine = kernel`'s parse is the kernel's one-shot parse; its identities and
-/// derived facts must agree with the same oracle the native pass pins.
 #[test]
 #[cfg(feature = "kernel")]
 fn kernel_block_parse_matches_oracle_identities() {
@@ -315,16 +281,12 @@ fn coinbase_witness_leaf_is_zero_for_commitment_only() {
     let materialized: Block = parsed.materialize();
     let wtxids: &[Wtxid] = facts.wtxids().expect("segwit fixture carries witness IDs");
 
-    // The production commitment check accepts the real fixture with the
-    // one-pass witness IDs.
     assert!(
         block_witness_commitment_matches(&materialized, wtxids),
         "production commitment check must accept the fixture"
     );
 
-    // Independent oracle recomputation: the witness tree's coinbase leaf is
-    // all zeros, the remaining leaves are the other transactions' wtxids,
-    // and the commitment digests root || reserved with double SHA-256.
+    // BIP141 zeros the coinbase leaf, not the coinbase's stored wtxid.
     let oracle_leaves = std::iter::once(
         bitcoin::Txid::from_str(&"0".repeat(64)).expect("zero leaf"),
     )
@@ -343,8 +305,6 @@ fn coinbase_witness_leaf_is_zero_for_commitment_only() {
     preimage.extend_from_slice(reserved);
     let commitment = sha256::Hash::hash(sha256::Hash::hash(&preimage).as_byte_array());
 
-    // The fixture's stored commitment (OP_RETURN push after the 6-byte
-    // prefix) matches the independent recomputation exactly.
     let stored = coinbase
         .output
         .iter()
@@ -363,8 +323,6 @@ fn coinbase_witness_leaf_is_zero_for_commitment_only() {
         "oracle witness commitment"
     );
 
-    // The zeroed leaf is a Merkle-tree convention only: the facts keep the
-    // coinbase's actual wtxid.
     assert_eq!(
         wtxids[0].to_string(),
         coinbase.compute_wtxid().to_string(),
@@ -374,10 +332,6 @@ fn coinbase_witness_leaf_is_zero_for_commitment_only() {
 
 #[test]
 fn mutated_tree_flags_merkle_mutation_while_unmutated_passes() {
-    // Synthetic tree [coinbase, X, X, X]: the two trailing X transactions
-    // form an equal *real* sibling pair, so the mutation flag fires even
-    // though the header root — computed with the odd-leaf duplication rule —
-    // matches.
     let bytes = fixture_bytes(LEGACY_HEIGHT);
     let mut reader = bytes.as_slice();
     let parsed = ParsedBlock::parse(&mut reader).expect("layout parse");
@@ -423,8 +377,6 @@ fn mutated_tree_flags_merkle_mutation_while_unmutated_passes() {
         "expected MerkleMutation, got {error:?}"
     );
 
-    // Control: the untouched two-transaction fixture stays valid through the
-    // same rules entry.
     let control_facts = BlockFacts::from_txids(&base.txs, base.txs.iter().map(Tx::txid).collect());
     verify_block_rules_precomputed(
         &base,

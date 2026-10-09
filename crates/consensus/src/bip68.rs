@@ -9,11 +9,8 @@ const SEQUENCE_LOCKTIME_MASK: u32 = 0x0000_ffff;
 /// BIP68 time-based granularity in seconds (`2^9`).
 const SEQUENCE_LOCKTIME_GRANULARITY_SECONDS: u32 = 512;
 
-/// Checks one input's BIP68 relative lock; `prevout_mtp` is only read for time-based locks.
-///
-/// # Errors
-///
-/// Returns `ConsensusError::Bip` when the relative lock is not yet satisfied.
+/// Checks one input's BIP68 relative lock; `prevout_mtp` is only read for time-
+/// based locks.
 pub fn check_sequence_lock(
     tx_version: i32,
     sequence: u32,
@@ -61,10 +58,8 @@ pub const fn sequence_lock_is_time_based(sequence: u32) -> bool {
     sequence & SEQUENCE_LOCKTIME_TYPE_FLAG != 0
 }
 
-/// Returns whether a relative sequence lock is satisfied at `block_height` / `block_mtp`.
-///
-/// Unconfirmed prevouts are encoded as `prevout_height == block_height` (the
-/// next block, for mempool admission) so any positive relative lock fails.
+/// Checks relative locks at `block_height` / `block_mtp`.
+/// Unconfirmed prevouts use `block_height`, so positive height locks fail.
 #[must_use]
 pub fn sequence_lock_satisfied(
     tx_version: i32,
