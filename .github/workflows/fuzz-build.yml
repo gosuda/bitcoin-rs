@@ -40,5 +40,8 @@ jobs:
       - uses: taiki-e/install-action@9534c84618278caac52cb373bb164ed464dbd8af # cargo-fuzz
         with:
           tool: cargo-fuzz@0.13.2
+      # fuzz/ is a separate workspace inheriting root workspace version pins;
+      # --locked fails fast when fuzz/Cargo.lock was not regenerated for them.
+      - run: cargo +nightly metadata --locked --format-version 1 --manifest-path fuzz/Cargo.toml > /dev/null
       # cargo-fuzz can otherwise select an unavailable musl target.
       - run: cargo +nightly fuzz build --target x86_64-unknown-linux-gnu

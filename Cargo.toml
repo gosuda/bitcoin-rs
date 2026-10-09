@@ -187,7 +187,7 @@ tracing            = { version = ">=0.1.44, <0.2", default-features = false, fea
 # pulled in only by the `usdt` feature). Apache-2.0, no AWS-LC/ring providers.
 # `default-features = false` drops the `asm` feature, an empty marker in 0.6.0 —
 # `.note.stapsdt` emission is unconditional and asserted by sdt_notes in CI.
-# Build-time chain caveat: usdt-parser → pest 2.9.3 now compiles `psm`/`stacker`
+# Build-time chain caveat: dtrace-parser → pest 2.9.3 now compiles `psm`/`stacker`
 # target assembly via `cc`, so builds enabling this feature need a C toolchain
 # even though the usdt crates themselves are pure Rust.
 usdt               = { version = "=0.6.0", default-features = false }
