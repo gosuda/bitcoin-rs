@@ -37,8 +37,10 @@ kernel_sys_crate = "libbitcoinkernel-sys"
 kernel_sys_crate_version = "0.4.1"
 # Published crate custody: `.cargo_vcs_info.json` identifies the wrapper tree.
 # Its subtree squash 84c89f1baa0bb14dca891323c6f5538b7241db44 records this
-# bitcoin/bitcoin source commit in `git-subtree-split`; 0.4.1 changes only
-# build flags, so the vendored tree stays byte-identical at that squash.
+# bitcoin/bitcoin source commit in `git-subtree-split`; the 0.4.1 release is
+# upstream build-flags only (its `bitcoin/` tree is byte-identical to 0.4.0's,
+# verified by `diff -rq` of the two published crate packages), so the vendored
+# tree stays at that squash.
 # https://github.com/sedited/rust-bitcoinkernel/commit/84c89f1baa0bb14dca891323c6f5538b7241db44
 kernel_vendor_commit = "f27eff2051e4e4d153b65fc7273c9a05dcd673fe"
 kernel_source_commit = "70d9ec7f3d452789d04dce81dc02db0b3b778bb5"
