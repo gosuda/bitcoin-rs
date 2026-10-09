@@ -214,15 +214,15 @@ impl ConnectionShared {
         &self,
         peer_addr: SocketAddr,
         lease: &crate::PeerLease,
-        info: crate::PeerInfo,
+        info: &crate::PeerInfo,
     ) -> bool {
         let source = lease.source(peer_addr);
-        if let Some(announcer) = &self.block_announcer {
-            announcer.on_peer_ready(peer_addr, lease, &info);
-        }
-        if self.peer_table.publish_info(peer_addr, lease, info)
+        if self.peer_table.publish_info(peer_addr, lease, info.clone())
             && self.peer_table.is_current(source)
         {
+            if let Some(announcer) = &self.block_announcer {
+                announcer.on_peer_ready(peer_addr, lease, info);
+            }
             self.notify_peer_ready(source);
             true
         } else {
@@ -970,7 +970,7 @@ fn run_connected_session(
             return Err(error);
         }
     };
-    shared.publish_info_and_notify_ready(peer_addr, &lease, info);
+    shared.publish_info_and_notify_ready(peer_addr, &lease, &info);
 
     let inbound = lease.is_inbound();
     tracing::info!(
@@ -981,9 +981,10 @@ fn run_connected_session(
 
     let loop_result = run_message_loop(peer, peer_addr, &lease, shared, shared.ibd.as_ref());
 
+    let source = lease.source(peer_addr);
     shared.peer_table.remove_current(peer_addr, &lease);
     if let Some(announcer) = &shared.block_announcer {
-        announcer.on_peer_disconnected(peer_addr);
+        announcer.on_peer_disconnected(source);
     }
     lease.cancel();
     let _ = peer.stream.shutdown(std::net::Shutdown::Both);
@@ -1349,14 +1350,20 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     crate::Message::Headers(headers) => {
                         if let Some(announcer) = &shared.block_announcer {
                             if let Some(last) = headers.last() {
-                                announcer.mark_known_block(peer_addr, last.compute_hash().into());
+                                announcer.mark_known_block(
+                                    lease.source(peer_addr),
+                                    last.compute_hash().into(),
+                                );
                             }
                         }
                         shared.send_headers(lease.source(peer_addr), headers, true, false);
                     }
                     crate::Message::Block(block) => {
                         if let Some(announcer) = &shared.block_announcer {
-                            announcer.mark_known_block(peer_addr, block.block_hash().into());
+                            announcer.mark_known_block(
+                                lease.source(peer_addr),
+                                block.block_hash().into(),
+                            );
                         }
                         shared.send_block(lease, peer_addr, block, raw);
                     }
@@ -1370,7 +1377,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     crate::Message::SendHeaders => {
                         shared.peer_table.note_send_headers(lease.source(peer_addr));
                         if let Some(announcer) = &shared.block_announcer {
-                            announcer.set_send_headers(peer_addr, true);
+                            announcer.set_send_headers(lease.source(peer_addr), true);
                         }
                     }
                     crate::Message::SendCmpct(send_cmpct) => {
@@ -1388,7 +1395,7 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                         }
                         if let Some(announcer) = &shared.block_announcer {
                             announcer.note_peer_compact_preference(
-                                peer_addr,
+                                lease.source(peer_addr),
                                 send_cmpct.send_compact,
                                 send_cmpct.version,
                             );
@@ -3038,13 +3045,13 @@ mod ready_notify_tests {
         shared.peer_table.register(addr, current.clone());
 
         assert!(
-            !shared.publish_info_and_notify_ready(addr, &stale, peer_info(addr, 1)),
+            !shared.publish_info_and_notify_ready(addr, &stale, &peer_info(addr, 1)),
             "replaced predecessor must not publish or notify"
         );
         assert_eq!(notified.load(Ordering::Relaxed), 0);
         assert_eq!(shared.peer_table.infos(), []);
 
-        assert!(shared.publish_info_and_notify_ready(addr, &current, peer_info(addr, 2)));
+        assert!(shared.publish_info_and_notify_ready(addr, &current, &peer_info(addr, 2)));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
         assert_eq!(shared.peer_table.infos()[0].start_height, 2);
     }
@@ -3059,7 +3066,7 @@ mod ready_notify_tests {
         let lease = crate::PeerLease::new(tx);
         shared.peer_table.register(addr, lease.clone());
 
-        assert!(shared.publish_info_and_notify_ready(addr, &lease, peer_info(addr, 3)));
+        assert!(shared.publish_info_and_notify_ready(addr, &lease, &peer_info(addr, 3)));
         assert_eq!(notified.load(Ordering::Relaxed), 1);
         assert_eq!(shared.peer_table.infos(), vec![peer_info(addr, 3)]);
     }
