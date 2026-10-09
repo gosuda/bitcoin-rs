@@ -221,7 +221,7 @@ impl ConnectionShared {
             && self.peer_table.is_current(source)
         {
             if let Some(announcer) = &self.block_announcer {
-                announcer.on_peer_ready(peer_addr, lease, info);
+                announcer.on_peer_ready(source);
             }
             self.notify_peer_ready(source);
             true
@@ -1376,9 +1376,6 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                     ),
                     crate::Message::SendHeaders => {
                         shared.peer_table.note_send_headers(lease.source(peer_addr));
-                        if let Some(announcer) = &shared.block_announcer {
-                            announcer.set_send_headers(lease.source(peer_addr), true);
-                        }
                     }
                     crate::Message::SendCmpct(send_cmpct) => {
                         // Any `sendcmpct` (v1 or v2) announces BIP152 relay:
@@ -1393,13 +1390,11 @@ fn run_message_loop<S: std::io::Read + std::io::Write>(
                                 .peer_table
                                 .note_compact_relay(lease.source(peer_addr));
                         }
-                        if let Some(announcer) = &shared.block_announcer {
-                            announcer.note_peer_compact_preference(
-                                lease.source(peer_addr),
-                                send_cmpct.send_compact,
-                                send_cmpct.version,
-                            );
-                        }
+                        shared.peer_table.note_compact_announcement(
+                            lease.source(peer_addr),
+                            send_cmpct.send_compact,
+                            send_cmpct.version,
+                        );
                     }
                     crate::Message::CmpctBlock(_) | crate::Message::BlockTxn(_) => {
                         process_compact_wire_message(

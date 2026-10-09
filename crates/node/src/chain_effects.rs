@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use bitcoin_rs_index::block_log::{BlockLog, BlockRecord};
-use bitcoin_rs_primitives::{Block, BlockHash, Hash256, Network};
+use bitcoin_rs_primitives::{Block, BlockHash, Hash256};
 use parking_lot::RwLock;
 
 use bitcoin_rs_chainstate::{ConnectOutcome, DisconnectOutcome};
@@ -57,7 +57,6 @@ pub struct ChainFollowers {
     mining: Arc<crate::mining::MiningGenerationSignal>,
     mempool: Option<Arc<MempoolGateway>>,
     block_announcer: Option<bitcoin_rs_p2p::BlockAnnounceQueue>,
-    ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
 }
 
 impl ChainFollowers {
@@ -86,7 +85,6 @@ impl ChainFollowers {
             mining,
             mempool,
             block_announcer: None,
-            ibd: None,
         }
     }
 
@@ -126,16 +124,6 @@ impl ChainFollowers {
         block_announcer: Option<bitcoin_rs_p2p::BlockAnnounceQueue>,
     ) -> Self {
         self.block_announcer = block_announcer;
-        self
-    }
-
-    /// Returns `self` with the initial block download latch configured.
-    #[must_use]
-    pub fn with_ibd(
-        mut self,
-        ibd: Option<(Arc<bitcoin_rs_chain::InitialBlockDownload>, Network)>,
-    ) -> Self {
-        self.ibd = ibd;
         self
     }
 
@@ -259,17 +247,8 @@ impl ChainFollowers {
         if let Some(admission) = &self.mempool {
             admission.chain_changed(&outcome.txids);
         }
-        let in_ibd = self.ibd.as_ref().is_some_and(|(latch, network)| {
-            latch.is_active(bitcoin_rs_primitives::unix_time_secs(), *network)
-        });
-        if !in_ibd {
-            if let Some(announcer) = &self.block_announcer {
-                announcer.announce(bitcoin_rs_p2p::BlockAnnounceEvent {
-                    height: outcome.height,
-                    hash: outcome.hash,
-                    prev_hash: block.header.prev_blockhash.into(),
-                });
-            }
+        if let Some(announcer) = &self.block_announcer {
+            announcer.wake();
         }
     }
 

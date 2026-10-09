@@ -17,7 +17,7 @@ use bitcoin_rs_primitives::{BlockHash, Hash256, Header, Network, deserialize};
 #[cfg(test)]
 use parking_lot::RwLock;
 
-use crate::dispatch::{ChainQuery, InventoryServing};
+use crate::dispatch::{ChainQuery, CommittedTip, InventoryServing};
 use crate::wire::{Message, PeerError};
 
 /// Depth from the active tip for which a `getdata` of a block is still worth
@@ -222,10 +222,15 @@ impl ChainQuery for ActiveChainQuery {
         self.compact_block_for(height, hash, compact_version)
     }
 
-    fn active_tip(&self) -> Option<(u32, BlockHash)> {
+    fn committed_tip(&self) -> Option<CommittedTip> {
+        let tip = self.applied_tip.load_full()?;
         let tree = self.block_tree.read();
-        let tip = tree.tip()?;
-        Some((tip.height, BlockHash::from(tip.hash)))
+        let node = tree.node(tip.tip_id).ok()?;
+        (node.hash == tip.hash).then(|| CommittedTip {
+            height: tip.height,
+            hash: BlockHash::from(tip.hash),
+            prev_hash: node.header.prev_blockhash,
+        })
     }
 
     fn serve_inventory_blocks(
@@ -503,6 +508,31 @@ mod tests {
         let response = query.headers_after(&[], stop, 2);
 
         assert_eq!(header_hashes(&response), vec![stop]);
+        Ok(())
+    }
+
+    #[test]
+    fn committed_tip_reads_applied_tip_when_headers_are_ahead()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let headers = seed_headers(3);
+        let mut tree = BlockTree::new();
+        let genesis = tree.insert_node(None, headers[0], NodeStatus::Active)?;
+        let applied_id = tree.insert_node(Some(genesis), headers[1], NodeStatus::Active)?;
+        let applied = tree.tip().ok_or("missing applied fixture tip")?;
+        tree.insert_node(Some(applied_id), headers[2], NodeStatus::Active)?;
+        let block_tree = BlockTreeReader::new(Arc::new(RwLock::new(tree)));
+        let applied_tip = TipReader::new(Arc::new(arc_swap::ArcSwapOption::empty()));
+        applied_tip.store(Some(applied));
+        let query = ActiveChainQuery::new(block_tree, applied_tip, Network::Regtest);
+
+        assert_eq!(
+            query.committed_tip(),
+            Some(CommittedTip {
+                height: 1,
+                hash: headers[1].compute_hash(),
+                prev_hash: headers[0].compute_hash(),
+            })
+        );
         Ok(())
     }
 

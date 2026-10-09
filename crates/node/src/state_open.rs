@@ -349,9 +349,7 @@ impl NodeState {
             gateway
         };
         // Construct followers before Chainstate so capture policy has one owner.
-        let (block_announce_queue, block_announce_rx) = bitcoin_rs_p2p::BlockAnnounceQueue::new(
-            bitcoin_rs_p2p::DEFAULT_BLOCK_ANNOUNCE_QUEUE_CAPACITY,
-        );
+        let (block_announce_queue, block_announce_rx) = bitcoin_rs_p2p::BlockAnnounceQueue::new();
         let followers = crate::chain_effects::ChainFollowers::new(
             Arc::clone(&blocks),
             Arc::clone(&zmq_publisher),
@@ -402,7 +400,6 @@ impl NodeState {
         // the transaction-relay gate, and block-peer eligibility can never
         // disagree.
         let ibd = chainstate.ibd_latch();
-        let followers = followers.with_ibd(Some((Arc::clone(&ibd), config.network)));
         let assumeutxo = Arc::new(
             bitcoin_rs_chainstate::AssumeUtxoManager::open(
                 config.network,

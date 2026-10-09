@@ -40,12 +40,21 @@ pub struct PeerSession {
     pub(crate) headers_horizon: Option<u32>,
 }
 
+/// Announcement-relevant state owned by the live peer connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PeerAnnouncementState {
+    pub(crate) best_known_block: Option<Hash256>,
+    pub(crate) compact_high_bandwidth: Option<bool>,
+    pub(crate) compact_version: Option<u64>,
+}
+
 #[derive(Debug)]
 struct Entry {
     lease: PeerLease,
     info: Option<PeerInfo>,
     demonstrated_tips: Vec<Hash256>,
     headers_horizon: Option<u32>,
+    announcement: PeerAnnouncementState,
 }
 
 impl Entry {
@@ -55,6 +64,7 @@ impl Entry {
             info: None,
             demonstrated_tips: Vec::new(),
             headers_horizon: None,
+            announcement: PeerAnnouncementState::default(),
         }
     }
 
@@ -352,6 +362,47 @@ impl PeerTable {
             }
             _ => false,
         }
+    }
+
+    /// Records the latest remote compact-announcement preference for the
+    /// current connection.
+    pub(crate) fn note_compact_announcement(
+        &self,
+        source: PeerSource,
+        high_bandwidth: bool,
+        version: u64,
+    ) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.announcement.compact_high_bandwidth = Some(high_bandwidth);
+        entry.announcement.compact_version = Some(version);
+        true
+    }
+
+    /// Records one block known to be held by the current connection.
+    pub(crate) fn note_known_block(&self, source: PeerSource, hash: Hash256) -> bool {
+        let mut entries = self.entries.write();
+        let Some(entry) = entries
+            .get_mut(&source.addr)
+            .filter(|entry| entry.lease.is_current(source) && !entry.lease.is_cancelled())
+        else {
+            return false;
+        };
+        entry.announcement.best_known_block = Some(hash);
+        true
+    }
+
+    /// Returns announcement state for the current published connection.
+    pub(crate) fn announcement_state(&self, source: PeerSource) -> Option<PeerAnnouncementState> {
+        let entries = self.entries.read();
+        entries.get(&source.addr).and_then(|entry| {
+            (entry.lease.is_current(source) && entry.info.is_some()).then_some(entry.announcement)
+        })
     }
 
     /// Reports whether the live published connection at `addr` requested
